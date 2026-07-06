@@ -34,6 +34,7 @@ type GangPack struct {
 var (
 	_ framework.PreFilterPlugin = &GangPack{}
 	_ framework.FilterPlugin    = &GangPack{}
+	_ framework.PermitPlugin    = &GangPack{}
 )
 
 // New is the plugin factory registered via app.WithPlugin. It stands up the

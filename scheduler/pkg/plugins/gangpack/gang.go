@@ -1,6 +1,16 @@
 package gangpack
 
-import v1 "k8s.io/api/core/v1"
+import (
+	"time"
+
+	v1 "k8s.io/api/core/v1"
+)
+
+// defaultPermitTimeout is the safety-valve wait a gang member holds at the gate
+// when its PodGroup declares no ScheduleTimeoutSeconds. The workload's own value
+// (the standard PodGroup field) overrides it; this is only the fallback so a
+// misconfigured gang can't wait forever.
+const defaultPermitTimeout = 600 * time.Second
 
 // podGroupLabel is the scheduler-plugins standard pod label naming a pod's
 // PodGroup. It is an ecosystem standard (sigs.k8s.io/scheduler-plugins), not an
@@ -15,21 +25,22 @@ const podGroupLabel = "scheduling.x-k8s.io/pod-group"
 // renameable. The scheduler is told no domain label globally.
 const topologyKeyAnnotation = "ome.io/topology-key"
 
-// gangInfo is everything the plugin needs to place a gang, all declared by the
-// workload (never global config): the gang's key, how many members must land
-// together, and which node label denotes its domain.
+// gangInfo is everything the plugin needs to place and gate a gang, all declared
+// by the workload (never global config): the gang's key, how many members must
+// land together, which node label denotes its domain, and how long a member may
+// wait at the gate for its siblings.
 type gangInfo struct {
 	key         string // namespace/podgroup-name
 	minMember   int
 	topologyKey string
+	timeout     time.Duration
 }
 
-// podGroupReader resolves a PodGroup into its placement facts (minMember + the
-// declared topology key from its annotation). It is an interface so the plugin
-// logic is unit-testable without a live PodGroup informer; the informer-backed
-// implementation lands separately.
+// podGroupReader resolves a PodGroup into its placement facts (minMember, the
+// declared topology key, and the gate timeout). It is an interface so the plugin
+// logic is unit-testable without a live PodGroup informer.
 type podGroupReader interface {
-	get(namespace, name string) (minMember int, topologyKey string, found bool)
+	get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, found bool)
 }
 
 // podGroupNameOf returns the (namespace, name) of a pod's PodGroup — namespace
@@ -55,9 +66,9 @@ func resolveGang(pod *v1.Pod, r podGroupReader) (gangInfo, bool) {
 	if !ok {
 		return gangInfo{}, false
 	}
-	minMember, topologyKey, found := r.get(ns, name)
+	minMember, topologyKey, timeout, found := r.get(ns, name)
 	if !found || minMember <= 0 || topologyKey == "" {
 		return gangInfo{}, false
 	}
-	return gangInfo{key: ns + "/" + name, minMember: minMember, topologyKey: topologyKey}, true
+	return gangInfo{key: ns + "/" + name, minMember: minMember, topologyKey: topologyKey, timeout: timeout}, true
 }

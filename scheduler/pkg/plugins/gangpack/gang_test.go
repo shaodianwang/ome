@@ -2,6 +2,7 @@ package gangpack
 
 import (
 	"testing"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -11,14 +12,15 @@ import (
 type fakeReader map[string]struct {
 	min  int
 	topo string
+	to   time.Duration
 }
 
-func (f fakeReader) get(namespace, name string) (minMember int, topologyKey string, found bool) {
+func (f fakeReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, found bool) {
 	v, ok := f[namespace+"/"+name]
 	if !ok {
-		return 0, "", false
+		return 0, "", 0, false
 	}
-	return v.min, v.topo, true
+	return v.min, v.topo, v.to, true
 }
 
 func gangPod(namespace, pg string) *v1.Pod {

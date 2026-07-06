@@ -2,6 +2,7 @@ package gangpack
 
 import (
 	"context"
+	"time"
 
 	"k8s.io/client-go/rest"
 	schedv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
@@ -21,27 +22,32 @@ type informerReader struct {
 var _ podGroupReader = &informerReader{}
 
 // factsFromPodGroup extracts the placement facts the plugin needs from a
-// PodGroup: the gang size (Spec.MinMember) and the domain topology key the
-// workload declared (the topologyKeyAnnotation). A PodGroup without the
-// annotation yields an empty topology key, which resolveGang treats as
-// unresolvable (no domain to pin to).
-func factsFromPodGroup(pg *schedv1alpha1.PodGroup) (minMember int, topologyKey string) {
+// PodGroup: the gang size (Spec.MinMember), the domain topology key the workload
+// declared (the topologyKeyAnnotation), and the gate timeout (the standard
+// Spec.ScheduleTimeoutSeconds, falling back to defaultPermitTimeout when unset).
+// A PodGroup without the topology annotation yields an empty key, which
+// resolveGang treats as unresolvable (no domain to pin to).
+func factsFromPodGroup(pg *schedv1alpha1.PodGroup) (minMember int, topologyKey string, timeout time.Duration) {
 	if pg == nil {
-		return 0, ""
+		return 0, "", defaultPermitTimeout
 	}
-	return int(pg.Spec.MinMember), pg.Annotations[topologyKeyAnnotation]
+	timeout = defaultPermitTimeout
+	if s := pg.Spec.ScheduleTimeoutSeconds; s != nil && *s > 0 {
+		timeout = time.Duration(*s) * time.Second
+	}
+	return int(pg.Spec.MinMember), pg.Annotations[topologyKeyAnnotation], timeout
 }
 
-// get resolves a PodGroup into (minMember, topologyKey, found). Any lookup error
-// or a missing PodGroup is reported as not-found — the pod is then left
-// unconstrained, never rejected on a transient read.
-func (r *informerReader) get(namespace, name string) (minMember int, topologyKey string, found bool) {
+// get resolves a PodGroup into (minMember, topologyKey, timeout, found). Any
+// lookup error or a missing PodGroup is reported as not-found — the pod is then
+// left unconstrained, never rejected on a transient read.
+func (r *informerReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, found bool) {
 	pg, err := r.getPG(namespace, name)
 	if err != nil || pg == nil {
-		return 0, "", false
+		return 0, "", 0, false
 	}
-	mm, tk := factsFromPodGroup(pg)
-	return mm, tk, true
+	mm, tk, to := factsFromPodGroup(pg)
+	return mm, tk, to, true
 }
 
 // newInformerReader builds a PodGroup informer from the scheduler's shared
