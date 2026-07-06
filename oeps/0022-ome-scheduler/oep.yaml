@@ -1,0 +1,29 @@
+title: "ome-scheduler: topology-aware gang placement for accelerator fleets"
+oep-number: "0022"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-07-06
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# ome-scheduler is the official kube-scheduler framework built as a library with an
+# OME placement plugin, deployed as a second scheduler that only pods opting in via
+# schedulerName use. It owns topology-aware gang placement and bin-packing the default
+# scheduler cannot do; Kueue is adopted for quota (Phase B); topology-aware preemption
+# is built on the same core (Phase C); batch backfill is mostly Kueue config (Phase D).
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"  # OMENative: OME manages pods + PodGroups directly — the model this builds on
+  - "/oeps/0018-multi-cluster-placement"      # the hub: cross-cluster capacity ledger + dispatch that ome-scheduler feeds
+  - "/oeps/0014-runtime-revisions"            # rollout-budget interaction on the schedulerName cutover (a pod-template change)
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
