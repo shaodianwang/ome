@@ -33,7 +33,7 @@ use tokio::sync::broadcast;
 
 pub use kube::runtime::reflector::Store;
 
-use k8s_openapi::api::core::v1::{Node, Pod};
+use k8s_openapi::api::core::v1::{Container, Node, Pod, PodSpec, PodStatus};
 
 use crate::listers::Lister;
 use crate::{
@@ -45,8 +45,10 @@ use crate::{
 /// reflector store. On large clusters this is a big memory and deserialize-cost
 /// saving — `Node.status.images` is the single largest field on a node (the full
 /// image inventory, tens of KB each), and `managedFields` is dead weight on every
-/// object. Implemented per watched kind so the generic informer can prune without
-/// knowing the concrete type.
+/// object. `Pod` is trimmed hardest — kept to just the fields the capacity rollup
+/// reads (node name, container resource requests, phase) — because at ~10^5 pods
+/// it dominates the cache. Implemented per watched kind so the generic informer
+/// can prune without knowing the concrete type.
 pub trait Prune {
     /// Strip unneeded fields in place.
     fn prune(&mut self);
@@ -69,7 +71,6 @@ macro_rules! prune_managed_fields_only {
 
 // Most kinds only need managedFields stripped; their specs/status are small.
 prune_managed_fields_only!(
-    Pod,
     InferenceService,
     BaseModel,
     ServingRuntime,
@@ -87,6 +88,40 @@ impl Prune for Node {
         // and is by far the heaviest part of a Node object — drop it.
         if let Some(status) = self.status.as_mut() {
             status.images = None;
+        }
+    }
+}
+
+impl Prune for Pod {
+    fn prune(&mut self) {
+        drop_managed_fields(self);
+        // The capacity rollup is the only reader of cached Pods; it needs only the
+        // node name, each container's resource requests, and the phase. Keep those
+        // and drop everything else — env, volumes, probes, ports, init containers,
+        // status conditions/containerStatuses, annotations — which is the bulk of a
+        // Pod and, at ~10^5 pods, the bulk of the whole cache. A future Pod reader
+        // must widen this prune to keep the fields it needs.
+        self.metadata.annotations = None;
+        if let Some(spec) = self.spec.take() {
+            self.spec = Some(PodSpec {
+                node_name: spec.node_name,
+                containers: spec
+                    .containers
+                    .into_iter()
+                    .map(|c| Container {
+                        name: c.name,
+                        resources: c.resources,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        if let Some(status) = self.status.take() {
+            self.status = Some(PodStatus {
+                phase: status.phase,
+                ..Default::default()
+            });
         }
     }
 }
@@ -392,5 +427,100 @@ impl SharedInformerFactory {
     }
     pub async fn workload_clusters(&self) -> Lister<WorkloadCluster> {
         self.lister().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{
+        ContainerImage, EnvVar, NodeStatus, ResourceRequirements, Volume,
+    };
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, ObjectMeta};
+    use std::collections::BTreeMap;
+
+    // The capacity rollup reads only pod node_name, container resource requests,
+    // and phase. Prune must keep exactly those and drop the rest — this test is the
+    // contract, so a future prune change can't silently break capacity numbers.
+    #[test]
+    fn pod_prune_keeps_capacity_fields_drops_the_rest() {
+        let requests = BTreeMap::from([("nvidia.com/gpu".to_string(), Quantity("8".to_string()))]);
+        let mut pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("p".into()),
+                namespace: Some("ns".into()),
+                annotations: Some(BTreeMap::from([("big".into(), "x".repeat(10_000))])),
+                managed_fields: Some(vec![ManagedFieldsEntry::default()]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some("node-1".into()),
+                volumes: Some(vec![Volume {
+                    name: "v".into(),
+                    ..Default::default()
+                }]),
+                containers: vec![Container {
+                    name: "c".into(),
+                    env: Some(vec![EnvVar {
+                        name: "E".into(),
+                        value: Some("v".into()),
+                        ..Default::default()
+                    }]),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                conditions: Some(vec![Default::default()]),
+                ..Default::default()
+            }),
+        };
+
+        pod.prune();
+
+        let spec = pod.spec.as_ref().unwrap();
+        assert_eq!(spec.node_name.as_deref(), Some("node-1"));
+        assert_eq!(pod.status.as_ref().unwrap().phase.as_deref(), Some("Running"));
+        let c = &spec.containers[0];
+        assert_eq!(
+            c.resources.as_ref().unwrap().requests.as_ref().unwrap()["nvidia.com/gpu"].0,
+            "8"
+        );
+        // Heavy fields no reader needs are gone.
+        assert!(pod.metadata.annotations.is_none());
+        assert!(pod.metadata.managed_fields.is_none());
+        assert!(spec.volumes.is_none());
+        assert!(c.env.is_none());
+        assert!(pod.status.as_ref().unwrap().conditions.is_none());
+    }
+
+    #[test]
+    fn node_prune_drops_images_and_managed_fields() {
+        let mut node = Node {
+            metadata: ObjectMeta {
+                name: Some("n".into()),
+                managed_fields: Some(vec![ManagedFieldsEntry::default()]),
+                ..Default::default()
+            },
+            status: Some(NodeStatus {
+                images: Some(vec![ContainerImage {
+                    names: Some(vec!["img".into()]),
+                    size_bytes: Some(1),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        node.prune();
+
+        assert!(node.metadata.managed_fields.is_none());
+        assert!(node.status.as_ref().unwrap().images.is_none());
     }
 }
