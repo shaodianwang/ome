@@ -62,6 +62,96 @@ func TestReleaseAllowsRechoose(t *testing.T) {
 	}
 }
 
+// TestChooseReservesAgainstOtherGangs: a gang's pin reserves its whole-node
+// capacity, so a second gang best-fits over what's LEFT — it won't pile into a
+// domain the first gang has already committed to but not yet filled. Without the
+// reservation both gangs would pick the same fullest domain and over-commit it.
+func TestChooseReservesAgainstOtherGangs(t *testing.T) {
+	p := New()
+	raw := topology.FreeByDomain{"d": 3, "e": 3}
+
+	// Gang A pins d (tie d/e -> "d") and reserves 3 there.
+	if d, ok := p.Choose("A", raw, 3); !ok || d != "d" {
+		t.Fatalf("A Choose = %q,%v want d,true", d, ok)
+	}
+	// Gang B sees d as full (3 raw - 3 reserved = 0) and must pick e instead —
+	// not d again, which would over-commit the domain.
+	if d, ok := p.Choose("B", raw, 3); !ok || d != "e" {
+		t.Fatalf("B Choose = %q,%v want e,true (d reserved by A)", d, ok)
+	}
+}
+
+// TestReservationBlocksWhenNoRoomLeft: if the only fitting domain is fully
+// reserved by another gang, the newcomer gets no fit and stays unpinned — it
+// waits rather than over-committing.
+func TestReservationBlocksWhenNoRoomLeft(t *testing.T) {
+	p := New()
+	raw := topology.FreeByDomain{"d": 3}
+	if d, ok := p.Choose("A", raw, 3); !ok || d != "d" {
+		t.Fatalf("A Choose = %q,%v want d,true", d, ok)
+	}
+	if d, ok := p.Choose("B", raw, 1); ok || d != "" {
+		t.Fatalf("B Choose = %q,%v want \"\",false (d fully reserved)", d, ok)
+	}
+}
+
+// TestPlaceDrainsReservationNoDoubleCount: as a gang's members land, Place drains
+// its reservation so a later gang isn't charged twice — once by the shrinking
+// reservation and once by the members now real in the (smaller) raw free.
+func TestPlaceDrainsReservationNoDoubleCount(t *testing.T) {
+	p := New()
+	// A domain of 5, gang A of 3 pins it (reserves 3). Room for a gang of 2 too.
+	if d, _ := p.Choose("A", topology.FreeByDomain{"d": 5}, 3); d != "d" {
+		t.Fatalf("A Choose = %q want d", d)
+	}
+	// A's three members land: raw free drops to 2, reservation drains to 0.
+	p.Place("A")
+	p.Place("A")
+	p.Place("A")
+	// A new gang of 2 sees the real 2 free (2 raw - 0 reserved), not 2 - 3 = -1.
+	if d, ok := p.Choose("C", topology.FreeByDomain{"d": 2}, 2); !ok || d != "d" {
+		t.Fatalf("C Choose = %q,%v want d,true (reservation drained, no double count)", d, ok)
+	}
+}
+
+// TestPlaceFloorsAtZero: Place never drives a reservation negative, and is a
+// no-op on an unpinned group.
+func TestPlaceFloorsAtZero(t *testing.T) {
+	p := New()
+	p.Place("ghost") // unpinned: no panic, no effect
+	p.Choose("A", topology.FreeByDomain{"d": 1}, 1)
+	p.Place("A")
+	p.Place("A") // already drained; must not go negative
+	// A gang of 1 sees the full 1 free (no negative reservation inflating it).
+	if d, ok := p.Choose("B", topology.FreeByDomain{"d": 1}, 1); !ok || d != "d" {
+		t.Fatalf("B Choose = %q,%v want d,true", d, ok)
+	}
+}
+
+// TestReleaseFreesReservation: releasing a gang returns its reserved capacity, so
+// a later gang can best-fit into the domain again.
+func TestReleaseFreesReservation(t *testing.T) {
+	p := New()
+	raw := topology.FreeByDomain{"d": 3}
+	p.Choose("A", raw, 3) // reserves all of d
+	p.Release("A")
+	if d, ok := p.Choose("B", raw, 3); !ok || d != "d" {
+		t.Fatalf("B Choose after release = %q,%v want d,true", d, ok)
+	}
+}
+
+// TestSetHoldsNoReservation: a failover-rebuilt pin reflects already-bound pods
+// (real occupancy in the snapshot), so it holds no reservation and doesn't shrink
+// what another gang sees.
+func TestSetHoldsNoReservation(t *testing.T) {
+	p := New()
+	p.Set("A", "d") // rebuilt: A's pods already bound in d
+	// B best-fits over raw free unmodified by any A reservation.
+	if d, ok := p.Choose("B", topology.FreeByDomain{"d": 3}, 3); !ok || d != "d" {
+		t.Fatalf("B Choose = %q,%v want d,true (Set holds no reservation)", d, ok)
+	}
+}
+
 // TestPartnerGangFollowsSharedGroup: prefill and decode share one placement
 // group, so the partner gang lands in the same domain the first gang pinned —
 // this is the co-location mechanism (OEP-0022 R2), even with a different size.

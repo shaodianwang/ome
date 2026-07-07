@@ -7,11 +7,21 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
-// Reserve is a no-op: placement is committed via the domain pin (PreFilter) and
-// enforced by Filter, and the gang gate lives in Permit. A real per-gang capacity
-// claim (so two gangs can't race into one domain) is future work; Reserve exists
-// today only to pair with Unreserve, which does the unwind.
-func (g *GangPack) Reserve(_ context.Context, _ *framework.CycleState, _ *v1.Pod, _ string) *framework.Status {
+// Reserve drains one whole node from the gang's domain reservation: this member
+// has now been assigned a real node (PreFilter pinned the domain and reserved the
+// gang's full capacity there; Filter kept it in-domain), so it becomes live
+// occupancy in the snapshot and its reserved slot is handed off via Place. That
+// hand-off is what stops two gangs racing into one domain — the reservation holds
+// the not-yet-placed capacity, and draining it as members land avoids
+// double-counting against the snapshot. A pod that is not a pinned gang member
+// reserves nothing.
+func (g *GangPack) Reserve(_ context.Context, _ *framework.CycleState, pod *v1.Pod, _ string) *framework.Status {
+	if g.pgReader == nil {
+		return nil
+	}
+	if gang, ok := resolveGang(pod, g.pgReader); ok {
+		g.pins.Place(gang.key)
+	}
 	return nil
 }
 

@@ -58,13 +58,15 @@ go test ./test/integration/... -v
 
 **Phase A.** The placement loop is live end to end: `PreFilter` best-fits and
 pins the gang's domain, `Filter` enforces it, `Permit` gates the gang until all
-members are present, and `Unreserve` unwinds a half-formed gang. Gang membership
-+ size come from the standard scheduler-plugins `PodGroup`; the domain label is
-declared per-workload via the PodGroup's `ome.io/topology-key` annotation; and
-node free-ness is inferred from the gang pod's own resource requests — the
-scheduler bakes in no workload conventions or fabric values. Still ahead: a
-per-gang capacity claim in `Reserve` (so two gangs can't race into one domain),
-replica spreading, and metrics; see OEP-0022 § Placement.
+members are present, and `Unreserve` unwinds a half-formed gang. `Reserve` claims
+the gang's whole-node capacity in its pinned domain so two gangs can't race into
+one and over-commit it. Gang membership + size come from the standard
+scheduler-plugins `PodGroup`; the domain label is declared per-workload via the
+PodGroup's `ome.io/topology-key` annotation; and node free-ness is inferred from
+the gang pod's own resource requests — the scheduler bakes in no workload
+conventions or fabric values. Still ahead: requeue hints (so a rejected gang
+member re-attempts promptly instead of on the slow periodic flush), replica
+spreading, and metrics; see OEP-0022 § Placement.
 
 ## Version policy
 

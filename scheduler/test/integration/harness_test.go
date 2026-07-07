@@ -168,6 +168,35 @@ func makeGangPod(name, ns, pgName string) *v1.Pod {
 	}
 }
 
+// domainOfNode returns a node's domain label (domainLabelKey).
+func domainOfNode(t *testing.T, tc *testContext, node string) string {
+	t.Helper()
+	n, err := tc.ClientSet.CoreV1().Nodes().Get(tc.Ctx, node, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get node %s: %v", node, err)
+	}
+	return n.Labels[domainLabelKey]
+}
+
+// keys returns a set's members as a slice (for readable failure messages).
+func keys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	return out
+}
+
+// sameDomain reports whether two single-domain sets refer to the same domain.
+func sameDomain(a, b map[string]bool) bool {
+	for d := range a {
+		if b[d] {
+			return true
+		}
+	}
+	return false
+}
+
 // ensureNotBound asserts the pod stays unbound (no node assigned) for the whole
 // window — used to prove the gang gate holds an incomplete gang rather than
 // letting a member bind. A not-found pod counts as unbound.

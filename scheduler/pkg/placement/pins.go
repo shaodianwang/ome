@@ -1,6 +1,7 @@
 // Package placement holds ome-scheduler's stateful placement decisions layered
 // on the pure accounting in package topology. Its first piece is the pin store:
-// which domain each placement group's gangs are committed to.
+// which domain each placement group's gangs are committed to, and how much whole-
+// node capacity each has reserved there but not yet filled.
 package placement
 
 import (
@@ -15,60 +16,110 @@ import (
 // pin. That is what turns the framework's one-pod-at-a-time scheduling into a
 // group decision (OEP-0022 § Placement / Pinning).
 //
+// A pin also carries a capacity reservation: the whole nodes the gang has
+// committed to its domain but not yet filled. A gang's members arrive one
+// scheduling cycle at a time, so between pinning a domain and completing there is
+// a window where the gang's future members' capacity is unclaimed; without a
+// reservation a second gang can best-fit into it and strand the first (which then
+// times out and re-plans). The reservation closes that window; it drains to zero
+// via Place as members become real occupancy, so the live snapshot's own
+// accounting is never double-counted.
+//
 // The scheduler runs scheduling cycles single-threaded, but plugin state is also
 // touched from event handlers (failover rebuild, release on gang teardown), so
 // the store guards itself with a mutex.
 type Pins struct {
 	mu      sync.Mutex
-	byGroup map[string]string // placement group -> domain
+	byGroup map[string]*commitment
+}
+
+// commitment is a group's placement decision: the pinned domain plus the count
+// of whole nodes still reserved there for members not yet placed.
+type commitment struct {
+	domain    string
+	remaining int
 }
 
 // New returns an empty pin store.
 func New() *Pins {
-	return &Pins{byGroup: make(map[string]string)}
+	return &Pins{byGroup: make(map[string]*commitment)}
 }
 
 // Choose returns the domain the group is committed to. If the group is already
 // pinned, that domain is returned as-is — regardless of current free counts,
 // because members are already reserved there; if the gang can no longer complete
 // there the caller unwinds via Release and calls Choose again. If the group is
-// not yet pinned, Choose runs best-fit over free, pins the winner, and returns
-// it. ok is false only when the group is unpinned and no domain currently fits
-// the gang (the gang waits, still unpinned).
-func (p *Pins) Choose(group string, free topology.FreeByDomain, gangSize int) (domain string, ok bool) {
+// not yet pinned, Choose best-fits over the EFFECTIVE free counts — the given raw
+// free minus every other group's outstanding reservation — so it never picks
+// capacity another gang has already committed to. It then pins the winner and
+// reserves gangSize whole nodes there. ok is false only when the group is
+// unpinned and no domain currently fits the gang (the gang waits, still
+// unpinned).
+func (p *Pins) Choose(group string, rawFree topology.FreeByDomain, gangSize int) (domain string, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if d, pinned := p.byGroup[group]; pinned {
-		return d, true
+	if c, pinned := p.byGroup[group]; pinned {
+		return c.domain, true
 	}
-	d, fit := topology.BestFit(free, gangSize)
+
+	// Effective free = raw free minus every OTHER group's outstanding reservation
+	// (this group is not in byGroup yet). A domain absent from rawFree has no free
+	// node to offer, so a reservation against it is irrelevant.
+	eff := make(topology.FreeByDomain, len(rawFree))
+	for d, f := range rawFree {
+		eff[d] = f
+	}
+	for _, c := range p.byGroup {
+		if _, present := eff[c.domain]; present {
+			eff[c.domain] -= c.remaining
+		}
+	}
+
+	d, fit := topology.BestFit(eff, gangSize)
 	if !fit {
 		return "", false
 	}
-	p.byGroup[group] = d
+	p.byGroup[group] = &commitment{domain: d, remaining: gangSize}
 	return d, true
+}
+
+// Place records that one of a group's members has landed on a real node in its
+// pinned domain, shrinking the reservation by one whole node — the member is now
+// counted by the live snapshot instead, so draining the reservation in step keeps
+// the two from double-counting the same node. No-op for an unpinned group or a
+// reservation already at zero.
+func (p *Pins) Place(group string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.byGroup[group]; ok && c.remaining > 0 {
+		c.remaining--
+	}
 }
 
 // Get returns the pinned domain for a group, or ("", false) if unpinned.
 func (p *Pins) Get(group string) (domain string, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	d, ok := p.byGroup[group]
-	return d, ok
+	if c, ok := p.byGroup[group]; ok {
+		return c.domain, true
+	}
+	return "", false
 }
 
 // Set pins a group to a domain without best-fit. Used on leader failover to
 // rebuild the store from where bound pods already sit (OEP-0022 § failure modes:
-// "the domain is simply where those pods are").
+// "the domain is simply where those pods are"). Those pods are real occupancy in
+// the snapshot, so the rebuilt commitment holds no outstanding reservation.
 func (p *Pins) Set(group, domain string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.byGroup[group] = domain
+	p.byGroup[group] = &commitment{domain: domain, remaining: 0}
 }
 
-// Release drops a group's pin — on gang completion, on gate-timeout unwind, or on
-// teardown — so the next Choose re-runs best-fit and may pick a different domain.
+// Release drops a group's pin and its reservation — on gang completion, on
+// gate-timeout unwind, or on teardown — so the next Choose re-runs best-fit and
+// may pick a different domain.
 func (p *Pins) Release(group string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

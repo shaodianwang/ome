@@ -8,12 +8,39 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
+	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
 func TestReserveIsNoop(t *testing.T) {
 	g := &GangPack{}
 	if s := g.Reserve(context.Background(), nil, &v1.Pod{}, "n1"); !s.IsSuccess() {
 		t.Fatalf("Reserve = %v, want Success", s)
+	}
+}
+
+// TestReserveDrainsReservation: reserving a gang member (it just got a real node)
+// drains one whole node from its domain reservation, so the capacity another gang
+// sees frees up in step — the hand-off from reserved to placed.
+func TestReserveDrainsReservation(t *testing.T) {
+	g := &GangPack{
+		pins:     placement.New(),
+		pgReader: fakeReader{"team/pf": {min: 2, topo: "clique"}},
+	}
+	// PreFilter would have pinned pf into domain d over 2 free nodes, reserving 2.
+	g.pins.Choose("team/pf", topology.FreeByDomain{"d": 2}, 2)
+	// A second gang can't fit: d is fully reserved (2 raw - 2 reserved = 0).
+	if _, ok := g.pins.Choose("team/other", topology.FreeByDomain{"d": 2}, 1); ok {
+		t.Fatal("precondition: d should be fully reserved before Reserve")
+	}
+
+	// One pf member lands: Reserve drains its slot.
+	if s := g.Reserve(context.Background(), nil, gangPod("team", "pf"), "node1"); !s.IsSuccess() {
+		t.Fatalf("Reserve = %v, want Success", s)
+	}
+
+	// Now a gang of 1 fits the freed node (2 raw - 1 reserved = 1).
+	if d, ok := g.pins.Choose("team/other", topology.FreeByDomain{"d": 2}, 1); !ok || d != "d" {
+		t.Fatalf("after Reserve, other Choose = %q,%v want d,true", d, ok)
 	}
 }
 

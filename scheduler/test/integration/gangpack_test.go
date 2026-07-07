@@ -54,11 +54,14 @@ func TestGangLandsInOneDomain(t *testing.T) {
 	const ns = "gang-onedomain"
 	createNamespace(t, tc, ns)
 
+	// Node names are unique per test: the suite shares one envtest apiserver, and a
+	// prior test's bound pods linger on its (deleted) nodes — reusing a node name
+	// would resurrect them as phantom occupancy.
 	nodes := []struct {
 		name, domain string
 	}{
-		{"a1", "a"}, {"a2", "a"},
-		{"b1", "b"}, {"b2", "b"}, {"b3", "b"},
+		{"od-a1", "a"}, {"od-a2", "a"},
+		{"od-b1", "b"}, {"od-b2", "b"}, {"od-b3", "b"},
 	}
 	for _, n := range nodes {
 		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(n.name, n.domain, 1), metav1.CreateOptions{}); err != nil {
@@ -80,12 +83,12 @@ func TestGangLandsInOneDomain(t *testing.T) {
 		}
 	}
 
-	domainA := map[string]bool{"a1": true, "a2": true}
+	domainA := map[string]bool{"od-a1": true, "od-a2": true}
 	bound := map[string]bool{}
 	for _, name := range podNames {
 		node := waitForPodBound(t, tc, ns, name, 30*time.Second)
 		if !domainA[node] {
-			t.Errorf("pod %s bound to %s, want a node of domain a (a1/a2)", name, node)
+			t.Errorf("pod %s bound to %s, want a node of domain a (od-a1/od-a2)", name, node)
 		}
 		if bound[node] {
 			t.Errorf("two gang pods bound to the same node %s (whole-node model expects one each)", node)
@@ -214,5 +217,79 @@ func TestIncompleteGangTimesOutThenRecovers(t *testing.T) {
 	node := waitForPodBound(t, tc, ns, "gp-0", 30*time.Second)
 	if node != "t1" && node != "t2" {
 		t.Errorf("pod gp-0 bound to %s, want t1/t2", node)
+	}
+}
+
+// TestTwoGangsDoNotOverCommitDomain is the capacity-claim guarantee: two gangs
+// whose best-fit both prefers the same tight domain must not both pile into it
+// and over-commit. When one gang pins a domain it reserves its whole-node
+// capacity there, so the other best-fits into what's left.
+//
+// Domain "a" has 3 nodes, domain "b" has 4. Both gangs need 3, and "a" is the
+// tightest fit for 3 — so without the reservation both would pin "a", leaving 6
+// pods to fight over 3 nodes and stranding the loser. With it, whichever gang
+// pins "a" first reserves all of it; the other lands wholly in "b". The invariant
+// asserted (robust to arrival order): every pod binds, each gang sits in a single
+// domain, and the two gangs occupy different domains.
+func TestTwoGangsDoNotOverCommitDomain(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-nooverlap"
+	createNamespace(t, tc, ns)
+
+	// Unique node names per test (shared apiserver — see TestGangLandsInOneDomain).
+	nodes := []struct{ name, domain string }{
+		{"oc-a1", "a"}, {"oc-a2", "a"}, {"oc-a3", "a"},
+		{"oc-b1", "b"}, {"oc-b2", "b"}, {"oc-b3", "b"}, {"oc-b4", "b"},
+	}
+	for _, n := range nodes {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(n.name, n.domain, 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", n.name, err)
+		}
+	}
+
+	// Two independent 3-member gangs. Generous gate timeout so completion, not a
+	// timeout, is what we observe.
+	longTimeout := int32(60)
+	for _, name := range []string{"ga", "gb"} {
+		pg := schedutil.MakePG(name, ns, 3, nil, nil)
+		pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+		pg.Spec.ScheduleTimeoutSeconds = &longTimeout
+		if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create podgroup %s: %v", name, err)
+		}
+	}
+
+	gangPods := map[string][]string{
+		"ga": {"ga-0", "ga-1", "ga-2"},
+		"gb": {"gb-0", "gb-1", "gb-2"},
+	}
+	for pgName, pods := range gangPods {
+		for _, name := range pods {
+			if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod(name, ns, pgName), metav1.CreateOptions{}); err != nil {
+				t.Fatalf("create pod %s: %v", name, err)
+			}
+		}
+	}
+
+	// Resolve each gang's domain set from where its members bound.
+	gangDomains := map[string]map[string]bool{}
+	for pgName, pods := range gangPods {
+		domains := map[string]bool{}
+		for _, name := range pods {
+			node := waitForPodBound(t, tc, ns, name, 60*time.Second)
+			domains[domainOfNode(t, tc, node)] = true
+		}
+		if len(domains) != 1 {
+			t.Errorf("gang %s spans %d domains %v, want exactly 1 (gang integrity)", pgName, len(domains), keys(domains))
+		}
+		gangDomains[pgName] = domains
+	}
+
+	// The two gangs must occupy different domains — else they over-committed one.
+	if sameDomain(gangDomains["ga"], gangDomains["gb"]) {
+		t.Errorf("both gangs landed in the same domain (over-commit): ga=%v gb=%v",
+			keys(gangDomains["ga"]), keys(gangDomains["gb"]))
 	}
 }
