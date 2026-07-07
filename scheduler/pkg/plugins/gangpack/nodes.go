@@ -78,7 +78,7 @@ func nodeFits(ni *framework.NodeInfo, req map[v1.ResourceName]int64) bool {
 // free nodes per domain for the given gang pod. A node participates only if it
 // carries a domain label AND could hold the pod (nodeRelevant); it is counted
 // free when the pod fits (nodeFits). A domain with no free node still appears at
-// 0 so "full" is distinguishable from "absent" (see topology.CountFree).
+// 0 so "full" is distinguishable from "absent".
 func freeByDomain(nodeInfos []*framework.NodeInfo, topologyKey string, pod *v1.Pod) topology.FreeByDomain {
 	req := podScalarRequests(pod)
 	out := topology.FreeByDomain{}

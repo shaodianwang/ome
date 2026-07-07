@@ -8,6 +8,14 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
+// TestPluginName pins the registered plugin name referenced from the scheduler
+// config.
+func TestPluginName(t *testing.T) {
+	if got := (&GangPack{}).Name(); got != Name {
+		t.Fatalf("Name() = %q, want %q", got, Name)
+	}
+}
+
 // TestFilterEnforcesPinnedDomain: once a gang is pinned to a domain (PreFilter
 // records it in CycleState), Filter admits only nodes in that domain and rejects
 // the rest as UnschedulableAndUnresolvable — a wrong-domain node can't become

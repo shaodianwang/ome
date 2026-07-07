@@ -191,8 +191,8 @@ func TestIncompleteGangTimesOutThenRecovers(t *testing.T) {
 
 	// Make the gang completable by the lone member: minMember 2 -> 1. The plugin
 	// re-reads the PodGroup each cycle, and its EnqueueExtensions register the
-	// PodGroup Update event — so this edit requeues the rejected member promptly
-	// (no periodic-flush wait, no nudge), then its gate opens and it binds.
+	// PodGroup Update event — so this edit requeues the rejected member promptly,
+	// then its gate opens and it binds.
 	cur, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Get(tc.Ctx, "gang", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get podgroup: %v", err)
