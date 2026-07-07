@@ -33,11 +33,15 @@ WORKDIR /workspace
 COPY ome-client-rs/ ome-client-rs/
 COPY muse/ muse/
 WORKDIR /workspace/muse
+# target/ is a cache mount (not persisted in the layer), so the binary is copied
+# out before the RUN ends — to /workspace/muse-bin, NOT /workspace/muse (that path
+# is the source-tree WORKDIR; copying into it would nest the binary and make the
+# runtime /muse a directory, so ENTRYPOINT would exec a dir).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/muse/target \
     cargo build --release -p muse-server --bin muse \
-    && cp target/release/muse /workspace/muse
+    && cp target/release/muse /workspace/muse-bin
 
 # 3) Runtime.
 ARG BASE_IMAGE
@@ -54,7 +58,10 @@ RUN if [ -f /usr/bin/microdnf ]; then \
         apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 WORKDIR /
-COPY --from=builder /workspace/muse /muse
+# The binary is /workspace/muse-bin, NOT /workspace/muse (that path is the source
+# tree / WORKDIR). Copying the dir here would make /muse a directory and the
+# ENTRYPOINT fail with `exec: "/muse": is a directory`.
+COPY --from=builder /workspace/muse-bin /muse
 COPY --from=web /web/dist /web
 # Serve the baked-in console; set MUSE_WEB_DIR="" for an API-only server.
 ENV MUSE_WEB_DIR=/web
