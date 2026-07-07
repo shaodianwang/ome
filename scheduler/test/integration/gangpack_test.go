@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
@@ -141,5 +142,77 @@ func TestGangGateHoldsUntilComplete(t *testing.T) {
 		if node != "g1" && node != "g2" {
 			t.Errorf("pod %s bound to %s, want g1/g2", name, node)
 		}
+	}
+}
+
+// TestIncompleteGangTimesOutThenRecovers is the failure-cleanup guarantee: a
+// gang that cannot form must time out and unwind cleanly — releasing its pin and
+// never leaving a member partially bound — and must still schedule once it
+// becomes completable. This exercises the Permit-timeout -> Unreserve path that
+// the gate test deliberately avoids (it raises the timeout).
+//
+// A 2-member PodGroup with a short gate timeout, but only one pod. The lone
+// member best-fits, pins, gates, and repeatedly times out; across that churn it
+// stays unbound (proving no half-scheduled strand and that Unreserve releases the
+// pin each cycle). Then the gang is made completable by dropping minMember to 1 —
+// a single-pod recovery, so there is no fragile two-pod realignment to race — and
+// the member binds.
+func TestIncompleteGangTimesOutThenRecovers(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-timeout"
+	createNamespace(t, tc, ns)
+
+	for _, name := range []string{"t1", "t2"} {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(name, "a", 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", name, err)
+		}
+	}
+
+	pg := schedutil.MakePG("gang", ns, 2, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	// Short gate timeout so the lone member cycles through gate -> timeout ->
+	// unwind several times within the hold window below.
+	shortTimeout := int32(3)
+	pg.Spec.ScheduleTimeoutSeconds = &shortTimeout
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod("gp-0", ns, "gang"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod gp-0: %v", err)
+	}
+	// Over ~2 timeout cycles the lone member must never bind — the gate times it
+	// out and Unreserve releases the pin each round rather than stranding it.
+	ensureNotBound(t, tc, ns, "gp-0", 7*time.Second)
+
+	// Make the gang completable by the lone member: minMember 2 -> 1. The plugin
+	// re-reads the PodGroup each cycle, so once its backoff expires the member's
+	// gate opens and it binds.
+	cur, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Get(tc.Ctx, "gang", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get podgroup: %v", err)
+	}
+	cur.Spec.MinMember = 1
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Update(tc.Ctx, cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("shrink podgroup minMember: %v", err)
+	}
+
+	// The plugin registers no EnqueueExtensions, so a Permit-rejected member is
+	// requeued only on the scheduler's slow periodic unschedulable flush, and the
+	// PodGroup edit alone doesn't wake it (the scheduling queue doesn't watch
+	// PodGroups). Nudge with an irrelevant node event — a gpu-less, domain-less
+	// node the member can never land on (NodeResourcesFit rejects it, freeByDomain
+	// ignores it) — to flush the queue promptly. Once requeue hints land this
+	// nudge can go. (See the recovery-latency follow-up.)
+	if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx,
+		&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "nudge"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create nudge node: %v", err)
+	}
+
+	node := waitForPodBound(t, tc, ns, "gp-0", 30*time.Second)
+	if node != "t1" && node != "t2" {
+		t.Errorf("pod gp-0 bound to %s, want t1/t2", node)
 	}
 }
