@@ -1,20 +1,16 @@
 import { useState } from "react";
 
 import { api } from "../api";
-import type { IsvcItem, RuntimeItem } from "../api";
-import { Pill } from "../components";
-import { Copyable, Drawer, Facts, Section } from "../drawer";
+import type { IsvcItem, RuntimeDetail, RuntimeItem } from "../api";
+import { EnvList, Pill, RefList } from "../components";
+import { Copyable, Facts } from "../drawer";
+import { Copy } from "../icons";
 import { useLive } from "../live";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
+import type { Selected } from "../types";
 
 type RuntimeRow = RuntimeItem & { scoped: boolean; used: number };
-
-interface Selected {
-  cluster: string;
-  name: string;
-  scoped: boolean;
-}
 
 /** Last path segment of an image ref — drops the registry/repo prefix for display. */
 const imageShort = (img?: string): string => (img ? (img.split("/").pop() ?? img) : "—");
@@ -33,6 +29,25 @@ const isDisaggregated = (r: RuntimeItem): boolean =>
 /** Any component runs a multi-node worker group. */
 const isMultiNode = (r: RuntimeItem): boolean => !!r.components?.some((c) => c.multiNode);
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Format a resource map as "cpu 4 · memory 32Gi · nvidia.com/gpu 8", or null. */
+const fmtRes = (m?: Record<string, string>): string | null =>
+  m && Object.keys(m).length
+    ? Object.entries(m)
+        .map(([k, v]) => `${k} ${v}`)
+        .join(" · ")
+    : null;
+
+/** Lay a command out one flag per line: the executable (and short flags) on the
+ *  first line, then each `--long-flag` with its values on its own indented line. */
+const argLines = (command?: string[], args?: string[]): string => {
+  const lines: string[] = [];
+  for (const t of [...(command ?? []), ...(args ?? [])]) {
+    if (t.startsWith("--") || lines.length === 0) lines.push(t);
+    else lines[lines.length - 1] += ` ${t}`;
+  }
+  return lines.map((l, i) => (i === 0 ? l : `  ${l}`)).join("\n");
+};
 
 const COLUMNS: Column<RuntimeRow>[] = [
   {
@@ -90,9 +105,13 @@ const TABS: Tab<RuntimeRow>[] = [
 ];
 
 export function Runtimes({
+  selected,
+  setSelected,
   openDeployment,
 }: {
-  openDeployment: (sel: { cluster: string; name: string }) => void;
+  selected: Selected | null;
+  setSelected: (sel: Selected | null) => void;
+  openDeployment: (sel: Selected) => void;
 }) {
   const scoped = useLive(api.clusterServingRuntimes, {
     kinds: ["ClusterServingRuntime"],
@@ -110,7 +129,6 @@ export function Runtimes({
     intervalMs: 30_000,
   });
   const [filter, setFilter] = useState("all");
-  const [selected, setSelected] = useState<Selected | null>(null);
 
   // Count deployments referencing each runtime name, across the fleet.
   const usage = new Map<string, number>();
@@ -130,137 +148,211 @@ export function Runtimes({
     })),
   ];
 
-  return (
-    <>
-      <ResourceTable<RuntimeRow>
-        title="Runtimes"
-        subtitle="Serving runtimes across the fleet — the engines that serve your models."
-        rows={rows}
-        status={{
-          loading: scoped.loading || nsScoped.loading,
-          error: scoped.error ?? nsScoped.error,
-        }}
-        noun="runtimes"
-        searchPlaceholder="Filter by name, framework, architecture…"
-        searchFields={(r) => [r.name, r.image, r.architectures?.join(" "), r.formats?.join(" ")]}
-        clusterOf={(r) => r.cluster}
-        rowKey={(r) => `${r.scoped ? "c" : "n"}/${r.cluster}/${r.name}`}
-        rowTone={(r) => (r.disabled ? "slate" : "green")}
-        onRowClick={(r) => setSelected({ cluster: r.cluster, name: r.name, scoped: r.scoped })}
-        columns={COLUMNS}
-        tabs={TABS}
-        filter={filter}
-        setFilter={setFilter}
+  if (selected) {
+    return (
+      <RuntimePage
+        sel={selected}
+        isvcs={isvcs.data?.items ?? []}
+        openDeployment={openDeployment}
+        onBack={() => setSelected(null)}
       />
-      {selected ? (
-        <RuntimeDrawer
-          sel={selected}
-          isvcs={isvcs.data?.items ?? []}
-          openDeployment={openDeployment}
-          onClose={() => setSelected(null)}
-        />
-      ) : null}
-    </>
+    );
+  }
+
+  return (
+    <ResourceTable<RuntimeRow>
+      title="Runtimes"
+      subtitle="Serving runtimes across the fleet — the engines that serve your models."
+      rows={rows}
+      status={{
+        loading: scoped.loading || nsScoped.loading,
+        error: scoped.error ?? nsScoped.error,
+      }}
+      noun="runtimes"
+      searchPlaceholder="Filter by name, framework, architecture…"
+      searchFields={(r) => [r.name, r.image, r.architectures?.join(" "), r.formats?.join(" ")]}
+      clusterOf={(r) => r.cluster}
+      rowKey={(r) => `${r.scoped ? "c" : "n"}/${r.cluster}/${r.name}`}
+      rowTone={(r) => (r.disabled ? "slate" : "green")}
+      onRowClick={(r) => setSelected({ cluster: r.cluster, name: r.name })}
+      columns={COLUMNS}
+      tabs={TABS}
+      filter={filter}
+      setFilter={setFilter}
+    />
   );
 }
 
-function RuntimeDrawer({
+/** A serving container's command: collapsible (collapsed by default) with a copy of
+ *  the single-line invocation; expands to one flag per line. */
+function CommandBlock({ command, args }: { command?: string[]; args?: string[] }) {
+  const [copied, setCopied] = useState(false);
+  const oneLine = [...(command ?? []), ...(args ?? [])].join(" ");
+  return (
+    <details className="collapse">
+      <summary>
+        Command
+        <button
+          className="icon-btn sm collapse-copy"
+          title="Copy command"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            void navigator.clipboard?.writeText(oneLine);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}
+        >
+          {copied ? "✓" : <Copy />}
+        </button>
+      </summary>
+      <pre className="argbox">{argLines(command, args)}</pre>
+    </details>
+  );
+}
+
+function RuntimePage({
   sel,
   isvcs,
   openDeployment,
-  onClose,
+  onBack,
 }: {
   sel: Selected;
   isvcs: IsvcItem[];
-  openDeployment: (sel: { cluster: string; name: string }) => void;
-  onClose: () => void;
+  openDeployment: (sel: Selected) => void;
+  onBack: () => void;
 }) {
-  const detail = useLive<RuntimeItem>(
+  // Scope isn't carried in the URL, so resolve either kind: cluster-scoped first,
+  // then namespaced.
+  const detail = useLive<RuntimeDetail>(
     () =>
-      sel.scoped
-        ? api.clusterServingRuntime(sel.cluster, sel.name)
-        : api.servingRuntime(sel.cluster, sel.name),
-    { kinds: [sel.scoped ? "ClusterServingRuntime" : "ServingRuntime"], throttleMs: 5_000 },
+      api
+        .clusterServingRuntime(sel.cluster, sel.name)
+        .catch(() => api.servingRuntime(sel.cluster, sel.name)),
+    { kinds: ["ClusterServingRuntime", "ServingRuntime"], throttleMs: 5_000 },
   );
   const d = detail.data;
   const serving = isvcs.filter((s) => s.runtime === sel.name);
 
   return (
-    <Drawer title={sel.name} subtitle={sel.cluster} onClose={onClose}>
+    <section className="panel active">
+      <div className="detail-head">
+        <button className="backlink" onClick={onBack}>
+          ‹ Runtimes
+        </button>
+        <h1 className="detail-title mono">{sel.name}</h1>
+        <span className="detail-meta">{sel.cluster}</span>
+        {d && isDisaggregated(d) ? <Pill tone="cyan" label="disaggregated" /> : null}
+        {d && isMultiNode(d) ? <Pill tone="violet" label="multi-node" /> : null}
+        {d?.disabled ? <span className="tag warn">disabled</span> : null}
+      </div>
+
       {!d ? (
-        <div className="muted drawer-empty">
+        <div className="muted attn-none">
           {detail.error ?? (detail.loading ? "Loading…" : "Not found")}
         </div>
       ) : (
         <>
-          <div className="drawer-toprow">
-            {isDisaggregated(d) ? <Pill tone="cyan" label="disaggregated" /> : null}
-            {isMultiNode(d) ? <Pill tone="violet" label="multi-node" /> : null}
-            <span className={`use-chip ${serving.length ? "on" : ""}`}>
-              {serving.length ? `${serving.length} serving` : "unused"}
-            </span>
-            {d.disabled ? <span className="tag warn">disabled</span> : null}
+          <div className="detail-grid2">
+            <div className="card">
+              <div className="card-head">
+                <h3>Engine</h3>
+              </div>
+              <div className="card-body">
+                {d.image ? (
+                  <Copyable text={d.image} />
+                ) : (
+                  <div className="muted">No image declared.</div>
+                )}
+                <Facts items={[["Protocols", d.protocols?.join(", ")]]} />
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-head">
+                <h3>Topology</h3>
+              </div>
+              <div className="card-body">
+                <Facts
+                  items={(d.components ?? []).map((c): [string, string] => [
+                    cap(c.role),
+                    c.multiNode
+                      ? `multi-node${c.nodes ? ` · ${c.nodes} nodes` : ""}`
+                      : "single-node",
+                  ])}
+                />
+                {isDisaggregated(d) ? (
+                  <p className="panel-note">
+                    Prefill/decode disaggregated — engine and decoder scale independently.
+                  </p>
+                ) : null}
+              </div>
+            </div>
           </div>
 
-          <Section title="Engine">
-            {d.image ? (
-              <Copyable text={d.image} />
-            ) : (
-              <div className="muted">No image declared.</div>
-            )}
-            <Facts items={[["Protocols", d.protocols?.join(", ")]]} />
-          </Section>
-
-          <Section title="Topology">
-            <Facts
-              items={(d.components ?? []).map((c): [string, string] => [
-                cap(c.role),
-                c.multiNode ? `multi-node${c.nodes ? ` · ${c.nodes} nodes` : ""}` : "single-node",
-              ])}
-            />
-            {isDisaggregated(d) ? (
-              <p className="panel-note">
-                Prefill/decode disaggregated — engine and decoder scale independently.
-              </p>
-            ) : null}
-          </Section>
-
           {d.architectures?.length || d.formats?.length || d.quantizations?.length ? (
-            <Section title="Serves models">
-              <Facts
-                items={[
-                  ["Architectures", d.architectures?.join(", ")],
-                  ["Formats", d.formats?.join(", ")],
-                  ["Quantizations", d.quantizations?.join(", ")],
-                ]}
-              />
-            </Section>
+            <div className="card section-gap">
+              <div className="card-head">
+                <h3>Serves models</h3>
+              </div>
+              <div className="card-body">
+                <Facts
+                  items={[
+                    ["Architectures", d.architectures?.join(", ")],
+                    ["Formats", d.formats?.join(", ")],
+                    ["Quantizations", d.quantizations?.join(", ")],
+                  ]}
+                />
+              </div>
+            </div>
           ) : null}
 
-          <Section title={`Used by (${serving.length})`}>
-            {serving.length ? (
-              <ul className="ref-list">
-                {serving.map((s) => (
-                  <li key={`${s.cluster}/${s.namespace}/${s.name}`}>
-                    <button
-                      className="linkbtn mono"
-                      onClick={() => openDeployment({ cluster: s.cluster, name: s.name })}
-                    >
-                      {s.name}
-                    </button>
-                    <span className="muted">
-                      {" "}
-                      · {s.namespace ?? "—"} · {s.cluster}
-                    </span>
-                  </li>
+          {d.containers?.length ? (
+            <div className="card section-gap">
+              <div className="card-head">
+                <h3>Configuration</h3>
+              </div>
+              <div className="card-body">
+                {d.containers.map((c) => (
+                  <div key={c.role} className="rt-cfg">
+                    {d.containers!.length > 1 ? <div className="eyebrow">{cap(c.role)}</div> : null}
+                    {c.command?.length || c.args?.length ? (
+                      <CommandBlock command={c.command} args={c.args} />
+                    ) : null}
+                    {c.resources ? (
+                      <Facts
+                        items={[
+                          ["Requests", fmtRes(c.resources.requests)],
+                          ["Limits", fmtRes(c.resources.limits)],
+                        ]}
+                      />
+                    ) : null}
+                    {c.env?.length ? (
+                      <details className="collapse">
+                        <summary>Environment ({c.env.length})</summary>
+                        <EnvList env={c.env} />
+                      </details>
+                    ) : null}
+                  </div>
                 ))}
-              </ul>
-            ) : (
-              <div className="muted">No deployments use this runtime yet.</div>
-            )}
-          </Section>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="card section-gap">
+            <div className="card-head">
+              <h3>Used by ({serving.length})</h3>
+            </div>
+            <div className="card-body">
+              <RefList
+                items={serving}
+                onOpen={openDeployment}
+                empty="No deployments use this runtime yet."
+              />
+            </div>
+          </div>
         </>
       )}
-    </Drawer>
+    </section>
   );
 }

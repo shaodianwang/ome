@@ -156,6 +156,25 @@ export interface RuntimeItem {
   age?: string;
 }
 
+/** A serving-runtime container's env var. */
+export interface RuntimeEnvVar {
+  name: string;
+  value?: string;
+}
+/** One serving component's container config (from the runtime detail). */
+export interface RuntimeContainer {
+  role: string;
+  image?: string;
+  command?: string[];
+  args?: string[];
+  env?: RuntimeEnvVar[];
+  resources?: { requests?: Record<string, string>; limits?: Record<string, string> };
+}
+/** Full runtime detail: the overview plus each component's serving-container config. */
+export interface RuntimeDetail extends RuntimeItem {
+  containers?: RuntimeContainer[];
+}
+
 /** Fine-tuned weight (LoRA / adapter) — links back to a base model. */
 export interface FtwItem {
   cluster: string;
@@ -278,9 +297,9 @@ export const api = {
   clusterBaseModel: (cluster: string, name: string) =>
     getJSON<ModelDetail>(`/v1/clusterbasemodels/${enc(name)}?cluster=${enc(cluster)}`),
   servingRuntime: (cluster: string, name: string) =>
-    getJSON<RuntimeItem>(`/v1/servingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
+    getJSON<RuntimeDetail>(`/v1/servingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
   clusterServingRuntime: (cluster: string, name: string) =>
-    getJSON<RuntimeItem>(`/v1/clusterservingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
+    getJSON<RuntimeDetail>(`/v1/clusterservingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
   chat: (cluster: string, name: string, body: unknown) =>

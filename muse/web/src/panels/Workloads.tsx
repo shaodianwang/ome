@@ -5,9 +5,9 @@ import { useLive } from "../live";
 import { toWorkloadRows } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
-import type { WorkloadRow } from "../types";
+import type { Selected, WorkloadRow } from "../types";
 import { ageToSecs, hostOf } from "../util";
-import { DeploymentDetail, type Selected } from "./DeploymentDetail";
+import { DeploymentDetail } from "./DeploymentDetail";
 
 const numOr = (s: string, fallback = -1) => {
   const v = parseInt(s, 10);
@@ -109,12 +109,16 @@ export function Workloads({
   setFilter,
   selected,
   setSelected,
+  openModel,
+  openRuntime,
 }: {
   goto: (p: PanelKey) => void;
   filter: DepFilter;
   setFilter: (f: DepFilter) => void;
   selected: Selected | null;
   setSelected: (s: Selected | null) => void;
+  openModel: (sel: Selected) => void;
+  openRuntime: (sel: Selected) => void;
 }) {
   const isvcs = useLive(api.inferenceServices, {
     kinds: ["InferenceService"],
@@ -123,7 +127,14 @@ export function Workloads({
   });
 
   if (selected) {
-    return <DeploymentDetail sel={selected} onBack={() => setSelected(null)} />;
+    return (
+      <DeploymentDetail
+        sel={selected}
+        onBack={() => setSelected(null)}
+        openModel={openModel}
+        openRuntime={openRuntime}
+      />
+    );
   }
 
   return (

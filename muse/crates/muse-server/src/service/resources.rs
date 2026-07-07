@@ -24,8 +24,8 @@ use crate::{
     informers::ClusterState,
     protocol::{
         tagged, BaseModelDetail, BaseModelView, FineTunedWeightView, InferenceServiceDetail,
-        InferenceServiceView, ListParams, Listing, NodeView, ResourceSummary, RuntimeView,
-        Topology, ViewParams,
+        InferenceServiceView, ListParams, Listing, NodeView, ResourceSummary, RuntimeDetail,
+        RuntimeView, Topology, ViewParams,
     },
     rollup,
 };
@@ -58,10 +58,10 @@ macro_rules! ome_kinds {
 ome_kinds! {
     "inferenceservices"      => inference_services       : InferenceServiceView::of,  InferenceServiceDetail::of;
     "basemodels"             => base_models              : BaseModelView::of,          BaseModelDetail::of;
-    "servingruntimes"        => serving_runtimes         : RuntimeView::of,            RuntimeView::of;
+    "servingruntimes"        => serving_runtimes         : RuntimeView::of,            RuntimeDetail::of;
     "inferencereplicas"      => inference_replicas       : ResourceSummary::of,        ResourceSummary::of;
     "clusterbasemodels"      => cluster_base_models      : BaseModelView::of_cluster,  BaseModelDetail::of_cluster;
-    "clusterservingruntimes" => cluster_serving_runtimes : RuntimeView::of_cluster,    RuntimeView::of_cluster;
+    "clusterservingruntimes" => cluster_serving_runtimes : RuntimeView::of_cluster,    RuntimeDetail::of_cluster;
     "finetunedweights"       => fine_tuned_weights       : FineTunedWeightView::of,    FineTunedWeightView::of;
     "workloadclusters"       => workload_clusters        : ResourceSummary::of,        ResourceSummary::of;
 }

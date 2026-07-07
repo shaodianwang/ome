@@ -4,22 +4,17 @@ import { useState } from "react";
 import type { PanelKey } from "../App";
 import { api } from "../api";
 import type { FtwItem, IsvcItem, ModelDetail, ModelItem } from "../api";
-import { Pill } from "../components";
+import { Pill, RefList } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
 import { Plus, Refresh } from "../icons";
 import { useLive } from "../live";
 import { modelUsage, stateTone } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
+import type { Selected } from "../types";
 import { num } from "../util";
 
 type ModelRow = ModelItem & { scoped: boolean; used: number };
-
-interface Selected {
-  cluster: string;
-  name: string;
-  scoped: boolean;
-}
 
 /** Parameter size ("405B" / "47B" / "350M") to a comparable number, for sorting. */
 const sizeVal = (s?: string): number => {
@@ -104,7 +99,17 @@ const TABS: Tab<ModelRow>[] = [
   },
 ];
 
-export function Models({ goto }: { goto: (p: PanelKey) => void }) {
+export function Models({
+  goto,
+  selected,
+  setSelected,
+  openDeployment,
+}: {
+  goto: (p: PanelKey) => void;
+  selected: Selected | null;
+  setSelected: (sel: Selected | null) => void;
+  openDeployment: (sel: Selected) => void;
+}) {
   const base = useLive(api.baseModels, {
     kinds: ["BaseModel"],
     throttleMs: 8_000,
@@ -126,7 +131,6 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
     intervalMs: 60_000,
   });
   const [filter, setFilter] = useState("all");
-  const [selected, setSelected] = useState<Selected | null>(null);
 
   const usage = modelUsage(isvcs.data?.items ?? []);
   const rows: ModelRow[] = [
@@ -166,7 +170,7 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
         clusterOf={(m) => m.cluster}
         rowKey={(m) => `${m.scoped ? "c" : "n"}/${m.cluster}/${m.name}`}
         rowTone={(m) => stateTone(m.state)}
-        onRowClick={(m) => setSelected({ cluster: m.cluster, name: m.name, scoped: m.scoped })}
+        onRowClick={(m) => setSelected({ cluster: m.cluster, name: m.name })}
         columns={COLUMNS}
         tabs={TABS}
         filter={filter}
@@ -178,6 +182,7 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
           isvcs={isvcs.data?.items ?? []}
           ftws={ftws.data?.items ?? []}
           goto={goto}
+          openDeployment={openDeployment}
           onClose={() => setSelected(null)}
         />
       ) : null}
@@ -199,20 +204,22 @@ function ModelDrawer({
   isvcs,
   ftws,
   goto,
+  openDeployment,
   onClose,
 }: {
   sel: Selected;
   isvcs: IsvcItem[];
   ftws: FtwItem[];
   goto: (p: PanelKey) => void;
+  openDeployment: (sel: Selected) => void;
   onClose: () => void;
 }) {
+  // Scope isn't carried in the URL, so resolve either kind: cluster-scoped first,
+  // then namespaced.
   const detail = useLive<ModelDetail>(
     () =>
-      sel.scoped
-        ? api.clusterBaseModel(sel.cluster, sel.name)
-        : api.baseModel(sel.cluster, sel.name),
-    { kinds: [sel.scoped ? "ClusterBaseModel" : "BaseModel"], throttleMs: 5_000 },
+      api.clusterBaseModel(sel.cluster, sel.name).catch(() => api.baseModel(sel.cluster, sel.name)),
+    { kinds: ["ClusterBaseModel", "BaseModel"], throttleMs: 5_000 },
   );
   const d = detail.data;
   const serving = isvcs.filter((s) => s.model === sel.name);
@@ -270,21 +277,11 @@ function ModelDrawer({
           ) : null}
 
           <Section title={`Serving (${serving.length})`}>
-            {serving.length ? (
-              <ul className="ref-list">
-                {serving.map((s) => (
-                  <li key={`${s.cluster}/${s.namespace}/${s.name}`}>
-                    <span className="mono">{s.name}</span>
-                    <span className="muted">
-                      {" "}
-                      · {s.namespace ?? "—"} · {s.cluster}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="muted">No deployments reference this model yet.</div>
-            )}
+            <RefList
+              items={serving}
+              onOpen={openDeployment}
+              empty="No deployments reference this model yet."
+            />
           </Section>
 
           {adapters.length ? (

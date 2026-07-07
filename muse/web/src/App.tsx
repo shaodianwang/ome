@@ -12,7 +12,7 @@ import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
 import { Deploy } from "./panels/Deploy";
 import { Fleet } from "./panels/Fleet";
-import type { Selected } from "./panels/DeploymentDetail";
+import type { Selected } from "./types";
 import { Models } from "./panels/Models";
 import { Runtimes } from "./panels/Runtimes";
 import { Workloads } from "./panels/Workloads";
@@ -36,14 +36,13 @@ export default function App() {
   const [route, navigate] = useRoute();
   const panel = route.panel;
   const depFilter: DepFilter = route.filter ?? "all";
-  const selectedDep = route.dep ?? null;
+  const sel = route.sel ?? null;
 
   const goto = (p: PanelKey) => navigate({ panel: p });
   const openDeployments = (f: DepFilter) => navigate({ panel: "workloads", filter: f });
-  const openDeployment = (sel: Selected) => navigate({ panel: "workloads", dep: sel });
-  const setDepFilter = (f: DepFilter) => navigate({ panel: "workloads", filter: f });
-  const setSelectedDep = (sel: Selected | null) =>
-    navigate({ panel: "workloads", dep: sel ?? undefined, filter: depFilter });
+  const openDeployment = (s: Selected) => navigate({ panel: "workloads", sel: s });
+  const openModel = (s: Selected) => navigate({ panel: "models", sel: s });
+  const openRuntime = (s: Selected) => navigate({ panel: "runtimes", sel: s });
 
   // Sidebar connection status, from the same read plane the panels use.
   const clusters = useLive(api.clusters, { kinds: ["InferenceService"], intervalMs: 30_000 });
@@ -114,13 +113,30 @@ export default function App() {
             <Workloads
               goto={goto}
               filter={depFilter}
-              setFilter={setDepFilter}
-              selected={selectedDep}
-              setSelected={setSelectedDep}
+              setFilter={(f) => navigate({ panel: "workloads", filter: f })}
+              selected={sel}
+              setSelected={(s) =>
+                navigate({ panel: "workloads", sel: s ?? undefined, filter: depFilter })
+              }
+              openModel={openModel}
+              openRuntime={openRuntime}
             />
           )}
-          {panel === "models" && <Models goto={goto} />}
-          {panel === "runtimes" && <Runtimes openDeployment={openDeployment} />}
+          {panel === "models" && (
+            <Models
+              goto={goto}
+              selected={sel}
+              setSelected={(s) => navigate({ panel: "models", sel: s ?? undefined })}
+              openDeployment={openDeployment}
+            />
+          )}
+          {panel === "runtimes" && (
+            <Runtimes
+              selected={sel}
+              setSelected={(s) => navigate({ panel: "runtimes", sel: s ?? undefined })}
+              openDeployment={openDeployment}
+            />
+          )}
           {panel === "deploy" && <Deploy />}
           {panel === "capacity" && <Capacity />}
         </div>

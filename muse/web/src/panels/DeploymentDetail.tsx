@@ -7,18 +7,24 @@ import { Copyable, Facts } from "../drawer";
 import { Copy } from "../icons";
 import { useEventFeed, useLive } from "../live";
 import { replicaRollup } from "../map";
+import type { Selected } from "../types";
 import { ago, num as n } from "../util";
 import { Dot, UtilRow } from "../viz";
-
-export interface Selected {
-  cluster: string;
-  name: string;
-}
 
 /** Full-page detail for one deployment: health, replicas, model/runtime,
  *  placement, a test box, and recent activity. No k8s conditions or deployment
  *  mode — health is shown in plain terms. */
-export function DeploymentDetail({ sel, onBack }: { sel: Selected; onBack: () => void }) {
+export function DeploymentDetail({
+  sel,
+  onBack,
+  openModel,
+  openRuntime,
+}: {
+  sel: Selected;
+  onBack: () => void;
+  openModel: (sel: Selected) => void;
+  openRuntime: (sel: Selected) => void;
+}) {
   const detail = useLive<IsvcDetail>(() => api.inferenceService(sel.cluster, sel.name), {
     kinds: ["InferenceService"],
     throttleMs: 4_000,
@@ -123,8 +129,28 @@ export function DeploymentDetail({ sel, onBack }: { sel: Selected; onBack: () =>
               <div className="card-body">
                 <Facts
                   items={[
-                    ["Model", d.model ? <span className="mono">{d.model}</span> : null],
-                    ["Runtime", d.runtime ? <span className="mono">{d.runtime}</span> : null],
+                    [
+                      "Model",
+                      d.model ? (
+                        <button
+                          className="linkbtn mono"
+                          onClick={() => openModel({ cluster: sel.cluster, name: d.model! })}
+                        >
+                          {d.model}
+                        </button>
+                      ) : null,
+                    ],
+                    [
+                      "Runtime",
+                      d.runtime ? (
+                        <button
+                          className="linkbtn mono"
+                          onClick={() => openRuntime({ cluster: sel.cluster, name: d.runtime! })}
+                        >
+                          {d.runtime}
+                        </button>
+                      ) : null,
+                    ],
                     ["Namespace", d.namespace],
                     ["Where", sel.cluster],
                     ["Age", d.age],

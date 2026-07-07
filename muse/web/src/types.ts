@@ -5,6 +5,13 @@ export type Cloud = "meta" | "gcp" | "oci" | "cw";
 export type Tone = "green" | "amber" | "red" | "blue" | "violet" | "cyan" | "slate";
 export type BarTone = "" | "green" | "amber" | "red" | "violet";
 
+/** A cluster-scoped reference to a named resource — the shape used for detail
+ *  views and cross-panel navigation. */
+export interface Selected {
+  cluster: string;
+  name: string;
+}
+
 export interface Pill {
   label: string;
   tone: Tone;

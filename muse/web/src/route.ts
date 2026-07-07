@@ -1,5 +1,5 @@
 // A tiny History-API router (no dependency). The URL is the source of truth for
-// which panel is shown and which deployment is open, so browser back/forward,
+// which panel is shown and which item's detail is open, so browser back/forward,
 // refresh, and deep-links all work. Paths are relative to the app's base (Vite
 // BASE_URL), so it works behind the gateway sub-path; the server serves
 // index.html for these paths (SPA fallback), so refresh/deep-link resolve.
@@ -9,8 +9,8 @@ import type { DepFilter, PanelKey } from "./App";
 
 export interface Route {
   panel: PanelKey;
-  /** Open deployment's detail (only meaningful when panel is "workloads"). */
-  dep?: { cluster: string; name: string };
+  /** Open item's detail on the current panel (a deployment / model / runtime). */
+  sel?: { cluster: string; name: string };
   /** Deployments list tab. */
   filter?: DepFilter;
 }
@@ -42,19 +42,21 @@ function parse(): Route {
   const seg = path.split("/").filter(Boolean);
   const panel = SLUG_TO_PANEL[seg[0] ?? ""] ?? "fleet";
   const route: Route = { panel };
-  if (panel === "workloads" && seg[1] && seg[2]) {
-    route.dep = { cluster: decodeURIComponent(seg[1]), name: decodeURIComponent(seg[2]) };
+  if (seg[1] && seg[2]) {
+    route.sel = { cluster: decodeURIComponent(seg[1]), name: decodeURIComponent(seg[2]) };
   }
-  const tab = new URLSearchParams(window.location.search).get("tab");
-  if (panel === "workloads" && (tab === "attention" || tab === "ready")) route.filter = tab;
+  if (panel === "workloads") {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    if (tab === "attention" || tab === "ready") route.filter = tab;
+  }
   return route;
 }
 
 /** Build the URL (base-relative) for a Route. */
 export function routePath(r: Route): string {
   let path = base + PANEL_TO_SLUG[r.panel];
-  if (r.dep) {
-    path += `/${encodeURIComponent(r.dep.cluster)}/${encodeURIComponent(r.dep.name)}`;
+  if (r.sel) {
+    path += `/${encodeURIComponent(r.sel.cluster)}/${encodeURIComponent(r.sel.name)}`;
   }
   const q = r.filter && r.filter !== "all" ? `?tab=${r.filter}` : "";
   return path + q;

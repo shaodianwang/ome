@@ -476,6 +476,76 @@ pre.curl {
   overflow-x: auto;
   color: var(--fg-2);
 }
+pre.argbox {
+  background: #0a0c11;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 0 0 var(--s2);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-2);
+}
+.rt-cfg + .rt-cfg {
+  margin-top: var(--s4);
+}
+.collapse {
+  margin-top: var(--s2);
+}
+.collapse > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+  user-select: none;
+  padding: 4px 0;
+}
+.collapse > summary::-webkit-details-marker {
+  display: none;
+}
+.collapse > summary::before {
+  content: "▸";
+  color: var(--accent-2);
+}
+.collapse[open] > summary::before {
+  content: "▾";
+}
+.collapse > summary:hover {
+  color: var(--fg-2);
+}
+.collapse-copy {
+  margin-left: auto;
+}
+.envlist {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+/* Hanging indent: KEY=value flush left, wrapped value lines indent under it. */
+.envlist li {
+  padding-left: var(--s4);
+  text-indent: calc(-1 * var(--s4));
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.envk {
+  color: var(--fg);
+  font-weight: 500;
+}
 .drawer-cta {
   margin-left: auto;
 }

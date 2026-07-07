@@ -289,9 +289,28 @@ fn image_of(c: &BTreeMap<String, Value>) -> Option<String> {
     c.get("image").and_then(Value::as_str).map(str::to_owned)
 }
 
-/// Best-effort image from an opaque container list (first that declares one).
-fn runtime_image(containers: &Option<Vec<BTreeMap<String, Value>>>) -> Option<String> {
-    containers.as_ref()?.iter().find_map(image_of)
+/// A component's primary serving container from its serialized config: the
+/// single-node `runner`/`containers`, or a multi-node `leader`/`worker`'s. Walking
+/// the serialized JSON lets one path cover engine/decoder/router across both the
+/// namespaced and cluster-scoped runtime types.
+fn container_in(cfg: &Value) -> Option<Container> {
+    [Some(cfg), cfg.get("leader"), cfg.get("worker")]
+        .into_iter()
+        .flatten()
+        .find_map(|node| {
+            let c = node.get("runner").filter(|v| v.is_object()).or_else(|| {
+                node.get("containers")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.first())
+            })?;
+            c.as_object()
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        })
+}
+
+/// The serving container of an optional component config (see [`container_in`]).
+fn config_container<T: Serialize>(cfg: &Option<T>) -> Option<Container> {
+    container_in(&serde_json::to_value(cfg.as_ref()?).ok()?)
 }
 
 /// Drop empty strings and duplicates, preserving first-seen order.
@@ -378,18 +397,10 @@ impl RuntimeView {
         Self {
             name: r.meta().name.clone().unwrap_or_default(),
             namespace: r.meta().namespace.clone(),
-            image: runtime_image(&s.containers)
-                .or_else(|| {
-                    s.engine_config
-                        .as_ref()
-                        .and_then(|e| runtime_image(&e.containers))
-                })
-                .or_else(|| {
-                    s.engine_config
-                        .as_ref()
-                        .and_then(|e| e.runner.as_ref())
-                        .and_then(image_of)
-                }),
+            image: config_container(&s.engine_config)
+                .or_else(|| s.containers.as_ref().and_then(|v| v.first()).cloned())
+                .as_ref()
+                .and_then(image_of),
             architectures: uniq_nonempty(
                 f.iter()
                     .filter_map(|x| x.model_architecture.clone())
@@ -420,18 +431,10 @@ impl RuntimeView {
         Self {
             name: r.meta().name.clone().unwrap_or_default(),
             namespace: r.meta().namespace.clone(),
-            image: runtime_image(&s.containers)
-                .or_else(|| {
-                    s.engine_config
-                        .as_ref()
-                        .and_then(|e| runtime_image(&e.containers))
-                })
-                .or_else(|| {
-                    s.engine_config
-                        .as_ref()
-                        .and_then(|e| e.runner.as_ref())
-                        .and_then(image_of)
-                }),
+            image: config_container(&s.engine_config)
+                .or_else(|| s.containers.as_ref().and_then(|v| v.first()).cloned())
+                .as_ref()
+                .and_then(image_of),
             architectures: uniq_nonempty(
                 f.iter()
                     .filter_map(|x| x.model_architecture.clone())
@@ -453,6 +456,163 @@ impl RuntimeView {
             ),
             disabled: s.disabled,
             age: age(r.meta()),
+        }
+    }
+}
+
+/// A serving container's env var (literal values only; refs are kept by name).
+#[derive(Serialize)]
+pub struct EnvVar {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// A container's resource requests / limits (resource name → quantity).
+#[derive(Serialize)]
+pub struct RuntimeResources {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub requests: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub limits: BTreeMap<String, String>,
+}
+
+/// One serving component's container config — enough to see how it runs.
+#[derive(Serialize)]
+pub struct RuntimeContainer {
+    pub role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub env: Vec<EnvVar>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<RuntimeResources>,
+}
+
+type Container = BTreeMap<String, Value>;
+
+/// A string-array field (e.g. command / args) of an opaque container map.
+fn str_list(c: &Container, key: &str) -> Vec<String> {
+    c.get(key)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Literal env vars of an opaque container map (valueFrom refs kept by name only).
+fn env_of(c: &Container) -> Vec<EnvVar> {
+    c.get("env")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    Some(EnvVar {
+                        name: e.get("name")?.as_str()?.to_owned(),
+                        value: e.get("value").and_then(Value::as_str).map(str::to_owned),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A k8s quantity map (e.g. resources.requests) from an opaque JSON object,
+/// stringifying each quantity (they may be JSON strings or numbers).
+fn quantity_map(v: Option<&Value>) -> BTreeMap<String, String> {
+    v.and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| {
+                    let s = val
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| val.is_number().then(|| val.to_string()))?;
+                    Some((k.clone(), s))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A container's resource requests/limits, if any are declared.
+fn resources_of(c: &Container) -> Option<RuntimeResources> {
+    let r = c.get("resources")?;
+    let requests = quantity_map(r.get("requests"));
+    let limits = quantity_map(r.get("limits"));
+    if requests.is_empty() && limits.is_empty() {
+        None
+    } else {
+        Some(RuntimeResources { requests, limits })
+    }
+}
+
+fn container_detail(role: &'static str, c: &Container) -> RuntimeContainer {
+    RuntimeContainer {
+        role,
+        image: image_of(c),
+        command: str_list(c, "command"),
+        args: str_list(c, "args"),
+        env: env_of(c),
+        resources: resources_of(c),
+    }
+}
+
+/// Full runtime detail: the overview plus each component's serving-container config
+/// (image, command, args, env). ServingRuntime and ClusterServingRuntime share it.
+#[derive(Serialize)]
+pub struct RuntimeDetail {
+    #[serde(flatten)]
+    pub view: RuntimeView,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub containers: Vec<RuntimeContainer>,
+}
+
+impl RuntimeDetail {
+    pub fn of(r: &ServingRuntime) -> Self {
+        let s = &r.spec;
+        let mut containers = Vec::new();
+        if let Some(c) = config_container(&s.engine_config)
+            .or_else(|| s.containers.as_ref().and_then(|v| v.first()).cloned())
+        {
+            containers.push(container_detail("engine", &c));
+        }
+        if let Some(c) = config_container(&s.decoder_config) {
+            containers.push(container_detail("decoder", &c));
+        }
+        if let Some(c) = config_container(&s.router_config) {
+            containers.push(container_detail("router", &c));
+        }
+        Self {
+            view: RuntimeView::of(r),
+            containers,
+        }
+    }
+
+    pub fn of_cluster(r: &ClusterServingRuntime) -> Self {
+        let s = &r.spec;
+        let mut containers = Vec::new();
+        if let Some(c) = config_container(&s.engine_config)
+            .or_else(|| s.containers.as_ref().and_then(|v| v.first()).cloned())
+        {
+            containers.push(container_detail("engine", &c));
+        }
+        if let Some(c) = config_container(&s.decoder_config) {
+            containers.push(container_detail("decoder", &c));
+        }
+        if let Some(c) = config_container(&s.router_config) {
+            containers.push(container_detail("router", &c));
+        }
+        Self {
+            view: RuntimeView::of_cluster(r),
+            containers,
         }
     }
 }

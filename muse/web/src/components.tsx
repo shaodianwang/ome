@@ -1,7 +1,7 @@
 // Small reusable presentational pieces shared across panels.
 import type { CSSProperties, ReactNode } from "react";
 
-import type { BarTone, Tone } from "./types";
+import type { BarTone, Selected, Tone } from "./types";
 import { num } from "./util";
 
 export function Pill({ tone, label, style }: { tone: Tone; label: string; style?: CSSProperties }) {
@@ -124,5 +124,51 @@ export function Pager({
         </button>
       </div>
     </div>
+  );
+}
+
+/** A list of deployment references, each a link to its detail; an empty note otherwise. */
+export function RefList({
+  items,
+  onOpen,
+  empty,
+}: {
+  items: { cluster: string; name: string; namespace?: string }[];
+  onOpen: (ref: Selected) => void;
+  empty: string;
+}) {
+  if (!items.length) return <div className="muted">{empty}</div>;
+  return (
+    <ul className="ref-list">
+      {items.map((s) => (
+        <li key={`${s.cluster}/${s.namespace ?? ""}/${s.name}`}>
+          <button
+            className="linkbtn mono"
+            onClick={() => onOpen({ cluster: s.cluster, name: s.name })}
+          >
+            {s.name}
+          </button>
+          <span className="muted">
+            {" "}
+            · {s.namespace ?? "—"} · {s.cluster}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** A container's environment as stacked key/value rows — long keys and values wrap
+ *  full-width rather than overlapping a fixed column. */
+export function EnvList({ env }: { env: { name: string; value?: string }[] }) {
+  return (
+    <ul className="envlist">
+      {env.map((e) => (
+        <li key={e.name}>
+          <span className="envk">{e.name}</span>=
+          {e.value ?? <span className="muted">(from ref)</span>}
+        </li>
+      ))}
+    </ul>
   );
 }
