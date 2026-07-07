@@ -32,10 +32,11 @@ type GangPack struct {
 
 // Interface assertions.
 var (
-	_ framework.PreFilterPlugin = &GangPack{}
-	_ framework.FilterPlugin    = &GangPack{}
-	_ framework.PermitPlugin    = &GangPack{}
-	_ framework.ReservePlugin   = &GangPack{}
+	_ framework.PreFilterPlugin   = &GangPack{}
+	_ framework.FilterPlugin      = &GangPack{}
+	_ framework.PermitPlugin      = &GangPack{}
+	_ framework.ReservePlugin     = &GangPack{}
+	_ framework.EnqueueExtensions = &GangPack{}
 )
 
 // New is the plugin factory registered via app.WithPlugin. It stands up the

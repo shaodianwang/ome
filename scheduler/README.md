@@ -64,9 +64,10 @@ one and over-commit it. Gang membership + size come from the standard
 scheduler-plugins `PodGroup`; the domain label is declared per-workload via the
 PodGroup's `ome.io/topology-key` annotation; and node free-ness is inferred from
 the gang pod's own resource requests — the scheduler bakes in no workload
-conventions or fabric values. Still ahead: requeue hints (so a rejected gang
-member re-attempts promptly instead of on the slow periodic flush), replica
-spreading, and metrics; see OEP-0022 § Placement.
+conventions or fabric values. A rejected gang member re-attempts promptly via
+registered requeue hints (sibling/PodGroup/node events) rather than the
+scheduler's slow periodic flush. Still ahead: replica spreading and metrics; see
+OEP-0022 § Placement.
 
 ## Version policy
 

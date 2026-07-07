@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
@@ -191,8 +190,9 @@ func TestIncompleteGangTimesOutThenRecovers(t *testing.T) {
 	ensureNotBound(t, tc, ns, "gp-0", 7*time.Second)
 
 	// Make the gang completable by the lone member: minMember 2 -> 1. The plugin
-	// re-reads the PodGroup each cycle, so once its backoff expires the member's
-	// gate opens and it binds.
+	// re-reads the PodGroup each cycle, and its EnqueueExtensions register the
+	// PodGroup Update event — so this edit requeues the rejected member promptly
+	// (no periodic-flush wait, no nudge), then its gate opens and it binds.
 	cur, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Get(tc.Ctx, "gang", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get podgroup: %v", err)
@@ -200,18 +200,6 @@ func TestIncompleteGangTimesOutThenRecovers(t *testing.T) {
 	cur.Spec.MinMember = 1
 	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Update(tc.Ctx, cur, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("shrink podgroup minMember: %v", err)
-	}
-
-	// The plugin registers no EnqueueExtensions, so a Permit-rejected member is
-	// requeued only on the scheduler's slow periodic unschedulable flush, and the
-	// PodGroup edit alone doesn't wake it (the scheduling queue doesn't watch
-	// PodGroups). Nudge with an irrelevant node event — a gpu-less, domain-less
-	// node the member can never land on (NodeResourcesFit rejects it, freeByDomain
-	// ignores it) — to flush the queue promptly. Once requeue hints land this
-	// nudge can go. (See the recovery-latency follow-up.)
-	if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx,
-		&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "nudge"}}, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create nudge node: %v", err)
 	}
 
 	node := waitForPodBound(t, tc, ns, "gp-0", 30*time.Second)
