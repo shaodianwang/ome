@@ -38,23 +38,25 @@ func (g *GangPack) Reserve(_ context.Context, _ *framework.CycleState, pod *v1.P
 // It is idempotent: rejected siblings are themselves unreserved, re-entering here,
 // but Release and Reject are both safe to repeat. A pod that is not a gang member
 // is left alone.
+//
+// The gang key comes from the pod's OWN pod-group label, not a PodGroup lookup, so
+// the pin and reservation are still released even if the PodGroup was deleted
+// mid-flight (which is when Unreserve tends to fire) — otherwise they would leak.
 func (g *GangPack) Unreserve(_ context.Context, _ *framework.CycleState, pod *v1.Pod, _ string) {
-	if g.pgReader == nil {
-		return
-	}
-	gang, ok := resolveGang(pod, g.pgReader)
+	ns, name, ok := podGroupNameOf(pod)
 	if !ok {
 		return
 	}
+	key := ns + "/" + name
 	// Count the unwind once per gang: only the first member's Unreserve actually
 	// releases the pin; rejected siblings re-enter here and find it already gone.
-	if g.pins.Release(gang.key) {
+	if g.pins.Release(key) {
 		gangUnwindTotal.Inc()
 		pinnedGroups.Set(float64(g.pins.Len()))
 	}
 	g.handle.IterateOverWaitingPods(func(wp framework.WaitingPod) {
-		if sameGang(wp.GetPod(), gang.key) {
-			wp.Reject(Name, "gang "+gang.key+" unwound after a member failed to schedule")
+		if sameGang(wp.GetPod(), key) {
+			wp.Reject(Name, "gang "+key+" unwound after a member failed to schedule")
 		}
 	})
 }

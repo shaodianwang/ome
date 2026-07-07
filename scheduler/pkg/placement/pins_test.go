@@ -152,6 +152,29 @@ func TestSetHoldsNoReservation(t *testing.T) {
 	}
 }
 
+// TestRetainOnlyReleasesDeadGangs: the GC hook drops pins for gangs absent from
+// the live set and returns their reserved capacity, while keeping live ones.
+func TestRetainOnlyReleasesDeadGangs(t *testing.T) {
+	p := New()
+	p.Choose("live", topology.FreeByDomain{"a": 5}, 2) // reserves 2 in a
+	p.Choose("dead", topology.FreeByDomain{"a": 5}, 2) // reserves 2 more in a
+
+	if released := p.RetainOnly(map[string]bool{"live": true}); released != 1 {
+		t.Fatalf("RetainOnly released %d, want 1", released)
+	}
+	if _, ok := p.Get("dead"); ok {
+		t.Fatal("dead gang's pin should be released")
+	}
+	if _, ok := p.Get("live"); !ok {
+		t.Fatal("live gang's pin must be retained")
+	}
+	// dead's reservation was returned: a of 5 now shows 3 free (5 - live's 2), so a
+	// gang of 3 fits where before (5 - 2 - 2 = 1) it did not.
+	if d, ok := p.Choose("new", topology.FreeByDomain{"a": 5}, 3); !ok || d != "a" {
+		t.Fatalf("new Choose = %q,%v want a,true (dead reservation reclaimed)", d, ok)
+	}
+}
+
 // TestPartnerGangFollowsSharedGroup: prefill and decode share one placement
 // group, so the partner gang lands in the same domain the first gang pinned —
 // this is the co-location mechanism (OEP-0022 R2), even with a different size.

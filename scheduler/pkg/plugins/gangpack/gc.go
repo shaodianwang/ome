@@ -1,0 +1,89 @@
+package gangpack
+
+import (
+	"context"
+	"time"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
+)
+
+// gcInterval is how often the pin garbage collector reconciles. It is internal
+// housekeeping cadence — not a scheduling-behavior value — so it is a constant,
+// not config: a pin left behind by a torn-down gang is harmless until reclaimed,
+// and the reconcile is cheap (a cache List plus an O(pins) sweep).
+const gcInterval = 60 * time.Second
+
+// gangPodLister yields the set of gang keys (namespace/podgroup) that still have
+// at least one live pod. An interface so the GC is unit-testable without an
+// informer.
+type gangPodLister interface {
+	liveGangKeys() (map[string]bool, error)
+}
+
+// runPinGC periodically reconciles the pin store against live gangs, releasing
+// pins whose pods are all gone. It runs for the scheduler's lifetime (bounded by
+// ctx) and is a no-op if no pod lister was wired.
+func (g *GangPack) runPinGC(ctx context.Context) {
+	if g.podLister == nil {
+		return
+	}
+	t := time.NewTicker(gcInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			g.gcPins()
+		}
+	}
+}
+
+// gcPins releases pins for gangs that no longer have any live pod. A transient
+// lister error is skipped — the next tick retries — rather than risking a release
+// against a partial view.
+func (g *GangPack) gcPins() {
+	live, err := g.podLister.liveGangKeys()
+	if err != nil {
+		return
+	}
+	if released := g.pins.RetainOnly(live); released > 0 {
+		pinnedGroups.Set(float64(g.pins.Len()))
+	}
+}
+
+// informerPodLister is the live gangPodLister, backed by the scheduler's shared
+// pod informer cache and filtered to pods that carry the pod-group label.
+type informerPodLister struct {
+	list func() ([]*v1.Pod, error)
+}
+
+var _ gangPodLister = &informerPodLister{}
+
+func (l *informerPodLister) liveGangKeys() (map[string]bool, error) {
+	pods, err := l.list()
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]bool, len(pods))
+	for _, p := range pods {
+		if ns, name, ok := podGroupNameOf(p); ok {
+			keys[ns+"/"+name] = true
+		}
+	}
+	return keys, nil
+}
+
+// newInformerPodLister builds a gang-pod lister from the scheduler's shared
+// informer factory, selecting only pods that carry the pod-group label.
+func newInformerPodLister(h framework.Handle) *informerPodLister {
+	lister := h.SharedInformerFactory().Core().V1().Pods().Lister()
+	req, _ := labels.NewRequirement(podGroupLabel, selection.Exists, nil)
+	sel := labels.NewSelector().Add(*req)
+	return &informerPodLister{
+		list: func() ([]*v1.Pod, error) { return lister.List(sel) },
+	}
+}

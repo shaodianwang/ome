@@ -160,6 +160,26 @@ func (p *Pins) Set(group, domain string) {
 	p.byGroup[group] = &commitment{domain: domain, remaining: 0}
 }
 
+// RetainOnly releases every pinned group NOT present in live, returning how many
+// were released. It is the garbage collector's hook: a gang whose pods are all
+// gone (completed and torn down, deleted, or abandoned before Reserve) leaves a
+// pin no failure path reclaims, so byGroup would grow unbounded and a reused
+// PodGroup name could inherit a stale domain. Reconciling against the set of
+// gangs that still have live pods bounds byGroup to live gangs.
+func (p *Pins) RetainOnly(live map[string]bool) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	released := 0
+	for group, c := range p.byGroup {
+		if !live[group] {
+			delete(p.byGroup, group)
+			p.addReservation(c.domain, -c.remaining)
+			released++
+		}
+	}
+	return released
+}
+
 // Release drops a group's pin and its reservation — on gang completion, on
 // gate-timeout unwind, or on teardown — so the next Choose re-runs best-fit and
 // may pick a different domain. It reports whether a pin was actually present, so

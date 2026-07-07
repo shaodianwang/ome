@@ -70,15 +70,35 @@ func TestUnreserveUnwindsGang(t *testing.T) {
 	}
 }
 
-// TestUnreserveNonGangNoop: a pod that is not a gang member unwinds nothing.
+// TestUnreserveNonGangNoop: a pod with no pod-group label is not a gang member,
+// so Unreserve does nothing.
 func TestUnreserveNonGangNoop(t *testing.T) {
 	victim := &fakeWaitingPod{pod: gangPod("team", "pf")}
 	h := &fakeHandle{waiting: []framework.WaitingPod{victim}}
-	g := &GangPack{handle: h, pins: placement.New(), pgReader: fakeReader{}} // empty reader -> not resolvable
+	g := &GangPack{handle: h, pins: placement.New(), pgReader: fakeReader{}}
 
-	g.Unreserve(context.Background(), nil, gangPod("team", "x"), "node1")
+	g.Unreserve(context.Background(), nil, gangPod("team", ""), "node1") // no label
 
 	if victim.rejected {
 		t.Fatal("non-gang Unreserve must not reject anyone")
+	}
+}
+
+// TestUnreserveReleasesWhenPodGroupGone: if the PodGroup was deleted mid-flight
+// (the reader can no longer resolve it), Unreserve must STILL release the pin and
+// reservation — the key comes from the pod's own label, not a PodGroup lookup —
+// so nothing leaks.
+func TestUnreserveReleasesWhenPodGroupGone(t *testing.T) {
+	g := &GangPack{
+		handle:   &fakeHandle{},
+		pins:     placement.New(),
+		pgReader: fakeReader{}, // empty: the PodGroup is gone
+	}
+	g.pins.Set("team/pf", "d1") // pinned before the PodGroup vanished
+
+	g.Unreserve(context.Background(), nil, gangPod("team", "pf"), "node1")
+
+	if _, pinned := g.pins.Get("team/pf"); pinned {
+		t.Fatal("pin must be released even though the PodGroup is gone (else it leaks)")
 	}
 }

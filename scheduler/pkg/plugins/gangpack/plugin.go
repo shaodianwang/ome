@@ -28,6 +28,9 @@ type GangPack struct {
 	// key). nil until the informer-backed reader is wired, in which case the
 	// plugin is inert (PreFilter returns Skip).
 	pgReader podGroupReader
+	// podLister enumerates live gang pods for the pin garbage collector. nil in
+	// unit tests that don't exercise GC.
+	podLister gangPodLister
 }
 
 // Interface assertions.
@@ -40,15 +43,23 @@ var (
 )
 
 // New is the plugin factory registered via app.WithPlugin. It stands up the
-// PodGroup informer from the scheduler's shared kubeconfig, so PreFilter can
-// resolve gang facts (minMember + declared topology key). Wiring pgReader here is
-// what activates the plugin (before this, PreFilter returned Skip).
+// PodGroup informer from the scheduler's shared kubeconfig (so PreFilter can
+// resolve gang facts), wires a gang-pod lister from the scheduler's shared
+// informer, and starts the pin garbage collector. Wiring pgReader here is what
+// activates the plugin (before this, PreFilter returned Skip).
 func New(ctx context.Context, _ runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	reader, err := newInformerReader(ctx, h.KubeConfig())
 	if err != nil {
 		return nil, err
 	}
-	return &GangPack{handle: h, pins: placement.New(), pgReader: reader}, nil
+	g := &GangPack{
+		handle:    h,
+		pins:      placement.New(),
+		pgReader:  reader,
+		podLister: newInformerPodLister(h),
+	}
+	go g.runPinGC(ctx)
+	return g, nil
 }
 
 // Name returns the plugin's registered name.
