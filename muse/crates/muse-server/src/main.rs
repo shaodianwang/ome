@@ -39,6 +39,14 @@ use kube::{
 };
 use ome_client::informers::SharedInformerFactory;
 
+// Route allocations through jemalloc: warming large informer caches churns
+// transient allocations the system allocator holds onto, inflating RSS. jemalloc
+// returns freed pages to the OS — aggressively when MALLOC_CONF enables a
+// background purge thread (set in the chart). MSVC isn't a target.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// The `ome.io/v1beta1` resource plurals MUSE watches — used only to report which
 /// are absent on a given cluster. Discovery (not this list) gates each informer.
 const OME_PLURALS: [&str; 8] = [

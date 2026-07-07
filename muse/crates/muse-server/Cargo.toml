@@ -33,5 +33,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7"] }
 
+# jemalloc: warming ~10^5-object informer caches churns transient allocations the
+# system allocator retains, inflating RSS. jemalloc returns freed pages to the OS
+# — aggressively when MALLOC_CONF enables a background purge thread (set in the
+# chart). Skip MSVC (not a target); builds on Linux and macOS.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
+
 [lints]
 workspace = true

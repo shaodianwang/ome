@@ -31,6 +31,11 @@ spec:
             {{- end }}
           env:
             # Config is env-driven (clap MUSE_* vars); nothing baked into the image.
+            {{- if .Values.config.mallocConf }}
+            # jemalloc purge tuning — read by the allocator at startup.
+            - name: MALLOC_CONF
+              value: {{ .Values.config.mallocConf | quote }}
+            {{- end }}
             - name: MUSE_HOST
               value: {{ .Values.config.host | quote }}
             - name: MUSE_WEB_DIR
