@@ -259,6 +259,26 @@ def ci_steps() -> str:
                       - name: container-0
                         image: "{CI_IMAGE}"
 
+          - label: ":test_tube: Scheduler Module"
+            key: "scheduler-test"
+{_gh_status("scheduler-test")}
+            # ome-scheduler (scheduler/go.mod) is a separate Go module, so
+            # the root pipeline's `go test ./...` never reaches it. This is
+            # the only step that builds + tests the OMEGangPack plugin, its
+            # pure topology/placement packages, and the envtest integration
+            # harness. Bootstraps its own envtest (1.33, matching the
+            # module's k8s pin); runs in parallel with the rest of the fan-out.
+            command: |
+              sh .buildkite/run_scheduler_tests.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+              - kubernetes:
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{CI_IMAGE}"
+
           - label: ":helm: Helm Lint"
             key: "helm-lint"
 {_gh_status("helm-lint")}
