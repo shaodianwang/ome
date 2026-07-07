@@ -92,3 +92,54 @@ func TestGangLandsInOneDomain(t *testing.T) {
 		bound[node] = true
 	}
 }
+
+// TestGangGateHoldsUntilComplete is the all-or-nothing guarantee: a gang member
+// must NOT bind while its gang is incomplete, and both members bind the moment
+// the gang is whole. This is what makes it a gang scheduler rather than a
+// bin-packer — without the Permit gate, the first pod would bind immediately and
+// strand the workload half-scheduled.
+//
+// Two nodes in one domain, a 2-member PodGroup. Creating just one pod, it best-
+// fits, pins, and gates — but stays unbound. Adding the second opens the gate and
+// both bind. The PodGroup's gate timeout is set well above the hold window so the
+// test never races the timeout unwind.
+func TestGangGateHoldsUntilComplete(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-gate"
+	createNamespace(t, tc, ns)
+
+	for _, name := range []string{"g1", "g2"} {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(name, "a", 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", name, err)
+		}
+	}
+
+	pg := schedutil.MakePG("gang", ns, 2, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	// Override MakePG's 10s default so the hold window below can't race the gate
+	// timeout (which would unwind the lone member and mask the property).
+	longTimeout := int32(120)
+	pg.Spec.ScheduleTimeoutSeconds = &longTimeout
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+
+	// One of two members: the gate must hold it unbound.
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod("gp-0", ns, "gang"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod gp-0: %v", err)
+	}
+	ensureNotBound(t, tc, ns, "gp-0", 4*time.Second)
+
+	// Complete the gang: the gate opens and both bind.
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod("gp-1", ns, "gang"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod gp-1: %v", err)
+	}
+	for _, name := range []string{"gp-0", "gp-1"} {
+		node := waitForPodBound(t, tc, ns, name, 30*time.Second)
+		if node != "g1" && node != "g2" {
+			t.Errorf("pod %s bound to %s, want g1/g2", name, node)
+		}
+	}
+}

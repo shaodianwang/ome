@@ -168,6 +168,21 @@ func makeGangPod(name, ns, pgName string) *v1.Pod {
 	}
 }
 
+// ensureNotBound asserts the pod stays unbound (no node assigned) for the whole
+// window — used to prove the gang gate holds an incomplete gang rather than
+// letting a member bind. A not-found pod counts as unbound.
+func ensureNotBound(t *testing.T, tc *testContext, ns, name string, window time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		p, err := tc.ClientSet.CoreV1().Pods(ns).Get(tc.Ctx, name, metav1.GetOptions{})
+		if err == nil && p.Spec.NodeName != "" {
+			t.Fatalf("pod %s/%s bound to %s while its gang was incomplete (gate should hold)", ns, name, p.Spec.NodeName)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // waitForPodBound polls until the pod has a node assigned, returning that node.
 func waitForPodBound(t *testing.T, tc *testContext, ns, name string, timeout time.Duration) string {
 	t.Helper()
