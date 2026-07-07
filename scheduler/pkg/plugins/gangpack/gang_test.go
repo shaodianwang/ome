@@ -41,6 +41,21 @@ func TestPodGroupNameOf(t *testing.T) {
 	}
 }
 
+// TestSplitGangKey round-trips a gang key back to its namespace/name, and rejects
+// malformed keys — the reservation reconciler resolves PodGroup facts from the key
+// alone, so a bad split must not fabricate a lookup.
+func TestSplitGangKey(t *testing.T) {
+	ns, name, ok := splitGangKey("team/svc-a")
+	if !ok || ns != "team" || name != "svc-a" {
+		t.Fatalf("splitGangKey = %q,%q,%v want team,svc-a,true", ns, name, ok)
+	}
+	for _, bad := range []string{"", "noslash", "/name", "ns/", "/"} {
+		if _, _, ok := splitGangKey(bad); ok {
+			t.Errorf("splitGangKey(%q) = ok, want not-ok", bad)
+		}
+	}
+}
+
 // TestResolveGang: the plugin learns everything about a gang from its PodGroup —
 // size and its declared topology key — nothing from global config. A pod that
 // isn't a gang member, whose PodGroup is missing, or whose PodGroup declares no

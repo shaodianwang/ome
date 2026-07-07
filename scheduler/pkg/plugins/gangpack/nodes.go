@@ -107,6 +107,27 @@ func boundGangMembers(nodeInfos []*framework.NodeInfo, pod *v1.Pod, topologyKey 
 	return domain, count
 }
 
+// placedInDomain counts a gang's members (namespace + pod-group name) occupying
+// nodes of the given domain in the snapshot. Unlike boundGangMembers it matches a
+// gang by its resolved key rather than a live pod object, so the reservation
+// reconciler can count a pinned gang's real footprint without a pod in hand.
+func placedInDomain(nodeInfos []*framework.NodeInfo, namespace, pgName, topologyKey, domain string) int {
+	count := 0
+	for _, info := range nodeInfos {
+		n := info.Node()
+		if n == nil || domainOf(n, topologyKey) != domain {
+			continue
+		}
+		for _, pi := range info.Pods {
+			mp := pi.Pod
+			if mp != nil && mp.Namespace == namespace && mp.Labels[podGroupLabel] == pgName {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 // freeByDomain projects a framework node snapshot onto the pure accounting type:
 // free nodes per domain for the given gang pod. A node participates only if it
 // carries a domain label AND could hold the pod (nodeRelevant); it is counted

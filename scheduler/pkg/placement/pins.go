@@ -123,6 +123,20 @@ func (p *Pins) Len() int {
 	return len(p.byGroup)
 }
 
+// Domains returns a snapshot of every pinned group's domain. It lets a caller
+// compute, against the live node snapshot, how much each group should still have
+// reserved — the input to Reconcile — without holding the store's lock across that
+// (potentially O(nodes)) scan.
+func (p *Pins) Domains() map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]string, len(p.byGroup))
+	for group, c := range p.byGroup {
+		out[group] = c.domain
+	}
+	return out
+}
+
 // Get returns the pinned domain for a group, or ("", false) if unpinned.
 func (p *Pins) Get(group string) (domain string, ok bool) {
 	p.mu.Lock()
@@ -178,6 +192,38 @@ func (p *Pins) RetainOnly(live map[string]bool) int {
 		}
 	}
 	return released
+}
+
+// Reconcile resets each present group's reservation to the size it can still
+// justify against ground truth, closing the reservation leak. A reservation is
+// drained per-Place only when a member is assumed, but a group can pin a domain
+// (reserving gangSize) and then fail its scheduling cycle before any member is
+// assumed — Filter rejects every candidate, so no Reserve or Unreserve runs and
+// the reservation is never returned. Such a reservation subtracts capacity forever,
+// starving other groups.
+//
+// want maps a group to how many whole nodes it still legitimately needs reserved
+// — gangSize minus the members already placed in its domain, computed from the
+// live snapshot. Set on the periodic GC sweep, this bounds a stale reservation's
+// lifetime to one interval instead of forever. A group absent from want is left
+// untouched (its facts weren't resolvable this pass — reconciling on a partial
+// view could wrongly reclaim a live reservation). Negative values clamp to zero.
+func (p *Pins) Reconcile(want map[string]int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for group, c := range p.byGroup {
+		r, ok := want[group]
+		if !ok {
+			continue
+		}
+		if r < 0 {
+			r = 0
+		}
+		if r != c.remaining {
+			p.addReservation(c.domain, r-c.remaining)
+			c.remaining = r
+		}
+	}
 }
 
 // Release drops a group's pin and its reservation — on gang completion, on

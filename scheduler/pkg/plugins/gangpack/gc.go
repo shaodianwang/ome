@@ -42,9 +42,13 @@ func (g *GangPack) runPinGC(ctx context.Context) {
 	}
 }
 
-// gcPins releases pins for gangs that no longer have any live pod. A transient
-// lister error is skipped — the next tick retries — rather than risking a release
-// against a partial view.
+// gcPins reconciles the pin store against ground truth on each tick. It first
+// releases pins for gangs that no longer have any live pod, then reconciles the
+// surviving pins' reservations against the live snapshot — reclaiming any
+// reservation left dangling by a gang that pinned a domain but whose scheduling
+// cycle failed before a member was assigned (Filter rejected it, so no
+// Reserve/Unreserve ran to return the reservation). A transient lister error skips
+// the whole sweep — the next tick retries — rather than acting on a partial view.
 func (g *GangPack) gcPins() {
 	live, err := g.podLister.liveGangKeys()
 	if err != nil {
@@ -53,6 +57,41 @@ func (g *GangPack) gcPins() {
 	if released := g.pins.RetainOnly(live); released > 0 {
 		pinnedGroups.Set(float64(g.pins.Len()))
 	}
+	g.reconcileReservations()
+}
+
+// reconcileReservations resets each pinned gang's reservation to what the live
+// snapshot still justifies: gangSize minus the members already occupying nodes in
+// its pinned domain. A reserved node is one committed but not yet filled, so once
+// a gang's cycle has failed without placing anyone the reservation should have
+// drained but did not — this returns it. Needs both the reader (for gangSize) and
+// the snapshot (for placed members); when either is unavailable it is a no-op.
+func (g *GangPack) reconcileReservations() {
+	if g.pgReader == nil {
+		return
+	}
+	domains := g.pins.Domains()
+	if len(domains) == 0 {
+		return
+	}
+	nodes, err := g.handle.SnapshotSharedLister().NodeInfos().List()
+	if err != nil {
+		return
+	}
+	want := make(map[string]int, len(domains))
+	for group, domain := range domains {
+		ns, name, ok := splitGangKey(group)
+		if !ok {
+			continue
+		}
+		minMember, topologyKey, _, found := g.pgReader.get(ns, name)
+		if !found || minMember <= 0 || topologyKey == "" {
+			continue
+		}
+		placed := placedInDomain(nodes, ns, name, topologyKey, domain)
+		want[group] = minMember - placed
+	}
+	g.pins.Reconcile(want)
 }
 
 // informerPodLister is the live gangPodLister, backed by the scheduler's shared

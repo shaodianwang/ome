@@ -101,10 +101,27 @@ func startScheduler(t *testing.T, cfg *restclient.Config, opts ...scheduler.Opti
 	return tc
 }
 
-// teardown deletes the nodes and stops the scheduler, so suites can reuse the
-// shared API server without cross-test node leakage.
+// teardown removes the objects this test created and stops the scheduler, so the
+// suite can reuse the shared API server without cross-test leakage. Pods and
+// PodGroups are deleted (force, across namespaces) alongside nodes — a prior test's
+// bound pods would otherwise linger on reused node names as phantom occupancy, and
+// leftover pod/PodGroup names collide on a repeated run.
 func (tc *testContext) teardown(t *testing.T) {
 	t.Helper()
+	zero := int64(0)
+	force := metav1.DeleteOptions{GracePeriodSeconds: &zero}
+	if pods, err := tc.ClientSet.CoreV1().Pods(metav1.NamespaceAll).List(tc.Ctx, metav1.ListOptions{}); err == nil {
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			_ = tc.ClientSet.CoreV1().Pods(p.Namespace).Delete(tc.Ctx, p.Name, force)
+		}
+	}
+	if pgs, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(metav1.NamespaceAll).List(tc.Ctx, metav1.ListOptions{}); err == nil {
+		for i := range pgs.Items {
+			pg := &pgs.Items[i]
+			_ = tc.SchedClient.SchedulingV1alpha1().PodGroups(pg.Namespace).Delete(tc.Ctx, pg.Name, metav1.DeleteOptions{})
+		}
+	}
 	if err := tc.ClientSet.CoreV1().Nodes().DeleteCollection(tc.Ctx, metav1.DeleteOptions{}, metav1.ListOptions{}); err != nil {
 		t.Errorf("cleanup nodes: %v", err)
 	}

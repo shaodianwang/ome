@@ -5,8 +5,10 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
+	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
 // fakeGangPodLister stands in for the informer-backed live-gang lister.
@@ -32,6 +34,86 @@ func TestGCPinsReleasesDeadGangs(t *testing.T) {
 	}
 	if _, ok := pins.Get("ns/live"); !ok {
 		t.Fatal("pin for a gang that still has pods must be kept")
+	}
+}
+
+// TestGCReconcilePreservesUnplacedGang: a gang pinned to an empty domain with zero
+// members placed is still legitimately forming — its full reservation is what
+// stops a second gang racing into the same domain. Reconcile sets remaining to
+// minMember-placed = minMember, i.e. it leaves the reservation intact. This is the
+// deliberate boundary: reconcile reclaims only the reservation NOT backed by real
+// remaining need; a still-forming gang keeps its whole claim.
+func TestGCReconcilePreservesUnplacedGang(t *testing.T) {
+	pins := placement.New()
+	if d, ok := pins.Choose("team/pf", topology.FreeByDomain{"a": 3}, 3); !ok || d != "a" {
+		t.Fatalf("precondition Choose = %q,%v want a,true", d, ok)
+	}
+
+	// Snapshot: "a" has 3 nodes, none holding a pf member (A never placed).
+	snapshot := []*framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4")),
+		nodeInfo(gpuNode("a2", "a", "4")),
+		nodeInfo(gpuNode("a3", "a", "4")),
+	}
+	g := &GangPack{
+		pins:      pins,
+		handle:    &fakeHandle{snapshot: snapshot},
+		pgReader:  fakeReader{"team/pf": {min: 3, topo: testKey}},
+		podLister: fakeGangPodLister{keys: map[string]bool{"team/pf": true}}, // still live
+	}
+
+	g.gcPins()
+
+	// A justifies its full reservation (0 placed of 3), so a second gang must not be
+	// able to take A's domain — A may yet form there.
+	if _, ok := pins.Choose("team/other", topology.FreeByDomain{"a": 3}, 3); ok {
+		t.Fatal("with zero members placed, A's reservation is legitimate and must be preserved")
+	}
+}
+
+// TestGCReconcilesPartialLeak: once a gang has placed some members, the snapshot
+// tells the true remaining need; a reservation stuck higher than that (a Place
+// that never ran) is reclaimed so the surplus nodes free up for other gangs.
+func TestGCReconcilesPartialLeak(t *testing.T) {
+	pins := placement.New()
+	// Gang A pinned "a" reserving 3, but only its actual placement matters now.
+	pins.Choose("team/pf", topology.FreeByDomain{"a": 5}, 3)
+
+	// Snapshot: "a" has 5 nodes; 2 hold pf members (A placed 2), 3 free. A's true
+	// remaining need is 1, but its reservation is still the stuck 3.
+	snapshot := []*framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")),
+		nodeInfo(gpuNode("a2", "a", "4"), gangPod("team", "pf")),
+		nodeInfo(gpuNode("a3", "a", "4")),
+		nodeInfo(gpuNode("a4", "a", "4")),
+		nodeInfo(gpuNode("a5", "a", "4")),
+	}
+	g := &GangPack{
+		pins:      pins,
+		handle:    &fakeHandle{snapshot: snapshot},
+		pgReader:  fakeReader{"team/pf": {min: 3, topo: testKey}},
+		podLister: fakeGangPodLister{keys: map[string]bool{"team/pf": true}},
+	}
+
+	g.gcPins()
+
+	// A now reserves 1 (3 minMember - 2 placed). Of the 3 raw free nodes, A holds 1,
+	// leaving 2 — a gang of 2 must fit. Before reconcile A reserved 3, so eff was
+	// 3 - 3 = 0 and this failed.
+	if d, ok := pins.Choose("team/other", topology.FreeByDomain{"a": 3}, 2); !ok || d != "a" {
+		t.Fatalf("other Choose = %q,%v want a,true (partial leak reclaimed to remaining=1)", d, ok)
+	}
+}
+
+// TestGCReconcileNoopWithoutReader / snapshot: the reconcile is inert when its
+// inputs are missing, so a plugin without a wired reader never panics.
+func TestGCReconcileNoopWithoutReader(t *testing.T) {
+	pins := placement.New()
+	pins.Choose("team/pf", topology.FreeByDomain{"a": 3}, 3)
+	g := &GangPack{pins: pins, podLister: fakeGangPodLister{keys: map[string]bool{"team/pf": true}}}
+	g.gcPins() // pgReader nil -> reconcile no-op, no panic
+	if _, ok := pins.Get("team/pf"); !ok {
+		t.Fatal("pin must survive a no-op reconcile")
 	}
 }
 

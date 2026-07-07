@@ -84,3 +84,26 @@ func TestFreeByDomain(t *testing.T) {
 		t.Fatalf("freeByDomain = %v want %v", got, want)
 	}
 }
+
+// TestPlacedInDomain counts a gang's members occupying a specific domain — the
+// input the reservation reconciler uses to learn a pinned gang's real footprint.
+// Only the named gang's pods in the named domain count: a sibling gang's members,
+// this gang's members in another domain, and non-gang pods are all excluded.
+func TestPlacedInDomain(t *testing.T) {
+	nodes := []*framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")),     // pf in a  -> count
+		nodeInfo(gpuNode("a2", "a", "4"), gangPod("team", "pf")),     // pf in a  -> count
+		nodeInfo(gpuNode("a3", "a", "4"), gangPod("team", "decode")), // other gang -> skip
+		nodeInfo(gpuNode("a4", "a", "4")),                            // free -> skip
+		nodeInfo(gpuNode("b1", "b", "4"), gangPod("team", "pf")),     // pf but wrong domain -> skip
+	}
+	if got := placedInDomain(nodes, "team", "pf", testKey, "a"); got != 2 {
+		t.Fatalf("placedInDomain(team/pf, a) = %d want 2", got)
+	}
+	if got := placedInDomain(nodes, "team", "pf", testKey, "b"); got != 1 {
+		t.Fatalf("placedInDomain(team/pf, b) = %d want 1", got)
+	}
+	if got := placedInDomain(nodes, "team", "absent", testKey, "a"); got != 0 {
+		t.Fatalf("placedInDomain(team/absent, a) = %d want 0", got)
+	}
+}

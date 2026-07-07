@@ -1,6 +1,7 @@
 package gangpack
 
 import (
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -55,6 +56,16 @@ func podGroupNameOf(pod *v1.Pod) (namespace, name string, ok bool) {
 		return "", "", false
 	}
 	return pod.Namespace, name, true
+}
+
+// splitGangKey splits a gang key ("namespace/podgroup-name") back into its parts.
+// ok is false for a malformed key (no separator, or an empty half).
+func splitGangKey(key string) (namespace, name string, ok bool) {
+	i := strings.IndexByte(key, '/')
+	if i <= 0 || i == len(key)-1 {
+		return "", "", false
+	}
+	return key[:i], key[i+1:], true
 }
 
 // resolveGang assembles a pod's gangInfo from its PodGroup. It returns false —
