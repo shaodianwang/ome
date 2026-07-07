@@ -139,13 +139,24 @@ pub struct Config {
     )]
     pub chat_enabled: bool,
 
-    /// Timeout (seconds) for one proxied inference test request.
+    /// Total timeout (seconds) for one proxied inference test request — the whole
+    /// budget, which must allow for the model's generation time.
     #[arg(
         long = "chat-timeout-secs",
         env = "MUSE_CHAT_TIMEOUT_SECS",
         default_value_t = 60
     )]
     pub chat_timeout_secs: u64,
+
+    /// Connect timeout (seconds) for a proxied inference test request — bounds just
+    /// the TCP+TLS connect, so an unreachable model endpoint fails fast instead of
+    /// stalling until the total `--chat-timeout-secs` elapses.
+    #[arg(
+        long = "chat-connect-timeout-secs",
+        env = "MUSE_CHAT_CONNECT_TIMEOUT_SECS",
+        default_value_t = 5
+    )]
+    pub chat_connect_timeout_secs: u64,
 
     /// Directory of the built web console (the SPA) to serve at `/`, with the
     /// API under `/v1`. Unset ⇒ API-only (the console is served elsewhere). The

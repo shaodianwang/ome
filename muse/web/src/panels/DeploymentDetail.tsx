@@ -198,6 +198,7 @@ export function DeploymentDetail({
                 endpoint={d.url}
                 defaultModel={d.model ?? ""}
                 enabled={cfg.data?.chat === true}
+                timeoutSecs={cfg.data?.chatTimeoutSecs}
               />
             </div>
           </div>
@@ -225,6 +226,10 @@ export function DeploymentDetail({
   );
 }
 
+/** How much longer than the server's own chat budget the console waits before
+ *  giving up — enough for the server's specific timeout error to arrive first. */
+const CLIENT_GRACE_MS = 5000;
+
 /** In-page inference test: a live chat when the proxy is enabled, else a
  *  copyable curl against the endpoint. */
 function ChatBox({
@@ -233,12 +238,14 @@ function ChatBox({
   endpoint,
   defaultModel,
   enabled,
+  timeoutSecs,
 }: {
   cluster: string;
   name: string;
   endpoint?: string;
   defaultModel: string;
   enabled: boolean;
+  timeoutSecs?: number;
 }) {
   const [model, setModel] = useState(defaultModel);
   const [prompt, setPrompt] = useState("");
@@ -276,13 +283,17 @@ function ChatBox({
     );
   }
 
+  // Bound the request a little above the server's own budget, so the server's
+  // (more specific) error wins in normal cases and this abort is only a backstop.
+  const timeoutMs = timeoutSecs != null ? timeoutSecs * 1000 + CLIENT_GRACE_MS : undefined;
+
   const send = () => {
     if (!prompt.trim() || busy) return;
     setBusy(true);
     setErr(null);
     setReply(null);
     api
-      .chat(cluster, name, { model, messages: [{ role: "user", content: prompt }] })
+      .chat(cluster, name, { model, messages: [{ role: "user", content: prompt }] }, timeoutMs)
       .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r)))
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));

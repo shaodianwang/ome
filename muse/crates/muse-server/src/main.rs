@@ -112,6 +112,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         signal,
         config.chat_enabled,
         Duration::from_secs(config.chat_timeout_secs.max(1)),
+        Duration::from_secs(config.chat_connect_timeout_secs.max(1)),
     );
     server::serve(&config, state).await
 }

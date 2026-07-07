@@ -33,7 +33,11 @@ pub struct AppState {
     pub signal: CapacitySignal,
     /// Whether the inference test proxy (`POST …/chat`) is enabled.
     pub chat_enabled: bool,
-    /// HTTP client for the inference test proxy (timeout baked in). Cheap to clone.
+    /// Total budget (seconds) for one proxied chat request. Surfaced via
+    /// `/v1/config` so the console can bound its own request a little above this,
+    /// so a stalled endpoint can't leave the UI "Sending…" indefinitely.
+    pub chat_timeout_secs: u64,
+    /// HTTP client for the inference test proxy (timeouts baked in). Cheap to clone.
     pub http: reqwest::Client,
 }
 
@@ -51,11 +55,15 @@ impl AppState {
         signal: CapacitySignal,
         chat_enabled: bool,
         chat_timeout: Duration,
+        chat_connect_timeout: Duration,
     ) -> Self {
-        // Client for the inference test proxy. `unwrap_or_default` (not unwrap):
-        // a builder failure falls back to a default client rather than panicking.
+        // Client for the inference test proxy. A short connect timeout bounds the
+        // TCP+TLS handshake so an unreachable endpoint fails fast, while the total
+        // timeout still allows for generation. `unwrap_or_default` (not unwrap): a
+        // builder failure falls back to a default client rather than panicking.
         let http = reqwest::Client::builder()
             .timeout(chat_timeout)
+            .connect_timeout(chat_connect_timeout)
             .build()
             .unwrap_or_default();
         let state = Self {
@@ -68,6 +76,7 @@ impl AppState {
             }))),
             signal,
             chat_enabled,
+            chat_timeout_secs: chat_timeout.as_secs(),
             http,
         };
         // Warm the cache once so the first request is served, not computed.

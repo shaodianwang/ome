@@ -1281,8 +1281,12 @@ pub struct ClusterSummary {
 
 /// Console feature flags for `GET /v1/config`.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigResp {
     pub chat: bool,
+    /// Total budget (seconds) for one proxied chat request. The console bounds its
+    /// own request a little above this so a stalled endpoint can't hang the UI.
+    pub chat_timeout_secs: u64,
 }
 
 /// Serialize any value to JSON, or `Null` on failure.

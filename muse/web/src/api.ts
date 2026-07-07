@@ -228,6 +228,9 @@ export interface RolloutItem {
 /** Feature flags from `GET /v1/config` (read once at load). */
 export interface AppConfig {
   chat: boolean;
+  /** Server-side total budget (seconds) for a chat proxy request; the console
+   *  bounds its own request a little above this so a stall can't hang the UI. */
+  chatTimeoutSecs?: number;
 }
 
 /** Minimal OpenAI-style chat completion response (only what the console reads). */
@@ -253,23 +256,40 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(at(path), {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let msg = `${res.status} ${res.statusText}`;
-    try {
-      const j = (await res.json()) as { error?: { message?: string } };
-      if (j.error?.message) msg = j.error.message;
-    } catch {
-      // non-JSON error body — keep the status line
+async function postJSON<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
+  // Optional client-side deadline: abort the request if the server hasn't
+  // responded in time, so a stalled upstream can't leave the UI hanging.
+  const ctrl = timeoutMs != null ? new AbortController() : undefined;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : undefined;
+  try {
+    const res = await fetch(at(path), {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl?.signal,
+    });
+    if (!res.ok) {
+      let msg = `${res.status} ${res.statusText}`;
+      try {
+        const j = (await res.json()) as { error?: { message?: string } };
+        if (j.error?.message) msg = j.error.message;
+      } catch {
+        // non-JSON error body — keep the status line
+      }
+      throw new Error(msg);
     }
-    throw new Error(msg);
+    return (await res.json()) as T;
+  } catch (e) {
+    if (ctrl?.signal.aborted) {
+      const secs = Math.round((timeoutMs ?? 0) / 1000);
+      throw new Error(
+        `no response within ${secs}s — the endpoint may be unreachable from the console`,
+      );
+    }
+    throw e;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  return (await res.json()) as T;
 }
 
 const enc = encodeURIComponent;
@@ -302,6 +322,10 @@ export const api = {
     getJSON<RuntimeDetail>(`/v1/clusterservingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
-  chat: (cluster: string, name: string, body: unknown) =>
-    postJSON<ChatResponse>(`/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}`, body),
+  chat: (cluster: string, name: string, body: unknown, timeoutMs?: number) =>
+    postJSON<ChatResponse>(
+      `/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}`,
+      body,
+      timeoutMs,
+    ),
 };
