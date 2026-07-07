@@ -7,10 +7,12 @@ package gangpack
 
 import (
 	"context"
+	"fmt"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
@@ -119,6 +121,20 @@ func (g *GangPack) PreFilter(_ context.Context, state *framework.CycleState, pod
 func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	domain, pinned := g.pins.Get(gang.key)
 
+	// Trace the pin decision at V(4): the domain choice, the pinStale inputs, and
+	// the narrowed candidate set are otherwise invisible, and they are exactly what
+	// is needed to debug a gang that won't place (e.g. pinned to a domain whose
+	// nodes are all filtered out while other domains sit free). Off at the default
+	// verbosity, so it costs nothing in normal operation.
+	if klog.V(4).Enabled() {
+		bd, bc := boundGangMembers(nodes, pod, gang.topologyKey)
+		free := freeByDomain(nodes, gang.topologyKey, pod)
+		klog.V(4).InfoS("gangpack.pinGang.enter", "gang", gang.key, "minMember", gang.minMember,
+			"topologyKey", gang.topologyKey, "pinned", pinned, "pinnedDomain", domain,
+			"nodesInPinnedDomain", nodesInDomain(nodes, gang.topologyKey, domain).Len(),
+			"boundDomain", bd, "boundCount", bc, "freePinnedDomain", free[domain], "freeByDomain", fmt.Sprintf("%v", free))
+	}
+
 	// A stale pin must be dropped and re-planned, else the gang wedges on it
 	// forever. Releasing also returns the pin's leaked capacity reservation. Only
 	// safe when no member has landed in the domain yet (see pinStale).
@@ -127,17 +143,21 @@ func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeI
 		gangPinTotal.WithLabelValues("stale_replan").Inc()
 		pinnedGroups.Set(float64(g.pins.Len()))
 		pinned = false
+		klog.V(4).InfoS("gangpack.pinGang.stale_replan", "gang", gang.key, "releasedDomain", domain)
 	}
 
 	if !pinned {
 		d, status := g.planDomain(nodes, gang, pod)
 		if status != nil {
+			klog.V(4).InfoS("gangpack.pinGang.no_fit", "gang", gang.key, "status", status.Message())
 			return nil, status
 		}
 		domain = d
 	}
 	writePin(state, domain, gang.topologyKey)
-	return &framework.PreFilterResult{NodeNames: nodesInDomain(nodes, gang.topologyKey, domain)}, nil
+	narrowed := nodesInDomain(nodes, gang.topologyKey, domain)
+	klog.V(4).InfoS("gangpack.pinGang.result", "gang", gang.key, "domain", domain, "narrowedNodes", narrowed.Len())
+	return &framework.PreFilterResult{NodeNames: narrowed}, nil
 }
 
 // planDomain commits an unpinned gang to a domain: it adopts the domain of any
