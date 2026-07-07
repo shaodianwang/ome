@@ -40,13 +40,13 @@ type Pins struct {
 }
 
 // commitment is a group's placement decision: the pinned domain plus the count
-// of whole nodes still reserved there for members not yet placed. adopted marks a
-// pin rebuilt from already-placed members (Set, on failover) rather than freshly
-// chosen — the gate uses it to know it must also count bound siblings.
+// of whole nodes still reserved there for members not yet placed. remaining==0
+// means the gang is fully committed — every reserved slot has been placed (or the
+// pin was rebuilt from already-bound members on failover) — which is the signal
+// the gate uses to know it must also count bound siblings, not just waiting ones.
 type commitment struct {
 	domain    string
 	remaining int
-	adopted   bool
 }
 
 // New returns an empty pin store.
@@ -133,14 +133,17 @@ func (p *Pins) Get(group string) (domain string, ok bool) {
 	return "", false
 }
 
-// Adopted reports whether a group's pin was rebuilt from already-placed members
-// (via Set on failover) rather than freshly chosen. The gate consults this to
-// decide whether it must also count bound siblings, not just waiting ones.
-func (p *Pins) Adopted(group string) bool {
+// Committed reports whether a group is pinned with no outstanding reservation
+// (remaining==0): every reserved slot has been placed, or the pin was rebuilt
+// from already-bound members on failover. Either way its members are (being)
+// bound, so the gate must also count bound siblings, not just waiting ones. A
+// still-forming gang has remaining>0, so this stays false and the gate never
+// pays the bound-sibling scan while a gang is filling normally.
+func (p *Pins) Committed(group string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.byGroup[group]
-	return ok && c.adopted
+	return ok && c.remaining == 0
 }
 
 // Set pins a group to a domain without best-fit. Used on leader failover to
@@ -154,7 +157,7 @@ func (p *Pins) Set(group, domain string) {
 	if old, ok := p.byGroup[group]; ok {
 		p.addReservation(old.domain, -old.remaining)
 	}
-	p.byGroup[group] = &commitment{domain: domain, remaining: 0, adopted: true}
+	p.byGroup[group] = &commitment{domain: domain, remaining: 0}
 }
 
 // Release drops a group's pin and its reservation — on gang completion, on

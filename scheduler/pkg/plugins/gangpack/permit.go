@@ -56,12 +56,14 @@ func (g *GangPack) Permit(_ context.Context, _ *framework.CycleState, pod *v1.Po
 
 	if !gateDecision(waiting, gang.minMember) {
 		// The waiting members alone don't complete the gang. Normally that means
-		// wait — but for a pin ADOPTED after a restart, some members are already
-		// bound (not in the waiting set), and they count toward minMember too.
-		// Only adopted gangs pay this snapshot scan, so a fresh gang forming
-		// normally never does (its members bind all-or-nothing, so none are bound
-		// while others gate).
-		if g.pins.Adopted(gang.key) && g.boundSiblings(pod, gang.topologyKey)+waiting+1 >= gang.minMember {
+		// wait — but once a gang is fully committed (remaining==0: every reserved
+		// slot placed, or the pin rebuilt from bound members on failover) some
+		// members are already BOUND and so not in the waiting set. They count
+		// toward minMember too: this admits a member recreated into an
+		// already-running gang (controller churn), a pod beyond minMember, a
+		// preempted member re-gating, and a straggler after restart. A still-
+		// forming gang has remaining>0, so it never pays this snapshot scan.
+		if g.pins.Committed(gang.key) && g.boundSiblings(pod, gang.topologyKey)+waiting+1 >= gang.minMember {
 			// fall through to admit
 		} else {
 			gangGateTotal.WithLabelValues("wait").Inc()

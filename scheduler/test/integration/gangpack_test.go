@@ -344,3 +344,51 @@ func TestGangRecoversAfterSchedulerRestart(t *testing.T) {
 		t.Errorf("straggler rg-2 bound to %s, want ra3 (adopt domain a + gate counts bound siblings)", node)
 	}
 }
+
+// TestSurplusPodJoinsCompletedGang: once a gang has met minMember and bound, a
+// further member (a pod beyond minMember, or one recreated into the running gang
+// by a controller) must still schedule — the gate counts the already-bound
+// siblings of the now-committed gang instead of wedging the newcomer. Before the
+// committed-gang bound-count, this pod waited out its timeout forever because it
+// saw zero waiting siblings.
+func TestSurplusPodJoinsCompletedGang(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-surplus"
+	createNamespace(t, tc, ns)
+
+	for _, n := range []string{"su1", "su2", "su3"} {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(n, "a", 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", n, err)
+		}
+	}
+	pg := schedutil.MakePG("gang", ns, 2, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	to := int32(120)
+	pg.Spec.ScheduleTimeoutSeconds = &to
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+
+	// Form and bind the 2-member gang first (deterministic committed state).
+	for _, name := range []string{"sp-0", "sp-1"} {
+		if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod(name, ns, "gang"), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create pod %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"sp-0", "sp-1"} {
+		waitForPodBound(t, tc, ns, name, 30*time.Second)
+	}
+
+	// Now the surplus 3rd member: must join the committed gang, not wedge.
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod("sp-2", ns, "gang"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create surplus pod sp-2: %v", err)
+	}
+	// It must bind (not wedge) into the gang's domain; which of a's free nodes it
+	// lands on is the scheduler's choice.
+	node := waitForPodBound(t, tc, ns, "sp-2", 30*time.Second)
+	if d := domainOfNode(t, tc, node); d != "a" {
+		t.Errorf("surplus pod sp-2 bound to %s (domain %q), want a node of domain a", node, d)
+	}
+}

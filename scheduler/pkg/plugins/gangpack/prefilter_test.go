@@ -65,8 +65,8 @@ func TestPinGangAdoptsBoundMembers(t *testing.T) {
 	if d, ok := g.pins.Get("team/pf"); !ok || d != "a" {
 		t.Fatalf("adopted pin = %q,%v, want a,true", d, ok)
 	}
-	if !g.pins.Adopted("team/pf") {
-		t.Fatal("pin should be marked adopted")
+	if !g.pins.Committed("team/pf") {
+		t.Fatal("adopted pin should be committed (remaining==0)")
 	}
 	if pin := readPin(st); pin == nil || pin.domain != "a" {
 		t.Fatalf("cycle pin = %+v, want domain a", pin)
