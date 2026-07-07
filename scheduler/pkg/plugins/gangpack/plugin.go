@@ -78,15 +78,24 @@ func (g *GangPack) PreFilter(_ context.Context, state *framework.CycleState, pod
 // pinGang is the decision core, split out so it is unit-testable with an explicit
 // node slice (no Handle): best-fit a domain for the gang, record the pin, and
 // return the domain's nodes as the downstream candidate set.
+//
+// Only the first member of a gang runs best-fit; once pinned, later members read
+// the committed domain and skip the O(nodes) freeByDomain projection entirely —
+// the expensive per-node resource accounting is paid once per gang, not once per
+// pod.
 func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
-	free := freeByDomain(nodes, gang.topologyKey, pod)
-	domain, fits := g.pins.Choose(gang.key, free, gang.minMember)
-	if !fits {
-		gangPinTotal.WithLabelValues("no_fit").Inc()
-		return nil, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
+	domain, pinned := g.pins.Get(gang.key)
+	if !pinned {
+		free := freeByDomain(nodes, gang.topologyKey, pod)
+		d, fits := g.pins.Choose(gang.key, free, gang.minMember)
+		if !fits {
+			gangPinTotal.WithLabelValues("no_fit").Inc()
+			return nil, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
+		}
+		gangPinTotal.WithLabelValues("pinned").Inc()
+		pinnedGroups.Set(float64(g.pins.Len()))
+		domain = d
 	}
-	gangPinTotal.WithLabelValues("pinned").Inc()
-	pinnedGroups.Set(float64(g.pins.Len()))
 	writePin(state, domain, gang.topologyKey)
 	return &framework.PreFilterResult{NodeNames: nodesInDomain(nodes, gang.topologyKey, domain)}, nil
 }

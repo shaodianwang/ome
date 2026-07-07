@@ -31,6 +31,12 @@ import (
 type Pins struct {
 	mu      sync.Mutex
 	byGroup map[string]*commitment
+	// reserved is the running per-domain sum of every group's outstanding
+	// reservation (Σ commitment.remaining). It is a denormalized aggregate so
+	// Choose subtracts reservations in O(domains) instead of O(groups) — the
+	// difference between O(gangs) and O(1) per pin at fleet scale. Kept exactly in
+	// step with byGroup by every mutator.
+	reserved map[string]int
 }
 
 // commitment is a group's placement decision: the pinned domain plus the count
@@ -42,7 +48,19 @@ type commitment struct {
 
 // New returns an empty pin store.
 func New() *Pins {
-	return &Pins{byGroup: make(map[string]*commitment)}
+	return &Pins{
+		byGroup:  make(map[string]*commitment),
+		reserved: make(map[string]int),
+	}
+}
+
+// addReservation adjusts the per-domain aggregate by delta, dropping the key when
+// it reaches zero so the map stays bounded by live domains. Caller holds the lock.
+func (p *Pins) addReservation(domain string, delta int) {
+	p.reserved[domain] += delta
+	if p.reserved[domain] <= 0 {
+		delete(p.reserved, domain)
+	}
 }
 
 // Choose returns the domain the group is committed to. If the group is already
@@ -63,17 +81,12 @@ func (p *Pins) Choose(group string, rawFree topology.FreeByDomain, gangSize int)
 		return c.domain, true
 	}
 
-	// Effective free = raw free minus every OTHER group's outstanding reservation
-	// (this group is not in byGroup yet). A domain absent from rawFree has no free
-	// node to offer, so a reservation against it is irrelevant.
+	// Effective free = raw free minus the outstanding reservation on each domain
+	// (this group is not reserved yet). Subtract from the per-domain aggregate in
+	// O(domains) rather than scanning every pinned group.
 	eff := make(topology.FreeByDomain, len(rawFree))
 	for d, f := range rawFree {
-		eff[d] = f
-	}
-	for _, c := range p.byGroup {
-		if _, present := eff[c.domain]; present {
-			eff[c.domain] -= c.remaining
-		}
+		eff[d] = f - p.reserved[d]
 	}
 
 	d, fit := topology.BestFit(eff, gangSize)
@@ -81,6 +94,7 @@ func (p *Pins) Choose(group string, rawFree topology.FreeByDomain, gangSize int)
 		return "", false
 	}
 	p.byGroup[group] = &commitment{domain: d, remaining: gangSize}
+	p.addReservation(d, gangSize)
 	return d, true
 }
 
@@ -94,6 +108,7 @@ func (p *Pins) Place(group string) {
 	defer p.mu.Unlock()
 	if c, ok := p.byGroup[group]; ok && c.remaining > 0 {
 		c.remaining--
+		p.addReservation(c.domain, -1)
 	}
 }
 
@@ -122,6 +137,10 @@ func (p *Pins) Get(group string) (domain string, ok bool) {
 func (p *Pins) Set(group, domain string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Drop any prior commitment's reservation before overwriting.
+	if old, ok := p.byGroup[group]; ok {
+		p.addReservation(old.domain, -old.remaining)
+	}
 	p.byGroup[group] = &commitment{domain: domain, remaining: 0}
 }
 
@@ -132,9 +151,11 @@ func (p *Pins) Set(group, domain string) {
 func (p *Pins) Release(group string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.byGroup[group]; !ok {
+	c, ok := p.byGroup[group]
+	if !ok {
 		return false
 	}
 	delete(p.byGroup, group)
+	p.addReservation(c.domain, -c.remaining)
 	return true
 }
