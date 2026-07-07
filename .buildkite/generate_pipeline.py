@@ -71,6 +71,9 @@ IMAGES = [
     ("canary-metrics", "canary-metrics", "dockerfiles/canary-metrics.Dockerfile"),
     # MUSE console: one image serving the read-plane API + the built web UI.
     ("muse-server", "muse-server", "dockerfiles/muse-server.Dockerfile"),
+    # ome-scheduler: kube-scheduler + OMEGangPack (OEP-0022). Separate Go module
+    # under scheduler/; pure-Go static binary, no xet.
+    ("ome-scheduler", "ome-scheduler", "dockerfiles/ome-scheduler.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse"]

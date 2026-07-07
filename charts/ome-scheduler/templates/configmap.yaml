@@ -1,0 +1,25 @@
+# The scheduler's KubeSchedulerConfiguration. One profile whose schedulerName is
+# the opt-in name; OMEGangPack is enabled via multiPoint, which wires it into
+# every extension point it implements (PreFilter, Filter, Reserve, Permit, and
+# its EnqueueExtensions) — no per-hook enumeration to drift.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.scheduler.name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-scheduler.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: {{ .Values.scheduler.leaderElect }}
+      resourceName: {{ .Values.scheduler.name }}
+      resourceNamespace: {{ .Release.Namespace }}
+    profiles:
+      - schedulerName: {{ .Values.scheduler.name }}
+        plugins:
+          multiPoint:
+            enabled:
+              - name: OMEGangPack

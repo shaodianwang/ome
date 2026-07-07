@@ -1,0 +1,44 @@
+# Default values for ome-scheduler.
+
+global:
+  # Optional registry prefix applied to image repositories that don't already
+  # contain a '/'. Matches the ome-resources chart's convention.
+  hub: ""
+  # Image pull secrets applied to the scheduler pod (overridable per-component).
+  imagePullSecrets: []
+
+scheduler:
+  # The scheduler's profile name. This is the value workloads put in
+  # spec.schedulerName to be scheduled by ome-scheduler; it is also the
+  # leader-election lock name. No workload convention is baked into the binary —
+  # this name is the entire opt-in surface.
+  name: ome-scheduler
+
+  image:
+    repository: ome-scheduler
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # >1 replica needs leaderElect: true (only the leader schedules; the rest are
+  # warm standbys). Safe to leave enabled with a single replica.
+  replicaCount: 1
+  leaderElect: true
+
+  # klog verbosity. 2 is a reasonable production default; raise to debug
+  # placement decisions.
+  verbosity: 2
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  podAnnotations: {}
+  imagePullSecrets: []
