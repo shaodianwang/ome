@@ -76,7 +76,7 @@ IMAGES = [
     ("ome-scheduler", "ome-scheduler", "dockerfiles/ome-scheduler.Dockerfile"),
 ]
 
-CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse"]
+CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler"]
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +447,8 @@ def cd_steps() -> str:
         image_keys.append(f"build-{label}")
         image_keys.append(f"mirror-{label}")
     for chart in CHARTS:
-        if chart == "ome-resources":
+        if chart in ("ome-resources", "ome-scheduler"):
+            # These charts stamp an image ref, so wait for the image build + mirror.
             parts.append(_push_chart_step(chart, depends_on=image_keys))
         else:
             parts.append(_push_chart_step(chart))

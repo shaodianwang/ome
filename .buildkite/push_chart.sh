@@ -54,6 +54,15 @@ if [ "${CHART}" = "ome-resources" ]; then
   # point at an upstream-published image themselves.
 fi
 
+# For ome-scheduler, likewise stamp the image hub (global.hub) + tag so the
+# published chart resolves the ome-scheduler image built from this commit on
+# policy-restricted clusters; dev clusters can override global.hub.
+if [ "${CHART}" = "ome-scheduler" ]; then
+  IMAGE_TAG="${SHORT_SHA}"
+  sed -i "s|hub: \"\"|hub: \"${PROD_ECR_REGISTRY}/msl_infra\"|" "charts/${CHART}/values.yaml"
+  sed -i "s|tag: latest|tag: \"${IMAGE_TAG}\"|" "charts/${CHART}/values.yaml"
+fi
+
 # The muse-server image is mirrored to the prod ECR from this same commit, so
 # point the chart's default hub/tag at it — gitops then needs no image overrides.
 if [ "${CHART}" = "muse" ]; then
