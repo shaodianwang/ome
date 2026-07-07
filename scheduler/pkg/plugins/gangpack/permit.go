@@ -21,6 +21,17 @@ func sameGang(pod *v1.Pod, gangKey string) bool {
 	return ok && ns+"/"+name == gangKey
 }
 
+// boundSiblings counts the pod's gang members already placed in the cluster, from
+// the live node snapshot. Used only on the gate's adopted-gang slow path.
+func (g *GangPack) boundSiblings(pod *v1.Pod, topologyKey string) int {
+	nodes, err := g.handle.SnapshotSharedLister().NodeInfos().List()
+	if err != nil {
+		return 0
+	}
+	_, count := boundGangMembers(nodes, pod, topologyKey)
+	return count
+}
+
 // Permit is the all-or-nothing gang gate. Each gang member waits here instead of
 // binding immediately; when the arriving member makes the count reach minMember,
 // every waiting sibling is released together and this member proceeds. Members
@@ -44,9 +55,18 @@ func (g *GangPack) Permit(_ context.Context, _ *framework.CycleState, pod *v1.Po
 	})
 
 	if !gateDecision(waiting, gang.minMember) {
-		// Not enough yet: hold this member at the gate for the gang's timeout.
-		gangGateTotal.WithLabelValues("wait").Inc()
-		return framework.NewStatus(framework.Wait), gang.timeout
+		// The waiting members alone don't complete the gang. Normally that means
+		// wait — but for a pin ADOPTED after a restart, some members are already
+		// bound (not in the waiting set), and they count toward minMember too.
+		// Only adopted gangs pay this snapshot scan, so a fresh gang forming
+		// normally never does (its members bind all-or-nothing, so none are bound
+		// while others gate).
+		if g.pins.Adopted(gang.key) && g.boundSiblings(pod, gang.topologyKey)+waiting+1 >= gang.minMember {
+			// fall through to admit
+		} else {
+			gangGateTotal.WithLabelValues("wait").Inc()
+			return framework.NewStatus(framework.Wait), gang.timeout
+		}
 	}
 
 	// The gang is complete: release every waiting sibling; this member proceeds.

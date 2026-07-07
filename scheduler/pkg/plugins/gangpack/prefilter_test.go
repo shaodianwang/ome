@@ -42,6 +42,40 @@ func TestPinGang(t *testing.T) {
 	}
 }
 
+// TestPinGangAdoptsBoundMembers: with the in-memory pin lost (restart) but a gang
+// member already placed in a domain, pinGang adopts that domain instead of
+// best-fitting fresh — even when a fresh best-fit would fail. Here domain "a" has
+// one member already bound and one free node (2 nodes total), so a fresh best-fit
+// for a gang of 3 fits nowhere; adoption pins "a" so the remaining members can
+// still land with their sibling.
+func TestPinGangAdoptsBoundMembers(t *testing.T) {
+	g := &GangPack{pins: placement.New()}
+	placed := gangPod("team", "pf") // a member already bound in domain a
+	nodes := []*framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4"), placed),
+		nodeInfo(gpuNode("a2", "a", "4")),
+		nodeInfo(gpuNode("b1", "b", "4")),
+	}
+	st := framework.NewCycleState()
+
+	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey}, gangPod("team", "pf"))
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang status = %v, want Success (adopt bound member's domain)", status)
+	}
+	if d, ok := g.pins.Get("team/pf"); !ok || d != "a" {
+		t.Fatalf("adopted pin = %q,%v, want a,true", d, ok)
+	}
+	if !g.pins.Adopted("team/pf") {
+		t.Fatal("pin should be marked adopted")
+	}
+	if pin := readPin(st); pin == nil || pin.domain != "a" {
+		t.Fatalf("cycle pin = %+v, want domain a", pin)
+	}
+	if res == nil || !res.NodeNames.Equal(sets.New("a1", "a2")) {
+		t.Fatalf("narrowed to %v, want {a1,a2}", res.NodeNames)
+	}
+}
+
 // TestPreFilterSkips: PreFilter returns Skip (no constraint, Filter skipped) when
 // the plugin has no PodGroup reader wired yet, or when the pod is not a gang
 // member. Neither path touches the node snapshot, so no Handle is needed.

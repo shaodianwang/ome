@@ -1,14 +1,17 @@
 package integration
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	fwkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 
+	schedclientset "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned"
 	schedutil "sigs.k8s.io/scheduler-plugins/test/util"
 
 	"github.com/ome-projects/ome/scheduler/pkg/plugins/gangpack"
@@ -279,5 +282,65 @@ func TestTwoGangsDoNotOverCommitDomain(t *testing.T) {
 	if sameDomain(gangDomains["ga"], gangDomains["gb"]) {
 		t.Errorf("both gangs landed in the same domain (over-commit): ga=%v gb=%v",
 			keys(gangDomains["ga"]), keys(gangDomains["gb"]))
+	}
+}
+
+// TestGangRecoversAfterSchedulerRestart is the failover guarantee: after a
+// scheduler restart the in-memory pins are gone, but a gang that was already
+// partially placed must still complete — its straggler adopts the domain its
+// bound siblings sit in (not a fresh best-fit that could strand them), and the
+// gate counts those bound siblings toward minMember (they are not in the waiting
+// set).
+//
+// We model "a prior instance placed 2 of a 3-member gang" by creating those two
+// pods already assigned to nodes BEFORE starting the scheduler — so its initial
+// informer sync (like a real restart) sees them. Then the fresh scheduler must
+// bind the third member into the same domain's last free node.
+func TestGangRecoversAfterSchedulerRestart(t *testing.T) {
+	const ns = "gang-restart"
+
+	// Setup client: build the pre-restart world before any scheduler is running.
+	setup := clientset.NewForConfigOrDie(globalKubeConfig)
+	schedSetup := schedclientset.NewForConfigOrDie(globalKubeConfig)
+	ctx := context.Background()
+
+	if _, err := setup.CoreV1().Namespaces().Create(ctx, namespaceObj(ns), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	// Domain "a" with 3 gpu nodes.
+	for _, n := range []string{"ra1", "ra2", "ra3"} {
+		if _, err := setup.CoreV1().Nodes().Create(ctx, makeGPUNode(n, "a", 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", n, err)
+		}
+	}
+	// A 3-member PodGroup, generous timeout.
+	pg := schedutil.MakePG("gang", ns, 3, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	to := int32(120)
+	pg.Spec.ScheduleTimeoutSeconds = &to
+	if _, err := schedSetup.SchedulingV1alpha1().PodGroups(ns).Create(ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+	// Two members already bound (as if by the previous scheduler instance).
+	for _, b := range []struct{ pod, node string }{{"rg-0", "ra1"}, {"rg-1", "ra2"}} {
+		p := makeGangPod(b.pod, ns, "gang")
+		p.Spec.NodeName = b.node
+		if _, err := setup.CoreV1().Pods(ns).Create(ctx, p, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create bound pod %s: %v", b.pod, err)
+		}
+	}
+
+	// Now bring up a fresh scheduler (fresh, empty pins) — its informer sync sees
+	// the two bound members, exactly as a restarted scheduler would.
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	// The straggler: must adopt domain a and complete the gang on ra3.
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod("rg-2", ns, "gang"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod rg-2: %v", err)
+	}
+	node := waitForPodBound(t, tc, ns, "rg-2", 30*time.Second)
+	if node != "ra3" {
+		t.Errorf("straggler rg-2 bound to %s, want ra3 (adopt domain a + gate counts bound siblings)", node)
 	}
 }

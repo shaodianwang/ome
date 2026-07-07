@@ -111,6 +111,12 @@ func (tc *testContext) teardown(t *testing.T) {
 	tc.CancelFn()
 }
 
+// namespaceObj builds a bare Namespace object, for setup done before a
+// testContext/scheduler exists.
+func namespaceObj(name string) *v1.Namespace {
+	return &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
 // createNamespace creates a namespace, tolerating AlreadyExists.
 func createNamespace(t *testing.T, tc *testContext, ns string) {
 	t.Helper()

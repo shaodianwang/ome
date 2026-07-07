@@ -40,10 +40,13 @@ type Pins struct {
 }
 
 // commitment is a group's placement decision: the pinned domain plus the count
-// of whole nodes still reserved there for members not yet placed.
+// of whole nodes still reserved there for members not yet placed. adopted marks a
+// pin rebuilt from already-placed members (Set, on failover) rather than freshly
+// chosen — the gate uses it to know it must also count bound siblings.
 type commitment struct {
 	domain    string
 	remaining int
+	adopted   bool
 }
 
 // New returns an empty pin store.
@@ -130,6 +133,16 @@ func (p *Pins) Get(group string) (domain string, ok bool) {
 	return "", false
 }
 
+// Adopted reports whether a group's pin was rebuilt from already-placed members
+// (via Set on failover) rather than freshly chosen. The gate consults this to
+// decide whether it must also count bound siblings, not just waiting ones.
+func (p *Pins) Adopted(group string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.byGroup[group]
+	return ok && c.adopted
+}
+
 // Set pins a group to a domain without best-fit. Used on leader failover to
 // rebuild the store from where bound pods already sit (OEP-0022 § failure modes:
 // "the domain is simply where those pods are"). Those pods are real occupancy in
@@ -141,7 +154,7 @@ func (p *Pins) Set(group, domain string) {
 	if old, ok := p.byGroup[group]; ok {
 		p.addReservation(old.domain, -old.remaining)
 	}
-	p.byGroup[group] = &commitment{domain: domain, remaining: 0}
+	p.byGroup[group] = &commitment{domain: domain, remaining: 0, adopted: true}
 }
 
 // Release drops a group's pin and its reservation — on gang completion, on

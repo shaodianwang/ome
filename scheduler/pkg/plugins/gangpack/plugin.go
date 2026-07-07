@@ -83,18 +83,32 @@ func (g *GangPack) PreFilter(_ context.Context, state *framework.CycleState, pod
 // the committed domain and skip the O(nodes) freeByDomain projection entirely —
 // the expensive per-node resource accounting is paid once per gang, not once per
 // pod.
+//
+// When the in-memory pin is absent but the gang already has members placed in the
+// cluster (scheduler restart / leader failover lost the pin), the gang's domain
+// is adopted from where those members already sit rather than best-fit afresh —
+// re-planning a live gang into a different domain would strand its bound members.
 func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	domain, pinned := g.pins.Get(gang.key)
 	if !pinned {
-		free := freeByDomain(nodes, gang.topologyKey, pod)
-		d, fits := g.pins.Choose(gang.key, free, gang.minMember)
-		if !fits {
-			gangPinTotal.WithLabelValues("no_fit").Inc()
-			return nil, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
+		if d, count := boundGangMembers(nodes, pod, gang.topologyKey); count > 0 {
+			// Rebuild the lost pin from ground truth: the gang lives where its
+			// members already are.
+			g.pins.Set(gang.key, d)
+			gangPinTotal.WithLabelValues("adopted").Inc()
+			pinnedGroups.Set(float64(g.pins.Len()))
+			domain = d
+		} else {
+			free := freeByDomain(nodes, gang.topologyKey, pod)
+			d, fits := g.pins.Choose(gang.key, free, gang.minMember)
+			if !fits {
+				gangPinTotal.WithLabelValues("no_fit").Inc()
+				return nil, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
+			}
+			gangPinTotal.WithLabelValues("pinned").Inc()
+			pinnedGroups.Set(float64(g.pins.Len()))
+			domain = d
 		}
-		gangPinTotal.WithLabelValues("pinned").Inc()
-		pinnedGroups.Set(float64(g.pins.Len()))
-		domain = d
 	}
 	writePin(state, domain, gang.topologyKey)
 	return &framework.PreFilterResult{NodeNames: nodesInDomain(nodes, gang.topologyKey, domain)}, nil

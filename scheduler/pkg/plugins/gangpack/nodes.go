@@ -74,6 +74,39 @@ func nodeFits(ni *framework.NodeInfo, req map[v1.ResourceName]int64) bool {
 	return true
 }
 
+// boundGangMembers scans the node snapshot for pods already placed (assumed or
+// bound) that belong to the same gang as pod — i.e. share its PodGroup. It
+// returns how many were found and the domain they sit in (the domain of the last
+// such node seen; a healthy gang is single-domain). This is how the plugin
+// recovers a gang whose in-memory pin was lost (scheduler restart / leader
+// failover): the truth of where a gang lives is where its members already are.
+// The pod being scheduled is not yet in any node's pod list, so it never counts
+// itself.
+func boundGangMembers(nodeInfos []*framework.NodeInfo, pod *v1.Pod, topologyKey string) (domain string, count int) {
+	ns, pgName, ok := podGroupNameOf(pod)
+	if !ok {
+		return "", 0
+	}
+	for _, info := range nodeInfos {
+		n := info.Node()
+		if n == nil {
+			continue
+		}
+		dom := domainOf(n, topologyKey)
+		if dom == "" {
+			continue
+		}
+		for _, pi := range info.Pods {
+			mp := pi.Pod
+			if mp != nil && mp.Namespace == ns && mp.Labels[podGroupLabel] == pgName {
+				domain = dom
+				count++
+			}
+		}
+	}
+	return domain, count
+}
+
 // freeByDomain projects a framework node snapshot onto the pure accounting type:
 // free nodes per domain for the given gang pod. A node participates only if it
 // carries a domain label AND could hold the pod (nodeRelevant); it is counted
