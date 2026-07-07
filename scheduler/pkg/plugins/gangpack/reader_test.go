@@ -1,14 +1,44 @@
 package gangpack
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	schedv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 )
+
+// TestNewInformerReaderDoesNotHangWithoutPodGroupAPI: the PodGroup CRD is an
+// optional dependency, so building the reader must NOT block forever when the
+// PodGroup API is unavailable (CRD absent, or apiserver unreachable). The initial
+// cache sync is time-bounded; newInformerReader returns after the timeout so the
+// scheduler still boots. Simulated with an unreachable apiserver + a short bound.
+func TestNewInformerReaderDoesNotHangWithoutPodGroupAPI(t *testing.T) {
+	orig := podGroupSyncTimeout
+	podGroupSyncTimeout = 200 * time.Millisecond
+	defer func() { podGroupSyncTimeout = orig }()
+
+	cfg := &rest.Config{Host: "https://127.0.0.1:1"} // nothing listening -> never syncs
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := newInformerReader(context.Background(), cfg)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("newInformerReader returned an error, want nil (boot regardless): %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("newInformerReader hung when the PodGroup API was unavailable; it must time-bound the initial sync")
+	}
+}
 
 func TestFactsFromPodGroup(t *testing.T) {
 	pg := &schedv1alpha1.PodGroup{

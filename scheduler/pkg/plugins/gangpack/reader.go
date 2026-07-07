@@ -50,9 +50,22 @@ func (r *informerReader) get(namespace, name string) (minMember int, topologyKey
 	return mm, tk, to, true
 }
 
+// podGroupSyncTimeout bounds how long newInformerReader waits for the initial
+// PodGroup cache sync before proceeding. A var so tests can shorten it.
+var podGroupSyncTimeout = 30 * time.Second
+
 // newInformerReader builds a PodGroup informer from the scheduler's shared
-// kubeconfig, starts it, waits for the initial cache sync, and returns a reader
-// backed by its lister. ctx bounds the informer's lifetime (the scheduler's).
+// kubeconfig, starts it, and returns a reader backed by its lister. ctx bounds
+// the informer's lifetime (the scheduler's).
+//
+// The PodGroup CRD is an OPTIONAL dependency: it is the ecosystem-standard gang
+// API, but the scheduler must still boot without it and schedule non-gang pods
+// normally — gang behavior activates once the CRD and its PodGroups exist and the
+// informer syncs. So the initial cache sync is best-effort and time-bounded: when
+// the CRD is present it returns as soon as the cache syncs (sub-second); when it
+// is absent we stop waiting after podGroupSyncTimeout rather than hanging New()
+// forever. The informer keeps retrying under ctx, so a CRD installed later is
+// picked up automatically.
 func newInformerReader(ctx context.Context, cfg *rest.Config) (*informerReader, error) {
 	client, err := schedclient.NewForConfig(cfg)
 	if err != nil {
@@ -61,7 +74,11 @@ func newInformerReader(ctx context.Context, cfg *rest.Config) (*informerReader, 
 	factory := schedinformers.NewSharedInformerFactory(client, 0)
 	lister := factory.Scheduling().V1alpha1().PodGroups().Lister()
 	factory.Start(ctx.Done())
-	factory.WaitForCacheSync(ctx.Done())
+
+	syncCtx, cancel := context.WithTimeout(ctx, podGroupSyncTimeout)
+	defer cancel()
+	factory.WaitForCacheSync(syncCtx.Done())
+
 	return &informerReader{
 		getPG: func(namespace, name string) (*schedv1alpha1.PodGroup, error) {
 			return lister.PodGroups(namespace).Get(name)
