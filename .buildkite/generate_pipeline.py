@@ -436,10 +436,11 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
 
 def cd_steps() -> str:
     parts: list[str] = []
-    # ome-resources chart's default `hub` points at the prod ECR, so it must
-    # wait for both the build (dev push) AND the mirror (prod push) to finish
-    # — otherwise a consumer installing the freshly published chart could
-    # hit ImagePullBackOff until the mirror catches up.
+    # The ome-resources / ome-scheduler / muse charts stamp an image ref (prod-ECR
+    # hub + tag) into their values at publish time, so they must wait for both the
+    # build (dev push) AND the mirror (prod push) to finish — otherwise a consumer
+    # installing the freshly published chart could hit ImagePullBackOff until the
+    # mirror catches up.
     image_keys = []
     for label, ecr_name, dockerfile in IMAGES:
         parts.append(_build_image_step(label, ecr_name, dockerfile))
@@ -447,7 +448,7 @@ def cd_steps() -> str:
         image_keys.append(f"build-{label}")
         image_keys.append(f"mirror-{label}")
     for chart in CHARTS:
-        if chart in ("ome-resources", "ome-scheduler"):
+        if chart in ("ome-resources", "ome-scheduler", "muse"):
             # These charts stamp an image ref, so wait for the image build + mirror.
             parts.append(_push_chart_step(chart, depends_on=image_keys))
         else:

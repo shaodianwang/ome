@@ -20,6 +20,10 @@ clusters: []
 
 # muse-server config — all env/flag driven, no values baked into the image.
 config:
+  # Bind address. "::" (IPv6 unspecified) dual-stacks on Linux — it accepts both
+  # IPv6 and IPv4 — so it works on IPv6, IPv4, and dual-stack clusters. Plain
+  # 0.0.0.0 is IPv4-only and fails kubelet probes on an IPv6 cluster.
+  host: "::"
   webDir: /web # the image bakes the console here; "" ⇒ API-only
   listStrategy: auto # auto | streaming | paginated
   capacityRefreshSecs: 10

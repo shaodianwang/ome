@@ -31,6 +31,8 @@ spec:
             {{- end }}
           env:
             # Config is env-driven (clap MUSE_* vars); nothing baked into the image.
+            - name: MUSE_HOST
+              value: {{ .Values.config.host | quote }}
             - name: MUSE_WEB_DIR
               value: {{ .Values.config.webDir | quote }}
             - name: MUSE_LIST_STRATEGY
