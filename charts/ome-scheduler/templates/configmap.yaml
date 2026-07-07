@@ -23,3 +23,15 @@ data:
           multiPoint:
             enabled:
               - name: OMEGangPack
+            {{- if .Values.scheduler.disablePreemption }}
+            disabled:
+              # Until OEP-0022 Phase C adds topology-aware preemption, the default
+              # preemptor is domain-blind for gangs: a no-fit gang carries no pin
+              # for Filter to enforce during preemption simulation, so it can evict
+              # victims scattered across domains that never assemble one whole free
+              # domain — churning pods for nothing. Disabling it here means
+              # ome-scheduler simply waits for capacity (the default scheduler still
+              # preempts for everything it schedules). Set disablePreemption: false
+              # to restore the built-in behavior.
+              - name: DefaultPreemption
+            {{- end }}
