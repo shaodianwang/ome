@@ -70,13 +70,17 @@ serviceAccount:
   name: ""
   annotations: {} # e.g. a Meta service identity for gateway/manifold auth later
 
+# muse-server holds one informer cache per aggregated cluster. InferenceService
+# and ServingRuntime are large objects (the pod-template schema is inlined), so
+# memory scales with the fleet's object count and spikes during the initial list.
+# These defaults suit a handful of clusters; raise limits.memory for a large fleet.
 resources:
   requests:
-    cpu: 100m
-    memory: 256Mi
-  limits:
-    cpu: "1"
+    cpu: 500m
     memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
 
 podAnnotations: {}
 nodeSelector: {}
