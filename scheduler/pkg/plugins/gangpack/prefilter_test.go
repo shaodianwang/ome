@@ -76,6 +76,31 @@ func TestPinGangAdoptsBoundMembers(t *testing.T) {
 	}
 }
 
+// TestPinGangReplansStalePin: a pin to a domain that no longer has any node (its
+// nodes drained/scaled away, or the topology key changed so the old domain value
+// matches nothing) is dropped and re-planned, instead of narrowing every
+// candidate away and wedging the gang forever.
+func TestPinGangReplansStalePin(t *testing.T) {
+	g := &GangPack{pins: placement.New()}
+	g.pins.Set("team/pf", "gone") // pinned to a domain that no longer exists
+	nodes := []*framework.NodeInfo{
+		nodeInfo(gpuNode("b1", "b", "4")),
+		nodeInfo(gpuNode("b2", "b", "4")),
+	}
+	st := framework.NewCycleState()
+
+	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gpuPod("4"))
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang status = %v, want Success (re-plan off the stale domain)", status)
+	}
+	if d, ok := g.pins.Get("team/pf"); !ok || d != "b" {
+		t.Fatalf("re-planned pin = %q,%v, want b,true", d, ok)
+	}
+	if res == nil || !res.NodeNames.Equal(sets.New("b1", "b2")) {
+		t.Fatalf("narrowed to %v, want {b1,b2}", res.NodeNames)
+	}
+}
+
 // TestPreFilterSkips: PreFilter returns Skip (no constraint, Filter skipped) when
 // the plugin has no PodGroup reader wired yet, or when the pod is not a gang
 // member. Neither path touches the node snapshot, so no Handle is needed.

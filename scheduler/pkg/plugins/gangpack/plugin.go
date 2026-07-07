@@ -101,28 +101,51 @@ func (g *GangPack) PreFilter(_ context.Context, state *framework.CycleState, pod
 // re-planning a live gang into a different domain would strand its bound members.
 func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	domain, pinned := g.pins.Get(gang.key)
+
+	// A pinned domain that no longer has any node — every node drained/scaled
+	// away, or the workload changed the PodGroup's topology key so the old domain
+	// value matches nothing under the new key — is stale. Reusing it would narrow
+	// every candidate away and wedge the gang forever with no re-plan. Drop it and
+	// re-plan instead. (A merely full or cordoned domain still HAS nodes, so it is
+	// not treated as stale.)
+	if pinned && nodesInDomain(nodes, gang.topologyKey, domain).Len() == 0 {
+		g.pins.Release(gang.key)
+		gangPinTotal.WithLabelValues("stale_replan").Inc()
+		pinned = false
+	}
+
 	if !pinned {
-		if d, count := boundGangMembers(nodes, pod, gang.topologyKey); count > 0 {
-			// Rebuild the lost pin from ground truth: the gang lives where its
-			// members already are.
-			g.pins.Set(gang.key, d)
-			gangPinTotal.WithLabelValues("adopted").Inc()
-			pinnedGroups.Set(float64(g.pins.Len()))
-			domain = d
-		} else {
-			free := freeByDomain(nodes, gang.topologyKey, pod)
-			d, fits := g.pins.Choose(gang.key, free, gang.minMember)
-			if !fits {
-				gangPinTotal.WithLabelValues("no_fit").Inc()
-				return nil, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
-			}
-			gangPinTotal.WithLabelValues("pinned").Inc()
-			pinnedGroups.Set(float64(g.pins.Len()))
-			domain = d
+		d, status := g.planDomain(nodes, gang, pod)
+		if status != nil {
+			return nil, status
 		}
+		domain = d
 	}
 	writePin(state, domain, gang.topologyKey)
 	return &framework.PreFilterResult{NodeNames: nodesInDomain(nodes, gang.topologyKey, domain)}, nil
+}
+
+// planDomain commits an unpinned gang to a domain: it adopts the domain of any
+// already-placed members (failover / lost pin), else best-fits a fresh one. It
+// records the pin and the placement metric. status is non-nil (Unschedulable)
+// only when the gang fits in no domain.
+func (g *GangPack) planDomain(nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod) (string, *framework.Status) {
+	if d, count := boundGangMembers(nodes, pod, gang.topologyKey); count > 0 {
+		// Rebuild from ground truth: the gang lives where its members already are.
+		g.pins.Set(gang.key, d)
+		gangPinTotal.WithLabelValues("adopted").Inc()
+		pinnedGroups.Set(float64(g.pins.Len()))
+		return d, nil
+	}
+	free := freeByDomain(nodes, gang.topologyKey, pod)
+	d, fits := g.pins.Choose(gang.key, free, gang.minMember)
+	if !fits {
+		gangPinTotal.WithLabelValues("no_fit").Inc()
+		return "", framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
+	}
+	gangPinTotal.WithLabelValues("pinned").Inc()
+	pinnedGroups.Set(float64(g.pins.Len()))
+	return d, nil
 }
 
 // PreFilterExtensions returns nil: the plugin does not incrementally re-evaluate
