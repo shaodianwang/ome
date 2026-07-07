@@ -34,6 +34,16 @@ func gpuPod(req string) *v1.Pod {
 	}}}}
 }
 
+// gangGPUPod is a gpuPod that is also a gang member (namespace + pod-group label),
+// so placement's boundGangMembers can match it while free-ness still comes from its
+// gpu request.
+func gangGPUPod(ns, pg, req string) *v1.Pod {
+	p := gpuPod(req)
+	p.Namespace = ns
+	p.Labels = map[string]string{podGroupLabel: pg}
+	return p
+}
+
 func nodeInfo(node *v1.Node, pods ...*v1.Pod) *framework.NodeInfo {
 	ni := framework.NewNodeInfo(pods...)
 	ni.SetNode(node)

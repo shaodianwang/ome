@@ -8,6 +8,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
+	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
 // TestPinGang is the PreFilter decision core (node slice in, pin + narrowed set
@@ -101,9 +102,73 @@ func TestPinGangReplansStalePin(t *testing.T) {
 	}
 }
 
+// TestPinGangReplansOnFullDomain: a gang pinned (with a capacity reservation) to a
+// domain that then FILLS — another gang won the race for it before this gang placed
+// any member — must drop the pin, re-plan onto a free domain, AND release the
+// reservation it leaked on the full domain. Without this the gang retries the full
+// domain forever while free domains sit idle, and the leaked reservation
+// permanently under-counts that domain for every other gang.
+func TestPinGangReplansOnFullDomain(t *testing.T) {
+	g := &GangPack{pins: placement.New()}
+	// pf pinned to "a" with a reservation, exactly as a first-member Choose would
+	// when "a" and "b" both looked free.
+	if d, ok := g.pins.Choose("team/pf", topology.FreeByDomain{"a": 2, "b": 2}, 2); !ok || d != "a" {
+		t.Fatalf("precondition: Choose = %q,%v, want a,true", d, ok)
+	}
+	// Snapshot now: "a" is full (its node occupied by another gang's pod), "b" free.
+	nodes := []*framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4"), gpuPod("4")), // occupied by a non-pf pod
+		nodeInfo(gpuNode("b1", "b", "4")),
+		nodeInfo(gpuNode("b2", "b", "4")),
+	}
+	st := framework.NewCycleState()
+
+	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang status = %v, want Success (re-plan off the full domain)", status)
+	}
+	if d, ok := g.pins.Get("team/pf"); !ok || d != "b" {
+		t.Fatalf("re-planned pin = %q,%v, want b,true", d, ok)
+	}
+	if res == nil || !res.NodeNames.Equal(sets.New("b1", "b2")) {
+		t.Fatalf("narrowed to %v, want {b1,b2}", res.NodeNames)
+	}
+	// The reservation pf leaked on "a" must be gone: a fresh gang can pin "a" once
+	// it frees. If the reservation leaked, "a"'s effective free would be 0 here.
+	if d, ok := g.pins.Choose("team/other", topology.FreeByDomain{"a": 2}, 2); !ok || d != "a" {
+		t.Fatalf("reservation on 'a' leaked after re-plan: other gang Choose = %q,%v, want a,true", d, ok)
+	}
+}
+
+// TestPinGangKeepsPinWhenMemberBound: a pinned domain that is full but already
+// holds one of the gang's own members is NOT stale — re-planning would strand that
+// member. The gang keeps its pin and waits for capacity in its own domain.
+func TestPinGangKeepsPinWhenMemberBound(t *testing.T) {
+	g := &GangPack{pins: placement.New()}
+	g.pins.Set("team/pf", "a")
+	// Domain "a": one node holds a pf member (bound), a second node is full with
+	// another gang's pod — so "a" cannot fit a fresh member, but pf lives here.
+	nodes := []*framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")), // pf's own bound member
+		nodeInfo(gpuNode("a2", "a", "4"), gpuPod("4")),           // occupied by another gang
+		nodeInfo(gpuNode("b1", "b", "4")),                        // free elsewhere
+	}
+	st := framework.NewCycleState()
+
+	_, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang status = %v, want Success (keep pin, don't strand bound member)", status)
+	}
+	if d, ok := g.pins.Get("team/pf"); !ok || d != "a" {
+		t.Fatalf("pin = %q,%v, want a,true (must not re-plan away from a bound member)", d, ok)
+	}
+}
+
 // TestPreFilterSkips: PreFilter returns Skip (no constraint, Filter skipped) when
-// the plugin has no PodGroup reader wired yet, or when the pod is not a gang
-// member. Neither path touches the node snapshot, so no Handle is needed.
+// the plugin has no PodGroup reader wired yet, when the pod carries no pod-group
+// label (not a gang member), or when its PodGroup is present but declares no domain
+// gang (non-positive minMember, or no topology key). None of these touch the node
+// snapshot, so no Handle is needed.
 func TestPreFilterSkips(t *testing.T) {
 	ctx := context.Background()
 
@@ -112,9 +177,33 @@ func TestPreFilterSkips(t *testing.T) {
 		t.Fatalf("nil-reader PreFilter = %v, want Skip", st)
 	}
 
-	nonGang := &GangPack{pins: placement.New(), pgReader: fakeReader{}} // reader present, pod not resolvable
-	res, st := nonGang.PreFilter(ctx, framework.NewCycleState(), gangPod("team", "x"))
+	// No pod-group label -> not a gang member -> Skip.
+	nonMember := &GangPack{pins: placement.New(), pgReader: fakeReader{}}
+	res, st := nonMember.PreFilter(ctx, framework.NewCycleState(), gangPod("team", ""))
 	if res != nil || st.Code() != framework.Skip {
-		t.Fatalf("non-gang PreFilter = %v,%v, want nil,Skip", res, st)
+		t.Fatalf("non-member PreFilter = %v,%v, want nil,Skip", res, st)
+	}
+
+	// PodGroup present but declares no topology key -> nothing to pin -> Skip.
+	noTopo := &GangPack{pins: placement.New(), pgReader: fakeReader{"team/x": {min: 3, topo: ""}}}
+	res, st = noTopo.PreFilter(ctx, framework.NewCycleState(), gangPod("team", "x"))
+	if res != nil || st.Code() != framework.Skip {
+		t.Fatalf("no-topology-key PreFilter = %v,%v, want nil,Skip", res, st)
+	}
+}
+
+// TestPreFilterHoldsWhenPodGroupMissing: a pod that IS a gang member (carries the
+// pod-group label) but whose PodGroup the reader can't resolve yet — the common
+// informer-lag race when a workload's pods and PodGroup are created together — must
+// be held (Unschedulable), NOT skipped. Skipping would let a lone member bind and
+// break all-or-nothing; holding requeues it until the PodGroup appears.
+func TestPreFilterHoldsWhenPodGroupMissing(t *testing.T) {
+	g := &GangPack{pins: placement.New(), pgReader: fakeReader{}} // reader present, group absent
+	res, st := g.PreFilter(context.Background(), framework.NewCycleState(), gangPod("team", "pf"))
+	if res != nil {
+		t.Fatalf("PreFilter result = %v, want nil", res)
+	}
+	if st.Code() != framework.Unschedulable {
+		t.Fatalf("PreFilter for uncached PodGroup = %v, want Unschedulable (hold, not Skip)", st)
 	}
 }

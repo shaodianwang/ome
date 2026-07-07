@@ -75,10 +75,27 @@ func (g *GangPack) PreFilter(_ context.Context, state *framework.CycleState, pod
 	if g.pgReader == nil {
 		return nil, framework.NewStatus(framework.Skip)
 	}
-	gang, ok := resolveGang(pod, g.pgReader)
-	if !ok {
+	ns, name, isMember := podGroupNameOf(pod)
+	if !isMember {
+		// Not a gang member: impose no constraint, skip Filter.
 		return nil, framework.NewStatus(framework.Skip)
 	}
+	minMember, topologyKey, timeout, found := g.pgReader.get(ns, name)
+	if !found {
+		// The pod is labelled into a PodGroup the reader can't resolve yet — most
+		// often informer lag right after the PodGroup was created (pod and group
+		// created together). Skipping here would let a lone member bind and break
+		// all-or-nothing, so hold the pod instead; it requeues automatically when
+		// the PodGroup appears (a registered enqueue event). Plain Unschedulable so
+		// the requeue hints stay in effect.
+		return nil, framework.NewStatus(framework.Unschedulable, "PodGroup "+ns+"/"+name+" not resolvable yet")
+	}
+	if minMember <= 0 || topologyKey == "" {
+		// PodGroup exists but declares no domain gang (no positive minMember, or no
+		// topology key to pin to): leave placement unconstrained.
+		return nil, framework.NewStatus(framework.Skip)
+	}
+	gang := gangInfo{key: ns + "/" + name, minMember: minMember, topologyKey: topologyKey, timeout: timeout}
 	nodes, err := g.handle.SnapshotSharedLister().NodeInfos().List()
 	if err != nil {
 		return nil, framework.AsStatus(err)
@@ -102,15 +119,13 @@ func (g *GangPack) PreFilter(_ context.Context, state *framework.CycleState, pod
 func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	domain, pinned := g.pins.Get(gang.key)
 
-	// A pinned domain that no longer has any node — every node drained/scaled
-	// away, or the workload changed the PodGroup's topology key so the old domain
-	// value matches nothing under the new key — is stale. Reusing it would narrow
-	// every candidate away and wedge the gang forever with no re-plan. Drop it and
-	// re-plan instead. (A merely full or cordoned domain still HAS nodes, so it is
-	// not treated as stale.)
-	if pinned && nodesInDomain(nodes, gang.topologyKey, domain).Len() == 0 {
+	// A stale pin must be dropped and re-planned, else the gang wedges on it
+	// forever. Releasing also returns the pin's leaked capacity reservation. Only
+	// safe when no member has landed in the domain yet (see pinStale).
+	if pinned && pinStale(nodes, gang, pod, domain) {
 		g.pins.Release(gang.key)
 		gangPinTotal.WithLabelValues("stale_replan").Inc()
+		pinnedGroups.Set(float64(g.pins.Len()))
 		pinned = false
 	}
 
@@ -168,6 +183,34 @@ func (g *GangPack) Filter(_ context.Context, state *framework.CycleState, _ *v1.
 			"node not in gang's pinned domain "+pin.domain)
 	}
 	return nil
+}
+
+// pinStale reports whether a gang's existing pin must be dropped and re-planned.
+// Two cases wedge a gang that keeps its pin, and both are safe to re-plan because
+// no member has landed in the pinned domain yet:
+//
+//   - the domain vanished — every node drained/scaled away, or the PodGroup's
+//     topology key changed so the old domain value matches no node. Reusing it
+//     narrows every candidate away.
+//   - the domain filled — another gang won the race for it after this gang pinned,
+//     so it can no longer fit this gang's minMember. Without a re-plan the gang
+//     retries the full domain forever (Filter rejects every occupied node) while
+//     other domains sit free, and its Choose reservation leaks until re-plan
+//     releases it.
+//
+// A domain that already holds any of this gang's members is NEVER stale: those
+// members are bound (or assumed) there, so re-planning would strand them. Such a
+// gang keeps its pin and waits for capacity in its own domain. The full-domain
+// projection is only paid while a gang is unplaced (a transient formation window);
+// once a member lands, the early return keeps steady-state PreFilter cheap.
+func pinStale(nodes []*framework.NodeInfo, gang gangInfo, pod *v1.Pod, domain string) bool {
+	if nodesInDomain(nodes, gang.topologyKey, domain).Len() == 0 {
+		return true // domain vanished
+	}
+	if _, bound := boundGangMembers(nodes, pod, gang.topologyKey); bound > 0 {
+		return false // has members placed here already; never strand them
+	}
+	return freeByDomain(nodes, gang.topologyKey, pod)[domain] < gang.minMember
 }
 
 // nodesInDomain returns the names of nodes whose domain matches — the candidate
