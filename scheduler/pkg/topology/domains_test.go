@@ -2,8 +2,8 @@ package topology
 
 import "testing"
 
-// TestBestFit pins the packing policy (OEP-0022 R1): among domains that can hold
-// the whole gang, pick the FULLEST — the one with the fewest free nodes — so
+// TestBestFit pins the packing policy: among domains that can hold the whole
+// gang, pick the FULLEST — the one with the fewest free nodes — so
 // already-busy domains fill up and empty domains stay whole for future large
 // gangs. Ties break on domain name for determinism.
 func TestBestFit(t *testing.T) {

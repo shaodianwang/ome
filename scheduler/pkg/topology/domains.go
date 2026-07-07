@@ -1,18 +1,17 @@
 // Package topology holds the pure, framework-free placement accounting for
 // ome-scheduler: per-domain free-capacity counting and the best-fit domain
-// choice that implements OEP-0022's bin-packing rule (R1). Keeping it free of
-// the scheduler framework is deliberate — this is the intellectual core of
-// placement, and it is unit-tested in isolation; the plugin wires the live
+// choice. Keeping it free of the scheduler framework is deliberate — this is
+// the core of placement, unit-tested in isolation; the plugin wires the live
 // node/pod state into these types.
 package topology
 
 import "sort"
 
 // FreeByDomain maps a domain (the value of the configured topology label) to its
-// count of free whole nodes. Whole-node accounting is the OEP-0022 v1 model: a
-// gang pod occupies an entire node, so capacity is just a node count and any
-// free node in a domain is interchangeable (true for NVLink; true for TPU when
-// the gang uses the whole slice — see OEP-0022 § Placement).
+// count of free whole nodes. Whole-node accounting is the model: a gang pod
+// occupies an entire node, so capacity is just a node count and any free node in
+// a domain is interchangeable (true for an NVLink clique; true for a TPU slice
+// when the gang uses the whole slice).
 type FreeByDomain map[string]int
 
 // BestFit returns the domain that best fits a gang of gangSize whole nodes: the

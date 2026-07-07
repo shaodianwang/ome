@@ -2,13 +2,13 @@
 
 The OME accelerator scheduler — the upstream kube-scheduler built as a library
 with the OME placement plugin (`OMEGangPack`) registered next to the built-in
-plugins. See [OEP-0022](../oeps/0022-ome-scheduler/README.md).
+plugins.
 
 ## Why a separate Go module
 
 Building the Kubernetes scheduler as a library requires importing
 `k8s.io/kubernetes`, which needs the staging `replace` block in `go.mod` (pinning
-every `k8s.io/*` to the fleet's Kubernetes version — currently 1.33). That block,
+every `k8s.io/*` to the target Kubernetes version — currently 1.33). That block,
 and the large transitive graph it pulls in, would poison the root
 `github.com/ome-projects/ome` module (which pins k8s via controller-runtime on a
 different cadence). So the scheduler is its **own module**, pinned and bumped
@@ -22,7 +22,7 @@ scheduler/
 ├── cmd/ome-scheduler/main.go     # entry point: kube-scheduler + our plugin
 ├── pkg/topology/                 # pure best-fit domain accounting (no k8s deps)
 ├── pkg/placement/                # per-gang domain pins
-├── pkg/plugins/gangpack/         # OMEGangPack placement plugin (Phase A)
+├── pkg/plugins/gangpack/         # OMEGangPack placement plugin
 └── test/integration/             # envtest + real in-process scheduler
 ```
 
@@ -56,7 +56,7 @@ go test ./test/integration/... -v
 
 ## Status
 
-**Phase A.** The placement loop is live end to end: `PreFilter` best-fits and
+The placement loop is live end to end: `PreFilter` best-fits and
 pins the gang's domain, `Filter` enforces it, `Permit` gates the gang until all
 members are present, and `Unreserve` unwinds a half-formed gang. `Reserve` claims
 the gang's whole-node capacity in its pinned domain so two gangs can't race into
@@ -68,13 +68,12 @@ conventions or fabric values. A rejected gang member re-attempts promptly via
 registered requeue hints (sibling/PodGroup/node events) rather than the
 scheduler's slow periodic flush. Placement decisions, gate outcomes, unwinds, and
 the count of pinned groups are exported as `ome_scheduler_*` metrics on the
-scheduler's `/metrics` endpoint. Still ahead: replica spreading; see
-OEP-0022 § Placement.
+scheduler's `/metrics` endpoint. Still ahead: replica spreading across domains
+for fault isolation, and topology-aware preemption.
 
 ## Version policy
 
-Pinned to the fleet's Kubernetes minor version (currently 1.33 →
+Pinned to the target Kubernetes minor version (currently 1.33 →
 `k8s.io/kubernetes v1.33.5`). The plugin framework API changes between k8s
 minors, so version bumps are deliberate, reviewed changes: regenerate the
-`replace` block from the matching `sigs.k8s.io/scheduler-plugins` release. See
-OEP-0022 § Graduation Criteria.
+`replace` block from the matching `sigs.k8s.io/scheduler-plugins` release.

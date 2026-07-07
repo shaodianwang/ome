@@ -177,7 +177,7 @@ func TestRetainOnlyReleasesDeadGangs(t *testing.T) {
 
 // TestPartnerGangFollowsSharedGroup: prefill and decode share one placement
 // group, so the partner gang lands in the same domain the first gang pinned —
-// this is the co-location mechanism (OEP-0022 R2), even with a different size.
+// this is the co-location mechanism, even with a different size.
 func TestPartnerGangFollowsSharedGroup(t *testing.T) {
 	p := New()
 	free := topology.FreeByDomain{"x": 20, "y": 8}

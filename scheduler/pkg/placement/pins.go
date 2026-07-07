@@ -14,7 +14,7 @@ import (
 // to. The first pod of a group chooses a domain via best-fit; every later
 // member — and the partner gang, which shares the placement group — follows the
 // pin. That is what turns the framework's one-pod-at-a-time scheduling into a
-// group decision (OEP-0022 § Placement / Pinning).
+// group decision.
 //
 // A pin also carries a capacity reservation: the whole nodes the gang has
 // committed to its domain but not yet filled. A gang's members arrive one
@@ -147,9 +147,9 @@ func (p *Pins) Committed(group string) bool {
 }
 
 // Set pins a group to a domain without best-fit. Used on leader failover to
-// rebuild the store from where bound pods already sit (OEP-0022 § failure modes:
-// "the domain is simply where those pods are"). Those pods are real occupancy in
-// the snapshot, so the rebuilt commitment holds no outstanding reservation.
+// rebuild the store from where bound pods already sit — the domain is simply
+// where those pods are. Those pods are real occupancy in the snapshot, so the
+// rebuilt commitment holds no outstanding reservation.
 func (p *Pins) Set(group, domain string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

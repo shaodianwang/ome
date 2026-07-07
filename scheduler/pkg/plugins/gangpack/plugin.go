@@ -1,8 +1,8 @@
 // Package gangpack is the OME placement plugin: topology-aware gang placement and
-// bin-packing (OEP-0022, Phase A). PreFilter chooses and pins a gang's domain;
-// Filter enforces it. The intellectual core (domain accounting, best-fit, pins)
-// lives in the pure topology/placement packages; this package wires the live
-// scheduler state onto them.
+// bin-packing. PreFilter chooses and pins a gang's domain; Filter enforces it.
+// The core (domain accounting, best-fit, pins) lives in the pure
+// topology/placement packages; this package wires the live scheduler state onto
+// them.
 package gangpack
 
 import (

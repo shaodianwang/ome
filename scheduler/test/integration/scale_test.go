@@ -43,7 +43,7 @@ import (
 // The defaults (below) are a moderate size that finishes well under ~90s on a
 // laptop-class machine against envtest. Every dimension is an env var; total pods
 // == scaleGangs * scaleGangSize == scaleDomains * scaleNodesPerDomain. To push
-// toward the OEP-0022 fleet target, e.g.:
+// toward a large-fleet target, e.g.:
 //
 //	OME_SCALE_DOMAINS=1000 OME_SCALE_NODES_PER_DOMAIN=20 \
 //	OME_SCALE_GANGS=1000  OME_SCALE_GANG_SIZE=20 \

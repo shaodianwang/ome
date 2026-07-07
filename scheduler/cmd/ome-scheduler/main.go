@@ -1,6 +1,6 @@
 // Command ome-scheduler is the OME accelerator scheduler: the upstream
 // kube-scheduler, built as a library, with the OME placement plugin registered
-// alongside the built-in plugins. See OEP-0022.
+// alongside the built-in plugins.
 package main
 
 import (
