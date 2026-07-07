@@ -392,3 +392,69 @@ func TestSurplusPodJoinsCompletedGang(t *testing.T) {
 		t.Errorf("surplus pod sp-2 bound to %s (domain %q), want a node of domain a", node, d)
 	}
 }
+
+// TestNoFitGangReschedulesWhenCapacityFrees is the availability guarantee: a gang
+// that fits no domain is Unschedulable (resolvable), so when real capacity frees
+// it reschedules PROMPTLY via the requeue hints — it is not stuck until the slow
+// periodic flush.
+//
+// Note the FORCE delete (grace 0): envtest has no kubelet, so an ordinary delete
+// leaves a pod stuck Terminating and its resources never free — the capacity has
+// to be removed for real for this to test anything.
+func TestNoFitGangReschedulesWhenCapacityFrees(t *testing.T) {
+	const ns = "gang-nofit-recover"
+
+	setup := clientset.NewForConfigOrDie(globalKubeConfig)
+	schedSetup := schedclientset.NewForConfigOrDie(globalKubeConfig)
+	ctx := context.Background()
+
+	if _, err := setup.CoreV1().Namespaces().Create(ctx, namespaceObj(ns), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	// One domain, two gpu nodes, both occupied by non-gang blockers -> a 2-member
+	// gang fits nowhere. Created before the scheduler starts so its first snapshot
+	// sees the domain full.
+	for _, n := range []string{"rc1", "rc2"} {
+		if _, err := setup.CoreV1().Nodes().Create(ctx, makeGPUNode(n, "a", 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", n, err)
+		}
+	}
+	for _, b := range []struct{ pod, node string }{{"rcblk-0", "rc1"}, {"rcblk-1", "rc2"}} {
+		p := makeGangPod(b.pod, ns, "") // no pod-group label: a plain gpu hog
+		p.Spec.NodeName = b.node
+		if _, err := setup.CoreV1().Pods(ns).Create(ctx, p, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create blocker %s: %v", b.pod, err)
+		}
+	}
+	pg := schedutil.MakePG("gang", ns, 2, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	to := int32(600)
+	pg.Spec.ScheduleTimeoutSeconds = &to
+	if _, err := schedSetup.SchedulingV1alpha1().PodGroups(ns).Create(ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	for _, name := range []string{"rc-0", "rc-1"} {
+		if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod(name, ns, "gang"), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create gang pod %s: %v", name, err)
+		}
+	}
+	ensureNotBound(t, tc, ns, "rc-0", 3*time.Second) // no-fit while the domain is full
+
+	// Force-free the capacity; the no-fit gang must reschedule promptly.
+	zero := int64(0)
+	for _, b := range []string{"rcblk-0", "rcblk-1"} {
+		if err := tc.ClientSet.CoreV1().Pods(ns).Delete(tc.Ctx, b, metav1.DeleteOptions{GracePeriodSeconds: &zero}); err != nil {
+			t.Fatalf("force-delete blocker %s: %v", b, err)
+		}
+	}
+	for _, name := range []string{"rc-0", "rc-1"} {
+		node := waitForPodBound(t, tc, ns, name, 30*time.Second)
+		if node != "rc1" && node != "rc2" {
+			t.Errorf("gang pod %s bound to %s, want rc1/rc2", name, node)
+		}
+	}
+}
