@@ -19,9 +19,12 @@ scheduler:
     tag: latest
     pullPolicy: IfNotPresent
 
-  # >1 replica needs leaderElect: true (only the leader schedules; the rest are
-  # warm standbys). Safe to leave enabled with a single replica.
-  replicaCount: 1
+  # HA by default: multiple replicas with leader election, so exactly one instance
+  # schedules and the rest are warm standbys for fast failover. A scheduler is a
+  # single-writer decision loop — you can never run more than one ACTIVE instance
+  # (two would double-bind pods), so leaderElect must stay true whenever
+  # replicaCount > 1. Scale down to 1 for constrained/dev clusters.
+  replicaCount: 3
   leaderElect: true
 
   # klog verbosity. 2 is a reasonable production default; raise to debug
