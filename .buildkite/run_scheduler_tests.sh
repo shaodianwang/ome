@@ -46,8 +46,14 @@ fi
 export KUBEBUILDER_ASSETS="$ENVTEST_ASSETS"
 
 # Build + test the scheduler module. `go build ./...` compile-checks every
-# package; `go test ./...` runs unit (topology/placement/gangpack) + the
+# package; `go test -race ./...` runs unit (topology/placement/gangpack) + the
 # envtest integration harness (test/integration).
+#
+# -race is a deliberate merge-gate: the plugin runs a background pin-GC goroutine
+# that touches the (mutex-guarded) pin store concurrently with the scheduling
+# loop, so every PR must clear the race detector. It roughly doubles runtime
+# (~40s total here), which is well within budget for a per-PR gate. The race
+# detector needs cgo + a C toolchain, both present in the CI image.
 cd scheduler
 go build ./...
-go test ./... -count=1
+CGO_ENABLED=1 go test -race ./... -count=1
