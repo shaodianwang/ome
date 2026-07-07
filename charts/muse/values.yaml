@@ -1,5 +1,9 @@
 # MUSE console — one image (muse-server) serving the read-plane API + web UI.
-replicaCount: 1
+# 2 replicas for HA (no downtime on rollout / node drain); the Service load-balances
+# reads across them. Each replica keeps its own informer cache per aggregated
+# cluster, so N replicas ≈ N× memory and N× the watch/list load on those apiservers
+# — set to 1 for a very large fleet where that cost outweighs HA.
+replicaCount: 2
 
 image:
   # Under global.hub when set and repository has no "/", else used as a full ref.
