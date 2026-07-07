@@ -198,7 +198,14 @@ func (g *GangPack) Filter(_ context.Context, state *framework.CycleState, _ *v1.
 	if pin == nil {
 		return nil // no pinned domain this cycle -> no constraint
 	}
-	if domainOf(nodeInfo.Node(), pin.topologyKey) != pin.domain {
+	nodeDomain := domainOf(nodeInfo.Node(), pin.topologyKey)
+	if nodeDomain != pin.domain {
+		// Trace at V(4): the pin (domain + topology key) Filter actually reads from
+		// CycleState, versus the candidate node's domain. Pairs with pinGang's trace
+		// to catch a PreFilter->Filter pin mismatch (a pinned domain's own nodes
+		// getting rejected here while it looks free in PreFilter).
+		klog.V(4).InfoS("gangpack.Filter.reject", "node", nodeInfo.Node().GetName(),
+			"nodeDomain", nodeDomain, "pinDomain", pin.domain, "pinTopologyKey", pin.topologyKey)
 		return framework.NewStatus(framework.UnschedulableAndUnresolvable,
 			"node not in gang's pinned domain "+pin.domain)
 	}
