@@ -97,6 +97,14 @@ func (p *Pins) Place(group string) {
 	}
 }
 
+// Len returns the number of groups currently pinned (with an outstanding
+// commitment) — used to surface a gauge of active placements.
+func (p *Pins) Len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.byGroup)
+}
+
 // Get returns the pinned domain for a group, or ("", false) if unpinned.
 func (p *Pins) Get(group string) (domain string, ok bool) {
 	p.mu.Lock()
@@ -119,9 +127,14 @@ func (p *Pins) Set(group, domain string) {
 
 // Release drops a group's pin and its reservation — on gang completion, on
 // gate-timeout unwind, or on teardown — so the next Choose re-runs best-fit and
-// may pick a different domain.
-func (p *Pins) Release(group string) {
+// may pick a different domain. It reports whether a pin was actually present, so
+// callers can act once per gang even though the unwind re-enters per member.
+func (p *Pins) Release(group string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, ok := p.byGroup[group]; !ok {
+		return false
+	}
 	delete(p.byGroup, group)
+	return true
 }

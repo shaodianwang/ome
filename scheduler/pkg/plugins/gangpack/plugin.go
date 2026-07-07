@@ -82,8 +82,11 @@ func (g *GangPack) pinGang(state *framework.CycleState, nodes []*framework.NodeI
 	free := freeByDomain(nodes, gang.topologyKey, pod)
 	domain, fits := g.pins.Choose(gang.key, free, gang.minMember)
 	if !fits {
+		gangPinTotal.WithLabelValues("no_fit").Inc()
 		return nil, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
 	}
+	gangPinTotal.WithLabelValues("pinned").Inc()
+	pinnedGroups.Set(float64(g.pins.Len()))
 	writePin(state, domain, gang.topologyKey)
 	return &framework.PreFilterResult{NodeNames: nodesInDomain(nodes, gang.topologyKey, domain)}, nil
 }

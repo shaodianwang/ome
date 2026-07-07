@@ -45,6 +45,7 @@ func (g *GangPack) Permit(_ context.Context, _ *framework.CycleState, pod *v1.Po
 
 	if !gateDecision(waiting, gang.minMember) {
 		// Not enough yet: hold this member at the gate for the gang's timeout.
+		gangGateTotal.WithLabelValues("wait").Inc()
 		return framework.NewStatus(framework.Wait), gang.timeout
 	}
 
@@ -54,5 +55,6 @@ func (g *GangPack) Permit(_ context.Context, _ *framework.CycleState, pod *v1.Po
 			wp.Allow(Name)
 		}
 	})
+	gangGateTotal.WithLabelValues("admit").Inc()
 	return framework.NewStatus(framework.Success), 0
 }

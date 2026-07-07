@@ -66,7 +66,9 @@ PodGroup's `ome.io/topology-key` annotation; and node free-ness is inferred from
 the gang pod's own resource requests — the scheduler bakes in no workload
 conventions or fabric values. A rejected gang member re-attempts promptly via
 registered requeue hints (sibling/PodGroup/node events) rather than the
-scheduler's slow periodic flush. Still ahead: replica spreading and metrics; see
+scheduler's slow periodic flush. Placement decisions, gate outcomes, unwinds, and
+the count of pinned groups are exported as `ome_scheduler_*` metrics on the
+scheduler's `/metrics` endpoint. Still ahead: replica spreading; see
 OEP-0022 § Placement.
 
 ## Version policy

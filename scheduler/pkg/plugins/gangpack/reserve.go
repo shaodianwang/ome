@@ -46,7 +46,12 @@ func (g *GangPack) Unreserve(_ context.Context, _ *framework.CycleState, pod *v1
 	if !ok {
 		return
 	}
-	g.pins.Release(gang.key)
+	// Count the unwind once per gang: only the first member's Unreserve actually
+	// releases the pin; rejected siblings re-enter here and find it already gone.
+	if g.pins.Release(gang.key) {
+		gangUnwindTotal.Inc()
+		pinnedGroups.Set(float64(g.pins.Len()))
+	}
 	g.handle.IterateOverWaitingPods(func(wp framework.WaitingPod) {
 		if sameGang(wp.GetPod(), gang.key) {
 			wp.Reject(Name, "gang "+gang.key+" unwound after a member failed to schedule")
