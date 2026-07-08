@@ -553,7 +553,7 @@ def case_category(case_id):
 # Other modes share the apply→wait-Ready→watch scaffolding but swap the Phase-2
 # trigger and the verdict. Implemented: scaledown. Planned: migrate, kill,
 # partition, rebump (each becomes a branch here on the same scaffolding).
-MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary"}   # modes with a real impl
+MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev"}   # modes with a real impl
 TO_KEYS = {"engine": "to_e", "decoder": "to_d", "router": "to_r"}  # scaledown target replicas
 
 
@@ -947,6 +947,286 @@ def _rebump(case_id, yaml_file, desc, hdr):
     else:
         checks.append(f"  ✓ converged to one final revision {sorted(fh)} — no Instance stranded on the intermediate (X-2 safe)")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+NOROLL_GRACE_S = 45.0  # how long to watch that a no-op / pinned runtime edit stays put
+
+
+def _runner_env_paths(spec, cfg):
+    """JSON-patch paths to the runner env list of a runtime config, across the
+    single-pod shape (flat `runner`) and the gang shape (`leader.runner` +
+    `worker.runner`). Only paths present in the live CSR are returned."""
+    node = spec.get(cfg) or {}
+    paths = []
+    if isinstance(node.get("runner"), dict):
+        paths.append(f"/spec/{cfg}/runner/env")
+    for sub in ("leader", "worker"):
+        if isinstance(node.get(sub), dict) and isinstance(node[sub].get("runner"), dict):
+            paths.append(f"/spec/{cfg}/{sub}/runner/env")
+    return paths
+
+
+def _bump_runtime(ctx, csr, comps, material):
+    """Trigger a change on the ISVC's dedicated ClusterServingRuntime.
+
+    material=True: bump the runner's TEST_REV env (index 0) on every runner of each
+    configured component's runtime config — a real pod-spec change that must
+    re-render and roll an autoSync=true ISVC (the runtime-side analogue of
+    _bump_rev's ISVC annotation). Shape-aware so it works for single-pod and gang
+    runtimes. material=False: touch a CSR label only — no pod-spec change, so the
+    revision-hash is unchanged and nothing should roll.
+    """
+    if not material:
+        rr = kubectl("patch", "clusterservingruntime", csr, "--type=merge",
+                     "-p", json.dumps({"metadata": {"labels": {"perm.test/touch": TRIGGER_VAL}}}))
+        ctx["trigger_ts"] = time.time()
+        return rr.returncode == 0
+    r = kubectl("get", "clusterservingruntime", csr, "-o", "json")
+    if r.returncode != 0:
+        return False
+    spec = (json.loads(r.stdout) or {}).get("spec", {})
+    ops = [{"op": "replace", "path": f"{base}/0/value", "value": TRIGGER_VAL}
+           for c in comps for base in _runner_env_paths(spec, f"{c}Config")]
+    if not ops:
+        print(f"  ✗ no runner env paths found on CSR {csr} for {comps}")
+        return False
+    rr = kubectl("patch", "clusterservingruntime", csr, "--type=json", "-p", json.dumps(ops))
+    ctx["trigger_ts"] = time.time()
+    return rr.returncode == 0
+
+
+def _csr_runner_image(csr, comp):
+    """Current runner image of a component's runtime config (first runner found)."""
+    r = kubectl("get", "clusterservingruntime", csr, "-o", "json")
+    if r.returncode != 0:
+        return None
+    node = ((json.loads(r.stdout) or {}).get("spec", {})).get(f"{comp}Config", {})
+    if isinstance(node.get("runner"), dict):
+        return node["runner"].get("image")
+    for sub in ("leader", "worker"):
+        if isinstance(node.get(sub), dict) and isinstance(node[sub].get("runner"), dict):
+            return node[sub]["runner"].get("image")
+    return None
+
+
+def _csr_set_image(csr, comps, image):
+    """Set every runner image (flat + leader/worker) of each configured component's
+    runtime config — used to drive a bad rollout and then correct it."""
+    r = kubectl("get", "clusterservingruntime", csr, "-o", "json")
+    if r.returncode != 0:
+        return False
+    spec = (json.loads(r.stdout) or {}).get("spec", {})
+    ops = []
+    for c in comps:
+        cfg = f"{c}Config"
+        node = spec.get(cfg) or {}
+        if isinstance(node.get("runner"), dict):
+            ops.append({"op": "replace", "path": f"/spec/{cfg}/runner/image", "value": image})
+        for sub in ("leader", "worker"):
+            if isinstance(node.get(sub), dict) and isinstance(node[sub].get("runner"), dict):
+                ops.append({"op": "replace", "path": f"/spec/{cfg}/{sub}/runner/image", "value": image})
+    if not ops:
+        return False
+    return kubectl("patch", "clusterservingruntime", csr, "--type=json", "-p", json.dumps(ops)).returncode == 0
+
+
+def _runtime_recover(case_id, yaml_file, desc, hdr, csr):
+    """Guard for the Failed-escalation wedge: drive the ISVC into a failed rollout
+    (bad runtime image → ImagePullBackOff → Instance escalates to Phase=Failed),
+    then apply a CORRECTIVE runtime edit (restore the good image + bump the env for
+    a distinct revision). The ISVC MUST recover — roll onto the new good revision
+    and converge. Today it does not (the escalation is terminal and no later desired
+    revision is acted on), so this FAILs until that is fixed."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N, configured = ctx["N"], ctx["configured"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    comps = sorted(configured)
+    good = _csr_runner_image(csr, comps[0])
+    if not good:
+        return _write_fail(case_id, desc, hdr, "CASE_ERROR", "could not read runner image")
+    bad = good.rsplit(":", 1)[0] + ":NONEXISTENT-omenative-recover-test"
+
+    print(f"  Phase 2a: drive a FAILED rollout — set image -> {bad.rsplit('/',1)[-1]}")
+    if not _csr_set_image(csr, comps, bad):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "bad-image patch failed")
+    t0 = time.time()
+    while time.time() - t0 < 120 and not ctx["closed"]:  # wait for the bad surge pod to appear/fail
+        _read_one(ctx)
+        if any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+               for p in ctx["pod_state"].values()):
+            break
+    seen_before = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
+    time.sleep(10)  # let the bad pod reach ImagePullBackOff / escalate
+
+    print("  Phase 2b: CORRECTIVE edit — restore good image + bump env (distinct good revision)")
+    if not _csr_set_image(csr, comps, good):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "good-image restore failed")
+    if not _bump_runtime(ctx, csr, comps, material=True):  # also resets trigger_ts
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "corrective env bump failed")
+    seen_before |= set(ctx.get("seen_hashes", set()))
+
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S *
+                 sum(N[c] * ctx["pods_per_inst"][c] for c in configured))
+    print(f"  Phase 3: watching RECOVERY onto the corrected revision (≤{budget}s)")
+
+    def attempted():  # any pod on a hash newer than the failed attempt = a fresh roll started
+        return any(p and p["alive"] and p.get("hash") and p["hash"] not in seen_before
+                   for p in ctx["pod_state"].values())
+
+    def recovered():
+        for c in configured:
+            a, rd, _ = ctx["agg"].get(c, (0, 0, 0))
+            if a != N[c] or rd != N[c]:
+                return False
+        for c in configured:
+            live = [p for p in ctx["pod_state"].values()
+                    if p and p["alive"] and p["comp"] == c and p.get("hash")]
+            if not live or any(p["hash"] in seen_before for p in live):
+                return False
+        return True
+
+    # Fast wedge detection: a real recovery starts a fresh roll within seconds. If
+    # NO corrected-revision pod appears within this grace, the corrective edit was
+    # ignored — the terminal wedge — so fail fast instead of waiting out the budget.
+    ATTEMPT_GRACE_S = 75.0
+    state, stable = "WEDGED", None
+    while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)
+        if recovered():
+            if stable is None:
+                stable = time.time()
+            elif time.time() - stable >= STABILITY_S:
+                state = "RECOVERED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                break
+        else:
+            stable = None
+        if time.time() - ctx["trigger_ts"] > ATTEMPT_GRACE_S and not attempted():
+            state = "WEDGED"
+            break
+
+    verdict, notes, checks = "PASS", [], []
+    if state != "RECOVERED":
+        verdict = "FAIL"
+        notes.append("failed rollout never recovered after a corrective runtime edit (terminal wedge)")
+        checks.append("  ✗ recovery: ISVC stayed wedged on the failed rollout — corrective runtime edit was not acted on")
+    else:
+        checks.append("  ✓ recovery: corrective runtime edit rolled the ISVC onto a healthy revision")
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _runtimerev(case_id, yaml_file, desc, hdr):
+    """Modify the ISVC's RUNTIME (not the ISVC) and assert the dependent ISVC
+    behaves per autoSync — the one rollout trigger the rest of the suite never
+    exercises (every other mode patches the ISVC itself).
+
+      - expect=roll  (autoSync=true + a material runtime edit): the ISVC
+        re-renders from the live runtime and rolls to a NEW revision, converging
+        with peaks ≤ ceiling and per its own updateStrategy.
+      - expect=noroll (a no-op runtime edit, OR an autoSync=false pinned ISVC):
+        the ISVC must NOT roll — no pod rotates to a new revision.
+
+    The CSR is dedicated per case (`rt=` header, applied as a second doc in the
+    case file) so the edit is isolated from concurrently-running cases.
+    """
+    csr = hdr.get("rt")
+    if not csr:
+        return _write_fail(case_id, desc, hdr, "CASE_ERROR", "runtimerev case missing rt= header")
+    if hdr.get("expect") == "recover":
+        return _runtime_recover(case_id, yaml_file, desc, hdr, csr)
+    expect_roll = hdr.get("expect", "roll") == "roll"
+    # Whether the runtime edit is material (changes the pod spec) is independent of
+    # whether a roll is expected: a material edit on a PINNED (autoSync=false) ISVC
+    # must NOT roll. Default: material when a roll is expected, no-op otherwise.
+    material = hdr.get("edit", "material" if expect_roll else "noop") == "material"
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N, configured = ctx["N"], ctx["configured"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    configs = sorted(f"{c}Config" for c in configured)
+    old = set(ctx["old_hashes"])
+
+    def new_hashes():
+        return {p["hash"] for p in ctx["pod_state"].values()
+                if p and p["alive"] and p.get("hash") and p["hash"] not in old}
+
+    print(f"  Phase 2: {'material' if material else 'no-op'} runtime edit on CSR {csr} ({configs}); "
+          f"expect {'ROLL' if expect_roll else 'NO ROLL'}")
+    if not _bump_runtime(ctx, csr, sorted(configured), material):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "csr patch failed")
+
+    verdict, notes, checks = "PASS", [], []
+
+    if expect_roll:
+        budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S *
+                     sum(N[c] * ctx["pods_per_inst"][c] for c in configured))
+        print(f"  Phase 3: watching autoSync roll to the new runtime revision (≤{budget}s)")
+
+        def converged():
+            # Every configured component must be at N ready, and each component's
+            # live pods must ALL be on a new (post-edit) hash. Per-component because
+            # a multi-Component ISVC (PD) rolls each component to its OWN new
+            # revision — there is one new hash per component, not one globally.
+            for c in configured:
+                a, rd, _ = ctx["agg"].get(c, (0, 0, 0))
+                if a != N[c] or rd != N[c]:
+                    return False
+            for c in configured:
+                live = [p for p in ctx["pod_state"].values()
+                        if p and p["alive"] and p["comp"] == c and p.get("hash")]
+                if not live or any(p["hash"] in old for p in live):
+                    return False
+            return True
+
+        state, stable = "ROTATING", None
+        while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+            _read_one(ctx)
+            if converged():
+                if stable is None:
+                    stable = time.time()
+                elif time.time() - stable >= STABILITY_S:
+                    state = "CONVERGED"
+                    ctx["converged_at"] = stable - ctx["trigger_ts"]
+                    break
+            else:
+                stable = None
+        for c in COMPS:
+            if N[c] and ctx["peaks"][c] > ceil[c]:
+                verdict = "FAIL"; notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {ceil[c]}")
+                checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+            elif N[c]:
+                checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+        if state != "CONVERGED":
+            verdict = "FAIL"
+            notes.append(f"runtime edit did not roll (state={state}, new={sorted(new_hashes())})")
+            checks.append(f"  ✗ autoSync roll: never converged onto a new runtime revision (state={state})")
+        else:
+            checks.append(f"  ✓ autoSync roll: converged onto new runtime revision {sorted(new_hashes())}")
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+    # expect=noroll — assert nothing rolls for the grace window.
+    print(f"  Phase 3: asserting NO roll for {int(NOROLL_GRACE_S)}s")
+    t0 = time.time()
+    while time.time() - t0 < NOROLL_GRACE_S and not ctx["closed"]:
+        _read_one(ctx)
+    nh = new_hashes()
+    now_uids = {c: {p["uid"] for p in ctx["pod_state"].values()
+                    if p and p["alive"] and p["comp"] == c and p.get("uid")} for c in configured}
+    rotated = sorted(c for c in configured if ctx["old_uids"].get(c) and not (ctx["old_uids"][c] <= now_uids.get(c, set())))
+    if nh:
+        verdict = "FAIL"; notes.append(f"unexpected roll to {sorted(nh)}")
+        checks.append(f"  ✗ no-roll violated: pods rolled to a new runtime revision {sorted(nh)} (expected none)")
+    elif rotated:
+        verdict = "FAIL"; notes.append(f"unexpected pod rotation on {rotated}")
+        checks.append(f"  ✗ no-roll violated: pods rotated on {rotated} without a new revision (expected none)")
+    else:
+        checks.append(f"  ✓ no roll: pods stayed on the original revision {sorted(old)} for {int(NOROLL_GRACE_S)}s")
+    return _finish(case_id, desc, hdr, ctx, "CONVERGED" if verdict == "PASS" else "NOROLL_VIOLATED", verdict, notes, checks)
 
 
 def _migration_ledger_entry(case_id, req_uuid):
@@ -1524,6 +1804,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _kill(case_id, yaml_file, desc, hdr)
     if mode == "canary":
         return _canary(case_id, yaml_file, desc, hdr)
+    if mode == "runtimerev":
+        return _runtimerev(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
     # Survivor set: instances with index < min(start,target) must be left UNTOUCHED
