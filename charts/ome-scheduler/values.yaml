@@ -27,13 +27,10 @@ scheduler:
   replicaCount: 3
   leaderElect: true
 
-  # klog verbosity. Temporarily elevated to 4 while OEP-0022 placement is being
-  # stabilized: V(4) emits the gang pin/Filter decision trace (chosen domain,
-  # pinStale inputs, per-domain free counts, Filter rejects) needed to diagnose
-  # placement wedges declaratively, without hand-patching a live deployment. The
-  # scheduler only acts on opt-in pods, so this is quiet when idle. Lower to 2 once
-  # placement is settled.
-  verbosity: 4
+  # klog verbosity. 2 is a reasonable production default. The gang pin/Filter
+  # decision trace lives at V(4) — raise to 4 to debug placement (which domain a
+  # gang pinned, pinStale inputs, per-domain free counts, Filter rejects).
+  verbosity: 2
 
   # Disable the built-in DefaultPreemption plugin for this scheduler. Until
   # topology-aware preemption lands (OEP-0022 Phase C), default preemption is
