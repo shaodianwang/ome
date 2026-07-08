@@ -331,16 +331,17 @@ func TestAggregateIRStatus_EmitsEngineReadyCondition(t *testing.T) {
 }
 
 // TestAggregateIRStatus_EmitsEngineReadyConditionFalse pins the
-// not-yet-ready branch: when the IR reports Replicas=1, ReadyReplicas=0,
-// EngineReady must be emitted with Status=False / Reason=NotAllReady.
-// Mirrors the legacy direct path's TopLevelComponentReadyFromLifecycle
-// derivation for the same input.
+// not-serving branch: when the IR reports Replicas=1 with 0 serving (pod not
+// yet Ready) and no disruption budget, EngineReady must be emitted with
+// Status=False / Reason=InsufficientAvailable (serving below the strict floor).
 func TestAggregateIRStatus_EmitsEngineReadyConditionFalse(t *testing.T) {
 	g := gomega.NewWithT(t)
 	isvc := baselineISVC("llama", "prod")
 	ir := liveIR("llama", "prod", 1)
-	// Pull ReadyReplicas down to 0 — pod not yet Ready.
+	// Pull the IR down to 0 serving — pod not yet Ready.
 	ir.Status.ReadyReplicas = 0
+	ir.Status.ServingReplicas = 0
+	ir.Status.AvailableReplicas = 0
 	// Also down the per-Instance Phase so callers reading
 	// InstanceStatuses see the partial-ready state.
 	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
@@ -361,8 +362,8 @@ func TestAggregateIRStatus_EmitsEngineReadyConditionFalse(t *testing.T) {
 	g.Expect(cond).NotTo(gomega.BeNil(),
 		"EngineReady must be emitted even when not all replicas are Ready")
 	g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionFalse),
-		"EngineReady must be False when ReadyReplicas < Replicas")
-	g.Expect(cond.Reason).To(gomega.Equal("NotAllReady"))
+		"EngineReady must be False when serving is below the availability floor")
+	g.Expect(cond.Reason).To(gomega.Equal("InsufficientAvailable"))
 }
 
 // TestAggregateIRStatus_MultiComponent_EmitsBothConditions pins the

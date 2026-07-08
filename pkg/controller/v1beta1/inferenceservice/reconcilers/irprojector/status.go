@@ -103,6 +103,28 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 //
 // On apierrors.IsNotFound for the ISVC Update: returns nil so a
 // race with ISVC deletion drops cleanly.
+// componentExtFor returns the ComponentExtensionSpec for one Component of the
+// ISVC (Engine / Decoder / Router), or nil when that Component isn't declared.
+// Its MinAvailable / MaxUnavailable (and rolling-update MaxUnavailable) set the
+// availability floor for the Component-ready condition.
+func componentExtFor(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) *v1beta1.ComponentExtensionSpec {
+	switch component {
+	case v1beta1.EngineComponent:
+		if isvc.Spec.Engine != nil {
+			return &isvc.Spec.Engine.ComponentExtensionSpec
+		}
+	case v1beta1.DecoderComponent:
+		if isvc.Spec.Decoder != nil {
+			return &isvc.Spec.Decoder.ComponentExtensionSpec
+		}
+	case v1beta1.RouterComponent:
+		if isvc.Spec.Router != nil {
+			return &isvc.Spec.Router.ComponentExtensionSpec
+		}
+	}
+	return nil
+}
+
 func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) error {
 	name := InferenceReplicaName(isvc.Name, component)
 	key := types.NamespacedName{Namespace: isvc.Namespace, Name: name}
@@ -135,7 +157,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	// separate reconcile would re-enter AggregateIRStatus). On a peer
 	// status-write conflict we re-Get the ISVC and re-stamp, but the
 	// condition itself is stable for this pass.
-	topCond := status.TopLevelComponentReadyFromLifecycle(component, desired)
+	topCond := status.TopLevelComponentReadyFromLifecycle(component, desired, componentExtFor(isvc, component))
 	isvcKey := client.ObjectKeyFromObject(isvc)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}

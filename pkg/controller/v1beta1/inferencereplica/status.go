@@ -12,6 +12,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // InferenceReplicaConditionReady is the top-level condition type written
@@ -49,10 +51,16 @@ const (
 	// Maps to Status=False so operators paging on Ready=False catch the
 	// failure immediately.
 	ReasonInstanceFailed = "InstanceFailed"
-	// ReasonReplicaCountMismatch is stamped when ReadyReplicas < Replicas
-	// with no in-flight rollout — something is stuck below the desired
-	// Ready count without revision churn to blame.
+	// ReasonReplicaCountMismatch is stamped when the serving Instance count is
+	// below the Component's availability floor (its MaxUnavailable budget) with
+	// no in-flight rollout — genuinely stuck below the minimum without revision
+	// churn to blame. Maps to Status=False.
 	ReasonReplicaCountMismatch = "ReplicaCountMismatch"
+	// ReasonMinimumAvailable is stamped when ReadyReplicas < Replicas but the
+	// serving Instance count is still at or above the availability floor —
+	// Ready=True (serving within budget), distinct from AllInstancesReady so
+	// "fully converged" stays distinguishable from "serving, still rolling".
+	ReasonMinimumAvailable = "MinimumAvailable"
 	// ReasonNoReplicas is stamped when Replicas == 0 (no desired
 	// Instances). Distinct from ReplicaCountMismatch so operators can
 	// tell "scaled-to-zero" from "something stuck".
@@ -197,14 +205,15 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		//   Status=True    when ReadyReplicas == Replicas AND
 		//                  CurrentRevision == UpdateRevision (fully
 		//                  converged, no rollout in flight).
-		//   Status=False   when any Instance has Phase=Failed OR
-		//                  ReadyReplicas < Replicas with no in-flight
-		//                  rollout (stuck below desired).
+		//   Status=False   when any Instance has Phase=Failed OR the
+		//                  serving Instance count is below the availability
+		//                  floor (MaxUnavailable budget) with no in-flight
+		//                  rollout (genuinely stuck below the minimum).
 		//   Status=Unknown when CurrentRevision != UpdateRevision —
 		//                  explicit "churning, check back" so
 		//                  `kubectl wait --for=condition=Ready` doesn't
 		//                  short-circuit mid-rollout.
-		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeReadyCondition(&fresh.Status))
+		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeReadyCondition(&fresh.Status, fresh.Spec.Pacing))
 
 		// Skip the write when the recomputed status matches what's
 		// already live: a no-op reconcile must perform ZERO writes so it
@@ -563,7 +572,7 @@ func hasFailedInstance(insts []v1beta1.OMENativeInstanceStatus) bool {
 // responsible for invoking apimeta.SetStatusCondition to merge the
 // returned condition into status.Conditions (which handles
 // LastTransitionTime correctly).
-func computeReadyCondition(status *v1beta1.InferenceReplicaStatus) metav1.Condition {
+func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.InferenceReplicaPacing) metav1.Condition {
 	cond := metav1.Condition{
 		Type:               InferenceReplicaConditionReady,
 		ObservedGeneration: status.ObservedGeneration,
@@ -587,10 +596,28 @@ func computeReadyCondition(status *v1beta1.InferenceReplicaStatus) metav1.Condit
 		cond.Reason = ReasonAllInstancesReady
 		cond.Message = fmt.Sprintf("%d/%d Instances Ready", status.ReadyReplicas, status.Replicas)
 	default:
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = ReasonReplicaCountMismatch
-		cond.Message = fmt.Sprintf("Only %d/%d Instances Ready (no rollout in flight)",
-			status.ReadyReplicas, status.Replicas)
+		// Not fully Ready and no rollout in flight. Readiness is
+		// availability-based: Ready=True while the serving Instance count is at
+		// or above the disruption floor derived from the rollout MaxUnavailable
+		// budget (the only budget projected onto the IR — the PDB MinAvailable/
+		// MaxUnavailable live on the ISVC). A drop below the floor is genuinely
+		// stuck. Keeps the IR's Ready consistent with the ISVC's EngineReady.
+		var fallback *intstr.IntOrString
+		if pacing != nil {
+			fallback = pacing.MaxUnavailable
+		}
+		floor := utils.AvailabilityFloor(status.Replicas, nil, nil, fallback)
+		if status.ServingReplicas >= floor {
+			cond.Status = metav1.ConditionTrue
+			cond.Reason = ReasonMinimumAvailable
+			cond.Message = fmt.Sprintf("%d/%d Instances serving (min %d)",
+				status.ServingReplicas, status.Replicas, floor)
+		} else {
+			cond.Status = metav1.ConditionFalse
+			cond.Reason = ReasonReplicaCountMismatch
+			cond.Message = fmt.Sprintf("%d/%d Instances serving, need %d (no rollout in flight)",
+				status.ServingReplicas, status.Replicas, floor)
+		}
 	}
 	return cond
 }

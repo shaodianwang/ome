@@ -168,3 +168,43 @@ func itoaPct(n int) string {
 	}
 	return string(digits) + "%"
 }
+
+func TestAvailabilityFloor_Table(t *testing.T) {
+	tests := []struct {
+		name           string
+		total          int32
+		minAvailable   *intstr.IntOrString
+		maxUnavailable *intstr.IntOrString
+		fallback       *intstr.IntOrString
+		want           int32
+	}{
+		{"no budget -> strict (all)", 10, nil, nil, nil, 10},
+		{"total zero -> 0", 0, nil, nil, nil, 0},
+
+		// minAvailable takes precedence.
+		{"minAvailable int 8", 10, p(intstr.FromInt32(8)), nil, nil, 8},
+		{"minAvailable int over total -> clamp", 3, p(intstr.FromInt32(5)), nil, nil, 3},
+		{"minAvailable 50% of 10 -> 5", 10, p(intstr.FromString("50%")), nil, nil, 5},
+		{"minAvailable 55% of 10 -> 6 (ceil)", 10, p(intstr.FromString("55%")), nil, nil, 6},
+		{"minAvailable wins over maxUnavailable", 10, p(intstr.FromInt32(9)), p(intstr.FromString("25%")), nil, 9},
+
+		// maxUnavailable -> floor = total - unavailable.
+		{"maxUnavailable 25% of 10 -> floor 7", 10, nil, p(intstr.FromString("25%")), nil, 7},
+		{"maxUnavailable int 3 of 10 -> floor 7", 10, nil, p(intstr.FromInt32(3)), nil, 7},
+		{"maxUnavailable exceeds total -> floor 0", 3, nil, p(intstr.FromInt32(5)), nil, 0},
+		{"maxUnavailable 100% -> floor 0", 4, nil, p(intstr.FromString("100%")), nil, 0},
+
+		// fallback (rollout budget) only when min/max unset.
+		{"fallback used when others nil", 10, nil, nil, p(intstr.FromString("25%")), 7},
+		{"maxUnavailable wins over fallback", 10, nil, p(intstr.FromString("10%")), p(intstr.FromString("50%")), 9},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AvailabilityFloor(tc.total, tc.minAvailable, tc.maxUnavailable, tc.fallback)
+			if got != tc.want {
+				t.Fatalf("AvailabilityFloor(%d, min=%v, max=%v, fb=%v) = %d, want %d",
+					tc.total, tc.minAvailable, tc.maxUnavailable, tc.fallback, got, tc.want)
+			}
+		})
+	}
+}

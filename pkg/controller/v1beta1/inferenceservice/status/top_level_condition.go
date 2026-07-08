@@ -4,32 +4,38 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"knative.dev/pkg/apis"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // TopLevelComponentReadyFromLifecycle derives the standard top-level
-// component-ready condition (EngineReady / DecoderReady / RouterReady)
-// from OMENative counters. Returns nil for unknown Component types so
-// callers leave the condition surface untouched.
+// component-ready condition (EngineReady / DecoderReady / RouterReady) from
+// OMENative counters, honoring the Component's disruption budget. Returns nil for
+// unknown Component types so callers leave the condition surface untouched.
 //
-// Ready=True iff ReadyReplicas == Replicas > 0 — i.e., every desired
-// Instance has all its pods ContainersReady. Mirrors the contract
-// PropagateRawStatus uses (Deployment.Available) so the ingress
-// reconciler, aggregate Ready rollup, and `kubectl wait
-// --for=condition=Ready` treat OMENative the same as RawDeployment.
+// Ready is availability-based, not strict: True when the number of serving
+// Instances is at or above the Component's availability floor (see
+// utils.AvailabilityFloor) — the same MinAvailable/MaxUnavailable that drive the
+// Component's PodDisruptionBudget, falling back to its rolling-update
+// MaxUnavailable (defaulted 25% for OMENative). This mirrors how RawDeployment
+// derives readiness from a Deployment's maxUnavailable-thresholded Available
+// condition, so a Component serving 9/10 Instances (within budget) reports Ready
+// instead of flapping to NotReady on every single-Instance disruption or
+// in-budget rollout. A genuine outage below the floor still reports NotReady.
 //
-// Lives in the neutral inferenceservice/status package rather than
-// either reconciler — both the legacy omenative direct path
-// (status_aggregate.go) and the IR-managed projector (irprojector
-// status.go) call this to derive the same condition off the same
-// LifecycleStatus shape. Single source of truth — any future
-// change to the Ready predicate lives here only. Keeping it out of
-// the omenative package also avoids a one-way coupling from the
-// IR-managed path (the new path) to the legacy omenative package
-// (which the design intends to delete after the IR cutover).
-func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1beta1.LifecycleStatus) *apis.Condition {
+// The reason distinguishes fully-converged ("Ready") from serving-at-or-above-
+// floor but not fully rolled out ("MinimumAvailable"), so rollout progress stays
+// visible. `ext` may be nil (e.g. a hand-crafted object bypassing the defaulter),
+// in which case the floor is strict (all Instances must serve).
+//
+// Lives in the neutral inferenceservice/status package — the single source of
+// truth for the Ready predicate that the IR-managed projector (irprojector
+// status.go) calls. The IR's own Ready condition derives the same way via
+// utils.AvailabilityFloor.
+func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1beta1.LifecycleStatus, ext *v1beta1.ComponentExtensionSpec) *apis.Condition {
 	var readyType apis.ConditionType
 	switch component {
 	case v1beta1.EngineComponent:
@@ -42,19 +48,50 @@ func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1
 		return nil
 	}
 	cond := &apis.Condition{Type: readyType}
-	switch {
-	case cs == nil || cs.Replicas == 0:
+	if cs == nil || cs.Replicas == 0 {
 		cond.Status = corev1.ConditionFalse
 		cond.Reason = "NoReplicas"
 		cond.Message = "Component has no desired Instances"
-	case cs.ReadyReplicas == cs.Replicas:
+		return cond
+	}
+	floor := utils.AvailabilityFloor(cs.Replicas, extMinAvailable(ext), extMaxUnavailable(ext), rolloutMaxUnavailable(ext))
+	switch {
+	case cs.ReadyReplicas >= cs.Replicas:
 		cond.Status = corev1.ConditionTrue
 		cond.Reason = "Ready"
 		cond.Message = "All Instances are Ready"
+	case cs.ServingReplicas >= floor:
+		cond.Status = corev1.ConditionTrue
+		cond.Reason = "MinimumAvailable"
+		cond.Message = fmt.Sprintf("%d/%d Instances serving (min %d)", cs.ServingReplicas, cs.Replicas, floor)
 	default:
 		cond.Status = corev1.ConditionFalse
-		cond.Reason = "NotAllReady"
-		cond.Message = fmt.Sprintf("%d/%d Instances ready", cs.ReadyReplicas, cs.Replicas)
+		cond.Reason = "InsufficientAvailable"
+		cond.Message = fmt.Sprintf("%d/%d Instances serving, need %d", cs.ServingReplicas, cs.Replicas, floor)
 	}
 	return cond
+}
+
+// extMinAvailable / extMaxUnavailable / rolloutMaxUnavailable pull the disruption
+// budget off a (possibly nil) ComponentExtensionSpec: the PDB MinAvailable /
+// MaxUnavailable, and the rolling-update MaxUnavailable fallback.
+func extMinAvailable(ext *v1beta1.ComponentExtensionSpec) *intstr.IntOrString {
+	if ext == nil {
+		return nil
+	}
+	return ext.MinAvailable
+}
+
+func extMaxUnavailable(ext *v1beta1.ComponentExtensionSpec) *intstr.IntOrString {
+	if ext == nil {
+		return nil
+	}
+	return ext.MaxUnavailable
+}
+
+func rolloutMaxUnavailable(ext *v1beta1.ComponentExtensionSpec) *intstr.IntOrString {
+	if ext == nil || ext.Lifecycle == nil || ext.Lifecycle.UpdateStrategy == nil || ext.Lifecycle.UpdateStrategy.RollingUpdate == nil {
+		return nil
+	}
+	return ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable
 }

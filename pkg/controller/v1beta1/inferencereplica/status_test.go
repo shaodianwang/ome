@@ -10,6 +10,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -240,7 +241,7 @@ func TestAggregateStatus_ReadyCondition_TrueWhenAllReady_RolloutDone(t *testing.
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 		},
 	}
-	cond := computeReadyCondition(status)
+	cond := computeReadyCondition(status, nil)
 	g.Expect(cond.Type).To(gomega.Equal(InferenceReplicaConditionReady))
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
 		"Ready=True when ReadyReplicas == Replicas AND CurrentRevision == UpdateRevision")
@@ -268,7 +269,7 @@ func TestAggregateStatus_ReadyCondition_UnknownDuringRollout(t *testing.T) {
 				TargetRevision: "rev-b"},
 		},
 	}
-	cond := computeReadyCondition(status)
+	cond := computeReadyCondition(status, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionUnknown),
 		"Ready=Unknown while CurrentRevision != UpdateRevision (rollout in flight)")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress))
@@ -288,6 +289,7 @@ func TestAggregateStatus_ReadyCondition_FalseOnStuck(t *testing.T) {
 	status := &v1beta1.InferenceReplicaStatus{
 		Replicas:        2,
 		ReadyReplicas:   1,
+		ServingReplicas: 1,
 		CurrentRevision: "rev-a",
 		UpdateRevision:  "rev-a",
 		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
@@ -297,10 +299,32 @@ func TestAggregateStatus_ReadyCondition_FalseOnStuck(t *testing.T) {
 			{Index: 1, Phase: v1beta1.OMENativeInstancePending, RunningRevision: "rev-a"},
 		},
 	}
-	cond := computeReadyCondition(status)
+	// nil pacing → strict floor (all Instances), so serving 1/2 is below floor.
+	cond := computeReadyCondition(status, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse),
-		"Ready=False when ReadyReplicas < Replicas with no rollout in flight")
+		"Ready=False when serving is below the availability floor with no rollout in flight")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonReplicaCountMismatch))
+}
+
+// TestAggregateStatus_ReadyCondition_TrueWhenServingWithinBudget pins the
+// availability-based branch: ReadyReplicas < Replicas with no rollout in flight,
+// but the serving Instance count is at or above the floor derived from the
+// rollout MaxUnavailable budget → Ready=True/MinimumAvailable. Mirrors the
+// ISVC-side EngineReady so `kubectl wait irep --for=condition=Ready` agrees.
+func TestAggregateStatus_ReadyCondition_TrueWhenServingWithinBudget(t *testing.T) {
+	g := gomega.NewWithT(t)
+	status := &v1beta1.InferenceReplicaStatus{
+		Replicas:        10,
+		ReadyReplicas:   9,
+		ServingReplicas: 9,
+		CurrentRevision: "rev-a",
+		UpdateRevision:  "rev-a",
+	}
+	mu := intstr.FromString("25%") // floor = 10 - ceil(2.5) = 7
+	cond := computeReadyCondition(status, &v1beta1.InferenceReplicaPacing{MaxUnavailable: &mu})
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
+		"Ready=True when serving (9) >= floor (7) even though ReadyReplicas < Replicas")
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonMinimumAvailable))
 }
 
 // TestAggregateStatus_ReadyCondition_FalseOnFailed pins the
@@ -325,7 +349,7 @@ func TestAggregateStatus_ReadyCondition_FalseOnFailed(t *testing.T) {
 			{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
 		},
 	}
-	cond := computeReadyCondition(status)
+	cond := computeReadyCondition(status, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse),
 		"Ready=False when any Instance has Phase=Failed, overriding rollout-in-flight")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonInstanceFailed))
@@ -348,7 +372,7 @@ func TestAggregateStatus_ReadyCondition_ObservedGenerationStamped(t *testing.T) 
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 		},
 	}
-	cond := computeReadyCondition(status)
+	cond := computeReadyCondition(status, nil)
 	g.Expect(cond.ObservedGeneration).To(gomega.Equal(int64(7)),
 		"Ready condition must stamp ObservedGeneration off status.ObservedGeneration")
 }
