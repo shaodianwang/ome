@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -2673,6 +2674,76 @@ func TestValidateOverlays_StructuralChecks(t *testing.T) {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
 			}
+		})
+	}
+}
+
+// TestDeploymentStrategyWarnings pins the footgun warning: deploymentStrategy is
+// raw-only, so setting it on an OMENative/PD component is a silent no-op and must
+// warn (pointing at lifecycle.updateStrategy); raw and no-strategy must not warn.
+func TestDeploymentStrategyWarnings(t *testing.T) {
+	strategy := func() *appsv1.DeploymentStrategy {
+		return &appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
+	}
+	engineWith := &v1beta1.EngineSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{DeploymentStrategy: strategy()},
+	}
+	modeAnn := func(m constants.DeploymentModeType) map[string]string {
+		return map[string]string{constants.DeploymentMode: string(m)}
+	}
+
+	tests := []struct {
+		name    string
+		isvc    *v1beta1.InferenceService
+		wantLen int
+	}{
+		{
+			name: "OMENative engine with deploymentStrategy warns",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Annotations: modeAnn(constants.OMENative)},
+				Spec:       v1beta1.InferenceServiceSpec{Engine: engineWith},
+			},
+			wantLen: 1,
+		},
+		{
+			name: "RawDeployment engine with deploymentStrategy does not warn (honored)",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Annotations: modeAnn(constants.RawDeployment)},
+				Spec:       v1beta1.InferenceServiceSpec{Engine: engineWith},
+			},
+			wantLen: 0,
+		},
+		{
+			name: "OMENative without deploymentStrategy does not warn",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Annotations: modeAnn(constants.OMENative)},
+				Spec:       v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}},
+			},
+			wantLen: 0,
+		},
+		{
+			name: "no resolved mode does not warn",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: engineWith},
+			},
+			wantLen: 0,
+		},
+		{
+			name: "PD decoder with deploymentStrategy warns",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Annotations: modeAnn(constants.PDDisaggregated)},
+				Spec: v1beta1.InferenceServiceSpec{
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{DeploymentStrategy: strategy()},
+					},
+				},
+			},
+			wantLen: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Len(t, deploymentStrategyWarnings(tt.isvc), tt.wantLen)
 		})
 	}
 }

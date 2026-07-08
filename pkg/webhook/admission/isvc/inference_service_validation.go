@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/runtimerevision"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
@@ -111,6 +112,41 @@ func GetIntReference(number int) *int {
 	return &num
 }
 
+// deploymentStrategyWarnings flags components that set deploymentStrategy while
+// resolving to a non-Raw deployment mode. deploymentStrategy is the k8s-native
+// appsv1.DeploymentStrategy and is honored only by RawDeployment (createRawDeployment
+// copies it onto the Deployment); OMENative and PD-disaggregated manage pods
+// directly and ignore it, so it is a silent no-op there. Point operators at
+// lifecycle.updateStrategy, which OMENative reads for rollout pacing.
+func deploymentStrategyWarnings(isvc *v1beta1.InferenceService) admission.Warnings {
+	mode := isvc.Annotations[constants.DeploymentMode]
+	if mode == "" && isvc.Spec.DeploymentMode != nil {
+		mode = string(*isvc.Spec.DeploymentMode)
+	}
+	// Unknown mode (defaulter hasn't run, e.g. a unit test) or Raw: nothing to warn.
+	if mode == "" || mode == string(constants.RawDeployment) {
+		return nil
+	}
+	var warnings admission.Warnings
+	check := func(name string, ext *v1beta1.ComponentExtensionSpec) {
+		if ext != nil && ext.DeploymentStrategy != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s.deploymentStrategy is set but deploymentMode is %q; deploymentStrategy applies only to RawDeployment and is ignored here — use %s.lifecycle.updateStrategy.rollingUpdate for rollout pacing",
+				name, mode, name))
+		}
+	}
+	if isvc.Spec.Engine != nil {
+		check("engine", &isvc.Spec.Engine.ComponentExtensionSpec)
+	}
+	if isvc.Spec.Decoder != nil {
+		check("decoder", &isvc.Spec.Decoder.ComponentExtensionSpec)
+	}
+	if isvc.Spec.Router != nil {
+		check("router", &isvc.Spec.Router.ComponentExtensionSpec)
+	}
+	return warnings
+}
+
 func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context, isvc *v1beta1.InferenceService) (admission.Warnings, error) {
 	var allWarnings admission.Warnings
 
@@ -205,6 +241,11 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	if err := validation.ValidateLifecycle(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
+
+	// deploymentStrategy (k8s appsv1) is honored only by RawDeployment; on
+	// OMENative / PD it is silently ignored. Warn so operators move rollout
+	// pacing to lifecycle.updateStrategy, which OMENative actually reads.
+	allWarnings = append(allWarnings, deploymentStrategyWarnings(isvc)...)
 
 	// At least one of spec.model or spec.runtime must be set. When
 	// spec.model is omitted (lean path), spec.runtime must name the
