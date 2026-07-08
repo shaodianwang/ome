@@ -37,6 +37,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -150,14 +151,17 @@ type Params struct {
 // CreateOrUpdates the object. Returns the post-write IR so the
 // caller can read IR.Status downstream (status.go uses this).
 //
-// Idempotent: the second invocation with the same Params produces
-// the same Spec and either no-ops or patches only diffed fields.
-// The retry.RetryOnConflict wrapper handles concurrent reconciles
-// (the ISVC controller and the IR controller can both bump
-// ResourceVersion; retry resolves the race).
+// Idempotent: the second invocation with the same Params produces the
+// same Spec and no-ops (projectionUnchanged skips the write). On a real
+// change it issues a merge patch of only the diffed fields — with no
+// ResourceVersion precondition, so a concurrent IR status write from the
+// IR controller can't turn it into an optimistic-lock conflict. The
+// retry.RetryOnConflict wrapper remains for the racing-create path, which
+// synthesizes a Conflict.
 //
 // Errors are wrapped with the offending IR namespace/name for grep-
-// ability in operator logs.
+// ability in operator logs — except apierrors.IsConflict, which callers
+// treat as a benign requeue rather than a hard error.
 func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceReplica, error) {
 	if err := validateParams(p); err != nil {
 		return nil, err
@@ -202,13 +206,31 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 			return fmt.Errorf("get IR %s/%s: %w", p.ISVC.Namespace, name, getErr)
 		}
 
-		// IR exists — apply the desired spec on top of the live object,
-		// preserving ResourceVersion. We don't clobber Spec fields the
-		// projector doesn't own (Pacing, Paused — owned by the ISVC
-		// controller's coordination layer in future PRs).
+		// IR exists — apply the desired spec on top of the live object.
+		// We don't clobber Spec fields the projector doesn't own (Pacing,
+		// Paused — owned by the ISVC controller's coordination layer in
+		// future PRs).
+		original := ir.DeepCopy()
 		applyDesiredSpec(ir, p, name)
-		if err := p.Client.Update(ctx, ir); err != nil {
-			return fmt.Errorf("update IR %s/%s: %w", p.ISVC.Namespace, name, err)
+
+		// No-op guard: skip the write entirely when nothing the projector
+		// owns changed. In steady state — including a workload stuck in
+		// CrashLoopBackOff — the desired spec is constant, so an
+		// unconditional write would churn the IR's ResourceVersion every
+		// reconcile and fight the IR controller's rapid status writes,
+		// producing a conflict hot-loop.
+		if projectionUnchanged(original, ir) {
+			committed = ir
+			return nil
+		}
+
+		// Merge patch (no ResourceVersion precondition) so a concurrent
+		// IR status write from the IR controller doesn't turn this into an
+		// optimistic-lock conflict — the projector only owns spec/metadata
+		// fields, never status. RetryOnConflict still wraps the Get→patch
+		// for the racing-create path below, which synthesizes a Conflict.
+		if err := p.Client.Patch(ctx, ir, client.MergeFrom(original)); err != nil {
+			return fmt.Errorf("patch IR %s/%s: %w", p.ISVC.Namespace, name, err)
 		}
 		committed = ir
 		return nil
@@ -346,6 +368,18 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// dispatch site that doesn't run the resolver (no spurious empty block
 	// lands on the IR).
 	ir.Spec.Autoscaler = p.ResolvedAutoscaler.DeepCopy()
+}
+
+// projectionUnchanged reports whether applyDesiredSpec left the fields the
+// projector owns (Spec + the stamped metadata) byte-equal to the live
+// object — i.e. there is nothing to write. Status is never compared: the
+// projector doesn't own it, and the IR controller writes it on a separate
+// cadence.
+func projectionUnchanged(old, updated *v1beta1.InferenceReplica) bool {
+	return equality.Semantic.DeepEqual(old.Spec, updated.Spec) &&
+		equality.Semantic.DeepEqual(old.Labels, updated.Labels) &&
+		equality.Semantic.DeepEqual(old.Annotations, updated.Annotations) &&
+		equality.Semantic.DeepEqual(old.OwnerReferences, updated.OwnerReferences)
 }
 
 // desiredReplicas decides the value to stamp on ir.Spec.Replicas,

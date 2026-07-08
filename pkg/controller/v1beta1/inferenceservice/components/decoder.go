@@ -6,6 +6,7 @@ import (
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -208,6 +209,12 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			Client:             d.Client,
 		})
 		if err != nil {
+			if apierrors.IsConflict(err) {
+				// Benign: a concurrent IR status write bumped the object.
+				// Re-read and reproject next pass instead of surfacing a hard
+				// error, which would fast-loop the ISVC reconcile.
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for decoder")
 		}
 		// Autoscaler dispatch is always-on per InferenceReplica.

@@ -15,6 +15,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -208,11 +209,10 @@ func TestEnsureInferenceReplica_Update_PreservesGeneration(t *testing.T) {
 		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, first)).To(gomega.Succeed())
 	firstRV := first.ResourceVersion
 
-	// Second invocation with identical params should be a no-op modulo
-	// the unconditional Update we issue. The fake client bumps
-	// ResourceVersion on every Update — we can't assert "no Update
-	// issued" with the fake client, but we CAN assert the Spec is
-	// stable.
+	// Second invocation with identical params is a no-op: the projector's
+	// no-op guard skips the write when nothing it owns changed, so the
+	// ResourceVersion must be stable (no spurious churn that would fight
+	// the IR controller's status writes).
 	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -223,10 +223,86 @@ func TestEnsureInferenceReplica_Update_PreservesGeneration(t *testing.T) {
 	g.Expect(second.Spec.Replicas).To(gomega.Equal(first.Spec.Replicas))
 	g.Expect(second.Spec.Component).To(gomega.Equal(first.Spec.Component))
 	g.Expect(second.Spec.ParentRef).To(gomega.Equal(first.Spec.ParentRef))
-	// ResourceVersion is bumped by the fake client on every Update —
-	// we don't pin it. Real apiservers patch-equality-no-op, but the
-	// fake doesn't.
-	_ = firstRV
+	g.Expect(second.ResourceVersion).To(gomega.Equal(firstRV),
+		"identical re-projection must not bump ResourceVersion (no-op guard)")
+}
+
+// TestEnsureInferenceReplica_NoChange_IssuesNoWrite pins the no-op guard at
+// the API layer: a second projection with identical params must issue ZERO
+// Create/Update/Patch calls. This is the fix for the conflict hot-loop —
+// an unconditional write every reconcile churned the IR's ResourceVersion
+// and fought the IR controller's status writes.
+func TestEnsureInferenceReplica_NoChange_IssuesNoWrite(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+
+	var writes int
+	count := interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			writes++
+			return c.Create(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			writes++
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			writes++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(count).Build()
+
+	// First call creates the IR (one write).
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(writes).To(gomega.Equal(1), "first projection should Create once")
+
+	// Second call with identical params must not write at all.
+	writes = 0
+	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(writes).To(gomega.Equal(0), "identical re-projection must issue no writes")
+}
+
+// TestEnsureInferenceReplica_SpecChange_IssuesMergePatch pins the change
+// path: when the desired spec differs from the live IR, the projector
+// issues exactly one merge Patch (not an Update), so a concurrent status
+// write can't turn it into an optimistic-lock conflict.
+func TestEnsureInferenceReplica_SpecChange_IssuesMergePatch(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+
+	var patches, updates int
+	count := interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updates++
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(count).Build()
+
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Change the desired replica count, re-project.
+	patches, updates = 0, 0
+	changed := minimalParams(t, isvc, c)
+	changed.ComponentExt = &v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(7)}
+	_, err = EnsureInferenceReplica(context.Background(), changed)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(updates).To(gomega.Equal(0), "projector must not use Update")
+	g.Expect(patches).To(gomega.Equal(1), "a real spec change must issue exactly one merge Patch")
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+	g.Expect(got.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*got.Spec.Replicas).To(gomega.Equal(int32(7)))
 }
 
 // TestEnsureInferenceReplica_MultiPod_LeaderAndWorker pins the
