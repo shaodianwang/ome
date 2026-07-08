@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
 import { Close, Copy } from "./icons";
+import { copyText } from "./util";
 
 /** Right-side slide-over. Click-scrim or Escape closes; body scrolls. */
 export function Drawer({
@@ -97,9 +98,11 @@ export function Copyable({ text }: { text: string }) {
         title="Copy"
         aria-label="Copy"
         onClick={() => {
-          void navigator.clipboard?.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
+          void copyText(text).then((ok) => {
+            if (!ok) return;
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          });
         }}
       >
         {copied ? "✓" : <Copy />}

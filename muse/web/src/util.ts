@@ -71,6 +71,42 @@ export function utilTone(pct: number): BarTone {
   return "green";
 }
 
+/**
+ * Copy text to the clipboard, resolving to whether it actually succeeded.
+ *
+ * The async Clipboard API (`navigator.clipboard.writeText`) is unavailable in
+ * non-secure contexts, and rejects inside an iframe without the `clipboard-write`
+ * permission or when the document isn't focused — cases where a bare
+ * `navigator.clipboard?.writeText(...)` silently no-ops while the UI still flashes
+ * "copied". This tries that path, then falls back to a temporary `<textarea>` +
+ * `execCommand("copy")`, and reports success so callers only show feedback when the
+ * copy landed.
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy execCommand path below.
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Message for an empty list slot: error first, then loading, else the empty
  *  text. Callers pass the exact copy so wording stays panel-specific. */
 export function emptyText(

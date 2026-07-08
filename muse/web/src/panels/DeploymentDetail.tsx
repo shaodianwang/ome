@@ -8,7 +8,7 @@ import { Copy } from "../icons";
 import { useEventFeed, useLive } from "../live";
 import { replicaRollup } from "../map";
 import type { Selected } from "../types";
-import { ago, num as n } from "../util";
+import { ago, copyText, num as n } from "../util";
 import { Dot, UtilRow } from "../viz";
 
 /** Full-page detail for one deployment: health, replicas, model/runtime,
@@ -230,8 +230,54 @@ export function DeploymentDetail({
  *  giving up — enough for the server's specific timeout error to arrive first. */
 const CLIENT_GRACE_MS = 5000;
 
-/** In-page inference test: a live chat when the proxy is enabled, else a
- *  copyable curl against the endpoint. */
+/** A ready-to-run curl for the model's OpenAI-style chat endpoint, using whatever
+ *  model + prompt the user has entered. The prompt is embedded in the single-quoted
+ *  `-d` payload, so any single quotes in it are escaped for the shell. This is what
+ *  the user copies to run the request from their terminal with their own creds —
+ *  the endpoint sits behind an auth gateway the console can't authenticate to. */
+function buildCurl(endpoint: string, model: string, prompt: string): string {
+  const body = JSON.stringify({
+    model,
+    messages: [{ role: "user", content: prompt || "Hello" }],
+  });
+  // bash-safe single quote: close, escaped quote, reopen.
+  const shellSafe = body.replace(/'/g, `'\\''`);
+  return [
+    `curl -s ${endpoint}/v1/chat/completions \\`,
+    `  -H 'content-type: application/json' \\`,
+    `  -d '${shellSafe}'`,
+  ].join("\n");
+}
+
+/** A curl command block with an honest copy button (only flags "Copied" when the
+ *  copy actually landed). Shared by the proxy-off state and the failure fallback. */
+function CurlBlock({ curl, note }: { curl: string; note?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="tryit">
+      {note ? <div className="muted cell-sm">{note}</div> : null}
+      <pre className="curl">{curl}</pre>
+      <button
+        className="btn ghost sm"
+        onClick={() =>
+          void copyText(curl).then((ok) => {
+            if (!ok) return;
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          })
+        }
+      >
+        <Copy />
+        {copied ? "Copied" : "Copy curl"}
+      </button>
+    </div>
+  );
+}
+
+/** In-page inference test: a live chat when the proxy is enabled, else a copyable
+ *  curl against the endpoint. When a live attempt fails — commonly because the
+ *  endpoint is behind an auth gateway the console can't authenticate to — it falls
+ *  back to the same curl (built from the user's own model + prompt) to run locally. */
 function ChatBox({
   cluster,
   name,
@@ -252,34 +298,17 @@ function ChatBox({
   const [reply, setReply] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   if (!endpoint) {
     return <div className="muted">No endpoint yet — this deployment isn't addressable.</div>;
   }
 
   if (!enabled) {
-    const curl = [
-      `curl -s ${endpoint}/v1/chat/completions \\`,
-      `  -H 'content-type: application/json' \\`,
-      `  -d '${JSON.stringify({ model: defaultModel, messages: [{ role: "user", content: "Hello" }] })}'`,
-    ].join("\n");
     return (
-      <div className="tryit">
-        <div className="muted cell-sm">Live testing is off on this console — run it yourself:</div>
-        <pre className="curl">{curl}</pre>
-        <button
-          className="btn ghost sm"
-          onClick={() => {
-            void navigator.clipboard?.writeText(curl);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          }}
-        >
-          <Copy />
-          {copied ? "Copied" : "Copy curl"}
-        </button>
-      </div>
+      <CurlBlock
+        curl={buildCurl(endpoint, defaultModel, "Hello")}
+        note="Live testing is off on this console — run it yourself:"
+      />
     );
   }
 
@@ -314,8 +343,16 @@ function ChatBox({
       <button className="btn primary sm" onClick={send} disabled={busy || !prompt.trim()}>
         {busy ? "Sending…" : "Send"}
       </button>
-      {err ? <div className="notice bad">{err}</div> : null}
       {reply ? <div className="chat-reply">{reply}</div> : null}
+      {err ? (
+        <>
+          <div className="notice bad">{err}</div>
+          <CurlBlock
+            curl={buildCurl(endpoint, model, prompt)}
+            note="Couldn't reach the endpoint from the console — it may require your credentials. Run it from your terminal instead:"
+          />
+        </>
+      ) : null}
     </div>
   );
 }

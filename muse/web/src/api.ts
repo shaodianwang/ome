@@ -248,12 +248,35 @@ const at = (path: string) => BASE + path.replace(/^\//, "");
 /** SSE endpoint for live resource-change events (see `live.ts`). */
 export const STREAM_URL = at("/v1/stream");
 
+/**
+ * Parse a response body as JSON, turning a non-JSON payload into a legible error
+ * instead of a raw `Unexpected token '<' … is not valid JSON` from `res.json()`.
+ * A proxy in front of the API (e.g. the Silfra tunnel) replaces a non-2xx muse
+ * response — or a request it can't route — with its own HTML error page, often
+ * served with a 2xx status, so an HTML body can reach even the success path.
+ */
+async function asJSON<T>(res: Response, path: string): Promise<T> {
+  const body = await res.text();
+  const ct = res.headers.get("content-type") ?? "";
+  if (!ct.includes("application/json")) {
+    throw new Error(
+      `${path} returned a non-JSON response (${res.status} ${res.statusText}) — ` +
+        `the API may be unreachable or a proxy intercepted the request.`,
+    );
+  }
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(`${path} returned a malformed JSON response (${res.status}).`);
+  }
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(at(path), { headers: { accept: "application/json" } });
   if (!res.ok) {
     throw new Error(`${path} → ${res.status} ${res.statusText}`);
   }
-  return (await res.json()) as T;
+  return asJSON<T>(res, path);
 }
 
 async function postJSON<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
@@ -278,7 +301,7 @@ async function postJSON<T>(path: string, body: unknown, timeoutMs?: number): Pro
       }
       throw new Error(msg);
     }
-    return (await res.json()) as T;
+    return asJSON<T>(res, path);
   } catch (e) {
     if (ctrl?.signal.aborted) {
       const secs = Math.round((timeoutMs ?? 0) / 1000);
