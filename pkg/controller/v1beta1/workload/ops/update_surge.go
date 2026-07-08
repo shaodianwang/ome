@@ -104,11 +104,20 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// observes RunningRevision != target.Name.
 	surgeTargetName := target.Name
 	var runningRevName string
+	// instanceFailed: this surge already escalated to Phase=Failed (e.g. its pod
+	// hit ImagePullBackOff on a bad revision). Recovery drops the pin below and
+	// drains the failed pod so a corrective target can re-surge — otherwise the
+	// surge stays pinned to the bad revision and the Instance is wedged forever.
+	instanceFailed := false
 	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil {
 		runningRevName = s.RunningRevision
-		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
+		instanceFailed = s.Phase == workload.InstancePhaseFailed
+		if !instanceFailed && s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 			(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
 			s.Operation.TargetRevision != "" {
+			// Normal in-flight surge: stay pinned to the committed rev (X-2
+			// anti-corruption). A FAILED surge instead re-commits to the current
+			// target so a corrective revision can supersede the failed one.
 			surgeTargetName = s.Operation.TargetRevision
 		}
 	}
@@ -122,7 +131,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// target while the actual pod is on the prior rev. See
 	// reclassifyByRevisionHash's header for the X-2 recovery path this
 	// guards.
-	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetHash, runningRevHash)
+	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetHash, runningRevHash, instanceFailed)
 
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
 	// already there. Idempotent on the second pass. Writes
@@ -374,8 +383,14 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 // runningRev is empty (first-ever surge cycle, no prior promote to
 // inherit from) or matches targetHash (no rev difference, the surge
 // is already valid).
-func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, targetHash, runningRevHash string) (newSurge, newDrain []*corev1.Pod) {
-	if runningRevHash == "" || runningRevHash == targetHash {
+// failedRecover (true only for an Instance escalated to Phase=Failed) widens the
+// reclassification: in addition to the just-promoted rev, ANY surge pod not on the
+// current target is treated as stale and drained. That evicts a failed surge pod
+// stuck on a bad revision so a corrective target can re-surge — without it, the
+// failed pod stays in the surge bucket forever (arbitrary-rev pods are otherwise
+// kept on purpose) and the Instance is wedged. No effect on non-failed surges.
+func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, targetHash, runningRevHash string, failedRecover bool) (newSurge, newDrain []*corev1.Pod) {
+	if !failedRecover && (runningRevHash == "" || runningRevHash == targetHash) {
 		return surge, drainPods
 	}
 	newSurge = surge[:0]
@@ -388,7 +403,7 @@ func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, targetHash, runnin
 			newSurge = append(newSurge, pod)
 			continue
 		}
-		if hash == runningRevHash {
+		if hash == runningRevHash || (failedRecover && hash != targetHash) {
 			// Stale: pod is labeled with the just-promoted rev but is
 			// sitting at the surge ordinal. Drain + delete so the
 			// next reconcile's Phase 1 re-creates with the

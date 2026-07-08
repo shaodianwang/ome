@@ -912,6 +912,34 @@ func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 	}
 }
 
+// TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch: a Failed Instance (e.g.
+// escalated after a bad rollout) must re-trigger toward a NEW target — otherwise a
+// corrective revision never rolls and the Instance is wedged forever. Failed is
+// treated like Ready for the revision comparison.
+func TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc)
+	target := legacyTargetSpecImage("llama:v2")
+	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+	st := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses
+	st[0].Phase = v1beta1.OMENativeInstanceFailed
+	st[0].RunningRevision = "llama-70b-engine-oldrev" // != tcr.Name (the corrective target)
+	if err := c.Status().Update(context.Background(), isvc); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+
+	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !trigger {
+		t.Errorf("Phase=Failed with RunningRevision != target must re-trigger update (recovery)")
+	}
+}
+
 // TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate: no
 // RunningRevision recorded, observed pod has image v1 but target spec
 // is v2 — must trigger.

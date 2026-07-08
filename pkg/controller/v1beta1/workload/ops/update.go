@@ -319,7 +319,14 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	if s.Phase == workload.InstancePhaseUpdating {
 		return true, nil
 	}
-	if s.Phase != workload.InstancePhaseReady {
+	// A Failed Instance must still re-trigger toward a NEW target. Once a
+	// rollout escalates an Instance to Phase=Failed (e.g. a bad image →
+	// ImagePullBackOff), a corrective revision (fixed runtime or ISVC edit)
+	// would otherwise never roll — the Instance stays wedged on the old
+	// revision forever. Treat Failed like Ready for the revision comparison so a
+	// changed target re-drives it (the reconciler's budget path lets a
+	// mid-operation Failed Instance continue rather than start fresh).
+	if s.Phase != workload.InstancePhaseReady && s.Phase != workload.InstancePhaseFailed {
 		return false, nil
 	}
 

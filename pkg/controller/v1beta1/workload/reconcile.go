@@ -260,7 +260,15 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 				continue
 			}
 			s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-			startingFresh := s == nil || s.Phase != InstancePhaseUpdating
+			// An Instance mid-operation (Operation set) that escalated to
+			// Phase=Failed is still a CONTINUATION of that in-flight surge/drain,
+			// not a fresh start: its own in-flight pod already counts against the
+			// surge/unavailable budget (Operation.Step is preserved through the
+			// Failed stamp), so charging it again would project over budget and
+			// gate the recovery forever. Treat it as a continuation so it bypasses
+			// the budget and UpdateWithPods replaces the failed pod at the target.
+			startingFresh := s == nil ||
+				(s.Phase != InstancePhaseUpdating && !(s.Phase == InstancePhaseFailed && s.Operation != nil))
 			if startingFresh {
 				// Per-Component within-Component cap. Independent from
 				// the coordination-group cap below: each is its own
