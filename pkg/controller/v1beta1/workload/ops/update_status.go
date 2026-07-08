@@ -131,10 +131,20 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(time.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Phase == workload.InstancePhaseUpdating &&
-			s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
+		// Already surging toward this target — no-op. The Phase check
+		// admits BOTH an in-flight Updating instance AND one the stuck-pod
+		// escalator has since flipped to Failed. Resurrecting a Failed
+		// instance back to Updating (with a fresh Operation + deadline)
+		// re-arms the escalator into a Failed<->Updating write storm when
+		// the target revision itself is bad and there is no corrective edit
+		// to drive to — the surge pod never goes Ready, so every pass
+		// re-stamps Updating and the escalator re-stamps Failed. A real
+		// corrective edit changes TargetRevision, so the guard falls
+		// through and the re-surge proceeds (the #711 recovery path).
+		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 			(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
-			s.TargetRevision == targetRev {
+			s.TargetRevision == targetRev &&
+			(s.Phase == workload.InstancePhaseUpdating || s.Phase == workload.InstancePhaseFailed) {
 			return false
 		}
 		s.Phase = workload.InstancePhaseUpdating

@@ -166,6 +166,60 @@ func TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep(t *testi
 	}
 }
 
+// TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget pins the
+// escalation-vs-dispatch anti-ping-pong: once the stuck-pod escalator flips a
+// surging Instance to Failed, re-stamping the surge toward the SAME target
+// must be a no-op (Phase stays Failed) — otherwise the resurrect to Updating
+// re-arms the escalator into a Failed<->Updating write storm for a workload
+// stuck on a bad revision with no corrective edit. A DIFFERENT target (a real
+// corrective edit) must still re-stamp Updating so recovery proceeds.
+func TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+
+	// Enter a surge toward rev-x, then have the escalator flip it to Failed.
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
+		t.Fatalf("stamp Surge: %v", err)
+	}
+	if err := input.MutateInstance(context.Background(), 0, func(s *workload.InstanceStatus) bool {
+		s.Phase = workload.InstancePhaseFailed
+		return true
+	}); err != nil {
+		t.Fatalf("flip to Failed: %v", err)
+	}
+	beforeRV := readRV(t, c, isvc)
+	beforeOpID := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation.ID
+
+	// Same target: must be a no-op — Phase stays Failed, no RV churn, no new op.
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
+		t.Fatalf("re-stamp Surge on Failed (same target): %v", err)
+	}
+	if got := readRV(t, c, isvc); got != beforeRV {
+		t.Errorf("Failed instance re-stamp bumped RV: %s -> %s (should be sticky)", beforeRV, got)
+	}
+	s := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: got %q want Failed (must not resurrect to Updating)", s.Phase)
+	}
+	if s.Operation == nil || s.Operation.ID != beforeOpID {
+		t.Errorf("Operation churned on Failed re-stamp (would reset deadline): before=%q after=%+v", beforeOpID, s.Operation)
+	}
+
+	// Different target (corrective edit): must re-stamp Updating toward it.
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-good", 30*time.Second); err != nil {
+		t.Fatalf("re-stamp Surge toward corrective target: %v", err)
+	}
+	s = isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("Phase after corrective re-stamp: got %q want Updating", s.Phase)
+	}
+	if s.TargetRevision != "rev-good" {
+		t.Errorf("TargetRevision after corrective re-stamp: got %q want rev-good", s.TargetRevision)
+	}
+}
+
 // TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC pins the
 // MutateInstance mirror requirement (#246). After a MutateInstance
 // closure commits a status change to the apiserver, the closure must
