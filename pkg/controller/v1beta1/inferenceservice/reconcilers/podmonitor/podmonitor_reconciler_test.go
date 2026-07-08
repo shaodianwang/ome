@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 type countingClient struct {
@@ -203,6 +205,53 @@ func TestPodMonitorReconciler_Create_RouterWithMetricsPort(t *testing.T) {
 
 	require.Len(t, got.Spec.PodMetricsEndpoints, 1)
 	assert.Equal(t, "metrics", *got.Spec.PodMetricsEndpoints[0].Port)
+	assert.Equal(t, 1, cc.createCalls)
+}
+
+// TestPodMonitorReconciler_Create_ExtraEndpoints mirrors the SMG HTTP-router
+// pod: a "metrics" port scraped at /metrics plus a second "http" port whose
+// /engine_metrics surface is declared via the extra-endpoints annotation. The
+// built PodMonitor must carry the default endpoint first, then the extra.
+func TestPodMonitorReconciler_Create_ExtraEndpoints(t *testing.T) {
+	scheme := buildScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cc := &countingClient{Client: baseClient}
+
+	meta := metav1.ObjectMeta{
+		Name:      "my-isvc-router",
+		Namespace: "prod",
+		Annotations: map[string]string{
+			constants.ExtraPodMetricsEndpointsAnnotationKey: "http:/engine_metrics",
+		},
+	}
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "main",
+			Ports: []corev1.ContainerPort{
+				{ContainerPort: 29000, Name: "metrics"},
+				{ContainerPort: 8000, Name: "http"},
+			},
+		}},
+	}
+
+	r := NewPodMonitorReconciler(cc, scheme, meta, podSpec)
+	obj, err := r.Reconcile()
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+
+	got := &monitoringv1.PodMonitor{}
+	err = baseClient.Get(context.Background(), types.NamespacedName{Name: meta.Name, Namespace: meta.Namespace}, got)
+	require.NoError(t, err)
+
+	require.Len(t, got.Spec.PodMetricsEndpoints, 2)
+	// Default /metrics endpoint stays first.
+	assert.Equal(t, "metrics", *got.Spec.PodMetricsEndpoints[0].Port)
+	assert.Equal(t, "/metrics", got.Spec.PodMetricsEndpoints[0].Path)
+	assert.Equal(t, monitoringv1.Duration("10s"), got.Spec.PodMetricsEndpoints[0].Interval)
+	// Annotation-declared endpoint is appended.
+	assert.Equal(t, "http", *got.Spec.PodMetricsEndpoints[1].Port)
+	assert.Equal(t, "/engine_metrics", got.Spec.PodMetricsEndpoints[1].Path)
+	assert.Equal(t, monitoringv1.Duration("10s"), got.Spec.PodMetricsEndpoints[1].Interval)
 	assert.Equal(t, 1, cc.createCalls)
 }
 

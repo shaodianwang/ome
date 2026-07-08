@@ -94,12 +94,18 @@ var (
 	EntrypointComponent                     = OMEAPIGroupName + "/entrypoint-component"
 	ContainerPrometheusPortKey              = "prometheus.ome.io/port"
 	ContainerPrometheusPathKey              = "prometheus.ome.io/path"
-	PrometheusPortAnnotationKey             = "prometheus.io/port"
-	PrometheusPathAnnotationKey             = "prometheus.io/path"
-	PrometheusScrapeAnnotationKey           = "prometheus.io/scrape"
-	RDMAAutoInjectAnnotationKey             = "rdma.ome.io/auto-inject"
-	RDMAProfileAnnotationKey                = "rdma.ome.io/profile"
-	RDMAContainerNameAnnotationKey          = "rdma.ome.io/container-name"
+	// ExtraPodMetricsEndpointsAnnotationKey declares ADDITIONAL PodMonitor
+	// scrape endpoints appended to the default /metrics endpoint. Value is a
+	// comma-separated list of "portName:path" (port name, not number), e.g.
+	// "http:/engine_metrics". Additive and backward-compatible; malformed
+	// entries are skipped.
+	ExtraPodMetricsEndpointsAnnotationKey = "prometheus.ome.io/extra-endpoints"
+	PrometheusPortAnnotationKey           = "prometheus.io/port"
+	PrometheusPathAnnotationKey           = "prometheus.io/path"
+	PrometheusScrapeAnnotationKey         = "prometheus.io/scrape"
+	RDMAAutoInjectAnnotationKey           = "rdma.ome.io/auto-inject"
+	RDMAProfileAnnotationKey              = "rdma.ome.io/profile"
+	RDMAContainerNameAnnotationKey        = "rdma.ome.io/container-name"
 
 	// Runtime profile injection — opt-in profiles that factor out
 	// repetitive ServingRuntime YAML (probes, /dev/shm, prometheus

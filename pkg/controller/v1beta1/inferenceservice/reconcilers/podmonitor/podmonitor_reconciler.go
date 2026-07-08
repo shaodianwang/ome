@@ -56,6 +56,14 @@ func createPodMonitor(componentMeta metav1.ObjectMeta, podSpec *corev1.PodSpec) 
 	appLabel := constants.TruncateNameWithMaxLength(componentMeta.Name, 63)
 	portName := metricsPortName(podSpec)
 
+	// Default /metrics endpoint, plus any extras from the annotation.
+	endpoints := []monitoringv1.PodMetricsEndpoint{{
+		Port:     &portName,
+		Path:     "/metrics",
+		Interval: "10s",
+	}}
+	endpoints = append(endpoints, ParseExtraEndpoints(componentMeta.Annotations)...)
+
 	return &monitoringv1.PodMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentMeta.Name,
@@ -73,13 +81,7 @@ func createPodMonitor(componentMeta metav1.ObjectMeta, podSpec *corev1.PodSpec) 
 					"app": appLabel,
 				},
 			},
-			PodMetricsEndpoints: []monitoringv1.PodMetricsEndpoint{
-				{
-					Port:     &portName,
-					Path:     "/metrics",
-					Interval: "10s",
-				},
-			},
+			PodMetricsEndpoints: endpoints,
 		},
 	}
 }

@@ -1080,6 +1080,78 @@ func TestEngineReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 	}
 }
 
+// TestEngineReconcileOMENativeSubresources_ExtraEndpoints pins that the
+// prometheus.ome.io/extra-endpoints annotation appends additional scrape
+// endpoints to the OMENative PodMonitor, after the default /metrics endpoint.
+// Mirrors the SMG HTTP-router pod: a "metrics" port scraped at /metrics plus an
+// "http" port whose /engine_metrics surface is declared via the annotation.
+func TestEngineReconcileOMENativeSubresources_ExtraEndpoints(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(monitoringv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	engineSpec := &v1beta1.EngineSpec{
+		PodSpec: v1beta1.PodSpec{
+			Containers: []v1.Container{{Name: "engine", Image: "engine:v1"}},
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-isvc", Namespace: "default",
+			UID: types.UID("test-isvc-uid"),
+		},
+		Spec: v1beta1.InferenceServiceSpec{Engine: engineSpec},
+	}
+	objectMeta := metav1.ObjectMeta{
+		Name:      "test-isvc-engine",
+		Namespace: "default",
+		Annotations: map[string]string{
+			constants.ExtraPodMetricsEndpointsAnnotationKey: "http:/engine_metrics",
+		},
+	}
+	// Router-shaped pod: "metrics" port scraped by default, "http" port carries
+	// the annotation-declared /engine_metrics surface.
+	podSpec := &v1.PodSpec{
+		Containers: []v1.Container{{Name: "engine", Image: "engine:v1",
+			Ports: []v1.ContainerPort{
+				{Name: "metrics", ContainerPort: 29000},
+				{Name: "http", ContainerPort: 8000},
+			}}},
+	}
+
+	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+	clientset := fake.NewClientset()
+	engine := NewEngine(
+		c, clientset,
+		nil, nil, nil,
+		scheme,
+		&controllerconfig.InferenceServicesConfig{},
+		constants.OMENative,
+		nil, nil,
+		engineSpec,
+		nil, "", nil, nil,
+	).(*Engine)
+
+	err := engine.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	pm := &monitoringv1.PodMonitor{}
+	g.Expect(c.Get(context.Background(),
+		client.ObjectKey{Namespace: "default", Name: "test-isvc-engine"},
+		pm)).To(gomega.Succeed())
+
+	g.Expect(pm.Spec.PodMetricsEndpoints).To(gomega.HaveLen(2))
+	// Default /metrics endpoint stays first, on the "metrics" port.
+	g.Expect(*pm.Spec.PodMetricsEndpoints[0].Port).To(gomega.Equal("metrics"))
+	g.Expect(pm.Spec.PodMetricsEndpoints[0].Path).To(gomega.Equal("/metrics"))
+	// Annotation-declared endpoint is appended after it.
+	g.Expect(*pm.Spec.PodMetricsEndpoints[1].Port).To(gomega.Equal("http"))
+	g.Expect(pm.Spec.PodMetricsEndpoints[1].Path).To(gomega.Equal("/engine_metrics"))
+}
+
 // TestDecoderReconcileOMENativeSubresources_Rank0Selector mirrors the
 // engine test for the Decoder. The two helpers are intentionally
 // duplicated across components/engine.go and components/decoder.go;

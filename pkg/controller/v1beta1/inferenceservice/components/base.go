@@ -27,6 +27,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/podmonitor"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -794,11 +795,13 @@ func ReconcileOMENativeSubresources(
 			MatchNames: []string{objectMeta.Namespace},
 		}
 		target.Spec.Selector = metav1.LabelSelector{MatchLabels: baseSelector}
-		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
+		endpoints := []monitoringv1.PodMetricsEndpoint{{
 			Port:     &portName,
 			Path:     "/metrics",
 			Interval: "10s",
 		}}
+		endpoints = append(endpoints, podmonitor.ParseExtraEndpoints(objectMeta.Annotations)...)
+		target.Spec.PodMetricsEndpoints = endpoints
 		target.Labels = baseSelector
 		target.OwnerReferences = []metav1.OwnerReference{
 			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
