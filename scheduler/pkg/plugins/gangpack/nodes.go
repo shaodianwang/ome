@@ -2,6 +2,7 @@ package gangpack
 
 import (
 	v1 "k8s.io/api/core/v1"
+	v1helper "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
@@ -128,11 +129,31 @@ func placedInDomain(nodeInfos []*framework.NodeInfo, namespace, pgName, topology
 	return count
 }
 
+// nodeSchedulable reports whether the gang pod could actually be placed on this
+// node right now — beyond having the accelerator free, the node must be
+// schedulable: not cordoned (spec.unschedulable), and its NoSchedule/NoExecute
+// taints tolerated by the pod. Without this check, freeByDomain would count a
+// cordoned or tainted node as free, so Choose could pin a domain whose nodes the
+// framework's own Filter (NodeUnschedulable / TaintToleration) then rejects —
+// wedging the gang there (pinStale keeps the pin because the domain still looks
+// "free") while genuinely schedulable domains sit unused.
+func nodeSchedulable(node *v1.Node, pod *v1.Pod) bool {
+	if node == nil || node.Spec.Unschedulable {
+		return false
+	}
+	_, untolerated := v1helper.FindMatchingUntoleratedTaint(node.Spec.Taints, pod.Spec.Tolerations, func(t *v1.Taint) bool {
+		return t.Effect == v1.TaintEffectNoSchedule || t.Effect == v1.TaintEffectNoExecute
+	})
+	return !untolerated
+}
+
 // freeByDomain projects a framework node snapshot onto the pure accounting type:
 // free nodes per domain for the given gang pod. A node participates only if it
 // carries a domain label AND could hold the pod (nodeRelevant); it is counted
-// free when the pod fits (nodeFits). A domain with no free node still appears at
-// 0 so "full" is distinguishable from "absent".
+// free when the pod fits (nodeFits) AND the node is actually schedulable
+// (nodeSchedulable) — a cordoned or untolerated-taint node has capacity but the
+// gang can't land on it. A domain with no free node still appears at 0 so "full"
+// is distinguishable from "absent".
 func freeByDomain(nodeInfos []*framework.NodeInfo, topologyKey string, pod *v1.Pod) topology.FreeByDomain {
 	req := podScalarRequests(pod)
 	out := topology.FreeByDomain{}
@@ -145,7 +166,7 @@ func freeByDomain(nodeInfos []*framework.NodeInfo, topologyKey string, pod *v1.P
 			continue
 		}
 		out[dom] += 0 // register the domain even if all nodes are occupied
-		if nodeFits(info, req) {
+		if nodeFits(info, req) && nodeSchedulable(info.Node(), pod) {
 			out[dom]++
 		}
 	}

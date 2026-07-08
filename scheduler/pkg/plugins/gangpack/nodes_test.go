@@ -44,6 +44,61 @@ func gangGPUPod(ns, pg, req string) *v1.Pod {
 	return p
 }
 
+// cordoned returns the node marked unschedulable (spec.unschedulable), as a drain
+// or an autoscaler cordon would.
+func cordoned(n *v1.Node) *v1.Node {
+	n.Spec.Unschedulable = true
+	return n
+}
+
+// tainted returns the node with a NoSchedule taint of the given key.
+func tainted(n *v1.Node, key string) *v1.Node {
+	n.Spec.Taints = append(n.Spec.Taints, v1.Taint{Key: key, Effect: v1.TaintEffectNoSchedule})
+	return n
+}
+
+// TestNodeSchedulable: a node is schedulable for the pod only when it is not
+// cordoned and its NoSchedule taints are tolerated — capacity alone is not enough.
+func TestNodeSchedulable(t *testing.T) {
+	pod := gpuPod("4") // no tolerations
+	if !nodeSchedulable(gpuNode("n", "a", "4"), pod) {
+		t.Fatal("plain node should be schedulable")
+	}
+	if nodeSchedulable(cordoned(gpuNode("n", "a", "4")), pod) {
+		t.Fatal("cordoned node should not be schedulable")
+	}
+	if nodeSchedulable(tainted(gpuNode("n", "a", "4"), "x"), pod) {
+		t.Fatal("node with an untolerated NoSchedule taint should not be schedulable")
+	}
+	tolerant := gpuPod("4")
+	tolerant.Spec.Tolerations = []v1.Toleration{{Key: "x", Operator: v1.TolerationOpExists, Effect: v1.TaintEffectNoSchedule}}
+	if !nodeSchedulable(tainted(gpuNode("n", "a", "4"), "x"), tolerant) {
+		t.Fatal("node with a tolerated taint should be schedulable")
+	}
+	if nodeSchedulable(nil, pod) {
+		t.Fatal("nil node should not be schedulable")
+	}
+}
+
+// TestFreeByDomainExcludesUnschedulable: a cordoned (or untolerated-taint) node
+// has capacity but is NOT counted free — otherwise Choose would pin a domain the
+// framework's Filter then rejects, wedging the gang.
+func TestFreeByDomainExcludesUnschedulable(t *testing.T) {
+	pod := gpuPod("4")
+	nodes := []*framework.NodeInfo{
+		nodeInfo(cordoned(gpuNode("a1", "a", "4"))),     // a: cordoned
+		nodeInfo(tainted(gpuNode("a2", "a", "4"), "x")), // a: untolerated taint
+		nodeInfo(gpuNode("b1", "b", "4")),               // b: free
+	}
+	free := freeByDomain(nodes, testKey, pod)
+	if free["a"] != 0 {
+		t.Fatalf("domain a free=%d, want 0 (all nodes unschedulable)", free["a"])
+	}
+	if free["b"] != 1 {
+		t.Fatalf("domain b free=%d, want 1", free["b"])
+	}
+}
+
 func nodeInfo(node *v1.Node, pods ...*v1.Pod) *framework.NodeInfo {
 	ni := framework.NewNodeInfo(pods...)
 	ni.SetNode(node)

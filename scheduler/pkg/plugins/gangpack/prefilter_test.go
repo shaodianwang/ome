@@ -140,6 +140,29 @@ func TestPinGangReplansOnFullDomain(t *testing.T) {
 	}
 }
 
+// TestPinGangReplansOffCordonedDomain: a gang pinned to a domain whose nodes have
+// become unschedulable (cordoned) — capacity intact but the framework's Filter
+// would reject them — must re-plan onto a schedulable domain, not wedge there. This
+// is the field wedge: freeByDomain now excludes unschedulable nodes, so pinStale
+// sees the pinned domain as unusable and drops it.
+func TestPinGangReplansOffCordonedDomain(t *testing.T) {
+	g := &GangPack{pins: placement.New()}
+	g.pins.Set("team/pf", "a") // pinned to a
+	nodes := []*framework.NodeInfo{
+		nodeInfo(cordoned(gpuNode("a1", "a", "4"))), // a: cordoned (has gpu, unschedulable)
+		nodeInfo(cordoned(gpuNode("a2", "a", "4"))),
+		nodeInfo(gpuNode("b1", "b", "4")), // b: schedulable
+		nodeInfo(gpuNode("b2", "b", "4")),
+	}
+	_, status := g.pinGang(framework.NewCycleState(), nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang status = %v, want Success (re-plan off the cordoned domain)", status)
+	}
+	if d, ok := g.pins.Get("team/pf"); !ok || d != "b" {
+		t.Fatalf("re-planned pin = %q,%v, want b,true", d, ok)
+	}
+}
+
 // TestPinGangKeepsPinWhenMemberBound: a pinned domain that is full but already
 // holds one of the gang's own members is NOT stale — re-planning would strand that
 // member. The gang keeps its pin and waits for capacity in its own domain.
