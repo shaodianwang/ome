@@ -18,6 +18,7 @@ import (
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 )
@@ -845,6 +846,82 @@ func TestHTTPRouteBuilder_AdditionalIngressGateways(t *testing.T) {
 	assert.Equal(t, gatewayapiv1.ObjectName("ext-gw"), route.Spec.ParentRefs[1].Name)
 	assert.Equal(t, gatewayapiv1.Hostname("test-isvc.default.int.example.com"), route.Spec.Hostnames[0])
 	assert.Equal(t, gatewayapiv1.Hostname("test-isvc.default.ext.example.com"), route.Spec.Hostnames[1])
+}
+
+// TestHTTPRouteBuilder_NamespaceIngressGateways verifies the per-namespace gateway
+// override: an ISVC in a namespace listed in NamespaceIngressGateways attaches to
+// that namespace's gateway(s) instead of the cluster default (the host stays
+// namespace-scoped via DomainTemplate); an ISVC in an unlisted namespace keeps the
+// cluster default; and a per-ISVC gateway annotation still wins for the primary.
+func TestHTTPRouteBuilder_NamespaceIngressGateways(t *testing.T) {
+	nsGateways := map[string]controllerconfig.NamespaceIngressGateway{
+		"prod": {
+			Primary: controllerconfig.IngressGatewaySpec{
+				OmeIngressGateway: "envoy-gateway-system/prod-int-gw",
+				IngressDomain:     "int.example.com",
+			},
+			Additional: []controllerconfig.IngressGatewaySpec{
+				{OmeIngressGateway: "envoy-gateway-system/prod-ext-gw", IngressDomain: "ext.example.com"},
+			},
+		},
+	}
+
+	newBuilder := func() *HTTPRouteBuilder {
+		b := createHTTPRouteBuilder()
+		b.ingressConfig.PerISVCSubdomain = true
+		b.ingressConfig.OmeIngressGateway = "envoy-gateway-system/meta-ai-int-gw"
+		b.ingressConfig.IngressDomain = "int.example.com"
+		b.ingressConfig.NamespaceIngressGateways = nsGateways
+		return b
+	}
+	buildTopLevel := func(t *testing.T, b *HTTPRouteBuilder, isvc *v1beta1.InferenceService) *gatewayapiv1.HTTPRoute {
+		result, err := b.BuildHTTPRoute(context.Background(), isvc, TopLevelComponent)
+		require.NoError(t, err)
+		return result.(*gatewayapiv1.HTTPRoute)
+	}
+
+	t.Run("namespace in map overrides to that namespace's gateways", func(t *testing.T) {
+		isvc := createTestInferenceServiceHTTPRoute("test-isvc", "prod")
+		setEngineReady(isvc)
+
+		route := buildTopLevel(t, newBuilder(), isvc)
+
+		require.Len(t, route.Spec.ParentRefs, 2, "primary + additional prod gateways")
+		assert.Equal(t, gatewayapiv1.ObjectName("prod-int-gw"), route.Spec.ParentRefs[0].Name)
+		assert.Equal(t, gatewayapiv1.ObjectName("prod-ext-gw"), route.Spec.ParentRefs[1].Name)
+		// Host is still namespace-scoped (rendered from DomainTemplate), unchanged.
+		assert.Equal(t, gatewayapiv1.Hostname("test-isvc.prod.int.example.com"), route.Spec.Hostnames[0])
+		assert.Equal(t, gatewayapiv1.Hostname("test-isvc.prod.ext.example.com"), route.Spec.Hostnames[1])
+	})
+
+	t.Run("namespace not in map keeps cluster default", func(t *testing.T) {
+		isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+		setEngineReady(isvc)
+
+		route := buildTopLevel(t, newBuilder(), isvc)
+
+		require.Len(t, route.Spec.ParentRefs, 1, "cluster-default primary only")
+		assert.Equal(t, gatewayapiv1.ObjectName("meta-ai-int-gw"), route.Spec.ParentRefs[0].Name)
+	})
+
+	t.Run("per-ISVC gateway annotation wins over namespace default", func(t *testing.T) {
+		isvc := createTestInferenceServiceHTTPRoute("test-isvc", "prod")
+		setEngineReady(isvc)
+		if isvc.Annotations == nil {
+			isvc.Annotations = map[string]string{}
+		}
+		isvc.Annotations[constants.IngressGatewayOverride] = "envoy-gateway-system/special-gw"
+
+		b := newBuilder()
+		// ResolveIngressConfig applies the annotation to the primary before the
+		// builder runs; simulate that resolved state here.
+		b.ingressConfig.OmeIngressGateway = "envoy-gateway-system/special-gw"
+
+		route := buildTopLevel(t, b, isvc)
+
+		// Annotation controls the primary parentRef, overriding the namespace map.
+		assert.Equal(t, gatewayapiv1.ObjectName("special-gw"), route.Spec.ParentRefs[0].Name)
+	})
 }
 
 // TestHTTPRouteBuilder_PerISVCSubdomainScheme verifies the opt-in (flag ON)

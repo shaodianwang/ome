@@ -97,6 +97,17 @@ type IngressConfig struct {
 	// timeout is never a hardcoded magic number. nil or non-positive means OME
 	// imposes no route timeout and the gateway's own default applies.
 	DefaultRouteTimeoutSeconds *int64 `json:"defaultRouteTimeoutSeconds,omitempty"`
+	// NamespaceIngressGateways maps an ISVC's namespace to the gateway(s) its
+	// generated HTTPRoutes attach to, overriding the cluster-default primary
+	// gateway (OmeIngressGateway/IngressDomain) and AdditionalIngressGateways for
+	// ISVCs in that namespace. Namespaces absent from the map fall back to the
+	// cluster defaults. This lets one OME controller serve per-namespace Gateways
+	// (each with its own TLS cert and DNS, e.g. "prod-int-gw-https" for the "prod"
+	// namespace) while the route hostname is unchanged — it is still rendered from
+	// DomainTemplate, which already embeds the namespace ("<isvc>.<namespace>.<domain>").
+	// A per-ISVC "ome.io/ingress-gateway" (or "ome.io/ingress-additional-gateways")
+	// annotation still takes precedence over this namespace default.
+	NamespaceIngressGateways map[string]NamespaceIngressGateway `json:"namespaceIngressGateways,omitempty"`
 }
 
 // IngressGatewaySpec identifies one gateway an HTTPRoute attaches to, plus the
@@ -107,6 +118,22 @@ type IngressGatewaySpec struct {
 	// IngressDomain is the domain used to render this gateway's route hostname
 	// (same scheme as the primary: per-ISVC subdomain or shared-host prefix).
 	IngressDomain string `json:"ingressDomain"`
+}
+
+// NamespaceIngressGateway is the per-namespace gateway override applied to every
+// ISVC in a namespace (keyed by namespace in IngressConfig.NamespaceIngressGateways):
+// the primary gateway its HTTPRoutes attach to plus any additional gateways,
+// replacing the cluster defaults for that namespace.
+type NamespaceIngressGateway struct {
+	// Primary is the primary gateway (parentRef "namespace/name") and the domain
+	// used to render its route hostname for ISVCs in this namespace. When
+	// OmeIngressGateway is empty the cluster-default primary is kept.
+	Primary IngressGatewaySpec `json:"primary"`
+	// Additional attaches each generated HTTPRoute to extra gateways beyond the
+	// primary (e.g. an external gateway alongside the internal one), replacing the
+	// cluster-default AdditionalIngressGateways for this namespace. nil keeps the
+	// cluster default; an explicit empty list means "no additional gateways".
+	Additional []IngressGatewaySpec `json:"additional,omitempty"`
 }
 
 // +kubebuilder:object:generate=false

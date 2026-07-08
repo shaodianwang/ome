@@ -166,6 +166,24 @@ ome:
       #     - omeIngressGateway: "envoy-gateway-system/external-gateway"
       #       ingressDomain: "external.example.com"
       additionalIngressGateways: []
+      # Per-namespace gateway override: map an ISVC namespace to the gateway(s) its
+      # HTTPRoutes attach to, replacing the primary (omeIngressGateway/domain) and
+      # additionalIngressGateways above for ISVCs in that namespace. The route host
+      # is unchanged — it is still "<isvc>.<namespace>.<domain>" from domainTemplate —
+      # so this lets one controller serve per-namespace Gateways that each own their
+      # namespace's TLS cert + DNS (e.g. a "prod" Gateway for *.prod.<domain>).
+      # Namespaces absent here fall back to the cluster defaults; a per-ISVC
+      # "ome.io/ingress-gateway" annotation still overrides this. Empty => disabled.
+      # Example:
+      #   namespaceIngressGateways:
+      #     prod:
+      #       primary:
+      #         omeIngressGateway: "envoy-gateway-system/prod-int-gw-https"
+      #         ingressDomain: "int-gw-https.example.com"
+      #       additional:
+      #         - omeIngressGateway: "envoy-gateway-system/prod-ext-gw-https"
+      #           ingressDomain: "ext-gw-https.example.com"
+      namespaceIngressGateways: {}
       # Cluster-default Gateway API request timeout (seconds) applied to every
       # generated HTTPRoute whose ISVC doesn't set spec.<component>.timeoutSeconds.
       # The OME binary has NO built-in default — this chart value is the source of

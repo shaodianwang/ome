@@ -28,6 +28,36 @@ ome:
         gateway: "envoy-gateway-system/meta-ai-ext-gw-https"
         gatewayService: "envoy-envoy-gateway-system-meta-ai-ext-gw-https-c35b1bd3.envoy-gateway-system.svc.cluster.local"
         className: "meta-ai-ext-gw-https"
+      # Per-namespace gateways: this cluster has a dedicated Gateway per namespace
+      # (prod-/sandbox-/staging-{int,ext}-gw-https), each with its own wildcard TLS
+      # cert + DNS for *.<namespace>.<int|ext>-gw-https.<cluster-domain>. Route the
+      # HTTPRoutes for ISVCs in those namespaces to their own Gateway so the
+      # namespace-scoped host (<isvc>.<namespace>.<domain>, from domainTemplate)
+      # actually resolves to a Gateway that serves it. Without this, ISVCs in these
+      # namespaces attach only to the meta-ai Gateway and their published URL 404s.
+      # Namespaces not listed (e.g. meta-ai) keep the cluster-default gateway above.
+      namespaceIngressGateways:
+        prod:
+          primary:
+            omeIngressGateway: "envoy-gateway-system/prod-int-gw-https"
+            ingressDomain: "int-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"
+          additional:
+            - omeIngressGateway: "envoy-gateway-system/prod-ext-gw-https"
+              ingressDomain: "ext-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"
+        sandbox:
+          primary:
+            omeIngressGateway: "envoy-gateway-system/sandbox-int-gw-https"
+            ingressDomain: "int-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"
+          additional:
+            - omeIngressGateway: "envoy-gateway-system/sandbox-ext-gw-https"
+              ingressDomain: "ext-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"
+        staging:
+          primary:
+            omeIngressGateway: "envoy-gateway-system/staging-int-gw-https"
+            ingressDomain: "int-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"
+          additional:
+            - omeIngressGateway: "envoy-gateway-system/staging-ext-gw-https"
+              ingressDomain: "ext-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"
   omeAgent:
     tag: "7010c388"             # keep ome-agent on the same build
   multiclusterAccess:

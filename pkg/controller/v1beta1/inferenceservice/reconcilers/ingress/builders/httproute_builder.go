@@ -153,10 +153,28 @@ func (b *HTTPRouteBuilder) gatewayHostnameForDomain(isvc *v1beta1.InferenceServi
 // domain. This lets one route serve, e.g., both an internal and an external
 // gateway. The hostnames and parentRefs are index-aligned per gateway.
 func (b *HTTPRouteBuilder) gatewaysForRoute(isvc *v1beta1.InferenceService) ([]gatewayapiv1.ParentReference, []gatewayapiv1.Hostname, error) {
-	gateways := []controllerconfig.IngressGatewaySpec{
-		{OmeIngressGateway: b.ingressConfig.OmeIngressGateway, IngressDomain: b.ingressConfig.IngressDomain},
+	primary := controllerconfig.IngressGatewaySpec{
+		OmeIngressGateway: b.ingressConfig.OmeIngressGateway,
+		IngressDomain:     b.ingressConfig.IngressDomain,
 	}
-	gateways = append(gateways, b.ingressConfig.AdditionalIngressGateways...)
+	additional := b.ingressConfig.AdditionalIngressGateways
+
+	// Per-namespace gateway override: attach this ISVC's routes to its namespace's
+	// gateway(s) (e.g. "prod-int-gw-https" for the "prod" namespace) instead of the
+	// cluster default, so per-namespace Gateways with their own TLS cert/DNS serve
+	// the namespace-scoped host the DomainTemplate already produces. A per-ISVC
+	// gateway annotation, already applied to b.ingressConfig by ResolveIngressConfig,
+	// wins over this namespace default, so skip the corresponding override when set.
+	if nsGW, ok := b.ingressConfig.NamespaceIngressGateways[isvc.Namespace]; ok {
+		if _, annotated := isvc.Annotations[constants.IngressGatewayOverride]; !annotated && nsGW.Primary.OmeIngressGateway != "" {
+			primary = nsGW.Primary
+		}
+		if _, annotated := isvc.Annotations[constants.IngressAdditionalGateways]; !annotated && nsGW.Additional != nil {
+			additional = nsGW.Additional
+		}
+	}
+
+	gateways := append([]controllerconfig.IngressGatewaySpec{primary}, additional...)
 
 	parentRefs := make([]gatewayapiv1.ParentReference, 0, len(gateways))
 	hosts := make([]gatewayapiv1.Hostname, 0, len(gateways))
