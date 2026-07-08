@@ -440,6 +440,93 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 	}
 }
 
+// TestEscalateStuckPodFailures_GangSurgeAttributedToSource pins the
+// gang-surge attribution: a SOURCE Instance whose in-flight surge lives at
+// a SEPARATE index must escalate to Failed when the SURGE gang wedges, even
+// though the source's own pods are healthy. Without attributing the surge
+// index's stuck pods to the source, a bad-revision gang surge hangs the
+// rollout at Phase=Updating forever.
+func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
+	prev := workload.StuckPodFailureGracePeriod
+	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
+	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+
+	now := time.Now()
+	healthy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "rev-old"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+		},
+	}
+	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
+	surgeStuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-2-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "rev-bad"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
+		},
+	}
+
+	surgeIdx := int32(2)
+	insts := []workload.InstanceStatus{{
+		Index:           0,
+		Phase:           workload.InstancePhaseUpdating,
+		RunningRevision: "rev-old",
+		Operation: &workload.InstanceOperation{
+			Type:       workload.InstanceOperationUpdate,
+			Step:       "Surge",
+			SurgeIndex: &surgeIdx,
+		},
+	}}
+	var eventFired struct {
+		idx   int32
+		pod   string
+		count int
+	}
+	input := workload.ReconcileInput{
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+			for i := range insts {
+				if insts[i].Index == idx {
+					mutate(&insts[i])
+					return nil
+				}
+			}
+			return nil
+		},
+		WarnInstanceFailed: func(idx int32, podName, _ string) {
+			eventFired.idx = idx
+			eventFired.pod = podName
+			eventFired.count++
+		},
+	}
+
+	err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+		Instances:           insts,
+		PodsByIndex:         map[int32][]*corev1.Pod{0: {healthy}, 2: {surgeStuck}},
+		CurrentRevisionHash: "rev-old",
+		RevisionHashLabel:   "ome.io/revision-hash",
+	})
+	if err != nil {
+		t.Fatalf("EscalateStuckPodFailures: %v", err)
+	}
+	if insts[0].Phase != workload.InstancePhaseFailed {
+		t.Errorf("source Phase: got %q want Failed", insts[0].Phase)
+	}
+	if eventFired.count != 1 || eventFired.idx != 0 {
+		t.Errorf("event: got count=%d idx=%d want count=1 idx=0", eventFired.count, eventFired.idx)
+	}
+	if eventFired.pod != surgeStuck.Name {
+		t.Errorf("event pod: got %q want %q (the wedged surge pod)", eventFired.pod, surgeStuck.Name)
+	}
+}
+
 // TestEscalateStuckPodFailures_AlreadyFailedNoOp pins the idempotency:
 // the escalator must not re-fire on an already-Failed Instance even
 // though the wedged pod is still in front of it.

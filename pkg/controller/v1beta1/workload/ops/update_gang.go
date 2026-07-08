@@ -62,6 +62,19 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		src.Operation.Type == workload.InstanceOperationUpdate &&
 		src.Operation.Step == updateStepSurge && src.Operation.SurgeIndex != nil
 
+	// Failed-surge recovery: a prior gang surge escalated the SOURCE to
+	// Phase=Failed because its replacement gang wedged on a bad revision
+	// (e.g. ImagePullBackOff). Abandon the stale surge and reset the source
+	// to Ready so the NEXT reconcile starts a fresh surge cycle toward the
+	// current (corrective) target. The source gang keeps serving on its
+	// running revision throughout, so capacity never drops. Without this the
+	// gang surge stays pinned to the bad TargetRevision below and the
+	// rollout is wedged forever — the multi-pod analogue of surgeUpdate's
+	// single-pod Failed-recovery path.
+	if surging && src.Phase == workload.InstancePhaseFailed {
+		return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision)
+	}
+
 	// surgeTargetName pins the revision THIS gang surge is committed to
 	// driving to — the gang-path equivalent of single-pod surgeUpdate's
 	// pin. On the FIRST pass (no in-flight Op) it equals target.Name, the
@@ -254,4 +267,60 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		"OMENative %s gang surge complete: instance %d promoted to revision %s",
 		instanceKey(comp, sourceIdx), surgeIdx, surgeTargetName)
 	return true, nil
+}
+
+// abandonFailedGangSurge tears down a gang surge that escalated to
+// Phase=Failed and resets the source Instance to Ready on its running
+// revision, so the next reconcile's DetectUpdateTrigger starts a fresh
+// surge cycle toward the current (corrective) target.
+//
+// Steps (one advanced per reconcile; the loop requeues between them):
+//  1. Delete the wedged replacement gang's pods at surgeIdx.
+//  2. Drop the surge index's marker InstanceStatus (if any).
+//  3. Reset the source: Phase=Ready, RunningRevision unchanged, Operation
+//     cleared. The source's own gang never left its running revision, so
+//     this is an accurate state — and RunningRevision != target then
+//     re-fires a clean surge on the next pass.
+func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx, surgeIdx int32, sourceRunningRev string) (bool, error) {
+	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
+
+	// 1. Delete the wedged surge gang's pods.
+	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
+	if err != nil {
+		return false, fmt.Errorf("list failed surge gang pods (instance=%d): %w", surgeIdx, err)
+	}
+	if len(surgePods) > 0 {
+		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, surgeIdx) {
+			return false, nil
+		}
+		for _, pod := range surgePods {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			deps.ExpectationsCache().ExpectDeletes(ns, owner, comp, surgeIdx, 1)
+			if err := deps.Client.Delete(ctx, pod); err != nil {
+				deps.ExpectationsCache().ObservedDelete(ns, owner, comp, surgeIdx)
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("delete failed surge pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+		}
+		return false, nil
+	}
+
+	// 2. Drop the surge index's marker InstanceStatus (no-op if absent).
+	if _, err := input.RemoveInstance(ctx, surgeIdx); err != nil {
+		return false, fmt.Errorf("remove failed surge marker (instance=%d): %w", surgeIdx, err)
+	}
+
+	// 3. Reset the source to Ready on its running revision, clearing the
+	// failed surge Operation.
+	if err := patchInstanceStatusReadyOnRevision(ctx, input, sourceIdx, sourceRunningRev); err != nil {
+		return false, fmt.Errorf("reset failed gang surge source (instance=%d): %w", sourceIdx, err)
+	}
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
+		"OMENative %s abandoned failed gang surge (surge-index=%d); resetting to revision %s for a fresh rollout",
+		instanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
+	return false, nil
 }

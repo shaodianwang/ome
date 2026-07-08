@@ -514,10 +514,11 @@ type EscalationParams struct {
 func EscalateStuckPodFailures(ctx context.Context, input ReconcileInput, p EscalationParams) error {
 	now := time.Now()
 	for _, s := range p.Instances {
-		if !ShouldCheckForStuckPods(&s, p.PodsByIndex[s.Index], p.CurrentRevisionHash, p.RevisionHashLabel) {
+		pods := podsForStuckCheck(s, p.PodsByIndex)
+		if !ShouldCheckForStuckPods(&s, pods, p.CurrentRevisionHash, p.RevisionHashLabel) {
 			continue
 		}
-		stuckPod, reason := FirstStuckPodForInstance(p.PodsByIndex[s.Index], now, StuckPodFailureGracePeriod)
+		stuckPod, reason := FirstStuckPodForInstance(pods, now, StuckPodFailureGracePeriod)
 		if stuckPod == nil {
 			continue
 		}
@@ -539,6 +540,31 @@ func EscalateStuckPodFailures(ctx context.Context, input ReconcileInput, p Escal
 		input.WarnInstanceFailed(s.Index, stuckPod.Name, reason)
 	}
 	return nil
+}
+
+// podsForStuckCheck returns the pods whose stuck state should escalate s.
+// It is s's own pods plus — when s owns an in-flight gang surge — the
+// surge index's pods. A gang surge's replacement gang lives at a SEPARATE
+// index (s.Operation.SurgeIndex) whose InstanceStatus carries only a
+// transient marker (or none at all), so a bad-revision surge gang wedged in
+// ImagePullBackOff would otherwise never escalate the SOURCE Instance and
+// the rollout would hang forever at Phase=Updating. Attributing the surge
+// pods to the source lets the source escalate to Phase=Failed, from which
+// the gang update path abandons the wedged surge and re-drives the
+// corrective target.
+func podsForStuckCheck(s InstanceStatus, byIdx map[int32][]*corev1.Pod) []*corev1.Pod {
+	own := byIdx[s.Index]
+	if s.Operation == nil || s.Operation.SurgeIndex == nil {
+		return own
+	}
+	surge := byIdx[*s.Operation.SurgeIndex]
+	if len(surge) == 0 {
+		return own
+	}
+	out := make([]*corev1.Pod, 0, len(own)+len(surge))
+	out = append(out, own...)
+	out = append(out, surge...)
+	return out
 }
 
 // ShouldCheckForStuckPods reports whether s qualifies for the
