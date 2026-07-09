@@ -699,6 +699,66 @@ func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
 	}
 }
 
+// TestSurgeUpdate_SupersededSurge_AbandonsAndKeepsSource pins the level-triggered
+// redirect: an in-flight surge toward a rev that's been superseded by a newer
+// desired target, whose surge pod is NOT yet Ready, is abandoned — the stuck surge
+// pod is deleted so the next reconcile re-surges toward the current target, while
+// the source pod at the old ordinal keeps serving (capacity holds; unlike the
+// Failed-recovery path this must NOT drain the source). This is the fix for the
+// p416 prod deadlock (a never-Ready, never-escalated surge pinned to a dead rev
+// holding the maxSurge budget until instanceReadyTimeout).
+func TestSurgeUpdate_SupersededSurge_AbandonsAndKeepsSource(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := surgePlan()
+
+	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true) // source at ord=0, serving
+	if err := c.Create(context.Background(), oldPod); err != nil {
+		t.Fatalf("seed source pod: %v", err)
+	}
+	rev2 := makeCR(t, c, isvc, "llama-70b-engine-rev-rev2hash")
+
+	// Pass 1: surge to rev2 — creates the surge pod at ord=1 (not yet Ready).
+	if _, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], rev2, []*corev1.Pod{oldPod}); err != nil {
+		t.Fatalf("pass 1 (rev2 surge create): %v", err)
+	}
+	surgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 1)
+	rev2Surge := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: surgeName}, rev2Surge); err != nil {
+		t.Fatalf("rev2 surge pod missing after pass 1: %v", err)
+	}
+
+	// Bump to rev3 (supersede) while the rev2 surge pod is still not Ready.
+	rev3 := makeCR(t, c, isvc, "llama-70b-engine-rev-rev3hash")
+	freshISVC := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), freshISVC); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	input2 := legacyTestInput(freshISVC, c, workload.ComponentEngine)
+
+	// Simulate the informer observing pass 1's create so the abandon's
+	// Satisfied() gate (which guards the delete) passes.
+	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+
+	// Pass 2 (superseding rev3 bump): abandon the stuck rev2 surge pod.
+	if _, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input2, plan, plan.Instances[0], rev3, []*corev1.Pod{oldPod, rev2Surge}); err != nil {
+		t.Fatalf("pass 2 (superseding rev3 bump): %v", err)
+	}
+
+	// The stuck rev2 surge pod (ord=1) must be deleted (abandoned).
+	gone := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: surgeName}, gone); err == nil && gone.DeletionTimestamp == nil {
+		t.Errorf("superseded rev2 surge pod should be deleted; it is still present")
+	}
+	// The source pod at ord=0 must be untouched — capacity holds during the redirect.
+	oldName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 0)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: oldName}, &corev1.Pod{}); err != nil {
+		t.Errorf("source pod (ord=0) must be kept during the redirect; got %v", err)
+	}
+}
+
 // TestSurgeUpdate_SingleBump_DoesNotShiftTarget pins the second-half
 // invariant of #256: a single bump (no in-flight surge) followed by a
 // re-invoke at the SAME target must NOT alter the recorded
@@ -1402,7 +1462,20 @@ func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 // pods to be created with the v3 revision-hash. The in-flight surge is
 // committed to v2; its pods must be labeled v2 so the per-revision drain
 // Service and the post-promote running-rev anchor stay consistent.
-func TestGangSurgeUpdate_BumpDuringBump_CreatesPinnedRevPods(t *testing.T) {
+// TestGangSurgeUpdate_BumpDuringBump_AbandonsSupersededSurge pins the
+// level-triggered redirect for gangs: a mid-surge spec bump to a newer rev, while
+// the in-flight surge's replacement gang is NOT yet up (pods not created / not
+// Ready), ABANDONS the superseded surge — it does NOT create pods for the now-dead
+// rev. The source gang at idx=0 is left untouched (capacity holds), and the source
+// Instance is reset to Ready so the next reconcile re-surges toward the current
+// desired through the normal gated path. (A surge already Ready and about to
+// promote instead keeps its pin — see _PromotesPinnedRev — so its promote stays
+// truthful; that's the X-2 no-false-promote invariant this redirect preserves.)
+//
+// Replaces the pre-redirect behavior (create pods on the pinned intermediate rev),
+// which deadlocked when the intermediate surge never became Ready and never
+// escalated (the p416 prod incident): it held the maxSurge budget on a dead rev.
+func TestGangSurgeUpdate_BumpDuringBump_AbandonsSupersededSurge(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	plan := gangSurgePlan()
@@ -1411,7 +1484,6 @@ func TestGangSurgeUpdate_BumpDuringBump_CreatesPinnedRevPods(t *testing.T) {
 	v2Name := "llama-70b-engine-rev-v2hash"
 	v3Name := "llama-70b-engine-rev-v3hash"
 	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
-	v3Hash := query.RevisionHashFromControllerRevisionName(v3Name)
 
 	// In-flight v2 gang surge, BEFORE the surge pods are created.
 	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
@@ -1419,7 +1491,7 @@ func TestGangSurgeUpdate_BumpDuringBump_CreatesPinnedRevPods(t *testing.T) {
 	c := legacyNewFakeClient(t, isvc)
 	makeCR(t, c, isvc, v2Name)
 	makeCR(t, c, isvc, v3Name)
-	// Source gang still alive at idx=0 (capacity holds during the surge).
+	// Source gang still alive at idx=0 (capacity must hold across the redirect).
 	for _, runner := range []string{"leader", "worker"} {
 		if err := c.Create(context.Background(), gangPodAt(isvc, 0, runner, v2Hash, true, true)); err != nil {
 			t.Fatalf("seed source pod (%s): %v", runner, err)
@@ -1432,24 +1504,44 @@ func TestGangSurgeUpdate_BumpDuringBump_CreatesPinnedRevPods(t *testing.T) {
 		t.Fatalf("get v3 CR: %v", err)
 	}
 
-	// Create-surge-gang pass against the v3 target (the re-bump). The surge
-	// gang pods must be created on the PINNED v2 rev, not v3.
+	// Bump to v3 mid-surge, before the v2 surge gang exists. The superseded v2
+	// surge must be abandoned — NOT created on v2.
 	if _, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v3, nil); err != nil {
-		t.Fatalf("gang surge create pass: %v", err)
+		t.Fatalf("gang surge redirect pass: %v", err)
 	}
 
+	// No surge pods created at idx=1 (the superseded v2 surge was abandoned).
 	surgePods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "llama-70b", workload.ComponentEngine, 1)
 	if err != nil {
 		t.Fatalf("list surge gang pods: %v", err)
 	}
-	if len(surgePods) == 0 {
-		t.Fatalf("expected surge gang pods to be created at idx=1; found none")
+	if len(surgePods) != 0 {
+		t.Errorf("superseded v2 surge should be abandoned; got %d pod(s) created at idx=1", len(surgePods))
 	}
-	for _, pod := range surgePods {
-		if got := pod.Labels[query.LabelRevisionHash]; got != v2Hash {
-			t.Errorf("X-2 re-bump: surge pod %s revision-hash=%q, want %q (the pinned in-flight rev). "+
-				"Got the latest target hash %q — the surge drifted to v3 mid-flight.",
-				pod.Name, got, v2Hash, v3Hash)
+
+	// Source gang at idx=0 untouched — capacity holds during the redirect.
+	srcPods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "llama-70b", workload.ComponentEngine, 0)
+	if err != nil {
+		t.Fatalf("list source gang pods: %v", err)
+	}
+	if len(srcPods) != 2 {
+		t.Errorf("source gang at idx=0 must be untouched (2 pods) during the redirect; got %d", len(srcPods))
+	}
+
+	// Source Instance reset to Ready (the v2 surge Op is dropped) so the next
+	// reconcile re-surges toward the current desired (v3).
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read isvc: %v", err)
+	}
+	for _, s := range fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses {
+		if s.Index == 0 {
+			if s.Phase != v1beta1.OMENativeInstanceReady {
+				t.Errorf("source Instance idx=0 should reset to Ready after abandon; got %q", s.Phase)
+			}
+			if s.Operation != nil {
+				t.Errorf("source Instance idx=0 Operation should be cleared after abandon; got %+v", s.Operation)
+			}
 		}
 	}
 }

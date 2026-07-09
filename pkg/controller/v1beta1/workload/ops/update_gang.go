@@ -75,6 +75,25 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision)
 	}
 
+	// Superseded-surge redirect: the in-flight gang surge is committed to a rev
+	// that is no longer desired, and its replacement gang is NOT about to promote
+	// (not fully Ready). Abandon it and re-surge toward the current target — the
+	// level-triggered contract, the multi-pod analogue of surgeUpdate's superseded
+	// redirect. Keyed on target-supersede rather than Phase=Failed so a gang surge
+	// that never becomes Ready and never escalates can't pin itself to a dead rev
+	// and hold the maxSurge budget until instanceReadyTimeout. A gang about to
+	// promote (all pods Ready) keeps its pin so the promote stamps the rev the pods
+	// actually run (X-2 anti-corruption).
+	if surging && src.Operation.TargetRevision != target.Name {
+		surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, *src.Operation.SurgeIndex)
+		if err != nil {
+			return false, fmt.Errorf("list surge gang pods for supersede check (instance=%d): %w", *src.Operation.SurgeIndex, err)
+		}
+		if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
+			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision)
+		}
+	}
+
 	// surgeTargetName pins the revision THIS gang surge is committed to
 	// driving to — the gang-path equivalent of single-pod surgeUpdate's
 	// pin. On the FIRST pass (no in-flight Op) it equals target.Name, the

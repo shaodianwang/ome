@@ -89,6 +89,57 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		return false, nil
 	}
 
+	// Superseded-surge redirect (level-triggered "desired wins"): the in-flight
+	// surge is committed to a revision that is no longer the desired target AND is
+	// not about to promote (surge pod not yet Ready). Abandon JUST the stuck surge
+	// pod — the source at oldOrdinal keeps serving, so capacity never drops (unlike
+	// the Failed-recovery reclassify path, which drains the whole slot; that's safe
+	// only because a Failed Instance is already compromised) — and reset the
+	// Instance to Ready on its running revision. The NEXT reconcile re-surges
+	// toward the current target through the normal gated path, so maxSurge / ratio
+	// / canary all re-apply. Without this, a surge that never becomes Ready and
+	// never escalates pins itself to a dead rev and holds the maxSurge budget until
+	// instanceReadyTimeout (the p416 deadlock). A surge that IS about to promote
+	// (Ready) skips this and keeps the X-2 pin below so its promote stamps the rev
+	// its pods actually run. Only Step=Surge — a SurgeDrain surge is past the point
+	// of no return (source already draining) and finishes its cycle.
+	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil &&
+		s.Phase != workload.InstancePhaseFailed && s.Operation != nil &&
+		s.Operation.Type == workload.InstanceOperationUpdate &&
+		s.Operation.Step == updateStepSurge && s.Operation.TargetRevision != "" &&
+		s.Operation.TargetRevision != target.Name &&
+		!(len(surgePods) > 0 && query.AllPodsRuntimeReady(surgePods)) {
+		if len(surgePods) > 0 {
+			if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
+				return false, nil
+			}
+			for _, pod := range surgePods {
+				if pod.DeletionTimestamp != nil {
+					continue
+				}
+				deps.ExpectationsCache().ExpectDeletes(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index, 1)
+				if derr := deps.Client.Delete(ctx, pod); derr != nil {
+					deps.ExpectationsCache().ObservedDelete(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index)
+					if apierrors.IsNotFound(derr) {
+						continue
+					}
+					return false, fmt.Errorf("delete superseded surge pod %s/%s: %w", pod.Namespace, pod.Name, derr)
+				}
+			}
+			return false, nil
+		}
+		// Surge pod gone — reset to Ready on the running rev (source unchanged); the
+		// next reconcile re-surges toward the current target via DetectUpdateTrigger
+		// + the surge budget / coordination gates.
+		if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, s.RunningRevision); err != nil {
+			return false, fmt.Errorf("reset superseded surge source (instance=%d): %w", inst.Index, err)
+		}
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
+			"OMENative %s abandoned superseded surge to %s; re-surging toward %s",
+			instanceKey(input.Key.Component, inst.Index), s.Operation.TargetRevision, target.Name)
+		return false, nil
+	}
+
 	// surgeTargetName pins the revision this surge is committed to
 	// driving to. On the FIRST pass (no in-flight Op) it equals
 	// target.Name — the rev the dispatcher just decided to roll to. On
