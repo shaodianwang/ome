@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // canonicalImage normalizes a container image reference for the
@@ -106,6 +108,35 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 	}
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
 		return fmt.Errorf("patch pod %s/%s images: %w", pod.Namespace, pod.Name, err)
+	}
+	return nil
+}
+
+// patchPodRevisionHashLabel strategic-merge-patches the pod's
+// ome.io/revision-hash label to targetHash. An in-place update changes a
+// pod's revision (image / annotations) WITHOUT recreating it, but that
+// label is stamped only at pod create time (render.go). Without restamping
+// it here, an in-place-rolled pod keeps its OLD revision-hash label while
+// InstanceStatus.RunningRevision advances — so per-revision Service
+// routing, drain (drain.IsPodDrained), and stuck-pod detection
+// (HasWedgedPodAgainstCurrent), which all key on this label, treat the
+// rolled pod as the PREVIOUS revision. Idempotent: no patch is issued when
+// the label already matches (or targetHash is empty).
+func patchPodRevisionHashLabel(ctx context.Context, c client.Client, pod *corev1.Pod, targetHash string) error {
+	if pod == nil {
+		return fmt.Errorf("patchPodRevisionHashLabel: nil pod")
+	}
+	if targetHash == "" || pod.Labels[query.LabelRevisionHash] == targetHash {
+		return nil
+	}
+	raw, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"labels": map[string]string{query.LabelRevisionHash: targetHash}},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal revision-hash label patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
+		return fmt.Errorf("patch pod %s/%s revision-hash label: %w", pod.Namespace, pod.Name, err)
 	}
 	return nil
 }

@@ -171,6 +171,54 @@ func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 	}
 }
 
+// TestUpdate_InPlace_RestampsRevisionHashLabel pins the fix for the
+// in-place revision-hash gap: an in-place rollout must restamp the pod's
+// ome.io/revision-hash label to the target revision. Without it the rolled
+// pod keeps its old label, so per-revision Service routing / drain /
+// stuck-pod detection (all keyed on the label) mis-classify it as the
+// previous revision.
+func TestUpdate_InPlace_RestampsRevisionHashLabel(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
+			},
+		},
+	}
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
+	// Pod starts on the legacy synthetic hash; the in-place roll must move it.
+	if pod.Labels[query.LabelRevisionHash] != testRevisionHashLegacy {
+		t.Fatalf("precondition: pod label got %q want %q", pod.Labels[query.LabelRevisionHash], testRevisionHashLegacy)
+	}
+	target := legacyTargetSpecImage("llama:v2")
+	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false /* drained */)
+	c := legacyNewFakeClient(t, isvc, pod, slice)
+	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
+		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+
+	if _, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	wantHash := query.RevisionHashFromControllerRevisionName(tcr.Name)
+	if wantHash == "" {
+		t.Fatalf("target CR %q yielded empty revision hash", tcr.Name)
+	}
+	if got.Labels[query.LabelRevisionHash] != wantHash {
+		t.Errorf("revision-hash label: got %q want %q (in-place must restamp)", got.Labels[query.LabelRevisionHash], wantHash)
+	}
+}
+
 // TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision pins the
 // in-place terminator: when the pod is already on the target image,
 // runtime-ready, and NOT yet serving (because a previous pass drained
