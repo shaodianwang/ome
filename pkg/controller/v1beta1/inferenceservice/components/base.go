@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -802,7 +803,20 @@ func ReconcileOMENativeSubresources(
 		}}
 		endpoints = append(endpoints, podmonitor.ParseExtraEndpoints(objectMeta.Annotations)...)
 		target.Spec.PodMetricsEndpoints = endpoints
-		target.Labels = baseSelector
+		// Own copy of baseSelector for metadata.labels: ApplyManagedScrapeConfig
+		// merges cfg.Labels into it, and spec.selector.MatchLabels must NOT gain
+		// those labels (pods don't carry them).
+		target.Labels = maps.Clone(baseSelector)
+		// Cluster-scope PodMonitor defaults (metadata labels + endpoint
+		// relabelings) from the inferenceservice-config ConfigMap. Applied
+		// AFTER target.Labels/endpoints are set: labels merge into
+		// metadata.labels only (spec.selector keeps selecting pods by
+		// baseSelector), relabelings append to every endpoint. Without this the
+		// PodMonitor carries only OME's own labels and a label-selecting
+		// collector (e.g. the KTel target allocator) never scrapes it.
+		if b.InferenceServiceConfig != nil {
+			podmonitor.ApplyManagedScrapeConfig(target, b.InferenceServiceConfig.PodMonitor)
+		}
 		target.OwnerReferences = []metav1.OwnerReference{
 			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 		}

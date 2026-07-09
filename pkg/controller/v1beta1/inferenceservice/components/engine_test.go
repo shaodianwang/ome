@@ -1152,6 +1152,100 @@ func TestEngineReconcileOMENativeSubresources_ExtraEndpoints(t *testing.T) {
 	g.Expect(pm.Spec.PodMetricsEndpoints[1].Path).To(gomega.Equal("/engine_metrics"))
 }
 
+// TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig pins the KTel
+// wiring: the podMonitor config block (metadata labels + endpoint relabelings)
+// is applied to the generated PodMonitor. The label goes to metadata.labels so
+// a label-selecting collector scrapes it, but must NOT leak into spec.selector
+// (pods don't carry it); the relabelings are appended to every endpoint so
+// scraped series carry the dashboard label schema.
+func TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(monitoringv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	engineSpec := &v1beta1.EngineSpec{
+		PodSpec: v1beta1.PodSpec{
+			Containers: []v1.Container{{Name: "engine", Image: "engine:v1"}},
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-isvc", Namespace: "default",
+			UID: types.UID("test-isvc-uid"),
+		},
+		Spec: v1beta1.InferenceServiceSpec{Engine: engineSpec},
+	}
+	objectMeta := metav1.ObjectMeta{
+		Name:      "test-isvc-engine",
+		Namespace: "default",
+		Annotations: map[string]string{
+			constants.ExtraPodMetricsEndpointsAnnotationKey: "http:/engine_metrics",
+		},
+	}
+	podSpec := &v1.PodSpec{
+		Containers: []v1.Container{{Name: "engine", Image: "engine:v1",
+			Ports: []v1.ContainerPort{
+				{Name: "metrics", ContainerPort: 29000},
+				{Name: "http", ContainerPort: 8000},
+			}}},
+	}
+
+	cfg := &controllerconfig.InferenceServicesConfig{
+		PodMonitor: controllerconfig.PodMonitorConfig{
+			Labels: map[string]string{"ktel.fb.com/scrape-tier": "cluster"},
+			Relabelings: []controllerconfig.RelabelConfig{
+				{
+					SourceLabels: []string{"__meta_kubernetes_pod_label_ome_io_inferenceservice"},
+					TargetLabel:  "inferenceservice",
+				},
+				{
+					SourceLabels: []string{"__meta_kubernetes_namespace"},
+					TargetLabel:  "k8s_namespace_name",
+				},
+			},
+		},
+	}
+
+	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+	clientset := fake.NewClientset()
+	engine := NewEngine(
+		c, clientset,
+		nil, nil, nil,
+		scheme,
+		cfg,
+		constants.OMENative,
+		nil, nil,
+		engineSpec,
+		nil, "", nil, nil,
+	).(*Engine)
+
+	err := engine.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	pm := &monitoringv1.PodMonitor{}
+	g.Expect(c.Get(context.Background(),
+		client.ObjectKey{Namespace: "default", Name: "test-isvc-engine"},
+		pm)).To(gomega.Succeed())
+
+	// KTel selection label is on metadata.labels...
+	g.Expect(pm.Labels).To(gomega.HaveKeyWithValue("ktel.fb.com/scrape-tier", "cluster"))
+	// ...but NOT on spec.selector (would break pod matching).
+	g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey("ktel.fb.com/scrape-tier"))
+	g.Expect(pm.Spec.Selector.MatchLabels).To(gomega.HaveKeyWithValue(constants.OMEComponentLabel, string(v1beta1.EngineComponent)))
+
+	// Relabelings appended to every endpoint (default + extra).
+	g.Expect(pm.Spec.PodMetricsEndpoints).To(gomega.HaveLen(2))
+	for _, ep := range pm.Spec.PodMetricsEndpoints {
+		g.Expect(ep.RelabelConfigs).To(gomega.HaveLen(2))
+		g.Expect(ep.RelabelConfigs[0].TargetLabel).To(gomega.Equal("inferenceservice"))
+		g.Expect(ep.RelabelConfigs[0].SourceLabels).To(gomega.ContainElement(monitoringv1.LabelName("__meta_kubernetes_pod_label_ome_io_inferenceservice")))
+		g.Expect(ep.RelabelConfigs[1].TargetLabel).To(gomega.Equal("k8s_namespace_name"))
+	}
+}
+
 // TestDecoderReconcileOMENativeSubresources_Rank0Selector mirrors the
 // engine test for the Decoder. The two helpers are intentionally
 // duplicated across components/engine.go and components/decoder.go;

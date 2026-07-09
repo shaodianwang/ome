@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -25,6 +26,7 @@ const (
 	ModelCacheConfigName     = "modelCache"
 	CanaryAnalysisConfigName = "canaryAnalysis"
 	CoordinationConfigName   = "coordination"
+	PodMonitorConfigName     = "podMonitor"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -54,6 +56,50 @@ type InferenceServicesConfig struct {
 	// ModelCache contains the configured model cache provider used by
 	// sharded model-serving runtimes.
 	ModelCache sharded.ProviderConfig `json:"modelCache,omitempty"`
+	// PodMonitor carries cluster-scope defaults applied to every generated
+	// PodMonitor (metadata labels + endpoint relabelings). Loaded from the
+	// "podMonitor" key of the inferenceservice-config ConfigMap.
+	PodMonitor PodMonitorConfig `json:"podMonitor,omitempty"`
+}
+
+// PodMonitorConfig configures the PodMonitor objects OME generates for each
+// InferenceService Component. Both fields have NO in-code default — they are
+// supplied via the inferenceservice-config ConfigMap (Helm chart / GitOps), so
+// scrape-pipeline-specific values are never hardcoded magic strings.
+//
+// +kubebuilder:object:generate=false
+type PodMonitorConfig struct {
+	// Labels are merged into each generated PodMonitor's metadata.labels (NOT
+	// its spec.selector, which continues to select pods by the component's own
+	// labels). Use this to opt the PodMonitor into an external scrape pipeline
+	// that selects monitors by label — e.g. a KTel / OpenTelemetry target
+	// allocator whose podMonitorSelector is {ktel.fb.com/scrape-tier: cluster}.
+	// Empty leaves the PodMonitor with only OME's own labels, in which case a
+	// label-selecting collector will not scrape it.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Relabelings are appended to every PodMetricsEndpoint of every generated
+	// PodMonitor. They map Kubernetes service-discovery meta labels onto the
+	// stable metric labels dashboards key on (e.g.
+	// __meta_kubernetes_pod_label_ome_io_inferenceservice -> inferenceservice),
+	// so PodMonitor-scraped series carry the same label schema as the legacy
+	// pod-annotation ("kubernetes-pods") scrape path. Empty means OME adds no
+	// relabelings and the collector's own defaults apply.
+	Relabelings []RelabelConfig `json:"relabelings,omitempty"`
+}
+
+// RelabelConfig is a JSON-friendly subset of the Prometheus-operator
+// monitoringv1.RelabelConfig. It is converted to the operator type by the
+// podmonitor reconciler. Only the fields OME needs are exposed; extend as
+// required.
+//
+// +kubebuilder:object:generate=false
+type RelabelConfig struct {
+	SourceLabels []string `json:"sourceLabels,omitempty"`
+	Separator    string   `json:"separator,omitempty"`
+	TargetLabel  string   `json:"targetLabel,omitempty"`
+	Regex        string   `json:"regex,omitempty"`
+	Replacement  string   `json:"replacement,omitempty"`
+	Action       string   `json:"action,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -324,19 +370,38 @@ func (c *ConfigCache) get(clientset kubernetes.Interface) (*v1.ConfigMap, error)
 // exists (callers fail fast otherwise) and returns an empty config struct.
 // ModelCache is loaded separately via NewModelCacheConfig.
 func NewInferenceServicesConfig(clientset kubernetes.Interface) (*InferenceServicesConfig, error) {
-	if _, err := getInferenceServiceConfigMap(clientset); err != nil {
+	cm, err := getInferenceServiceConfigMap(clientset)
+	if err != nil {
 		return nil, err
 	}
-	return &InferenceServicesConfig{}, nil
+	return inferenceServicesConfigFromConfigMap(cm)
 }
 
 // NewInferenceServicesConfigCached is the ConfigCache-backed variant of
 // NewInferenceServicesConfig used on the reconcile hot path.
 func NewInferenceServicesConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*InferenceServicesConfig, error) {
-	if _, err := cache.get(clientset); err != nil {
+	cm, err := cache.get(clientset)
+	if err != nil {
 		return nil, err
 	}
-	return &InferenceServicesConfig{}, nil
+	return inferenceServicesConfigFromConfigMap(cm)
+}
+
+// inferenceServicesConfigFromConfigMap builds the InferenceServicesConfig from
+// the ConfigMap. ModelCache is still populated separately by the reconciler;
+// the podMonitor block is parsed here so components can read it via
+// InferenceServiceConfig.PodMonitor.
+func inferenceServicesConfigFromConfigMap(cm *v1.ConfigMap) (*InferenceServicesConfig, error) {
+	cfg := &InferenceServicesConfig{}
+	if cm == nil {
+		return cfg, nil
+	}
+	if data, ok := cm.Data[PodMonitorConfigName]; ok && strings.TrimSpace(data) != "" {
+		if err := json.Unmarshal([]byte(data), &cfg.PodMonitor); err != nil {
+			return nil, fmt.Errorf("unable to parse %q config json: %w", PodMonitorConfigName, err)
+		}
+	}
+	return cfg, nil
 }
 
 // NewOmeAgentConfig loads the ome-agent block from the inferenceservice

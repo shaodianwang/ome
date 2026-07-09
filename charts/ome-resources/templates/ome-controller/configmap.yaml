@@ -84,6 +84,10 @@ data:
       "enableMetricAggregation": "{{ .Values.ome.metricsaggregator.enableMetricAggregation }}",
       "enablePrometheusScraping" : "{{ .Values.ome.metricsaggregator.enablePrometheusScraping }}"
     }
+{{- if .Values.ome.podMonitor }}
+  podMonitor: |-
+    {{- toJson .Values.ome.podMonitor | nindent 4 }}
+{{- end }}
 {{ if .Values.ome.modelCache.provider }}
   modelCache: |-
     {

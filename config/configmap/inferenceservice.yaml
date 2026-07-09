@@ -38,6 +38,32 @@ data:
       "enablePrometheusScraping" : "false"
     }
 
+  # podMonitor configures cluster-scope defaults applied to every PodMonitor OME
+  # generates per InferenceService Component. Omit this key to keep the legacy
+  # behavior (PodMonitors carry only OME's own labels; a label-selecting metrics
+  # collector will not scrape them, so metrics flow only via the pod-annotation
+  # scrape path). There is intentionally NO in-code default — supply the value
+  # via this ConfigMap (Helm chart / GitOps), so scrape-pipeline-specific values
+  # are never hardcoded in the binary.
+  #
+  # - labels:      merged into each PodMonitor's metadata.labels (NOT
+  #                spec.selector). Opts the monitor into a label-selecting
+  #                collector, e.g. a KTel/OTel target allocator whose
+  #                podMonitorSelector is {ktel.fb.com/scrape-tier: cluster}.
+  # - relabelings: appended to every PodMetricsEndpoint so scraped series carry
+  #                the same label schema as the legacy pod-annotation scrape.
+  #
+  # podMonitor: |-
+  #   {
+  #     "labels": { "ktel.fb.com/scrape-tier": "cluster" },
+  #     "relabelings": [
+  #       { "sourceLabels": ["__meta_kubernetes_pod_label_ome_io_inferenceservice"], "targetLabel": "inferenceservice" },
+  #       { "sourceLabels": ["__meta_kubernetes_pod_label_component"], "targetLabel": "component" },
+  #       { "sourceLabels": ["__meta_kubernetes_pod_label_serving_runtime"], "targetLabel": "serving_runtime" },
+  #       { "sourceLabels": ["__meta_kubernetes_namespace"], "targetLabel": "k8s_namespace_name" }
+  #     ]
+  #   }
+
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel/ClusterBaseModel resources with spec.distribution: Sharded.
   # Omit this key (or leave provider empty) to keep the default PerNode /

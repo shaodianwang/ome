@@ -12,6 +12,34 @@ ome:
   metricsaggregator:
     enableMetricAggregation: "false"
     enablePrometheusScraping: "false"
+  # podMonitor configures cluster-scope defaults for every PodMonitor OME
+  # generates per InferenceService Component. Omit (or leave empty) to keep the
+  # legacy behavior: PodMonitors carry only OME's own labels, so a
+  # label-selecting metrics collector will not scrape them and metrics flow only
+  # via the pod-annotation scrape path.
+  #
+  # Set `labels` to opt the generated PodMonitors into an external scrape
+  # pipeline that selects monitors by label — e.g. a KTel / OpenTelemetry target
+  # allocator whose podMonitorSelector requires {ktel.fb.com/scrape-tier: cluster}.
+  # These labels land on metadata.labels only (never spec.selector).
+  #
+  # Set `relabelings` to map Kubernetes SD meta labels onto the stable metric
+  # labels dashboards key on, so PodMonitor-scraped series match the legacy
+  # pod-annotation ("kubernetes-pods") label schema. Appended to every endpoint.
+  #
+  # podMonitor:
+  #   labels:
+  #     ktel.fb.com/scrape-tier: cluster
+  #   relabelings:
+  #     - sourceLabels: ["__meta_kubernetes_pod_label_ome_io_inferenceservice"]
+  #       targetLabel: inferenceservice
+  #     - sourceLabels: ["__meta_kubernetes_pod_label_component"]
+  #       targetLabel: component
+  #     - sourceLabels: ["__meta_kubernetes_pod_label_serving_runtime"]
+  #       targetLabel: serving_runtime
+  #     - sourceLabels: ["__meta_kubernetes_namespace"]
+  #       targetLabel: k8s_namespace_name
+  podMonitor: {}
   # multiclusterAccess installs the long-lived ServiceAccount token used by
   # InferenceDeploymentOperator to manage OME resources from a control-plane
   # cluster.
