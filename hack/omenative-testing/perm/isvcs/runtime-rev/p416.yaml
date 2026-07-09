@@ -1,0 +1,59 @@
+# p416: runtime-rev engine corrective-rollout-deadlocks-behind-stuck-surge (KNOWN BUG: deadlocks today) mode=runtimerev rt=ome-coordtest-rt-p416 expect=recover break=stuck Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+# Surge-budget deadlock guard (prod incident, t4-9b-mm-smg-shadow). maxSurge=1:
+# a prior rollout's ONE surge pod runs but never becomes Ready (readinessProbe
+# forced to fail; container stays up via startup/liveness → no crash, no
+# ImagePullBackOff → the fast stuck-pod breaker never fires). That stuck surge
+# holds the entire maxSurge budget, so a later CORRECTIVE rollout can start zero
+# new-revision pods and deadlocks at 0/N until instanceReadyTimeout. MUST roll
+# the corrective revision forward; today it does not.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: ome-coordtest-rt-p416
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+
+  engineConfig: &cpuRunner
+    nodeSelector: { kubernetes.io/arch: amd64 }
+    runner:
+      name:  ome-container
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+      command: ["sh", "-c", "sleep ${TEST_STARTUP_DELAY:-15} && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
+      env:
+        - { name: TEST_REV,            value: "v1" }
+        - { name: TEST_STARTUP_DELAY,  value: "15" }
+      ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+      # startup + liveness stay httpGet so the container stays UP (nginx serves);
+      # the guard forces readinessProbe to fail at runtime to make the surge pod
+      # run-but-never-Ready WITHOUT crashing (so it never escalates).
+      startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
+      readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 2 }
+      livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
+      resources:
+        requests: { cpu: 50m,  memory: 64Mi }
+        limits:   { cpu: 200m, memory: 128Mi }
+
+  decoderConfig: *cpuRunner
+  routerConfig:  *cpuRunner
+
+---
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p416 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-rt-p416, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

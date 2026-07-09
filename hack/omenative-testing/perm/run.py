@@ -785,7 +785,8 @@ def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     if note:
         print(f"\nFailure reasons: {note}")
     _stop_watcher(ctx)
-    kubectl("delete", "-n", NS, "-f", str(find_isvc(case_id)), "--wait=false")
+    if not os.getenv("OME_TEST_KEEP"):
+        kubectl("delete", "-n", NS, "-f", str(find_isvc(case_id)), "--wait=false")
     write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, ctx["peaks"], final,
                  ctx.get("converged_at"), ctx["info"].get("policy"), verdict, note, new_final)
     return 0
@@ -1030,6 +1031,131 @@ def _csr_set_image(csr, comps, image):
     return kubectl("patch", "clusterservingruntime", csr, "--type=json", "-p", json.dumps(ops)).returncode == 0
 
 
+# readinessProbe variants for the surge-budget-deadlock guard. _BAD keeps the
+# container RUNNING (startup/liveness httpGet still pass — nginx serves) but
+# readiness never flips, so a surge pod is alive-but-never-Ready WITHOUT crashing
+# → it dodges the stuck-pod breaker (no terminal waiting state) and just holds the
+# maxSurge budget. _GOOD mirrors runtime/csr.yaml's real probe (restore).
+_BAD_READINESS = {"exec": {"command": ["false"]}}
+_GOOD_READINESS = {"httpGet": {"path": "/", "port": 8080}, "periodSeconds": 2, "failureThreshold": 2}
+
+
+def _csr_patch_readiness(csr, comps, probe):
+    """Replace every runner's readinessProbe (flat + leader/worker) of each
+    configured component. Used to make a rollout's surge pods run-but-never-Ready
+    (never-escalating) and then restore normal readiness."""
+    r = kubectl("get", "clusterservingruntime", csr, "-o", "json")
+    if r.returncode != 0:
+        return False
+    spec = (json.loads(r.stdout) or {}).get("spec", {})
+    ops = []
+    for c in comps:
+        cfg = f"{c}Config"
+        node = spec.get(cfg) or {}
+        if isinstance(node.get("runner"), dict):
+            ops.append({"op": "replace", "path": f"/spec/{cfg}/runner/readinessProbe", "value": probe})
+        for sub in ("leader", "worker"):
+            if isinstance(node.get(sub), dict) and isinstance(node[sub].get("runner"), dict):
+                ops.append({"op": "replace", "path": f"/spec/{cfg}/{sub}/runner/readinessProbe", "value": probe})
+    if not ops:
+        return False
+    return kubectl("patch", "clusterservingruntime", csr, "--type=json", "-p", json.dumps(ops)).returncode == 0
+
+
+def _runtime_recover_stuck(case_id, yaml_file, desc, hdr, csr):
+    """Guard for the surge-budget deadlock (prod incident on t4-9b-mm-smg-shadow):
+    a prior rollout's surge pods that RUN but never become Ready — and never
+    escalate (no crash, no ImagePullBackOff, so the fast stuck-pod breaker never
+    fires) — consume the per-Component maxSurge budget, so a later CORRECTIVE
+    rollout can't start a single new-revision pod. It deadlocks at 0/N until
+    instanceReadyTimeout (~1h30m). MUST roll the corrective revision forward
+    quickly; today it does not, so this FAILs until fixed.
+
+    Reproduction: break readiness (readinessProbe -> exec:false; container stays up
+    via startup/liveness) + bump a rev -> surge pods run-but-never-Ready, holding
+    maxSurge. Then restore readiness + bump a distinct good rev -> the corrective
+    rollout must supersede the stuck surge and converge."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N, configured = ctx["N"], ctx["configured"]
+    comps = sorted(configured)
+
+    print("  Phase 2a: break readiness (surge pods run but never become Ready) + bump a broken rev")
+    if not _csr_patch_readiness(csr, comps, _BAD_READINESS):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "break-readiness patch failed")
+    if not _bump_runtime(ctx, csr, comps, material=True):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "broken-rev bump failed")
+    t0, stuck = time.time(), set()
+    while time.time() - t0 < 150 and not ctx["closed"]:
+        _read_one(ctx)
+        for p in ctx["pod_state"].values():
+            if p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]:
+                stuck.add(p["hash"])
+        if stuck:
+            break
+    if not stuck:
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "no surge pod appeared for the broken rollout")
+    time.sleep(20)  # let it settle as stuck: running, not Ready, not escalated
+    seen_before = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set())) | stuck
+
+    print("  Phase 2b: CORRECTIVE edit — restore readiness + bump a distinct good rev")
+    if not _csr_patch_readiness(csr, comps, _GOOD_READINESS):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "restore-readiness patch failed")
+    if not _bump_runtime(ctx, csr, comps, material=True):  # resets trigger_ts
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "corrective bump failed")
+    seen_before |= set(ctx.get("seen_hashes", set()))
+
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S *
+                 sum(N[c] * ctx["pods_per_inst"][c] for c in configured))
+    print(f"  Phase 3: watching the corrective rollout roll forward (≤{budget}s)")
+
+    def attempted():  # a corrective-rev pod (newer than the stuck attempt) appeared
+        return any(p and p["alive"] and p.get("hash") and p["hash"] not in seen_before
+                   for p in ctx["pod_state"].values())
+
+    def recovered():
+        for c in configured:
+            a, rd, _ = ctx["agg"].get(c, (0, 0, 0))
+            if a != N[c] or rd != N[c]:
+                return False
+        for c in configured:
+            live = [p for p in ctx["pod_state"].values()
+                    if p and p["alive"] and p["comp"] == c and p.get("hash")]
+            if not live or any(p["hash"] in seen_before for p in live):
+                return False
+        return True
+
+    # The corrective rollout is deadlocked behind the stuck surge until
+    # instanceReadyTimeout; if NO corrective-rev pod even appears within this grace,
+    # it's the budget deadlock — fail fast rather than waiting out the budget.
+    ATTEMPT_GRACE_S = 120.0
+    state, stable = "WEDGED", None
+    while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)
+        if recovered():
+            if stable is None:
+                stable = time.time()
+            elif time.time() - stable >= STABILITY_S:
+                state = "RECOVERED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                break
+        else:
+            stable = None
+        if time.time() - ctx["trigger_ts"] > ATTEMPT_GRACE_S and not attempted():
+            state = "WEDGED"
+            break
+
+    verdict, notes, checks = "PASS", [], []
+    if state != "RECOVERED":
+        verdict = "FAIL"
+        notes.append("corrective rollout deadlocked behind an unhealthy prior surge (maxSurge held by a never-ready, never-escalated surge)")
+        checks.append("  ✗ deadlock: corrective edit never rolled forward — a stuck surge held the maxSurge budget and never escalated")
+    else:
+        checks.append("  ✓ recovery: corrective edit rolled forward despite the unhealthy prior-rollout surge")
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _runtime_recover(case_id, yaml_file, desc, hdr, csr):
     """Guard for the Failed-escalation wedge: drive the ISVC into a failed rollout
     (bad runtime image → ImagePullBackOff → Instance escalates to Phase=Failed),
@@ -1136,6 +1262,8 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
     if not csr:
         return _write_fail(case_id, desc, hdr, "CASE_ERROR", "runtimerev case missing rt= header")
     if hdr.get("expect") == "recover":
+        if hdr.get("break") == "stuck":
+            return _runtime_recover_stuck(case_id, yaml_file, desc, hdr, csr)
         return _runtime_recover(case_id, yaml_file, desc, hdr, csr)
     expect_roll = hdr.get("expect", "roll") == "roll"
     # Whether the runtime edit is material (changes the pod spec) is independent of
