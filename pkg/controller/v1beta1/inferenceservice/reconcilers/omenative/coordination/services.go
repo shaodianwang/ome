@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // perRevisionServicePort is the default port the per-revision routing
@@ -49,15 +50,19 @@ type PerRevisionService struct {
 }
 
 // PerRevisionServiceName returns the per-revision Service name for one
-// (component, revisionHash) pair. Format: `<isvc>-<component>-rev-<hash>`.
+// (component, revisionHash) pair. Format: `<isvc>-<component>-rev-<hash>`,
+// bounded to the DNS1035 label limit. Delegates to the workload/query
+// copy so the coordination-created name and the dispatch-path lookup
+// (workload/ops) are always byte-identical.
 func PerRevisionServiceName(isvcName string, component v1beta1.ComponentType, revisionHash string) string {
-	return fmt.Sprintf("%s-%s-rev-%s", isvcName, component, revisionHash)
+	return query.PerRevisionServiceName(isvcName, workload.ComponentType(component), revisionHash)
 }
 
 // PerRevisionHeadlessServiceName returns the per-revision headless
-// Service name. Format: `<isvc>-<component>-rev-<hash>-headless`.
+// Service name. Format: `<isvc>-<component>-rev-<hash>-headless`, bounded
+// to the DNS1035 label limit.
 func PerRevisionHeadlessServiceName(isvcName string, component v1beta1.ComponentType, revisionHash string) string {
-	return PerRevisionServiceName(isvcName, component, revisionHash) + "-headless"
+	return query.PerRevisionHeadlessServiceName(isvcName, workload.ComponentType(component), revisionHash)
 }
 
 // PerRevisionServiceNames returns the routing + headless names for a

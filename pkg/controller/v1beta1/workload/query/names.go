@@ -3,8 +3,22 @@ package query
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/ome-projects/ome/pkg/constants"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// boundedServiceName guarantees a Service name fits the DNS1035 label
+// limit. Names within the limit pass through unchanged; longer names are
+// truncated to a deterministic, collision-resistant `{hash}-{suffix}`
+// form via the shared constants helper. Overflowing names no longer
+// parse back to their owner in the Service→owner event mappers, so they
+// fall back to the timer-poll reconcile path — correct, just not
+// event-driven.
+func boundedServiceName(name string) string {
+	return constants.TruncateNameWithMaxLength(name, validation.DNS1035LabelMaxLength)
+}
 
 // PodName returns the stable pod name for one ordinal of one Runner
 // of one Instance — <isvc>-<comp>-<inst-idx>-<runner>-<ordinal>. Stable
@@ -19,7 +33,7 @@ func PodName(isvc string, component workload.ComponentType, instanceIdx int32, r
 // publishes the pods it's about to mutate, and by status_aggregate to
 // scan EndpointSlices for ready endpoints.
 func HeadlessServiceName(isvc string, component workload.ComponentType) string {
-	return fmt.Sprintf("%s-%s-headless", isvc, component)
+	return boundedServiceName(fmt.Sprintf("%s-%s-headless", isvc, component))
 }
 
 // StableServiceName returns the per-Component stable (non-headless,
@@ -39,11 +53,20 @@ func StableServiceName(isvc string, component workload.ComponentType) string {
 
 // PerRevisionServiceName returns the per-revision routed Service name
 // for one (owner, component, revisionHash) tuple — format
-// `<owner>-<component>-rev-<hash>`. The coordination package keeps
-// its own v1beta1-typed copy; both must produce identical names so
-// dispatch-path lookups line up.
+// `<owner>-<component>-rev-<hash>`, bounded to the DNS1035 label limit.
+// The coordination package delegates to this copy; both must produce
+// identical names so dispatch-path lookups line up.
 func PerRevisionServiceName(ownerName string, component workload.ComponentType, revisionHash string) string {
-	return fmt.Sprintf("%s-%s-rev-%s", ownerName, component, revisionHash)
+	return boundedServiceName(fmt.Sprintf("%s-%s-rev-%s", ownerName, component, revisionHash))
+}
+
+// PerRevisionHeadlessServiceName returns the per-revision headless
+// Service name — `<owner>-<component>-rev-<hash>-headless`, bounded to
+// the DNS1035 label limit. Bounding the full name (rather than
+// appending `-headless` to the already-bounded routing name) keeps the
+// headless name distinct from and independent of the routing name.
+func PerRevisionHeadlessServiceName(ownerName string, component workload.ComponentType, revisionHash string) string {
+	return boundedServiceName(fmt.Sprintf("%s-%s-rev-%s-headless", ownerName, component, revisionHash))
 }
 
 // InstanceSubdomain returns the per-Instance DNS subdomain stamped

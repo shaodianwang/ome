@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // PeerEndpointEnv is the set of generation-scoped peer-discovery env
@@ -68,14 +69,16 @@ func BuildPeerEndpointEnv(isvcName, namespace string, peer v1beta1.ComponentType
 // per-Component Service. The OMENative reconciler emits one of these
 // per Component (`<isvc>-<peer>`).
 func genericPeerDNS(isvc string, peer v1beta1.ComponentType, namespace string) string {
-	return fmt.Sprintf("%s-%s.%s.svc.cluster.local", isvc, peer, namespace)
+	return fmt.Sprintf("%s-%s.%s.%s", isvc, peer, namespace, constants.ClusterLocalDomain)
 }
 
 // revisionPeerDNS returns the in-cluster DNS for the per-revision peer
 // Service. The OMENative coordination layer creates one of these per
 // (Component, revisionHash) pair.
 func revisionPeerDNS(isvc string, peer v1beta1.ComponentType, revisionHash, namespace string) string {
-	return fmt.Sprintf("%s-%s-rev-%s.%s.svc.cluster.local", isvc, peer, revisionHash, namespace)
+	// Derive from PerRevisionServiceName so the peer DNS always matches
+	// the (bounded) routing Service name coordination actually creates.
+	return fmt.Sprintf("%s.%s.%s", PerRevisionServiceName(isvc, peer, revisionHash), namespace, constants.ClusterLocalDomain)
 }
 
 // InjectPeerEnv overlays the OME_<PEER>_ENDPOINT and
