@@ -85,6 +85,16 @@ type PodMonitorConfig struct {
 	// pod-annotation ("kubernetes-pods") scrape path. Empty means OME adds no
 	// relabelings and the collector's own defaults apply.
 	Relabelings []RelabelConfig `json:"relabelings,omitempty"`
+	// MetricRelabelings are appended to every PodMetricsEndpoint's
+	// metricRelabelings (Prometheus metric_relabel_configs, applied AFTER the
+	// scrape on each sample). Unlike Relabelings — which run before the scrape on
+	// the target's label set and cannot see a sample's __name__ — these can
+	// rewrite the metric name itself. Use this to normalize engine metric names,
+	// e.g. a router that re-exports vLLM metrics under underscore names (vllm_*)
+	// back to the colon form (vllm:*) that dashboards query. Empty means OME adds
+	// no metric relabelings. Safe cluster-wide when the regex is scoped (e.g.
+	// "vllm_(.+)"): it no-ops on series that don't match.
+	MetricRelabelings []RelabelConfig `json:"metricRelabelings,omitempty"`
 }
 
 // RelabelConfig is a JSON-friendly subset of the Prometheus-operator

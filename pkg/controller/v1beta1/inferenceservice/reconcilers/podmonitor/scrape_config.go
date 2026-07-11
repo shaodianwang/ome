@@ -46,10 +46,15 @@ func RelabelingsFromConfig(in []controllerconfig.RelabelConfig) []monitoringv1.R
 //     such as the KTel target allocator will scrape it). They are intentionally
 //     NOT added to spec.selector, which must keep selecting pods by the
 //     component's own labels.
-//   - cfg.Relabelings are appended to every PodMetricsEndpoint so scraped series
-//     carry the dashboard label schema (inferenceservice, component, ...).
+//   - cfg.Relabelings are appended to every PodMetricsEndpoint's relabelings
+//     (pre-scrape) so scraped series carry the dashboard label schema
+//     (inferenceservice, component, ...).
+//   - cfg.MetricRelabelings are appended to every PodMetricsEndpoint's
+//     metricRelabelings (post-scrape) so metric names/labels can be rewritten,
+//     e.g. normalizing a router's re-exported vllm_* back to vllm:*.
 //
-// Existing endpoint relabelings are preserved and OME's are appended after them.
+// Existing endpoint relabelings/metricRelabelings are preserved; OME's are
+// appended after them.
 func ApplyManagedScrapeConfig(pm *monitoringv1.PodMonitor, cfg controllerconfig.PodMonitorConfig) {
 	if pm == nil {
 		return
@@ -63,11 +68,15 @@ func ApplyManagedScrapeConfig(pm *monitoringv1.PodMonitor, cfg controllerconfig.
 		}
 	}
 	relabelings := RelabelingsFromConfig(cfg.Relabelings)
-	if len(relabelings) == 0 {
-		return
-	}
+	metricRelabelings := RelabelingsFromConfig(cfg.MetricRelabelings)
 	for i := range pm.Spec.PodMetricsEndpoints {
-		pm.Spec.PodMetricsEndpoints[i].RelabelConfigs = append(
-			pm.Spec.PodMetricsEndpoints[i].RelabelConfigs, relabelings...)
+		if len(relabelings) > 0 {
+			pm.Spec.PodMetricsEndpoints[i].RelabelConfigs = append(
+				pm.Spec.PodMetricsEndpoints[i].RelabelConfigs, relabelings...)
+		}
+		if len(metricRelabelings) > 0 {
+			pm.Spec.PodMetricsEndpoints[i].MetricRelabelConfigs = append(
+				pm.Spec.PodMetricsEndpoints[i].MetricRelabelConfigs, metricRelabelings...)
+		}
 	}
 }
