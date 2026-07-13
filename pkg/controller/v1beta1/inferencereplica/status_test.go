@@ -2,16 +2,23 @@ package inferencereplica
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -577,6 +584,52 @@ func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, afterSecond)).To(gomega.Succeed())
 	g.Expect(afterSecond.ResourceVersion).To(gomega.Equal(rvAfterFirst),
 		"a no-op aggregateAndWriteStatus pass must perform ZERO writes (ResourceVersion unchanged)")
+}
+
+// TestAggregateAndWriteStatus_ConflictSurfacesAsConflict pins the
+// terminal-conflict contract the deferred Reconcile handler keys on: when
+// every status write loses the optimistic-lock race (RetryOnConflict
+// exhausted), aggregateAndWriteStatus returns an error that
+// apierrors.IsConflict recognizes — so the caller maps it to a benign
+// requeue instead of an ERROR-level "Reconciler error".
+func TestAggregateAndWriteStatus_ConflictSurfacesAsConflict(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ActiveOrdinal: 0},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+
+	// Force every status write to lose the optimistic-lock race so the
+	// aggregator returns the terminal conflict RetryOnConflict surfaces.
+	conflict := interceptor.Funcs{
+		SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+			return apierrors.NewConflict(
+				schema.GroupResource{Group: "ome.io", Resource: "inferencereplicas"},
+				obj.GetName(), fmt.Errorf("the object has been modified"))
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(ir, pod0).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithInterceptorFuncs(conflict).
+		Build()
+	r := &Reconciler{Client: c, Log: logf.Log.WithName("test"), Expectations: workload.NewExpectations()}
+
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+
+	err := r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil)
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(apierrors.IsConflict(err)).To(gomega.BeTrue(),
+		"a terminal status conflict must remain recognizable so the caller can requeue instead of logging ERROR")
 }
 
 // withIRStuckPodGracePeriod swaps in a short grace window for the

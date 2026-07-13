@@ -754,6 +754,11 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if err = r.updateStatus(isvc, deploymentMode); err != nil {
+		// A terminal status conflict is benign — requeue and re-reconcile
+		// off fresh state instead of surfacing an ERROR-level failure.
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
 	}
@@ -790,6 +795,11 @@ func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.Infer
 	}})
 
 	if err := r.updateStatus(isvc, constants.VirtualDeployment); err != nil {
+		// A terminal status conflict is benign — requeue and re-reconcile
+		// off fresh state instead of surfacing an ERROR-level failure.
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
 	}
@@ -859,9 +869,15 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		// visible apart from other write failures.
 		if apierrors.IsConflict(err) {
 			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultConflict)
-		} else {
-			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultError)
+			// Benign: a concurrent writer bumped the ISVC. The next
+			// reconcile re-reads fresh state, so log at V(1) and surface the
+			// conflict for the caller to map to a requeue rather than an
+			// ERROR-level "Reconciler error".
+			r.Log.V(1).Info("InferenceService status write lost an optimistic-lock race; requeueing",
+				"InferenceService", desiredService.Name)
+			return errors.Wrapf(err, "fails to update InferenceService status")
 		}
+		obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultError)
 		r.Log.Error(err, "Failed to update InferenceService status", "InferenceService", desiredService.Name)
 		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, "UpdateFailed",
 			"Failed to update status for InferenceService %q: %v", desiredService.Name, err)

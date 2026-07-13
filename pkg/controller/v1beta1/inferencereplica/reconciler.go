@@ -292,6 +292,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	defer func() {
 		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget); serr != nil {
 			if err == nil {
+				// A terminal status conflict is benign — a concurrent writer
+				// bumped the IR and the next reconcile re-reads fresh state.
+				// Requeue instead of surfacing an ERROR-level "Reconciler
+				// error".
+				if apierrors.IsConflict(serr) {
+					result, err = ctrl.Result{Requeue: true}, nil
+					return
+				}
 				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
 				return
 			}
