@@ -1,0 +1,24 @@
+title: "InferenceService status URLs: correct, gateway-aware endpoints"
+oep-number: "0023"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-07-13
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Related surfaces this OEP touches or leans on:
+see-also:
+  - "/oeps/0011-inference-traffic-policy"   # ingress / traffic-policy config surface
+  - "/oeps/0018-multi-cluster-placement"    # PlacementStatus.Endpoint mirrors status.url; depends on it being correct
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
