@@ -300,6 +300,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					result, err = ctrl.Result{Requeue: true}, nil
 					return
 				}
+				// Error-driven requeue: clear any non-zero dispatcher result.
+				// controller-runtime ignores the result when err != nil, so
+				// returning both violates the reconcile contract.
+				result = ctrl.Result{}
 				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
 				return
 			}
@@ -365,6 +369,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// double-failure case is grep-able.
 	if serr := workload.ReconcileHeadlessService(ctx, r.Client, buildHeadlessServiceSpec(ir)); serr != nil {
 		if err == nil {
+			// Error-driven requeue: clear any non-zero dispatcher result
+			// (controller-runtime ignores the result when err != nil).
+			result = ctrl.Result{}
 			err = fmt.Errorf("InferenceReplica reconciler: reconcile headless service: %w", serr)
 		} else {
 			log.V(1).Error(serr, "Headless Service reconcile also failed; primary error preserved")
