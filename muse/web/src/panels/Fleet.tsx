@@ -7,18 +7,20 @@ import type { Selected } from "../types";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import { deploymentHealth, toFeed, toRollouts } from "../map";
 import { fleetTotals, perfRows } from "../metrics";
-import { emptyText, num as n, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
-import { Dot, FilterChip, Gauge, Spark, StatTile, UtilRow } from "../viz";
+import {
+  emptyText,
+  fmtErrPct,
+  fmtLatency,
+  fmtPct,
+  fmtRate,
+  num as n,
+  UNASSIGNED_GROUP,
+  utilPct,
+  utilTone,
+} from "../util";
+import { Card, Dot, FilterChip, Gauge, Spark, StatTile, UtilRow } from "../viz";
 
 const kpct = (a?: { allocatable: number; allocated: number }) => (a ? utilPct(a) : 0);
-
-// Compact formatters.
-const fmtLatency = (s: number | null) =>
-  s == null ? "—" : s < 1 ? `${Math.round(s * 1000)}ms` : `${s.toFixed(2)}s`;
-const fmtRate = (v: number | null) =>
-  v == null ? "—" : v >= 100 ? String(Math.round(v)) : v.toFixed(1);
-const fmtErrPct = (v: number | null) => (v == null ? "—" : `${v.toFixed(2)}%`);
-const fmtRowPct = (v: number | null) => (v == null ? "—" : `${v.toFixed(1)}%`);
 
 export function Fleet({
   openDeployments,
@@ -110,7 +112,10 @@ export function Fleet({
     { value: "all", label: "All" },
     ...allClusters.map((c) => ({ value: c.name, label: c.name })),
   ];
-  const modelOpts = [{ value: "all", label: "All" }, ...modelNames.map((m) => ({ value: m, label: m }))];
+  const modelOpts = [
+    { value: "all", label: "All" },
+    ...modelNames.map((m) => ({ value: m, label: m })),
+  ];
   const accelOpts = [
     { value: "all", label: "All" },
     { value: "gpu", label: "GPU" },
@@ -158,7 +163,12 @@ export function Fleet({
 
       {metricsOn ? (
         <div className="filters">
-          <FilterChip label="cluster" value={fCluster} options={clusterOpts} onChange={setFCluster} />
+          <FilterChip
+            label="cluster"
+            value={fCluster}
+            options={clusterOpts}
+            onChange={setFCluster}
+          />
           <FilterChip label="model" value={fModel} options={modelOpts} onChange={setFModel} />
           <FilterChip label="accel" value={fAccel} options={accelOpts} onChange={setFAccel} />
           <FilterChip value={fRange} options={rangeOpts} onChange={setFRange} accent />
@@ -174,8 +184,17 @@ export function Fleet({
         />
         <StatTile
           label="Fleet QPS"
-          value={<>{fmtRate(totals.requestRate)}<small>/s</small></>}
-          sub={qpsDelta == null ? undefined : `${qpsDelta >= 0 ? "▲" : "▼"} ${Math.abs(qpsDelta).toFixed(0)}% vs window start`}
+          value={
+            <>
+              {fmtRate(totals.requestRate)}
+              <small>/s</small>
+            </>
+          }
+          sub={
+            qpsDelta == null
+              ? undefined
+              : `${qpsDelta >= 0 ? "▲" : "▼"} ${Math.abs(qpsDelta).toFixed(0)}% vs window start`
+          }
         >
           <Spark points={trim(totals.requestSeries)} />
         </StatTile>
@@ -189,14 +208,20 @@ export function Fleet({
         <StatTile
           label="Error rate"
           value={fmtErrPct(totals.errorPct)}
-          sub={totals.errorPct == null ? undefined : totals.errorPct < 1 ? "within SLO (<1%)" : "above SLO"}
+          sub={
+            totals.errorPct == null
+              ? undefined
+              : totals.errorPct < 1
+                ? "within SLO (<1%)"
+                : "above SLO"
+          }
         >
           <Spark points={errPctSeries} color="var(--amber)" />
         </StatTile>
         <StatTile
           label="GPU allocated"
           value={
-            <span style={{ color: gpuTight ? "var(--red)" : undefined }}>{gpu ? `${gpuPct}%` : "—"}</span>
+            <span className={gpuTight ? "txt-bad" : undefined}>{gpu ? `${gpuPct}%` : "—"}</span>
           }
           sub={gpu ? `${n(gpu.free)} free · util — (DCGM)` : undefined}
         />
@@ -209,69 +234,68 @@ export function Fleet({
           <h2 className="sec">
             Performance <span className="who">· per model · researchers · PMs · managers</span>
           </h2>
-          <div className="card">
-            <div className="card-head">
-              <h3>Models by traffic</h3>
+          <Card
+            title="Models by traffic"
+            actions={
               <span className="right">
                 <button className="linkbtn" onClick={() => openDeployments("all")}>
                   open Deployments →
                 </button>
               </span>
-            </div>
-            <div className="card-body">
-              {perf.length ? (
-                <>
-                  <table className="place-tbl perf-tbl">
-                    <thead>
-                      <tr>
-                        <th>Deployment</th>
-                        <th>Cluster</th>
-                        <th>
-                          QPS <span className="muted">6h</span>
-                        </th>
-                        <th>p50</th>
-                        <th>p99</th>
-                        <th>TTFT</th>
-                        <th>tok/s</th>
-                        <th>Err%</th>
-                        <th>GPU util</th>
+            }
+          >
+            {perf.length ? (
+              <>
+                <table className="place-tbl perf-tbl">
+                  <thead>
+                    <tr>
+                      <th>Deployment</th>
+                      <th>Cluster</th>
+                      <th>
+                        QPS <span className="muted">6h</span>
+                      </th>
+                      <th>p50</th>
+                      <th>p99</th>
+                      <th>TTFT</th>
+                      <th>tok/s</th>
+                      <th>Err%</th>
+                      <th>GPU util</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {perf.slice(0, 12).map((r) => (
+                      <tr
+                        key={r.isvc}
+                        className="link"
+                        onClick={() =>
+                          openDeployment({ cluster: r.clusters[0] ?? "", name: r.isvc })
+                        }
+                      >
+                        <td className="mono">{r.isvc}</td>
+                        <td className="muted">{r.clusters.join(", ")}</td>
+                        <td className="tnum">{fmtRate(r.qps)}</td>
+                        <td className="tnum">{fmtLatency(r.p50)}</td>
+                        <td className="tnum">{fmtLatency(r.p99)}</td>
+                        <td className="tnum">{fmtLatency(r.ttft)}</td>
+                        <td className="tnum">{fmtRate(r.throughput)}</td>
+                        <td className="tnum">{fmtPct(r.errPct)}</td>
+                        <td className="tnum muted">
+                          {r.gpuUtil == null ? "—" : `${Math.round(r.gpuUtil)}%`}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {perf.slice(0, 12).map((r) => (
-                        <tr
-                          key={r.isvc}
-                          className="link"
-                          onClick={() =>
-                            openDeployment({ cluster: r.clusters[0] ?? "", name: r.isvc })
-                          }
-                        >
-                          <td className="mono">{r.isvc}</td>
-                          <td className="muted">{r.clusters.join(", ")}</td>
-                          <td className="tnum">{fmtRate(r.qps)}</td>
-                          <td className="tnum">{fmtLatency(r.p50)}</td>
-                          <td className="tnum">{fmtLatency(r.p99)}</td>
-                          <td className="tnum">{fmtLatency(r.ttft)}</td>
-                          <td className="tnum">{fmtRate(r.throughput)}</td>
-                          <td className="tnum">{fmtRowPct(r.errPct)}</td>
-                          <td className="tnum muted">
-                            {r.gpuUtil == null ? "—" : `${Math.round(r.gpuUtil)}%`}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {perf.length > 12 ? (
-                    <p className="panel-note">
-                      Showing top 12 of {n(perf.length)} by traffic · open Deployments for all.
-                    </p>
-                  ) : null}
-                </>
-              ) : (
-                <div className="muted attn-none">Waiting for serving metrics…</div>
-              )}
-            </div>
-          </div>
+                    ))}
+                  </tbody>
+                </table>
+                {perf.length > 12 ? (
+                  <p className="panel-note">
+                    Showing top 12 of {n(perf.length)} by traffic · open Deployments for all.
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <div className="muted attn-none">Waiting for serving metrics…</div>
+            )}
+          </Card>
         </>
       ) : null}
 
@@ -283,106 +307,93 @@ export function Fleet({
         <div className="panel-alert">
           <Dot tone="red" />
           <span>
-            <b>GPU {gpuPct}% allocated</b> — {gpu ? n(gpu.free) : 0} free. Utilization (power) is pending
-            DCGM into an in‑cluster Prometheus, so idle‑but‑allocated capacity isn't visible yet.
+            <b>GPU {gpuPct}% allocated</b> — {gpu ? n(gpu.free) : 0} free. Utilization (power) is
+            pending DCGM into an in‑cluster Prometheus, so idle‑but‑allocated capacity isn't visible
+            yet.
           </span>
         </div>
       ) : null}
       <div className="grid g3">
-        <div className="card">
-          <div className="card-head">
-            <h3>Accelerator allocation</h3>
-            <span className="sub">claimed / capacity</span>
+        <Card title="Accelerator allocation" sub="claimed / capacity">
+          <div className="cap-line">
+            <span className="cap-k">GPU</span>
+            <Gauge pct={gpuPct} tone={utilTone(gpuPct)} />
+            <span className="cap-free">{gpu ? `${n(gpu.free)} free` : "—"}</span>
           </div>
-          <div className="card-body">
-            <div className="cap-line">
-              <span className="cap-k">GPU</span>
-              <Gauge pct={gpuPct} tone={utilTone(gpuPct)} />
-              <span className="cap-free">{gpu ? `${n(gpu.free)} free` : "—"}</span>
-            </div>
-            <div className="cap-line">
-              <span className="cap-k">TPU</span>
-              <Gauge pct={kpct(tpu)} tone={utilTone(kpct(tpu))} />
-              <span className="cap-free">{tpu ? `${n(tpu.free)} free` : "—"}</span>
-            </div>
-            <p className="panel-note">Utilization (GPU power / TPU duty cycle) pending metrics in‑cluster.</p>
+          <div className="cap-line">
+            <span className="cap-k">TPU</span>
+            <Gauge pct={kpct(tpu)} tone={utilTone(kpct(tpu))} />
+            <span className="cap-free">{tpu ? `${n(tpu.free)} free` : "—"}</span>
           </div>
-        </div>
-        <div className="card">
-          <div className="card-head">
-            <h3>Allocation by cluster</h3>
-            <span className="sub">load · free</span>
+          <p className="panel-note">
+            Utilization (GPU power / TPU duty cycle) pending metrics in‑cluster.
+          </p>
+        </Card>
+        <Card title="Allocation by cluster" sub="load · free">
+          <div className="urows">
+            {clusterRows.map((c) => (
+              <UtilRow
+                key={c.name}
+                name={c.name}
+                tag={c.kind}
+                pct={c.pct}
+                tone={utilTone(c.pct)}
+                value={`${n(c.free)} free`}
+              />
+            ))}
+            {clusterRows.length === 0 ? (
+              <div className="muted urow-empty">
+                {emptyText(clusters, "Loading clusters…", "No clusters")}
+              </div>
+            ) : null}
           </div>
-          <div className="card-body">
-            <div className="urows">
-              {clusterRows.map((c) => (
-                <UtilRow
-                  key={c.name}
-                  name={c.name}
-                  tag={c.kind}
-                  pct={c.pct}
-                  tone={utilTone(c.pct)}
-                  value={`${n(c.free)} free`}
-                />
-              ))}
-              {clusterRows.length === 0 ? (
-                <div className="muted urow-empty">
-                  {emptyText(clusters, "Loading clusters…", "No clusters")}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-head">
-            <h3>Largest placeable job</h3>
-            <span className="sub">free now, per tier</span>
-          </div>
-          <div className="card-body">
-            <table className="place-tbl">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>
-                    Rack <span className="muted">NVLink / ICI</span>
-                  </th>
-                  <th>
-                    Fabric <span className="muted">island</span>
-                  </th>
+        </Card>
+        <Card title="Largest placeable job" sub="free now, per tier">
+          <table className="place-tbl">
+            <thead>
+              <tr>
+                <th></th>
+                <th>
+                  Rack <span className="muted">NVLink / ICI</span>
+                </th>
+                <th>
+                  Fabric <span className="muted">island</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {placeKinds.map((k) => (
+                <tr key={k}>
+                  <td className="place-kind">{k.toUpperCase()}</td>
+                  <td>
+                    {maxRack.has(k) ? (
+                      <b className="tnum">{n(maxRack.get(k) ?? 0)}</b>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td>
+                    {maxFabric.has(k) ? (
+                      <b className="tnum">{n(maxFabric.get(k) ?? 0)}</b>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {placeKinds.map((k) => (
-                  <tr key={k}>
-                    <td className="place-kind">{k.toUpperCase()}</td>
-                    <td>
-                      {maxRack.has(k) ? (
-                        <b className="tnum">{n(maxRack.get(k) ?? 0)}</b>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                    <td>
-                      {maxFabric.has(k) ? (
-                        <b className="tnum">{n(maxFabric.get(k) ?? 0)}</b>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {placeKinds.length === 0 ? (
-                  <tr>
-                    <td colSpan={3} className="muted">
-                      —
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-            <p className="panel-note">Biggest tightly‑coupled job that fits in one block right now.</p>
-          </div>
-        </div>
+              ))}
+              {placeKinds.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="muted">
+                    —
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+          <p className="panel-note">
+            Biggest tightly‑coupled job that fits in one block right now.
+          </p>
+        </Card>
       </div>
 
       {/* DEPLOYMENTS */}
@@ -390,77 +401,73 @@ export function Fleet({
         Deployments <span className="who">· everyone</span>
       </h2>
       <div className="grid g2">
-        <div className="card">
-          <div className="card-head">
-            <h3>By cluster</h3>
+        <Card
+          title="By cluster"
+          actions={
             <span className="right">
               <button className="linkbtn" onClick={() => openDeployments("all")}>
                 open Deployments →
               </button>
             </span>
-          </div>
-          <div className="card-body">
-            <table className="place-tbl">
-              <thead>
-                <tr>
-                  <th>Cluster</th>
-                  <th>Total</th>
-                  <th>Ready</th>
-                  <th>Rolling</th>
-                  <th>Attention</th>
+          }
+        >
+          <table className="place-tbl">
+            <thead>
+              <tr>
+                <th>Cluster</th>
+                <th>Total</th>
+                <th>Ready</th>
+                <th>Rolling</th>
+                <th>Attention</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byCluster.map((c) => (
+                <tr key={c.name}>
+                  <td className="mono">{c.name}</td>
+                  <td className="tnum">{c.total}</td>
+                  <td className={c.ready ? "tnum txt-ok" : "tnum"}>{c.ready}</td>
+                  <td className="tnum">{c.rolling || <span className="muted">—</span>}</td>
+                  <td className={c.attention ? "tnum txt-bad" : "tnum"}>
+                    {c.attention || <span className="muted">—</span>}
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {byCluster.map((c) => (
-                  <tr key={c.name}>
-                    <td className="mono">{c.name}</td>
-                    <td className="tnum">{c.total}</td>
-                    <td className="tnum" style={{ color: c.ready ? "var(--green)" : undefined }}>
-                      {c.ready}
-                    </td>
-                    <td className="tnum">{c.rolling || <span className="muted">—</span>}</td>
-                    <td className="tnum" style={{ color: c.attention ? "var(--red)" : undefined }}>
-                      {c.attention || <span className="muted">—</span>}
-                    </td>
-                  </tr>
-                ))}
-                {byCluster.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="muted">
-                      {emptyText(clusters, "Loading…", "No clusters")}
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-head">
-            <h3>Needs attention · {n(health.attention.length)}</h3>
+              ))}
+              {byCluster.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="muted">
+                    {emptyText(clusters, "Loading…", "No clusters")}
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </Card>
+        <Card
+          title={`Needs attention · ${n(health.attention.length)}`}
+          actions={
             <span className="right">
               <button className="linkbtn" onClick={() => openDeployments("attention")}>
                 see all →
               </button>
             </span>
-          </div>
-          <div className="card-body">
-            {health.attention.length ? (
-              <ul className="attn-list wide">
-                {health.attention.slice(0, 8).map((a, i) => (
-                  <li key={i} onClick={() => openDeployments("attention")}>
-                    <Dot tone="red" />
-                    <span className="mono">{a.name}</span>
-                    <span className="muted">{a.cluster}</span>
-                    {a.reason ? <span className="attn-reason">{a.reason}</span> : null}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="muted attn-none">All healthy.</div>
-            )}
-          </div>
-        </div>
+          }
+        >
+          {health.attention.length ? (
+            <ul className="attn-list wide">
+              {health.attention.slice(0, 8).map((a, i) => (
+                <li key={i} onClick={() => openDeployments("attention")}>
+                  <Dot tone="red" />
+                  <span className="mono">{a.name}</span>
+                  <span className="muted">{a.cluster}</span>
+                  {a.reason ? <span className="attn-reason">{a.reason}</span> : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="muted attn-none">All healthy.</div>
+          )}
+        </Card>
       </div>
 
       {/* ROLLOUTS & ACTIVITY */}
@@ -468,31 +475,25 @@ export function Fleet({
         Rollouts &amp; activity <span className="who">· operators · engineers</span>
       </h2>
       <div className="grid g2">
-        <div className="card">
-          <div className="card-head">
-            <h3>Active rollouts · {n(rolloutCards.length)}</h3>
-            <span className="sub">progress · phase</span>
-          </div>
-          <div className="card-body">
-            {rolloutCards.length ? (
-              <div className="urows">
-                {rolloutCards.map((r) => (
-                  <UtilRow
-                    key={`${r.cluster}/${r.name}`}
-                    name={r.name}
-                    pct={r.barPct ?? 0}
-                    tone={r.barTone || "amber"}
-                    value={r.note}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="muted attn-none">
-                {rollouts.loading ? "Loading…" : "Nothing rolling out."}
-              </div>
-            )}
-          </div>
-        </div>
+        <Card title={`Active rollouts · ${n(rolloutCards.length)}`} sub="progress · phase">
+          {rolloutCards.length ? (
+            <div className="urows">
+              {rolloutCards.map((r) => (
+                <UtilRow
+                  key={`${r.cluster}/${r.name}`}
+                  name={r.name}
+                  pct={r.barPct ?? 0}
+                  tone={r.barTone || "amber"}
+                  value={r.note}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="muted attn-none">
+              {rollouts.loading ? "Loading…" : "Nothing rolling out."}
+            </div>
+          )}
+        </Card>
         <div className="card">
           <div className="card-head">
             <h3>Recent activity</h3>

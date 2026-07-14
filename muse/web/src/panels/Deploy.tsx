@@ -13,21 +13,11 @@ export function Deploy() {
         </div>
       </div>
 
-      <div
-        className="summary-note"
-        style={{
-          marginBottom: 16,
-          borderRadius: 8,
-          border: "1px solid color-mix(in srgb, var(--amber) 30%, var(--border))",
-          background: "var(--amber-dim)",
-          color: "var(--fg-2)",
-        }}
-      >
+      <div className="summary-note warn">
         <Info />
         <div>
-          <b style={{ color: "var(--amber)" }}>Preview.</b> Deploying from the console isn't wired
-          up yet — this form is a design preview with placeholder values and doesn't create
-          anything.
+          <b className="warn-label">Preview.</b> Deploying from the console isn't wired up yet —
+          this form is a design preview with placeholder values and doesn't create anything.
         </div>
       </div>
 
@@ -43,7 +33,7 @@ export function Deploy() {
               Pick a ready model. Its architecture, format, and capabilities are used to choose how
               to serve it.
             </p>
-            <div style={{ marginLeft: 29 }}>
+            <div className="sec-indent">
               <div className="field">
                 <label>Model</label>
                 <div className="input">
@@ -62,7 +52,7 @@ export function Deploy() {
               <h3>Where it runs</h3>
             </div>
             <p className="sec-desc">Place it automatically by free capacity, or pin a cluster.</p>
-            <div className="radio-cards" style={{ gridTemplateColumns: "1fr 1fr" }}>
+            <div className="radio-cards cols-2">
               <label className="rcard">
                 <input type="radio" name="place" defaultChecked />
                 <div className="rt">
@@ -82,7 +72,7 @@ export function Deploy() {
                 <div className="rd">Force a single named cluster.</div>
               </label>
             </div>
-            <div className="field-row" style={{ marginTop: 16 }}>
+            <div className="field-row spaced">
               <div className="field">
                 <label>Accelerator</label>
                 <div className="input">
@@ -184,70 +174,21 @@ export function Deploy() {
                 <div className="rd">Warm the new version fully, then cut over.</div>
               </label>
             </div>
-            <div
-              style={{
-                marginLeft: 29,
-                marginTop: 16,
-                background: "var(--bg-2)",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                padding: 14,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  textTransform: "uppercase",
-                  letterSpacing: ".06em",
-                  color: "var(--fg-3)",
-                  marginBottom: 12,
-                }}
-              >
-                Canary steps preview
-              </div>
+            <div className="canary-preview">
+              <div className="eyebrow">Canary steps preview</div>
               <div className="canary-steps">
-                <span
-                  className="cstep done"
-                  style={{ background: "var(--accent)", borderColor: "var(--accent)" }}
-                />
-                <span
-                  className="cstep"
-                  style={{
-                    background: "var(--accent-dim)",
-                    borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
-                  }}
-                />
-                <span
-                  className="cstep"
-                  style={{
-                    background: "var(--accent-dim)",
-                    borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
-                  }}
-                />
-                <span
-                  className="cstep"
-                  style={{
-                    background: "var(--accent-dim)",
-                    borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
-                  }}
-                />
+                <span className="cstep done" />
+                <span className="cstep" />
+                <span className="cstep" />
+                <span className="cstep" />
               </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 11,
-                  color: "var(--fg-2)",
-                  marginTop: 8,
-                  fontFamily: "var(--mono)",
-                }}
-              >
+              <div className="canary-scale">
                 <span>10%</span>
                 <span>25%</span>
                 <span>50%</span>
                 <span>100%</span>
               </div>
-              <div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 10 }}>
+              <div className="canary-hint">
                 Advances a step only while latency and error rate stay within target.
               </div>
             </div>
@@ -264,8 +205,8 @@ export function Deploy() {
                 per-cluster objects.
               </div>
             </div>
-            <div className="card-body" style={{ padding: "16px 20px" }}>
-              <dl className="kv" style={{ gridTemplateColumns: "120px 1fr", gap: "8px 12px" }}>
+            <div className="card-body pad-lg">
+              <dl className="kv summary">
                 <dt>Model</dt>
                 <dd>llama-3.1-405b-instruct</dd>
                 <dt>Where</dt>
@@ -277,19 +218,7 @@ export function Deploy() {
                 <dt>Est. GPUs</dt>
                 <dd>128 at full scale</dd>
               </dl>
-              <button
-                className="btn primary"
-                disabled
-                title="Deploying isn't wired yet"
-                style={{
-                  width: "100%",
-                  justifyContent: "center",
-                  marginTop: 18,
-                  padding: 11,
-                  opacity: 0.5,
-                  cursor: "not-allowed",
-                }}
-              >
+              <button className="btn primary block" disabled title="Deploying isn't wired yet">
                 <Upload />
                 Deploy (not yet wired)
               </button>

@@ -1,19 +1,33 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 
 import { api } from "../api";
-import type { IsvcDetail } from "../api";
+import type { EventItem, IsvcDetail } from "../api";
 import { Pill } from "../components";
 import { Copyable, Facts } from "../drawer";
-import { Copy } from "../icons";
-import { useEventFeed, useLive } from "../live";
+import { useEventFeed, useLive, useMetrics } from "../live";
 import { replicaRollup } from "../map";
+import { isvcMetrics, seriesOf } from "../metrics";
+import type { IsvcMetrics } from "../metrics";
 import type { Selected } from "../types";
-import { ago, copyText, num as n } from "../util";
-import { Dot, UtilRow } from "../viz";
+import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate, num as n } from "../util";
+import { Card, Dot, Gauge, UtilRow } from "../viz";
+import { ChatBox } from "./ChatBox";
+import { Monitoring } from "./DeploymentMonitoring";
 
-/** Full-page detail for one deployment: health, replicas, model/runtime,
- *  placement, a test box, and recent activity. No k8s conditions or deployment
- *  mode — health is shown in plain terms. */
+/** Console-style detail for one deployment, modelled on a cloud console (EC2 /
+ *  OCI): a persistent identity header + actions bar over a few substantial tabs.
+ *  Overview holds config *and* current state (components, conditions, rollout,
+ *  placement) — deliberately not split into thin per-facet tabs. Monitoring owns
+ *  the time-series; Activity is the change log. Write actions are surfaced but
+ *  disabled — MUSE is a read plane until the write path lands. */
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "monitoring", label: "Monitoring" },
+  { id: "activity", label: "Activity" },
+] as const;
+type TabId = (typeof TABS)[number]["id"];
+
 export function DeploymentDetail({
   sel,
   onBack,
@@ -25,6 +39,7 @@ export function DeploymentDetail({
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
 }) {
+  const [tab, setTab] = useState<TabId>("overview");
   const detail = useLive<IsvcDetail>(() => api.inferenceService(sel.cluster, sel.name), {
     kinds: ["InferenceService"],
     throttleMs: 4_000,
@@ -32,6 +47,11 @@ export function DeploymentDetail({
   const cfg = useLive(api.config, { kinds: [] });
   const feed = useEventFeed(200);
   const d = detail.data;
+
+  // This deployment's serving metrics (from the live snapshot; SSE-pushed).
+  const metricsOn = !!cfg.data?.metrics;
+  const metrics = useMetrics(metricsOn);
+  const m = isvcMetrics(metrics.data, sel.cluster, sel.name);
 
   const activity = feed.events.filter(
     (e) => e.kind === "InferenceService" && e.name === sel.name && e.cluster === sel.cluster,
@@ -45,24 +65,41 @@ export function DeploymentDetail({
         ? { label: "Not ready", tone: "red" as const }
         : { label: "Unknown", tone: "slate" as const };
 
-  const standby = (d?.placement?.candidates ?? []).filter(
-    (c) => c.cluster !== d?.placement?.cluster,
-  );
+  const meta = [sel.cluster, d?.namespace, d?.deploymentMode, d?.age].filter(Boolean).join(" · ");
 
   return (
     <section className="panel active">
+      <button className="backlink" onClick={onBack}>
+        ‹ Deployments
+      </button>
       <div className="detail-head">
-        <button className="backlink" onClick={onBack}>
-          ‹ Deployments
-        </button>
         <h1 className="detail-title mono">{sel.name}</h1>
-        <span className="detail-meta">
-          {sel.cluster}
-          {d?.namespace ? ` · ${d.namespace}` : ""}
-        </span>
         {status ? <Pill tone={status.tone} label={status.label} /> : null}
-        {d?.age ? <span className="detail-meta">· {d.age}</span> : null}
+        <span className="detail-meta">{meta}</span>
+        <div className="detail-actions">
+          <button className="btn primary sm" onClick={() => setTab("overview")}>
+            Test
+          </button>
+          <button className="btn sm" disabled title="Logs — not available yet (needs a log source)">
+            Logs
+          </button>
+          <ManageMenu />
+        </div>
       </div>
+
+      {d?.url ? (
+        <div className="detail-endpoint">
+          <span className="eyebrow">Endpoint</span>
+          <Copyable text={d.url} />
+        </div>
+      ) : null}
+
+      {d && d.ready === false && (d.reason || d.message) ? (
+        <div className="notice bad">
+          {d.reason ? <b>{d.reason}</b> : null}
+          {d.message ? <div>{d.message}</div> : null}
+        </div>
+      ) : null}
 
       {!d ? (
         <div className="muted attn-none">
@@ -70,287 +107,303 @@ export function DeploymentDetail({
         </div>
       ) : (
         <>
-          {d.url ? (
-            <div className="detail-endpoint">
-              <span className="eyebrow">Endpoint</span>
-              <Copyable text={d.url} />
-            </div>
-          ) : null}
-
-          {d.ready === false && (d.reason || d.message) ? (
-            <div className="notice bad">
-              {d.reason ? <b>{d.reason}</b> : null}
-              {d.message ? <div>{d.message}</div> : null}
-            </div>
-          ) : null}
-
-          <div className="detail-grid2">
-            <div className="card">
-              <div className="card-head">
-                <h3>Replicas</h3>
-                <span className="sub">{replicaRollup(d.components).label} ready</span>
-              </div>
-              <div className="card-body">
-                {d.components && d.components.length ? (
-                  <div className="urows">
-                    {d.components.map((c) => {
-                      const cur = c.currentReplicas ?? 0;
-                      const des = c.desiredReplicas ?? 0;
-                      const pct = des > 0 ? Math.round((cur / des) * 100) : cur > 0 ? 100 : 0;
-                      const tone = c.ready ? "green" : cur < des ? "amber" : "";
-                      return (
-                        <UtilRow
-                          key={c.name}
-                          name={c.name}
-                          pct={pct}
-                          tone={tone}
-                          value={`${cur}/${des}`}
-                        />
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="muted">No component detail.</div>
-                )}
-                {d.loadedCopies != null || d.failedCopies ? (
-                  <div className="detail-load">
-                    <Dot tone={d.failedCopies ? "amber" : "green"} />
-                    model {n(d.loadedCopies ?? 0)} loaded
-                    {d.failedCopies ? ` · ${n(d.failedCopies)} failed` : ""}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="card-head">
-                <h3>Model &amp; runtime</h3>
-              </div>
-              <div className="card-body">
-                <Facts
-                  items={[
-                    [
-                      "Model",
-                      d.model ? (
-                        <button
-                          className="linkbtn mono"
-                          onClick={() => openModel({ cluster: sel.cluster, name: d.model! })}
-                        >
-                          {d.model}
-                        </button>
-                      ) : null,
-                    ],
-                    [
-                      "Runtime",
-                      d.runtime ? (
-                        <button
-                          className="linkbtn mono"
-                          onClick={() => openRuntime({ cluster: sel.cluster, name: d.runtime! })}
-                        >
-                          {d.runtime}
-                        </button>
-                      ) : null,
-                    ],
-                    ["Namespace", d.namespace],
-                    ["Where", sel.cluster],
-                    ["Age", d.age],
-                  ]}
-                />
-              </div>
-            </div>
+          <div className="dtabs">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`dtab${tab === t.id ? " active" : ""}`}
+                onClick={() => setTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
 
-          {d.placement && (d.placement.cluster || standby.length) ? (
-            <div className="card section-gap">
-              <div className="card-head">
-                <h3>Placement</h3>
-                <span className="sub">where it runs</span>
-              </div>
-              <div className="card-body">
-                <div className="urows">
-                  {d.placement.cluster ? (
-                    <div className="place-row">
-                      <Dot tone="green" />
-                      <span className="mono">{d.placement.cluster}</span>
-                      <span className="muted">active</span>
-                    </div>
-                  ) : null}
-                  {standby.map((c, i) => (
-                    <div className="place-row" key={i}>
-                      <Dot tone="slate" />
-                      <span className="mono">{c.cluster}</span>
-                      <span className="muted">standby</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+          {tab === "overview" ? (
+            <OverviewPane
+              d={d}
+              m={m}
+              sel={sel}
+              metricsOn={metricsOn}
+              chat={cfg.data?.chat === true}
+              chatTimeoutSecs={cfg.data?.chatTimeoutSecs}
+              openModel={openModel}
+              openRuntime={openRuntime}
+              goMonitoring={() => setTab("monitoring")}
+            />
           ) : null}
-
-          <div className="card section-gap">
-            <div className="card-head">
-              <h3>Test</h3>
-            </div>
-            <div className="card-body">
-              <ChatBox
-                cluster={sel.cluster}
-                name={sel.name}
-                endpoint={d.url}
-                defaultModel={d.model ?? ""}
-                enabled={cfg.data?.chat === true}
-                timeoutSecs={cfg.data?.chatTimeoutSecs}
-              />
-            </div>
-          </div>
-
-          {activity.length ? (
-            <div className="card section-gap">
-              <div className="card-head">
-                <h3>Recent activity</h3>
-              </div>
-              <div className="card-body">
-                <ul className="mini-feed">
-                  {activity.slice(0, 12).map((e, i) => (
-                    <li key={i}>
-                      <span className="mono">{e.action === "deleted" ? "removed" : "updated"}</span>{" "}
-                      · {ago(e.at)}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          ) : null}
+          {tab === "monitoring" ? <Monitoring m={m} metricsOn={metricsOn} /> : null}
+          {tab === "activity" ? <ActivityPane activity={activity} /> : null}
         </>
       )}
     </section>
   );
 }
 
-/** How much longer than the server's own chat budget the console waits before
- *  giving up — enough for the server's specific timeout error to arrive first. */
-const CLIENT_GRACE_MS = 5000;
-
-/** A ready-to-run curl for the model's OpenAI-style chat endpoint, using whatever
- *  model + prompt the user has entered. The prompt is embedded in the single-quoted
- *  `-d` payload, so any single quotes in it are escaped for the shell. This is what
- *  the user copies to run the request from their terminal with their own creds —
- *  the endpoint sits behind an auth gateway the console can't authenticate to. */
-function buildCurl(endpoint: string, model: string, prompt: string): string {
-  const body = JSON.stringify({
-    model,
-    messages: [{ role: "user", content: prompt || "Hello" }],
-  });
-  // bash-safe single quote: close, escaped quote, reopen.
-  const shellSafe = body.replace(/'/g, `'\\''`);
-  return [
-    `curl -s ${endpoint}/v1/chat/completions \\`,
-    `  -H 'content-type: application/json' \\`,
-    `  -d '${shellSafe}'`,
-  ].join("\n");
-}
-
-/** A curl command block with an honest copy button (only flags "Copied" when the
- *  copy actually landed). Shared by the proxy-off state and the failure fallback. */
-function CurlBlock({ curl, note }: { curl: string; note?: string }) {
-  const [copied, setCopied] = useState(false);
+/** One compact stat in the Overview headline strip (a glance, not a tile wall). */
+function StripStat({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="tryit">
-      {note ? <div className="muted cell-sm">{note}</div> : null}
-      <pre className="curl">{curl}</pre>
-      <button
-        className="btn ghost sm"
-        onClick={() =>
-          void copyText(curl).then((ok) => {
-            if (!ok) return;
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          })
-        }
-      >
-        <Copy />
-        {copied ? "Copied" : "Copy curl"}
-      </button>
+    <div className="s2">
+      <span className="lbl">{label}</span>
+      <span className="val">{value}</span>
     </div>
   );
 }
 
-/** In-page inference test: a live chat when the proxy is enabled, else a copyable
- *  curl against the endpoint. When a live attempt fails — commonly because the
- *  endpoint is behind an auth gateway the console can't authenticate to — it falls
- *  back to the same curl (built from the user's own model + prompt) to run locally. */
-function ChatBox({
-  cluster,
-  name,
-  endpoint,
-  defaultModel,
-  enabled,
-  timeoutSecs,
+// ---------------------------------------------------------------------------
+// Overview — config, identity, and current state (components, conditions,
+// rollout, placement). All the static/state facts in one place; the headline
+// strip links out to Monitoring for the charts.
+// ---------------------------------------------------------------------------
+function OverviewPane({
+  d,
+  m,
+  sel,
+  metricsOn,
+  chat,
+  chatTimeoutSecs,
+  openModel,
+  openRuntime,
+  goMonitoring,
 }: {
-  cluster: string;
-  name: string;
-  endpoint?: string;
-  defaultModel: string;
-  enabled: boolean;
-  timeoutSecs?: number;
+  d: IsvcDetail;
+  m: IsvcMetrics;
+  sel: Selected;
+  metricsOn: boolean;
+  chat: boolean;
+  chatTimeoutSecs?: number;
+  openModel: (sel: Selected) => void;
+  openRuntime: (sel: Selected) => void;
+  goMonitoring: () => void;
 }) {
-  const [model, setModel] = useState(defaultModel);
-  const [prompt, setPrompt] = useState("");
-  const [reply, setReply] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  if (!endpoint) {
-    return <div className="muted">No endpoint yet — this deployment isn't addressable.</div>;
-  }
-
-  if (!enabled) {
-    return (
-      <CurlBlock
-        curl={buildCurl(endpoint, defaultModel, "Hello")}
-        note="Live testing is off on this console — run it yourself:"
-      />
-    );
-  }
-
-  // Bound the request a little above the server's own budget, so the server's
-  // (more specific) error wins in normal cases and this abort is only a backstop.
-  const timeoutMs = timeoutSecs != null ? timeoutSecs * 1000 + CLIENT_GRACE_MS : undefined;
-
-  const send = () => {
-    if (!prompt.trim() || busy) return;
-    setBusy(true);
-    setErr(null);
-    setReply(null);
-    api
-      .chat(cluster, name, { model, messages: [{ role: "user", content: prompt }] }, timeoutMs)
-      .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r)))
-      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false));
-  };
+  const showMetrics = metricsOn && m.present;
+  const standby = (d.placement?.candidates ?? []).filter((c) => c.cluster !== d.placement?.cluster);
+  const components = d.components ?? [];
+  const ready = replicaRollup(d.components).label;
+  const qps = seriesOf(m, "request_rate").last;
+  const errRate = seriesOf(m, "error_rate").last;
+  const errPct = qps && qps > 0 ? ((errRate ?? 0) / qps) * 100 : null;
 
   return (
-    <div className="tryit">
-      <div className="chat-model">
-        <label>model</label>
-        <input value={model} onChange={(e) => setModel(e.target.value)} />
-      </div>
-      <textarea
-        className="chat-input"
-        placeholder="Send a test prompt…"
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-      />
-      <button className="btn primary sm" onClick={send} disabled={busy || !prompt.trim()}>
-        {busy ? "Sending…" : "Send"}
-      </button>
-      {reply ? <div className="chat-reply">{reply}</div> : null}
-      {err ? (
-        <>
-          <div className="notice bad">{err}</div>
-          <CurlBlock
-            curl={buildCurl(endpoint, model, prompt)}
-            note="Couldn't reach the endpoint from the console — it may require your credentials. Run it from your terminal instead:"
+    <>
+      <div className="statstrip">
+        <StripStat label="Replicas" value={ready} />
+        {showMetrics ? <StripStat label="QPS" value={fmtRate(qps)} /> : null}
+        {showMetrics ? (
+          <StripStat label="p99" value={fmtLatency(seriesOf(m, "latency_p99").last)} />
+        ) : null}
+        {showMetrics ? <StripStat label="Error" value={fmtErrPct(errPct)} /> : null}
+        {showMetrics ? (
+          <StripStat label="In-flight" value={fmtInt(seriesOf(m, "running_reqs").last)} />
+        ) : null}
+        {d.loadedCopies != null ? (
+          <StripStat
+            label="Model copies"
+            value={`${n(d.loadedCopies)}${d.failedCopies ? ` · ${n(d.failedCopies)} failed` : ""}`}
           />
+        ) : null}
+        {metricsOn ? (
+          <button className="linkbtn strip-link" onClick={goMonitoring}>
+            Monitoring →
+          </button>
+        ) : null}
+      </div>
+
+      <div className="detail-grid2">
+        <Card title="Details">
+          <Facts
+            items={[
+              [
+                "Model",
+                d.model ? (
+                  <button
+                    className="linkbtn mono"
+                    onClick={() => openModel({ cluster: sel.cluster, name: d.model! })}
+                  >
+                    {d.model}
+                  </button>
+                ) : null,
+              ],
+              [
+                "Runtime",
+                d.runtime ? (
+                  <button
+                    className="linkbtn mono"
+                    onClick={() => openRuntime({ cluster: sel.cluster, name: d.runtime! })}
+                  >
+                    {d.runtime}
+                  </button>
+                ) : null,
+              ],
+              ["Mode", d.deploymentMode],
+              ["Namespace", d.namespace],
+              ["Cluster", sel.cluster],
+              ["Age", d.age],
+            ]}
+          />
+        </Card>
+
+        <Card title="Invoke & test" sub="OpenAI-compatible">
+          <ChatBox
+            cluster={sel.cluster}
+            name={sel.name}
+            endpoint={d.url}
+            defaultModel={d.model ?? ""}
+            enabled={chat}
+            timeoutSecs={chatTimeoutSecs}
+          />
+        </Card>
+      </div>
+
+      <div className="detail-grid2 section-gap">
+        <Card title="Components" sub={`${ready} ready`}>
+          {components.length ? (
+            <div className="urows">
+              {components.map((c) => {
+                const cur = c.currentReplicas ?? 0;
+                const des = c.desiredReplicas ?? 0;
+                const pct = des > 0 ? Math.round((cur / des) * 100) : cur > 0 ? 100 : 0;
+                const tone = c.ready ? "green" : cur < des ? "amber" : "";
+                const extra = [c.revision, c.rolloutPhase].filter(Boolean).join(" · ");
+                return (
+                  <UtilRow
+                    key={c.name}
+                    name={
+                      <>
+                        {c.name}
+                        {extra ? <span className="muted"> · {extra}</span> : null}
+                      </>
+                    }
+                    pct={pct}
+                    tone={tone}
+                    value={`${cur}/${des}`}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <div className="muted">No component detail.</div>
+          )}
+          {d.loadedCopies != null || d.failedCopies ? (
+            <div className="detail-load">
+              <Dot tone={d.failedCopies ? "amber" : "green"} />
+              model {n(d.loadedCopies ?? 0)} loaded
+              {d.failedCopies ? ` · ${n(d.failedCopies)} failed` : ""}
+            </div>
+          ) : null}
+        </Card>
+
+        <Card title="Conditions">
+          {d.conditions && d.conditions.length ? (
+            d.conditions.map((c, i) => (
+              <div className="cond-row" key={i}>
+                <Dot
+                  tone={c.status === "True" ? "green" : c.status === "False" ? "red" : "slate"}
+                />
+                <span className="mono">{c.type}</span>
+                <span className="cond-rs">{c.reason || c.status}</span>
+              </div>
+            ))
+          ) : (
+            <div className="muted">No conditions reported.</div>
+          )}
+        </Card>
+      </div>
+
+      {d.canary ? (
+        <Card title="Rollout" sub={`canary · step ${d.canary.currentStep}`} className="section-gap">
+          <Gauge pct={d.canary.trafficWeight} />
+          <p className="panel-note">{d.canary.trafficWeight}% of traffic on the new revision.</p>
+        </Card>
+      ) : null}
+
+      {d.placement?.cluster || standby.length ? (
+        <Card title="Placement" sub="where it runs" className="section-gap">
+          {d.placement?.cluster ? (
+            <div className="place-row">
+              <Dot tone="green" />
+              <span className="mono">{d.placement.cluster}</span>
+              <span className="muted">active</span>
+            </div>
+          ) : null}
+          {standby.map((c, i) => (
+            <div className="place-row" key={i}>
+              <Dot tone="slate" />
+              <span className="mono">{c.cluster}</span>
+              <span className="muted">standby</span>
+            </div>
+          ))}
+        </Card>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Activity — recent changes for this deployment (from the shared event feed).
+// ---------------------------------------------------------------------------
+function ActivityPane({ activity }: { activity: EventItem[] }) {
+  if (!activity.length) {
+    return <div className="muted attn-none">No recent activity.</div>;
+  }
+  return (
+    <Card title="Activity" sub="recent changes">
+      <ul className="mini-feed">
+        {activity.slice(0, 50).map((e, i) => (
+          <li key={i}>
+            <span className="mono">{e.action === "deleted" ? "removed" : "updated"}</span> ·{" "}
+            {ago(e.at)}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+/** The write-action menu. Every item is a mutation MUSE can't perform yet (it's
+ *  a read plane), so they're surfaced-but-disabled to show the intended surface
+ *  until the write path lands. */
+const MANAGE_ACTIONS: ({ label: string; danger?: boolean } | { sep: true })[] = [
+  { label: "Redeploy" },
+  { label: "Restart" },
+  { label: "Scale" },
+  { label: "Edit config" },
+  { sep: true },
+  { label: "Pause rollout" },
+  { label: "Promote" },
+  { label: "Rollback" },
+  { label: "Migrate" },
+  { sep: true },
+  { label: "Undeploy", danger: true },
+];
+
+function ManageMenu() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="menu">
+      <button className="btn sm" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        Manage ▾
+      </button>
+      {open ? (
+        <>
+          <button
+            className="menu-backdrop"
+            aria-hidden
+            tabIndex={-1}
+            onClick={() => setOpen(false)}
+          />
+          <div className="menu-list" role="menu">
+            {MANAGE_ACTIONS.map((a, i) =>
+              "sep" in a ? (
+                <hr className="menu-sep" key={i} />
+              ) : (
+                <button className={`menu-item${a.danger ? " danger" : ""}`} key={i} disabled>
+                  {a.label}
+                  <span className="menu-soon">soon</span>
+                </button>
+              ),
+            )}
+          </div>
         </>
       ) : null}
     </div>

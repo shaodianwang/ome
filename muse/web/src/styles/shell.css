@@ -151,6 +151,12 @@
   margin-right: 6px;
   vertical-align: middle;
 }
+.sidebar-foot .dot.syncing {
+  background: var(--amber);
+}
+.sync-line {
+  margin-top: 4px;
+}
 
 /* ---- topbar ---- */
 .main {

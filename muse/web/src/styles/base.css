@@ -112,6 +112,16 @@ body::before {
 .tnum {
   font-variant-numeric: tabular-nums;
 }
+/* state-encoding text color utilities (green ok / red bad / amber warn) */
+.txt-ok {
+  color: var(--green);
+}
+.txt-bad {
+  color: var(--red);
+}
+.txt-warn {
+  color: var(--amber);
+}
 /* uppercase micro eyebrow label (smg "section-label" pattern) */
 .eyebrow {
   font-size: var(--t-xs);

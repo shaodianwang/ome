@@ -82,14 +82,11 @@ export default function App() {
 
         <div className="sidebar-foot">
           <div>
-            <span
-              className="dot"
-              style={{ background: syncing ? "var(--amber)" : "var(--green)" }}
-            />
+            <span className={syncing ? "dot syncing" : "dot"} />
             {items.length ? `${items.length} clusters connected` : "connecting…"}
           </div>
           {items.length ? (
-            <div style={{ marginTop: 4 }} className="mono">
+            <div className="sync-line mono">
               {syncing ? `${syncing} syncing · ${ready} ready` : "all synced"}
             </div>
           ) : null}

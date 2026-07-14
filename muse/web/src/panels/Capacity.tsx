@@ -5,7 +5,7 @@ import type { AccelGroup, CapacityResp } from "../api";
 import { Bar, EmptyRow, Pager } from "../components";
 import { useLive } from "../live";
 import { matches, num as n, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
-import { Gauge, StatTile } from "../viz";
+import { Card, Gauge, StatTile } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
 type Kind = "all" | "gpu" | "tpu";
@@ -225,115 +225,109 @@ export function Capacity() {
         <StatTile label="Clusters" value={caps.length || "—"} sub="reporting capacity" />
       </div>
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Placement</h3>
-          <span className="sub">biggest job you can schedule now</span>
-        </div>
-        <div className="card-body">
-          <table className="place-tbl">
-            <thead>
-              <tr>
-                <th></th>
-                <th>
-                  Per rack <span className="muted">NVLink / ICI</span>
-                </th>
-                <th>
-                  Per fabric block <span className="muted">island</span>
-                </th>
+      <Card title="Placement" sub="biggest job you can schedule now">
+        <table className="place-tbl">
+          <thead>
+            <tr>
+              <th></th>
+              <th>
+                Per rack <span className="muted">NVLink / ICI</span>
+              </th>
+              <th>
+                Per fabric block <span className="muted">island</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {tiers.map((t) => (
+              <tr key={t.kind}>
+                <td className="place-kind">{t.kind.toUpperCase()}</td>
+                <td>
+                  {t.domain ? (
+                    <>
+                      <b className="tnum">{n(t.domain.free)}</b>{" "}
+                      <span className="muted">
+                        ≈{nodesWorth(t.domain)} nodes · {t.domain.cluster}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td>
+                  {t.island ? (
+                    <>
+                      <b className="tnum">{n(t.island.free)}</b>{" "}
+                      <span className="muted">
+                        ≈{nodesWorth(t.island)} nodes · {t.island.cluster}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {tiers.map((t) => (
-                <tr key={t.kind}>
-                  <td className="place-kind">{t.kind.toUpperCase()}</td>
-                  <td>
-                    {t.domain ? (
-                      <>
-                        <b className="tnum">{n(t.domain.free)}</b>{" "}
-                        <span className="muted">
-                          ≈{nodesWorth(t.domain)} nodes · {t.domain.cluster}
-                        </span>
-                      </>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    {t.island ? (
-                      <>
-                        <b className="tnum">{n(t.island.free)}</b>{" "}
-                        <span className="muted">
-                          ≈{nodesWorth(t.island)} nodes · {t.island.cluster}
-                        </span>
-                      </>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="fit-row">
+          <label className="fit-input">
+            Will a job of
+            <input
+              type="number"
+              min={1}
+              placeholder="128"
+              value={fit}
+              onChange={(e) => setFit(e.target.value)}
+            />
+            <select value={fitKind} onChange={(e) => setFitKind(e.target.value)}>
+              {kindsPresent.map((k) => (
+                <option key={k} value={k}>
+                  {k.toUpperCase()}
+                </option>
               ))}
-            </tbody>
-          </table>
-
-          <div className="fit-row">
-            <label className="fit-input">
-              Will a job of
-              <input
-                type="number"
-                min={1}
-                placeholder="128"
-                value={fit}
-                onChange={(e) => setFit(e.target.value)}
-              />
-              <select value={fitKind} onChange={(e) => setFitKind(e.target.value)}>
-                {kindsPresent.map((k) => (
-                  <option key={k} value={k}>
-                    {k.toUpperCase()}
-                  </option>
-                ))}
-              </select>
-              fit in one block?
-            </label>
-            {fitActive ? (
-              fitIslands.length ? (
-                <span className="fit-ok">
-                  ✓ fits — {fitIslands.length} {fitKind.toUpperCase()} block
-                  {fitIslands.length === 1 ? "" : "s"}, largest {n(fitBest?.free ?? 0)} on{" "}
-                  {fitBest?.cluster}
-                </span>
-              ) : (
-                <span className="fit-no">
-                  ✗ largest {fitKind.toUpperCase()} block is {n(fitBest?.free ?? 0)}
-                  {fitBest ? ` (${fitBest.cluster})` : ""}
-                </span>
-              )
-            ) : null}
-          </div>
-
-          {topBlocks.length ? (
-            <div className="place-top">
-              <div className="eyebrow">Most free blocks (islands)</div>
-              <ul className="place-toplist">
-                {topBlocks.map((b, i) => (
-                  <li key={i}>
-                    <span className="mono">{shortId(b.name)}</span>
-                    <span className="muted">{b.cluster}</span>
-                    <span className="place-free tnum">
-                      {n(b.free)} {b.kind.toUpperCase()}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+            </select>
+            fit in one block?
+          </label>
+          {fitActive ? (
+            fitIslands.length ? (
+              <span className="fit-ok">
+                ✓ fits — {fitIslands.length} {fitKind.toUpperCase()} block
+                {fitIslands.length === 1 ? "" : "s"}, largest {n(fitBest?.free ?? 0)} on{" "}
+                {fitBest?.cluster}
+              </span>
+            ) : (
+              <span className="fit-no">
+                ✗ largest {fitKind.toUpperCase()} block is {n(fitBest?.free ?? 0)}
+                {fitBest ? ` (${fitBest.cluster})` : ""}
+              </span>
+            )
           ) : null}
-
-          <p className="panel-note">
-            Only clusters whose nodes carry topology labels are counted. A "—" means no labeled
-            block exists for that tier.
-          </p>
         </div>
-      </div>
+
+        {topBlocks.length ? (
+          <div className="place-top">
+            <div className="eyebrow">Most free blocks (islands)</div>
+            <ul className="place-toplist">
+              {topBlocks.map((b, i) => (
+                <li key={i}>
+                  <span className="mono">{shortId(b.name)}</span>
+                  <span className="muted">{b.cluster}</span>
+                  <span className="place-free tnum">
+                    {n(b.free)} {b.kind.toUpperCase()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        <p className="panel-note">
+          Only clusters whose nodes carry topology labels are counted. A "—" means no labeled block
+          exists for that tier.
+        </p>
+      </Card>
 
       <div className="filterbar">
         <div className="seg">
@@ -398,10 +392,7 @@ export function Capacity() {
                   <td className="num">{n(r.total)}</td>
                   <td className="num muted">{n(r.used)}</td>
                   <td className="num">
-                    <span
-                      className="free-strong"
-                      style={{ color: r.free > 0 ? "var(--green)" : "var(--fg-3)" }}
-                    >
+                    <span className={r.free > 0 ? "free-strong txt-ok" : "free-strong muted"}>
                       {n(r.free)}
                     </span>
                   </td>

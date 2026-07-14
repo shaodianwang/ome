@@ -3,12 +3,8 @@
 
 import type { BarTone } from "./types";
 
-/**
- * Sentinel the capacity rollup assigns to nodes with no configured topology label.
- * Such nodes aren't a real placement domain (they'd collapse a whole cluster into
- * one bucket), so the placement planner must exclude this group rather than treat
- * it as a schedulable block.
- */
+/** Capacity-rollup bucket for nodes with no topology label — not a real placement
+ *  domain, so the placement planner excludes it. */
 export const UNASSIGNED_GROUP = "unassigned";
 
 /**
@@ -24,6 +20,20 @@ export function matches(query: string, ...fields: (string | undefined)[]): boole
 
 /** Format an integer with locale grouping (e.g. 11556 → "11,556"). */
 export const num = (v: number): string => v.toLocaleString();
+
+// Metric formatters, shared across the dashboard + detail panels. `null` → em dash.
+/** A rate/count: large values rounded, small keep one decimal. */
+export const fmtRate = (v: number | null): string =>
+  v == null ? "—" : v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+/** A latency in seconds → "Nms" (<1s) or "N.NNs". */
+export const fmtLatency = (s: number | null): string =>
+  s == null ? "—" : s < 1 ? `${Math.round(s * 1000)}ms` : `${s.toFixed(2)}s`;
+/** A percentage with two decimals (for small error rates). */
+export const fmtErrPct = (v: number | null): string => (v == null ? "—" : `${v.toFixed(2)}%`);
+/** A percentage with one decimal. */
+export const fmtPct = (v: number | null): string => (v == null ? "—" : `${v.toFixed(1)}%`);
+/** An integer count. */
+export const fmtInt = (v: number | null): string => (v == null ? "—" : String(Math.round(v)));
 
 /** Shorten an opaque/long identifier (e.g. a topology-label hash) for display,
  *  keeping the head and tail so it's still recognisable. */
@@ -71,17 +81,9 @@ export function utilTone(pct: number): BarTone {
   return "green";
 }
 
-/**
- * Copy text to the clipboard, resolving to whether it actually succeeded.
- *
- * The async Clipboard API (`navigator.clipboard.writeText`) is unavailable in
- * non-secure contexts, and rejects inside an iframe without the `clipboard-write`
- * permission or when the document isn't focused — cases where a bare
- * `navigator.clipboard?.writeText(...)` silently no-ops while the UI still flashes
- * "copied". This tries that path, then falls back to a temporary `<textarea>` +
- * `execCommand("copy")`, and reports success so callers only show feedback when the
- * copy landed.
- */
+/** Copy to clipboard, resolving to whether it succeeded. The async Clipboard API
+ *  no-ops in non-secure/unfocused/iframe contexts, so fall back to a `<textarea>` +
+ *  `execCommand` and report the real outcome (callers flag "copied" only if so). */
 export async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {

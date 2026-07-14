@@ -11,22 +11,25 @@ export function Dot({ tone }: { tone: Tone }) {
   return <span className={`vdot ${tone}`} />;
 }
 
-/** A KPI tile: label, big value, an optional inline viz, and a sub-line. */
+/** A KPI tile: label, big value, an optional inline viz, and a sub-line. `tone`
+ *  colors the value for at-a-glance status (e.g. green healthy / red breached). */
 export function StatTile({
   label,
   value,
   sub,
+  tone,
   children,
 }: {
   label: ReactNode;
   value: ReactNode;
   sub?: ReactNode;
+  tone?: Tone;
   children?: ReactNode;
 }) {
   return (
     <div className="tile">
       <div className="tile-label">{label}</div>
-      <div className="tile-val">{value}</div>
+      <div className={tone ? `tile-val ${tone}` : "tile-val"}>{value}</div>
       {children ? <div className="tile-viz">{children}</div> : null}
       {sub != null ? <div className="tile-sub">{sub}</div> : null}
     </div>
@@ -124,8 +127,9 @@ export function Spark({
       aria-hidden
     >
       <polyline
+        className="spark-ln"
         points={d}
-        style={{ fill: "none", stroke: color, strokeWidth: 1.5 }}
+        style={{ stroke: color }}
         vectorEffect="non-scaling-stroke"
       />
     </svg>
@@ -201,8 +205,9 @@ export function Chart({
         s.area && s.points.filter((v) => Number.isFinite(v)).length > 1 ? (
           <polygon
             key={`a${i}`}
+            className="chart-area"
             points={`${path(s.points)} ${W},${H} 0,${H}`}
-            style={{ fill: s.color, opacity: 0.13 }}
+            style={{ fill: s.color }}
           />
         ) : null,
       )}
@@ -210,12 +215,101 @@ export function Chart({
         s.points.filter((v) => Number.isFinite(v)).length > 1 ? (
           <polyline
             key={`l${i}`}
+            className="chart-ln"
             points={path(s.points)}
-            style={{ fill: "none", stroke: s.color, strokeWidth: 1.6 }}
+            style={{ stroke: s.color }}
             vectorEffect="non-scaling-stroke"
           />
         ) : null,
       )}
     </svg>
+  );
+}
+
+/** One chart series: numeric points, a CSS color, and whether to fill under it. */
+export interface Series {
+  points: number[];
+  color: string;
+  area?: boolean;
+}
+
+/** A titled panel card: an optional header (title · sub · actions) over a body.
+ *  The base container for dashboard panels — use it instead of hand-writing the
+ *  `card`/`card-head`/`card-body` markup. */
+export function Card({
+  title,
+  sub,
+  actions,
+  className,
+  children,
+}: {
+  title?: ReactNode;
+  sub?: ReactNode;
+  actions?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  const head = title != null || sub != null || actions != null;
+  return (
+    <div className={className ? `card ${className}` : "card"}>
+      {head ? (
+        <div className="card-head">
+          {title != null ? <h3>{title}</h3> : null}
+          {sub != null ? <span className="sub">{sub}</span> : null}
+          {actions}
+        </div>
+      ) : null}
+      <div className="card-body">{children}</div>
+    </div>
+  );
+}
+
+/** A card plotting one or more series with a headline value. Renders nothing when
+ *  there's no data; `hideIfZero` also hides an all-zero series, so rare-event
+ *  panels (errors, preemptions) surface only when something actually happens. */
+export function MetricChart({
+  title,
+  value,
+  sub,
+  series,
+  hideIfZero = false,
+}: {
+  title: ReactNode;
+  value: ReactNode;
+  sub?: ReactNode;
+  series: Series[];
+  hideIfZero?: boolean;
+}) {
+  const plottable = series.some((s) => s.points.length > 1);
+  if (!plottable || (hideIfZero && series.every((s) => s.points.every((v) => v === 0)))) {
+    return null;
+  }
+  return (
+    <Card title={title} sub={sub}>
+      <div className="chart-val">{value}</div>
+      <Chart series={series} />
+    </Card>
+  );
+}
+
+/** A card showing a bounded fraction (0..1) as a threshold gauge. */
+export function GaugeCard({
+  title,
+  frac,
+  tone,
+  sub,
+}: {
+  title: ReactNode;
+  frac: number | null;
+  tone?: BarTone;
+  sub?: ReactNode;
+}) {
+  if (frac == null) return null;
+  const p = Math.round(frac * 100);
+  return (
+    <Card title={title} sub={sub}>
+      <div className="chart-val">{p}%</div>
+      <Gauge pct={p} tone={tone} />
+    </Card>
   );
 }

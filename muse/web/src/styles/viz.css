@@ -137,6 +137,18 @@ h2.sec .who {
   stroke: var(--border);
   stroke-width: 0.5;
 }
+/* chart/spark strokes — only the (data-driven) color stays inline */
+.spark-ln {
+  fill: none;
+  stroke-width: 1.5px;
+}
+.chart-ln {
+  fill: none;
+  stroke-width: 1.6px;
+}
+.chart-area {
+  opacity: 0.13;
+}
 .legend {
   display: flex;
   gap: 14px;
@@ -776,4 +788,206 @@ th.right .sort-arrow {
 .btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* ---- deployment detail: actions bar + tabs (console layout) ---- */
+.detail-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.dtabs {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--s5);
+}
+.dtab {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 8px 15px;
+  color: var(--fg-3);
+  font: inherit;
+  font-size: var(--t-md);
+  cursor: pointer;
+}
+.dtab:hover {
+  color: var(--fg-2);
+}
+.dtab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* overview headline strip — a glance, distinct from the Monitoring tile wall */
+.statstrip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s6);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--s3) var(--s4);
+  margin-bottom: var(--s4);
+}
+.statstrip .s2 {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.statstrip .lbl {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+}
+.statstrip .val {
+  font-size: var(--t-lg);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.strip-link {
+  margin-left: auto;
+}
+
+/* small summary rows in the overview cards + conditions list */
+.cond-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--t-sm);
+}
+.cond-row:last-child {
+  border-bottom: 0;
+}
+.cond-rs {
+  margin-left: auto;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+/* write-action menu (surfaced-but-disabled until the write plane) */
+.menu {
+  position: relative;
+  display: inline-block;
+}
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+.menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: var(--t-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+.menu-item:disabled {
+  cursor: default;
+  color: var(--fg-faint);
+}
+.menu-item.danger {
+  color: var(--red);
+}
+.menu-item.danger:disabled {
+  color: color-mix(in srgb, var(--red) 55%, var(--fg-faint));
+}
+.menu-sep {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+.menu-soon {
+  flex: none;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 0 6px;
+}
+
+/* ---- deployment monitoring dashboard ---- */
+.grid.g4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+@media (max-width: 1000px) {
+  .grid.g4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+/* threshold-colored KPI values */
+.tile-val.green {
+  color: var(--green);
+}
+.tile-val.amber {
+  color: var(--amber);
+}
+.tile-val.red {
+  color: var(--red);
+}
+/* latency-phase segments for the request-lifecycle bar */
+.dist .seg.cyan {
+  background: var(--cyan);
+}
+.dist .seg.violet {
+  background: var(--violet);
+}
+/* latency breakdown: taller bar + a value legend */
+.brk-bar {
+  margin-bottom: var(--s3);
+}
+.brk-bar .dist {
+  height: 14px;
+}
+.brk-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+}
+.brk-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
 }

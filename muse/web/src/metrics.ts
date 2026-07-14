@@ -1,7 +1,7 @@
-// Shaping for the fleet metrics snapshot: fold the per-cluster, per-query
-// Prometheus results into one row per InferenceService for the Performance panel.
-// The query ids (`latency_p99`, `throughput_tokens`, …) match the server's
-// curated query set (config/metrics-queries.json).
+// Shaping for the fleet metrics snapshot: fold the per-cluster, per-query Prometheus
+// results into the rows/series the panels render (per-isvc, per-deployment, fleet
+// totals). Query ids (`latency_p99`, …) match the server's curated set
+// (charts/muse/files/metrics-queries.json).
 
 import type { MetricsSnapshot, PromResult, PromSeries } from "./api";
 
@@ -74,8 +74,7 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
     return r;
   };
   // Latencies take the worst across clusters; rates sum across them.
-  const worst = (cur: number | null, v: number | null) =>
-    v == null ? cur : Math.max(cur ?? 0, v);
+  const worst = (cur: number | null, v: number | null) => (v == null ? cur : Math.max(cur ?? 0, v));
   const add = (cur: number | null, v: number | null) => (cur ?? 0) + (v ?? 0);
 
   for (const [cluster, queries] of Object.entries(snap.clusters)) {
@@ -102,6 +101,45 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
   return [...byIsvc.values()].sort(
     (a, b) => (b.qps ?? 0) - (a.qps ?? 0) || (b.throughput ?? 0) - (a.throughput ?? 0),
   );
+}
+
+/** One query id's latest scalar + its range series (for a sparkline). */
+export interface IsvcSeries {
+  last: number | null;
+  series: number[];
+}
+/** Per-deployment serving metrics: every curated query id for one isvc on one
+ *  cluster. Generic — new queries in metrics-queries.json surface here without
+ *  code changes; the detail page maps query ids to tiles. Read one with
+ *  `seriesOf` (never throws; empty if absent). */
+export interface IsvcMetrics {
+  /** Whether this deployment has any serving signal in the snapshot. */
+  present: boolean;
+  /** By query id (`latency_p99`, `tpot`, `kv_transfer_latency`, …). */
+  by: Record<string, IsvcSeries>;
+}
+
+const EMPTY_SERIES: IsvcSeries = { last: null, series: [] };
+
+export function seriesOf(m: IsvcMetrics, qid: string): IsvcSeries {
+  return m.by[qid] ?? EMPTY_SERIES;
+}
+
+export function isvcMetrics(
+  snap: MetricsSnapshot | null,
+  cluster: string,
+  isvc: string,
+): IsvcMetrics {
+  const queries = snap?.clusters?.[cluster];
+  const by: Record<string, IsvcSeries> = {};
+  if (queries) {
+    for (const [qid, res] of Object.entries(queries)) {
+      const s = results(res).find((x) => x.metric?.inferenceservice === isvc);
+      by[qid] = s ? { last: last(s), series: nums(s) } : EMPTY_SERIES;
+    }
+  }
+  const has = (qid: string) => (by[qid]?.last ?? null) != null || (by[qid]?.series.length ?? 0) > 0;
+  return { present: has("request_rate") || has("latency_p99") || has("running_reqs"), by };
 }
 
 /** Fleet-wide aggregates for the SLI banner: sums across all series (throughput,

@@ -9,6 +9,7 @@ import { useLive } from "../live";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
 import type { Selected } from "../types";
+import { Card } from "../viz";
 
 type RuntimeRow = RuntimeItem & { scoped: boolean; used: number };
 
@@ -254,103 +255,76 @@ function RuntimePage({
       ) : (
         <>
           <div className="detail-grid2">
-            <div className="card">
-              <div className="card-head">
-                <h3>Engine</h3>
-              </div>
-              <div className="card-body">
-                {d.image ? (
-                  <Copyable text={d.image} />
-                ) : (
-                  <div className="muted">No image declared.</div>
-                )}
-                <Facts items={[["Protocols", d.protocols?.join(", ")]]} />
-              </div>
-            </div>
+            <Card title="Engine">
+              {d.image ? (
+                <Copyable text={d.image} />
+              ) : (
+                <div className="muted">No image declared.</div>
+              )}
+              <Facts items={[["Protocols", d.protocols?.join(", ")]]} />
+            </Card>
 
-            <div className="card">
-              <div className="card-head">
-                <h3>Topology</h3>
-              </div>
-              <div className="card-body">
-                <Facts
-                  items={(d.components ?? []).map((c): [string, string] => [
-                    cap(c.role),
-                    c.multiNode
-                      ? `multi-node${c.nodes ? ` · ${c.nodes} nodes` : ""}`
-                      : "single-node",
-                  ])}
-                />
-                {isDisaggregated(d) ? (
-                  <p className="panel-note">
-                    Prefill/decode disaggregated — engine and decoder scale independently.
-                  </p>
-                ) : null}
-              </div>
-            </div>
+            <Card title="Topology">
+              <Facts
+                items={(d.components ?? []).map((c): [string, string] => [
+                  cap(c.role),
+                  c.multiNode ? `multi-node${c.nodes ? ` · ${c.nodes} nodes` : ""}` : "single-node",
+                ])}
+              />
+              {isDisaggregated(d) ? (
+                <p className="panel-note">
+                  Prefill/decode disaggregated — engine and decoder scale independently.
+                </p>
+              ) : null}
+            </Card>
           </div>
 
           {d.architectures?.length || d.formats?.length || d.quantizations?.length ? (
-            <div className="card section-gap">
-              <div className="card-head">
-                <h3>Serves models</h3>
-              </div>
-              <div className="card-body">
-                <Facts
-                  items={[
-                    ["Architectures", d.architectures?.join(", ")],
-                    ["Formats", d.formats?.join(", ")],
-                    ["Quantizations", d.quantizations?.join(", ")],
-                  ]}
-                />
-              </div>
-            </div>
+            <Card title="Serves models" className="section-gap">
+              <Facts
+                items={[
+                  ["Architectures", d.architectures?.join(", ")],
+                  ["Formats", d.formats?.join(", ")],
+                  ["Quantizations", d.quantizations?.join(", ")],
+                ]}
+              />
+            </Card>
           ) : null}
 
           {d.containers?.length ? (
-            <div className="card section-gap">
-              <div className="card-head">
-                <h3>Configuration</h3>
-              </div>
-              <div className="card-body">
-                {d.containers.map((c) => (
-                  <div key={c.role} className="rt-cfg">
-                    {d.containers!.length > 1 ? <div className="eyebrow">{cap(c.role)}</div> : null}
-                    {c.command?.length || c.args?.length ? (
-                      <CommandBlock command={c.command} args={c.args} />
-                    ) : null}
-                    {c.resources ? (
-                      <Facts
-                        items={[
-                          ["Requests", fmtRes(c.resources.requests)],
-                          ["Limits", fmtRes(c.resources.limits)],
-                        ]}
-                      />
-                    ) : null}
-                    {c.env?.length ? (
-                      <details className="collapse">
-                        <summary>Environment ({c.env.length})</summary>
-                        <EnvList env={c.env} />
-                      </details>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </div>
+            <Card title="Configuration" className="section-gap">
+              {d.containers.map((c) => (
+                <div key={c.role} className="rt-cfg">
+                  {d.containers!.length > 1 ? <div className="eyebrow">{cap(c.role)}</div> : null}
+                  {c.command?.length || c.args?.length ? (
+                    <CommandBlock command={c.command} args={c.args} />
+                  ) : null}
+                  {c.resources ? (
+                    <Facts
+                      items={[
+                        ["Requests", fmtRes(c.resources.requests)],
+                        ["Limits", fmtRes(c.resources.limits)],
+                      ]}
+                    />
+                  ) : null}
+                  {c.env?.length ? (
+                    <details className="collapse">
+                      <summary>Environment ({c.env.length})</summary>
+                      <EnvList env={c.env} />
+                    </details>
+                  ) : null}
+                </div>
+              ))}
+            </Card>
           ) : null}
 
-          <div className="card section-gap">
-            <div className="card-head">
-              <h3>Used by ({serving.length})</h3>
-            </div>
-            <div className="card-body">
-              <RefList
-                items={serving}
-                onOpen={openDeployment}
-                empty="No deployments use this runtime yet."
-              />
-            </div>
-          </div>
+          <Card title={`Used by (${serving.length})`} className="section-gap">
+            <RefList
+              items={serving}
+              onOpen={openDeployment}
+              empty="No deployments use this runtime yet."
+            />
+          </Card>
         </>
       )}
     </section>
