@@ -35,11 +35,11 @@ config:
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60
     # mTLS the proxy presents to reach a model gateway that requires client certs.
-    # Off by default; when enabled the pod mounts its service identity (below) and
-    # muse-server sends it. The gateway must authorize the pod's identity for the
-    # models — otherwise use the copy-paste curl (which runs with the user's cert).
+    # On by default: the pod mounts its service identity (below) and muse-server
+    # presents it. The gateway must still authorize the pod's identity for the
+    # models — otherwise the copy-paste curl (user's own cert) is the fallback.
     tls:
-      enabled: false
+      enabled: true
       caCert: /var/facebook/rootcanal/ca.pem # from the rootcanal hostPath mount
       clientCert: /etc/muse/identity/tls.crt # from the cert-manager CSI mount
       clientKey: /etc/muse/identity/tls.key
@@ -50,7 +50,7 @@ config:
         issuerGroup: identity.mks.meta.com
         issuerKind: ProdRAClusterIssuer
         issuerName: prodra
-        name: "" # REQUIRED when enabled, e.g. <cluster>/<namespace>/<serviceaccount>
+        name: "" # empty ⇒ derived <cluster>/<namespace>/<serviceAccount> from the release; set to override
         type: MKS_SERVICEACCOUNT
   # Fleet metrics: muse-server proxies PromQL to each cluster's in-cluster
   # Prometheus (via the apiserver services/proxy on that cluster's client — no

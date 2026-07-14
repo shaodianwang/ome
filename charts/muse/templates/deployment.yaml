@@ -130,7 +130,7 @@ spec:
               csi.cert-manager.io/issuer-group: {{ .Values.config.chat.tls.identity.issuerGroup }}
               csi.cert-manager.io/issuer-kind: {{ .Values.config.chat.tls.identity.issuerKind }}
               csi.cert-manager.io/issuer-name: {{ .Values.config.chat.tls.identity.issuerName }}
-              identity.mks.meta.com/name: {{ .Values.config.chat.tls.identity.name | quote }}
+              identity.mks.meta.com/name: {{ .Values.config.chat.tls.identity.name | default (printf "%s/%s/%s" (trimPrefix "muse-" (include "muse.fullname" .)) .Release.Namespace (include "muse.serviceAccountName" .)) | quote }}
               identity.mks.meta.com/type: {{ .Values.config.chat.tls.identity.type }}
         {{- end }}
       {{- end }}
