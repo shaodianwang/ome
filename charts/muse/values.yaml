@@ -35,11 +35,13 @@ config:
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60
     # mTLS the proxy presents to reach a model gateway that requires client certs.
-    # On by default: the pod mounts its service identity (below) and muse-server
-    # presents it. The gateway must still authorize the pod's identity for the
-    # models — otherwise the copy-paste curl (user's own cert) is the fallback.
+    # OFF by default. Enabling it requires BOTH: (1) the pod's SA to have RBAC to
+    # create cert-manager CertificateRequests (otherwise the CSI mount fails and the
+    # pod never starts), and (2) the target gateway to authorize that pod identity.
+    # The external gateway serves without a client cert, so leave this off unless a
+    # gateway specifically demands mTLS and the SA has the RBAC above.
     tls:
-      enabled: true
+      enabled: false
       caCert: /var/facebook/rootcanal/ca.pem # from the rootcanal hostPath mount
       clientCert: /etc/muse/identity/tls.crt # from the cert-manager CSI mount
       clientKey: /etc/muse/identity/tls.key
