@@ -131,6 +131,11 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         config.chat_enabled,
         Duration::from_secs(config.chat_timeout_secs.max(1)),
         Duration::from_secs(config.chat_connect_timeout_secs.max(1)),
+        app_context::ChatTls {
+            client_cert: config.chat_client_cert.clone(),
+            client_key: config.chat_client_key.clone(),
+            ca_cert: config.chat_ca_cert.clone(),
+        },
         config.prom_service.clone(),
         metrics_queries,
         Duration::from_secs(config.metrics_refresh_secs.max(1)),

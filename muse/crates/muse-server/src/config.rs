@@ -229,6 +229,23 @@ pub struct Config {
     )]
     pub chat_connect_timeout_secs: u64,
 
+    /// Client certificate (PEM) the chat proxy presents for mTLS to the model's
+    /// gateway. The muse pod mounts its service identity here; with
+    /// `--chat-client-key` + `--chat-ca-cert` it lets the in-console test reach an
+    /// mTLS-gated endpoint. No baked default: unset ⇒ a plain TLS request.
+    #[arg(long = "chat-client-cert", env = "MUSE_CHAT_CLIENT_CERT")]
+    pub chat_client_cert: Option<String>,
+
+    /// Private key (PEM) paired with `--chat-client-cert`; omit if the cert file
+    /// already carries the key.
+    #[arg(long = "chat-client-key", env = "MUSE_CHAT_CLIENT_KEY")]
+    pub chat_client_key: Option<String>,
+
+    /// CA bundle (PEM) verifying the gateway's server cert for the chat proxy.
+    /// No baked default: unset ⇒ the system roots.
+    #[arg(long = "chat-ca-cert", env = "MUSE_CHAT_CA_CERT")]
+    pub chat_ca_cert: Option<String>,
+
     /// Prometheus to proxy PromQL to, per cluster, as `namespace/name:port`
     /// (e.g. `ome/ome-prometheus:9090`). Reached through each cluster's own kube
     /// client via the apiserver `services/proxy` subresource — no separate

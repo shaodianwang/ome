@@ -8,54 +8,46 @@ import { copyText } from "../util";
  *  giving up — enough for the server's specific timeout error to arrive first. */
 const CLIENT_GRACE_MS = 5000;
 
-/** A ready-to-run curl for the model's OpenAI-style chat endpoint, using whatever
- *  model + prompt the user has entered. The prompt is embedded in the single-quoted
- *  `-d` payload, so any single quotes in it are escaped for the shell. This is what
- *  the user copies to run the request from their terminal with their own creds —
- *  the endpoint sits behind an auth gateway the console can't authenticate to. */
-function buildCurl(endpoint: string, model: string, prompt: string): string {
-  const body = JSON.stringify({
-    model,
-    messages: [{ role: "user", content: prompt || "Hello" }],
-  });
-  // bash-safe single quote: close, escaped quote, reopen.
-  const shellSafe = body.replace(/'/g, `'\\''`);
+/** The endpoints a served model may expose. Engines differ: sglang serves only
+ *  `/generate` (and ignores `model`); vLLM serves `/v1/chat/completions`
+ *  (which requires `model`) and `/generate`. The panel defaults to chat but lets
+ *  the user switch — behavior/topology varies per deployment, so it stays open. */
+const ENDPOINTS = [
+  { path: "/v1/chat/completions", label: "Chat completions · vLLM" },
+  { path: "/generate", label: "Generate · sglang" },
+] as const;
+
+/** A starter request body for an endpoint. Chat carries `model` + `messages`
+ *  (vLLM requires the model); `/generate` uses sglang's `text` + sampling params. */
+function defaultBody(path: string, model: string): string {
+  if (path === "/generate") {
+    return JSON.stringify({ text: "Hello", sampling_params: { max_new_tokens: 128 } }, null, 2);
+  }
+  return JSON.stringify({ model, messages: [{ role: "user", content: "Hello" }] }, null, 2);
+}
+
+/** A ready-to-run curl for the chosen URL/endpoint/body. The served endpoint sits
+ *  behind an mTLS gateway the console can't authenticate to as the user, so this
+ *  is the reliable path: the caller runs it with their own client cert. Cert paths
+ *  are placeholders — the user fills in their CA + x509. Single quotes in the body
+ *  are escaped for the shell. */
+function buildCurl(base: string, path: string, body: string): string {
+  const url = `${base.replace(/\/+$/, "")}${path}`;
+  const compact = body.replace(/\s+/g, " ").trim().replace(/'/g, `'\\''`);
   return [
-    `curl -s ${endpoint}/v1/chat/completions \\`,
+    `curl -sS '${url}' \\`,
+    `  --noproxy '*' \\`,
+    `  --cacert <ca.pem> --cert <your-client-cert.pem> \\`,
     `  -H 'content-type: application/json' \\`,
-    `  -d '${shellSafe}'`,
+    `  -d '${compact}'`,
   ].join("\n");
 }
 
-/** A curl command block with an honest copy button (only flags "Copied" when the
- *  copy actually landed). Shared by the proxy-off state and the failure fallback. */
-function CurlBlock({ curl, note }: { curl: string; note?: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="tryit">
-      {note ? <div className="muted cell-sm">{note}</div> : null}
-      <pre className="curl">{curl}</pre>
-      <button
-        className="btn ghost sm"
-        onClick={() =>
-          void copyText(curl).then((ok) => {
-            if (!ok) return;
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          })
-        }
-      >
-        <Copy />
-        {copied ? "Copied" : "Copy curl"}
-      </button>
-    </div>
-  );
-}
-
-/** In-page inference test: a live chat when the proxy is enabled, else a copyable
- *  curl against the endpoint. When a live attempt fails — commonly because the
- *  endpoint is behind an auth gateway the console can't authenticate to — it falls
- *  back to the same curl (built from the user's own model + prompt) to run locally. */
+/** In-page inference test. The endpoint, target URL, and request body are all
+ *  editable — engines and gateways vary, and `status.url` is often wrong today,
+ *  so the panel is deliberately flexible. It always offers a correct curl (run
+ *  with your own cert); when the proxy is enabled it also sends the chosen
+ *  endpoint live through muse, falling back to the curl on any failure. */
 export function ChatBox({
   cluster,
   name,
@@ -71,66 +63,106 @@ export function ChatBox({
   enabled: boolean;
   timeoutSecs?: number;
 }) {
-  const [model, setModel] = useState(defaultModel);
-  const [prompt, setPrompt] = useState("");
+  const [path, setPath] = useState<string>(ENDPOINTS[0].path);
+  const [baseUrl, setBaseUrl] = useState(endpoint ?? "");
+  const [body, setBody] = useState(() => defaultBody(ENDPOINTS[0].path, defaultModel));
   const [reply, setReply] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  if (!endpoint) {
-    return <div className="muted">No endpoint yet — this deployment isn't addressable.</div>;
-  }
+  const onEndpoint = (p: string) => {
+    setPath(p);
+    setBody(defaultBody(p, defaultModel));
+    setReply(null);
+    setErr(null);
+  };
 
-  if (!enabled) {
-    return (
-      <CurlBlock
-        curl={buildCurl(endpoint, defaultModel, "Hello")}
-        note="Live testing is off on this console — run it yourself:"
-      />
-    );
-  }
-
-  // Bound the request a little above the server's own budget, so the server's
-  // (more specific) error wins in normal cases and this abort is only a backstop.
-  const timeoutMs = timeoutSecs != null ? timeoutSecs * 1000 + CLIENT_GRACE_MS : undefined;
+  const curl = buildCurl(baseUrl, path, body);
+  // The live proxy forwards the chosen endpoint through muse (using the pod's
+  // identity + the server-known URL); the curl is the fallback with your own cert.
+  const canLiveSend = enabled;
 
   const send = () => {
-    if (!prompt.trim() || busy) return;
+    if (busy) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      setErr("Request body is not valid JSON.");
+      return;
+    }
     setBusy(true);
     setErr(null);
     setReply(null);
+    const timeoutMs = timeoutSecs != null ? timeoutSecs * 1000 + CLIENT_GRACE_MS : undefined;
     api
-      .chat(cluster, name, { model, messages: [{ role: "user", content: prompt }] }, timeoutMs)
-      .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r)))
+      .chat(cluster, name, path, parsed, timeoutMs)
+      .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r, null, 2)))
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));
   };
 
   return (
     <div className="tryit">
-      <div className="chat-model">
-        <label>model</label>
-        <input value={model} onChange={(e) => setModel(e.target.value)} />
-      </div>
-      <textarea
-        className="chat-input"
-        placeholder="Send a test prompt…"
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-      />
-      <button className="btn primary sm" onClick={send} disabled={busy || !prompt.trim()}>
-        {busy ? "Sending…" : "Send"}
-      </button>
-      {reply ? <div className="chat-reply">{reply}</div> : null}
-      {err ? (
-        <>
-          <div className="notice bad">{err}</div>
-          <CurlBlock
-            curl={buildCurl(endpoint, model, prompt)}
-            note="Couldn't reach the endpoint from the console — it may require your credentials. Run it from your terminal instead:"
+      <div className="chat-controls">
+        <label className="chat-field">
+          <span>Endpoint</span>
+          <select value={path} onChange={(e) => onEndpoint(e.target.value)}>
+            {ENDPOINTS.map((e) => (
+              <option key={e.path} value={e.path}>
+                {e.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="chat-field grow">
+          <span>Target URL</span>
+          <input
+            className="mono"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder="https://…"
           />
-        </>
+        </label>
+      </div>
+      {!endpoint ? (
+        <p className="note">
+          No endpoint on status yet — enter the gateway URL to build a request.
+        </p>
       ) : null}
+
+      <textarea
+        className="chat-input mono"
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        spellCheck={false}
+        rows={6}
+      />
+
+      {canLiveSend ? (
+        <button className="btn primary sm" onClick={send} disabled={busy}>
+          {busy ? "Sending…" : "Send"}
+        </button>
+      ) : null}
+      {reply ? <div className="chat-reply">{reply}</div> : null}
+      {err ? <div className="notice bad">{err}</div> : null}
+
+      <p className="note">Behind an mTLS gateway — run it with your own client cert + CA:</p>
+      <pre className="curl">{curl}</pre>
+      <button
+        className="btn ghost sm"
+        onClick={() =>
+          void copyText(curl).then((ok) => {
+            if (!ok) return;
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          })
+        }
+      >
+        <Copy />
+        {copied ? "Copied" : "Copy curl"}
+      </button>
     </div>
   );
 }

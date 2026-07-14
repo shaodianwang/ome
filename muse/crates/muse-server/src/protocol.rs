@@ -1229,10 +1229,16 @@ pub struct ViewParams {
     pub cluster: Option<String>,
 }
 
-/// Query params for the inference test proxy: which cluster the ISVC lives on.
+/// Query params for the inference test proxy: which cluster the ISVC lives on, and
+/// which endpoint path to POST to (engines differ — vLLM `/v1/chat/completions`,
+/// sglang `/generate`).
 #[derive(Debug, Default, Deserialize)]
 pub struct ChatParams {
     pub cluster: Option<String>,
+    /// Endpoint path on the model's own URL. Defaults to `/v1/chat/completions`.
+    /// Must be an absolute path (no scheme/host) — the handler rejects anything
+    /// else so the proxy can't be redirected off the ISVC's endpoint (SSRF-safe).
+    pub path: Option<String>,
 }
 
 // ===========================================================================

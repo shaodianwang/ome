@@ -422,16 +422,25 @@ button.mcard:hover {
 .tryit .btn {
   align-self: flex-start;
 }
-.chat-model {
+.chat-controls {
   display: flex;
-  align-items: center;
   gap: 8px;
-  font-size: var(--t-sm);
+  flex-wrap: wrap;
 }
-.chat-model label {
+.chat-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: var(--t-xs);
   color: var(--fg-3);
 }
-.chat-model input,
+.chat-field.grow {
+  flex: 1;
+  min-width: 180px;
+}
+.chat-field select,
+.chat-field input,
 .chat-input {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -441,16 +450,15 @@ button.mcard:hover {
   padding: 7px 9px;
   outline: none;
 }
-.chat-model input {
-  flex: 1;
+.chat-field input {
   font-family: var(--mono);
 }
 .chat-input {
-  font-family: inherit;
   min-height: 64px;
   resize: vertical;
 }
-.chat-model input:focus,
+.chat-field select:focus,
+.chat-field input:focus,
 .chat-input:focus {
   border-color: var(--accent);
 }

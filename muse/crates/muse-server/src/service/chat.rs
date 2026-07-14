@@ -30,7 +30,17 @@ pub async fn proxy(
         .and_then(|isvc| isvc.status.as_ref().and_then(|s| s.url.clone()))
         .filter(|u| !u.is_empty())
         .ok_or_else(|| ApiError::Unavailable(format!("{name} has no ready endpoint")))?;
-    let target = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
+    // The endpoint path is caller-chosen (engines differ — vLLM
+    // `/v1/chat/completions`, sglang `/generate`) but must be an absolute path with
+    // no host/scheme/`..`, so the proxy stays pinned to the ISVC's own URL (the base
+    // is always `status.url`, never the caller) — it can't be redirected elsewhere.
+    let path = params.path.as_deref().unwrap_or("/v1/chat/completions");
+    if !path.starts_with('/') || path.starts_with("//") || path.contains("..") {
+        return Err(ApiError::Unavailable(format!(
+            "invalid endpoint path: {path}"
+        )));
+    }
+    let target = format!("{}{}", url.trim_end_matches('/'), path);
     let resp = st
         .http
         .post(&target)

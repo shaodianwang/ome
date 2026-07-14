@@ -70,17 +70,23 @@ impl AppState {
         chat_enabled: bool,
         chat_timeout: Duration,
         chat_connect_timeout: Duration,
+        chat_tls: ChatTls,
         prom: Option<PromTarget>,
         metrics_queries: Arc<Vec<QueryDef>>,
         metrics_refresh: Duration,
     ) -> Self {
         // Client for the inference test proxy. A short connect timeout bounds the
         // TCP+TLS handshake so an unreachable endpoint fails fast, while the total
-        // timeout still allows for generation. `unwrap_or_default` (not unwrap): a
-        // builder failure falls back to a default client rather than panicking.
-        let http = reqwest::Client::builder()
-            .timeout(chat_timeout)
-            .connect_timeout(chat_connect_timeout)
+        // timeout still allows for generation. When configured, it presents the
+        // pod's mTLS client cert + trusts the given CA so it can reach a gated
+        // gateway. `unwrap_or_default` (not unwrap): a builder failure falls back to
+        // a default client rather than panicking.
+        let http = chat_tls
+            .apply(
+                reqwest::Client::builder()
+                    .timeout(chat_timeout)
+                    .connect_timeout(chat_connect_timeout),
+            )
             .build()
             .unwrap_or_default();
         let (metrics_tx, _) = watch::channel(empty_metrics());
@@ -197,4 +203,55 @@ impl AppState {
 /// The initial (empty) metrics snapshot, before the first refresh completes.
 fn empty_metrics() -> Arc<Value> {
     Arc::new(json!({ "updatedAt": 0, "clusters": {} }))
+}
+
+/// mTLS material for the chat proxy's HTTP client — all optional and config-driven
+/// (the muse pod mounts its service identity; unset ⇒ a plain TLS request).
+#[derive(Clone, Default)]
+pub struct ChatTls {
+    pub client_cert: Option<String>,
+    pub client_key: Option<String>,
+    pub ca_cert: Option<String>,
+}
+
+impl ChatTls {
+    /// Apply the configured client identity + CA to a reqwest builder. A missing or
+    /// unreadable file is logged and skipped (the proxy then sends without it)
+    /// rather than failing muse startup.
+    fn apply(&self, mut b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        if let Some(cert) = &self.client_cert {
+            match load_identity(cert, self.client_key.as_deref()) {
+                Ok(id) => b = b.identity(id),
+                Err(e) => {
+                    tracing::error!(error = %e, "chat proxy: client cert not loaded; sending without mTLS")
+                }
+            }
+        }
+        if let Some(ca) = &self.ca_cert {
+            match load_ca(ca) {
+                Ok(c) => b = b.add_root_certificate(c),
+                Err(e) => {
+                    tracing::error!(error = %e, "chat proxy: CA not loaded; using system roots")
+                }
+            }
+        }
+        b
+    }
+}
+
+/// Load a client identity from a cert PEM (and an optional separate key PEM; when
+/// omitted the cert file is expected to carry the key too).
+fn load_identity(cert_path: &str, key_path: Option<&str>) -> Result<reqwest::Identity, String> {
+    let mut pem = std::fs::read(cert_path).map_err(|e| format!("read {cert_path}: {e}"))?;
+    if let Some(kp) = key_path {
+        pem.push(b'\n');
+        pem.extend(std::fs::read(kp).map_err(|e| format!("read {kp}: {e}"))?);
+    }
+    reqwest::Identity::from_pem(&pem).map_err(|e| format!("parse client identity: {e}"))
+}
+
+/// Load a CA bundle PEM as a trusted root for the chat proxy.
+fn load_ca(path: &str) -> Result<reqwest::Certificate, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    reqwest::Certificate::from_pem(&pem).map_err(|e| format!("parse CA cert: {e}"))
 }

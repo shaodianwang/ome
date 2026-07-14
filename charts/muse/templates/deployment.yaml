@@ -48,6 +48,15 @@ spec:
               value: {{ .Values.config.chat.enabled | quote }}
             - name: MUSE_CHAT_TIMEOUT_SECS
               value: {{ .Values.config.chat.timeoutSecs | quote }}
+            {{- if .Values.config.chat.tls.enabled }}
+            # mTLS the chat proxy presents to reach a gated model gateway (certs mounted below).
+            - name: MUSE_CHAT_CLIENT_CERT
+              value: {{ .Values.config.chat.tls.clientCert | quote }}
+            - name: MUSE_CHAT_CLIENT_KEY
+              value: {{ .Values.config.chat.tls.clientKey | quote }}
+            - name: MUSE_CHAT_CA_CERT
+              value: {{ .Values.config.chat.tls.caCert | quote }}
+            {{- end }}
             {{- if .Values.config.metrics.enabled }}
             # Fleet metrics proxy → each cluster's Prometheus; query set mounted below.
             - name: MUSE_PROM_SERVICE
@@ -71,7 +80,7 @@ spec:
               path: /livez
               port: http
           resources: {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or .Values.clusters .Values.config.metrics.enabled }}
+          {{- if or .Values.clusters .Values.config.metrics.enabled .Values.config.chat.tls.enabled }}
           volumeMounts:
             {{- range .Values.clusters }}
             - name: kubeconfig-{{ .name }}
@@ -83,8 +92,16 @@ spec:
               mountPath: /etc/muse/metrics
               readOnly: true
             {{- end }}
+            {{- if .Values.config.chat.tls.enabled }}
+            - name: chat-rootcanal
+              mountPath: {{ .Values.config.chat.tls.rootcanalHostPath }}
+              readOnly: true
+            - name: chat-identity
+              mountPath: /etc/muse/identity
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if or .Values.clusters .Values.config.metrics.enabled }}
+      {{- if or .Values.clusters .Values.config.metrics.enabled .Values.config.chat.tls.enabled }}
       volumes:
         # Each workload cluster's kubeconfig Secret (key: `kubeconfig`).
         {{- range .Values.clusters }}
@@ -97,6 +114,24 @@ spec:
         - name: metrics-queries
           configMap:
             name: {{ include "muse.fullname" . }}-metrics
+        {{- end }}
+        {{- if .Values.config.chat.tls.enabled }}
+        # Internal CA on the node (hostPath) + a pod service-identity x509 from the
+        # cert-manager CSI driver — the mTLS materials the model gateway requires.
+        - name: chat-rootcanal
+          hostPath:
+            path: {{ .Values.config.chat.tls.rootcanalHostPath }}
+            type: Directory
+        - name: chat-identity
+          csi:
+            driver: {{ .Values.config.chat.tls.identity.driver }}
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-group: {{ .Values.config.chat.tls.identity.issuerGroup }}
+              csi.cert-manager.io/issuer-kind: {{ .Values.config.chat.tls.identity.issuerKind }}
+              csi.cert-manager.io/issuer-name: {{ .Values.config.chat.tls.identity.issuerName }}
+              identity.mks.meta.com/name: {{ .Values.config.chat.tls.identity.name | quote }}
+              identity.mks.meta.com/type: {{ .Values.config.chat.tls.identity.type }}
         {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
