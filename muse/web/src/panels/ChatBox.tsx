@@ -97,7 +97,7 @@ export function ChatBox({
     setReply(null);
     const timeoutMs = timeoutSecs != null ? timeoutSecs * 1000 + CLIENT_GRACE_MS : undefined;
     api
-      .chat(cluster, name, path, parsed, timeoutMs)
+      .chat(cluster, name, path, baseUrl, parsed, timeoutMs)
       .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r, null, 2)))
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));

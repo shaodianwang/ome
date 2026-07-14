@@ -1239,6 +1239,12 @@ pub struct ChatParams {
     /// Must be an absolute path (no scheme/host) — the handler rejects anything
     /// else so the proxy can't be redirected off the ISVC's endpoint (SSRF-safe).
     pub path: Option<String>,
+    /// Override the target base URL. Needed because `status.url` often points at an
+    /// unreachable/internal gateway (OEP-0023) while the external gateway works —
+    /// the console lets the user pick. Accepted only when its host is within the
+    /// deployment's own cluster domain (the handler enforces this), so the proxy
+    /// still can't be aimed at an arbitrary host. Empty ⇒ use `status.url`.
+    pub base: Option<String>,
 }
 
 // ===========================================================================

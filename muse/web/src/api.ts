@@ -373,9 +373,16 @@ export const api = {
   config: () => getJSON<AppConfig>("/v1/config"),
   // Latest fleet metrics snapshot (initial load; live updates arrive via SSE).
   metrics: () => getJSON<MetricsSnapshot>("/v1/metrics"),
-  chat: (cluster: string, name: string, path: string, body: unknown, timeoutMs?: number) =>
+  chat: (
+    cluster: string,
+    name: string,
+    path: string,
+    base: string,
+    body: unknown,
+    timeoutMs?: number,
+  ) =>
     postJSON<ChatResponse>(
-      `/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}&path=${enc(path)}`,
+      `/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}&path=${enc(path)}&base=${enc(base)}`,
       body,
       timeoutMs,
     ),
