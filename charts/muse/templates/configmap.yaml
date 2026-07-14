@@ -1,0 +1,19 @@
+{{- if .Values.config.metrics.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "muse.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+data:
+  # Curated dashboard query set muse-server loads (--metrics-queries-file).
+  # Default ships from charts/muse/files/metrics-queries.json (engine/topology-
+  # agnostic: PromQL `or` unions, router -> sglang -> vllm). Override per
+  # environment with config.metrics.queries (a list of {id,kind,promql,...}).
+  {{- if .Values.config.metrics.queries }}
+  metrics-queries.json: {{ dict "queries" .Values.config.metrics.queries | toJson | quote }}
+  {{- else }}
+  metrics-queries.json: |-
+    {{- .Files.Get "files/metrics-queries.json" | nindent 4 }}
+  {{- end }}
+{{- end }}

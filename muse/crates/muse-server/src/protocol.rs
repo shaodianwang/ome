@@ -1287,6 +1287,9 @@ pub struct ConfigResp {
     /// Total budget (seconds) for one proxied chat request. The console bounds its
     /// own request a little above this so a stalled endpoint can't hang the UI.
     pub chat_timeout_secs: u64,
+    /// Whether the metrics proxy (`/v1/metrics/*` → a cluster's Prometheus) is
+    /// configured; the console hides its metric panels when false.
+    pub metrics: bool,
 }
 
 /// Serialize any value to JSON, or `Null` on failure.

@@ -89,3 +89,133 @@ export function UtilRow({
     </div>
   );
 }
+
+/** A minimal sparkline for a numeric time-series — scales to its own min/max,
+ *  presentational only. `color` is any CSS color/var; the stroke stays 1.5px under
+ *  the non-uniform scale via `vector-effect`. Fewer than two points renders blank. */
+export function Spark({
+  points,
+  color = "var(--accent)",
+  width = 108,
+  height = 24,
+}: {
+  points: number[];
+  color?: string;
+  width?: number;
+  height?: number;
+}) {
+  if (points.length < 2) {
+    return <svg className="spark" width={width} height={height} aria-hidden />;
+  }
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const dx = width / (points.length - 1);
+  const d = points
+    .map((p, i) => `${(i * dx).toFixed(1)},${(height - ((p - min) / span) * height).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg
+      className="spark"
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden
+    >
+      <polyline
+        points={d}
+        style={{ fill: "none", stroke: color, strokeWidth: 1.5 }}
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
+/** A Grafana-style filter chip: a label + a native select styled as a pill.
+ *  `accent` highlights it (used for the time-range control). */
+export function FilterChip({
+  label,
+  value,
+  options,
+  onChange,
+  accent = false,
+}: {
+  label?: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+  accent?: boolean;
+}) {
+  return (
+    <label className={accent ? "fv range" : "fv"}>
+      {label ? <span className="lbl">{label}</span> : null}
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** A line/area chart for one or more numeric series — grid lines + polylines
+ *  scaled to the combined range, matching the mockup's `.chart` (300×96 viewBox,
+ *  non-scaling stroke). Each series: `points` + a CSS `color`; `area` fills under
+ *  it. Non-finite points (e.g. NaN latency during idle) are ignored. */
+export function Chart({
+  series,
+  height = 96,
+}: {
+  series: { points: number[]; color: string; area?: boolean }[];
+  height?: number;
+}) {
+  const W = 300;
+  const H = height;
+  const all = series.flatMap((s) => s.points).filter((v) => Number.isFinite(v));
+  if (all.length < 2) {
+    return (
+      <svg className="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden />
+    );
+  }
+  const min = Math.min(...all, 0);
+  const max = Math.max(...all) || 1;
+  const span = max - min || 1;
+  const path = (arr: number[]) =>
+    arr
+      .map((v, i) =>
+        Number.isFinite(v)
+          ? `${((i / (arr.length - 1)) * W).toFixed(1)},${(H - ((v - min) / span) * H).toFixed(1)}`
+          : "",
+      )
+      .filter(Boolean)
+      .join(" ");
+  return (
+    <svg className="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line key={f} className="grid-ln" x1="0" y1={H * f} x2={W} y2={H * f} />
+      ))}
+      {series.map((s, i) =>
+        s.area && s.points.filter((v) => Number.isFinite(v)).length > 1 ? (
+          <polygon
+            key={`a${i}`}
+            points={`${path(s.points)} ${W},${H} 0,${H}`}
+            style={{ fill: s.color, opacity: 0.13 }}
+          />
+        ) : null,
+      )}
+      {series.map((s, i) =>
+        s.points.filter((v) => Number.isFinite(v)).length > 1 ? (
+          <polyline
+            key={`l${i}`}
+            points={path(s.points)}
+            style={{ fill: "none", stroke: s.color, strokeWidth: 1.6 }}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : null,
+      )}
+    </svg>
+  );
+}

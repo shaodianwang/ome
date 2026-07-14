@@ -231,6 +231,28 @@ export interface AppConfig {
   /** Server-side total budget (seconds) for a chat proxy request; the console
    *  bounds its own request a little above this so a stall can't hang the UI. */
   chatTimeoutSecs?: number;
+  /** Whether the metrics proxy is configured server-side; panels hide when false. */
+  metrics?: boolean;
+}
+
+/** One Prometheus result series: instant queries carry `value`, range queries
+ *  carry `values` (a `[unixSeconds, stringValue]` pair or list). */
+export interface PromSeries {
+  metric: Record<string, string>;
+  value?: [number, string];
+  values?: [number, string][];
+}
+/** A Prometheus query result, or `{ error }` when the server couldn't run it. */
+export interface PromResult {
+  status?: string;
+  data?: { resultType: string; result: PromSeries[] };
+  error?: string;
+}
+/** The fleet metrics snapshot: per cluster, per query id, a Prometheus result.
+ *  Built server-side on a timer and pushed over `METRICS_STREAM_URL`. */
+export interface MetricsSnapshot {
+  updatedAt: number;
+  clusters: Record<string, Record<string, PromResult>>;
 }
 
 /** Minimal OpenAI-style chat completion response (only what the console reads). */
@@ -247,6 +269,10 @@ const at = (path: string) => BASE + path.replace(/^\//, "");
 
 /** SSE endpoint for live resource-change events (see `live.ts`). */
 export const STREAM_URL = at("/v1/stream");
+
+/** SSE endpoint for the live metrics snapshot, pushed on each server-side refresh
+ *  (see `useMetrics` in `live.ts`). The console subscribes once and never polls. */
+export const METRICS_STREAM_URL = at("/v1/metrics/stream");
 
 /**
  * Parse a response body as JSON, turning a non-JSON payload into a legible error
@@ -345,6 +371,8 @@ export const api = {
     getJSON<RuntimeDetail>(`/v1/clusterservingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
+  // Latest fleet metrics snapshot (initial load; live updates arrive via SSE).
+  metrics: () => getJSON<MetricsSnapshot>("/v1/metrics"),
   chat: (cluster: string, name: string, body: unknown, timeoutMs?: number) =>
     postJSON<ChatResponse>(
       `/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}`,

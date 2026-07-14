@@ -21,7 +21,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use kube::Resource;
+use kube::{Client, Resource};
 use ome_client::{
     informers::{InformerEvent, Prune, SharedInformerFactory},
     k8s_openapi::api::core::v1::{Node, Pod},
@@ -41,6 +41,9 @@ use crate::protocol::FeedEvent;
 /// One workload cluster's informer-backed listers.
 pub struct ClusterState {
     pub name: String,
+    /// The cluster's kube client, retained past informer setup for the metrics
+    /// proxy (PromQL over the apiserver `services/proxy`). Cheap to clone (Arc).
+    pub client: Client,
     pub inference_services: Lister<InferenceService>,
     pub base_models: Lister<BaseModel>,
     pub serving_runtimes: Lister<ServingRuntime>,
@@ -76,6 +79,7 @@ pub type ReadyFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// in the background to learn when the cluster is fully warm.
 pub fn build_cluster_state(
     name: String,
+    client: Client,
     factory: &SharedInformerFactory,
     ome: &HashSet<String>,
     feed: &Feed,
@@ -150,6 +154,7 @@ pub fn build_cluster_state(
         nodes: warm::<Node>(factory, true, &mut readies, None, Some(signal.clone())),
         pods: warm::<Pod>(factory, true, &mut readies, None, Some(signal.clone())),
         name,
+        client,
         ready: Arc::new(AtomicBool::new(false)),
     };
     (state, readies)

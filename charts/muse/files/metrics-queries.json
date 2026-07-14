@@ -1,0 +1,50 @@
+{
+  "_comment": "Curated fleet-dashboard query set, loaded by muse-server (--metrics-queries-file), rendered as a ConfigMap by the chart. ENGINE- AND TOPOLOGY-AGNOSTIC: each query unions the metric sources present in the fleet via PromQL `or`, so no source is baked into the binary — add engines/proxies by editing this file. Source hierarchy for user-facing SLIs is router (the SMG reverse proxy, `router_*` / `smg_*`, component=router) → engine (`sglang:*` / `vllm:*`, component=engine): the router sees true client-facing traffic (and per-deployment status codes), while the engine sees per-replica internals. Token throughput stays on the engine (the router emits no tokens). All queries group by `inferenceservice` (the deployment), which every layer carries via the ome-inferenceservice-pods scrape relabeling.",
+  "queries": [
+    {
+      "id": "latency_p99",
+      "kind": "range",
+      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(router_request_duration_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
+    },
+    {
+      "id": "latency_p50",
+      "kind": "range",
+      "promql": "histogram_quantile(0.50, sum by (inferenceservice, le) (rate(router_request_duration_seconds_bucket[5m]))) or histogram_quantile(0.50, sum by (inferenceservice, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.50, sum by (inferenceservice, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
+    },
+    {
+      "id": "ttft",
+      "kind": "range",
+      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(router_ttft_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:time_to_first_token_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))"
+    },
+    {
+      "id": "request_rate",
+      "kind": "range",
+      "promql": "sum by (inferenceservice) (rate(router_requests_total[5m])) or sum by (inferenceservice) (rate(sglang:e2e_request_latency_seconds_count[5m])) or sum by (inferenceservice) (rate(vllm:e2e_request_latency_seconds_count[5m]))"
+    },
+    {
+      "id": "error_rate",
+      "kind": "range",
+      "promql": "sum by (inferenceservice) (rate(router_requests_total{status=~\"5..\"}[5m])) or sum by (inferenceservice) (rate(sglang:num_aborted_requests_total[5m]))"
+    },
+    {
+      "id": "throughput_tokens",
+      "kind": "range",
+      "promql": "sum by (inferenceservice) (rate(sglang:generation_tokens_total[5m])) or sum by (inferenceservice) (rate(vllm:generation_tokens_total[5m]))"
+    },
+    {
+      "id": "running_reqs",
+      "kind": "instant",
+      "promql": "sum by (inferenceservice) (router_pool_inflight_reqs) or sum by (inferenceservice) (sglang:num_running_reqs) or sum by (inferenceservice) (vllm:num_requests_running)"
+    },
+    {
+      "id": "queue_reqs",
+      "kind": "instant",
+      "promql": "sum by (inferenceservice) (sglang:num_queue_reqs) or sum by (inferenceservice) (vllm:num_requests_waiting)"
+    },
+    {
+      "id": "pool_healthy",
+      "kind": "instant",
+      "promql": "sum by (inferenceservice) (router_pool_healthy_count)"
+    }
+  ]
+}

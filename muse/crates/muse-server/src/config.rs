@@ -5,9 +5,10 @@
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
+use anyhow::Context;
 use clap::Parser;
 
 /// A workload cluster to aggregate: a name + an optional explicit kubeconfig
@@ -29,6 +30,76 @@ fn parse_cluster(spec: &str) -> Result<ClusterRef, String> {
         name: name.to_owned(),
         kubeconfig: Some(PathBuf::from(path)),
     })
+}
+
+/// A Prometheus the apiserver can proxy PromQL to: `namespace/name:port` (e.g.
+/// `ome/ome-prometheus:9090`). The metrics endpoint reaches it through the
+/// cluster's own kube client via the `services/proxy` subresource, so MUSE holds
+/// no Prometheus credential of its own.
+#[derive(Debug, Clone)]
+pub struct PromTarget {
+    pub namespace: String,
+    pub service: String,
+    pub port: u16,
+}
+
+fn parse_prom_target(spec: &str) -> Result<PromTarget, String> {
+    let err = || format!("expected namespace/name:port, got '{spec}'");
+    let (namespace, rest) = spec.split_once('/').ok_or_else(err)?;
+    let (service, port) = rest.split_once(':').ok_or_else(err)?;
+    if namespace.is_empty() || service.is_empty() {
+        return Err(err());
+    }
+    let port = port.parse().map_err(|_| format!("bad port in '{spec}'"))?;
+    Ok(PromTarget {
+        namespace: namespace.to_owned(),
+        service: service.to_owned(),
+        port,
+    })
+}
+
+/// Whether a dashboard query is an instant (single value per series) or range
+/// (time series) PromQL query.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryType {
+    Instant,
+    #[default]
+    Range,
+}
+
+/// One dashboard metric: an id the console renders by, the PromQL to run, and — for
+/// range queries — the lookback window and step, both in seconds.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct QueryDef {
+    pub id: String,
+    pub promql: String,
+    #[serde(default)]
+    pub kind: QueryType,
+    #[serde(default = "default_window")]
+    pub window: u64,
+    #[serde(default = "default_step")]
+    pub step: u64,
+}
+
+fn default_window() -> u64 {
+    21600 // 6h, matching the dashboard's default time range
+}
+fn default_step() -> u64 {
+    300 // 5m resolution
+}
+
+/// Load the dashboard query set from a JSON file (`{ "queries": [ … ] }`).
+pub fn load_queries(path: &Path) -> anyhow::Result<Vec<QueryDef>> {
+    #[derive(serde::Deserialize)]
+    struct QueriesFile {
+        queries: Vec<QueryDef>,
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read metrics queries file {}", path.display()))?;
+    let file: QueriesFile = serde_json::from_str(&text)
+        .with_context(|| format!("parse metrics queries file {}", path.display()))?;
+    Ok(file.queries)
 }
 
 /// How an informer fetches its initial state from an apiserver.
@@ -157,6 +228,32 @@ pub struct Config {
         default_value_t = 5
     )]
     pub chat_connect_timeout_secs: u64,
+
+    /// Prometheus to proxy PromQL to, per cluster, as `namespace/name:port`
+    /// (e.g. `ome/ome-prometheus:9090`). Reached through each cluster's own kube
+    /// client via the apiserver `services/proxy` subresource — no separate
+    /// Prometheus credential. No baked default: unset ⇒ the `/v1/metrics/*`
+    /// endpoints are disabled and the console hides its metric panels. Supply it
+    /// via deployment config (flag / env / GitOps).
+    #[arg(long = "prom-service", env = "MUSE_PROM_SERVICE", value_parser = parse_prom_target)]
+    pub prom_service: Option<PromTarget>,
+
+    /// How often (seconds) the background refresher re-polls each cluster's
+    /// Prometheus for the dashboard query set and pushes a new snapshot to SSE
+    /// subscribers. One poll per interval regardless of how many consoles are open.
+    #[arg(
+        long = "metrics-refresh-secs",
+        env = "MUSE_METRICS_REFRESH_SECS",
+        default_value_t = 15
+    )]
+    pub metrics_refresh_secs: u64,
+
+    /// Path to the dashboard metrics query set: JSON `{ "queries": [ … ] }`, each
+    /// `{ id, promql, kind: "instant"|"range", window?, step? }`. No baked-in
+    /// queries — engine-specific metric names (e.g. sglang vs vllm) come from this
+    /// file, supplied per environment via deployment config. Unset ⇒ empty snapshot.
+    #[arg(long = "metrics-queries-file", env = "MUSE_METRICS_QUERIES_FILE")]
+    pub metrics_queries_file: Option<PathBuf>,
 
     /// Directory of the built web console (the SPA) to serve at `/`, with the
     /// API under `/v1`. Unset ⇒ API-only (the console is served elsewhere). The

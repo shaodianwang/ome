@@ -34,6 +34,18 @@ config:
   chat: # in-console inference test proxy (POST /v1/.../chat)
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60
+  # Fleet metrics: muse-server proxies PromQL to each cluster's in-cluster
+  # Prometheus (via the apiserver services/proxy on that cluster's client — no
+  # separate credential) and pushes a snapshot to the console over SSE.
+  metrics:
+    enabled: true # false ⇒ no --prom-service; the console hides its metric panels
+    promService: ome/ome-prometheus:9090 # namespace/name:port, applied per cluster
+    refreshSecs: 15 # background poll interval (one poll/interval regardless of viewers)
+    queriesFile: /etc/muse/metrics/metrics-queries.json # mount path (internal)
+    # Default query set ships from charts/muse/files/metrics-queries.json
+    # (engine/topology-agnostic: router → sglang → vllm). Override per environment
+    # with a list of { id, kind: instant|range, promql, window?, step? }.
+    queries: []
   # jemalloc tuning (MALLOC_CONF). A background thread purges freed pages back to
   # the OS after a short decay, so RSS drops after the initial-list allocation
   # burst instead of lingering. Empty ⇒ jemalloc defaults (no background purge).

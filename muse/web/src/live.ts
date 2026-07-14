@@ -10,8 +10,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api } from "./api";
-import type { EventItem } from "./api";
-import { STREAM_URL } from "./api";
+import type { EventItem, MetricsSnapshot } from "./api";
+import { METRICS_STREAM_URL, STREAM_URL } from "./api";
 
 type Listener = (event: EventItem) => void;
 
@@ -165,4 +165,51 @@ export function useEventFeed(limit = 60): {
   }, [limit]);
 
   return { events, error, loading };
+}
+
+// ---------------------------------------------------------------------------
+// Metrics: a second shared SSE connection carrying the full fleet metrics
+// snapshot, pushed by the server on each refresh. Separate from the resource
+// change stream above (different data, different cadence); one connection for the
+// whole app, and subscribers never poll.
+// ---------------------------------------------------------------------------
+
+let metricsSource: EventSource | null = null;
+const metricsListeners = new Set<(snap: MetricsSnapshot) => void>();
+let lastMetrics: MetricsSnapshot | null = null;
+
+function ensureMetricsSource() {
+  if (metricsSource) return;
+  metricsSource = new EventSource(METRICS_STREAM_URL);
+  metricsSource.onmessage = (msg) => {
+    let snap: MetricsSnapshot;
+    try {
+      snap = JSON.parse(msg.data) as MetricsSnapshot;
+    } catch {
+      return;
+    }
+    lastMetrics = snap;
+    metricsListeners.forEach((l) => l(snap));
+  };
+  // EventSource reconnects automatically on error; nothing to do here.
+}
+
+/**
+ * Subscribe to the live fleet metrics snapshot. The server pushes a fresh snapshot
+ * on each refresh, so there is no polling — the SSE payload *is* the data. Pass
+ * `enabled=false` (e.g. metrics unconfigured) to skip the connection entirely.
+ */
+export function useMetrics(enabled = true): { data: MetricsSnapshot | null } {
+  const [data, setData] = useState<MetricsSnapshot | null>(lastMetrics);
+  useEffect(() => {
+    if (!enabled) return;
+    ensureMetricsSource();
+    if (lastMetrics) setData(lastMetrics);
+    const listener = (snap: MetricsSnapshot) => setData(snap);
+    metricsListeners.add(listener);
+    return () => {
+      metricsListeners.delete(listener);
+    };
+  }, [enabled]);
+  return { data };
 }

@@ -1,8 +1,9 @@
 //! The application context: `AppState`, the handle every request runs against.
 //!
 //! It holds one [`ClusterState`] per workload cluster, the topology labels, the
-//! activity feed, and a background-refreshed capacity snapshot. Cheap to clone
-//! (an `Arc` and a few small handles), so Axum clones it per request. Reads
+//! activity feed, a background-refreshed capacity snapshot, and a
+//! background-refreshed metrics snapshot (pushed to SSE subscribers). Cheap to
+//! clone (an `Arc` and a few small handles), so Axum clones it per request. Reads
 //! aggregate across all clusters by default, or one via [`AppState::select`].
 
 use std::{
@@ -11,9 +12,11 @@ use std::{
     time::Duration,
 };
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use tokio::sync::watch;
 
 use crate::{
+    config::{PromTarget, QueryDef},
     informers::{CapacitySignal, ClusterState, Feed},
     protocol::{to_val, Topology},
     rollup,
@@ -39,6 +42,16 @@ pub struct AppState {
     pub chat_timeout_secs: u64,
     /// HTTP client for the inference test proxy (timeouts baked in). Cheap to clone.
     pub http: reqwest::Client,
+    /// The Prometheus to proxy PromQL to (per cluster, via the apiserver
+    /// `services/proxy`). `None` ⇒ metrics are unconfigured and the endpoints are off.
+    pub prom: Option<PromTarget>,
+    /// The curated dashboard query set the metrics refresher runs each interval.
+    metrics_queries: Arc<Vec<QueryDef>>,
+    metrics_refresh: Duration,
+    /// Latest metrics snapshot, updated by the background refresher and pushed to
+    /// SSE subscribers. `watch` retains only the latest value (new subscribers get
+    /// it immediately) — exactly the "current fleet metrics" semantics.
+    metrics_tx: watch::Sender<Arc<Value>>,
 }
 
 /// Pre-computed capacity responses (already serialized to JSON).
@@ -48,6 +61,7 @@ struct CapacitySnapshot {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         clusters: Vec<ClusterState>,
         topology: Topology,
@@ -56,6 +70,9 @@ impl AppState {
         chat_enabled: bool,
         chat_timeout: Duration,
         chat_connect_timeout: Duration,
+        prom: Option<PromTarget>,
+        metrics_queries: Arc<Vec<QueryDef>>,
+        metrics_refresh: Duration,
     ) -> Self {
         // Client for the inference test proxy. A short connect timeout bounds the
         // TCP+TLS handshake so an unreachable endpoint fails fast, while the total
@@ -66,6 +83,7 @@ impl AppState {
             .connect_timeout(chat_connect_timeout)
             .build()
             .unwrap_or_default();
+        let (metrics_tx, _) = watch::channel(empty_metrics());
         let state = Self {
             clusters: Arc::new(clusters),
             topology,
@@ -78,6 +96,10 @@ impl AppState {
             chat_enabled,
             chat_timeout_secs: chat_timeout.as_secs(),
             http,
+            prom,
+            metrics_queries,
+            metrics_refresh,
+            metrics_tx,
         };
         // Warm the cache once so the first request is served, not computed.
         state.refresh_capacity();
@@ -138,4 +160,41 @@ impl AppState {
                 .ok_or_else(|| ApiError::NotFound(format!("unknown cluster: {name}"))),
         }
     }
+
+    /// Whether the metrics proxy is configured (a `--prom-service` was supplied).
+    pub fn metrics_enabled(&self) -> bool {
+        self.prom.is_some()
+    }
+
+    /// The curated dashboard query set (shared; cheap to clone the Arc).
+    pub fn metrics_queries(&self) -> Arc<Vec<QueryDef>> {
+        self.metrics_queries.clone()
+    }
+
+    /// How often the background refresher re-polls each cluster's Prometheus.
+    pub fn metrics_refresh_interval(&self) -> Duration {
+        self.metrics_refresh
+    }
+
+    /// Publish a freshly-built metrics snapshot; new + existing SSE subscribers see
+    /// it, and it's retained for the next `GET /v1/metrics`. `send_replace` never
+    /// fails on zero subscribers (unlike `send`), so the latest value always sticks.
+    pub fn publish_metrics(&self, snapshot: Arc<Value>) {
+        let _ = self.metrics_tx.send_replace(snapshot);
+    }
+
+    /// The latest metrics snapshot (for `GET /v1/metrics`).
+    pub fn metrics_snapshot(&self) -> Arc<Value> {
+        self.metrics_tx.borrow().clone()
+    }
+
+    /// A receiver yielding the current snapshot then each subsequent one (for SSE).
+    pub fn metrics_subscribe(&self) -> watch::Receiver<Arc<Value>> {
+        self.metrics_tx.subscribe()
+    }
+}
+
+/// The initial (empty) metrics snapshot, before the first refresh completes.
+fn empty_metrics() -> Arc<Value> {
+    Arc::new(json!({ "updatedAt": 0, "clusters": {} }))
 }

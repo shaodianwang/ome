@@ -76,6 +76,20 @@ pub async fn serve(config: &Config, state: AppState) -> anyhow::Result<()> {
         }
     });
 
+    // Metrics: one poll of each cluster's Prometheus per interval (regardless of
+    // how many consoles are open), pushed to SSE subscribers. Only runs when a
+    // Prometheus target is configured; otherwise the snapshot stays empty.
+    if state.metrics_enabled() {
+        let ms = state.clone();
+        let interval = state.metrics_refresh_interval();
+        tokio::spawn(async move {
+            loop {
+                service::metrics::refresh(&ms).await;
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
     let app = build_app(state, config.web_dir.clone());
     let addr = config.api_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;

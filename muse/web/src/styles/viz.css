@@ -57,6 +57,136 @@
   }
 }
 
+/* Grafana-style filter / template-var bar */
+.filters {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: var(--s4);
+}
+.fv {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px 8px;
+  font-size: var(--t-sm);
+}
+.fv .lbl {
+  color: var(--fg-3);
+}
+.fv select {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  outline: none;
+  max-width: 180px;
+}
+.fv.range {
+  border-color: var(--accent);
+}
+.fv.range select {
+  color: var(--accent);
+}
+
+/* dashboard sections + card grids (ported from the mockup) */
+h2.sec {
+  font-size: var(--t-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-3);
+  margin: 22px 2px 10px;
+  font-weight: 600;
+}
+h2.sec .who {
+  color: var(--fg-faint);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.grid {
+  display: grid;
+  gap: 13px;
+  margin-bottom: 13px;
+}
+.grid.g3 {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+.grid.g2 {
+  grid-template-columns: 1fr 1fr;
+}
+@media (max-width: 1000px) {
+  .grid.g3,
+  .grid.g2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* line/area charts */
+.chart {
+  width: 100%;
+  height: 96px;
+  display: block;
+}
+.grid-ln {
+  stroke: var(--border);
+  stroke-width: 0.5;
+}
+.legend {
+  display: flex;
+  gap: 14px;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  margin-top: 6px;
+}
+.legend .d {
+  display: inline-block;
+  width: 9px;
+  height: 2px;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+.chart-val {
+  font-size: var(--t-xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+}
+.chart-val small {
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  font-weight: 500;
+}
+
+/* inline alert banner (capacity) */
+.panel-alert {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  margin-bottom: 13px;
+}
+.panel-alert b {
+  color: var(--red);
+}
+.place-tbl tbody tr.link {
+  cursor: pointer;
+}
+.place-tbl tbody tr.link:hover {
+  background: var(--hover);
+}
+
 /* status dot */
 .vdot {
   display: inline-block;

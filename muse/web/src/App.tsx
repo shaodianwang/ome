@@ -108,7 +108,9 @@ export default function App() {
         </header>
 
         <div className="content">
-          {panel === "fleet" && <Fleet openDeployments={openDeployments} />}
+          {panel === "fleet" && (
+            <Fleet openDeployments={openDeployments} openDeployment={openDeployment} />
+          )}
           {panel === "workloads" && (
             <Workloads
               goto={goto}

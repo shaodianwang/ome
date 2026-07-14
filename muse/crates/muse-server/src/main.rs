@@ -113,6 +113,16 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         "serving read plane; caches warming in background"
     );
 
+    // Load the curated dashboard query set (if configured). A read/parse failure
+    // degrades to an empty snapshot rather than failing startup.
+    let metrics_queries = std::sync::Arc::new(match config.metrics_queries_file.as_deref() {
+        Some(path) => config::load_queries(path).unwrap_or_else(|err| {
+            tracing::error!(error = %err, "failed to load metrics queries; snapshot will be empty");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    });
+
     let state = app_context::AppState::new(
         clusters,
         topology,
@@ -121,6 +131,9 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         config.chat_enabled,
         Duration::from_secs(config.chat_timeout_secs.max(1)),
         Duration::from_secs(config.chat_connect_timeout_secs.max(1)),
+        config.prom_service.clone(),
+        metrics_queries,
+        Duration::from_secs(config.metrics_refresh_secs.max(1)),
     );
     server::serve(&config, state).await
 }
@@ -165,9 +178,15 @@ async fn build_cluster(
         tracing::warn!(cluster = %cluster_ref.name, ?missing, "ome.io CRDs absent on this cluster — those kinds will be empty");
     }
 
-    let factory = SharedInformerFactory::with_streaming_lists(client, streaming);
-    let (state, readies) =
-        informers::build_cluster_state(cluster_ref.name.clone(), &factory, &ome, feed, signal);
+    let factory = SharedInformerFactory::with_streaming_lists(client.clone(), streaming);
+    let (state, readies) = informers::build_cluster_state(
+        cluster_ref.name.clone(),
+        client,
+        &factory,
+        &ome,
+        feed,
+        signal,
+    );
     // Serve immediately and warm the caches in the background; flip the cluster's
     // ready flag once every informer has finished its first sync. Awaiting the
     // futures in sequence still completes in max(individual) time — the reflector
