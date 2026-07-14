@@ -203,11 +203,27 @@ export function useMetrics(enabled = true): { data: MetricsSnapshot | null } {
   const [data, setData] = useState<MetricsSnapshot | null>(lastMetrics);
   useEffect(() => {
     if (!enabled) return;
+    let alive = true;
+    // The SSE pushes the snapshot on connect and on every refresh — that's the live
+    // path. A one-time GET on mount is a fallback so metrics still show if a proxy
+    // drops the stream; it's served from the server's cached snapshot (no upstream
+    // cost) and there's no polling (mirrors useEventFeed: fetch once, then stream).
+    api
+      .metrics()
+      .then((s) => {
+        if (!alive) return;
+        lastMetrics = s;
+        setData(s);
+      })
+      .catch(() => {});
     ensureMetricsSource();
     if (lastMetrics) setData(lastMetrics);
-    const listener = (snap: MetricsSnapshot) => setData(snap);
+    const listener = (snap: MetricsSnapshot) => {
+      if (alive) setData(snap);
+    };
     metricsListeners.add(listener);
     return () => {
+      alive = false;
       metricsListeners.delete(listener);
     };
   }, [enabled]);
