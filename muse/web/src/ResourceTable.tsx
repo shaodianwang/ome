@@ -48,6 +48,10 @@ export function ResourceTable<T>({
   tabs,
   filter,
   setFilter,
+  cluster: clusterProp,
+  setCluster: setClusterProp,
+  query: queryProp,
+  setQuery: setQueryProp,
 }: {
   title: string;
   subtitle: string;
@@ -65,9 +69,19 @@ export function ResourceTable<T>({
   tabs: Tab<T>[];
   filter: string;
   setFilter: (f: string) => void;
+  /** Optional controlled cluster filter + search — URL-backed on Deployments, so
+   *  they survive navigating into a detail and back. Absent → internal state. */
+  cluster?: string;
+  setCluster?: (c: string) => void;
+  query?: string;
+  setQuery?: (q: string) => void;
 }) {
-  const [q, setQ] = useState("");
-  const [cluster, setCluster] = useState("");
+  const [qState, setQState] = useState("");
+  const [clusterState, setClusterState] = useState("");
+  const q = queryProp ?? qState;
+  const setQ = setQueryProp ?? setQState;
+  const cluster = clusterProp ?? clusterState;
+  const setCluster = setClusterProp ?? setClusterState;
   const [sortKey, setSortKey] = useState(columns.find((c) => c.sort)?.key ?? "");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(0);

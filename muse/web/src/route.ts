@@ -13,6 +13,10 @@ export interface Route {
   sel?: { cluster: string; name: string };
   /** Deployments list tab. */
   filter?: DepFilter;
+  /** Deployments list cluster filter (empty/undefined = all clusters). */
+  cluster?: string;
+  /** Deployments list search query. */
+  q?: string;
 }
 
 const PANEL_TO_SLUG: Record<PanelKey, string> = {
@@ -46,8 +50,13 @@ function parse(): Route {
     route.sel = { cluster: decodeURIComponent(seg[1]), name: decodeURIComponent(seg[2]) };
   }
   if (panel === "workloads") {
-    const tab = new URLSearchParams(window.location.search).get("tab");
+    const sp = new URLSearchParams(window.location.search);
+    const tab = sp.get("tab");
     if (tab === "attention" || tab === "ready") route.filter = tab;
+    const cluster = sp.get("cluster");
+    if (cluster) route.cluster = cluster;
+    const q = sp.get("q");
+    if (q) route.q = q;
   }
   return route;
 }
@@ -58,21 +67,29 @@ export function routePath(r: Route): string {
   if (r.sel) {
     path += `/${encodeURIComponent(r.sel.cluster)}/${encodeURIComponent(r.sel.name)}`;
   }
-  const q = r.filter && r.filter !== "all" ? `?tab=${r.filter}` : "";
-  return path + q;
+  const sp = new URLSearchParams();
+  if (r.filter && r.filter !== "all") sp.set("tab", r.filter);
+  if (r.cluster) sp.set("cluster", r.cluster);
+  if (r.q) sp.set("q", r.q);
+  const query = sp.toString();
+  return query ? `${path}?${query}` : path;
 }
 
-/** The current route plus a navigate() that pushes it to browser history. */
-export function useRoute(): [Route, (r: Route) => void] {
+/** The current route plus a navigate(). Navigation (panel / detail) pushes a
+ *  history entry; list-filter changes pass `{ replace: true }` so refining a list
+ *  updates the URL in place instead of spamming back-history. */
+export function useRoute(): [Route, (r: Route, opts?: { replace?: boolean }) => void] {
   const [route, setRoute] = useState<Route>(parse);
   useEffect(() => {
     const onPop = () => setRoute(parse());
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  const navigate = (r: Route) => {
-    if (routePath(r) !== window.location.pathname + window.location.search) {
-      window.history.pushState(null, "", routePath(r));
+  const navigate = (r: Route, opts?: { replace?: boolean }) => {
+    const target = routePath(r);
+    if (target !== window.location.pathname + window.location.search) {
+      if (opts?.replace) window.history.replaceState(null, "", target);
+      else window.history.pushState(null, "", target);
     }
     setRoute(r);
   };

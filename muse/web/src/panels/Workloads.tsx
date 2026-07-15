@@ -107,6 +107,10 @@ export function Workloads({
   goto,
   filter,
   setFilter,
+  cluster,
+  setCluster,
+  query,
+  setQuery,
   selected,
   setSelected,
   openModel,
@@ -115,6 +119,10 @@ export function Workloads({
   goto: (p: PanelKey) => void;
   filter: DepFilter;
   setFilter: (f: DepFilter) => void;
+  cluster: string;
+  setCluster: (c: string) => void;
+  query: string;
+  setQuery: (q: string) => void;
   selected: Selected | null;
   setSelected: (s: Selected | null) => void;
   openModel: (sel: Selected) => void;
@@ -160,6 +168,10 @@ export function Workloads({
       tabs={TABS}
       filter={filter}
       setFilter={(f) => setFilter(f as DepFilter)}
+      cluster={cluster}
+      setCluster={setCluster}
+      query={query}
+      setQuery={setQuery}
     />
   );
 }

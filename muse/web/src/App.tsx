@@ -17,6 +17,7 @@ import { Models } from "./panels/Models";
 import { Runtimes } from "./panels/Runtimes";
 import { Workloads } from "./panels/Workloads";
 import { useRoute } from "./route";
+import type { Route } from "./route";
 
 export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "deploy" | "capacity";
 export type DepFilter = "all" | "attention" | "ready";
@@ -36,7 +37,18 @@ export default function App() {
   const [route, navigate] = useRoute();
   const panel = route.panel;
   const depFilter: DepFilter = route.filter ?? "all";
+  const depCluster = route.cluster;
+  const depQ = route.q;
   const sel = route.sel ?? null;
+  // A workloads route carrying the current list filters (tab / cluster / search),
+  // so navigating into a detail and back restores them.
+  const wl = (over: Partial<Route>): Route => ({
+    panel: "workloads",
+    filter: depFilter,
+    cluster: depCluster,
+    q: depQ,
+    ...over,
+  });
 
   const goto = (p: PanelKey) => navigate({ panel: p });
   const openDeployments = (f: DepFilter) => navigate({ panel: "workloads", filter: f });
@@ -112,11 +124,13 @@ export default function App() {
             <Workloads
               goto={goto}
               filter={depFilter}
-              setFilter={(f) => navigate({ panel: "workloads", filter: f })}
+              setFilter={(f) => navigate(wl({ filter: f }), { replace: true })}
+              cluster={depCluster ?? ""}
+              setCluster={(c) => navigate(wl({ cluster: c || undefined }), { replace: true })}
+              query={depQ ?? ""}
+              setQuery={(query) => navigate(wl({ q: query || undefined }), { replace: true })}
               selected={sel}
-              setSelected={(s) =>
-                navigate({ panel: "workloads", sel: s ?? undefined, filter: depFilter })
-              }
+              setSelected={(s) => navigate(wl({ sel: s ?? undefined }))}
               openModel={openModel}
               openRuntime={openRuntime}
             />
