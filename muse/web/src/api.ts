@@ -34,6 +34,27 @@ export interface CapacityResp {
   byIsland: AccelGroup[];
   byNvlinkDomain: AccelGroup[];
   byInstanceType: AccelGroup[];
+  /** Unscheduled accelerator demand — Pending pods not yet placed, by kind. */
+  pending?: { kind: string; accelerators: number; pods: number }[];
+  /** Accelerators on NotReady/cordoned nodes — present but unschedulable, by kind. */
+  unavailable?: { kind: string; accelerators: number; nodes: number }[];
+  /** TPU carve-able slices by shape — whole slices free now vs partially used. */
+  tpuSlices?: PlacementUnit[];
+  /** GPU whole-node availability by GPUs-per-node. */
+  gpuNodes?: PlacementUnit[];
+  /** GPU whole-NVLink-domain availability by domain GPU-count. */
+  gpuDomains?: PlacementUnit[];
+}
+
+/** A carve-able placement unit at one size (a TPU slice shape, a GPU node, or an
+ *  NVLink domain): how many whole units are free vs partially used. */
+export interface PlacementUnit {
+  /** Size label: a TPU shape ("2x2x2") or the unit's chip/GPU count ("8", "72"). */
+  label: string;
+  /** Chips (TPU) or GPUs per unit. */
+  chips: number;
+  total: number;
+  available: number;
 }
 
 export interface ListResp<T> {

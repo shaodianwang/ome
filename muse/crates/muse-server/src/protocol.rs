@@ -1166,6 +1166,55 @@ pub struct CapacityReport {
     pub by_nvlink_domain: Vec<GroupCapacity>,
     #[serde(rename = "byInstanceType")]
     pub by_instance_type: Vec<GroupCapacity>,
+    /// Unscheduled accelerator demand — Pending pods not yet placed, by kind.
+    pub pending: Vec<AccelDemand>,
+    /// Accelerators on NotReady/cordoned nodes — present but unschedulable, by kind.
+    pub unavailable: Vec<AccelLost>,
+    /// TPU carve-able slices grouped by shape — how many whole slices are free now
+    /// vs partially used. Empty on clusters without GKE TPU partition labels.
+    #[serde(rename = "tpuSlices")]
+    pub tpu_slices: Vec<PlacementUnit>,
+    /// GPU whole-node availability grouped by GPUs-per-node — how many entire nodes
+    /// are free (for a job needing a full box) vs partially used.
+    #[serde(rename = "gpuNodes")]
+    pub gpu_nodes: Vec<PlacementUnit>,
+    /// GPU whole-NVLink-domain availability grouped by domain GPU-count — how many
+    /// entire domains (e.g. NVL72 racks) are free vs partially used. Empty without
+    /// NVLink domain labels.
+    #[serde(rename = "gpuDomains")]
+    pub gpu_domains: Vec<PlacementUnit>,
+}
+
+/// A carve-able placement unit at one size — a TPU slice shape, a GPU node's
+/// GPU-count, or an NVLink domain's GPU-count. `available` counts units that are
+/// wholly free and schedulable (placeable for a job that needs the whole unit); the
+/// rest are partially used or unhealthy. TPU fragmentation is "hard" (a job takes a
+/// whole slice); GPU is "soft" (partially-used nodes/domains still take smaller
+/// jobs) — the wire shape is the same, the console labels the difference.
+#[derive(Serialize)]
+pub struct PlacementUnit {
+    /// Size label: a TPU shape ("2x2x2"), or the unit's chip/GPU count ("8", "72").
+    pub label: String,
+    /// Chips (TPU) or GPUs per unit of this size.
+    pub chips: i64,
+    pub total: i64,
+    pub available: i64,
+}
+
+/// Unscheduled accelerator demand for one kind (Pending, not-yet-placed pods).
+#[derive(Serialize)]
+pub struct AccelDemand {
+    pub kind: String,
+    pub accelerators: i64,
+    pub pods: i64,
+}
+
+/// Accelerators that exist but can't be scheduled (on NotReady / cordoned nodes).
+#[derive(Serialize)]
+pub struct AccelLost {
+    pub kind: String,
+    pub accelerators: i64,
+    pub nodes: i64,
 }
 
 #[derive(Serialize, Default)]

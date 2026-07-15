@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../api";
-import type { AccelGroup, CapacityResp } from "../api";
+import type { AccelGroup, CapacityResp, PlacementUnit } from "../api";
 import { Bar, EmptyRow, Pager } from "../components";
 import { useLive } from "../live";
 import { matches, num as n, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
-import { Card, Gauge, StatTile } from "../viz";
+import { Card, Gauge, StatTile, UtilRow } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
 type Kind = "all" | "gpu" | "tpu";
@@ -44,6 +44,71 @@ const kpct = (t?: { alloc: number; used: number }) =>
   t ? utilPct({ allocatable: t.alloc, allocated: t.used }) : 0;
 const sortVal = (r: Row, k: SortKey): string | number =>
   k === "cluster" || k === "name" || k === "kind" ? String(r[k]).toLowerCase() : r[k];
+
+type UnitAgg = { chips: number; total: number; available: number };
+
+/** Sum a per-cluster PlacementUnit list into fleet totals per size label, biggest
+ *  unit first. Shared by the TPU-slice, GPU-node, and GPU-domain sections. */
+function aggUnits(
+  caps: { cap: CapacityResp }[],
+  pick: (c: CapacityResp) => PlacementUnit[] | undefined,
+): [string, UnitAgg][] {
+  const m = new Map<string, UnitAgg>();
+  for (const { cap } of caps) {
+    for (const u of pick(cap) ?? []) {
+      // Ignore rows from a stale/mismatched backend (missing label/chips) so a
+      // version skew degrades to an empty section instead of crashing the page.
+      if (typeof u.label !== "string" || typeof u.chips !== "number") continue;
+      const e = m.get(u.label) ?? { chips: u.chips, total: 0, available: 0 };
+      e.chips = u.chips;
+      e.total += u.total;
+      e.available += u.available;
+      m.set(u.label, e);
+    }
+  }
+  return [...m.entries()].sort((a, b) => b[1].chips - a[1].chips);
+}
+
+/** A fragmentation card: per size, a bar of whole units free vs total. Renders
+ *  nothing when there are no units (no TPUs, or no NVLink labels). */
+function FragCard({
+  title,
+  sub,
+  noun,
+  units,
+  note,
+}: {
+  title: string;
+  sub: string;
+  noun: string;
+  units: [string, UnitAgg][];
+  note: string;
+}) {
+  if (!units.length) return null;
+  return (
+    <Card title={title} sub={sub}>
+      <div className="urows">
+        {units.map(([label, u]) => (
+          <UtilRow
+            key={label}
+            name={
+              <>
+                {label}{" "}
+                <span className="muted">
+                  · {n(u.chips)} {noun}
+                </span>
+              </>
+            }
+            pct={u.total > 0 ? Math.round((u.available / u.total) * 100) : 0}
+            tone={u.available > 0 ? "green" : "amber"}
+            value={`${n(u.available)} / ${n(u.total)} free`}
+          />
+        ))}
+      </div>
+      <p className="panel-note">{note}</p>
+    </Card>
+  );
+}
 
 export function Capacity() {
   const [kind, setKind] = useState<Kind>("all");
@@ -90,6 +155,29 @@ export function Capacity() {
   const schedNodes = caps.reduce((s, { cap }) => s + cap.nodes.schedulable, 0);
   const totalNodes = caps.reduce((s, { cap }) => s + cap.nodes.total, 0);
   const kindsPresent = [...byKind.keys()].sort();
+
+  // Demand (Pending pods waiting on capacity) + lost capacity (accelerators on
+  // NotReady/cordoned nodes), summed across clusters.
+  let pendingAccel = 0;
+  let pendingPods = 0;
+  let unavailAccel = 0;
+  let unavailNodes = 0;
+  for (const { cap } of caps) {
+    for (const p of cap.pending ?? []) {
+      pendingAccel += p.accelerators;
+      pendingPods += p.pods;
+    }
+    for (const u of cap.unavailable ?? []) {
+      unavailAccel += u.accelerators;
+      unavailNodes += u.nodes;
+    }
+  }
+
+  // Carve-able placement units — whole TPU slices, GPU nodes, and GPU NVLink
+  // domains that are entirely free vs partially used, summed across clusters.
+  const tpuSlices = aggUnits(caps, (c) => c.tpuSlices);
+  const gpuNodes = aggUnits(caps, (c) => c.gpuNodes);
+  const gpuDomains = aggUnits(caps, (c) => c.gpuDomains);
 
   // Placement: the largest free block per kind at each topology tier (rack-level
   // NVLink/ICI domain, and fabric-level island), with which cluster offers it and
@@ -204,26 +292,37 @@ export function Capacity() {
 
       <div className="tiles cap-tiles">
         <StatTile
-          label="GPU in use"
+          label="GPU allocated"
           value={`${kpct(gpu)}%`}
           sub={gpu ? `${n(gpu.used)} / ${n(gpu.alloc)} · ${n(gpu.free)} free` : "no GPU clusters"}
         >
           <Gauge pct={kpct(gpu)} tone={utilTone(kpct(gpu))} />
         </StatTile>
         <StatTile
-          label="TPU in use"
+          label="TPU allocated"
           value={`${kpct(tpu)}%`}
           sub={tpu ? `${n(tpu.used)} / ${n(tpu.alloc)} · ${n(tpu.free)} free` : "no TPU clusters"}
         >
           <Gauge pct={kpct(tpu)} tone={utilTone(kpct(tpu))} />
         </StatTile>
         <StatTile
-          label="Accelerator nodes"
-          value={n(accelNodes)}
-          sub={`${n(schedNodes)} schedulable of ${n(totalNodes)}`}
+          label="Pending"
+          value={pendingAccel ? n(pendingAccel) : "0"}
+          sub={pendingAccel ? `${n(pendingPods)} pods waiting for capacity` : "none waiting"}
+          tone={pendingAccel > 0 ? "red" : "green"}
         />
-        <StatTile label="Clusters" value={caps.length || "—"} sub="reporting capacity" />
+        <StatTile
+          label="Unavailable"
+          value={unavailAccel ? n(unavailAccel) : "0"}
+          sub={unavailAccel ? `${n(unavailNodes)} nodes NotReady / cordoned` : "all nodes healthy"}
+          tone={unavailAccel > 0 ? "amber" : "green"}
+        />
       </div>
+      <p className="cap-help">
+        {n(accelNodes)} accelerator nodes across {caps.length || 0} clusters · {n(schedNodes)}{" "}
+        schedulable of {n(totalNodes)}. Percentages are <b>allocated</b> (scheduled), not live GPU
+        utilization.
+      </p>
 
       <Card title="Placement" sub="biggest job you can schedule now">
         <table className="place-tbl">
@@ -328,6 +427,28 @@ export function Capacity() {
           exists for that tier.
         </p>
       </Card>
+
+      <FragCard
+        title="TPU slices"
+        sub="carve-able slices by shape — whole slices free now vs partially used"
+        noun="chips"
+        units={tpuSlices}
+        note="A TPU job takes a whole slice, so a slice counts as free only when every chip is free and its nodes are schedulable. The rest are effectively blocked — free chips that can't take a job of that shape."
+      />
+      <FragCard
+        title="GPU nodes"
+        sub="whole-node availability by GPUs per node — free for a full-node job vs partially used"
+        noun="GPUs"
+        units={gpuNodes}
+        note="Counts nodes that are entirely free and schedulable. Partially-used nodes aren't lost — they still take smaller jobs — but can't host one that needs the whole box."
+      />
+      <FragCard
+        title="GPU racks"
+        sub="whole-NVLink-domain availability by size — free for a full-rack job vs partially used"
+        noun="GPUs"
+        units={gpuDomains}
+        note="An NVLink domain (e.g. an NVL72 rack) counts as free only when all its GPUs are free and every node is schedulable — what a large, tightly-coupled job needs. Smaller jobs still use partially-filled domains."
+      />
 
       <div className="filterbar">
         <div className="seg">

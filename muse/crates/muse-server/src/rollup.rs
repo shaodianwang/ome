@@ -16,9 +16,22 @@ use kube::Resource;
 use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
 
 use crate::protocol::{
-    first_label, node_accel, sum_accel, CapacityReport, GpuView, GroupCapacity, NodeCounts,
-    Topology,
+    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, GpuView,
+    GroupCapacity, NodeCounts, PlacementUnit, Topology,
 };
+
+/// Accelerator kinds tracked separately (a pod/node never mixes them in practice).
+const KINDS: [&str; 2] = ["gpu", "tpu"];
+
+/// GKE labels each TPU node with the carve-able slice it belongs to: the key
+/// `cloud.google.com/gke-tpu-partition-<shape>-id` encodes the slice shape, its
+/// value the slice instance. A fixed GKE API contract — like the `google.com/tpu`
+/// and `node.kubernetes.io/instance-type` keys read elsewhere — so it's matched
+/// directly off informer data rather than configured (it can't vary the way the
+/// island/NVLink label keys do across providers). Non-GKE nodes carry no such
+/// label and contribute no slices.
+const TPU_PARTITION_PREFIX: &str = "cloud.google.com/gke-tpu-partition-";
+const TPU_PARTITION_SUFFIX: &str = "-id";
 
 /// One cluster's cached Nodes + Pods, the input to aggregation.
 pub struct ClusterData {
@@ -69,9 +82,14 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
     let mut islands: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
     let mut nvlink: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
     let mut instance: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
+    // Demand: Pending accelerator pods not yet placed (kind -> accel, pods).
+    let mut pending: BTreeMap<&'static str, (i64, i64)> = BTreeMap::new();
+    // Lost capacity: accelerators on NotReady/cordoned nodes (kind -> accel, nodes).
+    let mut unavail: BTreeMap<&'static str, (i64, usize)> = BTreeMap::new();
 
     for cluster in clusters {
         let allocated = accel_allocated_by_node(&cluster.pods);
+        accumulate_pending(&cluster.pods, &mut pending);
 
         for node in &cluster.nodes {
             let name = node.meta().name.clone().unwrap_or_default();
@@ -79,19 +97,12 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
             let labels = node.meta().labels.clone().unwrap_or_default();
 
             counts.total += 1;
-            let ready = status
-                .and_then(|s| s.conditions.as_ref())
-                .map(|c| c.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
-                .unwrap_or(false);
+            let ready = node_ready(node);
             if ready {
                 counts.ready += 1;
             }
-            if !node
-                .spec
-                .as_ref()
-                .and_then(|s| s.unschedulable)
-                .unwrap_or(false)
-            {
+            let unschedulable = node_unschedulable(node);
+            if !unschedulable {
                 counts.schedulable += 1;
             }
 
@@ -102,6 +113,12 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
                 continue; // non-accelerator node: counted in totals, skipped in rollups
             };
             counts.accelerator_nodes += 1;
+            // Accelerators on a NotReady or cordoned node exist but can't be scheduled.
+            if !ready || unschedulable {
+                let e = unavail.entry(kind).or_insert((0, 0));
+                e.0 += allocatable;
+                e.1 += 1;
+            }
 
             let stat = GpuView::new(allocatable, allocated.get(&name).copied().unwrap_or(0));
             accumulate(&mut kinds, (kind.to_owned(), kind), &stat);
@@ -137,6 +154,164 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
         by_island: into_groups(islands),
         by_nvlink_domain: into_groups(nvlink),
         by_instance_type: into_groups(instance),
+        pending: pending
+            .into_iter()
+            .map(|(kind, (accelerators, pods))| AccelDemand {
+                kind: kind.to_owned(),
+                accelerators,
+                pods,
+            })
+            .collect(),
+        unavailable: unavail
+            .into_iter()
+            .map(|(kind, (accelerators, nodes))| AccelLost {
+                kind: kind.to_owned(),
+                accelerators,
+                nodes: nodes as i64,
+            })
+            .collect(),
+        // TPU: each node's partition-id label names the slice it belongs to;
+        // the slice shape buckets them. GPU: the node itself is a unit (bucketed by
+        // GPU count), and — where NVLink labels exist — so is the whole domain.
+        tpu_slices: placement_units(clusters, "tpu", |cluster, _name, labels| {
+            labels.keys().find_map(|k| {
+                k.strip_prefix(TPU_PARTITION_PREFIX)
+                    .and_then(|s| s.strip_suffix(TPU_PARTITION_SUFFIX))
+                    .map(|shape| {
+                        (
+                            format!("{cluster}|{shape}|{}", labels[k]),
+                            Some(shape.to_owned()),
+                        )
+                    })
+            })
+        }),
+        gpu_nodes: placement_units(clusters, "gpu", |cluster, name, _labels| {
+            Some((format!("{cluster}|{name}"), None))
+        }),
+        gpu_domains: placement_units(clusters, "gpu", |cluster, _name, labels| {
+            first_label(labels, &topo.nvlink_labels).map(|dom| (format!("{cluster}|{dom}"), None))
+        }),
+    }
+}
+
+/// Whether a node's `Ready` condition is True.
+fn node_ready(node: &Node) -> bool {
+    node.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .map(|c| c.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
+        .unwrap_or(false)
+}
+
+/// Whether a node is cordoned (`spec.unschedulable`).
+fn node_unschedulable(node: &Node) -> bool {
+    node.spec
+        .as_ref()
+        .and_then(|s| s.unschedulable)
+        .unwrap_or(false)
+}
+
+/// Carve-able placement units of `want_kind`, bucketed by size, counting how many
+/// whole units are placeable (every chip free and every node schedulable) vs
+/// partially used — the fragmentation a raw free-chip count hides.
+///
+/// `unit_of(cluster, node, labels)` assigns a node to a unit, returning `(unique
+/// unit key, optional size label)`; a node it maps to `None` is skipped. A `None`
+/// size label buckets the unit by its own chip count (GPU nodes / NVLink domains,
+/// which have no fixed shape); TPU passes the slice shape. The unit key must be
+/// cluster-unique so a slice/partition id reused across clusters isn't merged.
+fn placement_units(
+    clusters: &[ClusterData],
+    want_kind: &str,
+    unit_of: impl Fn(&str, &str, &BTreeMap<String, String>) -> Option<(String, Option<String>)>,
+) -> Vec<PlacementUnit> {
+    // unit key -> (chips, free chips, all-free-and-schedulable, size label).
+    let mut units: BTreeMap<String, (i64, i64, bool, Option<String>)> = BTreeMap::new();
+    for cluster in clusters {
+        let allocated = accel_allocated_by_node(&cluster.pods);
+        for node in &cluster.nodes {
+            let Some((kind, chips)) = node
+                .status
+                .as_ref()
+                .and_then(|s| s.allocatable.as_ref())
+                .and_then(node_accel)
+            else {
+                continue;
+            };
+            if kind != want_kind {
+                continue;
+            }
+            let name = node.meta().name.clone().unwrap_or_default();
+            let labels = node.meta().labels.clone().unwrap_or_default();
+            let Some((key, label)) = unit_of(&cluster.name, &name, &labels) else {
+                continue;
+            };
+            let used = allocated.get(&name).copied().unwrap_or(0);
+            let ok = used == 0 && node_ready(node) && !node_unschedulable(node);
+            let e = units.entry(key).or_insert((0, 0, true, label.clone()));
+            e.0 += chips;
+            e.1 += chips - used;
+            e.2 &= ok;
+            if e.3.is_none() {
+                e.3 = label;
+            }
+        }
+    }
+
+    // Bucket units by size label (explicit shape, else the unit's chip count).
+    let mut by_size: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
+    for (_key, (chips, free, ok, label)) in units {
+        let bucket = label.unwrap_or_else(|| chips.to_string());
+        let e = by_size.entry(bucket).or_insert((0, 0, 0));
+        e.0 = e.0.max(chips); // chips per unit (uniform within a size)
+        e.1 += 1; // total
+        if ok && free == chips {
+            e.2 += 1; // wholly available
+        }
+    }
+    let mut out: Vec<PlacementUnit> = by_size
+        .into_iter()
+        .map(|(label, (chips, total, available))| PlacementUnit {
+            label,
+            chips,
+            total,
+            available,
+        })
+        .collect();
+    // Biggest units first — the ones fragmentation strands soonest.
+    out.sort_by(|a, b| b.chips.cmp(&a.chips).then(a.label.cmp(&b.label)));
+    out
+}
+
+/// Sum accelerator requests of Pending, not-yet-scheduled pods, per kind — demand
+/// waiting on capacity. A Pending pod that already has a node (e.g. pulling an
+/// image) isn't waiting on capacity, so it's excluded.
+fn accumulate_pending(pods: &[Arc<Pod>], out: &mut BTreeMap<&'static str, (i64, i64)>) {
+    for pod in pods {
+        let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+        if phase != Some("Pending") {
+            continue;
+        }
+        let Some(spec) = pod.spec.as_ref() else {
+            continue;
+        };
+        if spec.node_name.is_some() {
+            continue;
+        }
+        for kind in KINDS {
+            let req: i64 = spec
+                .containers
+                .iter()
+                .filter_map(|c| c.resources.as_ref())
+                .filter_map(|r| r.requests.as_ref())
+                .map(|r| sum_accel(r, kind))
+                .sum();
+            if req > 0 {
+                let e = out.entry(kind).or_insert((0, 0));
+                e.0 += req;
+                e.1 += 1;
+            }
+        }
     }
 }
 
