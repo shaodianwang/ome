@@ -1097,7 +1097,15 @@ export function Capacity() {
             </thead>
             <tbody>
               {pageRows.map((r, i) => (
-                <tr key={`${r.cluster}/${r.name}/${r.kind}/${i}`}>
+                <tr
+                  key={`${r.cluster}/${r.name}/${r.kind}/${i}`}
+                  className="clickable"
+                  title={`Open ${r.cluster}`}
+                  onClick={() => {
+                    setTab(r.cluster);
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }}
+                >
                   <td className="cell-name mono">{r.cluster}</td>
                   {showName ? <td className="mono">{r.name || "—"}</td> : null}
                   <td>
