@@ -633,6 +633,73 @@ h2.sec .who {
   line-height: 1.5;
 }
 
+.cap-syncing {
+  margin: calc(-1 * var(--s2)) 0 var(--s4);
+  font-size: var(--t-sm);
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- capacity: fragmentation by carve-able unit ---- */
+.frag-row {
+  padding: var(--s3) 0;
+  border-bottom: 1px solid var(--border);
+}
+.frag-row:last-of-type {
+  border-bottom: 0;
+}
+.frag-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  margin-bottom: 7px;
+  font-size: var(--t-sm);
+}
+.frag-name {
+  font-weight: 600;
+}
+.frag-free {
+  margin-left: auto;
+  color: var(--green);
+}
+.frag-free b {
+  font-size: var(--t-md);
+  font-weight: 600;
+}
+.frag-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+  margin-top: 7px;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+}
+.frag-stranded {
+  color: var(--amber);
+  font-weight: 600;
+}
+.frag-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: 8px;
+}
+.frag-list-lbl {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+}
+.frag-chip {
+  font-size: var(--t-xs);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  color: var(--fg-2);
+}
+
 /* ---- fleet: useful home ---- */
 .fleet-status {
   display: flex;

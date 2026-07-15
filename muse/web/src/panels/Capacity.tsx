@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../api";
-import type { AccelGroup, CapacityResp, PlacementUnit } from "../api";
+import type { AccelGroup, CapacityResp, Fragment, PlacementUnits } from "../api";
 import { Bar, EmptyRow, Pager } from "../components";
 import { useLive } from "../live";
 import { matches, num as n, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
-import { Card, Gauge, StatTile, UtilRow } from "../viz";
+import { Card, Distribution, Dot, Gauge, StatTile } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
 type Kind = "all" | "gpu" | "tpu";
@@ -45,13 +45,22 @@ const kpct = (t?: { alloc: number; used: number }) =>
 const sortVal = (r: Row, k: SortKey): string | number =>
   k === "cluster" || k === "name" || k === "kind" ? String(r[k]).toLowerCase() : r[k];
 
-type UnitAgg = { chips: number; total: number; available: number };
+type UnitAgg = {
+  chips: number;
+  total: number;
+  free: number;
+  fragmented: number;
+  full: number;
+  unhealthy: number;
+  stranded: number;
+  fragments: Fragment[];
+};
 
-/** Sum a per-cluster PlacementUnit list into fleet totals per size label, biggest
- *  unit first. Shared by the TPU-slice, GPU-node, and GPU-domain sections. */
+/** Sum a per-cluster PlacementUnits list into fleet occupancy per size label,
+ *  biggest unit first. Shared by the TPU-slice, GPU-node, and GPU-domain sections. */
 function aggUnits(
   caps: { cap: CapacityResp }[],
-  pick: (c: CapacityResp) => PlacementUnit[] | undefined,
+  pick: (c: CapacityResp) => PlacementUnits[] | undefined,
 ): [string, UnitAgg][] {
   const m = new Map<string, UnitAgg>();
   for (const { cap } of caps) {
@@ -59,18 +68,87 @@ function aggUnits(
       // Ignore rows from a stale/mismatched backend (missing label/chips) so a
       // version skew degrades to an empty section instead of crashing the page.
       if (typeof u.label !== "string" || typeof u.chips !== "number") continue;
-      const e = m.get(u.label) ?? { chips: u.chips, total: 0, available: 0 };
+      const e = m.get(u.label) ?? {
+        chips: u.chips,
+        total: 0,
+        free: 0,
+        fragmented: 0,
+        full: 0,
+        unhealthy: 0,
+        stranded: 0,
+        fragments: [],
+      };
       e.chips = u.chips;
       e.total += u.total;
-      e.available += u.available;
+      e.free += u.free;
+      e.fragmented += u.fragmented;
+      e.full += u.full;
+      e.unhealthy += u.unhealthy;
+      e.stranded += u.strandedChips;
+      e.fragments = e.fragments.concat(u.fragments ?? []);
       m.set(u.label, e);
     }
   }
+  for (const e of m.values()) e.fragments.sort((a, b) => b.free - a.free);
   return [...m.entries()].sort((a, b) => b[1].chips - a[1].chips);
 }
 
-/** A fragmentation card: per size, a bar of whole units free vs total. Renders
- *  nothing when there are no units (no TPUs, or no NVLink labels). */
+/** One size's occupancy: a stacked free/fragmented/full/unhealthy bar, the headline
+ *  free count (researcher), the breakdown + stranded chips (product), and the named
+ *  defrag shortlist (operator). */
+function FragRow({ label, u, noun }: { label: string; u: UnitAgg; noun: string }) {
+  return (
+    <div className="frag-row">
+      <div className="frag-head">
+        <span className="frag-name mono">
+          {label}{" "}
+          <span className="muted">
+            · {n(u.chips)} {noun}
+          </span>
+        </span>
+        <span className="frag-free">
+          <b className="tnum">{n(u.free)}</b> free
+        </span>
+        <span className="frag-total muted tnum">of {n(u.total)}</span>
+      </div>
+      <Distribution
+        segments={[
+          { value: u.free, tone: "green" },
+          { value: u.fragmented, tone: "amber" },
+          { value: u.full, tone: "cyan" },
+          { value: u.unhealthy, tone: "red" },
+        ]}
+      />
+      <div className="frag-stats">
+        <span className="tnum">{n(u.fragmented)} fragmented</span>
+        <span className="tnum">{n(u.full)} full</span>
+        <span className="tnum">{n(u.unhealthy)} unhealthy</span>
+        {u.stranded > 0 ? (
+          <span className="frag-stranded tnum">
+            {n(u.stranded)} {noun} stranded
+          </span>
+        ) : null}
+      </div>
+      {u.fragments.length ? (
+        <div className="frag-list">
+          <span className="frag-list-lbl">most fragmented</span>
+          {u.fragments.slice(0, 6).map((f, i) => (
+            <span className="frag-chip mono" key={i} title={f.id}>
+              {shortId(f.id)} <span className="muted">{f.cluster}</span>{" "}
+              <span className="tnum">
+                {n(f.chips - f.free)}/{n(f.chips)}
+              </span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A fragmentation card for one unit kind (TPU slices / GPU nodes / GPU racks): a
+ *  legend + one occupancy row per size. Renders nothing when there are no units
+ *  (no TPUs, or no NVLink labels). */
 function FragCard({
   title,
   sub,
@@ -87,24 +165,23 @@ function FragCard({
   if (!units.length) return null;
   return (
     <Card title={title} sub={sub}>
-      <div className="urows">
-        {units.map(([label, u]) => (
-          <UtilRow
-            key={label}
-            name={
-              <>
-                {label}{" "}
-                <span className="muted">
-                  · {n(u.chips)} {noun}
-                </span>
-              </>
-            }
-            pct={u.total > 0 ? Math.round((u.available / u.total) * 100) : 0}
-            tone={u.available > 0 ? "green" : "amber"}
-            value={`${n(u.available)} / ${n(u.total)} free`}
-          />
-        ))}
+      <div className="health-legend">
+        <span>
+          <Dot tone="green" /> free
+        </span>
+        <span>
+          <Dot tone="amber" /> fragmented
+        </span>
+        <span>
+          <Dot tone="cyan" /> full
+        </span>
+        <span>
+          <Dot tone="red" /> unhealthy
+        </span>
       </div>
+      {units.map(([label, u]) => (
+        <FragRow key={label} label={label} u={u} noun={noun} />
+      ))}
       <p className="panel-note">{note}</p>
     </Card>
   );
@@ -127,12 +204,18 @@ export function Capacity() {
     async () => {
       const cl = await api.clusters();
       return Promise.all(
-        cl.items.map((c) => api.capacityForCluster(c.name).then((cap) => ({ name: c.name, cap }))),
+        cl.items.map((c) =>
+          api.capacityForCluster(c.name).then((cap) => ({ name: c.name, ready: c.ready, cap })),
+        ),
       );
     },
     { kinds: [], intervalMs: 30_000 },
   );
-  const caps: { name: string; cap: CapacityResp }[] = live.data ?? [];
+  const caps: { name: string; ready: boolean; cap: CapacityResp }[] = live.data ?? [];
+  // A cluster still warming its informer caches reports partial data (pods sync
+  // after nodes → allocated looks like 0, everything looks free). Flag it so the
+  // numbers aren't mistaken for steady state.
+  const syncing = caps.filter((c) => !c.ready).map((c) => c.name);
 
   useEffect(() => {
     setPage(0);
@@ -323,6 +406,12 @@ export function Capacity() {
         schedulable of {n(totalNodes)}. Percentages are <b>allocated</b> (scheduled), not live GPU
         utilization.
       </p>
+      {syncing.length ? (
+        <p className="cap-syncing">
+          ⏳ {syncing.length} cluster{syncing.length > 1 ? "s" : ""} still syncing (
+          {syncing.join(", ")}) — capacity is partial until caches warm.
+        </p>
+      ) : null}
 
       <Card title="Placement" sub="biggest job you can schedule now">
         <table className="place-tbl">
@@ -430,24 +519,24 @@ export function Capacity() {
 
       <FragCard
         title="TPU slices"
-        sub="carve-able slices by shape — whole slices free now vs partially used"
+        sub="slice occupancy by shape — free · fragmented · full"
         noun="chips"
         units={tpuSlices}
-        note="A TPU job takes a whole slice, so a slice counts as free only when every chip is free and its nodes are schedulable. The rest are effectively blocked — free chips that can't take a job of that shape."
+        note="Each TPU host is part of a 2x2x1 slice and the 2x2x2 it shares with a neighbour. A slice is free only when all its chips are free and healthy; a fragmented slice pairs an idle host with a busy one — its free chips are stranded until the slice drains."
       />
       <FragCard
         title="GPU nodes"
-        sub="whole-node availability by GPUs per node — free for a full-node job vs partially used"
+        sub="node occupancy by GPUs per node — free · fragmented · full"
         noun="GPUs"
         units={gpuNodes}
-        note="Counts nodes that are entirely free and schedulable. Partially-used nodes aren't lost — they still take smaller jobs — but can't host one that needs the whole box."
+        note="A fragmented node has some GPUs free but not all — usable by smaller jobs, but not one needing the whole box. Stranded counts those free-but-partial GPUs."
       />
       <FragCard
         title="GPU racks"
-        sub="whole-NVLink-domain availability by size — free for a full-rack job vs partially used"
+        sub="NVLink-domain occupancy by size — free · fragmented · full"
         noun="GPUs"
         units={gpuDomains}
-        note="An NVLink domain (e.g. an NVL72 rack) counts as free only when all its GPUs are free and every node is schedulable — what a large, tightly-coupled job needs. Smaller jobs still use partially-filled domains."
+        note="A domain (e.g. an NVL72 rack) is free only when every GPU is free and healthy — what a large, tightly-coupled job needs. Fragmented domains still take smaller jobs; their free GPUs are stranded for whole-rack work."
       />
 
       <div className="filterbar">

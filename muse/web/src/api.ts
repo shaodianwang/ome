@@ -38,23 +38,43 @@ export interface CapacityResp {
   pending?: { kind: string; accelerators: number; pods: number }[];
   /** Accelerators on NotReady/cordoned nodes — present but unschedulable, by kind. */
   unavailable?: { kind: string; accelerators: number; nodes: number }[];
-  /** TPU carve-able slices by shape — whole slices free now vs partially used. */
-  tpuSlices?: PlacementUnit[];
-  /** GPU whole-node availability by GPUs-per-node. */
-  gpuNodes?: PlacementUnit[];
-  /** GPU whole-NVLink-domain availability by domain GPU-count. */
-  gpuDomains?: PlacementUnit[];
+  /** TPU slice occupancy by shape. */
+  tpuSlices?: PlacementUnits[];
+  /** GPU node occupancy by GPUs-per-node. */
+  gpuNodes?: PlacementUnits[];
+  /** GPU NVLink-domain occupancy by domain GPU-count. */
+  gpuDomains?: PlacementUnits[];
 }
 
-/** A carve-able placement unit at one size (a TPU slice shape, a GPU node, or an
- *  NVLink domain): how many whole units are free vs partially used. */
-export interface PlacementUnit {
+/** One fragmented carve-able unit, named for a drill-down (a TPU slice/partition id
+ *  or an NVLink-domain/node name), with how many of its chips are free. */
+export interface Fragment {
+  id: string;
+  cluster: string;
+  free: number;
+  chips: number;
+}
+
+/** Occupancy breakdown of the carve-able units at one size (a TPU slice shape, a
+ *  GPU node, or an NVLink domain). Every unit is in exactly one bucket, so
+ *  total === free + fragmented + full + unhealthy. */
+export interface PlacementUnits {
   /** Size label: a TPU shape ("2x2x2") or the unit's chip/GPU count ("8", "72"). */
   label: string;
   /** Chips (TPU) or GPUs per unit. */
   chips: number;
   total: number;
-  available: number;
+  /** Wholly free + schedulable — placeable for a job needing the whole unit. */
+  free: number;
+  /** Partially used (some chips busy, all nodes schedulable) — the defrag targets. */
+  fragmented: number;
+  full: number;
+  /** ≥1 node NotReady/cordoned. */
+  unhealthy: number;
+  /** Free chips trapped in fragmented units (recoverable-by-defrag waste). */
+  strandedChips: number;
+  /** Most-stranded fragmented units, named — the operator drill-down. */
+  fragments: Fragment[];
 }
 
 export interface ListResp<T> {

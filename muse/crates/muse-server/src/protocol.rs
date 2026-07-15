@@ -1173,32 +1173,55 @@ pub struct CapacityReport {
     /// TPU carve-able slices grouped by shape — how many whole slices are free now
     /// vs partially used. Empty on clusters without GKE TPU partition labels.
     #[serde(rename = "tpuSlices")]
-    pub tpu_slices: Vec<PlacementUnit>,
+    pub tpu_slices: Vec<PlacementUnits>,
     /// GPU whole-node availability grouped by GPUs-per-node — how many entire nodes
     /// are free (for a job needing a full box) vs partially used.
     #[serde(rename = "gpuNodes")]
-    pub gpu_nodes: Vec<PlacementUnit>,
+    pub gpu_nodes: Vec<PlacementUnits>,
     /// GPU whole-NVLink-domain availability grouped by domain GPU-count — how many
     /// entire domains (e.g. NVL72 racks) are free vs partially used. Empty without
     /// NVLink domain labels.
     #[serde(rename = "gpuDomains")]
-    pub gpu_domains: Vec<PlacementUnit>,
+    pub gpu_domains: Vec<PlacementUnits>,
 }
 
-/// A carve-able placement unit at one size — a TPU slice shape, a GPU node's
-/// GPU-count, or an NVLink domain's GPU-count. `available` counts units that are
-/// wholly free and schedulable (placeable for a job that needs the whole unit); the
-/// rest are partially used or unhealthy. TPU fragmentation is "hard" (a job takes a
-/// whole slice); GPU is "soft" (partially-used nodes/domains still take smaller
-/// jobs) — the wire shape is the same, the console labels the difference.
+/// The occupancy breakdown of the carve-able units at one size — a TPU slice shape,
+/// a GPU node's GPU-count, or an NVLink domain's GPU-count. Every unit falls in
+/// exactly one bucket, so `total == free + fragmented + full + unhealthy`. This is
+/// what makes fragmentation legible: `free` is what a whole-unit job can land on
+/// (researcher), `fragmented` are the defrag targets (operator), and
+/// `stranded_chips` is the free capacity trapped inside them (product).
 #[derive(Serialize)]
-pub struct PlacementUnit {
+pub struct PlacementUnits {
     /// Size label: a TPU shape ("2x2x2"), or the unit's chip/GPU count ("8", "72").
     pub label: String,
     /// Chips (TPU) or GPUs per unit of this size.
     pub chips: i64,
     pub total: i64,
-    pub available: i64,
+    /// Wholly free and schedulable — placeable for a job needing the whole unit.
+    pub free: i64,
+    /// Partially used (some chips busy, some free), all nodes schedulable.
+    pub fragmented: i64,
+    /// Fully allocated.
+    pub full: i64,
+    /// At least one node NotReady/cordoned — can't be scheduled regardless of usage.
+    pub unhealthy: i64,
+    /// Free chips trapped inside fragmented units — free, but can't serve a
+    /// whole-unit job of this size (the recoverable-by-defrag waste).
+    #[serde(rename = "strandedChips")]
+    pub stranded_chips: i64,
+    /// The most-stranded fragmented units, named — the operator's defrag shortlist.
+    pub fragments: Vec<Fragment>,
+}
+
+/// One fragmented carve-able unit, named for a drill-down: a TPU slice/partition id
+/// or an NVLink-domain/node name, its cluster, and how many of its chips are free.
+#[derive(Serialize)]
+pub struct Fragment {
+    pub id: String,
+    pub cluster: String,
+    pub free: i64,
+    pub chips: i64,
 }
 
 /// Unscheduled accelerator demand for one kind (Pending, not-yet-placed pods).

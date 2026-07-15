@@ -16,8 +16,8 @@ use kube::Resource;
 use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
 
 use crate::protocol::{
-    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, GpuView,
-    GroupCapacity, NodeCounts, PlacementUnit, Topology,
+    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, Fragment, GpuView,
+    GroupCapacity, NodeCounts, PlacementUnits, Topology,
 };
 
 /// Accelerator kinds tracked separately (a pod/node never mixes them in practice).
@@ -170,26 +170,33 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
                 nodes: nodes as i64,
             })
             .collect(),
-        // TPU: each node's partition-id label names the slice it belongs to;
-        // the slice shape buckets them. GPU: the node itself is a unit (bucketed by
-        // GPU count), and — where NVLink labels exist — so is the whole domain.
+        // TPU: a host carries a partition-id label for *every* slice shape it's
+        // part of (its own 2x2x1 and the 2x2x2 it shares with a neighbour), so emit
+        // one unit per label — bucketed by shape. GPU: the node itself is a unit
+        // (bucketed by GPU count), and — where NVLink labels exist — so is the
+        // whole domain (bucketed by domain GPU-count).
         tpu_slices: placement_units(clusters, "tpu", |cluster, _name, labels| {
-            labels.keys().find_map(|k| {
-                k.strip_prefix(TPU_PARTITION_PREFIX)
-                    .and_then(|s| s.strip_suffix(TPU_PARTITION_SUFFIX))
-                    .map(|shape| {
-                        (
-                            format!("{cluster}|{shape}|{}", labels[k]),
-                            Some(shape.to_owned()),
-                        )
-                    })
-            })
+            labels
+                .iter()
+                .filter_map(|(k, id)| {
+                    let shape = k
+                        .strip_prefix(TPU_PARTITION_PREFIX)?
+                        .strip_suffix(TPU_PARTITION_SUFFIX)?;
+                    Some((
+                        format!("{cluster}|{shape}|{id}"),
+                        id.clone(),
+                        Some(shape.to_owned()),
+                    ))
+                })
+                .collect()
         }),
         gpu_nodes: placement_units(clusters, "gpu", |cluster, name, _labels| {
-            Some((format!("{cluster}|{name}"), None))
+            vec![(format!("{cluster}|{name}"), name.to_owned(), None)]
         }),
         gpu_domains: placement_units(clusters, "gpu", |cluster, _name, labels| {
-            first_label(labels, &topo.nvlink_labels).map(|dom| (format!("{cluster}|{dom}"), None))
+            first_label(labels, &topo.nvlink_labels)
+                .map(|dom| vec![(format!("{cluster}|{dom}"), dom.clone(), None)])
+                .unwrap_or_default()
         }),
     }
 }
@@ -211,22 +218,34 @@ fn node_unschedulable(node: &Node) -> bool {
         .unwrap_or(false)
 }
 
-/// Carve-able placement units of `want_kind`, bucketed by size, counting how many
-/// whole units are placeable (every chip free and every node schedulable) vs
-/// partially used — the fragmentation a raw free-chip count hides.
+/// The most-stranded fragmented units surfaced per size (the operator drill-down).
+const MAX_FRAGMENTS: usize = 12;
+
+/// Carve-able placement units of `want_kind`, bucketed by size, split by occupancy
+/// (free / fragmented / full / unhealthy) with the chips stranded inside fragmented
+/// units — the fragmentation a single "free" number hides.
 ///
-/// `unit_of(cluster, node, labels)` assigns a node to a unit, returning `(unique
-/// unit key, optional size label)`; a node it maps to `None` is skipped. A `None`
-/// size label buckets the unit by its own chip count (GPU nodes / NVLink domains,
-/// which have no fixed shape); TPU passes the slice shape. The unit key must be
-/// cluster-unique so a slice/partition id reused across clusters isn't merged.
+/// `unit_of(cluster, node, labels)` returns *every* unit a node belongs to as
+/// `(unique key, display id, optional size label)` — a list, because one node can
+/// belong to several (a TPU host is part of both its 2x2x1 and 2x2x2 slice). A
+/// `None` size label buckets by the unit's own chip count (GPU nodes / domains,
+/// which have no fixed shape); TPU passes the slice shape. The key is cluster-scoped
+/// so an id reused across clusters isn't merged.
 fn placement_units(
     clusters: &[ClusterData],
     want_kind: &str,
-    unit_of: impl Fn(&str, &str, &BTreeMap<String, String>) -> Option<(String, Option<String>)>,
-) -> Vec<PlacementUnit> {
-    // unit key -> (chips, free chips, all-free-and-schedulable, size label).
-    let mut units: BTreeMap<String, (i64, i64, bool, Option<String>)> = BTreeMap::new();
+    unit_of: impl Fn(&str, &str, &BTreeMap<String, String>) -> Vec<(String, String, Option<String>)>,
+) -> Vec<PlacementUnits> {
+    // A carve-able unit's running tally across its member nodes.
+    struct Acc {
+        chips: i64,
+        free: i64,
+        healthy: bool,
+        label: Option<String>,
+        cluster: String,
+        id: String,
+    }
+    let mut units: BTreeMap<String, Acc> = BTreeMap::new();
     for cluster in clusters {
         let allocated = accel_allocated_by_node(&cluster.pods);
         for node in &cluster.nodes {
@@ -243,39 +262,81 @@ fn placement_units(
             }
             let name = node.meta().name.clone().unwrap_or_default();
             let labels = node.meta().labels.clone().unwrap_or_default();
-            let Some((key, label)) = unit_of(&cluster.name, &name, &labels) else {
-                continue;
-            };
             let used = allocated.get(&name).copied().unwrap_or(0);
-            let ok = used == 0 && node_ready(node) && !node_unschedulable(node);
-            let e = units.entry(key).or_insert((0, 0, true, label.clone()));
-            e.0 += chips;
-            e.1 += chips - used;
-            e.2 &= ok;
-            if e.3.is_none() {
-                e.3 = label;
+            let healthy = node_ready(node) && !node_unschedulable(node);
+            for (key, id, label) in unit_of(&cluster.name, &name, &labels) {
+                let e = units.entry(key).or_insert_with(|| Acc {
+                    chips: 0,
+                    free: 0,
+                    healthy: true,
+                    label,
+                    cluster: cluster.name.clone(),
+                    id,
+                });
+                e.chips += chips;
+                e.free += chips - used;
+                e.healthy &= healthy;
             }
         }
     }
 
-    // Bucket units by size label (explicit shape, else the unit's chip count).
-    let mut by_size: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
-    for (_key, (chips, free, ok, label)) in units {
-        let bucket = label.unwrap_or_else(|| chips.to_string());
-        let e = by_size.entry(bucket).or_insert((0, 0, 0));
-        e.0 = e.0.max(chips); // chips per unit (uniform within a size)
-        e.1 += 1; // total
-        if ok && free == chips {
-            e.2 += 1; // wholly available
+    // One accumulator per size bucket, splitting its units by occupancy.
+    struct Bucket {
+        chips: i64,
+        free: i64,
+        fragmented: i64,
+        full: i64,
+        unhealthy: i64,
+        stranded: i64,
+        frags: Vec<Fragment>,
+    }
+    let mut by_size: BTreeMap<String, Bucket> = BTreeMap::new();
+    for (_key, u) in units {
+        let bucket = u.label.clone().unwrap_or_else(|| u.chips.to_string());
+        let b = by_size.entry(bucket).or_insert_with(|| Bucket {
+            chips: 0,
+            free: 0,
+            fragmented: 0,
+            full: 0,
+            unhealthy: 0,
+            stranded: 0,
+            frags: Vec::new(),
+        });
+        b.chips = b.chips.max(u.chips);
+        if !u.healthy {
+            b.unhealthy += 1;
+        } else if u.free >= u.chips {
+            b.free += 1;
+        } else if u.free <= 0 {
+            b.full += 1;
+        } else {
+            b.fragmented += 1;
+            b.stranded += u.free;
+            b.frags.push(Fragment {
+                id: u.id,
+                cluster: u.cluster,
+                free: u.free,
+                chips: u.chips,
+            });
         }
     }
-    let mut out: Vec<PlacementUnit> = by_size
+
+    let mut out: Vec<PlacementUnits> = by_size
         .into_iter()
-        .map(|(label, (chips, total, available))| PlacementUnit {
-            label,
-            chips,
-            total,
-            available,
+        .map(|(label, mut b)| {
+            b.frags.sort_by(|a, c| c.free.cmp(&a.free)); // most stranded first
+            b.frags.truncate(MAX_FRAGMENTS);
+            PlacementUnits {
+                label,
+                chips: b.chips,
+                total: b.free + b.fragmented + b.full + b.unhealthy,
+                free: b.free,
+                fragmented: b.fragmented,
+                full: b.full,
+                unhealthy: b.unhealthy,
+                stranded_chips: b.stranded,
+                fragments: b.frags,
+            }
         })
         .collect();
     // Biggest units first — the ones fragmentation strands soonest.
