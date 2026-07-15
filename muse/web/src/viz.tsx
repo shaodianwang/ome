@@ -36,13 +36,40 @@ export function StatTile({
   );
 }
 
+/** The single-value filled-track bar behind Gauge, Bar, and UtilRow: a colored
+ *  fill sized to `pct` over a muted track. `size="md"` is taller (8px); `bordered`
+ *  is the boxed table-cell variant. One source of truth for every non-stacked bar
+ *  (the stacked/segmented bar is `Distribution`). */
+export function Track({
+  pct,
+  tone = "",
+  striped = false,
+  bordered = false,
+  size = "sm",
+  width,
+}: {
+  pct: number;
+  tone?: BarTone;
+  striped?: boolean;
+  bordered?: boolean;
+  size?: "sm" | "md";
+  width?: number | string;
+}) {
+  const cls = ["track", size, tone, striped ? "striped" : "", bordered ? "bordered" : ""]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <div className={cls} style={width !== undefined ? { width } : undefined}>
+      <i style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+    </div>
+  );
+}
+
 /** Horizontal utilization gauge (filled track + percent), for use inside tiles. */
 export function Gauge({ pct, tone = "" }: { pct: number; tone?: BarTone }) {
   return (
-    <div className={`gauge ${tone}`}>
-      <div className="gauge-track">
-        <i style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
-      </div>
+    <div className="gauge">
+      <Track pct={pct} tone={tone} />
       <span className="gauge-pct tnum">{pct}%</span>
     </div>
   );
@@ -84,9 +111,7 @@ export function UtilRow({
     <div className="urow">
       <div className="urow-name mono">{name}</div>
       {tag ? <span className="urow-tag">{tag}</span> : null}
-      <div className="urow-bar">
-        <i className={tone} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
-      </div>
+      <Track pct={pct} tone={tone} size="md" />
       {showPct ? <div className="urow-pct tnum">{pct}%</div> : null}
       {value != null ? <div className="urow-val tnum">{value}</div> : null}
     </div>

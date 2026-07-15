@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import type { BarTone, Selected, Tone } from "./types";
 import { num } from "./util";
+import { Track } from "./viz";
 
 export function Pill({ tone, label, style }: { tone: Tone; label: string; style?: CSSProperties }) {
   return (
@@ -13,23 +14,14 @@ export function Pill({ tone, label, style }: { tone: Tone; label: string; style?
   );
 }
 
-export function Bar({
-  pct,
-  tone = "",
-  striped = false,
-  width,
-}: {
+/** Boxed table-cell bar — the bordered variant of the shared {@link Track}. */
+export function Bar(props: {
   pct: number;
   tone?: BarTone;
   striped?: boolean;
   width?: number | string;
 }) {
-  const cls = ["bar", tone, striped ? "striped" : ""].filter(Boolean).join(" ");
-  return (
-    <div className={cls} style={width !== undefined ? { width } : undefined}>
-      <i style={{ width: `${pct}%` }} />
-    </div>
-  );
+  return <Track {...props} bordered />;
 }
 
 /** Cluster scope selector: "" = all clusters, else a specific cluster name. */

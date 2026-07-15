@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api } from "../api";
 import type { AccelGroup, CapacityResp, Fragment, PlacementUnits } from "../api";
+import type { Tone } from "../types";
 import { Bar, EmptyRow, Pager } from "../components";
 import { useLive } from "../live";
 import { matches, num as n, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
@@ -93,10 +94,34 @@ function aggUnits(
   return [...m.entries()].sort((a, b) => b[1].chips - a[1].chips);
 }
 
-/** One size's occupancy: a stacked free/fragmented/full/unhealthy bar, the headline
- *  free count (researcher), the breakdown + stranded chips (product), and the named
- *  defrag shortlist (operator). */
-function FragRow({ label, u, noun }: { label: string; u: UnitAgg; noun: string }) {
+/** The occupancy buckets a carve-able unit can be in, in bar + legend order. */
+const OCCUPANCY: {
+  key: "free" | "fragmented" | "full" | "unhealthy";
+  tone: Tone;
+  label: string;
+}[] = [
+  { key: "free", tone: "green", label: "free" },
+  { key: "fragmented", tone: "amber", label: "fragmented" },
+  { key: "full", tone: "cyan", label: "full" },
+  { key: "unhealthy", tone: "red", label: "unhealthy" },
+];
+
+/** One size's occupancy: a tall stacked bar, the headline free count (researcher),
+ *  a colored count legend, the stranded capacity framed as recoverable whole units
+ *  (product), and the named defrag shortlist (operator). */
+function FragRow({
+  label,
+  u,
+  noun,
+  unit,
+}: {
+  label: string;
+  u: UnitAgg;
+  noun: string;
+  unit: string;
+}) {
+  const recoverable = u.chips > 0 ? Math.floor(u.stranded / u.chips) : 0;
+  const pct = (v: number) => (u.total > 0 ? Math.round((v / u.total) * 100) : 0);
   return (
     <div className="frag-row">
       <div className="frag-head">
@@ -107,31 +132,38 @@ function FragRow({ label, u, noun }: { label: string; u: UnitAgg; noun: string }
           </span>
         </span>
         <span className="frag-free">
-          <b className="tnum">{n(u.free)}</b> free
+          <b className="tnum">{n(u.free)}</b> free <span className="muted">/ {n(u.total)}</span>
         </span>
-        <span className="frag-total muted tnum">of {n(u.total)}</span>
       </div>
-      <Distribution
-        segments={[
-          { value: u.free, tone: "green" },
-          { value: u.fragmented, tone: "amber" },
-          { value: u.full, tone: "cyan" },
-          { value: u.unhealthy, tone: "red" },
-        ]}
-      />
-      <div className="frag-stats">
-        <span className="tnum">{n(u.fragmented)} fragmented</span>
-        <span className="tnum">{n(u.full)} full</span>
-        <span className="tnum">{n(u.unhealthy)} unhealthy</span>
-        {u.stranded > 0 ? (
-          <span className="frag-stranded tnum">
-            {n(u.stranded)} {noun} stranded
-          </span>
-        ) : null}
+      <div className="frag-bar">
+        <Distribution segments={OCCUPANCY.map((o) => ({ value: u[o.key], tone: o.tone }))} />
       </div>
+      <div className="frag-cells">
+        {OCCUPANCY.map((o) => (
+          <div key={o.key} className={u[o.key] ? "frag-cell" : "frag-cell zero"}>
+            <span className="frag-cell-k">
+              <Dot tone={o.tone} /> {o.label}
+            </span>
+            <span className="frag-cell-v tnum">
+              {n(u[o.key])} <small>{pct(u[o.key])}%</small>
+            </span>
+          </div>
+        ))}
+      </div>
+      {u.stranded > 0 ? (
+        <p className="frag-strand">
+          <b className="tnum">{n(u.stranded)}</b> {noun} stranded
+          {recoverable >= 1 ? (
+            <>
+              {" "}
+              · ≈<b className="tnum">{n(recoverable)}</b> more {unit}s if defragmented
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {u.fragments.length ? (
         <div className="frag-list">
-          <span className="frag-list-lbl">most fragmented</span>
+          <span className="frag-list-lbl">most fragmented {unit}s</span>
           {u.fragments.slice(0, 6).map((f, i) => (
             <span className="frag-chip mono" key={i} title={f.id}>
               {shortId(f.id)} <span className="muted">{f.cluster}</span>{" "}
@@ -146,41 +178,29 @@ function FragRow({ label, u, noun }: { label: string; u: UnitAgg; noun: string }
   );
 }
 
-/** A fragmentation card for one unit kind (TPU slices / GPU nodes / GPU racks): a
- *  legend + one occupancy row per size. Renders nothing when there are no units
- *  (no TPUs, or no NVLink labels). */
+/** A fragmentation card for one unit kind (TPU slices / GPU nodes / GPU racks):
+ *  one occupancy row per size. Renders nothing when there are no units (no TPUs,
+ *  or no NVLink labels). */
 function FragCard({
   title,
   sub,
   noun,
+  unit,
   units,
   note,
 }: {
   title: string;
   sub: string;
   noun: string;
+  unit: string;
   units: [string, UnitAgg][];
   note: string;
 }) {
   if (!units.length) return null;
   return (
     <Card title={title} sub={sub}>
-      <div className="health-legend">
-        <span>
-          <Dot tone="green" /> free
-        </span>
-        <span>
-          <Dot tone="amber" /> fragmented
-        </span>
-        <span>
-          <Dot tone="cyan" /> full
-        </span>
-        <span>
-          <Dot tone="red" /> unhealthy
-        </span>
-      </div>
       {units.map(([label, u]) => (
-        <FragRow key={label} label={label} u={u} noun={noun} />
+        <FragRow key={label} label={label} u={u} noun={noun} unit={unit} />
       ))}
       <p className="panel-note">{note}</p>
     </Card>
@@ -413,114 +433,11 @@ export function Capacity() {
         </p>
       ) : null}
 
-      <Card title="Placement" sub="biggest job you can schedule now">
-        <table className="place-tbl">
-          <thead>
-            <tr>
-              <th></th>
-              <th>
-                Per rack <span className="muted">NVLink / ICI</span>
-              </th>
-              <th>
-                Per fabric block <span className="muted">island</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {tiers.map((t) => (
-              <tr key={t.kind}>
-                <td className="place-kind">{t.kind.toUpperCase()}</td>
-                <td>
-                  {t.domain ? (
-                    <>
-                      <b className="tnum">{n(t.domain.free)}</b>{" "}
-                      <span className="muted">
-                        ≈{nodesWorth(t.domain)} nodes · {t.domain.cluster}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-                <td>
-                  {t.island ? (
-                    <>
-                      <b className="tnum">{n(t.island.free)}</b>{" "}
-                      <span className="muted">
-                        ≈{nodesWorth(t.island)} nodes · {t.island.cluster}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <div className="fit-row">
-          <label className="fit-input">
-            Will a job of
-            <input
-              type="number"
-              min={1}
-              placeholder="128"
-              value={fit}
-              onChange={(e) => setFit(e.target.value)}
-            />
-            <select value={fitKind} onChange={(e) => setFitKind(e.target.value)}>
-              {kindsPresent.map((k) => (
-                <option key={k} value={k}>
-                  {k.toUpperCase()}
-                </option>
-              ))}
-            </select>
-            fit in one block?
-          </label>
-          {fitActive ? (
-            fitIslands.length ? (
-              <span className="fit-ok">
-                ✓ fits — {fitIslands.length} {fitKind.toUpperCase()} block
-                {fitIslands.length === 1 ? "" : "s"}, largest {n(fitBest?.free ?? 0)} on{" "}
-                {fitBest?.cluster}
-              </span>
-            ) : (
-              <span className="fit-no">
-                ✗ largest {fitKind.toUpperCase()} block is {n(fitBest?.free ?? 0)}
-                {fitBest ? ` (${fitBest.cluster})` : ""}
-              </span>
-            )
-          ) : null}
-        </div>
-
-        {topBlocks.length ? (
-          <div className="place-top">
-            <div className="eyebrow">Most free blocks (islands)</div>
-            <ul className="place-toplist">
-              {topBlocks.map((b, i) => (
-                <li key={i}>
-                  <span className="mono">{shortId(b.name)}</span>
-                  <span className="muted">{b.cluster}</span>
-                  <span className="place-free tnum">
-                    {n(b.free)} {b.kind.toUpperCase()}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        <p className="panel-note">
-          Only clusters whose nodes carry topology labels are counted. A "—" means no labeled block
-          exists for that tier.
-        </p>
-      </Card>
-
       <FragCard
         title="TPU slices"
         sub="slice occupancy by shape — free · fragmented · full"
         noun="chips"
+        unit="slice"
         units={tpuSlices}
         note="Each TPU host is part of a 2x2x1 slice and the 2x2x2 it shares with a neighbour. A slice is free only when all its chips are free and healthy; a fragmented slice pairs an idle host with a busy one — its free chips are stranded until the slice drains."
       />
@@ -528,6 +445,7 @@ export function Capacity() {
         title="GPU nodes"
         sub="node occupancy by GPUs per node — free · fragmented · full"
         noun="GPUs"
+        unit="node"
         units={gpuNodes}
         note="A fragmented node has some GPUs free but not all — usable by smaller jobs, but not one needing the whole box. Stranded counts those free-but-partial GPUs."
       />
@@ -535,6 +453,7 @@ export function Capacity() {
         title="GPU racks"
         sub="NVLink-domain occupancy by size — free · fragmented · full"
         noun="GPUs"
+        unit="rack"
         units={gpuDomains}
         note="A domain (e.g. an NVL72 rack) is free only when every GPU is free and healthy — what a large, tightly-coupled job needs. Fragmented domains still take smaller jobs; their free GPUs are stranded for whole-rack work."
       />
@@ -638,6 +557,110 @@ export function Capacity() {
         onPage={setPage}
         onPageSize={setPageSize}
       />
+
+      <Card title="Placement" sub="biggest job you can schedule now">
+        <table className="place-tbl">
+          <thead>
+            <tr>
+              <th></th>
+              <th>
+                Per rack <span className="muted">NVLink / ICI</span>
+              </th>
+              <th>
+                Per fabric block <span className="muted">island</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {tiers.map((t) => (
+              <tr key={t.kind}>
+                <td className="place-kind">{t.kind.toUpperCase()}</td>
+                <td>
+                  {t.domain ? (
+                    <>
+                      <b className="tnum">{n(t.domain.free)}</b>{" "}
+                      <span className="muted">
+                        ≈{nodesWorth(t.domain)} nodes · {t.domain.cluster}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td>
+                  {t.island ? (
+                    <>
+                      <b className="tnum">{n(t.island.free)}</b>{" "}
+                      <span className="muted">
+                        ≈{nodesWorth(t.island)} nodes · {t.island.cluster}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="fit-row">
+          <label className="fit-input">
+            Will a job of
+            <input
+              type="number"
+              min={1}
+              placeholder="128"
+              value={fit}
+              onChange={(e) => setFit(e.target.value)}
+            />
+            <select value={fitKind} onChange={(e) => setFitKind(e.target.value)}>
+              {kindsPresent.map((k) => (
+                <option key={k} value={k}>
+                  {k.toUpperCase()}
+                </option>
+              ))}
+            </select>
+            fit in one block?
+          </label>
+          {fitActive ? (
+            fitIslands.length ? (
+              <span className="fit-ok">
+                ✓ fits — {fitIslands.length} {fitKind.toUpperCase()} block
+                {fitIslands.length === 1 ? "" : "s"}, largest {n(fitBest?.free ?? 0)} on{" "}
+                {fitBest?.cluster}
+              </span>
+            ) : (
+              <span className="fit-no">
+                ✗ largest {fitKind.toUpperCase()} block is {n(fitBest?.free ?? 0)}
+                {fitBest ? ` (${fitBest.cluster})` : ""}
+              </span>
+            )
+          ) : null}
+        </div>
+
+        {topBlocks.length ? (
+          <div className="place-top">
+            <div className="eyebrow">Most free blocks (islands)</div>
+            <ul className="place-toplist">
+              {topBlocks.map((b, i) => (
+                <li key={i}>
+                  <span className="mono">{shortId(b.name)}</span>
+                  <span className="muted">{b.cluster}</span>
+                  <span className="place-free tnum">
+                    {n(b.free)} {b.kind.toUpperCase()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        <p className="panel-note">
+          Only clusters whose nodes carry topology labels are counted. A "—" means no labeled block
+          exists for that tier.
+        </p>
+      </Card>
     </section>
   );
 }

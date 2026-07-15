@@ -234,27 +234,55 @@ h2.sec .who {
   align-items: center;
   gap: var(--s2);
 }
-.gauge-track {
+.gauge .track {
   flex: 1;
+}
+
+/* filled-track bar — the single-value primitive behind Gauge / Bar / UtilRow.
+   (The stacked/segmented bar is `.dist`.) */
+.track {
   height: 6px;
   background: var(--bg-2);
   border-radius: var(--radius-pill);
   overflow: hidden;
 }
-.gauge-track > i {
+.track.md {
+  height: 8px;
+}
+.track.bordered {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.track > i {
   display: block;
   height: 100%;
   background: var(--accent);
   border-radius: inherit;
 }
-.gauge.green .gauge-track > i {
+.track.green > i {
   background: var(--green);
 }
-.gauge.amber .gauge-track > i {
+.track.amber > i {
   background: var(--amber);
 }
-.gauge.red .gauge-track > i {
+.track.red > i {
   background: var(--red);
+}
+.track.violet > i {
+  background: linear-gradient(90deg, var(--violet), var(--accent));
+}
+.track.striped > i {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.16) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.16) 50%,
+    rgba(255, 255, 255, 0.16) 75%,
+    transparent 75%
+  );
+  background-size: 14px 14px;
+  animation: stripe 1s linear infinite;
 }
 .gauge-pct {
   font-size: var(--t-sm);
@@ -320,28 +348,9 @@ h2.sec .who {
   color: var(--fg-3);
   min-width: 30px;
 }
-.urow-bar {
+.urow .track {
   flex: 1;
-  height: 8px;
   min-width: 60px;
-  background: var(--bg-2);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-}
-.urow-bar > i {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  border-radius: inherit;
-}
-.urow-bar > i.green {
-  background: var(--green);
-}
-.urow-bar > i.amber {
-  background: var(--amber);
-}
-.urow-bar > i.red {
-  background: var(--red);
 }
 .urow-pct {
   flex: none;
@@ -642,7 +651,7 @@ h2.sec .who {
 
 /* ---- capacity: fragmentation by carve-able unit ---- */
 .frag-row {
-  padding: var(--s3) 0;
+  padding: var(--s5) 0;
   border-bottom: 1px solid var(--border);
 }
 .frag-row:last-of-type {
@@ -652,8 +661,8 @@ h2.sec .who {
   display: flex;
   align-items: baseline;
   gap: var(--s2);
-  margin-bottom: 7px;
-  font-size: var(--t-sm);
+  margin-bottom: 9px;
+  font-size: var(--t-md);
 }
 .frag-name {
   font-weight: 600;
@@ -661,29 +670,93 @@ h2.sec .who {
 .frag-free {
   margin-left: auto;
   color: var(--green);
+  font-size: var(--t-sm);
 }
 .frag-free b {
-  font-size: var(--t-md);
+  font-size: var(--t-xl);
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
-.frag-stats {
+/* segmented occupancy bar — taller, rounded, gaps between segments */
+.frag-bar {
+  margin: 0 0 11px;
+}
+.frag-bar .dist {
+  height: 18px;
+  gap: 2px;
+  background: transparent;
+  border-radius: 0;
+  overflow: visible;
+}
+.frag-bar .seg {
+  border-radius: 3px;
+}
+.frag-bar .seg:first-child {
+  border-top-left-radius: var(--radius-pill);
+  border-bottom-left-radius: var(--radius-pill);
+}
+.frag-bar .seg:last-child {
+  border-top-right-radius: var(--radius-pill);
+  border-bottom-right-radius: var(--radius-pill);
+}
+/* occupancy stat cells — one per bucket */
+.frag-cells {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--s2);
+}
+@media (max-width: 720px) {
+  .frag-cells {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.frag-cell {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--s2) var(--s4);
-  margin-top: 7px;
-  font-size: var(--t-sm);
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.frag-cell.zero {
+  opacity: 0.45;
+}
+.frag-cell-k {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-xs);
   color: var(--fg-3);
 }
-.frag-stranded {
-  color: var(--amber);
+.frag-cell-v {
+  font-size: var(--t-lg);
   font-weight: 600;
+}
+.frag-cell-v small {
+  margin-left: 4px;
+  font-size: var(--t-xs);
+  font-weight: 400;
+  color: var(--fg-faint);
+}
+/* stranded → recoverable callout pill */
+.frag-strand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 11px 0 0;
+  padding: 5px 11px;
+  font-size: var(--t-sm);
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  border-radius: var(--radius-sm);
 }
 .frag-list {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
-  margin-top: 8px;
+  margin-top: 11px;
 }
 .frag-list-lbl {
   font-size: var(--t-xs);
@@ -696,7 +769,7 @@ h2.sec .who {
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 2px 7px;
+  padding: 3px 8px;
   color: var(--fg-2);
 }
 
