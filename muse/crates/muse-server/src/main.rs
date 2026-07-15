@@ -186,6 +186,7 @@ async fn build_cluster(
     let factory = SharedInformerFactory::with_streaming_lists(client.clone(), streaming);
     let (state, readies) = informers::build_cluster_state(
         cluster_ref.name.clone(),
+        info.git_version.clone(),
         client,
         &factory,
         &ome,

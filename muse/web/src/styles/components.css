@@ -282,6 +282,11 @@ table.tbl .num {
   text-align: right;
   font-family: var(--mono);
 }
+/* Right-aligned header cells must out-specify `table.tbl thead th`'s left default
+   so a numeric header lines up with its `.num` column. */
+table.tbl thead th.right {
+  text-align: right;
+}
 .cell-name {
   font-weight: 600;
 }

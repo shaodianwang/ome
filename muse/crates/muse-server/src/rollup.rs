@@ -16,8 +16,8 @@ use kube::Resource;
 use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
 
 use crate::protocol::{
-    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, Fragment, GpuView,
-    GroupCapacity, NodeCounts, PlacementUnits, Topology,
+    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, Consumer, Fragment,
+    GpuView, GroupCapacity, NodeCounts, PlacementUnits, Topology, UnitBox,
 };
 
 /// Accelerator kinds tracked separately (a pod/node never mixes them in practice).
@@ -86,10 +86,13 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
     let mut pending: BTreeMap<&'static str, (i64, i64)> = BTreeMap::new();
     // Lost capacity: accelerators on NotReady/cordoned nodes (kind -> accel, nodes).
     let mut unavail: BTreeMap<&'static str, (i64, usize)> = BTreeMap::new();
+    // Top consumers: chips held by scheduled pods, per (namespace, kind).
+    let mut consumers: BTreeMap<(String, &'static str), (i64, i64)> = BTreeMap::new();
 
     for cluster in clusters {
         let allocated = accel_allocated_by_node(&cluster.pods);
         accumulate_pending(&cluster.pods, &mut pending);
+        accumulate_consumers(&cluster.pods, &mut consumers);
 
         for node in &cluster.nodes {
             let name = node.meta().name.clone().unwrap_or_default();
@@ -193,12 +196,64 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
         gpu_nodes: placement_units(clusters, "gpu", |cluster, name, _labels| {
             vec![(format!("{cluster}|{name}"), name.to_owned(), None)]
         }),
-        gpu_domains: placement_units(clusters, "gpu", |cluster, _name, labels| {
-            first_label(labels, &topo.nvlink_labels)
-                .map(|dom| vec![(format!("{cluster}|{dom}"), dom.clone(), None)])
-                .unwrap_or_default()
-        }),
+        // Individual domains (one box each in the console) grouped by the NVLink/ICI
+        // label — GPU NVLink racks and TPU subblocks.
+        gpu_racks: domain_units(clusters, "gpu", &topo.nvlink_labels),
+        tpu_subblocks: domain_units(clusters, "tpu", &topo.nvlink_labels),
+        consumers: top_consumers(consumers),
     }
+}
+
+/// One box per carve-able domain (a GPU NVLink rack or a TPU subblock): group
+/// `want_kind` nodes by their `keys` label value, summing chips + free and AND-ing
+/// health. Unlike [`placement_units`] this returns the domains individually (not
+/// bucketed by size) for the console heatmap — most free first so available
+/// capacity leads. A domain's varying chip count is just how many of its hosts are
+/// currently present.
+fn domain_units(clusters: &[ClusterData], want_kind: &str, keys: &[String]) -> Vec<UnitBox> {
+    // cluster-scoped key -> (chips, free, healthy, cluster, id)
+    let mut units: BTreeMap<String, (i64, i64, bool, String, String)> = BTreeMap::new();
+    for cluster in clusters {
+        let allocated = accel_allocated_by_node(&cluster.pods);
+        for node in &cluster.nodes {
+            let Some((kind, chips)) = node
+                .status
+                .as_ref()
+                .and_then(|s| s.allocatable.as_ref())
+                .and_then(node_accel)
+            else {
+                continue;
+            };
+            if kind != want_kind {
+                continue;
+            }
+            let labels = node.meta().labels.clone().unwrap_or_default();
+            let Some(dom) = first_label(&labels, keys) else {
+                continue;
+            };
+            let name = node.meta().name.clone().unwrap_or_default();
+            let used = allocated.get(&name).copied().unwrap_or(0);
+            let healthy = node_ready(node) && !node_unschedulable(node);
+            let e = units
+                .entry(format!("{}|{dom}", cluster.name))
+                .or_insert_with(|| (0, 0, true, cluster.name.clone(), dom));
+            e.0 += chips;
+            e.1 += chips - used;
+            e.2 &= healthy;
+        }
+    }
+    let mut out: Vec<UnitBox> = units
+        .into_values()
+        .map(|(chips, free, healthy, cluster, id)| UnitBox {
+            id,
+            cluster,
+            chips,
+            free,
+            healthy,
+        })
+        .collect();
+    out.sort_by(|a, b| b.free.cmp(&a.free).then(a.id.cmp(&b.id)));
+    out
 }
 
 /// Whether a node's `Ready` condition is True.
@@ -374,6 +429,62 @@ fn accumulate_pending(pods: &[Arc<Pod>], out: &mut BTreeMap<&'static str, (i64, 
             }
         }
     }
+}
+
+/// How many top consumers to surface per cluster.
+const MAX_CONSUMERS: usize = 8;
+
+/// Sum accelerator chips held by *scheduled* pods, per (namespace, kind) — who is
+/// actually occupying the cluster's accelerators. A Pending/unscheduled pod isn't
+/// holding capacity yet, so it's excluded (that's [`accumulate_pending`]'s job).
+fn accumulate_consumers(pods: &[Arc<Pod>], out: &mut BTreeMap<(String, &'static str), (i64, i64)>) {
+    for pod in pods {
+        let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+        if matches!(phase, Some("Succeeded" | "Failed")) {
+            continue;
+        }
+        let Some(spec) = pod.spec.as_ref() else {
+            continue;
+        };
+        if spec.node_name.is_none() {
+            continue;
+        }
+        let ns = pod.metadata.namespace.clone().unwrap_or_default();
+        for kind in KINDS {
+            let req: i64 = spec
+                .containers
+                .iter()
+                .filter_map(|c| c.resources.as_ref())
+                .filter_map(|r| r.requests.as_ref())
+                .map(|r| sum_accel(r, kind))
+                .sum();
+            if req > 0 {
+                let e = out.entry((ns.clone(), kind)).or_insert((0, 0));
+                e.0 += req;
+                e.1 += 1;
+            }
+        }
+    }
+}
+
+/// Flatten the consumer map into the top-N namespaces by chips held.
+fn top_consumers(map: BTreeMap<(String, &'static str), (i64, i64)>) -> Vec<Consumer> {
+    let mut out: Vec<Consumer> = map
+        .into_iter()
+        .map(|((namespace, kind), (accelerators, pods))| Consumer {
+            namespace,
+            kind: kind.to_owned(),
+            accelerators,
+            pods,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.accelerators
+            .cmp(&a.accelerators)
+            .then(a.namespace.cmp(&b.namespace))
+    });
+    out.truncate(MAX_CONSUMERS);
+    out
 }
 
 /// The first present island/domain label value, or "unassigned".

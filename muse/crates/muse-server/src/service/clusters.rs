@@ -26,11 +26,23 @@ pub async fn list(State(st): State<AppState>) -> Json<Listing> {
                         .is_some()
                 })
                 .count();
+            // Cloud region from the first node carrying the standard label — a
+            // well-known Kubernetes key, uniform across a cluster.
+            let region = nodes.iter().find_map(|n| {
+                n.metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get("topology.kubernetes.io/region"))
+                    .filter(|v| !v.is_empty())
+                    .cloned()
+            });
             let ready = c.ready.load(Ordering::Relaxed);
             to_val(ClusterSummary {
                 name: c.name.clone(),
                 ready,
                 status: if ready { "ready" } else { "syncing" },
+                version: c.version.clone(),
+                region,
                 nodes: nodes.len(),
                 accelerator_nodes,
                 inference_services: c.inference_services.list().len(),

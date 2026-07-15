@@ -23,9 +23,9 @@ use crate::{
     app_context::AppState,
     informers::ClusterState,
     protocol::{
-        tagged, BaseModelDetail, BaseModelView, FineTunedWeightView, InferenceServiceDetail,
-        InferenceServiceView, ListParams, Listing, NodeView, ResourceSummary, RuntimeDetail,
-        RuntimeView, Topology, ViewParams,
+        sum_accel, tagged, BaseModelDetail, BaseModelView, FineTunedWeightView,
+        InferenceServiceDetail, InferenceServiceView, ListParams, Listing, NodeDetail, NodePod,
+        NodeView, ResourceSummary, RuntimeDetail, RuntimeView, Topology, ViewParams,
     },
     rollup,
 };
@@ -128,18 +128,55 @@ fn node_rows(c: &ClusterState, topo: &Topology) -> Vec<Value> {
         .collect()
 }
 
-/// Detail for one named Node on one cluster (or the raw object when `raw`).
+/// Detail for one named Node on one cluster (or the raw object when `raw`): the
+/// overview plus conditions, taints, and the pods scheduled on it.
 fn node_detail(c: &ClusterState, name: &str, raw: bool, topo: &Topology) -> Option<Value> {
     c.nodes.get(name).map(|n| {
         if raw {
-            tagged(&*n, &c.name)
-        } else {
-            let used = rollup::accel_allocated_by_node(&c.pods.list())
-                .get(name)
-                .copied()
-                .unwrap_or(0);
-            tagged(NodeView::of(n.as_ref(), used, topo), &c.name)
+            return tagged(&*n, &c.name);
         }
+        let pods = c.pods.list();
+        let used = rollup::accel_allocated_by_node(&pods)
+            .get(name)
+            .copied()
+            .unwrap_or(0);
+        let mut on_node: Vec<NodePod> = pods
+            .iter()
+            .filter(|p| {
+                p.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(name)
+                    && !matches!(
+                        p.status.as_ref().and_then(|s| s.phase.as_deref()),
+                        Some("Succeeded" | "Failed")
+                    )
+            })
+            .map(|p| {
+                let accel: i64 = p
+                    .spec
+                    .as_ref()
+                    .map(|s| {
+                        s.containers
+                            .iter()
+                            .filter_map(|ctr| ctr.resources.as_ref())
+                            .filter_map(|r| r.requests.as_ref())
+                            .map(|r| sum_accel(r, "gpu") + sum_accel(r, "tpu"))
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                NodePod {
+                    namespace: p.metadata.namespace.clone().unwrap_or_default(),
+                    name: p.metadata.name.clone().unwrap_or_default(),
+                    accelerators: (accel > 0).then_some(accel),
+                }
+            })
+            .collect();
+        on_node.sort_by(|a, b| {
+            b.accelerators
+                .unwrap_or(0)
+                .cmp(&a.accelerators.unwrap_or(0))
+                .then(a.namespace.cmp(&b.namespace))
+                .then(a.name.cmp(&b.name))
+        });
+        tagged(NodeDetail::of(n.as_ref(), used, on_node, topo), &c.name)
     })
 }
 

@@ -1035,6 +1035,10 @@ pub struct NodeView {
     pub devices: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "kubeletVersion")]
     pub kubelet_version: Option<String>,
+    /// Problems with the node (NotReady / cordoned / pressure conditions); empty =
+    /// healthy + schedulable. Powers the console's node explorer + why-down view.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub issues: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
 }
@@ -1094,9 +1098,128 @@ impl NodeView {
             kubelet_version: status
                 .and_then(|s| s.node_info.as_ref())
                 .map(|i| i.kubelet_version.clone()),
+            issues: node_issues(node),
             age: age(meta),
         }
     }
+}
+
+/// Problems with a node, for the console — NotReady, pressure conditions, or
+/// cordoned. Empty means healthy and schedulable. Taints are intentionally
+/// excluded: accelerator nodes routinely carry a NoSchedule device taint that
+/// isn't a fault, so flagging it would be noise.
+fn node_issues(node: &Node) -> Vec<String> {
+    let mut out = Vec::new();
+    let conds = node.status.as_ref().and_then(|s| s.conditions.as_ref());
+    let cond = |t: &str| conds.and_then(|cs| cs.iter().find(|c| c.type_ == t));
+    if cond("Ready").map(|c| c.status != "True").unwrap_or(true) {
+        out.push("NotReady".to_owned());
+    }
+    for t in [
+        "MemoryPressure",
+        "DiskPressure",
+        "PIDPressure",
+        "NetworkUnavailable",
+    ] {
+        if cond(t).map(|c| c.status == "True").unwrap_or(false) {
+            out.push(t.to_owned());
+        }
+    }
+    if node
+        .spec
+        .as_ref()
+        .and_then(|s| s.unschedulable)
+        .unwrap_or(false)
+    {
+        out.push("cordoned".to_owned());
+    }
+    out
+}
+
+/// A scheduling taint on a node (key + effect; value when set).
+#[derive(Serialize)]
+pub struct TaintView {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub effect: String,
+}
+
+/// A pod scheduled on a node, with the accelerators it holds — so an operator can
+/// see what a drain would evict.
+#[derive(Serialize)]
+pub struct NodePod {
+    pub namespace: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accelerators: Option<i64>,
+}
+
+/// Full node detail for the console drill-down: the overview plus status
+/// conditions, scheduling taints, and the pods currently on it.
+#[derive(Serialize)]
+pub struct NodeDetail {
+    #[serde(flatten)]
+    pub view: NodeView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ConditionView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub taints: Vec<TaintView>,
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "podsOnNode")]
+    pub pods_on_node: Vec<NodePod>,
+}
+
+impl NodeDetail {
+    /// `pods_on_node` is built by the handler (it holds the Pod cache); the rest is
+    /// projected from the Node object.
+    pub fn of(
+        node: &Node,
+        accel_allocated: i64,
+        pods_on_node: Vec<NodePod>,
+        topo: &Topology,
+    ) -> Self {
+        Self {
+            view: NodeView::of(node, accel_allocated, topo),
+            conditions: node_conditions(node),
+            taints: node
+                .spec
+                .as_ref()
+                .and_then(|s| s.taints.as_ref())
+                .map(|ts| {
+                    ts.iter()
+                        .map(|t| TaintView {
+                            key: t.key.clone(),
+                            value: t.value.clone().filter(|v| !v.is_empty()),
+                            effect: t.effect.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            pods_on_node,
+        }
+    }
+}
+
+/// Project a node's *notable* status conditions to `ConditionView`: `Ready` plus
+/// anything currently `True`. Nodes (esp. with a problem-detector) carry dozens of
+/// conditions that sit `False` in steady state — keeping only Ready + active ones
+/// drops that noise while still surfacing every fault that's firing.
+fn node_conditions(node: &Node) -> Vec<ConditionView> {
+    node.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .map(|cs| {
+            cs.iter()
+                .filter(|c| c.type_ == "Ready" || c.status == "True")
+                .map(|c| ConditionView {
+                    type_: c.type_.clone(),
+                    status: c.status.clone(),
+                    reason: c.reason.clone().filter(|s| !s.is_empty()),
+                    message: c.message.clone().filter(|s| !s.is_empty()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A label value, treating absent and empty-string as the same (None).
@@ -1174,15 +1297,42 @@ pub struct CapacityReport {
     /// vs partially used. Empty on clusters without GKE TPU partition labels.
     #[serde(rename = "tpuSlices")]
     pub tpu_slices: Vec<PlacementUnits>,
+    /// TPU subblocks — one entry per physical subblock (from the NVLink/ICI label),
+    /// for the heatmap grid. Empty without that label.
+    #[serde(rename = "tpuSubblocks")]
+    pub tpu_subblocks: Vec<UnitBox>,
     /// GPU whole-node availability grouped by GPUs-per-node — how many entire nodes
     /// are free (for a job needing a full box) vs partially used.
     #[serde(rename = "gpuNodes")]
     pub gpu_nodes: Vec<PlacementUnits>,
-    /// GPU whole-NVLink-domain availability grouped by domain GPU-count — how many
-    /// entire domains (e.g. NVL72 racks) are free vs partially used. Empty without
-    /// NVLink domain labels.
-    #[serde(rename = "gpuDomains")]
-    pub gpu_domains: Vec<PlacementUnits>,
+    /// GPU racks — one entry per NVLink domain (from the NVLink label), for the
+    /// heatmap grid. Empty without that label.
+    #[serde(rename = "gpuRacks")]
+    pub gpu_racks: Vec<UnitBox>,
+    /// Top accelerator consumers on this cluster (by namespace), most chips first.
+    pub consumers: Vec<Consumer>,
+}
+
+/// One carve-able domain (a TPU subblock or a GPU NVLink rack) for the heatmap:
+/// its id, cluster, and chip occupancy. The console derives the state — free /
+/// partial / full / unhealthy — from `free`, `chips`, and `healthy`.
+#[derive(Serialize)]
+pub struct UnitBox {
+    pub id: String,
+    pub cluster: String,
+    pub chips: i64,
+    pub free: i64,
+    pub healthy: bool,
+}
+
+/// A top accelerator consumer on a cluster: a namespace, the accelerator kind, and
+/// how many chips its scheduled pods hold.
+#[derive(Serialize)]
+pub struct Consumer {
+    pub namespace: String,
+    pub kind: String,
+    pub accelerators: i64,
+    pub pods: i64,
 }
 
 /// The occupancy breakdown of the carve-able units at one size — a TPU slice shape,
@@ -1356,6 +1506,11 @@ pub struct ClusterSummary {
     pub name: String,
     pub ready: bool,
     pub status: &'static str,
+    /// Apiserver Kubernetes version (e.g. "v1.35.6").
+    pub version: String,
+    /// Cloud region, from the standard `topology.kubernetes.io/region` node label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     pub nodes: usize,
     #[serde(rename = "acceleratorNodes")]
     pub accelerator_nodes: usize,

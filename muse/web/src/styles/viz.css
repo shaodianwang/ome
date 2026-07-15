@@ -650,94 +650,8 @@ h2.sec .who {
 }
 
 /* ---- capacity: fragmentation by carve-able unit ---- */
-.frag-row {
-  padding: var(--s5) 0;
-  border-bottom: 1px solid var(--border);
-}
-.frag-row:last-of-type {
-  border-bottom: 0;
-}
-.frag-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s2);
-  margin-bottom: 9px;
-  font-size: var(--t-md);
-}
-.frag-name {
-  font-weight: 600;
-}
-.frag-free {
-  margin-left: auto;
-  color: var(--green);
-  font-size: var(--t-sm);
-}
-.frag-free b {
-  font-size: var(--t-xl);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-/* segmented occupancy bar — taller, rounded, gaps between segments */
-.frag-bar {
-  margin: 0 0 11px;
-}
-.frag-bar .dist {
-  height: 18px;
-  gap: 2px;
-  background: transparent;
-  border-radius: 0;
-  overflow: visible;
-}
-.frag-bar .seg {
-  border-radius: 3px;
-}
-.frag-bar .seg:first-child {
-  border-top-left-radius: var(--radius-pill);
-  border-bottom-left-radius: var(--radius-pill);
-}
-.frag-bar .seg:last-child {
-  border-top-right-radius: var(--radius-pill);
-  border-bottom-right-radius: var(--radius-pill);
-}
-/* occupancy stat cells — one per bucket */
-.frag-cells {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--s2);
-}
-@media (max-width: 720px) {
-  .frag-cells {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-.frag-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 7px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.frag-cell.zero {
-  opacity: 0.45;
-}
-.frag-cell-k {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--t-xs);
-  color: var(--fg-3);
-}
-.frag-cell-v {
-  font-size: var(--t-lg);
-  font-weight: 600;
-}
-.frag-cell-v small {
-  margin-left: 4px;
-  font-size: var(--t-xs);
-  font-weight: 400;
-  color: var(--fg-faint);
+.frag-legend {
+  margin-bottom: var(--s2);
 }
 /* stranded → recoverable callout pill */
 .frag-strand {
@@ -771,6 +685,136 @@ h2.sec .who {
   border-radius: var(--radius-sm);
   padding: 3px 8px;
   color: var(--fg-2);
+}
+
+/* ---- capacity: placement-capacity summary table + drill-down ---- */
+.tier-tbl .tier-name {
+  white-space: nowrap;
+}
+.tier-caret {
+  display: inline-block;
+  width: 14px;
+  color: var(--fg-faint);
+  font-size: 10px;
+}
+.tier-mix {
+  width: 160px;
+}
+.tier-mix .dist {
+  height: 12px;
+  gap: 2px;
+  background: transparent;
+  border-radius: 0;
+  overflow: visible;
+}
+.tier-mix .seg {
+  border-radius: 2px;
+}
+.tier-mix .seg:first-child {
+  border-top-left-radius: var(--radius-pill);
+  border-bottom-left-radius: var(--radius-pill);
+}
+.tier-mix .seg:last-child {
+  border-top-right-radius: var(--radius-pill);
+  border-bottom-right-radius: var(--radius-pill);
+}
+.tier-detail-row td {
+  background: var(--bg-2);
+}
+.tier-detail {
+  padding: var(--s3) var(--s2);
+}
+.unit-table {
+  margin-top: var(--s2);
+}
+/* occupancy-state tag in the drill-down table */
+.utag {
+  font-size: var(--t-xs);
+  text-transform: capitalize;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+}
+.utag.green {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+}
+.utag.amber {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+}
+.utag.cyan {
+  color: var(--cyan);
+  border-color: color-mix(in srgb, var(--cyan) 40%, transparent);
+}
+.utag.red {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+}
+
+/* ---- capacity: node explorer drill-down ---- */
+table.tbl .node-detail-row td {
+  padding: 0;
+  background: var(--bg-2);
+}
+.node-detail {
+  padding: var(--s3) var(--s4);
+}
+.node-cmds {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+.node-cmds-lbl {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+}
+.copybtn {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+  color: var(--accent-2);
+  cursor: pointer;
+}
+.copybtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.node-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.2fr;
+  gap: var(--s5);
+}
+@media (max-width: 860px) {
+  .node-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.node-pods {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--t-sm);
+}
+.node-pods li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 3px 0;
+}
+.node-pod-accel {
+  margin-left: auto;
+  color: var(--fg-3);
+}
+.txt-bad {
+  color: var(--red);
 }
 
 /* ---- fleet: useful home ---- */

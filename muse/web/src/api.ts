@@ -8,6 +8,10 @@ export interface ClusterItem {
   name: string;
   ready: boolean;
   status: "ready" | "syncing";
+  /** Apiserver Kubernetes version (e.g. "v1.35.6"). */
+  version?: string;
+  /** Cloud region from the standard `topology.kubernetes.io/region` node label. */
+  region?: string;
   nodes: number;
   acceleratorNodes: number;
   inferenceServices: number;
@@ -40,10 +44,24 @@ export interface CapacityResp {
   unavailable?: { kind: string; accelerators: number; nodes: number }[];
   /** TPU slice occupancy by shape. */
   tpuSlices?: PlacementUnits[];
+  /** TPU subblocks — one entry per physical subblock, for the heatmap. */
+  tpuSubblocks?: UnitBox[];
   /** GPU node occupancy by GPUs-per-node. */
   gpuNodes?: PlacementUnits[];
-  /** GPU NVLink-domain occupancy by domain GPU-count. */
-  gpuDomains?: PlacementUnits[];
+  /** GPU racks — one entry per NVLink domain, for the heatmap. */
+  gpuRacks?: UnitBox[];
+  /** Top accelerator consumers on this cluster (by namespace), most chips first. */
+  consumers?: { namespace: string; kind: string; accelerators: number; pods: number }[];
+}
+
+/** One carve-able domain (a TPU subblock or GPU NVLink rack) for the heatmap: id,
+ *  cluster, and chip occupancy. The console derives state from free/chips/healthy. */
+export interface UnitBox {
+  id: string;
+  cluster: string;
+  chips: number;
+  free: number;
+  healthy: boolean;
 }
 
 /** One fragmented carve-able unit, named for a drill-down (a TPU slice/partition id
@@ -243,7 +261,17 @@ export interface NodeItem {
   pods?: string;
   devices?: Record<string, string>;
   kubeletVersion?: string;
+  /** Problems with the node (NotReady / cordoned / pressure); empty = healthy. */
+  issues?: string[];
   age?: string;
+}
+
+/** Full node detail (row drill-down): the overview plus conditions, taints, and
+ *  the pods currently scheduled on it. */
+export interface NodeDetail extends NodeItem {
+  conditions?: ConditionItem[];
+  taints?: { key: string; value?: string; effect: string }[];
+  podsOnNode?: { namespace: string; name: string; accelerators?: number }[];
 }
 
 export interface EventItem {
@@ -396,6 +424,9 @@ export const api = {
   servingRuntimes: () => getJSON<ListResp<RuntimeItem>>("/v1/servingruntimes"),
   clusterServingRuntimes: () => getJSON<ListResp<RuntimeItem>>("/v1/clusterservingruntimes"),
   nodes: () => getJSON<ListResp<NodeItem>>("/v1/nodes"),
+  nodesForCluster: (name: string) => getJSON<ListResp<NodeItem>>(`/v1/nodes?cluster=${enc(name)}`),
+  nodeDetail: (cluster: string, name: string) =>
+    getJSON<NodeDetail>(`/v1/nodes/${enc(name)}?cluster=${enc(cluster)}`),
   events: () => getJSON<ListResp<EventItem>>("/v1/events"),
   rollouts: () => getJSON<ListResp<RolloutItem>>("/v1/rollouts"),
   // Per-object detail for the drawers; `cluster` disambiguates same-named

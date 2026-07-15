@@ -41,6 +41,8 @@ use crate::protocol::FeedEvent;
 /// One workload cluster's informer-backed listers.
 pub struct ClusterState {
     pub name: String,
+    /// Apiserver `gitVersion` (e.g. "v1.35.6"), captured at connect time.
+    pub version: String,
     /// The cluster's kube client, retained past informer setup for the metrics
     /// proxy (PromQL over the apiserver `services/proxy`). Cheap to clone (Arc).
     pub client: Client,
@@ -79,6 +81,7 @@ pub type ReadyFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// in the background to learn when the cluster is fully warm.
 pub fn build_cluster_state(
     name: String,
+    version: String,
     client: Client,
     factory: &SharedInformerFactory,
     ome: &HashSet<String>,
@@ -154,6 +157,7 @@ pub fn build_cluster_state(
         nodes: warm::<Node>(factory, true, &mut readies, None, Some(signal.clone())),
         pods: warm::<Pod>(factory, true, &mut readies, None, Some(signal.clone())),
         name,
+        version,
         client,
         ready: Arc::new(AtomicBool::new(false)),
     };
