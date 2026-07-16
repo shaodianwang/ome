@@ -52,6 +52,10 @@ spec:
             - name: MUSE_CHAT_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.chat.maxResponseBytes }}
+            - name: MUSE_CHAT_MAX_RESPONSE_BYTES
+              value: {{ . | int64 | quote }}
+            {{- end }}
             {{- with .Values.config.chat.connectTimeoutSecs }}
             - name: MUSE_CHAT_CONNECT_TIMEOUT_SECS
               value: {{ . | quote }}

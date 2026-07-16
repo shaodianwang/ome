@@ -89,6 +89,7 @@ config:
   chat:
     enabled: true
     timeoutSecs: 60
+    maxResponseBytes: 1048576
     connectTimeoutSecs: 5
     clientGraceSecs: 5
     allowedHosts:
@@ -97,6 +98,13 @@ config:
       - serving.example.com
 ```
 
+Enabling chat requires both `timeoutSecs` and `maxResponseBytes`. If either is
+absent, muse-server leaves the proxy disabled instead of inventing a runtime
+default. The response cap is enforced on the streamed body, including responses
+without a trustworthy `Content-Length` header.
+
 Chat targets must use HTTPS unless `allowHttp: true` is explicitly set. Redirects
 are refused rather than followed. The packaged console and API are same-origin;
-the server does not emit permissive CORS headers.
+the server does not emit permissive CORS headers. For mTLS, client certificate,
+client key, and CA certificate must all be configured; any partial tuple leaves
+the proxy disabled.

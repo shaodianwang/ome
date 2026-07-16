@@ -73,6 +73,16 @@ fn parse_positive_secs(spec: &str) -> Result<u64, String> {
     Ok(value)
 }
 
+fn parse_positive_bytes(spec: &str) -> Result<u64, String> {
+    let value = spec
+        .parse::<u64>()
+        .map_err(|_| format!("expected a positive number of bytes, got '{spec}'"))?;
+    if value == 0 {
+        return Err(format!("expected a positive number of bytes, got '{spec}'"));
+    }
+    Ok(value)
+}
+
 /// Whether a dashboard query is an instant (single value per series) or range
 /// (time series) PromQL query.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
@@ -242,6 +252,17 @@ pub struct Config {
     )]
     pub chat_timeout_secs: Option<u64>,
 
+    /// Maximum upstream response body size (bytes) for one proxied inference test.
+    /// No binary default: when chat is enabled without this value, the proxy stays
+    /// disabled. The limit is enforced while streaming, including when the upstream
+    /// omits or lies about Content-Length.
+    #[arg(
+        long = "chat-max-response-bytes",
+        env = "MUSE_CHAT_MAX_RESPONSE_BYTES",
+        value_parser = parse_positive_bytes
+    )]
+    pub chat_max_response_bytes: Option<u64>,
+
     /// Connect timeout (seconds) for a proxied inference test request — bounds just
     /// the TCP+TLS connect, so an unreachable model endpoint fails fast instead of
     /// stalling until the total `--chat-timeout-secs` elapses. Optional; the total
@@ -289,19 +310,20 @@ pub struct Config {
     pub chat_allow_http: bool,
 
     /// Client certificate (PEM) the chat proxy presents for mTLS to the model's
-    /// gateway. The muse pod mounts its service identity here; with
-    /// `--chat-client-key` + `--chat-ca-cert` it lets the in-console test reach an
-    /// mTLS-gated endpoint. No baked default: unset ⇒ a plain TLS request.
+    /// gateway. The muse pod mounts its service identity here; all of
+    /// `--chat-client-cert`, `--chat-client-key`, and `--chat-ca-cert` are required
+    /// together. No baked default: leave all three unset for a plain TLS request.
     #[arg(long = "chat-client-cert", env = "MUSE_CHAT_CLIENT_CERT")]
     pub chat_client_cert: Option<String>,
 
-    /// Private key (PEM) paired with `--chat-client-cert`; omit if the cert file
-    /// already carries the key.
+    /// Private key (PEM) paired with `--chat-client-cert`. Supplying only part of
+    /// the cert/key/CA tuple disables the proxy.
     #[arg(long = "chat-client-key", env = "MUSE_CHAT_CLIENT_KEY")]
     pub chat_client_key: Option<String>,
 
     /// CA bundle (PEM) verifying the gateway's server cert for the chat proxy.
-    /// No baked default: unset ⇒ the system roots.
+    /// Supply it with both client identity files, or leave all three unset to use
+    /// system roots without client authentication.
     #[arg(long = "chat-ca-cert", env = "MUSE_CHAT_CA_CERT")]
     pub chat_ca_cert: Option<String>,
 
@@ -362,8 +384,8 @@ impl Config {
     }
 
     /// Build the optional chat proxy's effective settings. Enabling the feature
-    /// without an explicit total timeout is a configuration error that the caller
-    /// handles by leaving chat disabled; no timeout is silently invented here.
+    /// without an explicit total timeout and response cap is a configuration error
+    /// that the caller handles by leaving chat disabled; no value is invented here.
     pub fn chat_proxy_config(&self) -> Result<Option<ChatProxyConfig>, String> {
         if !self.chat_enabled {
             return Ok(None);
@@ -372,8 +394,17 @@ impl Config {
             "chat proxy enabled without MUSE_CHAT_TIMEOUT_SECS; proxy will remain disabled"
                 .to_owned()
         })?;
+        let max_response_bytes = self.chat_max_response_bytes.ok_or_else(|| {
+            "chat proxy enabled without MUSE_CHAT_MAX_RESPONSE_BYTES; proxy will remain disabled"
+                .to_owned()
+        })?;
+        let max_response_bytes = usize::try_from(max_response_bytes).map_err(|_| {
+            "MUSE_CHAT_MAX_RESPONSE_BYTES exceeds this platform's addressable size; proxy will remain disabled"
+                .to_owned()
+        })?;
         Ok(Some(ChatProxyConfig {
             timeout: std::time::Duration::from_secs(timeout_secs),
+            max_response_bytes,
             connect_timeout: self
                 .chat_connect_timeout_secs
                 .map(std::time::Duration::from_secs),
@@ -402,11 +433,20 @@ mod tests {
     }
 
     #[test]
+    fn enabled_chat_without_response_cap_degrades_to_disabled_config() {
+        let config =
+            Config::try_parse_from(["muse", "--chat-enabled", "--chat-timeout-secs=75"]).unwrap();
+        let err = config.chat_proxy_config().unwrap_err();
+        assert!(err.contains("MUSE_CHAT_MAX_RESPONSE_BYTES"));
+    }
+
+    #[test]
     fn chat_timeout_and_target_policy_are_config_driven() {
         let config = Config::try_parse_from([
             "muse",
             "--chat-enabled",
             "--chat-timeout-secs=75",
+            "--chat-max-response-bytes=1048576",
             "--chat-connect-timeout-secs=4",
             "--chat-client-grace-secs=6",
             "--chat-allowed-host=gateway.example:8443",
@@ -417,6 +457,7 @@ mod tests {
         let chat = config.chat_proxy_config().unwrap().unwrap();
 
         assert_eq!(chat.timeout, Duration::from_secs(75));
+        assert_eq!(chat.max_response_bytes, 1_048_576);
         assert_eq!(chat.connect_timeout, Some(Duration::from_secs(4)));
         assert_eq!(chat.client_grace, Some(Duration::from_secs(6)));
         assert_eq!(chat.allowed_hosts, ["gateway.example:8443"]);
@@ -427,6 +468,12 @@ mod tests {
     #[test]
     fn zero_chat_timeout_is_rejected_at_config_parse_time() {
         let result = Config::try_parse_from(["muse", "--chat-timeout-secs=0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_chat_response_cap_is_rejected_at_config_parse_time() {
+        let result = Config::try_parse_from(["muse", "--chat-max-response-bytes=0"]);
         assert!(result.is_err());
     }
 }

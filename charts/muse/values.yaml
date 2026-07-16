@@ -37,6 +37,9 @@ config:
   chat: # in-console inference test proxy (POST /v1/.../chat)
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60
+    # Maximum bytes buffered from one upstream response. The server enforces this
+    # while streaming, even when Content-Length is missing or incorrect.
+    maxResponseBytes: 1048576
     connectTimeoutSecs: 5
     clientGraceSecs: 5 # lets the server's timeout response arrive before browser abort
     # HTTPS is required by default. Enable plaintext only in a controlled local
@@ -57,6 +60,7 @@ config:
     # gateway specifically demands mTLS and the SA has the RBAC above.
     tls:
       enabled: false
+      # All three files below are required together when TLS identity is enabled.
       caCert: /var/facebook/rootcanal/ca.pem # from the rootcanal hostPath mount
       clientCert: /etc/muse/identity/tls.crt # from the cert-manager CSI mount
       clientKey: /etc/muse/identity/tls.key

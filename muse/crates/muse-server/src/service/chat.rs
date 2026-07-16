@@ -47,8 +47,8 @@ pub async fn proxy(
             "endpoint returned redirect {status}; redirects are not allowed"
         )));
     }
-    let payload = resp
-        .json::<Value>()
+    let payload = chat
+        .read_json_response(resp)
         .await
         .map_err(|e| ApiError::BadGateway(format!("bad response from {target}: {e}")))?;
     if !status.is_success() {
