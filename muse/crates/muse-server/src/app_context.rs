@@ -47,6 +47,9 @@ pub struct AppState {
     /// The curated dashboard query set the metrics refresher runs each interval.
     metrics_queries: Arc<Vec<QueryDef>>,
     metrics_refresh: Duration,
+    /// Optional heartbeat interval shared by every SSE endpoint. Deployment config
+    /// owns this value; `None` leaves an otherwise valid stream event-driven.
+    sse_keep_alive: Option<Duration>,
     dashboard_policy: Option<DashboardPolicy>,
     /// Latest metrics snapshot, updated by the background refresher and pushed to
     /// SSE subscribers. `watch` retains only the latest value (new subscribers get
@@ -66,6 +69,7 @@ pub struct AppStateConfig {
     pub prom: Option<PromTarget>,
     pub queries: Arc<Vec<QueryDef>>,
     pub refresh: Duration,
+    pub sse_keep_alive: Option<Duration>,
     pub capacity_limits: rollup::CapacityLimits,
     pub dashboard_policy: Option<DashboardPolicy>,
 }
@@ -96,6 +100,7 @@ impl AppState {
             prom: config.prom,
             metrics_queries: config.queries,
             metrics_refresh: config.refresh,
+            sse_keep_alive: config.sse_keep_alive,
             dashboard_policy: config.dashboard_policy,
             metrics_tx,
         };
@@ -241,6 +246,11 @@ impl AppState {
     /// How often the background refresher re-polls each cluster's Prometheus.
     pub fn metrics_refresh_interval(&self) -> Duration {
         self.metrics_refresh
+    }
+
+    /// Configured interval between SSE keep-alive comments, if any.
+    pub fn sse_keep_alive_interval(&self) -> Option<Duration> {
+        self.sse_keep_alive
     }
 
     /// Optional UI health classification policy. Missing categories are neutral.

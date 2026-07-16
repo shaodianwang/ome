@@ -23,6 +23,7 @@ pub mod health;
 pub mod metrics;
 pub mod resources;
 pub mod rollouts;
+mod sse;
 
 /// The complete route table, still awaiting its state. `server::build_app` applies
 /// the state, the static-console fallback, and the middleware layers.

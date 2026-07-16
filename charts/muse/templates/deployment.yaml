@@ -70,6 +70,10 @@ spec:
             - name: MUSE_LIVE_INVALIDATION_BATCH_MS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.sseKeepAliveSecs }}
+            - name: MUSE_SSE_KEEP_ALIVE_SECS
+              value: {{ . | quote }}
+            {{- end }}
             - name: MUSE_CAPACITY_BACKSTOP_SECS
               value: {{ .Values.config.capacityBackstopSecs | quote }}
             - name: MUSE_CAPACITY_MAX_FRAGMENTS

@@ -187,6 +187,9 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             prom: config.prom_service.clone(),
             queries: metrics_queries,
             refresh: Duration::from_secs(config.metrics_refresh_secs),
+            sse_keep_alive: config
+                .sse_keep_alive_secs
+                .map(|seconds| Duration::from_secs(seconds.get())),
             capacity_limits: rollup::CapacityLimits {
                 max_fragments: config.capacity_max_fragments,
                 max_consumers: config.capacity_max_consumers,

@@ -47,6 +47,8 @@ config:
   # Batch informer changes into one live-query invalidation. This controls the
   # responsiveness vs refetch/SSE load tradeoff; the binary has no baked default.
   liveInvalidationBatchMs: 1000
+  # Heartbeat for idle SSE connections. The binary has no baked interval.
+  sseKeepAliveSecs: 10
   capacityBackstopSecs: 120
   # Bound the operator-facing drill-down arrays in each capacity response.
   capacityMaxFragments: 12
@@ -149,6 +151,16 @@ route:
       - https
       - https-8443
   pathPrefix: /muse
+  streams:
+    # Gateway API request timeout for the exact SSE routes below. SSE responses
+    # are intentionally long-lived, so 0s disables Envoy's finite route timeout.
+    # Set null to omit the exact rules and use the general route's timeout policy.
+    requestTimeout: 0s
+    # Backend paths. The chart prepends pathPrefix for each exact external match,
+    # then rewrites the request back to the full backend path.
+    paths:
+      - /v1/stream
+      - /v1/metrics/stream
   # Needed only if the backend Service is in a different namespace than the route
   # (it isn't here — both are in the release namespace).
   referenceGrant: false

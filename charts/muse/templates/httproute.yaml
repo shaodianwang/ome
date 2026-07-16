@@ -19,6 +19,30 @@ spec:
       sectionName: {{ . }}
     {{- end }}
   rules:
+    {{- with .Values.route.streams.requestTimeout }}
+    # Exact stream rules disable the total request timeout without removing
+    # Gateway protection from REST, static assets, or chat requests.
+    {{- range $.Values.route.streams.paths }}
+    {{- $backendPath := printf "/%s" (trimPrefix "/" .) }}
+    - matches:
+        - path:
+            type: Exact
+            value: {{ printf "%s%s" (trimSuffix "/" $.Values.route.pathPrefix) $backendPath | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: {{ $backendPath | quote }}
+      timeouts:
+        request: {{ $.Values.route.streams.requestTimeout | quote }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ include "muse.fullname" $ }}
+          port: {{ $.Values.service.port }}
+    {{- end }}
+    {{- end }}
     - matches:
         - path:
             type: PathPrefix

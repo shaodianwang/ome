@@ -14,7 +14,7 @@ use std::{convert::Infallible, sync::Arc};
 use axum::{
     extract::State,
     http::Request,
-    response::sse::{Event as SseEvent, KeepAlive, Sse},
+    response::{sse::Event as SseEvent, Response},
     Json,
 };
 use kube::{Api, Error as KubeError};
@@ -27,6 +27,7 @@ use crate::{
     app_context::AppState,
     config::{PromTarget, QueryDef, QueryType},
     informers::now_secs,
+    service::sse,
 };
 
 /// `GET /v1/metrics` — the latest metrics snapshot (initial load / non-SSE clients).
@@ -38,9 +39,7 @@ pub async fn snapshot(State(st): State<AppState>) -> Json<Value> {
 /// one on every background refresh, so the console updates without polling. The
 /// `watch` receiver yields the current value immediately (flushing the response
 /// headers), then each subsequent snapshot.
-pub async fn stream(
-    State(st): State<AppState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+pub async fn stream(State(st): State<AppState>) -> Response {
     let live = WatchStream::new(st.metrics_subscribe()).map(|snap| {
         let sse = SseEvent::default()
             .json_data(&*snap)
@@ -53,7 +52,8 @@ pub async fn stream(
     let hello = tokio_stream::once(Ok::<_, Infallible>(
         SseEvent::default().comment("connected"),
     ));
-    Sse::new(hello.chain(live)).keep_alive(KeepAlive::default())
+    let keep_alive = st.sse_keep_alive_interval();
+    sse::response(hello.chain(live), keep_alive)
 }
 
 /// Poll every cluster's Prometheus for the curated query set and publish one

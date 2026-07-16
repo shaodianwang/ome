@@ -342,6 +342,12 @@ pub struct Config {
     )]
     pub live_invalidation_batch_ms: Option<NonZeroU64>,
 
+    /// Seconds between SSE keep-alive comments on the activity and metrics streams.
+    /// No binary default: absent config leaves the streams event-driven, while the
+    /// deployment chart supplies the heartbeat policy needed by its intermediaries.
+    #[arg(long = "sse-keep-alive-secs", env = "MUSE_SSE_KEEP_ALIVE_SECS")]
+    pub sse_keep_alive_secs: Option<NonZeroU64>,
+
     /// Backstop interval for a capacity recompute when no informer signal arrives.
     #[arg(
         long = "capacity-backstop-secs",
@@ -901,5 +907,18 @@ mod tests {
             Some(45)
         );
         assert!(parse_with(false, false, &["--cache-sync-timeout-secs=0"]).is_err());
+    }
+
+    #[test]
+    fn sse_keep_alive_is_optional_and_requires_positive_seconds() {
+        let config = parse_with(false, false, &[]).unwrap();
+        assert_eq!(config.sse_keep_alive_secs, None);
+
+        let config = parse_with(false, false, &["--sse-keep-alive-secs=20"]).unwrap();
+        assert_eq!(
+            config.sse_keep_alive_secs.map(|value| value.get()),
+            Some(20)
+        );
+        assert!(parse_with(false, false, &["--sse-keep-alive-secs=0"]).is_err());
     }
 }

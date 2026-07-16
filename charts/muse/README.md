@@ -10,7 +10,10 @@ and exposes it through an existing Envoy Gateway — no nginx, no separate front
 - **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`;
   metrics add `get` on `services` and `services/proxy` for discovery and queries.
 - **HTTPRoute** on the shared Envoy Gateway, serving the console under `/muse` — the
-  route strips the prefix (`URLRewrite`), so muse-server serves at root.
+  general route strips the prefix (`URLRewrite`), so muse-server serves at root.
+  Exact activity and metrics stream rules disable the Gateway request timeout
+  without removing that protection from REST or chat; set
+  `route.streams.requestTimeout: null` to omit those exact rules.
 - Optional **ReferenceGrant** and **CiliumNetworkPolicy**.
 
 ## Deploy (GitOps / ArgoCD)

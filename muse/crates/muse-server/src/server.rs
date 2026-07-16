@@ -47,6 +47,8 @@ pub fn build_app(state: AppState, web_dir: Option<PathBuf>) -> Router {
         )
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuidV7))
+        // tower-http's default predicate excludes `text/event-stream`; retaining it
+        // keeps compression buffers from delaying SSE snapshots and heartbeats.
         .layer(CompressionLayer::new())
 }
 
