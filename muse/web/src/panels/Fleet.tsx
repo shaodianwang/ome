@@ -7,6 +7,7 @@ import {
   metricAvailable,
   metricsHealth,
   metricsQueryIssue,
+  metricsSourceIssues,
   summarizeFleetIssues,
 } from "../dataState";
 import type { FleetNoticeIssue } from "../dataState";
@@ -128,11 +129,14 @@ export function Fleet({
           tone: metricState.ready ? "warning" : "danger",
         }
       : null;
-  const queryIssue = metricsOn
-    ? metricsQueryIssue(metricState, Object.keys(scope.metrics?.clusters ?? {}).length)
-    : null;
+  const queryableMetricClusters = Object.keys(scope.metrics?.clusters ?? {}).filter((cluster) => {
+    const source = scope.metrics?.sources?.[cluster];
+    return source == null || source.status === "available";
+  }).length;
+  const queryIssue = metricsOn ? metricsQueryIssue(metricState, queryableMetricClusters) : null;
+  const metricsCoverageIssues = metricsOn ? metricsSourceIssues(scope.metrics) : [];
   const fleetNotice = summarizeFleetIssues(
-    [...sourceIssues, metricsTransportIssue, queryIssue].filter(
+    [...sourceIssues, metricsTransportIssue, ...metricsCoverageIssues, queryIssue].filter(
       (issue): issue is FleetNoticeIssue => issue != null,
     ),
   );

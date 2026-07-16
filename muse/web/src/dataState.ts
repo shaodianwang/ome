@@ -118,6 +118,7 @@ export function metricsQueryIssue(
   scopedClusterCount: number,
 ): FleetNoticeIssue | null {
   if (!health.ready) return null;
+  if (scopedClusterCount === 0) return null;
   if (health.queryCount === 0) {
     const noun = scopedClusterCount === 1 ? "cluster" : "clusters";
     return {
@@ -136,6 +137,39 @@ export function metricsQueryIssue(
     message: `${health.failedQueryCount} of ${health.queryCount} queries failed across ${clusterCount} ${noun}${names}`,
     tone: health.failedQueryCount === health.queryCount ? "danger" : "warning",
   };
+}
+
+/** Report cluster-level metrics coverage separately from PromQL query failures. */
+export function metricsSourceIssues(snapshot: MetricsSnapshot | null): FleetNoticeIssue[] {
+  if (!snapshot || snapshot.updatedAt <= 0) return [];
+
+  const unconfigured: string[] = [];
+  const unavailable: string[] = [];
+  for (const [cluster, source] of Object.entries(snapshot.sources ?? {})) {
+    if (source.status === "unconfigured") unconfigured.push(cluster);
+    if (source.status === "unavailable") unavailable.push(cluster);
+  }
+
+  const issues: FleetNoticeIssue[] = [];
+  if (unconfigured.length) {
+    unconfigured.sort();
+    const noun = unconfigured.length === 1 ? "cluster" : "clusters";
+    issues.push({
+      domain: "Metrics coverage",
+      message: `serving metrics are not configured for ${unconfigured.length} ${noun} (${unconfigured.join(", ")})`,
+      tone: "warning",
+    });
+  }
+  if (unavailable.length) {
+    unavailable.sort();
+    const noun = unavailable.length === 1 ? "cluster" : "clusters";
+    issues.push({
+      domain: "Metrics sources",
+      message: `${unavailable.length} configured ${noun} could not be reached (${unavailable.join(", ")})`,
+      tone: "danger",
+    });
+  }
+  return issues;
 }
 
 /** True when at least one scoped cluster returned this query without an error. */

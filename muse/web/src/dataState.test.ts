@@ -6,6 +6,7 @@ import {
   metricAvailable,
   metricsHealth,
   metricsQueryIssue,
+  metricsSourceIssues,
   metricsTransportState,
   summarizeFleetIssues,
 } from "./dataState";
@@ -146,6 +147,36 @@ describe("metricsQueryIssue", () => {
       message: "no query results returned across 1 scoped cluster",
       tone: "danger",
     });
+    expect(
+      metricsQueryIssue({ ready: true, queryCount: 0, failedQueryCount: 0, failedClusters: [] }, 0),
+    ).toBeNull();
+  });
+});
+
+describe("metricsSourceIssues", () => {
+  it("reports each affected cluster once without inflating query failures", () => {
+    expect(
+      metricsSourceIssues({
+        updatedAt: 123,
+        clusters: { available: {}, missing: {}, forbidden: {} },
+        sources: {
+          available: { status: "available", target: "ome/prom:9090" },
+          missing: { status: "unconfigured", target: "ome/prom:9090" },
+          forbidden: { status: "unavailable", target: "ome/prom:9090" },
+        },
+      }),
+    ).toEqual([
+      {
+        domain: "Metrics coverage",
+        message: "serving metrics are not configured for 1 cluster (missing)",
+        tone: "warning",
+      },
+      {
+        domain: "Metrics sources",
+        message: "1 configured cluster could not be reached (forbidden)",
+        tone: "danger",
+      },
+    ]);
   });
 });
 

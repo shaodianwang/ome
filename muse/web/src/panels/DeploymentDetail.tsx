@@ -57,10 +57,12 @@ export function DeploymentDetail({
   const metricsOn = !!cfg.data?.metrics;
   const metrics = useMetrics(metricsOn);
   const m = isvcMetrics(metrics.data, sel.cluster, sel.name, metricIdentity === "unambiguous");
+  const metricsSource = metrics.data?.sources?.[sel.cluster];
   const clusterMetrics = metrics.data
     ? {
         updatedAt: metrics.data.updatedAt,
         clusters: { [sel.cluster]: metrics.data.clusters[sel.cluster] ?? {} },
+        sources: metricsSource ? { [sel.cluster]: metricsSource } : {},
       }
     : null;
   const metricState = metricsHealth(clusterMetrics);
@@ -180,6 +182,7 @@ export function DeploymentDetail({
                 queryCount={metricState.queryCount}
                 failedQueryCount={metricState.failedQueryCount}
                 updatedAt={metrics.data?.updatedAt}
+                source={metricsSource}
               />
             )
           ) : null}

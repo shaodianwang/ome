@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { DashboardPolicy } from "../api";
+import type { DashboardPolicy, MetricsSourceState } from "../api";
 import { DataNotice } from "../components";
 import { metricsRangeLabel, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
@@ -42,6 +42,7 @@ export function Monitoring({
   queryCount,
   failedQueryCount,
   updatedAt,
+  source,
 }: {
   m: IsvcMetrics;
   metricsOn: boolean;
@@ -51,9 +52,27 @@ export function Monitoring({
   queryCount: number;
   failedQueryCount: number;
   updatedAt?: number;
+  source?: MetricsSourceState;
 }) {
   if (!metricsOn) {
     return <div className="muted attn-none">Metrics aren't configured on this console.</div>;
+  }
+  if (source && source.status !== "available" && !m.present) {
+    const unconfigured = source.status === "unconfigured";
+    const forbidden = source.error?.code === "prometheus_service_discovery_forbidden";
+    return (
+      <DataNotice
+        tone={unconfigured ? "warning" : "danger"}
+        title={unconfigured ? "Serving metrics are not configured" : "Serving metrics unavailable"}
+        detail={
+          unconfigured
+            ? `Prometheus Service ${source.target} is not configured in this cluster.`
+            : forbidden
+              ? `The cluster credential cannot read Prometheus Service ${source.target}.`
+              : `Muse could not validate Prometheus Service ${source.target}.`
+        }
+      />
+    );
   }
   if (error && !m.present) {
     return <DataNotice tone="danger" title="Serving metrics unavailable" detail={error} />;
