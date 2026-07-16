@@ -11,5 +11,6 @@ pub async fn get(State(st): State<AppState>) -> Json<ConfigResp> {
         chat_timeout_secs: st.chat_proxy().map(|chat| chat.timeout_secs()),
         chat_client_grace_secs: st.chat_proxy().and_then(|chat| chat.client_grace_secs()),
         metrics: st.metrics_enabled(),
+        dashboard_policy: st.dashboard_policy().cloned(),
     })
 }

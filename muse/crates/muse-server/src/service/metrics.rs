@@ -93,9 +93,12 @@ async fn run_query(client: &kube::Client, prom: &PromTarget, def: &QueryDef) -> 
             }
         }
         QueryType::Range => {
+            let (Some(window), Some(step)) = (def.window, def.step) else {
+                return json!({ "error": format!("range query '{}' has no window or step", def.id) });
+            };
             let end = now_secs();
-            let start = end.saturating_sub(def.window.max(1));
-            let step = format!("{}s", def.step.max(1));
+            let start = end.saturating_sub(window);
+            let step = format!("{step}s");
             match encode_params(&[
                 ("query", def.promql.as_str()),
                 ("start", &start.to_string()),

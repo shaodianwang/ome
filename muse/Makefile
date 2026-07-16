@@ -8,7 +8,7 @@ build:
 	cargo build
 
 run: ## run the read-plane server against your current kubecontext
-	cargo run -p muse-server --bin muse
+	set -a; . ./config/dev.env; set +a; cargo run -p muse-server --bin muse
 
 check:
 	cargo check

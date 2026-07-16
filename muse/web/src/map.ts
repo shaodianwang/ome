@@ -1,71 +1,13 @@
 // Map muse read-plane responses into the view-model shapes the panels render.
 //
-// The API DTOs are deliberately lean; display-only attributes the API doesn't
-// carry (cloud, region) are inferred here, best-effort. Sections with no backing
-// endpoint (Workloads PD/canary detail, Models onboarding pipeline) are left
-// empty and the panels render a placeholder.
+// Sections with no backing endpoint (Workloads PD/canary detail, Models onboarding
+// pipeline) are left empty and the panels render a placeholder.
 
-import type {
-  CapacityResp,
-  ClusterItem,
-  ComponentItem,
-  EventItem,
-  IsvcItem,
-  RolloutItem,
-} from "./api";
-import type { Cloud, ClusterRow, FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
-import { ago, utilPct, utilTone } from "./util";
-
-// ---- small helpers -------------------------------------------------------
-
-/** Best-effort cloud from a cluster name. */
-function cloudOf(name: string): Cloud {
-  const n = name.toLowerCase();
-  if (n.includes("gcp") || n.includes("gke")) return "gcp";
-  if (n.includes("oci")) return "oci";
-  if (n.includes("meta") || n.includes("fb")) return "meta";
-  return "cw";
-}
-
-/** Best-effort region from a cluster name, "—" when unknown. */
-function regionOf(name: string): string {
-  const n = name.toLowerCase();
-  if (n.includes("usc1")) return "us-central1";
-  if (n.includes("use2")) return "us-east-2";
-  if (n.includes("use1")) return "us-east-1";
-  if (n.includes("usw2")) return "us-west-2";
-  return "—";
-}
+import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
+import type { FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
+import { ago } from "./util";
 
 // ---- Fleet ----------------------------------------------------------------
-
-export function toClusterRows(
-  clusters: ClusterItem[],
-  capacity: CapacityResp | null,
-): ClusterRow[] {
-  const byCluster = capacity?.byCluster ?? [];
-  return clusters.map((c) => {
-    const groups = byCluster.filter((g) => g.name === c.name);
-    const alloc = groups.reduce((s, g) => s + g.allocatable, 0);
-    const used = groups.reduce((s, g) => s + g.allocated, 0);
-    const pct = utilPct({ allocatable: alloc, allocated: used });
-    const kinds = [...new Set(groups.map((g) => g.kind))];
-    const kindLabel = kinds.length === 1 ? kinds[0].toUpperCase() : "accel";
-    return {
-      name: c.name,
-      cloud: cloudOf(c.name),
-      region: regionOf(c.name),
-      // e.g. "51 GPU · 57 total" — 51 GPU nodes of 57 (the rest are CPU/system).
-      nodes: `${c.acceleratorNodes} ${kindLabel} · ${c.nodes} total`,
-      accel: groups.length === 0 ? "—" : `${alloc} ${kindLabel}`,
-      kind: kindLabel,
-      free: alloc - used,
-      utilPct: pct,
-      barTone: utilTone(pct),
-      status: c.ready ? { label: "Ready", tone: "green" } : { label: "Syncing", tone: "amber" },
-    };
-  });
-}
 
 const FEED_ICON: Record<string, FeedItem["icon"]> = {
   InferenceService: "deploy",

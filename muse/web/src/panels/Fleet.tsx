@@ -6,7 +6,8 @@ import { scopeFleet } from "../fleet";
 import type { Selected } from "../types";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import { deploymentHealth, toFeed, toRollouts } from "../map";
-import { fleetTotals, perfRows } from "../metrics";
+import { fleetTotals, metricsQueryRangeSeconds, metricsRangeLabel, perfRows } from "../metrics";
+import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import {
   emptyText,
   fmtErrPct,
@@ -16,11 +17,10 @@ import {
   num as n,
   UNASSIGNED_GROUP,
   utilPct,
-  utilTone,
 } from "../util";
 import { Card, Dot, FilterChip, Gauge, Spark, StatTile, UtilRow } from "../viz";
 
-const kpct = (a?: { allocatable: number; allocated: number }) => (a ? utilPct(a) : 0);
+const kpct = (a: { allocatable: number; allocated: number }) => utilPct(a);
 
 export function Fleet({
   openDeployments,
@@ -53,12 +53,11 @@ export function Fleet({
   const [fCluster, setFCluster] = useState("all");
   const [fModel, setFModel] = useState("all");
   const [fAccel, setFAccel] = useState("all");
-  const [fRange, setFRange] = useState("6h");
 
   // One scoping pass — the whole dashboard reads from `scope`, so the filter bar
   // re-scopes every panel together (deployments, rollouts, activity, capacity).
   const scope = scopeFleet(
-    { cluster: fCluster, model: fModel, accel: fAccel, range: fRange },
+    { cluster: fCluster, model: fModel, accel: fAccel },
     {
       clusters: clusters.data?.items ?? [],
       isvcs: isvcs.data?.items ?? [],
@@ -70,27 +69,33 @@ export function Fleet({
   );
 
   const health = deploymentHealth(scope.isvcs);
-  const availPct = health.total ? Math.round((health.ready / health.total) * 100) : null;
+  const availPct = health.total ? (health.ready / health.total) * 100 : null;
+  const policy = cfg.data?.dashboardPolicy;
+  const availabilityTone = lowerThresholdTone(availPct, policy?.availability);
   const feed = toFeed(scope.events);
   const rolloutCards = toRollouts(scope.rollouts);
 
   const gpu = scope.accelerators.find((a) => a.kind === "gpu");
   const tpu = scope.accelerators.find((a) => a.kind === "tpu");
-  const gpuPct = kpct(gpu);
-  const gpuTight = !!gpu && gpuPct >= 90;
+  const gpuPct = gpu ? kpct(gpu) : null;
+  const tpuPct = tpu ? kpct(tpu) : null;
+  const gpuTone = upperThresholdTone(gpuPct, policy?.utilization);
+  const tpuTone = upperThresholdTone(tpuPct, policy?.utilization);
+  const gpuTight = !!gpu && gpuTone === "red";
 
   const perf = perfRows(scope.metrics);
   const totals = fleetTotals(scope.metrics);
-  const rangePts = fRange === "1h" ? 12 : 72;
-  const trim = (a: number[]) => a.slice(-rangePts);
-  const errPctSeries = trim(
-    totals.errorSeries.map((e, i) => {
-      const r = totals.requestSeries[i] ?? 0;
-      return r > 0 ? (e / r) * 100 : 0;
-    }),
-  );
+  const rangeLabel = metricsRangeLabel(metricsQueryRangeSeconds(scope.metrics, "request_rate"));
+  const errorTone = upperThresholdTone(totals.errorPct, policy?.errorRate);
+  const errorThresholds = policy?.errorRate
+    ? `warning ≥ ${fmtErrPct(policy.errorRate.warningAt)} · critical ≥ ${fmtErrPct(policy.errorRate.criticalAt)}`
+    : undefined;
+  const errPctSeries = totals.errorSeries.map((e, i) => {
+    const r = totals.requestSeries[i] ?? 0;
+    return r > 0 ? (e / r) * 100 : 0;
+  });
   const qpsDelta = (() => {
-    const s = trim(totals.requestSeries);
+    const s = totals.requestSeries;
     return s.length >= 2 && s[0] > 0 ? ((s[s.length - 1] - s[0]) / s[0]) * 100 : null;
   })();
 
@@ -121,11 +126,6 @@ export function Fleet({
     { value: "gpu", label: "GPU" },
     { value: "tpu", label: "TPU" },
   ];
-  const rangeOpts = [
-    { value: "6h", label: "Last 6h" },
-    { value: "1h", label: "Last 1h" },
-  ];
-
   // Largest placeable job, per tier (scoped by accel; see scopeFleet note on cluster tiers).
   const maxAt = (groups: { kind: string; free: number; name: string }[]) => {
     const m = new Map<string, number>();
@@ -170,7 +170,6 @@ export function Fleet({
           />
           <FilterChip label="model" value={fModel} options={modelOpts} onChange={setFModel} />
           <FilterChip label="accel" value={fAccel} options={accelOpts} onChange={setFAccel} />
-          <FilterChip value={fRange} options={rangeOpts} onChange={setFRange} accent />
         </div>
       ) : null}
 
@@ -178,8 +177,9 @@ export function Fleet({
       <div className="tiles">
         <StatTile
           label="Availability"
-          value={availPct == null ? "—" : `${availPct}%`}
+          value={fmtPct(availPct)}
           sub={`${n(health.ready)} serving / ${n(health.total)}`}
+          tone={availabilityTone || undefined}
         />
         <StatTile
           label="Fleet QPS"
@@ -195,34 +195,28 @@ export function Fleet({
               : `${qpsDelta >= 0 ? "▲" : "▼"} ${Math.abs(qpsDelta).toFixed(0)}% vs window start`
           }
         >
-          <Spark points={trim(totals.requestSeries)} />
+          <Spark points={totals.requestSeries} />
         </StatTile>
         <StatTile
           label="p99 latency"
           value={fmtLatency(totals.p99)}
           sub={`p50 ${fmtLatency(totals.p50)} · TTFT ${fmtLatency(totals.ttft)}`}
         >
-          <Spark points={trim(totals.p99Series)} color="var(--red)" />
+          <Spark points={totals.p99Series} color="var(--red)" />
         </StatTile>
         <StatTile
           label="Error rate"
           value={fmtErrPct(totals.errorPct)}
-          sub={
-            totals.errorPct == null
-              ? undefined
-              : totals.errorPct < 1
-                ? "within SLO (<1%)"
-                : "above SLO"
-          }
+          sub={totals.errorPct == null ? undefined : errorThresholds}
+          tone={errorTone || undefined}
         >
           <Spark points={errPctSeries} color="var(--amber)" />
         </StatTile>
         <StatTile
           label="GPU allocated"
-          value={
-            <span className={gpuTight ? "txt-bad" : undefined}>{gpu ? `${gpuPct}%` : "—"}</span>
-          }
+          value={gpu ? `${gpuPct}%` : "—"}
           sub={gpu ? `${n(gpu.free)} free` : undefined}
+          tone={gpuTone || undefined}
         />
       </div>
 
@@ -247,9 +241,7 @@ export function Fleet({
                     <tr>
                       <th>Deployment</th>
                       <th>Cluster</th>
-                      <th>
-                        QPS <span className="muted">6h</span>
-                      </th>
+                      <th>QPS {rangeLabel ? <span className="muted">{rangeLabel}</span> : null}</th>
                       <th>p50</th>
                       <th>p99</th>
                       <th>TTFT</th>
@@ -320,12 +312,12 @@ export function Fleet({
         <Card title="Accelerator allocation" sub="claimed / capacity">
           <div className="cap-line">
             <span className="cap-k">GPU</span>
-            <Gauge pct={gpuPct} tone={utilTone(gpuPct)} />
+            {gpu ? <Gauge pct={kpct(gpu)} tone={gpuTone} /> : <span className="muted">—</span>}
             <span className="cap-free">{gpu ? `${n(gpu.free)} free` : "—"}</span>
           </div>
           <div className="cap-line">
             <span className="cap-k">TPU</span>
-            <Gauge pct={kpct(tpu)} tone={utilTone(kpct(tpu))} />
+            {tpu ? <Gauge pct={kpct(tpu)} tone={tpuTone} /> : <span className="muted">—</span>}
             <span className="cap-free">{tpu ? `${n(tpu.free)} free` : "—"}</span>
           </div>
           <p className="panel-note">Allocation only; utilization telemetry is unavailable.</p>
@@ -338,7 +330,7 @@ export function Fleet({
                 name={c.name}
                 tag={c.kind}
                 pct={c.pct}
-                tone={utilTone(c.pct)}
+                tone={upperThresholdTone(c.pct, policy?.utilization)}
                 value={`${n(c.free)} free`}
               />
             ))}

@@ -1,10 +1,10 @@
 //! Command-line / env configuration (clap).
 //!
-//! No behavioural value is a code literal — host, ports, and log format come
-//! from flags or env (defaults live in the flag definitions, the config surface).
+//! Behavioral values come from flags or env. Production defaults live in the
+//! Helm chart; local-development values live in `muse/config/dev.env`.
 
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     num::NonZeroU64,
     path::{Path, PathBuf},
 };
@@ -12,7 +12,7 @@ use std::{
 use anyhow::Context;
 use clap::Parser;
 
-use crate::chat_proxy::ChatProxyConfig;
+use crate::{chat_proxy::ChatProxyConfig, protocol::DashboardPolicy};
 
 /// A workload cluster to aggregate: a name + an optional explicit kubeconfig
 /// (None = use the ambient kube config).
@@ -83,13 +83,114 @@ fn parse_positive_bytes(spec: &str) -> Result<u64, String> {
     Ok(value)
 }
 
+fn parse_positive_usize(spec: &str) -> Result<usize, String> {
+    let value = spec
+        .parse::<usize>()
+        .map_err(|_| format!("expected a positive integer, got '{spec}'"))?;
+    if value == 0 {
+        return Err(format!("expected a positive integer, got '{spec}'"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_float(spec: &str) -> Result<f64, String> {
+    let value = spec
+        .parse::<f64>()
+        .map_err(|_| format!("expected a positive number, got '{spec}'"))?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("expected a positive number, got '{spec}'"));
+    }
+    Ok(value)
+}
+
+fn validate_threshold_pair(
+    name: &str,
+    warning: f64,
+    critical: f64,
+    max: f64,
+    larger_is_worse: bool,
+) -> Result<(), String> {
+    if !warning.is_finite()
+        || !critical.is_finite()
+        || !(0.0..=max).contains(&warning)
+        || !(0.0..=max).contains(&critical)
+    {
+        return Err(format!(
+            "{name} thresholds must be finite values from 0 to {max}"
+        ));
+    }
+    if (larger_is_worse && warning >= critical) || (!larger_is_worse && critical >= warning) {
+        return Err(format!(
+            "{name} warning and critical thresholds are reversed"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dashboard_policy(policy: &DashboardPolicy) -> Result<(), String> {
+    if let Some(value) = &policy.utilization {
+        validate_threshold_pair(
+            "utilization",
+            value.warning_at,
+            value.critical_at,
+            100.0,
+            true,
+        )?;
+    }
+    if let Some(value) = &policy.availability {
+        validate_threshold_pair(
+            "availability",
+            value.warning_below,
+            value.critical_below,
+            100.0,
+            false,
+        )?;
+    }
+    if let Some(value) = &policy.error_rate {
+        validate_threshold_pair(
+            "error rate",
+            value.warning_at,
+            value.critical_at,
+            100.0,
+            true,
+        )?;
+    }
+    if let Some(value) = &policy.kv_cache {
+        validate_threshold_pair("KV cache", value.warning_at, value.critical_at, 1.0, true)?;
+    }
+    if let Some(value) = &policy.prefix_cache {
+        validate_threshold_pair(
+            "prefix cache",
+            value.warning_below,
+            value.critical_below,
+            1.0,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+fn parse_dashboard_policy(spec: &str) -> Result<DashboardPolicy, String> {
+    let policy = serde_json::from_str(spec)
+        .map_err(|error| format!("invalid dashboard policy JSON: {error}"))?;
+    validate_dashboard_policy(&policy)?;
+    Ok(policy)
+}
+
+fn parse_non_empty(spec: &str) -> Result<String, String> {
+    let value = spec.trim();
+    if value.is_empty() {
+        return Err("value must not be empty".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
 /// Whether a dashboard query is an instant (single value per series) or range
 /// (time series) PromQL query.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryType {
     Instant,
-    #[default]
     Range,
 }
 
@@ -99,19 +200,9 @@ pub enum QueryType {
 pub struct QueryDef {
     pub id: String,
     pub promql: String,
-    #[serde(default)]
     pub kind: QueryType,
-    #[serde(default = "default_window")]
-    pub window: u64,
-    #[serde(default = "default_step")]
-    pub step: u64,
-}
-
-fn default_window() -> u64 {
-    21600 // 6h, matching the dashboard's default time range
-}
-fn default_step() -> u64 {
-    300 // 5m resolution
+    pub window: Option<u64>,
+    pub step: Option<u64>,
 }
 
 /// Load the dashboard query set from a JSON file (`{ "queries": [ … ] }`).
@@ -124,16 +215,26 @@ pub fn load_queries(path: &Path) -> anyhow::Result<Vec<QueryDef>> {
         .with_context(|| format!("read metrics queries file {}", path.display()))?;
     let file: QueriesFile = serde_json::from_str(&text)
         .with_context(|| format!("parse metrics queries file {}", path.display()))?;
+    for query in &file.queries {
+        if matches!(query.kind, QueryType::Range)
+            && (!matches!(query.window, Some(value) if value > 0)
+                || !matches!(query.step, Some(value) if value > 0))
+        {
+            anyhow::bail!(
+                "range metrics query '{}' must configure positive window and step values",
+                query.id
+            );
+        }
+    }
     Ok(file.queries)
 }
 
 /// How an informer fetches its initial state from an apiserver.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ListStrategy {
     /// Stream the initial list (WatchList) on apiservers new enough to support it,
     /// else paginate — decided per cluster from its reported version. WatchList is
     /// beta and on by default since Kubernetes 1.32.
-    #[default]
     Auto,
     /// Always stream the initial list (WatchList). Will fail to sync on apiservers
     /// without WatchList support.
@@ -158,30 +259,57 @@ impl ListStrategy {
 #[command(name = "muse", about = "MUSE read-plane API server (OEP-0021)")]
 pub struct Config {
     /// Address to bind to (API and metrics).
-    #[arg(long, env = "MUSE_HOST", default_value_t = IpAddr::V4(Ipv4Addr::UNSPECIFIED))]
+    #[arg(long, env = "MUSE_HOST")]
     pub host: IpAddr,
 
     /// Port for the read-plane API.
-    #[arg(long, env = "MUSE_PORT", default_value_t = 8080)]
+    #[arg(long, env = "MUSE_PORT")]
     pub port: u16,
 
     /// Port for the Prometheus `/metrics` endpoint (served off the API surface).
-    #[arg(long, env = "MUSE_METRICS_PORT", default_value_t = 9090)]
+    #[arg(long, env = "MUSE_METRICS_PORT")]
     pub metrics_port: u16,
 
     /// Emit logs as JSON instead of human-readable text.
-    #[arg(long, env = "MUSE_LOG_JSON", default_value_t = false)]
+    #[arg(
+        long,
+        env = "MUSE_LOG_JSON",
+        action = clap::ArgAction::Set,
+        required = true
+    )]
     pub log_json: bool,
 
+    /// Tracing filter expression (for example `info,muse=debug`).
+    #[arg(long, env = "MUSE_LOG_FILTER", value_parser = parse_non_empty)]
+    pub log_filter: String,
+
+    /// Tokio worker-thread stack size in bytes. Large generated Kubernetes types
+    /// may require more than Tokio's standard worker stack.
+    #[arg(
+        long,
+        env = "MUSE_WORKER_THREAD_STACK_BYTES",
+        value_parser = parse_positive_usize
+    )]
+    pub worker_thread_stack_bytes: usize,
+
     /// Workload clusters to aggregate, as `name=/path/to/kubeconfig` (repeatable).
-    /// If none are given, the ambient kube config is used as one cluster "default".
+    /// If none are given, the ambient kube config uses `--local-cluster-name`.
     #[arg(long = "cluster", value_parser = parse_cluster)]
     pub clusters: Vec<ClusterRef>,
+
+    /// Display identity for the ambient in-cluster kubeconfig when no explicit
+    /// `--cluster` entries are configured. Required only for that ambient mode.
+    #[arg(
+        long = "local-cluster-name",
+        env = "MUSE_LOCAL_CLUSTER_NAME",
+        value_parser = parse_non_empty
+    )]
+    pub local_cluster_name: Option<String>,
 
     /// Informer initial-list strategy: `auto` (stream on Kubernetes >= 1.32, else
     /// paginate), `streaming`, or `paginated`. Streaming (WatchList) is far cheaper
     /// on large clusters; `auto` picks it per cluster from the apiserver version.
-    #[arg(long = "list-strategy", env = "MUSE_LIST_STRATEGY", value_enum, default_value_t = ListStrategy::Auto)]
+    #[arg(long = "list-strategy", env = "MUSE_LIST_STRATEGY", value_enum)]
     pub list_strategy: ListStrategy,
 
     /// Minimum seconds between capacity recomputes. The rollup is recomputed when
@@ -192,7 +320,7 @@ pub struct Config {
     #[arg(
         long = "capacity-refresh-secs",
         env = "MUSE_CAPACITY_REFRESH_SECS",
-        default_value_t = 10
+        value_parser = parse_positive_secs
     )]
     pub capacity_refresh_secs: u64,
 
@@ -205,6 +333,81 @@ pub struct Config {
         env = "MUSE_LIVE_INVALIDATION_BATCH_MS"
     )]
     pub live_invalidation_batch_ms: Option<NonZeroU64>,
+
+    /// Backstop interval for a capacity recompute when no informer signal arrives.
+    #[arg(
+        long = "capacity-backstop-secs",
+        env = "MUSE_CAPACITY_BACKSTOP_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub capacity_backstop_secs: u64,
+
+    /// Maximum fragmented placement units returned per size bucket.
+    #[arg(
+        long = "capacity-max-fragments",
+        env = "MUSE_CAPACITY_MAX_FRAGMENTS",
+        value_parser = parse_positive_usize
+    )]
+    pub capacity_max_fragments: usize,
+
+    /// Maximum top consumers returned in each capacity report.
+    #[arg(
+        long = "capacity-max-consumers",
+        env = "MUSE_CAPACITY_MAX_CONSUMERS",
+        value_parser = parse_positive_usize
+    )]
+    pub capacity_max_consumers: usize,
+
+    /// Maximum time to wait for the initial apiserver version preflight.
+    #[arg(
+        long = "apiserver-preflight-timeout-secs",
+        env = "MUSE_APISERVER_PREFLIGHT_TIMEOUT_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub apiserver_preflight_timeout_secs: u64,
+
+    /// Number of recent activity events retained in memory for new subscribers.
+    #[arg(
+        long = "event-history-limit",
+        env = "MUSE_EVENT_HISTORY_LIMIT",
+        value_parser = parse_positive_usize
+    )]
+    pub event_history_limit: usize,
+
+    /// Grace period for in-flight requests after SIGTERM before forced exit.
+    #[arg(
+        long = "shutdown-grace-secs",
+        env = "MUSE_SHUTDOWN_GRACE_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub shutdown_grace_secs: u64,
+
+    /// Prometheus histogram upkeep cadence.
+    #[arg(
+        long = "metrics-upkeep-secs",
+        env = "MUSE_METRICS_UPKEEP_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub metrics_upkeep_secs: u64,
+
+    /// HTTP request-duration histogram buckets, in seconds, strictly increasing.
+    #[arg(
+        long = "http-latency-buckets",
+        env = "MUSE_HTTP_LATENCY_BUCKETS",
+        value_delimiter = ',',
+        value_parser = parse_positive_float,
+        required = true
+    )]
+    pub http_latency_buckets: Vec<f64>,
+
+    /// Dashboard health thresholds as one JSON object. The deployment config owns
+    /// every value; absent or `{}` renders health tones neutrally.
+    #[arg(
+        long = "dashboard-policy-json",
+        env = "MUSE_DASHBOARD_POLICY_JSON",
+        value_parser = parse_dashboard_policy
+    )]
+    pub dashboard_policy: Option<DashboardPolicy>,
 
     /// Node label(s) naming the accelerator's outer topology domain — the RDMA
     /// island / network fabric for GPUs, or the physical block for TPUs — used to
@@ -238,7 +441,12 @@ pub struct Config {
     /// and returns the reply. Off by default — it is a human-driven debug tool, not
     /// a serving path, so it is opt-in. When off, the console shows a copyable curl
     /// command instead of a live chat box.
-    #[arg(long = "chat-enabled", env = "MUSE_CHAT_ENABLED")]
+    #[arg(
+        long = "chat-enabled",
+        env = "MUSE_CHAT_ENABLED",
+        action = clap::ArgAction::Set,
+        required = true
+    )]
     pub chat_enabled: bool,
 
     /// Total timeout (seconds) for one proxied inference test request — the whole
@@ -304,9 +512,14 @@ pub struct Config {
     )]
     pub chat_allowed_host_suffixes: Vec<String>,
 
-    /// Permit plaintext HTTP chat targets. Off when absent; enable only for a
-    /// controlled development environment.
-    #[arg(long = "chat-allow-http", env = "MUSE_CHAT_ALLOW_HTTP")]
+    /// Permit plaintext HTTP chat targets. Enable only for a controlled
+    /// development environment.
+    #[arg(
+        long = "chat-allow-http",
+        env = "MUSE_CHAT_ALLOW_HTTP",
+        action = clap::ArgAction::Set,
+        required = true
+    )]
     pub chat_allow_http: bool,
 
     /// Client certificate (PEM) the chat proxy presents for mTLS to the model's
@@ -342,7 +555,7 @@ pub struct Config {
     #[arg(
         long = "metrics-refresh-secs",
         env = "MUSE_METRICS_REFRESH_SECS",
-        default_value_t = 15
+        value_parser = parse_positive_secs
     )]
     pub metrics_refresh_secs: u64,
 
@@ -362,6 +575,24 @@ pub struct Config {
 }
 
 impl Config {
+    /// Validate cross-field constraints that clap cannot express.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.http_latency_buckets.is_empty()
+            || !self
+                .http_latency_buckets
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        {
+            anyhow::bail!("MUSE_HTTP_LATENCY_BUCKETS must be strictly increasing");
+        }
+        if self.clusters.is_empty() && self.local_cluster_name.is_none() {
+            anyhow::bail!(
+                "MUSE_LOCAL_CLUSTER_NAME is required when no explicit clusters are configured"
+            );
+        }
+        Ok(())
+    }
+
     pub fn api_addr(&self) -> SocketAddr {
         SocketAddr::new(self.host, self.port)
     }
@@ -370,16 +601,19 @@ impl Config {
         SocketAddr::new(self.host, self.metrics_port)
     }
 
-    /// The clusters to watch — the configured list, or the ambient config as a
-    /// single "default" cluster.
-    pub fn cluster_refs(&self) -> Vec<ClusterRef> {
+    /// The clusters to watch — the configured list, or the ambient config under
+    /// its explicitly configured display name.
+    pub fn cluster_refs(&self) -> anyhow::Result<Vec<ClusterRef>> {
         if self.clusters.is_empty() {
-            vec![ClusterRef {
-                name: "default".to_owned(),
+            Ok(vec![ClusterRef {
+                name: self
+                    .local_cluster_name
+                    .clone()
+                    .context("local cluster name was not configured")?,
                 kubeconfig: None,
-            }]
+            }])
         } else {
-            self.clusters.clone()
+            Ok(self.clusters.clone())
         }
     }
 
@@ -420,39 +654,80 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{fs, time::Duration};
 
     use clap::Parser;
 
-    use super::Config;
+    use super::{load_queries, Config};
+
+    fn configured_args(chat_enabled: bool, allow_http: bool) -> Vec<String> {
+        [
+            "muse",
+            "--host=127.0.0.1",
+            "--port=18080",
+            "--metrics-port=19090",
+            "--log-json=false",
+            "--log-filter=info,muse=debug",
+            "--worker-thread-stack-bytes=1048576",
+            "--local-cluster-name=test-cluster",
+            "--list-strategy=paginated",
+            "--capacity-refresh-secs=3",
+            "--capacity-backstop-secs=30",
+            "--capacity-max-fragments=4",
+            "--capacity-max-consumers=3",
+            "--apiserver-preflight-timeout-secs=2",
+            "--event-history-limit=10",
+            "--shutdown-grace-secs=1",
+            "--metrics-upkeep-secs=4",
+            "--http-latency-buckets=0.001,0.1,1",
+            "--metrics-refresh-secs=7",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([
+            format!("--chat-enabled={chat_enabled}"),
+            format!("--chat-allow-http={allow_http}"),
+        ])
+        .collect()
+    }
+
+    fn parse_with(
+        chat_enabled: bool,
+        allow_http: bool,
+        extra: &[&str],
+    ) -> Result<Config, clap::Error> {
+        let mut args = configured_args(chat_enabled, allow_http);
+        args.extend(extra.iter().map(|value| (*value).to_owned()));
+        Config::try_parse_from(args)
+    }
 
     #[test]
     fn enabled_chat_without_timeout_degrades_to_disabled_config() {
-        let config = Config::try_parse_from(["muse", "--chat-enabled"]).unwrap();
+        let config = parse_with(true, false, &[]).unwrap();
         assert!(config.chat_proxy_config().is_err());
     }
 
     #[test]
     fn enabled_chat_without_response_cap_degrades_to_disabled_config() {
-        let config =
-            Config::try_parse_from(["muse", "--chat-enabled", "--chat-timeout-secs=75"]).unwrap();
+        let config = parse_with(true, false, &["--chat-timeout-secs=75"]).unwrap();
         let err = config.chat_proxy_config().unwrap_err();
         assert!(err.contains("MUSE_CHAT_MAX_RESPONSE_BYTES"));
     }
 
     #[test]
     fn chat_timeout_and_target_policy_are_config_driven() {
-        let config = Config::try_parse_from([
-            "muse",
-            "--chat-enabled",
-            "--chat-timeout-secs=75",
-            "--chat-max-response-bytes=1048576",
-            "--chat-connect-timeout-secs=4",
-            "--chat-client-grace-secs=6",
-            "--chat-allowed-host=gateway.example:8443",
-            "--chat-allowed-host-suffix=serving.example",
-            "--chat-allow-http",
-        ])
+        let config = parse_with(
+            true,
+            true,
+            &[
+                "--chat-timeout-secs=75",
+                "--chat-max-response-bytes=1048576",
+                "--chat-connect-timeout-secs=4",
+                "--chat-client-grace-secs=6",
+                "--chat-allowed-host=gateway.example:8443",
+                "--chat-allowed-host-suffix=serving.example",
+            ],
+        )
         .unwrap();
         let chat = config.chat_proxy_config().unwrap().unwrap();
 
@@ -467,13 +742,143 @@ mod tests {
 
     #[test]
     fn zero_chat_timeout_is_rejected_at_config_parse_time() {
-        let result = Config::try_parse_from(["muse", "--chat-timeout-secs=0"]);
+        let result = parse_with(false, false, &["--chat-timeout-secs=0"]);
         assert!(result.is_err());
     }
 
     #[test]
+    fn runtime_values_have_no_binary_fallbacks() {
+        assert!(Config::try_parse_from(["muse"]).is_err());
+
+        let config = parse_with(false, false, &[]).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.port, 18080);
+        assert_eq!(config.metrics_port, 19090);
+        assert_eq!(config.worker_thread_stack_bytes, 1_048_576);
+        assert_eq!(config.event_history_limit, 10);
+        assert_eq!(config.capacity_max_fragments, 4);
+        assert_eq!(config.capacity_max_consumers, 3);
+        assert_eq!(config.http_latency_buckets, [0.001, 0.1, 1.0]);
+        assert_eq!(config.cluster_refs().unwrap()[0].name, "test-cluster");
+        assert!(config.dashboard_policy.is_none());
+    }
+
+    #[test]
+    fn dashboard_health_policy_is_config_driven() {
+        let config = parse_with(
+            false,
+            false,
+            &[r#"--dashboard-policy-json={"utilization":{"warningAt":72,"criticalAt":91},"availability":{"warningBelow":99.9,"criticalBelow":99},"errorRate":{"warningAt":0.2,"criticalAt":2},"kvCache":{"warningAt":0.65,"criticalAt":0.88},"prefixCache":{"warningBelow":0.75,"criticalBelow":0.45}}"#],
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let policy = config.dashboard_policy.unwrap();
+        let wire = serde_json::to_value(&policy).unwrap();
+
+        assert_eq!(wire["errorRate"]["criticalAt"], 2.0);
+        assert_eq!(wire["prefixCache"]["warningBelow"], 0.75);
+        assert_eq!(policy.utilization.unwrap().warning_at, 72.0);
+        assert_eq!(policy.availability.unwrap().critical_below, 99.0);
+        assert_eq!(policy.error_rate.unwrap().critical_at, 2.0);
+        assert_eq!(policy.kv_cache.unwrap().warning_at, 0.65);
+        assert_eq!(policy.prefix_cache.unwrap().warning_below, 0.75);
+    }
+
+    #[test]
+    fn dashboard_health_policy_requires_complete_threshold_pairs() {
+        assert!(parse_with(
+            false,
+            false,
+            &[r#"--dashboard-policy-json={"errorRate":{"warningAt":0.2}}"#],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dashboard_health_policy_rejects_noncanonical_threshold_keys() {
+        assert!(parse_with(
+            false,
+            false,
+            &[r#"--dashboard-policy-json={"utilization":{"warningAtPct":75,"criticalAtPct":90}}"#],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dashboard_health_policy_rejects_reversed_warning_and_critical_order() {
+        assert!(parse_with(
+            false,
+            false,
+            &[r#"--dashboard-policy-json={"kvCache":{"warningAt":0.9,"criticalAt":0.7}}"#],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dashboard_health_policy_rejects_values_outside_the_metric_domain() {
+        assert!(parse_with(
+            false,
+            false,
+            &[r#"--dashboard-policy-json={"prefixCache":{"warningBelow":1.1,"criticalBelow":0.4}}"#],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn capacity_limits_must_be_positive() {
+        for flag in ["capacity-max-fragments", "capacity-max-consumers"] {
+            let mut args = configured_args(false, false);
+            args.retain(|arg| !arg.starts_with(&format!("--{flag}=")));
+            args.push(format!("--{flag}=0"));
+            assert!(Config::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn histogram_buckets_must_be_strictly_increasing() {
+        let mut config = parse_with(false, false, &[]).unwrap();
+        config.http_latency_buckets = vec![0.1, 0.1];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn ambient_cluster_requires_an_explicit_name() {
+        let mut config = parse_with(false, false, &[]).unwrap();
+        config.local_cluster_name = None;
+        assert!(config.validate().is_err());
+        assert!(config.cluster_refs().is_err());
+    }
+
+    #[test]
+    fn metrics_query_timing_is_required_only_for_range_queries() {
+        let path = std::env::temp_dir().join(format!(
+            "muse-query-config-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::write(
+            &path,
+            r#"{"queries":[{"id":"instant","promql":"up","kind":"instant"}]}"#,
+        )
+        .unwrap();
+        let instant = load_queries(&path).unwrap();
+        assert_eq!(instant.len(), 1);
+        assert_eq!(instant[0].window, None);
+        assert_eq!(instant[0].step, None);
+
+        fs::write(
+            &path,
+            r#"{"queries":[{"id":"range","promql":"up","kind":"range","window":0,"step":1}]}"#,
+        )
+        .unwrap();
+        let range = load_queries(&path);
+        let _ = fs::remove_file(path);
+        assert!(range.is_err());
+    }
+
+    #[test]
     fn zero_chat_response_cap_is_rejected_at_config_parse_time() {
-        let result = Config::try_parse_from(["muse", "--chat-max-response-bytes=0"]);
+        let result = parse_with(false, false, &["--chat-max-response-bytes=0"]);
         assert!(result.is_err());
     }
 }

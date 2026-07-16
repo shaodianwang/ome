@@ -1,8 +1,6 @@
 // Small shared helpers used across panels: text search, URL/time formatting,
 // accelerator-utilization math, and the empty-list message.
 
-import type { BarTone } from "./types";
-
 /** Capacity-rollup bucket for nodes with no topology label — not a real placement
  *  domain, so the placement planner excludes it. */
 export const UNASSIGNED_GROUP = "unassigned";
@@ -72,13 +70,6 @@ export function ageToSecs(age?: string): number {
 /** Accelerator utilization percent (allocated / allocatable), 0 when empty. */
 export function utilPct(g: { allocatable: number; allocated: number }): number {
   return g.allocatable > 0 ? Math.round((g.allocated / g.allocatable) * 100) : 0;
-}
-
-/** Utilization tone by percent: ≥90 red, ≥75 amber, else green. */
-export function utilTone(pct: number): BarTone {
-  if (pct >= 90) return "red";
-  if (pct >= 75) return "amber";
-  return "green";
 }
 
 /** Copy to clipboard, resolving to whether it succeeded. The async Clipboard API

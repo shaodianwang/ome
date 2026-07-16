@@ -56,13 +56,13 @@ pub async fn serve(config: &Config, state: AppState) -> anyhow::Result<()> {
     // — not on a blind timer or per request. A burst of changes is coalesced into
     // at most one recompute per `capacity_refresh_secs`; when nothing changes,
     // nothing is recomputed (a long backstop re-syncs in case an event is missed).
-    let min_interval = Duration::from_secs(config.capacity_refresh_secs.max(1));
-    const BACKSTOP: Duration = Duration::from_secs(120);
+    let min_interval = Duration::from_secs(config.capacity_refresh_secs);
+    let backstop = Duration::from_secs(config.capacity_backstop_secs);
     let bg = state.clone();
     tokio::spawn(async move {
         loop {
             // Wake on a change, or at the backstop.
-            let _ = tokio::time::timeout(BACKSTOP, bg.signal.wait()).await;
+            let _ = tokio::time::timeout(backstop, bg.signal.wait()).await;
             let s = bg.clone();
             let _ = tokio::task::spawn_blocking(move || s.refresh_capacity()).await;
             // Pace: coalesce further changes for one interval before recomputing.
@@ -89,13 +89,15 @@ pub async fn serve(config: &Config, state: AppState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "muse read-plane listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(Duration::from_secs(
+            config.shutdown_grace_secs,
+        )))
         .await?;
     Ok(())
 }
 
 /// Resolve on Ctrl-C or SIGTERM.
-async fn shutdown_signal() {
+async fn shutdown_signal(grace: Duration) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -117,8 +119,8 @@ async fn shutdown_signal() {
     // Long-lived SSE streams (/v1/stream, /v1/metrics/stream) never close on their
     // own, so axum's graceful drain would otherwise hang on them indefinitely. Arm
     // a short hard deadline: let quick in-flight requests finish, then force-exit.
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
         tracing::warn!("shutdown grace elapsed (open streams) — forcing exit");
         std::process::exit(0);
     });

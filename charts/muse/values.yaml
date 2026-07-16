@@ -17,7 +17,7 @@ global:
 
 # Workload clusters muse-server aggregates. Each entry mounts a kubeconfig Secret
 # (key: `kubeconfig`) and passes `--cluster <name>=<path>`. Empty ⇒ muse uses its
-# in-cluster ServiceAccount as a single "default" cluster (the one it runs in).
+# in-cluster ServiceAccount under `config.localClusterName`.
 clusters: []
 #  - name: cw-use2-1
 #    kubeconfigSecret: muse-kubeconfig-cw-use2-1
@@ -28,12 +28,46 @@ config:
   # IPv6 and IPv4 — so it works on IPv6, IPv4, and dual-stack clusters. Plain
   # 0.0.0.0 is IPv4-only and fails kubelet probes on an IPv6 cluster.
   host: "::"
+  # Identity used for the ambient in-cluster client when `clusters` is empty.
+  localClusterName: default
+  logJson: false
+  logFilter: info,muse=debug
+  # Generated Kubernetes API types require a larger Tokio worker stack.
+  workerThreadStackBytes: "67108864"
   webDir: /web # the image bakes the console here; "" ⇒ API-only
   listStrategy: auto # auto | streaming | paginated
+  apiserverPreflightTimeoutSecs: 15
+  eventHistoryLimit: 100
   capacityRefreshSecs: 10
   # Batch informer changes into one live-query invalidation. This controls the
   # responsiveness vs refetch/SSE load tradeoff; the binary has no baked default.
   liveInvalidationBatchMs: 1000
+  capacityBackstopSecs: 120
+  # Bound the operator-facing drill-down arrays in each capacity response.
+  capacityMaxFragments: 12
+  capacityMaxConsumers: 8
+  shutdownGraceSecs: 2
+  metricsUpkeepSecs: 5
+  httpLatencyBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+  # Dashboard-only health classification. Set a category (or the whole policy) to
+  # null to render it neutrally; the binary supplies no threshold defaults.
+  # Percent metrics use 0..100, while cache metrics are 0..1 fractions.
+  dashboardPolicy:
+    utilization:
+      warningAt: 75
+      criticalAt: 90
+    availability:
+      warningBelow: 100
+      criticalBelow: 99
+    errorRate:
+      warningAt: 0.1
+      criticalAt: 1
+    kvCache:
+      warningAt: 0.7
+      criticalAt: 0.9
+    prefixCache:
+      warningBelow: 0.7
+      criticalBelow: 0.4
   chat: # in-console inference test proxy (POST /v1/.../chat)
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60
@@ -83,7 +117,7 @@ config:
     queriesFile: /etc/muse/metrics/metrics-queries.json # mount path (internal)
     # Default query set ships from charts/muse/files/metrics-queries.json
     # (engine/topology-agnostic: router → sglang → vllm). Override per environment
-    # with a list of { id, kind: instant|range, promql, window?, step? }.
+    # with a list of { id, kind: instant|range, promql, window, step }.
     queries: []
   # jemalloc tuning (MALLOC_CONF). A background thread purges freed pages back to
   # the OS after a short decay, so RSS drops after the initial-list allocation

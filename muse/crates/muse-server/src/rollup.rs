@@ -42,6 +42,13 @@ pub struct ClusterData {
     pub pods: Vec<Arc<Pod>>,
 }
 
+/// User-visible response cardinality limits supplied by deployment config.
+#[derive(Clone, Copy, Debug)]
+pub struct CapacityLimits {
+    pub max_fragments: usize,
+    pub max_consumers: usize,
+}
+
 /// Accelerator count claimed by non-terminal Pods, keyed by node name. Kind-
 /// agnostic: a node's pods request the same accelerator kind the node offers, so
 /// the per-node total lines up with that node's kind in [`build`].
@@ -77,7 +84,7 @@ pub fn accel_allocated_by_node(pods: &[Arc<Pod>]) -> BTreeMap<String, i64> {
 type Key = (String, &'static str);
 
 /// Build the fleet capacity report across all clusters.
-pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
+pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) -> CapacityReport {
     let mut counts = NodeCounts::default();
     let mut kinds: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
     let mut by_cluster: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
@@ -182,29 +189,37 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
         // one unit per label — bucketed by shape. GPU: the node itself is a unit
         // (bucketed by GPU count), and — where NVLink labels exist — so is the
         // whole domain (bucketed by domain GPU-count).
-        tpu_slices: placement_units(clusters, "tpu", |cluster, _name, labels| {
-            labels
-                .iter()
-                .filter_map(|(k, id)| {
-                    let shape = k
-                        .strip_prefix(TPU_PARTITION_PREFIX)?
-                        .strip_suffix(TPU_PARTITION_SUFFIX)?;
-                    Some((
-                        format!("{cluster}|{shape}|{id}"),
-                        id.clone(),
-                        Some(shape.to_owned()),
-                    ))
-                })
-                .collect()
-        }),
-        gpu_nodes: placement_units(clusters, "gpu", |cluster, name, _labels| {
-            vec![(format!("{cluster}|{name}"), name.to_owned(), None)]
-        }),
+        tpu_slices: placement_units(
+            clusters,
+            "tpu",
+            limits.max_fragments,
+            |cluster, _name, labels| {
+                labels
+                    .iter()
+                    .filter_map(|(k, id)| {
+                        let shape = k
+                            .strip_prefix(TPU_PARTITION_PREFIX)?
+                            .strip_suffix(TPU_PARTITION_SUFFIX)?;
+                        Some((
+                            format!("{cluster}|{shape}|{id}"),
+                            id.clone(),
+                            Some(shape.to_owned()),
+                        ))
+                    })
+                    .collect()
+            },
+        ),
+        gpu_nodes: placement_units(
+            clusters,
+            "gpu",
+            limits.max_fragments,
+            |cluster, name, _labels| vec![(format!("{cluster}|{name}"), name.to_owned(), None)],
+        ),
         // Individual domains (one box each in the console) grouped by the NVLink/ICI
         // label — GPU NVLink racks and TPU subblocks.
         gpu_racks: domain_units(clusters, "gpu", &topo.nvlink_labels),
         tpu_subblocks: domain_units(clusters, "tpu", &topo.nvlink_labels),
-        consumers: top_consumers(consumers),
+        consumers: top_consumers(consumers, limits.max_consumers),
     }
 }
 
@@ -284,9 +299,6 @@ fn node_available(node: &Node) -> bool {
     node_ready(node) && !node_unschedulable(node)
 }
 
-/// The most-stranded fragmented units surfaced per size (the operator drill-down).
-const MAX_FRAGMENTS: usize = 12;
-
 /// Carve-able placement units of `want_kind`, bucketed by size, split by occupancy
 /// (free / fragmented / full / unhealthy) with the chips stranded inside fragmented
 /// units — the fragmentation a single "free" number hides.
@@ -300,6 +312,7 @@ const MAX_FRAGMENTS: usize = 12;
 fn placement_units(
     clusters: &[ClusterData],
     want_kind: &str,
+    max_fragments: usize,
     unit_of: impl Fn(&str, &str, &BTreeMap<String, String>) -> Vec<(String, String, Option<String>)>,
 ) -> Vec<PlacementUnits> {
     // A carve-able unit's running tally across its member nodes.
@@ -393,7 +406,7 @@ fn placement_units(
         .into_iter()
         .map(|(label, mut b)| {
             b.frags.sort_by_key(|f| std::cmp::Reverse(f.free)); // most stranded first
-            b.frags.truncate(MAX_FRAGMENTS);
+            b.frags.truncate(max_fragments);
             PlacementUnits {
                 label,
                 chips: b.chips,
@@ -444,9 +457,6 @@ fn accumulate_pending(pods: &[Arc<Pod>], out: &mut BTreeMap<&'static str, (i64, 
     }
 }
 
-/// How many top consumers to surface per cluster.
-const MAX_CONSUMERS: usize = 8;
-
 /// Sum accelerator chips held by *scheduled* pods, per (namespace, kind) — who is
 /// actually occupying the cluster's accelerators. A Pending/unscheduled pod isn't
 /// holding capacity yet, so it's excluded (that's [`accumulate_pending`]'s job).
@@ -481,7 +491,10 @@ fn accumulate_consumers(pods: &[Arc<Pod>], out: &mut BTreeMap<(String, &'static 
 }
 
 /// Flatten the consumer map into the top-N namespaces by chips held.
-fn top_consumers(map: BTreeMap<(String, &'static str), (i64, i64)>) -> Vec<Consumer> {
+fn top_consumers(
+    map: BTreeMap<(String, &'static str), (i64, i64)>,
+    max_consumers: usize,
+) -> Vec<Consumer> {
     let mut out: Vec<Consumer> = map
         .into_iter()
         .map(|((namespace, kind), (accelerators, pods))| Consumer {
@@ -496,7 +509,7 @@ fn top_consumers(map: BTreeMap<(String, &'static str), (i64, i64)>) -> Vec<Consu
             .cmp(&a.accelerators)
             .then(a.namespace.cmp(&b.namespace))
     });
-    out.truncate(MAX_CONSUMERS);
+    out.truncate(max_consumers);
     out
 }
 
@@ -541,7 +554,7 @@ mod tests {
         apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
     };
 
-    use super::{build, ClusterData};
+    use super::{build, CapacityLimits, ClusterData};
     use crate::protocol::{
         AccelLost, CapacityReport, GroupCapacity, PlacementUnits, Topology, UnitBox,
     };
@@ -566,6 +579,13 @@ mod tests {
         Topology {
             island_labels: vec![ISLAND_LABEL.to_owned()],
             nvlink_labels: vec![DOMAIN_LABEL.to_owned()],
+        }
+    }
+
+    fn limits() -> CapacityLimits {
+        CapacityLimits {
+            max_fragments: usize::MAX,
+            max_consumers: usize::MAX,
         }
     }
 
@@ -628,12 +648,22 @@ mod tests {
     }
 
     fn pod(name: &str, node_name: &str, kind: &str, chips: i64) -> Arc<Pod> {
+        pod_in_namespace(name, node_name, kind, chips, "workloads")
+    }
+
+    fn pod_in_namespace(
+        name: &str,
+        node_name: &str,
+        kind: &str,
+        chips: i64,
+        namespace: &str,
+    ) -> Arc<Pod> {
         let requests =
             BTreeMap::from([(accel_resource(kind).to_owned(), Quantity(chips.to_string()))]);
         Arc::new(Pod {
             metadata: ObjectMeta {
                 name: Some(name.to_owned()),
-                namespace: Some("workloads".to_owned()),
+                namespace: Some(namespace.to_owned()),
                 ..ObjectMeta::default()
             },
             spec: Some(PodSpec {
@@ -754,6 +784,7 @@ mod tests {
                 vec![],
             )],
             &topology(),
+            limits(),
         );
 
         assert_eq!(report.nodes.total, 1);
@@ -778,6 +809,51 @@ mod tests {
     }
 
     #[test]
+    fn response_cardinality_uses_configured_limits() {
+        let nodes = (0..4)
+            .map(|index| {
+                node(
+                    &format!("gpu-{index}"),
+                    "gpu",
+                    8,
+                    Availability::Healthy,
+                    Placement {
+                        island: "island-a",
+                        domain: "domain-a",
+                        tpu_slice: None,
+                    },
+                )
+            })
+            .collect();
+        let pods = (0..4)
+            .map(|index| {
+                pod_in_namespace(
+                    &format!("work-{index}"),
+                    &format!("gpu-{index}"),
+                    "gpu",
+                    index + 1,
+                    &format!("tenant-{index}"),
+                )
+            })
+            .collect();
+        let report = build(
+            &[cluster(nodes, pods)],
+            &topology(),
+            CapacityLimits {
+                max_fragments: 2,
+                max_consumers: 2,
+            },
+        );
+
+        let gpu_nodes = placement(&report.gpu_nodes, "8");
+        assert_eq!(gpu_nodes.fragmented, 4);
+        assert_eq!(gpu_nodes.fragments.len(), 2);
+        assert_eq!(report.consumers.len(), 2);
+        assert_eq!(report.consumers[0].namespace, "tenant-3");
+        assert_eq!(report.consumers[1].namespace, "tenant-2");
+    }
+
+    #[test]
     fn not_ready_gpu_is_reported_only_as_unavailable_inventory() {
         let report = build(
             &[cluster(
@@ -795,6 +871,7 @@ mod tests {
                 vec![],
             )],
             &topology(),
+            limits(),
         );
 
         assert_inventory_only(&report, 0);
@@ -818,6 +895,7 @@ mod tests {
                 vec![],
             )],
             &topology(),
+            limits(),
         );
 
         assert_inventory_only(&report, 1);
@@ -901,7 +979,7 @@ mod tests {
             pod("tpu-partial-work", "tpu-partial", "tpu", 1),
             pod("tpu-down-work", "tpu-not-ready", "tpu", 2),
         ];
-        let report = build(&[cluster(nodes, pods)], &topology());
+        let report = build(&[cluster(nodes, pods)], &topology(), limits());
 
         assert_eq!(report.nodes.total, 6);
         assert_eq!(report.nodes.ready, 4);

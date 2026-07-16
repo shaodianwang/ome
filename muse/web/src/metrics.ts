@@ -39,8 +39,48 @@ function nums(s: PromSeries): number[] {
   return src.map((v) => parseFloat(v[1])).filter((n) => Number.isFinite(n));
 }
 
+function rangeSeconds(series: PromSeries[]): number | null {
+  let longest: number | null = null;
+  for (const item of series) {
+    let first = Number.POSITIVE_INFINITY;
+    let last = Number.NEGATIVE_INFINITY;
+    for (const [at] of item.values ?? []) {
+      if (!Number.isFinite(at)) continue;
+      first = Math.min(first, at);
+      last = Math.max(last, at);
+    }
+    if (Number.isFinite(first) && last > first) {
+      longest = Math.max(longest ?? 0, last - first);
+    }
+  }
+  return longest;
+}
+
 function results(r?: PromResult): PromSeries[] {
   return r?.data?.result ?? [];
+}
+
+/** Actual range represented by one query's returned Prometheus timestamps. */
+export function metricsQueryRangeSeconds(
+  snap: MetricsSnapshot | null,
+  queryId: string,
+): number | null {
+  if (!snap?.clusters) return null;
+  const series: PromSeries[] = [];
+  for (const queries of Object.values(snap.clusters)) {
+    series.push(...results(queries[queryId]));
+  }
+  return rangeSeconds(series);
+}
+
+/** Compact duration label derived from data, never from a dashboard default. */
+export function metricsRangeLabel(seconds: number | null): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  const rounded = Math.round(seconds);
+  if (rounded % 86_400 === 0) return `${rounded / 86_400}d`;
+  if (rounded % 3_600 === 0) return `${rounded / 3_600}h`;
+  if (rounded % 60 === 0) return `${rounded / 60}m`;
+  return `${rounded}s`;
 }
 
 /**
@@ -115,6 +155,8 @@ export interface IsvcSeries {
 export interface IsvcMetrics {
   /** Whether this deployment has any serving signal in the snapshot. */
   present: boolean;
+  /** Actual time span represented by the returned range samples. */
+  rangeSeconds: number | null;
   /** By query id (`latency_p99`, `tpot`, `kv_transfer_latency`, …). */
   by: Record<string, IsvcSeries>;
 }
@@ -132,14 +174,20 @@ export function isvcMetrics(
 ): IsvcMetrics {
   const queries = snap?.clusters?.[cluster];
   const by: Record<string, IsvcSeries> = {};
+  let requestRangeSeconds: number | null = null;
   if (queries) {
     for (const [qid, res] of Object.entries(queries)) {
       const s = results(res).find((x) => x.metric?.inferenceservice === isvc);
+      if (qid === "request_rate" && s) requestRangeSeconds = rangeSeconds([s]);
       by[qid] = s ? { last: last(s), series: nums(s) } : EMPTY_SERIES;
     }
   }
   const has = (qid: string) => (by[qid]?.last ?? null) != null || (by[qid]?.series.length ?? 0) > 0;
-  return { present: has("request_rate") || has("latency_p99") || has("running_reqs"), by };
+  return {
+    present: has("request_rate") || has("latency_p99") || has("running_reqs"),
+    rangeSeconds: requestRangeSeconds,
+    by,
+  };
 }
 
 /** Fleet-wide aggregates for the SLI banner: sums across all series (throughput,

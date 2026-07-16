@@ -8,17 +8,21 @@ per-request apiserver call. Built on [`ome-client-rs`](../ome-client-rs).
 
 ```sh
 # single cluster (ambient kube config):
-cargo run -p muse-server
+make -C muse run
 
 # multiple clusters + the cluster's real topology labels:
-cargo run -p muse-server -- \
+set -a; . muse/config/dev.env; set +a
+cd muse && cargo run -p muse-server -- \
   --cluster cw-use2=~/.kube/msl-cw-use2-dev-2.conf \
   --cluster cw-use3=~/.kube/msl-cw-use3-dev.conf \
   --rdma-island-label   network.meta.com/ai-zone,backend.coreweave.cloud/fabric \
   --nvlink-domain-label network.meta.com/domain,nvidia.com/gpu.clique
 ```
 
-API on `:8080`, Prometheus `/metrics` on `:9090` (both configurable). Each
+The local values above come from [`config/dev.env`](config/dev.env); production
+values come from `charts/muse/values.yaml`. The binary has no behavioral
+fallbacks. With the checked-in development config, the API listens on `:8080`
+and Prometheus `/metrics` on `:9090`. Each
 topology flag accepts a comma-separated candidate list (first present wins), so
 one config covers clusters that label topology differently. An unreachable
 cluster is skipped, not fatal.

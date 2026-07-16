@@ -63,19 +63,24 @@ const OME_PLURALS: [&str; 8] = [
 
 fn main() -> anyhow::Result<()> {
     let config = config::Config::parse();
+    config.validate()?;
     // InferenceService / ServingRuntime are enormous generated types (the
     // pod-template schema is inlined); the reflector deserializes them on a
     // worker thread, which overflows tokio's default 2 MiB stack. Give workers a
     // large stack. (RUST_MIN_STACK does NOT override tokio's explicit worker size.)
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(64 * 1024 * 1024)
+        .thread_stack_size(config.worker_thread_stack_bytes)
         .build()?
         .block_on(run(config))
 }
 
 async fn run(config: config::Config) -> anyhow::Result<()> {
-    telemetry::init_logging(config.log_json);
+    telemetry::init_logging(config.log_json, &config.log_filter)?;
+    let dashboard_policy = config
+        .dashboard_policy
+        .clone()
+        .filter(|policy| !policy.is_empty());
 
     // Chat is optional and must fail closed. Missing policy/timeout config or bad
     // TLS material disables only the proxy; the read plane remains available.
@@ -101,7 +106,10 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         }
     };
 
-    let metrics = telemetry::init_metrics()?;
+    let metrics = telemetry::init_metrics(
+        &config.http_latency_buckets,
+        Duration::from_secs(config.metrics_upkeep_secs),
+    )?;
     let metrics_addr = config.metrics_addr();
     tokio::spawn(async move {
         if let Err(err) = telemetry::serve_metrics(metrics, metrics_addr).await {
@@ -115,7 +123,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
     };
 
     // Shared activity feed: curated, human-facing OME changes flow here.
-    let feed = informers::Feed::new(100);
+    let feed = informers::Feed::new(config.event_history_limit);
     // Query invalidations are independent from activity and cover every informer
     // update. Deployment config owns their batching/load tradeoff.
     let invalidations = informers::Invalidations::new(
@@ -129,13 +137,14 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
     // Fan out: one informer set per cluster. An unreachable cluster is skipped
     // (logged), not fatal — the fleet view degrades rather than failing.
     let mut clusters = Vec::new();
-    for cluster_ref in config.cluster_refs() {
+    for cluster_ref in config.cluster_refs()? {
         match build_cluster(
             &cluster_ref,
             config.list_strategy,
             &feed,
             &invalidations,
             &signal,
+            Duration::from_secs(config.apiserver_preflight_timeout_secs),
         )
         .await
         {
@@ -170,10 +179,15 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         invalidations,
         signal,
         chat,
-        app_context::MetricsConfig {
+        app_context::AppStateConfig {
             prom: config.prom_service.clone(),
             queries: metrics_queries,
-            refresh: Duration::from_secs(config.metrics_refresh_secs.max(1)),
+            refresh: Duration::from_secs(config.metrics_refresh_secs),
+            capacity_limits: rollup::CapacityLimits {
+                max_fragments: config.capacity_max_fragments,
+                max_consumers: config.capacity_max_consumers,
+            },
+            dashboard_policy,
         },
     );
     server::serve(&config, state).await
@@ -188,13 +202,20 @@ async fn build_cluster(
     feed: &informers::Feed,
     invalidations: &informers::Invalidations,
     signal: &informers::CapacitySignal,
+    preflight_timeout: Duration,
 ) -> anyhow::Result<informers::ClusterState> {
     let client = client_for(cluster_ref).await?;
     // Preflight so an unreachable cluster fails fast (and gets skipped) rather
     // than hanging on the first informer's initial sync.
-    let info = tokio::time::timeout(Duration::from_secs(15), client.apiserver_version())
+    let info = tokio::time::timeout(preflight_timeout, client.apiserver_version())
         .await
-        .with_context(|| format!("cluster {} unreachable within 15s", cluster_ref.name))?
+        .with_context(|| {
+            format!(
+                "cluster {} unreachable within {}s",
+                cluster_ref.name,
+                preflight_timeout.as_secs()
+            )
+        })?
         .with_context(|| format!("cluster {} version query failed", cluster_ref.name))?;
     // Decide the initial-list strategy from the configured policy and the
     // apiserver version (WatchList is beta/on by default only since 1.32).

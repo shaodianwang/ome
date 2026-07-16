@@ -1,18 +1,11 @@
 import type { ReactNode } from "react";
 
-import { seriesOf } from "../metrics";
+import type { DashboardPolicy } from "../api";
+import { metricsRangeLabel, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
-import type { BarTone } from "../types";
+import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import { fmtErrPct, fmtInt, fmtLatency, fmtRate } from "../util";
 import { Card, Distribution, Dot, GaugeCard, MetricChart, Spark, StatTile } from "../viz";
-
-// At-a-glance color thresholds — viz heuristics for reading a value at a glance,
-// not deployment SLOs (those are workload-specific and belong in config).
-const KV_WARN = 0.7; // KV-cache fill: amber at/above
-const KV_HOT = 0.9; //               red at/above
-const HIT_OK = 0.7; // prefix-cache hit: green at/above …
-const HIT_LOW = 0.4; //                … red below
-const ERR_HOT = 1; // error rate (%): red above
 
 const ACCENT = "var(--accent-2)";
 const RED = "var(--red)";
@@ -32,15 +25,6 @@ const perSec = (v: number | null): ReactNode => (
   </>
 );
 
-function kvTone(v: number | null): BarTone {
-  if (v == null) return "";
-  return v >= KV_HOT ? "red" : v >= KV_WARN ? "amber" : "green";
-}
-function hitTone(v: number | null): BarTone {
-  if (v == null) return "";
-  return v >= HIT_OK ? "green" : v >= HIT_LOW ? "amber" : "red";
-}
-
 /**
  * Serving dashboard for one deployment. The visualization is chosen per data
  * shape: golden signals as threshold-colored stats; the request latency as a
@@ -48,7 +32,15 @@ function hitTone(v: number | null): BarTone {
  * area charts; bounded saturation (KV cache, prefix hit) as gauges; rare events
  * as charts that appear only when non-zero.
  */
-export function Monitoring({ m, metricsOn }: { m: IsvcMetrics; metricsOn: boolean }) {
+export function Monitoring({
+  m,
+  metricsOn,
+  policy,
+}: {
+  m: IsvcMetrics;
+  metricsOn: boolean;
+  policy?: DashboardPolicy;
+}) {
   if (!metricsOn) {
     return <div className="muted attn-none">Metrics aren't configured on this console.</div>;
   }
@@ -56,6 +48,7 @@ export function Monitoring({ m, metricsOn }: { m: IsvcMetrics; metricsOn: boolea
     return <div className="muted attn-none">No serving traffic in the selected window.</div>;
   }
   const g = (id: string) => seriesOf(m, id);
+  const rangeLabel = metricsRangeLabel(m.rangeSeconds);
 
   // Golden signals.
   const qps = g("request_rate").last;
@@ -91,15 +84,13 @@ export function Monitoring({ m, metricsOn }: { m: IsvcMetrics; metricsOn: boolea
         <StatTile
           label="Availability"
           value={avail == null ? "—" : `${avail.toFixed(2)}%`}
-          sub="last 6h"
-          tone={avail == null ? undefined : avail >= 100 ? "green" : avail >= 99 ? "amber" : "red"}
+          sub={rangeLabel ? `last ${rangeLabel}` : undefined}
+          tone={lowerThresholdTone(avail, policy?.availability) || undefined}
         />
         <StatTile
           label="Error rate"
           value={fmtErrPct(errPct)}
-          tone={
-            errPct == null ? undefined : errPct > ERR_HOT ? "red" : errPct > 0 ? "amber" : "green"
-          }
+          tone={upperThresholdTone(errPct, policy?.errorRate) || undefined}
         >
           <Spark points={errSeries} color={AMBER} />
         </StatTile>
@@ -176,8 +167,18 @@ export function Monitoring({ m, metricsOn }: { m: IsvcMetrics; metricsOn: boolea
 
       <h2 className="sec">Saturation &amp; efficiency</h2>
       <div className="grid g2">
-        <GaugeCard title="KV cache" frac={kv} tone={kvTone(kv)} sub="utilization" />
-        <GaugeCard title="Prefix cache hit" frac={hit} tone={hitTone(hit)} sub="higher is better" />
+        <GaugeCard
+          title="KV cache"
+          frac={kv}
+          tone={upperThresholdTone(kv, policy?.kvCache)}
+          sub="utilization"
+        />
+        <GaugeCard
+          title="Prefix cache hit"
+          frac={hit}
+          tone={lowerThresholdTone(hit, policy?.prefixCache)}
+          sub="higher is better"
+        />
       </div>
       <div className="grid g2">
         <MetricChart

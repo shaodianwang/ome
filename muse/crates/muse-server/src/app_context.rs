@@ -20,7 +20,7 @@ use crate::{
     chat_proxy::ChatProxy,
     config::{PromTarget, QueryDef},
     informers::{CapacitySignal, ClusterState, Feed, Invalidations},
-    protocol::{to_val, Topology},
+    protocol::{to_val, DashboardPolicy, Topology},
     rollup,
     service::error::ApiError,
 };
@@ -36,6 +36,7 @@ pub struct AppState {
     /// from this keeps `/v1/capacity` latency flat as the fleet grows, instead of
     /// re-walking every Node × Pod on each request.
     capacity: Arc<RwLock<Arc<CapacitySnapshot>>>,
+    capacity_limits: rollup::CapacityLimits,
     pub signal: CapacitySignal,
     /// Optional inference-test proxy. `None` means disabled or invalidly configured;
     /// the rest of the read plane remains available.
@@ -46,6 +47,7 @@ pub struct AppState {
     /// The curated dashboard query set the metrics refresher runs each interval.
     metrics_queries: Arc<Vec<QueryDef>>,
     metrics_refresh: Duration,
+    dashboard_policy: Option<DashboardPolicy>,
     /// Latest metrics snapshot, updated by the background refresher and pushed to
     /// SSE subscribers. `watch` retains only the latest value (new subscribers get
     /// it immediately) — exactly the "current fleet metrics" semantics.
@@ -58,12 +60,14 @@ struct CapacitySnapshot {
     per_cluster: HashMap<String, Value>,
 }
 
-/// Optional dashboard-metrics service configuration, grouped so AppState's
-/// constructor stays readable as cross-cutting services are added.
-pub struct MetricsConfig {
+/// Cross-cutting report, metrics, and display inputs, grouped so AppState's
+/// constructor stays readable as services are added.
+pub struct AppStateConfig {
     pub prom: Option<PromTarget>,
     pub queries: Arc<Vec<QueryDef>>,
     pub refresh: Duration,
+    pub capacity_limits: rollup::CapacityLimits,
+    pub dashboard_policy: Option<DashboardPolicy>,
 }
 
 impl AppState {
@@ -74,7 +78,7 @@ impl AppState {
         invalidations: Invalidations,
         signal: CapacitySignal,
         chat: Option<ChatProxy>,
-        metrics: MetricsConfig,
+        config: AppStateConfig,
     ) -> Self {
         let (metrics_tx, _) = watch::channel(empty_metrics());
         let state = Self {
@@ -86,11 +90,13 @@ impl AppState {
                 fleet: Value::Null,
                 per_cluster: HashMap::new(),
             }))),
+            capacity_limits: config.capacity_limits,
             signal,
             chat: chat.map(Arc::new),
-            prom: metrics.prom,
-            metrics_queries: metrics.queries,
-            metrics_refresh: metrics.refresh,
+            prom: config.prom,
+            metrics_queries: config.queries,
+            metrics_refresh: config.refresh,
+            dashboard_policy: config.dashboard_policy,
             metrics_tx,
         };
         // Warm the cache once so the first request is served, not computed.
@@ -129,11 +135,15 @@ impl AppState {
                 pods: c.pods.list(),
             })
             .collect();
-        let fleet = to_val(rollup::build(&all, &self.topology));
+        let fleet = to_val(rollup::build(&all, &self.topology, self.capacity_limits));
         let per_cluster = all
             .iter()
             .map(|cd| {
-                let report = rollup::build(std::slice::from_ref(cd), &self.topology);
+                let report = rollup::build(
+                    std::slice::from_ref(cd),
+                    &self.topology,
+                    self.capacity_limits,
+                );
                 (cd.name.clone(), to_val(report))
             })
             .collect();
@@ -174,6 +184,11 @@ impl AppState {
     /// How often the background refresher re-polls each cluster's Prometheus.
     pub fn metrics_refresh_interval(&self) -> Duration {
         self.metrics_refresh
+    }
+
+    /// Optional UI health classification policy. Missing categories are neutral.
+    pub fn dashboard_policy(&self) -> Option<&DashboardPolicy> {
+        self.dashboard_policy.as_ref()
     }
 
     /// Publish a freshly-built metrics snapshot; new + existing SSE subscribers see

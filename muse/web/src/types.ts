@@ -1,7 +1,6 @@
 // View-model types for the MUSE console — the shapes the panels render, mapped
 // from the muse read-plane API (see src/map.ts and src/api.ts).
 
-export type Cloud = "meta" | "gcp" | "oci" | "cw";
 export type Tone = "green" | "amber" | "red" | "blue" | "violet" | "cyan" | "slate";
 export type BarTone = "" | "green" | "amber" | "red" | "violet";
 
@@ -15,22 +14,6 @@ export interface Selected {
 export interface Pill {
   label: string;
   tone: Tone;
-}
-
-/** Fleet · workload clusters table */
-export interface ClusterRow {
-  name: string;
-  cloud: Cloud;
-  region: string;
-  nodes: string;
-  accel: string;
-  /** Accelerator kind label (e.g. "GPU", "TPU", or "accel" when mixed). */
-  kind: string;
-  /** Free accelerators (allocatable − allocated) on this cluster. */
-  free: number;
-  utilPct: number;
-  barTone: BarTone;
-  status: Pill;
 }
 
 /** Fleet · recent activity feed */

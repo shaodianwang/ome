@@ -357,7 +357,7 @@ pub struct Feed {
 
 impl Feed {
     pub fn new(cap: usize) -> Self {
-        let (tx, _) = broadcast::channel(cap.max(16));
+        let (tx, _) = broadcast::channel(cap);
         Self {
             inner: Arc::new(Mutex::new(VecDeque::with_capacity(cap))),
             tx,

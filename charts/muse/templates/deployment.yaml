@@ -38,14 +38,52 @@ spec:
             {{- end }}
             - name: MUSE_HOST
               value: {{ .Values.config.host | quote }}
+            - name: MUSE_PORT
+              value: {{ .Values.service.port | quote }}
+            - name: MUSE_METRICS_PORT
+              value: {{ .Values.service.metricsPort | quote }}
+            - name: MUSE_LOG_JSON
+              value: {{ .Values.config.logJson | quote }}
+            - name: MUSE_LOG_FILTER
+              value: {{ .Values.config.logFilter | quote }}
+            - name: MUSE_WORKER_THREAD_STACK_BYTES
+              value: {{ .Values.config.workerThreadStackBytes | quote }}
+            - name: MUSE_LOCAL_CLUSTER_NAME
+              value: {{ .Values.config.localClusterName | quote }}
+            {{- with .Values.config.webDir }}
             - name: MUSE_WEB_DIR
-              value: {{ .Values.config.webDir | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             - name: MUSE_LIST_STRATEGY
               value: {{ .Values.config.listStrategy | quote }}
+            - name: MUSE_APISERVER_PREFLIGHT_TIMEOUT_SECS
+              value: {{ .Values.config.apiserverPreflightTimeoutSecs | quote }}
+            - name: MUSE_EVENT_HISTORY_LIMIT
+              value: {{ .Values.config.eventHistoryLimit | quote }}
             - name: MUSE_CAPACITY_REFRESH_SECS
               value: {{ .Values.config.capacityRefreshSecs | quote }}
+            {{- with .Values.config.liveInvalidationBatchMs }}
             - name: MUSE_LIVE_INVALIDATION_BATCH_MS
-              value: {{ .Values.config.liveInvalidationBatchMs | quote }}
+              value: {{ . | quote }}
+            {{- end }}
+            - name: MUSE_CAPACITY_BACKSTOP_SECS
+              value: {{ .Values.config.capacityBackstopSecs | quote }}
+            - name: MUSE_CAPACITY_MAX_FRAGMENTS
+              value: {{ .Values.config.capacityMaxFragments | quote }}
+            - name: MUSE_CAPACITY_MAX_CONSUMERS
+              value: {{ .Values.config.capacityMaxConsumers | quote }}
+            - name: MUSE_SHUTDOWN_GRACE_SECS
+              value: {{ .Values.config.shutdownGraceSecs | quote }}
+            - name: MUSE_METRICS_UPKEEP_SECS
+              value: {{ .Values.config.metricsUpkeepSecs | quote }}
+            - name: MUSE_HTTP_LATENCY_BUCKETS
+              value: {{ join "," .Values.config.httpLatencyBuckets | quote }}
+            {{- with .Values.config.dashboardPolicy }}
+            - name: MUSE_DASHBOARD_POLICY_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
+            - name: MUSE_METRICS_REFRESH_SECS
+              value: {{ .Values.config.metrics.refreshSecs | quote }}
             - name: MUSE_CHAT_ENABLED
               value: {{ .Values.config.chat.enabled | quote }}
             {{- with .Values.config.chat.timeoutSecs }}
@@ -87,8 +125,6 @@ spec:
             # Fleet metrics proxy → each cluster's Prometheus; query set mounted below.
             - name: MUSE_PROM_SERVICE
               value: {{ .Values.config.metrics.promService | quote }}
-            - name: MUSE_METRICS_REFRESH_SECS
-              value: {{ .Values.config.metrics.refreshSecs | quote }}
             - name: MUSE_METRICS_QUERIES_FILE
               value: {{ .Values.config.metrics.queriesFile | quote }}
             {{- end }}

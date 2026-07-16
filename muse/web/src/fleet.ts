@@ -18,7 +18,6 @@ export interface FleetFilter {
   cluster: string; // "all" | cluster name
   model: string; // "all" | model
   accel: string; // "all" | "gpu" | "tpu"
-  range: string; // "6h" | "1h"
 }
 
 export interface FleetRaw {

@@ -28,10 +28,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 // Setup — installed once at boot.
 // ===========================================================================
 
-/// Initialise tracing: honour `RUST_LOG`, else a sane default; fmt or JSON.
-pub fn init_logging(json: bool) {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,muse=debug"));
+/// Initialise tracing with the configured filter; emit plain text or JSON.
+pub fn init_logging(json: bool, filter: &str) -> anyhow::Result<()> {
+    let filter = EnvFilter::try_new(filter).context("parse configured log filter")?;
     let fmt = tracing_subscriber::fmt::layer().with_target(true);
     let fmt = if json {
         fmt.json().boxed()
@@ -39,16 +38,20 @@ pub fn init_logging(json: bool) {
         fmt.boxed()
     };
     tracing_subscriber::registry().with(filter).with(fmt).init();
+    Ok(())
 }
 
 /// Install the Prometheus recorder (latency buckets on any `*_duration_seconds`
 /// metric), describe the HTTP metrics, and start the histogram upkeep task.
-pub fn init_metrics() -> anyhow::Result<PrometheusHandle> {
-    const BUCKETS: &[f64] = &[
-        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-    ];
+pub fn init_metrics(
+    request_duration_buckets: &[f64],
+    upkeep_interval: Duration,
+) -> anyhow::Result<PrometheusHandle> {
     let handle = PrometheusBuilder::new()
-        .set_buckets_for_metric(Matcher::Suffix("duration_seconds".to_owned()), BUCKETS)
+        .set_buckets_for_metric(
+            Matcher::Suffix("duration_seconds".to_owned()),
+            request_duration_buckets,
+        )
         .context("set metric buckets")?
         .install_recorder()
         .context("install prometheus recorder")?;
@@ -70,7 +73,7 @@ pub fn init_metrics() -> anyhow::Result<PrometheusHandle> {
     // Histogram bucket rotation — required when using install_recorder.
     let upkeep = handle.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut tick = tokio::time::interval(upkeep_interval);
         loop {
             tick.tick().await;
             upkeep.run_upkeep();

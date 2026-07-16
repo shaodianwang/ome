@@ -1533,7 +1533,52 @@ pub struct ClusterSummary {
     pub inference_services: usize,
 }
 
-/// Console feature flags for `GET /v1/config`.
+/// Thresholds where larger values are worse. A value at the warning threshold is
+/// warning; a value at the critical threshold is critical.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpperThresholdPolicy {
+    pub warning_at: f64,
+    pub critical_at: f64,
+}
+
+/// Thresholds where smaller values are worse. A value below the warning threshold
+/// is warning; a value below the critical threshold is critical.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LowerThresholdPolicy {
+    pub warning_below: f64,
+    pub critical_below: f64,
+}
+
+/// Optional dashboard health policy. Percentage-valued metrics use 0..100;
+/// cache ratios use 0..1. Missing categories render without a health tone.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DashboardPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<UpperThresholdPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<LowerThresholdPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_rate: Option<UpperThresholdPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_cache: Option<UpperThresholdPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_cache: Option<LowerThresholdPolicy>,
+}
+
+impl DashboardPolicy {
+    pub fn is_empty(&self) -> bool {
+        self.utilization.is_none()
+            && self.availability.is_none()
+            && self.error_rate.is_none()
+            && self.kv_cache.is_none()
+            && self.prefix_cache.is_none()
+    }
+}
+
+/// Console feature flags and display policy for `GET /v1/config`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigResp {
@@ -1549,6 +1594,10 @@ pub struct ConfigResp {
     /// Whether the metrics proxy (`/v1/metrics/*` → a cluster's Prometheus) is
     /// configured; the console hides its metric panels when false.
     pub metrics: bool,
+    /// Optional health classification policy. Omitted when no categories are
+    /// configured, which tells the console to render neutral status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_policy: Option<DashboardPolicy>,
 }
 
 /// Serialize any value to JSON, or `Null` on failure.

@@ -123,7 +123,9 @@ export function DeploymentDetail({
               goMonitoring={() => setTab("monitoring")}
             />
           ) : null}
-          {tab === "monitoring" ? <Monitoring m={m} metricsOn={metricsOn} /> : null}
+          {tab === "monitoring" ? (
+            <Monitoring m={m} metricsOn={metricsOn} policy={cfg.data?.dashboardPolicy} />
+          ) : null}
           {tab === "activity" ? <ActivityPane activity={activity} /> : null}
         </>
       )}

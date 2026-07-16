@@ -13,7 +13,8 @@ import type {
 import type { Tone } from "../types";
 import { Bar, EmptyRow, Pager } from "../components";
 import { useLive } from "../live";
-import { copyText, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
+import { upperThresholdTone } from "../policy";
+import { copyText, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct } from "../util";
 import { Card, Distribution, Dot, Gauge, StatTile, UtilRow } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
@@ -49,8 +50,8 @@ interface Row {
 
 type SortKey = keyof Row;
 
-const kpct = (t?: { alloc: number; used: number }) =>
-  t ? utilPct({ allocatable: t.alloc, allocated: t.used }) : 0;
+const kpct = (t: { alloc: number; used: number }) =>
+  utilPct({ allocatable: t.alloc, allocated: t.used });
 const sortVal = (r: Row, k: SortKey): string | number =>
   k === "cluster" || k === "name" || k === "kind" ? String(r[k]).toLowerCase() : r[k];
 
@@ -472,6 +473,8 @@ export function Capacity() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const config = useLive(api.config, { kinds: [] });
+  const utilizationPolicy = config.data?.dashboardPolicy?.utilization;
 
   // One scoped-capacity request per cluster, combined client-side so island /
   // domain rows stay attributed to their cluster and kind.
@@ -555,6 +558,8 @@ export function Capacity() {
   }
   const gpu = byKind.get("gpu");
   const tpu = byKind.get("tpu");
+  const gpuPct = gpu ? kpct(gpu) : null;
+  const tpuPct = tpu ? kpct(tpu) : null;
   const accelNodes = caps.reduce((s, { cap }) => s + cap.nodes.acceleratorNodes, 0);
   const schedNodes = caps.reduce((s, { cap }) => s + cap.nodes.schedulable, 0);
   const totalNodes = caps.reduce((s, { cap }) => s + cap.nodes.total, 0);
@@ -816,17 +821,21 @@ export function Capacity() {
       <div className="tiles cap-tiles">
         <StatTile
           label="GPU allocated"
-          value={`${kpct(gpu)}%`}
+          value={gpuPct == null ? "—" : `${gpuPct}%`}
           sub={gpu ? `${n(gpu.used)} / ${n(gpu.alloc)} · ${n(gpu.free)} free` : "no GPU clusters"}
         >
-          <Gauge pct={kpct(gpu)} tone={utilTone(kpct(gpu))} />
+          {gpuPct == null ? null : (
+            <Gauge pct={gpuPct} tone={upperThresholdTone(gpuPct, utilizationPolicy)} />
+          )}
         </StatTile>
         <StatTile
           label="TPU allocated"
-          value={`${kpct(tpu)}%`}
+          value={tpuPct == null ? "—" : `${tpuPct}%`}
           sub={tpu ? `${n(tpu.used)} / ${n(tpu.alloc)} · ${n(tpu.free)} free` : "no TPU clusters"}
         >
-          <Gauge pct={kpct(tpu)} tone={utilTone(kpct(tpu))} />
+          {tpuPct == null ? null : (
+            <Gauge pct={tpuPct} tone={upperThresholdTone(tpuPct, utilizationPolicy)} />
+          )}
         </StatTile>
         <StatTile
           label="Pending"
@@ -1173,7 +1182,11 @@ export function Capacity() {
                   </td>
                   <td>
                     <div className="bar-cell">
-                      <Bar pct={r.util} tone={utilTone(r.util)} width={90} />
+                      <Bar
+                        pct={r.util}
+                        tone={upperThresholdTone(r.util, utilizationPolicy)}
+                        width={90}
+                      />
                       <span className="mono">{r.util}%</span>
                     </div>
                   </td>

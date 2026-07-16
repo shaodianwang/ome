@@ -299,7 +299,29 @@ export interface RolloutItem {
   age?: string;
 }
 
-/** Feature flags from `GET /v1/config` (read once at load). */
+/** Health thresholds where larger values are worse. */
+export interface UpperThresholdPolicy {
+  warningAt: number;
+  criticalAt: number;
+}
+
+/** Health thresholds where smaller values are worse. */
+export interface LowerThresholdPolicy {
+  warningBelow: number;
+  criticalBelow: number;
+}
+
+/** Optional dashboard health policy. Percent metrics use 0..100; cache metrics
+ *  use 0..1 fractions. Missing categories render neutrally. */
+export interface DashboardPolicy {
+  utilization?: UpperThresholdPolicy;
+  availability?: LowerThresholdPolicy;
+  errorRate?: UpperThresholdPolicy;
+  kvCache?: UpperThresholdPolicy;
+  prefixCache?: LowerThresholdPolicy;
+}
+
+/** Feature flags and display policy from `GET /v1/config` (read once at load). */
 export interface AppConfig {
   chat: boolean;
   /** Server-side total budget (seconds) for a chat proxy request; the console
@@ -309,6 +331,7 @@ export interface AppConfig {
   chatClientGraceSecs?: number;
   /** Whether the metrics proxy is configured server-side; panels hide when false. */
   metrics?: boolean;
+  dashboardPolicy?: DashboardPolicy;
 }
 
 /** One Prometheus result series: instant queries carry `value`, range queries

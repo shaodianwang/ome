@@ -108,3 +108,12 @@ are refused rather than followed. The packaged console and API are same-origin;
 the server does not emit permissive CORS headers. For mTLS, client certificate,
 client key, and CA certificate must all be configured; any partial tuple leaves
 the proxy disabled.
+
+## Dashboard health policy
+
+Health colors are deployment policy, not binary heuristics. Configure warning and
+critical pairs under `config.dashboardPolicy`; set the whole policy or an
+individual category to `null` to render that metric neutrally. Percentage metrics
+use 0..100 and cache metrics use 0..1 fractions. The chart's values file carries
+the default policy and the server exposes the effective typed policy via
+`/v1/config`.
