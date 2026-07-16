@@ -192,6 +192,29 @@ func TestEnsureInferenceReplica_Create_NewIR(t *testing.T) {
 		"Lifecycle must be threaded through")
 }
 
+func TestEnsureInferenceReplica_ProjectsPauseAnnotationAndClearsOnRemoval(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Annotations = map[string]string{constants.PausedRolloutAnnotation: "true"}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	key := types.NamespacedName{Name: "llama-engine", Namespace: "prod"}
+	paused := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, paused)).To(gomega.Succeed())
+	g.Expect(paused.Spec.Paused).To(gomega.BeTrue(),
+		"the controller-only IR must receive pause intent from its parent ISVC")
+
+	delete(isvc.Annotations, constants.PausedRolloutAnnotation)
+	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	unpaused := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, unpaused)).To(gomega.Succeed())
+	g.Expect(unpaused.Spec.Paused).To(gomega.BeFalse(),
+		"removing the parent annotation must clear the projected circuit breaker")
+}
+
 // TestEnsureInferenceReplica_Update_PreservesGeneration pins the
 // update path: the projector emits the same IR Spec on a second
 // invocation, so the apiserver-side Generation should NOT bump (no

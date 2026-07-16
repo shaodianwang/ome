@@ -153,6 +153,67 @@ func TestReconcile_NilTarget_DrivesCreate(t *testing.T) {
 	}
 }
 
+// TestReconcile_PausedSkipsCreate proves InferenceReplica.spec.paused is a
+// real circuit breaker: a missing Instance must not be allocated while the
+// plan is paused.
+func TestReconcile_PausedSkipsCreate(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	allocateCalls := 0
+	in.MutateInstance = func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
+		allocateCalls++
+		return nil
+	}
+	plan := minimalPlan()
+	plan.Paused = true
+
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("paused reconcile must stay quiescent, got %+v", result)
+	}
+	if allocateCalls != 0 {
+		t.Fatalf("paused reconcile allocated %d Instances, want 0", allocateCalls)
+	}
+}
+
+// TestReconcile_PausedStillScalesDown keeps the safety boundary explicit:
+// pausing lifecycle churn must not prevent a deliberate replica reduction
+// from deleting an extra Instance.
+func TestReconcile_PausedStillScalesDown(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Phase: workload.InstancePhaseReady},
+		{Index: 1, Phase: workload.InstancePhaseReady},
+	}
+	removed := 0
+	in.RemoveInstance = func(_ context.Context, idx int32) (bool, error) {
+		if idx != 1 {
+			t.Fatalf("RemoveInstance index=%d want 1", idx)
+		}
+		removed++
+		return true, nil
+	}
+	plan := minimalPlan()
+	plan.Paused = true
+
+	if _, err := workload.Reconcile(context.Background(), deps, in, plan, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("paused scale-down removed %d Instances, want 1", removed)
+	}
+}
+
 // TestReconcile_ScaleDownExtra_DrivesDelete covers the
 // "InstanceStatus has index 1 but plan doesn't" scale-down path. The
 // dispatcher MUST drive Delete for the extra index, and because Delete

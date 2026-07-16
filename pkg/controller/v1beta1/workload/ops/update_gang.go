@@ -180,15 +180,19 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		// callback is wired by the caller (gang package owns the podgroup dep,
 		// keeping ops free of it); nil callback / single-pod surge / absent
 		// CRD all no-op inside EnsureGangPodGroup.
+		renderPlan := plan
 		if deps.EnsureGangPodGroup != nil {
-			if pgErr := deps.EnsureGangPodGroup(ctx, input, plan, surgeInst); pgErr != nil {
+			effectiveTopology, pgErr := deps.EnsureGangPodGroup(ctx, input, plan, surgeInst)
+			if pgErr != nil {
 				return false, fmt.Errorf("ensure surge gang PodGroup (instance=%d): %w", surgeIdx, pgErr)
 			}
+			renderPlan.InstanceTopologyKeys = cloneInstanceTopologyKeys(plan.InstanceTopologyKeys)
+			renderPlan.InstanceTopologyKeys[surgeIdx] = effectiveTopology
 		}
 		// Stamp the pinned in-flight rev hash (NOT the latest target) so
 		// the gang's pods match the revision this surge committed to and
 		// the per-revision drain Service selects them. See surgeTargetName.
-		if _, cerr := createMissingPods(ctx, deps, input, plan, surgeInst, surgeIdx, missing, query.RevisionHashFromControllerRevisionName(surgeTargetName)); cerr != nil {
+		if _, cerr := createMissingPods(ctx, deps, input, renderPlan, surgeInst, surgeIdx, missing, query.RevisionHashFromControllerRevisionName(surgeTargetName)); cerr != nil {
 			return false, fmt.Errorf("create surge gang (instance=%d): %w", surgeIdx, cerr)
 		}
 		return false, nil
@@ -286,6 +290,14 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		"OMENative %s gang surge complete: instance %d promoted to revision %s",
 		instanceKey(comp, sourceIdx), surgeIdx, surgeTargetName)
 	return true, nil
+}
+
+func cloneInstanceTopologyKeys(in map[int32]string) map[int32]string {
+	out := make(map[int32]string, len(in)+1)
+	for index, key := range in {
+		out[index] = key
+	}
+	return out
 }
 
 // abandonFailedGangSurge tears down a gang surge that escalated to

@@ -40,13 +40,35 @@ type ComponentPlan struct {
 	// never).
 	MigrationMode MigrationMode
 
+	// Paused stops the dispatcher before it starts or advances Restart,
+	// Migration, Update, or Create operations. Scale-down remains active so a
+	// reduced desired replica count can still release capacity while paused.
+	Paused bool
+
 	// TopologyKey is the resolved gang co-location node-label key for
 	// this Component (e.g. an NVLink/RDMA fabric-domain label). Empty for
 	// single-pod Components or when unset. When non-empty on a multi-pod
 	// Component, Render auto-generates the per-Instance worker→leader
-	// podAffinity that co-locates every worker onto its gang's leader on
-	// a node sharing this label value.
+	// podAffinity and the PodGroup carries the same key for topology-aware
+	// gang schedulers. Both constraints therefore select the same configured
+	// topology domain.
 	TopologyKey string
+
+	// InstanceTopologyKeys holds a temporary per-Instance override while live
+	// pods still carry affinity rendered from an older revision. Missing pods in
+	// that active gang must use the same immutable topology contract; fresh
+	// Instances and surge indices fall back to TopologyKey.
+	InstanceTopologyKeys map[int32]string
+}
+
+// TopologyKeyForInstance returns the live-safe topology contract for an
+// Instance, falling back to the Component's current desired key when the group
+// has no active revision-specific override.
+func (p ComponentPlan) TopologyKeyForInstance(index int32) string {
+	if key, ok := p.InstanceTopologyKeys[index]; ok {
+		return key
+	}
+	return p.TopologyKey
 }
 
 // InstancePlan is the desired state for one Instance — the atomic

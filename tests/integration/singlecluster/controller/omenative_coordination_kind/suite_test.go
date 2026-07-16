@@ -38,8 +38,12 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		// timeout). Two workers give it a real off-source home.
 		Workers:     2,
 		BuildImages: kindfix.FakeServingImages(),
-		CRDPaths:    kindfix.OMECRDPaths(),
-		Scheme:      kindfix.OMEScheme(),
+		// This suite owns the authoritative multi-pod topology contract, so
+		// install and register the optional scheduler-plugins PodGroup API.
+		// Pods still use KIND's default scheduler; PodGroup creation is the
+		// controller contract under test, not coscheduling behavior.
+		CRDPaths: kindfix.GangCRDPaths(),
+		Scheme:   kindfix.GangScheme(),
 		// OMENative is driven exclusively through the IR-managed path now
 		// (the legacy omenative-direct path was retired). The cross-Component
 		// coordination this suite exercises (Sequential / BlueGreen /

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,6 +17,7 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -94,13 +96,14 @@ func TestBuildPodGroup_NameUsesOwnerNameNotOwnerObject(t *testing.T) {
 }
 
 // TestBuildPodGroup_Shape pins the canonical multi-pod PodGroup
-// (leader + 3 workers, 15-minute timeout). One assertion per surface
+// (leader + 3 workers). One assertion per surface
 // (name, namespace, labels, ownerRefs, spec) keeps diffs readable.
 func TestBuildPodGroup_Shape(t *testing.T) {
 	isvc := newPodGroupISVC("prod-models", "llama-engine")
 	plan := core.ComponentPlan{
 		Component:            workload.ComponentEngine,
 		InstanceReadyTimeout: 15 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
 	}
 	inst := core.InstancePlan{
 		Index: 0,
@@ -146,6 +149,9 @@ func TestBuildPodGroup_Shape(t *testing.T) {
 	if diff := cmp.Diff(wantLabels, pg.Labels); diff != "" {
 		t.Errorf("Labels (-want +got):\n%s", diff)
 	}
+	if got := pg.Annotations[query.AnnotationTopologyKey]; got != plan.TopologyKey {
+		t.Errorf("%s annotation: got %q want %q", query.AnnotationTopologyKey, got, plan.TopologyKey)
+	}
 
 	// OwnerReferences: single Controller-owner pointing at the ISVC.
 	if len(pg.OwnerReferences) != 1 {
@@ -164,10 +170,7 @@ func TestBuildPodGroup_Shape(t *testing.T) {
 }
 
 // TestBuildPodGroup_TopologyKeyAnnotation verifies the gang topology-domain
-// key is stamped as the ome.io/topology-key annotation the OME gang scheduler
-// plugin (OMEGangPack) reads to pin the gang to one free partition. It is set
-// when the ComponentPlan declares a TopologyKey and absent (nil map) when it
-// doesn't, so non-topology gangs don't churn on an empty-string annotation.
+// key is stamped when declared and omitted when unset.
 func TestBuildPodGroup_TopologyKeyAnnotation(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	inst := core.InstancePlan{
@@ -188,9 +191,8 @@ func TestBuildPodGroup_TopologyKeyAnnotation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildPodGroup: %v", err)
 		}
-		if got := pg.Annotations[query.AnnotationTopologyKey]; got != "cloud.google.com/gke-tpu-partition-2x2x2-id" {
-			t.Errorf("annotation %s: got %q want cloud.google.com/gke-tpu-partition-2x2x2-id",
-				query.AnnotationTopologyKey, got)
+		if got := pg.Annotations[query.AnnotationTopologyKey]; got != plan.TopologyKey {
+			t.Errorf("annotation %s: got %q want %q", query.AnnotationTopologyKey, got, plan.TopologyKey)
 		}
 	})
 
@@ -198,20 +200,17 @@ func TestBuildPodGroup_TopologyKeyAnnotation(t *testing.T) {
 		plan := core.ComponentPlan{
 			Component:            workload.ComponentEngine,
 			InstanceReadyTimeout: 5 * time.Minute,
-			// TopologyKey deliberately unset.
 		}
 		pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
 		if err != nil {
 			t.Fatalf("BuildPodGroup: %v", err)
 		}
 		if pg.Annotations != nil {
-			t.Errorf("annotations: got %v want nil (no topology key declared)", pg.Annotations)
+			t.Errorf("annotations: got %v want nil", pg.Annotations)
 		}
 	})
 }
 
-// TestBuildPodGroup_TimeoutClamp covers the three clamp regions —
-// zero (floor), in-range (passthrough), too-big (cap).
 func TestBuildPodGroup_TimeoutClamp(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -307,7 +306,11 @@ func TestEnsurePodGroup_SinglePodNoOp(t *testing.T) {
 func TestEnsurePodGroup_CreatesWhenAbsent(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{
+		Component:            workload.ComponentEngine,
+		InstanceReadyTimeout: 5 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
+	}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 3}}}
 
 	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
@@ -324,6 +327,9 @@ func TestEnsurePodGroup_CreatesWhenAbsent(t *testing.T) {
 	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != "llama" {
 		t.Errorf("OwnerReferences: got %#v want one pointing at the ISVC", got.OwnerReferences)
 	}
+	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey {
+		t.Errorf("%s annotation: got %#v want %q", query.AnnotationTopologyKey, got.Annotations, plan.TopologyKey)
+	}
 }
 
 // TestEnsurePodGroup_DriftCorrected — pre-existing PodGroup with stale
@@ -336,6 +342,10 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 			Name:      "llama-engine-0",
 			Namespace: "prod",
 			Labels:    map[string]string{"stale": "true"},
+			Annotations: map[string]string{
+				query.AnnotationTopologyKey: "stale.example.com/domain",
+				"example.com/preserve":      "yes",
+			},
 		},
 		Spec: schedulingv1alpha1.PodGroupSpec{
 			MinMember:              99, // stale
@@ -343,7 +353,11 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 		},
 	}
 	c := newPodGroupClient(t, isvc, stale)
-	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 3 * time.Minute}
+	plan := core.ComponentPlan{
+		Component:            workload.ComponentEngine,
+		InstanceReadyTimeout: 3 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
+	}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
 
 	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
@@ -366,6 +380,188 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 	if _, hasStale := got.Labels["stale"]; hasStale {
 		t.Errorf("Labels: stale label not overwritten, got %#v", got.Labels)
 	}
+	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey {
+		t.Errorf("topology annotation drift not corrected: got %#v want %q", got.Annotations, plan.TopologyKey)
+	}
+	if got.Annotations["example.com/preserve"] != "yes" {
+		t.Errorf("unrelated annotation was not preserved: got %#v", got.Annotations)
+	}
+}
+
+func TestEnsurePodGroup_UnsetTopologyKeyRemovesOwnedAnnotationOnly(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 3 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	existing, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	existing.Annotations = map[string]string{
+		query.AnnotationTopologyKey: "stale.example.com/domain",
+		"example.com/preserve":      "yes",
+	}
+	c := newPodGroupClient(t, isvc, existing)
+
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
+		t.Fatalf("EnsurePodGroup: %v", err)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(existing), got); err != nil {
+		t.Fatalf("get PodGroup: %v", err)
+	}
+	if _, found := got.Annotations[query.AnnotationTopologyKey]; found {
+		t.Errorf("unset topology key must remove owned annotation, got %#v", got.Annotations)
+	}
+	if got.Annotations["example.com/preserve"] != "yes" {
+		t.Errorf("unrelated annotation was not preserved: got %#v", got.Annotations)
+	}
+}
+
+func TestEnsurePodGroup_TopologyAnnotationDriftTriggersUpdate(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	plan := core.ComponentPlan{
+		Component:            workload.ComponentEngine,
+		InstanceReadyTimeout: 3 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
+	}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	existing, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	existing.Annotations[query.AnnotationTopologyKey] = "stale.example.com/domain"
+	existing.Annotations["example.com/preserve"] = "yes"
+	cc := newCountingClient(newPodGroupClient(t, isvc, existing))
+
+	if err := EnsurePodGroup(context.Background(), cc, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
+		t.Fatalf("EnsurePodGroup: %v", err)
+	}
+	if cc.updates != 1 {
+		t.Fatalf("topology-only drift update count: got %d want 1", cc.updates)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := cc.Get(context.Background(), client.ObjectKeyFromObject(existing), got); err != nil {
+		t.Fatalf("get PodGroup: %v", err)
+	}
+	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey || got.Annotations["example.com/preserve"] != "yes" {
+		t.Errorf("annotations after topology drift correction: got %#v", got.Annotations)
+	}
+}
+
+func TestReconcileDesiredTopologyWithLivePods_MissingGroupAmbiguousAffinityFailsClosed(t *testing.T) {
+	desired := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+		Annotations: map[string]string{query.AnnotationTopologyKey: "topology.example.com/new"},
+	}}
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelRunner: "leader"}},
+	}}
+
+	err := reconcileDesiredTopologyWithLivePods(
+		desired, &schedulingv1alpha1.PodGroup{}, false,
+		"llama", workload.ComponentEngine, 0, pods)
+	if err == nil {
+		t.Fatal("ambiguous live topology with nonempty desired key must fail closed")
+	}
+	if got := desired.Annotations[query.AnnotationTopologyKey]; got != "topology.example.com/new" {
+		t.Fatalf("failed reconciliation mutated desired topology: got %q", got)
+	}
+}
+
+func TestReconcileDesiredTopologyWithLivePods_DoesNotPromoteUserAffinity(t *testing.T) {
+	desired := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+		Annotations: map[string]string{query.AnnotationTopologyKey: "topology.example.com/desired"},
+	}}
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelRunner: "worker"}},
+		Spec: corev1.PodSpec{Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				TopologyKey: "kubernetes.io/hostname",
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"app": "cache",
+				}},
+			}},
+		}}},
+	}}
+
+	err := reconcileDesiredTopologyWithLivePods(
+		desired, &schedulingv1alpha1.PodGroup{}, false,
+		"llama", workload.ComponentEngine, 0, pods)
+	if err == nil {
+		t.Fatal("unrelated user affinity must not prove the gang topology")
+	}
+	if got := desired.Annotations[query.AnnotationTopologyKey]; got != "topology.example.com/desired" {
+		t.Fatalf("user affinity replaced desired topology with %q", got)
+	}
+}
+
+func TestGeneratedTopologyKeyFromPods_AcceptsOnlyOMELeaderSelector(t *testing.T) {
+	const generatedKey = "topology.example.com/domain"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+			query.LabelRunner:      "worker",
+			query.LabelInstanceIdx: "0",
+		}},
+		Spec: corev1.PodSpec{Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					TopologyKey: "kubernetes.io/hostname",
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						"app": "cache",
+					}},
+				},
+				{
+					TopologyKey: generatedKey,
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						constants.InferenceServicePodLabelKey: "llama",
+						constants.OMEComponentLabel:           string(workload.ComponentEngine),
+						query.LabelInstanceIdx:                "0",
+						query.LabelRunner:                     "leader",
+					}},
+				},
+			},
+		}}},
+	}
+
+	key, ok, err := GeneratedTopologyKeyFromPods("llama", workload.ComponentEngine, []*corev1.Pod{pod})
+	if err != nil || !ok || key != generatedKey {
+		t.Fatalf("generated topology: got %q ok=%v err=%v want %q", key, ok, err, generatedKey)
+	}
+
+	pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution =
+		pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[:1]
+	if key, ok, err := GeneratedTopologyKeyFromPods("llama", workload.ComponentEngine, []*corev1.Pod{pod}); err != nil || ok {
+		t.Fatalf("user-only affinity result: key=%q ok=%v err=%v", key, ok, err)
+	}
+}
+
+func TestGeneratedTopologyKeyFromPods_RejectsConflictingOMEKeys(t *testing.T) {
+	makeWorker := func(index, key string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+				query.LabelRunner:      "worker",
+				query.LabelInstanceIdx: index,
+			}},
+			Spec: corev1.PodSpec{Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+					TopologyKey: key,
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						constants.InferenceServicePodLabelKey: "llama",
+						constants.OMEComponentLabel:           string(workload.ComponentEngine),
+						query.LabelInstanceIdx:                index,
+						query.LabelRunner:                     "leader",
+					}},
+				}},
+			}}},
+		}
+	}
+
+	_, _, err := GeneratedTopologyKeyFromPods("llama", workload.ComponentEngine, []*corev1.Pod{
+		makeWorker("0", "topology.example.com/a"),
+		makeWorker("1", "topology.example.com/b"),
+	})
+	if err == nil {
+		t.Fatal("conflicting generated topology keys must fail closed")
+	}
 }
 
 // TestEnsurePodGroup_Idempotent — two ensures back-to-back leave
@@ -373,7 +569,11 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 func TestEnsurePodGroup_Idempotent(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{
+		Component:            workload.ComponentEngine,
+		InstanceReadyTimeout: 5 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
+	}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
 
 	for i := 0; i < 2; i++ {
@@ -388,34 +588,28 @@ func TestEnsurePodGroup_Idempotent(t *testing.T) {
 	if got.Spec.MinMember != 3 {
 		t.Errorf("MinMember after idempotent ensure: got %d want 3", got.Spec.MinMember)
 	}
+	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey {
+		t.Errorf("topology annotation after idempotent ensure: got %#v want %q", got.Annotations, plan.TopologyKey)
+	}
 }
 
 // TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift pins the
 // steady-state fast path: EnsurePodGroup must do its own cache Get up
 // front and, on the no-drift re-ensure, return after that Get without
-// touching CreateOrUpdate (no Create/Update/Patch).
-//
-// A ResourceVersion / counting-Update-only assertion is NOT enough to
-// guard the fast path: the fallback CreateOrUpdate is itself a no-op on
-// a matching object (Get -> DeepEqual match -> OperationResultNone, no
-// Update), so it never bumps RV or issues an Update either. The signal
-// that the fast path actually runs is the extra pre-check Get on the
-// write path: with the fast path, the create-from-absent ensure issues
-// TWO Gets (the fast-path probe that returns NotFound, then
-// CreateOrUpdate's own Get); without it, only CreateOrUpdate's single
-// Get. Reverting gang.go/podgroup.go collapses that to one Get and
-// fails this test.
+// touching the write path (no Create/Update/Patch).
 func TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	cc := newCountingClient(newPodGroupClient(t, isvc))
-	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{
+		Component:            workload.ComponentEngine,
+		InstanceReadyTimeout: 5 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
+	}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
 
 	// First ensure: object absent -> must be created. The fast path runs
-	// its NotFound probe Get BEFORE handing off to CreateOrUpdate, so we
-	// expect 2 Gets and exactly 1 Create. Reverted code does a single
-	// Get (CreateOrUpdate's) -> getsCreate == 1, which fails the check
-	// below.
+	// its NotFound probe Get before the direct Create, so we expect one Get
+	// and exactly one Create.
 	cc.reset()
 	if err := EnsurePodGroup(context.Background(), cc, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup (create): %v", err)
@@ -423,12 +617,23 @@ func TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift(t *testing.T) {
 	if cc.creates != 1 {
 		t.Errorf("create ensure: Create count = %d, want 1", cc.creates)
 	}
-	if cc.gets != 2 {
-		t.Errorf("create ensure: Get count = %d, want 2 (fast-path pre-check probe + CreateOrUpdate's Get). "+
-			"A count of 1 means the fast-path Get was removed — fast path reverted.", cc.gets)
+	if cc.gets != 1 {
+		t.Errorf("create ensure: Get count = %d, want 1 fast-path probe", cc.gets)
 	}
 
-	// Second ensure: object now matches desired -> the fast path must
+	// Add an unrelated annotation between passes. It is outside this
+	// controller's field ownership, so it must neither trigger a write nor be
+	// removed by the next ensure.
+	seeded := &schedulingv1alpha1.PodGroup{}
+	if err := cc.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-engine-0"}, seeded); err != nil {
+		t.Fatalf("get before adding unrelated annotation: %v", err)
+	}
+	seeded.Annotations["example.com/preserve"] = "yes"
+	if err := cc.Update(context.Background(), seeded); err != nil {
+		t.Fatalf("add unrelated annotation: %v", err)
+	}
+
+	// Second ensure: all owned fields match desired -> the fast path must
 	// short-circuit after a single Get with NO write.
 	cc.reset()
 	if err := EnsurePodGroup(context.Background(), cc, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
@@ -439,7 +644,7 @@ func TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift(t *testing.T) {
 			cc.creates, cc.updates, cc.patches)
 	}
 	if cc.gets != 1 {
-		t.Errorf("no-drift ensure: Get count = %d, want 1 (fast-path probe only, no CreateOrUpdate)", cc.gets)
+		t.Errorf("no-drift ensure: Get count = %d, want 1 (fast-path probe only, no write)", cc.gets)
 	}
 
 	// Sanity: the PodGroup that survives the no-drift pass still carries
@@ -451,14 +656,17 @@ func TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift(t *testing.T) {
 	if got.Spec.MinMember != 3 {
 		t.Errorf("MinMember after no-drift ensure: got %d want 3", got.Spec.MinMember)
 	}
+	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey || got.Annotations["example.com/preserve"] != "yes" {
+		t.Errorf("annotations after no-drift ensure: got %#v", got.Annotations)
+	}
 }
 
-// TestEnsurePodGroup_DriftStillWritesViaCreateOrUpdate is the
+// TestEnsurePodGroup_DriftStillWrites is the
 // counterpart to the fast-path skip: when the cached object drifts from
 // desired, podGroupMatches must return false and EnsurePodGroup must
-// fall through to CreateOrUpdate and issue exactly one write. Pins that
+// fall through to the update path and issue exactly one write. Pins that
 // the fast path never swallows a real drift.
-func TestEnsurePodGroup_DriftStillWritesViaCreateOrUpdate(t *testing.T) {
+func TestEnsurePodGroup_DriftStillWrites(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	stale := &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -540,7 +748,7 @@ func newPodGroupISVC(ns, name string) *v1beta1.InferenceService {
 // countingClient wraps a client.Client (via an interceptor) and tallies
 // the Get / Create / Update / Patch calls EnsurePodGroup makes, so a
 // test can prove the steady-state fast path reads before writing and
-// skips CreateOrUpdate entirely on the no-drift path. reset() zeroes the
+// skips the write path entirely on no drift. reset() zeroes the
 // counters between phases of a single test.
 type countingClient struct {
 	client.Client

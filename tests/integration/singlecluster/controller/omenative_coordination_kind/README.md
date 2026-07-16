@@ -35,6 +35,8 @@ vs. recreate updates.
 | BlueGreen + RatioBalanced load | loadtest_kind |
 | Pause/resume Idle | pause_kind |
 | Pause/resume mid-rollout | pause_midrollout_kind |
+| InferenceReplica pause blocks pod recreation | inference_replica_pause_kind |
+| Multi-pod topology PodGroup + worker affinity | topology_podgroup_kind |
 | Single-replica safe default | single_replica_kind |
 | In-place opt-in | inplace_kind |
 | Sequential | sequential_kind |
@@ -65,6 +67,7 @@ vs. recreate updates.
 ```sh
 make test-kind                                  # full suite
 GINKGO_FOCUS='PD per-Component' make test-kind  # narrow to specific specs
+make test-kind-scheduler                        # focused controller + ome-scheduler contract
 make test-kind-clean                            # delete leftover clusters
 ```
 
@@ -88,6 +91,11 @@ KIND_KEEP_CLUSTER=true \
   the docker build when the source hasn't changed.
 - `tests/integration/dep-crds/prometheus-operator/` PodMonitor CRD is
   applied at suite startup (the OMENative reconciler hard-requires it).
+- `tests/integration/dep-crds/scheduler-plugins/` PodGroup CRD is
+  applied so multi-pod topology and gang object wiring run end to end.
+- This suite deliberately keeps KIND's default scheduler. The separate
+  `ome_scheduler_kind` suite owns custom-scheduler admission and topology
+  placement so the large rollout suite does not duplicate that setup.
 - The suite uses the production controller code paths (no mocks /
   fakes other than the fake-serving HTTP server) — bugs caught here
   reflect real controller behavior.

@@ -271,6 +271,109 @@ func TestRevisionHash_WorkerPodSpecAffectsHash(t *testing.T) {
 	}
 }
 
+// TestRevisionHash_TopologyKeyAffectsHash pins that a topology-only edit
+// rolls the immutable worker affinity and its PodGroup contract together.
+func TestRevisionHash_TopologyKeyAffectsHash(t *testing.T) {
+	leader := basicPodSpecForRevision()
+	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
+
+	hA, _, err := HashWithWorkerAndTopology(leader, worker, nil, "topology.example.com/domain-a", nil, "")
+	if err != nil {
+		t.Fatalf("HashWithWorkerAndTopology A: %v", err)
+	}
+	hB, _, err := HashWithWorkerAndTopology(leader, worker, nil, "topology.example.com/domain-b", nil, "")
+	if err != nil {
+		t.Fatalf("HashWithWorkerAndTopology B: %v", err)
+	}
+	if hA == hB {
+		t.Errorf("topology-only edit must change hash: hA=%q hB=%q", hA, hB)
+	}
+}
+
+func TestRevisionHash_TopologyKeyIgnoredWithoutWorker(t *testing.T) {
+	leader := basicPodSpecForRevision()
+
+	legacyHash, legacyRaw, err := Hash(leader, nil, nil, "")
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	topologyHash, topologyRaw, err := HashWithWorkerAndTopology(
+		leader, nil, nil, "topology.example.com/ignored", nil, "")
+	if err != nil {
+		t.Fatalf("HashWithWorkerAndTopology: %v", err)
+	}
+	if legacyHash != topologyHash || !bytes.Equal(legacyRaw, topologyRaw) {
+		t.Fatalf("single-pod topology must not change revision: hash %q/%q raw %s/%s",
+			legacyHash, topologyHash, legacyRaw, topologyRaw)
+	}
+}
+
+func TestRevisionPayload_TopologyPresenceSurvivesRoundTrip(t *testing.T) {
+	leader := basicPodSpecForRevision()
+	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
+	const topologyKey = "topology.example.com/domain"
+
+	_, raw, err := HashWithWorkerAndTopology(leader, worker, nil, topologyKey, nil, "")
+	if err != nil {
+		t.Fatalf("HashWithWorkerAndTopology: %v", err)
+	}
+	payload, err := PayloadFromControllerRevision(&appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-revision"},
+		Data:       runtime.RawExtension{Raw: raw},
+	})
+	if err != nil {
+		t.Fatalf("PayloadFromControllerRevision: %v", err)
+	}
+	if payload.TopologyKey == nil || *payload.TopologyKey != topologyKey {
+		t.Fatalf("TopologyKey: got %#v want %q", payload.TopologyKey, topologyKey)
+	}
+
+	_, emptyRaw, err := HashWithWorkerAndTopology(leader, worker, nil, "", nil, "")
+	if err != nil {
+		t.Fatalf("HashWithWorkerAndTopology empty: %v", err)
+	}
+	emptyPayload, err := PayloadFromControllerRevision(&appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "topology-free-revision"},
+		Data:       runtime.RawExtension{Raw: emptyRaw},
+	})
+	if err != nil {
+		t.Fatalf("topology-free PayloadFromControllerRevision: %v", err)
+	}
+	if emptyPayload.TopologyKey != nil {
+		t.Fatalf("topology-free TopologyKey: got %#v want nil", emptyPayload.TopologyKey)
+	}
+
+	legacyPayload, err := PayloadFromControllerRevision(&appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy-revision"},
+		Data: runtime.RawExtension{Raw: []byte(
+			`{"podSpec":{"containers":[{"name":"main","image":"v1","resources":{}}]},"podMeta":null}`)},
+	})
+	if err != nil {
+		t.Fatalf("legacy PayloadFromControllerRevision: %v", err)
+	}
+	if legacyPayload.TopologyKey != nil {
+		t.Fatalf("legacy TopologyKey: got %#v want nil", legacyPayload.TopologyKey)
+	}
+}
+
+// TestRevisionHash_EmptyTopologyKeyIsBackwardCompatible pins that leaving the
+// optional key unset does not manufacture a new multi-pod revision.
+func TestRevisionHash_EmptyTopologyKeyIsBackwardCompatible(t *testing.T) {
+	leader := &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "test:v1"}}}
+	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "test:v1"}}}
+	wantRaw := []byte(`{"podSpec":{"containers":[{"name":"leader","image":"test:v1","resources":{}}]},"podMeta":null,"workerPodSpec":{"containers":[{"name":"worker","image":"test:v1","resources":{}}]}}`)
+	const wantHash = "c3a098f7"
+
+	topologyHash, topologyRaw, err := HashWithWorkerAndTopology(leader, worker, nil, "", nil, "")
+	if err != nil {
+		t.Fatalf("HashWithWorkerAndTopology: %v", err)
+	}
+	if topologyHash != wantHash || !bytes.Equal(topologyRaw, wantRaw) {
+		t.Fatalf("empty topology changed legacy revision: hash got/want %q/%q raw got/want %s/%s",
+			topologyHash, wantHash, topologyRaw, wantRaw)
+	}
+}
+
 // TestRevisionHash_NilWorkerSpecBackwardCompat pins that
 // HashWithWorker(.., nil) hashes identically to Hash(..), so existing
 // single-pod revisions stay valid after the multi-pod field is

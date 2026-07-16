@@ -75,6 +75,10 @@ type DataPayload struct {
 	PodSpec       *corev1.PodSpec    `json:"podSpec"`
 	PodMeta       *metav1.ObjectMeta `json:"podMeta"`
 	WorkerPodSpec *corev1.PodSpec    `json:"workerPodSpec,omitempty"`
+	// TopologyKey records explicit topology intent for multi-pod revisions.
+	// It is omitted when topology is unset so existing topology-free revisions
+	// retain their canonical payload and hash.
+	TopologyKey *string `json:"topologyKey,omitempty"`
 }
 
 // Hash returns the deterministic hash that becomes the
@@ -127,13 +131,30 @@ func Hash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCo
 // spec — produced by delete-and-recreate cycles — emit distinct CR names.
 // See Hash for the rationale.
 func HashWithWorker(template, workerSpec *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32, ownerUID types.UID) (string, []byte, error) {
+	return HashWithWorkerAndTopology(template, workerSpec, templateMeta, "", collisionCount, ownerUID)
+}
+
+// HashWithWorkerAndTopology extends HashWithWorker with the topology key used
+// to render immutable worker affinity and the matching PodGroup contract.
+// Multi-pod revisions record non-empty topology intent. An empty topology key
+// preserves the legacy topology-free payload and hash; single-pod hashes remain
+// unchanged regardless of the supplied key.
+func HashWithWorkerAndTopology(template, workerSpec *corev1.PodSpec, templateMeta *metav1.ObjectMeta, topologyKey string, collisionCount *int32, ownerUID types.UID) (string, []byte, error) {
 	if template == nil {
 		return "", nil, fmt.Errorf("nil pod template")
+	}
+	// Topology is meaningful only for a leader+worker workload. The public API
+	// documents it as ignored for single-pod Components, so it must not produce
+	// a phantom revision when no worker template exists.
+	var topologyKeyPayload *string
+	if workerSpec != nil && topologyKey != "" {
+		topologyKeyPayload = &topologyKey
 	}
 	raw, err := json.Marshal(DataPayload{
 		PodSpec:       template,
 		PodMeta:       TemplateMeta(templateMeta),
 		WorkerPodSpec: workerSpec,
+		TopologyKey:   topologyKeyPayload,
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal revision payload: %w", err)

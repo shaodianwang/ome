@@ -104,6 +104,7 @@ type fixtureOptions struct {
 	engineImage       string
 	engineMinReplicas int
 	engineAnnots      map[string]string
+	engineTopologyKey string
 	// engineWorkerSize > 0 promotes the engine to a multi-pod gang
 	// Instance: a Leader + N workers per Instance (total = N+1 pods).
 	// Zero leaves the engine as single-pod (default).
@@ -172,6 +173,12 @@ func WithEngineAnnotation(k, v string) FixtureOption {
 // selector tightening.
 func WithEngineWorkerSize(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.engineWorkerSize = n }
+}
+
+// WithEngineTopologyKey configures the topology domain used by multi-pod
+// worker affinity and the corresponding PodGroup annotation.
+func WithEngineTopologyKey(key string) FixtureOption {
+	return func(o *fixtureOptions) { o.engineTopologyKey = key }
 }
 
 // WithEngineUpdateStrategy sets Spec.Engine.Lifecycle.UpdateStrategy.Type.
@@ -390,6 +397,10 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 			Name:  "ome-container",
 			Image: o.engineImage,
 		}}},
+	}
+	if o.engineTopologyKey != "" {
+		topologyKey := o.engineTopologyKey
+		engine.TopologyKey = &topologyKey
 	}
 	if o.engineMinReplicas != 1 {
 		mr := o.engineMinReplicas

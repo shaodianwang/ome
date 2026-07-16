@@ -94,6 +94,15 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // the nil check correct.
 func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
+	// The parent annotation is the operator-facing source of truth whenever the
+	// parent is readable. This deliberately overrides both stale true and stale
+	// false values on the projected IR: a component render/projector failure must
+	// not let an in-flight IR continue after the operator pauses, and annotation
+	// removal must resume it without waiting for a successful projection pass.
+	// When the parent is unavailable, fall back to the last projected IR value.
+	if parent != nil {
+		desired.Paused = parent.Annotations[constants.PausedRolloutAnnotation] == "true"
+	}
 	// Thread the controller's cached gang-availability into DesiredSpec —
 	// EnsurePodGroups gates per-Instance PodGroup creation on this flag.
 	desired.GangSchedulingAvailable = r.GangSchedulingAvailable

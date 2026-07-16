@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
@@ -337,6 +338,44 @@ func TestBuildReconcileInput_ThreadsGangSchedulingAvailable(t *testing.T) {
 	r.GangSchedulingAvailable = false
 	g.Expect(r.buildReconcileInput(context.Background(), ir, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeFalse(),
 		"flag false ⇒ DesiredSpec false ⇒ EnsurePodGroups skips (CRD absent / degradation surface)")
+}
+
+func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) {
+	tests := []struct {
+		name       string
+		irPaused   bool
+		parent     *v1beta1.InferenceService
+		wantPaused bool
+	}{
+		{
+			name:       "readable parent pause overrides stale false IR projection",
+			parent:     &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{constants.PausedRolloutAnnotation: "true"}}},
+			wantPaused: true,
+		},
+		{
+			name:       "readable parent removal overrides stale true IR projection",
+			irPaused:   true,
+			parent:     &v1beta1.InferenceService{},
+			wantPaused: false,
+		},
+		{
+			name:       "unreadable parent falls back to projected IR value",
+			irPaused:   true,
+			wantPaused: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := newReconciler(t)
+			ir := baselineIR("llama-engine", "default", 1)
+			ir.Spec.Paused = tc.irPaused
+			got := r.buildReconcileInput(context.Background(), ir, tc.parent).DesiredSpec.Paused
+			if got != tc.wantPaused {
+				t.Fatalf("DesiredSpec.Paused: got %v want %v", got, tc.wantPaused)
+			}
+		})
+	}
 }
 
 // TestBuildReconcileInput_GateUsesFreshIRStatus pins the IR-path

@@ -38,6 +38,48 @@ func stringPtr(s string) *string {
 	return &s
 }
 
+func TestEngineReconcileDeployment_ProjectsMergedTopologyKey(t *testing.T) {
+	g := gomega.NewWithT(t)
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		v1beta1.AddToScheme,
+		v1.AddToScheme,
+		appsv1.AddToScheme,
+		autoscalingv2.AddToScheme,
+		kedav1.AddToScheme,
+	} {
+		g.Expect(add(scheme)).To(gomega.Succeed())
+	}
+	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+	workerSize := 1
+	topologyKey := "topology.example.com/domain"
+	engineSpec := &v1beta1.EngineSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
+		Leader:                 &v1beta1.LeaderSpec{},
+		Worker:                 &v1beta1.WorkerSpec{Size: &workerSize},
+		TopologyKey:            &topologyKey,
+	}
+	engine := NewEngine(
+		c, fake.NewClientset(), c, nil, nil, scheme, &controllerconfig.InferenceServicesConfig{},
+		constants.OMENative, nil, nil, engineSpec, nil, "", nil, nil,
+	).(*Engine)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "topology", Namespace: "default", UID: types.UID("topology-uid")},
+	}
+	g.Expect(c.Create(context.Background(), &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{
+		Name: "topology-engine", Namespace: "default", UID: types.UID("topology-engine-uid"),
+	}})).To(gomega.Succeed())
+	leaderPodSpec := &v1.PodSpec{Containers: []v1.Container{{Name: "leader", Image: "test:v1"}}}
+	workerPodSpec := &v1.PodSpec{Containers: []v1.Container{{Name: "worker", Image: "test:v1"}}}
+
+	_, err := engine.reconcileDeployment(context.Background(), isvc, metav1.ObjectMeta{}, leaderPodSpec, 1, workerPodSpec)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	ir := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "topology-engine"}, ir)).To(gomega.Succeed())
+	g.Expect(ir.Spec.TopologyKey).NotTo(gomega.BeNil())
+	g.Expect(*ir.Spec.TopologyKey).To(gomega.Equal(topologyKey))
+}
+
 func TestEngineReconcile(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

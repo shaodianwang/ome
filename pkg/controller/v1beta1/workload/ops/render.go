@@ -550,35 +550,10 @@ func buildInstancePeerHostnames(isvcName string, component workload.ComponentTyp
 	return hosts
 }
 
-// GKE TPU node-label scheme. A multi-host TPU slice spans several nodes that
-// all share one cloud.google.com/gke-tpu-partition-<topology>-id value; the
-// topology (e.g. "2x2x2") comes from the workload's
-// cloud.google.com/gke-tpu-topology nodeSelector. The partition-id label key is
-// derived per-topology, so this generalizes to any multi-host shape, not just
-// 2x2x2.
-const (
-	gkeTPUTopologyNodeSelectorKey = "cloud.google.com/gke-tpu-topology"
-	gkeTPUPartitionLabelPrefix    = "cloud.google.com/gke-tpu-partition-"
-	gkeTPUPartitionLabelSuffix    = "-id"
-)
-
 // injectGangDomainAffinity co-locates a multi-node gang's worker pods onto the
-// SAME topology domain as their Instance's leader — a TPU slice for TPU
-// workloads, or any network / NVLink domain (e.g. GPU MNNVL) named by a
-// user-supplied node-label key. A multi-node gang only works when every pod
-// lands in one domain: cross-host TPU runtimes (JAX/libtpu START_SESSION) won't
-// form a session across two slices, and high-bandwidth GPU collectives degrade
-// or fail across domains. GKE provides the TPU case for LWS pods via a webhook;
-// OMENative supplies both cases natively for any multi-node gang worker.
-//
-// The domain topologyKey is resolved per pod:
-//   - TPU pods (request google.com/tpu) derive it from the GKE
-//     cloud.google.com/gke-tpu-topology nodeSelector — the per-topology slice
-//     partition label. Unchanged from the original TPU-only behavior.
-//   - Otherwise it's the Component's resolved spec topologyKey (plan.TopologyKey),
-//     the effective ISVC↔runtime value the user supplied.
-//
-// Empty resolved key → no-op (the field is opt-in for non-TPU gangs).
+// SAME topology domain as their Instance's leader. The domain is the explicit
+// effective per-Instance topology key. OME does not infer provider-specific
+// topology labels; an empty key is a non-blocking no-op.
 //
 // Worker-follows-leader (not mutual affinity) by design: a required mutual
 // affinity would deadlock the gang since the first-scheduled pod has no peer to
@@ -598,20 +573,7 @@ func injectGangDomainAffinity(pod *corev1.Pod, plan workload.ComponentPlan, inst
 		return
 	}
 
-	// Resolve the domain topologyKey. TPU pods derive it from their own
-	// TPU-topology nodeSelector; everything else uses the resolved spec key.
-	var topologyKey string
-	if podRequestsResource(pod, constants.GoogleTPUResourceType) {
-		// Absent the TPU-topology nodeSelector we can't name the right
-		// partition label, so skip rather than emit a broken affinity.
-		topology := pod.Spec.NodeSelector[gkeTPUTopologyNodeSelectorKey]
-		if topology == "" {
-			return
-		}
-		topologyKey = gkeTPUPartitionLabelPrefix + topology + gkeTPUPartitionLabelSuffix
-	} else {
-		topologyKey = plan.TopologyKey
-	}
+	topologyKey := plan.TopologyKeyForInstance(inst.Index)
 	if topologyKey == "" {
 		return
 	}

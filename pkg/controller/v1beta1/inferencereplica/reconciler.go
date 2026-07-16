@@ -41,6 +41,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	workloadpodgroup "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -65,9 +66,9 @@ type Reconciler struct {
 	Recorder record.EventRecorder
 
 	// APIReader is the live (uncached) API reader. Used for the
-	// correctness-critical reads in revision bookkeeping where stale
-	// cache contents could cause spurious collisions. Optional; when
-	// nil the cached Client is used.
+	// correctness-critical reads in revision bookkeeping and immutable topology
+	// safety where stale cache contents could cause a collision or split a live
+	// gang across domains. Optional; when nil the cached Client is used.
 	APIReader client.Reader
 
 	// Expectations is the create/delete bookkeeping cache the
@@ -198,6 +199,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	input := r.buildReconcileInput(ctx, ir, parent)
 
+	// Park every in-flight deadline before revision creation, rollback payload
+	// reads, or plan construction can fail. The deferred aggregate path below
+	// remains authoritative for normal gated-pod bookkeeping and for rearming
+	// parked deadlines after unpause; this early edge only makes the pause
+	// circuit breaker resilient to failures that occur before that defer exists.
+	if input.DesiredSpec.Paused {
+		// A paused pass only parks deadlines; the timeout is used solely when
+		// rearming during the normal aggregate path after unpause.
+		if derr := r.reconcileHeldDeadlines(ctx, ir, parent, nil, true, 0); derr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: park paused operation deadlines: %w", derr)
+		}
+	}
+
 	// Spec target ControllerRevision (from the rendered desired). Computed up
 	// front and reported as UpdateRevision so a new spec target stays VISIBLE to
 	// the ISVC even during a rollback — when the actual roll targets the stable
@@ -220,20 +234,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// target (above). The forward-roll machinery then drains the canary pods onto
 	// stable. CR gone (GC'd) → fall through to the normal desired spec.
 	rollTarget := specTarget
+	var rollbackPayload *revision.DataPayload
+	var rollbackRevision *appsv1.ControllerRevision
 	if ir.Spec.Pacing != nil && ir.Spec.Pacing.RollbackToRevision != nil && *ir.Spec.Pacing.RollbackToRevision != "" {
 		cr := &appsv1.ControllerRevision{}
-		switch err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: *ir.Spec.Pacing.RollbackToRevision}, cr); {
+		switch err := r.reader().Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: *ir.Spec.Pacing.RollbackToRevision}, cr); {
 		case err == nil:
 			payload, perr := revision.PayloadFromControllerRevision(cr)
 			if perr != nil {
 				return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: rollback revision payload (ir=%s/%s): %w", ir.Namespace, ir.Name, perr)
 			}
 			if payload != nil && payload.PodSpec != nil {
-				input.DesiredSpec.PodSpec = payload.PodSpec
-				input.DesiredSpec.WorkerPodSpec = payload.WorkerPodSpec
-				input.DesiredSpec.PodTemplateObjectMeta = payload.PodMeta
+				if perr := r.applyRollbackPayload(ctx, ir, &input.DesiredSpec, payload, cr); perr != nil {
+					return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: apply rollback revision %s: %w", cr.Name, perr)
+				}
 				rollTarget = cr
-				log.Info("Canary rollback: rolling Instances back to stable revision", "revision", cr.Name)
+				rollbackPayload = payload
+				rollbackRevision = cr
 			}
 		case apierrors.IsNotFound(err):
 			// stable CR GC'd — nothing to roll back to; proceed normally.
@@ -246,6 +263,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if perr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: build plan (ir=%s/%s): %w",
 			ir.Namespace, ir.Name, perr)
+	}
+
+	// Install status aggregation before PodGroup reconciliation. Besides
+	// counters, the aggregator parks InstanceReadyTimeout deadlines while the
+	// workload is paused. A live-read or PodGroup error must not bypass that
+	// circuit-breaker bookkeeping.
+	defer func() {
+		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget); serr != nil {
+			if err == nil {
+				if apierrors.IsConflict(serr) {
+					result, err = ctrl.Result{Requeue: true}, nil
+					return
+				}
+				result = ctrl.Result{}
+				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
+				return
+			}
+			log.V(1).Error(serr, "Status write also failed; primary error preserved")
+		}
+		r.sweepRevisions(ctx, ir)
+		if priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "" {
+			log.Info("Rollout complete; CurrentRevision promoted",
+				"previousCurrentRevision", priorCurrentRevision,
+				"currentRevision", ir.Status.CurrentRevision)
+		}
+		if !priorAnyFailed && hasFailedInstance(ir.Status.InstanceStatuses) {
+			log.Info("Instance escalation observed; at least one Instance reached Phase=Failed")
+		}
+	}()
+
+	if rollbackPayload != nil {
+		log.Info("Canary rollback: rolling Instances back to stable revision", "revision", rollbackRevision.Name)
 	}
 
 	deps := workload.Deps{
@@ -266,8 +315,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// closes the window where the surge index hasn't yet landed in the
 		// plan the top-level EnsurePodGroups keys off (a gang scheduler
 		// would otherwise reject the surge pods with "PodGroup not found").
-		EnsureGangPodGroup: workloadgang.EnsureSurgePodGroup(r.Client),
 	}
+	deps.EnsureGangPodGroup = workloadgang.EnsureSurgePodGroup(deps)
 
 	// PodGroups must exist BEFORE the first pod of any multi-pod Instance is
 	// created, or the gang scheduler rejects the pods with "PodGroup not
@@ -277,60 +326,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// on DesiredSpec.GangSchedulingAvailable, stamps GangSchedulingUnavailable,
 	// and returns. Runs before the revision/dispatch so the gang is announced
 	// ahead of pod creation.
-	if gerr := workloadgang.EnsurePodGroups(ctx, deps, input, plan); gerr != nil {
+	effectiveTopology, gerr := workloadgang.EnsurePodGroupsWithTopology(ctx, deps, input, plan)
+	if gerr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure pod groups (component=%s): %w", ir.Spec.Component, gerr)
 	}
-
-	// Defer status aggregation so it runs regardless of whether the
-	// workload dispatcher returned a requeue or an error. Status-write
-	// errors don't clobber a real dispatcher error — they only surface
-	// when everything else succeeded. We log the suppressed error at
-	// V(1) so a dispatcher+status double-failure isn't fully invisible.
-	// Reports specTarget (the spec's desired) as UpdateRevision; in a rollback
-	// the roll itself targets rollTarget (stable) but the spec target stays the
-	// reported one so a new revision re-arms the canary.
-	defer func() {
-		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget); serr != nil {
-			if err == nil {
-				// A terminal status conflict is benign — a concurrent writer
-				// bumped the IR and the next reconcile re-reads fresh state.
-				// Requeue instead of surfacing an ERROR-level "Reconciler
-				// error".
-				if apierrors.IsConflict(serr) {
-					result, err = ctrl.Result{Requeue: true}, nil
-					return
-				}
-				// Error-driven requeue: clear any non-zero dispatcher result.
-				// controller-runtime ignores the result when err != nil, so
-				// returning both violates the reconcile contract.
-				result = ctrl.Result{}
-				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
-				return
-			}
-			log.V(1).Error(serr, "Status write also failed; primary error preserved")
-		}
-		// ControllerRevision retention sweep. Runs AFTER the status write
-		// so CollectLiveRevisionNames reads the just-committed
-		// CurrentRevision / UpdateRevision (mirrored onto ir.Status above)
-		// and never sweeps a revision the controller just promoted.
-		// Best-effort: sweepRevisions logs + events on failure but never
-		// fails the reconcile — without this the IR path accumulated
-		// ControllerRevisions unbounded (the gap this fixes; retention was
-		// only ever wired on the now-retired OMENative direct path).
-		r.sweepRevisions(ctx, ir)
-		// State-transition logs: only fire when a real transition
-		// crossed in this reconcile (not on steady-state passes). The
-		// in-memory mirror in aggregateAndWriteStatus means ir.Status
-		// now reflects the post-write counters.
-		if priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "" {
-			log.Info("Rollout complete; CurrentRevision promoted",
-				"previousCurrentRevision", priorCurrentRevision,
-				"currentRevision", ir.Status.CurrentRevision)
-		}
-		if !priorAnyFailed && hasFailedInstance(ir.Status.InstanceStatuses) {
-			log.Info("Instance escalation observed; at least one Instance reached Phase=Failed")
-		}
-	}()
+	plan.InstanceTopologyKeys = effectiveTopology
 
 	// Self-trigger auto-migration for Instances stuck past
 	// MigrationPolicy.ProgressDeadlineSeconds (node failure / wedged
@@ -339,9 +339,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// DetectMigrationRequest (wired in buildReconcileInput) picks up
 	// inside workload.Reconcile below. Reads the parent ISVC's ledger +
 	// aggregated InstanceStatuses; no-op when the parent is unresolved or
-	// ProgressDeadlineSeconds is unset. Runs BEFORE the dispatch so the
-	// request is visible this pass.
-	if parent != nil {
+	// ProgressDeadlineSeconds is unset. Paused workloads skip detection so the
+	// circuit breaker cannot queue a migration that fires immediately on
+	// unpause. Runs BEFORE the dispatch so an allowed request is visible this
+	// pass.
+	if !plan.Paused && parent != nil {
 		if merr := omenativeops.DetectStuckInstancesForISVC(ctx, parent,
 			&v1beta1.ComponentExtensionSpec{Lifecycle: ir.Spec.Lifecycle},
 			r.APIReader, r.Client, r.Recorder, ir.Spec.Component); merr != nil {
@@ -378,6 +380,73 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 	}
 	return result, err
+}
+
+// reader returns the live API reader when configured and preserves the
+// fake-client/test fallback used by controller helpers.
+func (r *Reconciler) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// applyRollbackPayload restores revision-owned render inputs. Explicitly
+// recorded topology is authoritative. A legacy multi-pod revision has no
+// topology field even when its live workers were rendered with OME-generated
+// affinity, so a non-empty current topology requires recovery from live pods;
+// ambiguity fails closed rather than rendering a split gang. When current
+// topology is empty, absence remains a non-blocking topology-free rollback.
+func (r *Reconciler) applyRollbackPayload(ctx context.Context, ir *v1beta1.InferenceReplica, desired *workload.WorkloadDesiredSpec, payload *revision.DataPayload, target *appsv1.ControllerRevision) error {
+	if desired == nil || payload == nil {
+		return nil
+	}
+	currentTopology := desired.TopologyKey
+	desired.PodSpec = payload.PodSpec
+	desired.WorkerPodSpec = payload.WorkerPodSpec
+	desired.PodTemplateObjectMeta = payload.PodMeta
+	desired.TopologyKey = ""
+	if payload.TopologyKey != nil {
+		desired.TopologyKey = *payload.TopologyKey
+		return nil
+	}
+	if payload.WorkerPodSpec == nil {
+		return nil
+	}
+	if ir == nil || target == nil {
+		if currentTopology == "" {
+			return nil
+		}
+		return fmt.Errorf("legacy multi-pod rollback with configured topology requires IR and target revision")
+	}
+	targetHash := query.RevisionHashFromControllerRevisionName(target.Name)
+	if targetHash == "" {
+		return fmt.Errorf("legacy rollback revision %q has no recognizable revision hash", target.Name)
+	}
+	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
+	pods, err := query.ListOMENativePodsByName(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name, component, false)
+	if err != nil {
+		return fmt.Errorf("list live pods for legacy rollback topology recovery: %w", err)
+	}
+	targetPods := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod != nil && pod.Labels[query.LabelRevisionHash] == targetHash {
+			targetPods = append(targetPods, pod)
+		}
+	}
+	recovered, ok, recoveryErr := workloadpodgroup.GeneratedTopologyKeyFromPods(
+		ir.Spec.ParentRef.Name, component, targetPods)
+	if recoveryErr != nil {
+		return fmt.Errorf("legacy rollback revision %q has conflicting OME-generated topology: %w", target.Name, recoveryErr)
+	}
+	if ok {
+		desired.TopologyKey = recovered
+		return nil
+	}
+	if currentTopology == "" {
+		return nil
+	}
+	return fmt.Errorf("legacy rollback revision %q has no unambiguous OME-generated topology among %d live target-revision pods", target.Name, len(targetPods))
 }
 
 // resolveParent fetches the parent ISVC named on the IR's ParentRef so
@@ -517,9 +586,10 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 // The rendered template (input.DesiredSpec.{PodSpec,WorkerPodSpec,
 // PodTemplateObjectMeta}) is a pure projection of the IR spec, so it only
 // changes on a spec edit (generation bump). collisionCount and scopeUID
-// are the remaining hash inputs folded by revision.HashWithWorker, so they
+// are the remaining hash inputs folded by
+// revision.HashWithWorkerAndTopology, so they
 // complete the cache key. On a miss it recomputes via the same
-// HashWithWorker call EnsureControllerRevisionWithWorker would have made,
+// canonical hash call used by the revision creation path,
 // so the (hash, raw) is byte-identical to the unmemoized path.
 //
 // raw is returned by reference (immutable once cached). EnsureController-
@@ -539,9 +609,10 @@ func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workload.R
 		return entry.hash, entry.raw, nil
 	}
 
-	hash, raw, err := revision.HashWithWorker(
+	hash, raw, err := revision.HashWithWorkerAndTopology(
 		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
 		input.DesiredSpec.PodTemplateObjectMeta,
+		input.DesiredSpec.TopologyKey,
 		collisionCount, scopeUID,
 	)
 	if err != nil {

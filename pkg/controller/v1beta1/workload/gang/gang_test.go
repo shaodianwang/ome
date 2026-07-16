@@ -2,6 +2,7 @@ package gang
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,9 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // Test fixtures use a v1beta1.InferenceService stand-in so the
@@ -211,6 +214,327 @@ func TestEnsurePodGroups_MultiPodCRDAvailableCreatesGang(t *testing.T) {
 
 	// Condition=False (gang available, not degraded).
 	assertCondition(t, store, metav1.ConditionFalse, string(workload.ReasonGangSchedulingAvailable))
+}
+
+func TestEnsurePodGroups_HoldsLivePodTopologyUntilGroupIsEmpty(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const oldTopology = "topology.example.com/old"
+	const newTopology = "topology.example.com/new"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	existing := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pgName,
+			Namespace: "prod",
+		},
+		Spec: schedulingv1alpha1.PodGroupSpec{MinMember: 2},
+	}
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "llama-engine-0-worker-0",
+			Namespace: "prod",
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: "llama",
+				constants.OMEComponentLabel:           string(workload.ComponentEngine),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelInstanceIdx:                "0",
+				query.LabelRunner:                     "worker",
+				query.LabelPodGroup:                   pgName,
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},
+			Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+					TopologyKey: oldTopology,
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						constants.InferenceServicePodLabelKey: "llama",
+						constants.OMEComponentLabel:           string(workload.ComponentEngine),
+						query.LabelInstanceIdx:                "0",
+						query.LabelRunner:                     "leader",
+					}},
+				}},
+			}},
+		},
+	}
+	c := newGangClient(t, owner, existing, worker)
+	input, _ := inputWithConditionStore(owner, true, 1, true, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	plan.TopologyKey = newTopology
+
+	effective, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: c}, input, plan)
+	if err != nil {
+		t.Fatalf("EnsurePodGroups with live old-topology pod: %v", err)
+	}
+	if effective[0] != oldTopology {
+		t.Fatalf("effective topology for partial active gang: got %q want %q", effective[0], oldTopology)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(existing), got); err != nil {
+		t.Fatalf("get held PodGroup: %v", err)
+	}
+	if got.Annotations[query.AnnotationTopologyKey] != oldTopology {
+		t.Fatalf("live PodGroup topology changed under immutable pod: got %q want %q",
+			got.Annotations[query.AnnotationTopologyKey], oldTopology)
+	}
+
+	if err := c.Delete(context.Background(), worker); err != nil {
+		t.Fatalf("delete old-topology pod: %v", err)
+	}
+	effective, err = EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: c}, input, plan)
+	if err != nil {
+		t.Fatalf("EnsurePodGroups after group empty: %v", err)
+	}
+	if effective[0] != newTopology {
+		t.Fatalf("effective topology for empty group: got %q want %q", effective[0], newTopology)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(existing), got); err != nil {
+		t.Fatalf("get advanced PodGroup: %v", err)
+	}
+	if got.Annotations[query.AnnotationTopologyKey] != newTopology {
+		t.Fatalf("empty PodGroup topology did not advance: got %q want %q",
+			got.Annotations[query.AnnotationTopologyKey], newTopology)
+	}
+}
+
+func TestEnsurePodGroups_UpgradeAnnotatesLegacyTPUDerivedTopology(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const legacyTopology = "cloud.google.com/gke-tpu-partition-2x2x1-id"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	timeout := int32(300)
+	legacyPG := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: pgName, Namespace: "prod"},
+		Spec: schedulingv1alpha1.PodGroupSpec{
+			MinMember:              2,
+			ScheduleTimeoutSeconds: &timeout,
+		},
+	}
+	worker := topologyWorkerPod("prod", "llama", workload.ComponentEngine, 0, pgName, legacyTopology)
+	c := newGangClient(t, owner, legacyPG, worker)
+	input, _ := inputWithConditionStore(owner, true, 1, true, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+
+	effective, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: c}, input, plan)
+	if err != nil {
+		t.Fatalf("EnsurePodGroupsWithTopology: %v", err)
+	}
+	if effective[0] != legacyTopology {
+		t.Fatalf("legacy TPU topology: got %q want %q", effective[0], legacyTopology)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(legacyPG), got); err != nil {
+		t.Fatalf("get upgraded PodGroup: %v", err)
+	}
+	if got.Annotations[query.AnnotationTopologyKey] != legacyTopology {
+		t.Fatalf("upgraded PodGroup annotation: got %#v", got.Annotations)
+	}
+}
+
+func TestEnsurePodGroups_UsesAPIReaderForTopologySafety(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const oldTopology = "topology.example.com/live-old"
+	const newTopology = "topology.example.com/desired-new"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	existing := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: pgName, Namespace: "prod"},
+		Spec:       schedulingv1alpha1.PodGroupSpec{MinMember: 2},
+	}
+	worker := topologyWorkerPod("prod", "llama", workload.ComponentEngine, 0, pgName, oldTopology)
+
+	// The cached writer has not observed the worker yet; the live reader has.
+	// Reconciliation must retain the immutable live key rather than advance to
+	// the desired key visible through the stale cache.
+	cached := newGangClient(t, owner, existing)
+	live := newGangClient(t, owner, existing.DeepCopy(), worker)
+	input, _ := inputWithConditionStore(owner, true, 1, true, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	plan.TopologyKey = newTopology
+
+	effective, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: cached, APIReader: live}, input, plan)
+	if err != nil {
+		t.Fatalf("EnsurePodGroupsWithTopology: %v", err)
+	}
+	if effective[0] != oldTopology {
+		t.Fatalf("effective topology from live reader: got %q want %q", effective[0], oldTopology)
+	}
+}
+
+func TestEnsurePodGroups_LeaderOnlyTrustsExistingPodGroupTopology(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const heldTopology = "topology.example.com/held"
+	const desiredTopology = "topology.example.com/new"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	existing := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        pgName,
+			Namespace:   "prod",
+			Annotations: map[string]string{query.AnnotationTopologyKey: heldTopology},
+		},
+		Spec: schedulingv1alpha1.PodGroupSpec{MinMember: 2},
+	}
+	leader := topologyLeaderPod("prod", "llama", workload.ComponentEngine, 0, pgName)
+	c := newGangClient(t, owner, existing, leader)
+	input, _ := inputWithConditionStore(owner, true, 1, true, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	plan.TopologyKey = desiredTopology
+
+	effective, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: c}, input, plan)
+	if err != nil {
+		t.Fatalf("EnsurePodGroupsWithTopology: %v", err)
+	}
+	if effective[0] != heldTopology {
+		t.Fatalf("leader-only gang topology: got %q want held %q", effective[0], heldTopology)
+	}
+}
+
+func TestEnsurePodGroups_CRDMissingPreservesLiveTopology(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const oldTopology = "topology.example.com/live-old"
+	const newTopology = "topology.example.com/desired-new"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	worker := topologyWorkerPod("prod", "llama", workload.ComponentEngine, 0, pgName, oldTopology)
+	cached := newGangClient(t, owner)
+	live := newGangClient(t, owner, worker)
+	input, _ := inputWithConditionStore(owner, true, 1, false, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	plan.TopologyKey = newTopology
+
+	effective, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: cached, APIReader: live}, input, plan)
+	if err != nil {
+		t.Fatalf("EnsurePodGroupsWithTopology without CRD: %v", err)
+	}
+	if effective[0] != oldTopology {
+		t.Fatalf("missing-CRD effective topology: got %q want live %q", effective[0], oldTopology)
+	}
+}
+
+func TestEnsurePodGroups_CRDMissingLeaderOnlyWithDesiredTopologyFailsClosed(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	leader := topologyLeaderPod("prod", "llama", workload.ComponentEngine, 0, pgName)
+	cached := newGangClient(t, owner)
+	live := newGangClient(t, owner, leader)
+	input, _ := inputWithConditionStore(owner, true, 1, false, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	plan.TopologyKey = "topology.example.com/desired"
+
+	if _, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: cached, APIReader: live}, input, plan); err == nil {
+		t.Fatal("leader-only partial create without PodGroup state must hold when desired topology is nonempty")
+	}
+}
+
+func TestEnsurePodGroups_CRDMissingLeaderOnlyWithoutDesiredTopologyContinues(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 0)
+	leader := topologyLeaderPod("prod", "llama", workload.ComponentEngine, 0, pgName)
+	cached := newGangClient(t, owner)
+	live := newGangClient(t, owner, leader)
+	input, _ := inputWithConditionStore(owner, true, 1, false, "")
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+
+	effective, err := EnsurePodGroupsWithTopology(context.Background(), workload.Deps{Client: cached, APIReader: live}, input, plan)
+	if err != nil {
+		t.Fatalf("intentional no-topology partial create must continue: %v", err)
+	}
+	if key, found := effective[0]; !found || key != "" {
+		t.Fatalf("intentional no-topology override: got %q found=%v", key, found)
+	}
+}
+
+func TestEnsureSurgePodGroup_UsesAPIReaderForTopologySafety(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const oldTopology = "topology.example.com/live-old"
+	const newTopology = "topology.example.com/desired-new"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 1)
+	existing := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: pgName, Namespace: "prod"},
+		Spec:       schedulingv1alpha1.PodGroupSpec{MinMember: 2},
+	}
+	worker := topologyWorkerPod("prod", "llama", workload.ComponentEngine, 1, pgName, oldTopology)
+	cached := newGangClient(t, owner, existing)
+	live := newGangClient(t, owner, existing.DeepCopy(), worker)
+	input, _ := inputWithConditionStore(owner, true, 1, true, "")
+	plan := planFor(workload.ComponentEngine, []int32{1}, true, 1, 5*time.Minute)
+	plan.TopologyKey = newTopology
+	deps := workload.Deps{Client: cached, APIReader: live}
+
+	key, err := EnsureSurgePodGroup(deps)(context.Background(), input, plan, plan.Instances[0])
+	if err != nil {
+		t.Fatalf("EnsureSurgePodGroup: %v", err)
+	}
+	if key != oldTopology {
+		t.Fatalf("surge effective topology from live reader: got %q want %q", key, oldTopology)
+	}
+}
+
+func TestEnsureSurgePodGroup_CRDMissingPreservesLiveTopology(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	const oldTopology = "topology.example.com/live-old"
+	const newTopology = "topology.example.com/desired-new"
+	pgName := query.PodGroupName("llama", workload.ComponentEngine, 1)
+	worker := topologyWorkerPod("prod", "llama", workload.ComponentEngine, 1, pgName, oldTopology)
+	cached := newGangClient(t, owner)
+	live := newGangClient(t, owner, worker)
+	input, _ := inputWithConditionStore(owner, true, 1, false, "")
+	plan := planFor(workload.ComponentEngine, []int32{1}, true, 1, 5*time.Minute)
+	plan.TopologyKey = newTopology
+	deps := workload.Deps{Client: cached, APIReader: live}
+
+	key, err := EnsureSurgePodGroup(deps)(context.Background(), input, plan, plan.Instances[0])
+	if err != nil {
+		t.Fatalf("EnsureSurgePodGroup without CRD: %v", err)
+	}
+	if key != oldTopology {
+		t.Fatalf("missing-CRD surge effective topology: got %q want live %q", key, oldTopology)
+	}
+}
+
+func topologyWorkerPod(namespace, ownerName string, component workload.ComponentType, index int32, podGroupName, topologyKey string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.PodName(ownerName, component, index, "worker", 0),
+			Namespace: namespace,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: ownerName,
+				constants.OMEComponentLabel:           string(component),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelInstanceIdx:                fmt.Sprintf("%d", index),
+				query.LabelRunner:                     "worker",
+				query.LabelPodGroup:                   podGroupName,
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},
+			Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+					TopologyKey: topologyKey,
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						constants.InferenceServicePodLabelKey: ownerName,
+						constants.OMEComponentLabel:           string(component),
+						query.LabelInstanceIdx:                fmt.Sprintf("%d", index),
+						query.LabelRunner:                     "leader",
+					}},
+				}},
+			}},
+		},
+	}
+}
+
+func topologyLeaderPod(namespace, ownerName string, component workload.ComponentType, index int32, podGroupName string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.PodName(ownerName, component, index, "leader", 0),
+			Namespace: namespace,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: ownerName,
+				constants.OMEComponentLabel:           string(component),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelInstanceIdx:                fmt.Sprintf("%d", index),
+				query.LabelRunner:                     "leader",
+				query.LabelPodGroup:                   podGroupName,
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
+	}
 }
 
 // TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup —

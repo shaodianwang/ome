@@ -902,6 +902,67 @@ func TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated(t *testing.T)
 			"a gated Instance's deadline must be parked (zeroed) so it never expires while queued")
 }
 
+// TestAggregateStatus_PausedInstance_DeadlineParkedAndRearmed verifies that
+// pausing an in-flight operation is a real circuit breaker: neither terminal
+// pod state nor an elapsed deadline may fail it while paused, and unpausing
+// restarts the timeout window instead of expiring the old deadline.
+func TestAggregateStatus_PausedInstance_DeadlineParkedAndRearmed(t *testing.T) {
+	g := gomega.NewWithT(t)
+	withIRStuckPodGracePeriod(t, time.Millisecond)
+
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Spec.Paused = true
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index:         0,
+		Incarnation:   1,
+		Phase:         v1beta1.OMENativeInstanceCreating,
+		ActiveOrdinal: 0,
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationCreate,
+			Step:     "CreatePods",
+			Deadline: metav1.NewTime(time.Now().Add(-time.Minute)),
+		},
+	}}
+	stuckPod := podForIR(ir, 0, "default", 0, false, false)
+	stuckPod.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Minute))
+	stuckPod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "ome-container",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "CrashLoopBackOff",
+		}},
+	}}
+
+	r, c := newReconciler(t, ir, stuckPod)
+	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	paused := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, paused)).To(gomega.Succeed())
+	g.Expect(paused.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceCreating))
+	g.Expect(paused.Status.InstanceStatuses[0].LastFailure).To(gomega.BeNil())
+	g.Expect(paused.Status.InstanceStatuses[0].Operation.Deadline.IsZero()).To(gomega.BeTrue())
+
+	// Simulate the container recovering while the operator investigates. The
+	// unpause assertion below isolates deadline rearming from the independent
+	// stuck-pod fast-failure policy.
+	recoveredPod := &corev1.Pod{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(stuckPod), recoveredPod)).To(gomega.Succeed())
+	recoveredPod.Status.ContainerStatuses = nil
+	g.Expect(c.Status().Update(context.Background(), recoveredPod)).To(gomega.Succeed())
+
+	paused.Spec.Paused = false
+	g.Expect(c.Update(context.Background(), paused)).To(gomega.Succeed())
+	beforeUnpause := time.Now()
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	unpaused := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, unpaused)).To(gomega.Succeed())
+	g.Expect(unpaused.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceCreating))
+	g.Expect(unpaused.Status.InstanceStatuses[0].Operation.Deadline.Time).To(gomega.BeTemporally(">", beforeUnpause))
+}
+
 // TestAggregateStatus_DeadlineFuture_NoEscalation pins the negative
 // case: a transient-phase Instance whose Operation.Deadline is still in
 // the future must NOT be escalated by the deadline backstop.

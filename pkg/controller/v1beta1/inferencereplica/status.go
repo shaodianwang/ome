@@ -271,8 +271,10 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// Phase stays at Surging indefinitely. Closes the bad_image_kind
 	// reproduction reported against the dev cluster after IR-managed
 	// became the default OMENative dispatch path.
-	if err := r.escalateStuckPodFailures(ctx, ir, parent, byIndex); err != nil {
-		return err
+	if !plan.Paused {
+		if err := r.escalateStuckPodFailures(ctx, ir, parent, byIndex); err != nil {
+			return err
+		}
 	}
 
 	// Broad backstop: any Instance still in a transient phase whose
@@ -292,8 +294,11 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// not count against the deadline. Runs BEFORE the expiry backstop so the
 	// backstop reads the parked (zeroed) deadline and skips it; once the pods
 	// clear the gate the clock restarts from admission.
-	if err := r.reconcileGatedDeadlines(ctx, ir, parent, byIndex, plan.InstanceReadyTimeout); err != nil {
+	if err := r.reconcileHeldDeadlines(ctx, ir, parent, byIndex, plan.Paused, plan.InstanceReadyTimeout); err != nil {
 		return err
+	}
+	if plan.Paused {
+		return nil
 	}
 	return r.expireOperationsIfDeadlinePassed(ctx, ir, parent)
 }
@@ -382,29 +387,30 @@ func (r *Reconciler) expireOperationsIfDeadlinePassed(ctx context.Context, ir *v
 		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses))
 }
 
-// reconcileGatedDeadlines is the IR-side adapter that pauses/restarts the
-// InstanceReadyTimeout clock around admission gating. It derives which
-// Instances have an admission-gated pod from the per-Instance pod buckets
-// the caller already computed (no re-list), then delegates to
-// workload.ReconcileGatedDeadlines. Runs immediately before the deadline
-// backstop so a queued (gated) workload is never failed by
-// InstanceReadyTimeout — the timeout is measured from admission, not from
-// operation start.
-func (r *Reconciler) reconcileGatedDeadlines(ctx context.Context, ir *v1beta1.InferenceReplica, parent client.Object, byIndex map[int32][]*corev1.Pod, timeout time.Duration) error {
+// reconcileHeldDeadlines parks/restarts InstanceReadyTimeout around either
+// admission gating or an operator pause. Pausing holds every in-flight
+// Instance; unpausing rearms each parked deadline from that point unless its
+// pods remain admission-gated.
+func (r *Reconciler) reconcileHeldDeadlines(ctx context.Context, ir *v1beta1.InferenceReplica, parent client.Object, byIndex map[int32][]*corev1.Pod, paused bool, timeout time.Duration) error {
 	if ir == nil {
 		return nil
 	}
-	gated := make(map[int32]bool, len(byIndex))
+	held := make(map[int32]bool, len(byIndex))
 	for idx, pods := range byIndex {
 		for _, p := range pods {
 			if workload.PodAdmissionGated(p) {
-				gated[idx] = true
+				held[idx] = true
 				break
 			}
 		}
 	}
+	if paused {
+		for i := range ir.Status.InstanceStatuses {
+			held[ir.Status.InstanceStatuses[i].Index] = true
+		}
+	}
 	return workload.ReconcileGatedDeadlines(ctx, r.buildEscalationInput(ir, parent),
-		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses), gated, timeout)
+		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses), held, timeout)
 }
 
 // buildEscalationInput builds the minimal workload.ReconcileInput the

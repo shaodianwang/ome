@@ -140,3 +140,24 @@ func TestMaybeWarnGangSplitRisk_NilSafe(t *testing.T) {
 		t.Errorf("nil-target must emit nothing, got %d", got)
 	}
 }
+
+func TestMaybeWarnGangSplitRisk_RecommendationIsProviderNeutral(t *testing.T) {
+	resetGangSplitRiskSeen()
+	rec := record.NewFakeRecorder(1)
+	plan, inst, runners := multiPodPlan(2)
+	pod := renderForSplitTest(t, basicPodSpec(), plan, inst, runners[1])
+
+	maybeWarnGangSplitRisk(rec, workload.ReconcileInput{OwnerObject: basicISVC()}, plan, inst, runners[1], pod)
+
+	select {
+	case event := <-rec.Events:
+		if !strings.Contains(event, ".topologyKey") {
+			t.Fatalf("recommendation does not name topologyKey: %q", event)
+		}
+		if strings.Contains(event, "cloud.google.com") {
+			t.Fatalf("recommendation must not prescribe a provider-specific label: %q", event)
+		}
+	default:
+		t.Fatal("expected GangSplitRisk event")
+	}
+}

@@ -2,7 +2,10 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -22,6 +25,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
 
 // testScheme returns a runtime.Scheme with the types the IR reconciler
@@ -124,6 +128,227 @@ func TestReconcile_NotFound_NoError(t *testing.T) {
 		"deleted IR between enqueue and reconcile should be a no-op")
 	g.Expect(result.Requeue).To(gomega.BeFalse())
 	g.Expect(result.RequeueAfter).To(gomega.BeZero())
+}
+
+func TestApplyRollbackPayload_RecordedTopologyIsAuthoritative(t *testing.T) {
+	stableTopology := "topology.example.com/stable"
+	desired := workload.WorkloadDesiredSpec{TopologyKey: "topology.example.com/canary"}
+	payload := &revision.DataPayload{TopologyKey: &stableTopology}
+
+	r := &Reconciler{APIReader: podListFailingReader{}}
+	if err := r.applyRollbackPayload(context.Background(), nil, &desired, payload, nil); err != nil {
+		t.Fatalf("applyRollbackPayload: %v", err)
+	}
+
+	if desired.TopologyKey != stableTopology {
+		t.Fatalf("recorded rollback topology: got %q want %q", desired.TopologyKey, stableTopology)
+	}
+}
+
+func TestApplyRollbackPayload_LegacyTopologyRecovery(t *testing.T) {
+	const stableTopology = "topology.example.com/stable"
+	ir := baselineIR("llama-engine", "prod", 1)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-engine-stablehash"}}
+	payload := &revision.DataPayload{
+		PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader"}}},
+		WorkerPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
+	}
+	worker := rollbackTopologyWorker(ir, "worker-0", "0", "stablehash", stableTopology)
+	otherRevision := rollbackTopologyWorker(ir, "worker-canary", "1", "canaryhash", "topology.example.com/canary")
+	r, _ := newReconciler(t, worker, otherRevision)
+	// Recovery must still inspect the stable revision when the canary removed
+	// topology; live stable workers prove the rollback target used this key.
+	desired := workload.WorkloadDesiredSpec{}
+
+	if err := r.applyRollbackPayload(context.Background(), ir, &desired, payload, target); err != nil {
+		t.Fatalf("applyRollbackPayload: %v", err)
+	}
+	if desired.TopologyKey != stableTopology {
+		t.Fatalf("recovered rollback topology: got %q want %q", desired.TopologyKey, stableTopology)
+	}
+}
+
+func TestApplyRollbackPayload_LegacyTopologyWithoutEvidenceFailsClosed(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-engine-stablehash"}}
+	payload := &revision.DataPayload{
+		PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader"}}},
+		WorkerPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
+	}
+	r, _ := newReconciler(t)
+	desired := workload.WorkloadDesiredSpec{TopologyKey: "topology.example.com/current"}
+
+	err := r.applyRollbackPayload(context.Background(), ir, &desired, payload, target)
+	if err == nil || !strings.Contains(err.Error(), "no unambiguous OME-generated topology") {
+		t.Fatalf("legacy rollback without live topology evidence: got %v", err)
+	}
+}
+
+func TestApplyRollbackPayload_LegacyTopologyAmbiguityFailsClosed(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-engine-stablehash"}}
+	payload := &revision.DataPayload{
+		PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader"}}},
+		WorkerPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
+	}
+	podA := rollbackTopologyWorker(ir, "worker-a", "0", "stablehash", "topology.example.com/a")
+	podB := rollbackTopologyWorker(ir, "worker-b", "1", "stablehash", "topology.example.com/b")
+	r, _ := newReconciler(t, podA, podB)
+	desired := workload.WorkloadDesiredSpec{TopologyKey: "topology.example.com/current"}
+
+	err := r.applyRollbackPayload(context.Background(), ir, &desired, payload, target)
+	if err == nil || !strings.Contains(err.Error(), "conflicting OME-generated topology") {
+		t.Fatalf("ambiguous legacy rollback topology: got %v", err)
+	}
+}
+
+func TestApplyRollbackPayload_LegacyTopologyFreeDoesNotBlock(t *testing.T) {
+	desired := workload.WorkloadDesiredSpec{}
+	payload := &revision.DataPayload{
+		PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader"}}},
+		WorkerPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
+	}
+	r := &Reconciler{APIReader: podListFailingReader{}}
+
+	if err := r.applyRollbackPayload(context.Background(), nil, &desired, payload, nil); err != nil {
+		t.Fatalf("topology-free legacy rollback must not read pods or fail: %v", err)
+	}
+	if desired.TopologyKey != "" {
+		t.Fatalf("TopologyKey: got %q want empty", desired.TopologyKey)
+	}
+}
+
+func rollbackTopologyWorker(ir *v1beta1.InferenceReplica, name, index, revisionHash, topologyKey string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ir.Namespace,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+				constants.OMEComponentLabel:           string(ir.Spec.Component),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelRunner:                     string(v1beta1.RunnerNameWorker),
+				query.LabelInstanceIdx:                index,
+				query.LabelRevisionHash:               revisionHash,
+			},
+		},
+		Spec: corev1.PodSpec{Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				TopologyKey: topologyKey,
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+					constants.OMEComponentLabel:           string(ir.Spec.Component),
+					query.LabelInstanceIdx:                index,
+					query.LabelRunner:                     string(v1beta1.RunnerNameLeader),
+				}},
+			}},
+		}}},
+	}
+}
+
+type podListFailingReader struct {
+	client.Reader
+}
+
+func (r podListFailingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1.PodList); ok {
+		return errors.New("injected live pod list failure")
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+func TestReconcile_PausedDeadlineParksWhenTopologyReadFails(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Spec.Paused = true
+	ir.Spec.Runners = []v1beta1.Runner{
+		{
+			Name: v1beta1.RunnerNameLeader,
+			Size: 1,
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "leader", Image: "test:v1"}},
+			}},
+		},
+		{
+			Name: v1beta1.RunnerNameWorker,
+			Size: 1,
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "worker", Image: "test:v1"}},
+			}},
+		},
+	}
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0,
+		Phase: v1beta1.OMENativeInstanceCreating,
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationCreate,
+			Step:     "CreatePods",
+			Deadline: metav1.NewTime(time.Now().Add(-time.Minute)),
+		},
+	}}
+	r, c := newReconciler(t, ir)
+	r.APIReader = podListFailingReader{Reader: c}
+	r.GangSchedulingAvailable = true
+	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	if err == nil || !strings.Contains(err.Error(), "injected live pod list failure") {
+		t.Fatalf("expected topology live-read error, got %v", err)
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("get paused IR: %v", err)
+	}
+	if got.Status.InstanceStatuses[0].Operation == nil ||
+		!got.Status.InstanceStatuses[0].Operation.Deadline.IsZero() {
+		t.Fatalf("paused deadline was not parked after earlier topology error: %+v",
+			got.Status.InstanceStatuses[0].Operation)
+	}
+	if got.Status.InstanceStatuses[0].Phase == v1beta1.OMENativeInstanceFailed {
+		t.Fatal("paused Instance expired despite topology error")
+	}
+}
+
+func TestReconcile_ParentPauseParksDeadlineBeforeRevisionError(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	// Model a stale projection caused by an ISVC component render failure: the
+	// parent is paused, but the IR spec was never patched.
+	ir.Spec.Paused = false
+	ir.OwnerReferences = nil // force revision creation to fail before the defer
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0,
+		Phase: v1beta1.OMENativeInstanceCreating,
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationCreate,
+			Step:     "CreatePods",
+			Deadline: metav1.NewTime(time.Now().Add(-time.Minute)),
+		},
+	}}
+	parent := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name:      ir.Spec.ParentRef.Name,
+		Namespace: ir.Namespace,
+		Annotations: map[string]string{
+			constants.PausedRolloutAnnotation: "true",
+		},
+	}}
+	r, c := newReconciler(t, ir, parent)
+	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	if err == nil || !strings.Contains(err.Error(), "missing controller OwnerReference") {
+		t.Fatalf("expected pre-defer revision error, got %v", err)
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("get paused IR: %v", err)
+	}
+	if got.Spec.Paused {
+		t.Fatal("test requires stale IR spec pause=false; parent must be authoritative at reconcile time")
+	}
+	if got.Status.InstanceStatuses[0].Operation == nil ||
+		!got.Status.InstanceStatuses[0].Operation.Deadline.IsZero() {
+		t.Fatalf("parent pause did not park deadline before revision error: %+v",
+			got.Status.InstanceStatuses[0].Operation)
+	}
 }
 
 // TestReconcile_DeletionTimestamp_NoOp pins that an IR with a

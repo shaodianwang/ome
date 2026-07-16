@@ -10,6 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
@@ -59,6 +60,14 @@ func listPerRevisionServices(g gomega.Gomega, namespace string) []corev1.Service
 // Used inside Eventually blocks where the spec needs the latest status.
 func freshISVC(g gomega.Gomega, namespace, name string) *v1beta1.InferenceService {
 	out := &v1beta1.InferenceService{}
+	g.ExpectWithOffset(1, k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: name}, out)).To(gomega.Succeed())
+	return out
+}
+
+// freshInferenceReplica reads the projected workload for one ISVC Component.
+func freshInferenceReplica(g gomega.Gomega, namespace, isvcName string, component v1beta1.ComponentType) *v1beta1.InferenceReplica {
+	out := &v1beta1.InferenceReplica{}
+	name := irprojector.InferenceReplicaName(isvcName, component)
 	g.ExpectWithOffset(1, k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: name}, out)).To(gomega.Succeed())
 	return out
 }

@@ -87,6 +87,19 @@ func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_ProjectsPausedCircuitBreaker(t *testing.T) {
+	desired := multiPodDesired(1, 1, Lifecycle{})
+	desired.Paused = true
+
+	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Paused {
+		t.Fatal("Paused: got false want true")
+	}
+}
+
 // TestBuildPlan_MultiPodWithZeroWorkerSize confirms WorkerSize=0 still
 // produces leader+worker entries; the webhook validator rejects orphan
 // leader without worker.size>0, but BuildPlan stays defensive.

@@ -206,10 +206,9 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 			return fmt.Errorf("get IR %s/%s: %w", p.ISVC.Namespace, name, getErr)
 		}
 
-		// IR exists — apply the desired spec on top of the live object.
-		// We don't clobber Spec fields the projector doesn't own (Pacing,
-		// Paused — owned by the ISVC controller's coordination layer in
-		// future PRs).
+		// IR exists - apply the desired spec on top of the live object. Pacing is
+		// owned by coordination and preserved here. Paused is projected from the
+		// parent ISVC's operator-facing rollout-paused annotation below.
 		original := ir.DeepCopy()
 		applyDesiredSpec(ir, p, name)
 
@@ -308,11 +307,9 @@ func newInferenceReplica(p Params, name string) *v1beta1.InferenceReplica {
 // whether the apiserver assigns a UID — and Spec.Replicas, which is
 // autoscaler-owned on Update; see desiredReplicas).
 //
-// Preserves Spec.Pacing and Spec.Paused on Update — those fields are
-// written by the ISVC controller's coordination layer in future PRs;
-// clobbering them every reconcile would fight the coordination writer.
-// (Today they're always nil/false; the preserve guard is defensive
-// against future PRs landing the coordination wire-in.)
+// Preserves Spec.Pacing on Update. Spec.Paused is projected from the existing
+// operator-facing ISVC annotation because InferenceReplica is controller-only;
+// removing the annotation explicitly clears the circuit breaker on every IR.
 //
 // Preserves Spec.Replicas on Update when the Component is autoscaler-
 // managed — the IR's /scale subresource is the HPA / KEDA / external
@@ -355,6 +352,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.Replicas = desiredReplicas(ir, p)
 	ir.Spec.Runners = runnersFromParams(p)
 	ir.Spec.Lifecycle = lifecycleFromComponentExt(p.ComponentExt)
+	ir.Spec.Paused = p.ISVC.Annotations[constants.PausedRolloutAnnotation] == "true"
 	// Project the resolved gang co-location key verbatim. The IR
 	// controller reads it to auto-generate the worker→leader podAffinity
 	// for multi-node Components; nil is a no-op there.

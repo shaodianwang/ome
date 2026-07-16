@@ -63,6 +63,7 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("p304", "prod", 1)
 	plan := gangSurgePlan()
+	plan.TopologyKey = "network.example.com/fabric-domain"
 
 	v1Name := "p304-engine-rev-v1hash"
 	v2Name := "p304-engine-rev-v2hash"
@@ -94,7 +95,7 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 	// Wire the inline surge-PodGroup ensure exactly as the IR reconciler
 	// does (deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup).
 	deps := legacyTestDeps(c)
-	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(c)
+	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(deps)
 
 	// Create-surge-gang pass: this is where the surge gang's pods are
 	// created at idx=1.
@@ -121,6 +122,9 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 	// MinMember must cover the whole gang (leader + worker = 2).
 	if pg.Spec.MinMember != 2 {
 		t.Errorf("PodGroup %q MinMember=%d, want 2 (leader+worker)", wantPG, pg.Spec.MinMember)
+	}
+	if got := pg.Annotations[query.AnnotationTopologyKey]; got != plan.TopologyKey {
+		t.Errorf("surge PodGroup %q topology annotation=%q, want %q", wantPG, got, plan.TopologyKey)
 	}
 	// Every surge pod must carry the pod-group label naming that PodGroup.
 	for _, pod := range surgePods {
@@ -173,7 +177,7 @@ func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) 
 	input := gangInputWithRemove(isvc, c)
 	input.DesiredSpec.GangSchedulingAvailable = true
 	deps := legacyTestDeps(c)
-	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(c)
+	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(deps)
 
 	v2 := &appsv1.ControllerRevision{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {

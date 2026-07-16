@@ -91,6 +91,15 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
 	}
 
+	// Paused is an operator circuit breaker. Keep scale-down above active so a
+	// deliberate replica reduction still releases capacity, but do not start or
+	// advance any lifecycle operation that can create, replace, or migrate pods.
+	// Pod and spec watches will enqueue the workload again after unpause; no
+	// periodic requeue is needed while the desired state is intentionally held.
+	if plan.Paused {
+		return ctrl.Result{}, nil
+	}
+
 	// 2. Per-Instance restart pass.
 	anyRestarting := false
 	if plan.RestartPolicy == RestartPolicyRecreateInstance {

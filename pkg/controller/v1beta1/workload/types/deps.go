@@ -17,8 +17,9 @@ type Deps struct {
 	Client client.Client
 
 	// APIReader is an optional live API reader (mgr.GetAPIReader()).
-	// Used for revision bookkeeping where stale cache contents could
-	// cause spurious collisions. When nil the cached Client is used.
+	// Used for revision bookkeeping and immutable topology observations where
+	// stale cache contents could cause a collision or split a live gang. When
+	// nil the cached Client is used.
 	APIReader client.Reader
 
 	// Recorder emits K8s Events at lifecycle transitions. nil-safe:
@@ -62,9 +63,10 @@ type Deps struct {
 // Name/Namespace/OwnerReferences (workload-controlled).
 type RenderHook func(pod *corev1.Pod, runnerName string, ordinal int32, revisionHash string)
 
-// EnsureGangPodGroupFn ensures the PodGroup for one multi-pod surge
-// Instance. See Deps.EnsureGangPodGroup.
-type EnsureGangPodGroupFn func(ctx context.Context, input ReconcileInput, plan ComponentPlan, inst InstancePlan) error
+// EnsureGangPodGroupFn ensures the PodGroup for one multi-pod surge Instance
+// and returns the effective topology key selected for its live pods. See
+// Deps.EnsureGangPodGroup.
+type EnsureGangPodGroupFn func(ctx context.Context, input ReconcileInput, plan ComponentPlan, inst InstancePlan) (string, error)
 
 // Reader returns the live API reader when APIReader is set, otherwise
 // the cached Client. Use for reads that must not observe a stale

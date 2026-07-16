@@ -49,6 +49,13 @@ func TestLabelPodGroup_MatchesUpstream(t *testing.T) {
 	}
 }
 
+func TestAnnotationTopologyKey_MatchesSchedulerContract(t *testing.T) {
+	const want = "ome.io/topology-key"
+	if AnnotationTopologyKey != want {
+		t.Errorf("AnnotationTopologyKey: got %q want %q", AnnotationTopologyKey, want)
+	}
+}
+
 func TestPodName(t *testing.T) {
 	cases := []struct {
 		name      string

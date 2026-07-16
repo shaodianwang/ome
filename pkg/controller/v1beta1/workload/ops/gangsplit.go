@@ -26,8 +26,8 @@ var gangSplitRiskSeen sync.Map
 //
 // It reads the ALREADY-RENDERED pod, so it inherits injectGangDomainAffinity's
 // exact decision instead of re-deriving it (no logic drift):
-//   - a resolved Component topologyKey (GPU MNNVL) or a derived TPU slice
-//     key means the injector added a required term → not at risk;
+//   - a resolved Component topologyKey means the injector added a required
+//     term -> not at risk;
 //   - a hand-written operator podAffinity is preserved on the pod → not
 //     at risk;
 //   - only a worker left with zero required podAffinity trips the warning.
@@ -62,8 +62,8 @@ func maybeWarnGangSplitRisk(rec record.EventRecorder, input workload.ReconcileIn
 		"OMENative component=%s is a multi-node gang but its worker pods have no co-location podAffinity: "+
 			"the gang may be scheduled across separate network/NVLink/TPU topology domains, breaking the "+
 			"tightly-coupled collectives a multi-node runtime needs (NCCL/RCCL/NIXL all-reduce, multi-host "+
-			"TPU sessions). Set %s.topologyKey to your NVLink/RDMA fabric-domain node label "+
-			"(or cloud.google.com/gke-tpu-topology for TPU) or declare a worker podAffinity.",
+			"TPU sessions). Set %s.topologyKey to the node label that identifies the required topology "+
+			"domain, or declare a worker podAffinity.",
 		plan.Component, plan.Component)
 }
 
