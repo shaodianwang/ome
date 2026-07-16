@@ -5,7 +5,9 @@ import {
   loadClusterCapacity,
   metricAvailable,
   metricsHealth,
+  metricsQueryIssue,
   metricsTransportState,
+  summarizeFleetIssues,
 } from "./dataState";
 
 const capacity = (total: number): CapacityResp => ({
@@ -122,5 +124,62 @@ describe("metricsHealth", () => {
     expect(metricAvailable(snapshot, "qps")).toBe(true);
     expect(metricAvailable(snapshot, "p99")).toBe(false);
     expect(metricAvailable(snapshot, "missing")).toBe(false);
+  });
+});
+
+describe("metricsQueryIssue", () => {
+  it("retains exact query and cluster counts", () => {
+    expect(
+      metricsQueryIssue(
+        { ready: true, queryCount: 3, failedQueryCount: 2, failedClusters: ["a", "b"] },
+        3,
+      ),
+    ).toEqual({
+      domain: "Metrics queries",
+      message: "2 of 3 queries failed across 2 clusters (a, b)",
+      tone: "warning",
+    });
+    expect(
+      metricsQueryIssue({ ready: true, queryCount: 0, failedQueryCount: 0, failedClusters: [] }, 1),
+    ).toEqual({
+      domain: "Metrics queries",
+      message: "no query results returned across 1 scoped cluster",
+      tone: "danger",
+    });
+  });
+});
+
+describe("summarizeFleetIssues", () => {
+  it("renders one punctuated warning without dropping domains", () => {
+    expect(
+      summarizeFleetIssues([
+        { domain: "Activity stream", message: "reconnecting.", tone: "warning" },
+        {
+          domain: "Metrics stream",
+          message: "disconnected; reconnecting. Showing the snapshot from 2m ago.",
+          tone: "warning",
+        },
+        {
+          domain: "Metrics queries",
+          message: "2 of 3 queries failed across 2 clusters (a, b)",
+          tone: "warning",
+        },
+      ]),
+    ).toEqual({
+      tone: "warning",
+      title: "Some fleet data is degraded.",
+      detail:
+        "Activity stream: reconnecting; Metrics stream: disconnected; reconnecting. Showing the snapshot from 2m ago; Metrics queries: 2 of 3 queries failed across 2 clusters (a, b).",
+    });
+  });
+
+  it("promotes mixed issues to danger and removes exact duplicates", () => {
+    const unavailable = { domain: "Capacity", message: "unavailable", tone: "danger" as const };
+    expect(summarizeFleetIssues([unavailable, unavailable])).toEqual({
+      tone: "danger",
+      title: "Some fleet data is stale or unavailable.",
+      detail: "Capacity: unavailable.",
+    });
+    expect(summarizeFleetIssues([])).toBeNull();
   });
 });

@@ -45,6 +45,47 @@ export interface MetricsHealth {
   failedClusters: string[];
 }
 
+export interface FleetNoticeIssue {
+  domain: string;
+  message: string;
+  tone: "danger" | "warning";
+}
+
+export interface FleetNoticeSummary {
+  detail: string;
+  title: string;
+  tone: FleetNoticeIssue["tone"];
+}
+
+const trimSentence = (value: string) => value.trim().replace(/[.;]+$/, "");
+
+/** Collapse correlated source failures into one readable, accessible notice. */
+export function summarizeFleetIssues(issues: FleetNoticeIssue[]): FleetNoticeSummary | null {
+  const normalized = issues.map((issue) => ({
+    ...issue,
+    domain: issue.domain.trim(),
+    message: trimSentence(issue.message),
+  }));
+  const unique = [
+    ...new Map(
+      normalized.map(
+        (issue) => [`${issue.domain}\u0000${issue.message}\u0000${issue.tone}`, issue] as const,
+      ),
+    ).values(),
+  ].filter((issue) => issue.domain && issue.message);
+  if (!unique.length) return null;
+
+  const tone = unique.some((issue) => issue.tone === "danger") ? "danger" : "warning";
+  return {
+    tone,
+    title:
+      tone === "danger"
+        ? "Some fleet data is stale or unavailable."
+        : "Some fleet data is degraded.",
+    detail: `${unique.map((issue) => `${issue.domain}: ${issue.message}`).join("; ")}.`,
+  };
+}
+
 /** Summarize per-query Prometheus failures carried in an otherwise valid snapshot. */
 export function metricsHealth(snapshot: MetricsSnapshot | null): MetricsHealth {
   if (!snapshot || snapshot.updatedAt <= 0) {
@@ -68,6 +109,32 @@ export function metricsHealth(snapshot: MetricsSnapshot | null): MetricsHealth {
     queryCount,
     failedQueryCount,
     failedClusters: [...failedClusters].sort(),
+  };
+}
+
+/** Describe failed Prometheus queries without losing query or cluster counts. */
+export function metricsQueryIssue(
+  health: MetricsHealth,
+  scopedClusterCount: number,
+): FleetNoticeIssue | null {
+  if (!health.ready) return null;
+  if (health.queryCount === 0) {
+    const noun = scopedClusterCount === 1 ? "cluster" : "clusters";
+    return {
+      domain: "Metrics queries",
+      message: `no query results returned across ${scopedClusterCount} scoped ${noun}`,
+      tone: "danger",
+    };
+  }
+  if (health.failedQueryCount === 0) return null;
+
+  const clusterCount = health.failedClusters.length;
+  const noun = clusterCount === 1 ? "cluster" : "clusters";
+  const names = clusterCount ? ` (${health.failedClusters.join(", ")})` : "";
+  return {
+    domain: "Metrics queries",
+    message: `${health.failedQueryCount} of ${health.queryCount} queries failed across ${clusterCount} ${noun}${names}`,
+    tone: health.failedQueryCount === health.queryCount ? "danger" : "warning",
   };
 }
 

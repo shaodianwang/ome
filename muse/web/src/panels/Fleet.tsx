@@ -3,7 +3,13 @@ import { useState } from "react";
 import type { DepFilter } from "../App";
 import { api } from "../api";
 import { DataNotice } from "../components";
-import { metricAvailable, metricsHealth } from "../dataState";
+import {
+  metricAvailable,
+  metricsHealth,
+  metricsQueryIssue,
+  summarizeFleetIssues,
+} from "../dataState";
+import type { FleetNoticeIssue } from "../dataState";
 import { scopeFleet, unambiguousDeploymentRef } from "../fleet";
 import type { Selected } from "../resource";
 import { useEventFeed, useLive, useMetrics } from "../live";
@@ -24,6 +30,19 @@ import {
 import { Card, Dot, FilterChip, Gauge, Spark, StatTile, UtilRow } from "../viz";
 
 const kpct = (a: { allocatable: number; allocated: number }) => utilPct(a);
+
+const sourceIssue = (
+  domain: string,
+  error: string | null,
+  hasSnapshot: boolean,
+): FleetNoticeIssue | null =>
+  error
+    ? {
+        domain,
+        message: hasSnapshot ? "refresh failed; showing the last snapshot" : "unavailable",
+        tone: hasSnapshot ? "warning" : "danger",
+      }
+    : null;
 
 export function Fleet({
   openDeployments,
@@ -82,14 +101,41 @@ export function Fleet({
   const hasLatency = metricAvailable(scope.metrics, "latency_p99");
   const hasErrors = hasQps && metricAvailable(scope.metrics, "error_rate");
   const sourceIssues = [
-    ["clusters", clusters.error],
-    ["capacity", capacity.error],
-    ["deployments", isvcs.error],
-    ["rollouts", rollouts.error],
-    ["activity", events.error],
-    ["activity stream", events.connection === "reconnecting" ? "stream reconnecting" : null],
-    ["configuration", cfg.error],
-  ].filter((entry): entry is [string, string] => entry[1] != null);
+    sourceIssue("Clusters", clusters.error, clusters.data != null),
+    sourceIssue("Capacity", capacity.error, capacity.data != null),
+    sourceIssue("Deployments", isvcs.error, isvcs.data != null),
+    sourceIssue("Rollouts", rollouts.error, rollouts.data != null),
+    sourceIssue("Activity history", events.error, events.events.length > 0),
+    sourceIssue("Configuration", cfg.error, cfg.data != null),
+    events.connection === "reconnecting"
+      ? {
+          domain: "Activity stream",
+          message: events.events.length
+            ? "reconnecting; loaded events remain visible"
+            : "reconnecting",
+          tone: "warning" as const,
+        }
+      : null,
+  ].filter((issue): issue is FleetNoticeIssue => issue != null);
+  const metricsTransportIssue: FleetNoticeIssue | null =
+    metricsOn && metrics.error
+      ? {
+          domain: "Metrics stream",
+          message:
+            metricState.ready && scope.metrics
+              ? `${metrics.error.replace(/^Live metrics stream\s*/i, "")} Showing the snapshot from ${ago(scope.metrics.updatedAt)}`
+              : metrics.error.replace(/^Live metrics stream\s*/i, ""),
+          tone: metricState.ready ? "warning" : "danger",
+        }
+      : null;
+  const queryIssue = metricsOn
+    ? metricsQueryIssue(metricState, Object.keys(scope.metrics?.clusters ?? {}).length)
+    : null;
+  const fleetNotice = summarizeFleetIssues(
+    [...sourceIssues, metricsTransportIssue, queryIssue].filter(
+      (issue): issue is FleetNoticeIssue => issue != null,
+    ),
+  );
   const retrySources = () => {
     clusters.refetch();
     capacity.refetch();
@@ -184,41 +230,12 @@ export function Fleet({
         </div>
       </div>
 
-      {sourceIssues.length ? (
+      {fleetNotice ? (
         <DataNotice
-          tone="danger"
-          title="Some fleet data is stale or unavailable"
-          detail={`${sourceIssues.map(([source]) => source).join(", ")}. ${sourceIssues.some(([source]) => source === "deployments") && isvcs.data ? "Previously loaded deployment status remains visible." : "Affected panels will not report empty data as healthy."}`}
-          action={{ label: "Retry", onClick: retrySources }}
-        />
-      ) : null}
-      {metricsOn && metrics.error ? (
-        <DataNotice
-          tone="danger"
-          title="Live metrics are unavailable"
-          detail={
-            metricState.ready && scope.metrics
-              ? `Showing the last snapshot from ${ago(scope.metrics.updatedAt)}. ${metrics.error}`
-              : metrics.error
-          }
-        />
-      ) : null}
-      {metricsOn && metricState.ready && metricState.queryCount === 0 ? (
-        <DataNotice
-          tone="danger"
-          title="Metrics snapshot is empty"
-          detail="No Prometheus query results were returned. Performance values are unavailable."
-        />
-      ) : null}
-      {metricsOn && metricState.failedQueryCount > 0 ? (
-        <DataNotice
-          tone={metricState.failedQueryCount === metricState.queryCount ? "danger" : "warning"}
-          title={
-            metricState.failedQueryCount === metricState.queryCount
-              ? "Serving metrics failed"
-              : "Serving metrics are partial"
-          }
-          detail={`${metricState.failedQueryCount} of ${metricState.queryCount} query results failed across ${metricState.failedClusters.join(", ")}. Updated ${scope.metrics ? ago(scope.metrics.updatedAt) : "unknown"}.`}
+          tone={fleetNotice.tone}
+          title={fleetNotice.title}
+          detail={fleetNotice.detail}
+          action={sourceIssues.length ? { label: "Retry", onClick: retrySources } : undefined}
         />
       ) : null}
 

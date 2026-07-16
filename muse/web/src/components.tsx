@@ -76,7 +76,12 @@ export function DataNotice({
     <div className={`data-notice ${tone}`} role={tone === "danger" ? "alert" : "status"}>
       <div>
         <strong>{title}</strong>
-        {detail ? <span>{detail}</span> : null}
+        {detail ? (
+          <>
+            {" "}
+            <span>{detail}</span>
+          </>
+        ) : null}
       </div>
       {action ? (
         <button type="button" className="btn ghost sm" onClick={action.onClick}>
