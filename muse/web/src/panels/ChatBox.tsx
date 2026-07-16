@@ -135,6 +135,7 @@ export function ChatBox({
 
       <textarea
         className="chat-input mono"
+        aria-label="Request body"
         value={body}
         onChange={(e) => setBody(e.target.value)}
         spellCheck={false}

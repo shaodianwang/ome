@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import {
   BrandMark,
-  Close,
   IconCapacity,
   IconFleet,
   IconModels,
@@ -106,7 +105,7 @@ export default function App() {
       title={label}
       ref={panel === key ? activeNavRef : undefined}
     >
-      <Icon className="ico" />
+      <Icon className="ico" aria-hidden />
       <span>{label}</span>
     </button>
   );
@@ -122,14 +121,14 @@ export default function App() {
       <aside className="sidebar" id="primary-navigation" aria-label="Primary navigation">
         <div className="brand">
           <div className="logo">
-            <BrandMark />
+            <BrandMark aria-hidden />
           </div>
           <div className="word">
             MUSE<small>Unified Serving</small>
           </div>
         </div>
 
-        <nav className="nav">
+        <nav className="nav" aria-label="Primary">
           {navItem("fleet", "Fleet", IconFleet)}
           {navItem("workloads", "Deployments", IconWorkloads)}
           {navItem("models", "Models", IconModels)}
@@ -155,13 +154,13 @@ export default function App() {
           <button
             type="button"
             className="icon-btn nav-toggle"
-            aria-label={navOpen ? "Close navigation" : "Open navigation"}
+            aria-label="Open navigation"
             aria-controls="primary-navigation"
             aria-expanded={navOpen}
             onClick={() => setNavOpen((open) => !open)}
             ref={navToggleRef}
           >
-            {navOpen ? <Close /> : <Menu />}
+            <Menu />
           </button>
           <div className="crumbs">
             <b>{LABELS[panel]}</b>

@@ -163,7 +163,7 @@ export function Runtimes({
   return (
     <ResourceTable<RuntimeRow>
       title="Runtimes"
-      subtitle="Serving runtimes across the fleet — the engines that serve your models."
+      subtitle="Serving runtime inventory across clusters."
       rows={rows}
       status={{
         loading: scoped.loading || nsScoped.loading,

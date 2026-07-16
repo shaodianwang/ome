@@ -21,7 +21,7 @@ const COLUMNS: Column<WorkloadRow>[] = [
     render: (w) => (
       <>
         {w.name}
-        {w.reason ? <div className="cell-sub bad">{w.reason}</div> : null}
+        {w.reason ? <span className="cell-sub bad">{w.reason}</span> : null}
       </>
     ),
     sort: (w) => w.name.toLowerCase(),
@@ -145,7 +145,7 @@ export function Workloads({
   return (
     <ResourceTable<WorkloadRow>
       title="Deployments"
-      subtitle="Every model deployment across the fleet. Click a row for detail and a test request."
+      subtitle="Model serving deployments across clusters."
       rows={toWorkloadRows(isvcs.data?.items ?? [])}
       status={isvcs}
       noun="deployments"

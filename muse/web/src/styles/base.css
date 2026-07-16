@@ -1,40 +1,46 @@
 /* ============================================================
-   MUSE design system  (ported verbatim from the OEP-0021 mockup)
+   MUSE design system
    ============================================================ */
 :root {
-  /* surfaces — warm charcoal / stone (warm-neutral, not blue-black) */
-  --bg: #14120f; /* app background, warm near-black */
-  --bg-2: #1a1713; /* sunken (table header, code) */
-  --panel: #201c17; /* elevated panel / card */
-  --panel-2: #262019; /* card header / nested */
-  --hover: #2b251d; /* row / item hover */
-  --border: #322c23; /* hairline border */
-  --border-2: #423a2e; /* stronger border / focus */
+  /* Neutral surfaces keep hierarchy in contrast and spacing, not hue. */
+  --bg: #121416;
+  --bg-2: #171a1d;
+  --panel: #1c1f22;
+  --panel-2: #22262a;
+  --hover: #272c30;
+  --border: #30363b;
+  --border-2: #485158;
 
-  /* text — warm whites / stone */
-  --fg: #ece7df; /* primary text */
-  --fg-2: #b1a899; /* secondary text */
-  --fg-3: #84796a; /* tertiary / labels */
-  --fg-faint: #5b5447; /* faint */
+  --fg: #f2f4f5;
+  --fg-2: #c3c9cd;
+  --fg-3: #969fa5;
+  --fg-faint: #747e84;
 
-  /* accent — a single muted warm (terracotta/amber) */
-  --accent: #d68a4e;
-  --accent-2: #e7a973;
-  --accent-dim: #352617; /* accent chip background */
-  --accent-fg: #f1c79f; /* accent text on dim */
+  /* Selection and actions are neutral. Color is reserved for state. */
+  --accent: #d9dee1;
+  --accent-2: #f3f5f6;
+  --accent-dim: #2c3135;
+  --accent-fg: #f3f5f6;
+  --accent-contrast: #17191b;
 
-  /* semantic — muted, used only for real status (not decoration) */
-  --green: #6fae84;
-  --green-dim: #1e2a20;
-  --amber: #d2a64a;
-  --amber-dim: #2e2612;
-  --red: #d97a68;
-  --red-dim: #321d18;
-  /* legacy decorative tones, desaturated toward neutral so nothing pops */
-  --violet: #a99ec0;
-  --violet-dim: #272232;
-  --cyan: #7fb0b3;
-  --cyan-dim: #18272a;
+  --green: #72c993;
+  --green-dim: #172a20;
+  --amber: #e3b65f;
+  --amber-dim: #2d2516;
+  --red: #ed8372;
+  --red-dim: #311c19;
+
+  /* Distinct data-series hues maintain 3:1 contrast when plotted together. */
+  --violet: #9867c5;
+  --violet-dim: #140f18;
+  --cyan: #b5f4fa;
+  --cyan-dim: #102326;
+
+  --code-bg: #0e1012;
+  --topbar-bg: rgb(18 20 22 / 94%);
+  --overlay: rgb(0 0 0 / 58%);
+  --focus-ring: rgb(217 222 225 / 18%);
+  --stripe: rgb(255 255 255 / 16%);
 
   /* type scale */
   --t-xs: 11px;
@@ -42,10 +48,10 @@
   --t-md: 13px;
   --t-base: 14px;
   --t-lg: 16px;
-  --t-xl: 20px;
-  --t-2xl: 26px;
-  --t-3xl: 34px;
-  --t-4xl: 44px;
+  --t-xl: 19px;
+  --t-2xl: 23px;
+  --t-3xl: 30px;
+  --t-4xl: 40px;
 
   /* spacing scale */
   --s1: 4px;
@@ -57,9 +63,9 @@
   --s7: 32px;
   --s8: 40px;
 
-  --radius: 8px;
-  --radius-sm: 6px;
-  --radius-lg: 12px;
+  --radius: 6px;
+  --radius-sm: 4px;
+  --radius-lg: 8px;
   --radius-pill: 999px;
 
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
@@ -67,8 +73,8 @@
     "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif;
 
-  /* soft, rare shadow — no glow */
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.22);
+  /* Shadows are for overlays only; routine surfaces use borders. */
+  --shadow: 0 18px 48px rgb(0 0 0 / 42%);
   --sidebar-w: 232px;
   --topbar-h: 54px;
 }
@@ -90,19 +96,6 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-/* faint warm sheen at the top — barely there, no neon glow */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  background: radial-gradient(
-    1100px 420px at 50% -300px,
-    rgba(214, 138, 78, 0.05),
-    transparent 70%
-  );
-  pointer-events: none;
-  z-index: 0;
-}
 .mono {
   font-family: var(--mono);
   font-feature-settings:
@@ -122,16 +115,14 @@ body::before {
 .txt-warn {
   color: var(--amber);
 }
-/* uppercase micro eyebrow label (smg "section-label" pattern) */
 .eyebrow {
-  font-size: var(--t-xs);
+  font-size: var(--t-sm);
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0;
   color: var(--fg-3);
 }
 ::selection {
-  background: rgba(214, 138, 78, 0.3);
+  background: var(--border-2);
 }
 
 :where(button, a, input, select, textarea):focus-visible {
@@ -145,12 +136,12 @@ body::before {
   height: 11px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a241c;
-  border-radius: 8px;
+  background: var(--border);
+  border-radius: var(--radius);
   border: 3px solid var(--bg);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a3228;
+  background: var(--border-2);
 }
 ::-webkit-scrollbar-track {
   background: transparent;

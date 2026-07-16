@@ -143,7 +143,7 @@ export function Models({
     <>
       <ResourceTable<ModelRow>
         title="Models"
-        subtitle="Models registered across the fleet — architecture, size, quantization and where served."
+        subtitle="Registered model inventory across clusters."
         actions={
           <button
             className="btn ghost"

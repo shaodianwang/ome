@@ -36,7 +36,7 @@ export function ClusterFilter({
 }) {
   return (
     <div className="input cluster-filter">
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <select aria-label="Cluster" value={value} onChange={(e) => onChange(e.target.value)}>
         <option value="">All clusters</option>
         {clusters.map((c) => (
           <option key={c} value={c}>

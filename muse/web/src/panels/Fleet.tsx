@@ -155,9 +155,8 @@ export function Fleet({
     <section className="panel active">
       <div className="page-head">
         <div>
-          <h1>
-            Fleet <small className="muted">overview · all clusters</small>
-          </h1>
+          <h1>Fleet</h1>
+          <p>Serving health, performance, and accelerator allocation across clusters.</p>
         </div>
       </div>
 
@@ -175,7 +174,7 @@ export function Fleet({
         </div>
       ) : null}
 
-      {/* SLI BANNER — the fleet-aggregate KPIs (current value + trend spark). */}
+      {/* Fleet-level KPIs with current values and compact trends. */}
       <div className="tiles">
         <StatTile
           label="Availability"
@@ -223,17 +222,14 @@ export function Fleet({
           value={
             <span className={gpuTight ? "txt-bad" : undefined}>{gpu ? `${gpuPct}%` : "—"}</span>
           }
-          sub={gpu ? `${n(gpu.free)} free · util — (DCGM)` : undefined}
+          sub={gpu ? `${n(gpu.free)} free` : undefined}
         />
-        <StatTile label="Reclaimable GPU" value="—" sub="needs GPU utilization (DCGM)" />
       </div>
 
-      {/* PERFORMANCE — per-model detail (what the banner can't show). */}
+      {/* Per-model performance detail. */}
       {metricsOn ? (
         <>
-          <h2 className="sec">
-            Performance <span className="who">· per model · researchers · PMs · managers</span>
-          </h2>
+          <h2 className="sec">Performance</h2>
           <Card
             title="Models by traffic"
             actions={
@@ -271,7 +267,18 @@ export function Fleet({
                           openDeployment({ cluster: r.clusters[0] ?? "", name: r.isvc })
                         }
                       >
-                        <td className="mono">{r.isvc}</td>
+                        <td className="mono">
+                          <button
+                            type="button"
+                            className="row-open"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openDeployment({ cluster: r.clusters[0] ?? "", name: r.isvc });
+                            }}
+                          >
+                            {r.isvc}
+                          </button>
+                        </td>
                         <td className="muted">{r.clusters.join(", ")}</td>
                         <td className="tnum">{fmtRate(r.qps)}</td>
                         <td className="tnum">{fmtLatency(r.p50)}</td>
@@ -299,17 +306,13 @@ export function Fleet({
         </>
       ) : null}
 
-      {/* CAPACITY */}
-      <h2 className="sec">
-        Capacity <span className="who">· allocation · operators · managers</span>
-      </h2>
+      <h2 className="sec">Capacity</h2>
       {gpuTight ? (
         <div className="panel-alert">
           <Dot tone="red" />
           <span>
-            <b>GPU {gpuPct}% allocated</b> — {gpu ? n(gpu.free) : 0} free. Utilization (power) is
-            pending DCGM into an in‑cluster Prometheus, so idle‑but‑allocated capacity isn't visible
-            yet.
+            <b>GPU {gpuPct}% allocated</b> — {gpu ? n(gpu.free) : 0} free. This view reflects
+            allocation because utilization telemetry is unavailable.
           </span>
         </div>
       ) : null}
@@ -325,9 +328,7 @@ export function Fleet({
             <Gauge pct={kpct(tpu)} tone={utilTone(kpct(tpu))} />
             <span className="cap-free">{tpu ? `${n(tpu.free)} free` : "—"}</span>
           </div>
-          <p className="panel-note">
-            Utilization (GPU power / TPU duty cycle) pending metrics in‑cluster.
-          </p>
+          <p className="panel-note">Allocation only; utilization telemetry is unavailable.</p>
         </Card>
         <Card title="Allocation by cluster" sub="load · free">
           <div className="urows">
@@ -396,10 +397,7 @@ export function Fleet({
         </Card>
       </div>
 
-      {/* DEPLOYMENTS */}
-      <h2 className="sec">
-        Deployments <span className="who">· everyone</span>
-      </h2>
+      <h2 className="sec">Deployments</h2>
       <div className="grid g2">
         <Card
           title="By cluster"
@@ -456,11 +454,17 @@ export function Fleet({
           {health.attention.length ? (
             <ul className="attn-list wide">
               {health.attention.slice(0, 8).map((a, i) => (
-                <li key={i} onClick={() => openDeployments("attention")}>
-                  <Dot tone="red" />
-                  <span className="mono">{a.name}</span>
-                  <span className="muted">{a.cluster}</span>
-                  {a.reason ? <span className="attn-reason">{a.reason}</span> : null}
+                <li key={i}>
+                  <button
+                    type="button"
+                    className="attn-open"
+                    onClick={() => openDeployments("attention")}
+                  >
+                    <Dot tone="red" />
+                    <span className="mono">{a.name}</span>
+                    <span className="muted">{a.cluster}</span>
+                    {a.reason ? <span className="attn-reason">{a.reason}</span> : null}
+                  </button>
                 </li>
               ))}
             </ul>
@@ -470,10 +474,7 @@ export function Fleet({
         </Card>
       </div>
 
-      {/* ROLLOUTS & ACTIVITY */}
-      <h2 className="sec">
-        Rollouts &amp; activity <span className="who">· operators · engineers</span>
-      </h2>
+      <h2 className="sec">Rollouts &amp; activity</h2>
       <div className="grid g2">
         <Card title={`Active rollouts · ${n(rolloutCards.length)}`} sub="progress · phase">
           {rolloutCards.length ? (

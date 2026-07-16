@@ -9,7 +9,7 @@ export const BrandMark = (p: P) => (
   <svg {...base(p)}>
     <path
       d="M3 17V7l5 4 4-6 4 6 5-4v10"
-      stroke="#fff"
+      stroke="currentColor"
       strokeWidth={2}
       strokeLinejoin="round"
       strokeLinecap="round"

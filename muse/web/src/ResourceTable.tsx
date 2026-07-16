@@ -134,11 +134,12 @@ export function ResourceTable<T>({
       </div>
 
       <div className="filterbar">
-        <div className="seg">
+        <div className="seg" role="group" aria-label={`${title} status filter`}>
           {tabs.map((t) => (
             <button
               key={t.key}
               className={filter === t.key ? "active" : undefined}
+              aria-pressed={filter === t.key}
               onClick={() => setFilter(t.key)}
             >
               {t.label} <span className="seg-count">{num(scoped.filter(t.match).length)}</span>
@@ -147,8 +148,13 @@ export function ResourceTable<T>({
         </div>
         <ClusterFilter clusters={clusters} value={cluster} onChange={setCluster} />
         <div className="input grow">
-          <Search />
-          <input placeholder={searchPlaceholder} value={q} onChange={(e) => setQ(e.target.value)} />
+          <Search aria-hidden />
+          <input
+            aria-label={`Search ${noun}`}
+            placeholder={searchPlaceholder}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
       </div>
 
@@ -170,25 +176,26 @@ export function ResourceTable<T>({
                             : "descending"
                           : undefined
                       }
-                      onClick={() => toggleSort(c.key)}
                     >
-                      {/* On right-aligned columns the arrow goes before the label so
-                          the label stays flush right, aligning with the numeric cell. */}
-                      {c.right ? (
-                        <>
-                          <span className="sort-arrow">
-                            {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
-                          </span>
-                          {c.label}
-                        </>
-                      ) : (
-                        <>
-                          {c.label}
-                          <span className="sort-arrow">
-                            {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
-                          </span>
-                        </>
-                      )}
+                      <button type="button" onClick={() => toggleSort(c.key)}>
+                        {/* On right-aligned columns the arrow goes before the label so
+                            the label stays flush right, aligning with the numeric cell. */}
+                        {c.right ? (
+                          <>
+                            <span className="sort-arrow" aria-hidden="true">
+                              {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
+                            </span>
+                            {c.label}
+                          </>
+                        ) : (
+                          <>
+                            {c.label}
+                            <span className="sort-arrow" aria-hidden="true">
+                              {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
+                            </span>
+                          </>
+                        )}
+                      </button>
                     </th>
                   ) : (
                     <th key={c.key} className={c.right ? "right" : undefined}>
@@ -204,9 +211,22 @@ export function ResourceTable<T>({
                   <td>
                     <Dot tone={rowTone(r)} />
                   </td>
-                  {columns.map((c) => (
+                  {columns.map((c, index) => (
                     <td key={c.key} className={c.cellClass}>
-                      {c.render(r)}
+                      {index === 0 ? (
+                        <button
+                          type="button"
+                          className="row-open"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onRowClick(r);
+                          }}
+                        >
+                          {c.render(r)}
+                        </button>
+                      ) : (
+                        c.render(r)
+                      )}
                     </td>
                   ))}
                 </tr>

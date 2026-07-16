@@ -224,6 +224,7 @@ function UnitTable({ units, unit }: { units: UnitBox[]; unit: string }) {
       <div className="filterbar">
         <div className="input grow">
           <input
+            aria-label={`Filter ${unit}s`}
             placeholder={`Filter ${unit}s by name or cluster…`}
             value={q}
             onChange={(e) => {
@@ -293,11 +294,23 @@ function TierRow({ t }: { t: Tier }) {
     <>
       <tr className="clickable" onClick={() => setOpen((o) => !o)}>
         <td className="tier-name">
-          <span className="tier-caret">{open ? "▾" : "▸"}</span>
-          <span className="tag">{t.kind}</span> {t.tier}{" "}
-          <span className="muted">
-            · {n(t.chips)} {t.noun}
-          </span>
+          <button
+            type="button"
+            className="row-open"
+            aria-expanded={open}
+            onClick={(event) => {
+              event.stopPropagation();
+              setOpen((o) => !o);
+            }}
+          >
+            <span className="tier-caret" aria-hidden="true">
+              {open ? "▾" : "▸"}
+            </span>
+            <span className="tag">{t.kind}</span> {t.tier}{" "}
+            <span className="muted">
+              · {n(t.chips)} {t.noun}
+            </span>
+          </button>
         </td>
         <td className="num txt-ok">{n(t.free)}</td>
         <td className="num">{t.fragmented ? n(t.fragmented) : "—"}</td>
@@ -356,10 +369,7 @@ function TierRow({ t }: { t: Tier }) {
 function PlacementCapacity({ tiers }: { tiers: Tier[] }) {
   if (!tiers.length) return null;
   return (
-    <Card
-      title="Placement capacity"
-      sub="carve-able units by tier — free vs fragmented; click a row to drill in"
-    >
+    <Card title="Placement capacity" sub="placeable units by tier · free vs fragmented">
       <div className="health-legend frag-legend">
         {OCCUPANCY.map((o) => (
           <span key={o.key}>
@@ -731,11 +741,14 @@ export function Capacity() {
   const th = (k: SortKey, label: string, right = false) => (
     <th
       className={`sortable${right ? " right" : ""}`}
-      onClick={() => toggleSort(k)}
       aria-sort={sortKey === k ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
     >
-      {label}
-      <span className="sort-arrow">{sortKey === k ? (sortDir === "asc" ? "▲" : "▼") : ""}</span>
+      <button type="button" onClick={() => toggleSort(k)}>
+        {label}
+        <span className="sort-arrow" aria-hidden="true">
+          {sortKey === k ? (sortDir === "asc" ? "▲" : "▼") : ""}
+        </span>
+      </button>
     </th>
   );
 
@@ -744,22 +757,27 @@ export function Capacity() {
       <div className="page-head">
         <div>
           <h1>Capacity</h1>
-          <p>Live accelerator inventory across clusters. GPUs and TPUs are counted separately.</p>
+          <p>Accelerator allocation and placement capacity across clusters.</p>
         </div>
       </div>
 
-      <div className="dtabs">
-        <button className={tab === "" ? "dtab active" : "dtab"} onClick={() => setTab("")}>
+      <div className="dtabs" role="group" aria-label="Capacity scope">
+        <button
+          className={tab === "" ? "dtab active" : "dtab"}
+          aria-pressed={tab === ""}
+          onClick={() => setTab("")}
+        >
           All clusters
         </button>
         {allCaps.map((c) => (
           <button
             key={c.name}
             className={tab === c.name ? "dtab active" : "dtab"}
+            aria-pressed={tab === c.name}
             onClick={() => setTab(c.name)}
           >
             {c.name}
-            {c.ready ? "" : " ⏳"}
+            {c.ready ? null : <Dot tone="amber" />}
           </button>
         ))}
       </div>
@@ -889,6 +907,7 @@ export function Capacity() {
           <div className="filterbar">
             <div className="input grow">
               <input
+                aria-label="Search nodes"
                 placeholder="Filter nodes by name, type, or issue…"
                 value={nodeQ}
                 onChange={(e) => setNodeQ(e.target.value)}
@@ -911,7 +930,19 @@ export function Capacity() {
                 {nodePageRows.map((nd) => (
                   <F key={nd.name}>
                     <tr className="clickable" onClick={() => toggleNode(nd.name)}>
-                      <td className="cell-name mono">{nd.name}</td>
+                      <td className="cell-name mono">
+                        <button
+                          type="button"
+                          className="row-open"
+                          aria-expanded={expanded === nd.name}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleNode(nd.name);
+                          }}
+                        >
+                          {nd.name}
+                        </button>
+                      </td>
                       <td className="mono muted">{nd.instanceType ?? "—"}</td>
                       <td className="num">
                         {nd.accelerator
@@ -1047,25 +1078,31 @@ export function Capacity() {
       ) : null}
 
       <div className="filterbar">
-        <div className="seg">
-          <button className={kind === "all" ? "active" : undefined} onClick={() => setKind("all")}>
+        <div className="seg" role="group" aria-label="Accelerator type">
+          <button
+            className={kind === "all" ? "active" : undefined}
+            aria-pressed={kind === "all"}
+            onClick={() => setKind("all")}
+          >
             All
           </button>
           {kindsPresent.map((k) => (
             <button
               key={k}
               className={kind === k ? "active" : undefined}
+              aria-pressed={kind === k}
               onClick={() => setKind(k as Kind)}
             >
               {k.toUpperCase()}
             </button>
           ))}
         </div>
-        <div className="seg">
+        <div className="seg" role="group" aria-label="Capacity grouping">
           {DIMS.map((d) => (
             <button
               key={d.key}
               className={d.key === dim ? "active" : undefined}
+              aria-pressed={d.key === dim}
               onClick={() => setDim(d.key)}
             >
               {d.label}
@@ -1074,6 +1111,7 @@ export function Capacity() {
         </div>
         <div className="input grow">
           <input
+            aria-label="Search capacity"
             placeholder="Filter by cluster, name, or kind…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -1102,13 +1140,25 @@ export function Capacity() {
                 <tr
                   key={`${r.cluster}/${r.name}/${r.kind}/${i}`}
                   className="clickable"
-                  title={`Open ${r.cluster}`}
                   onClick={() => {
                     setTab(r.cluster);
                     window.scrollTo({ top: 0, behavior: "smooth" });
                   }}
                 >
-                  <td className="cell-name mono">{r.cluster}</td>
+                  <td className="cell-name mono">
+                    <button
+                      type="button"
+                      className="row-open"
+                      title={`Open ${r.cluster}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setTab(r.cluster);
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }}
+                    >
+                      {r.cluster}
+                    </button>
+                  </td>
                   {showName ? <td className="mono">{r.name || "—"}</td> : null}
                   <td>
                     <span className="tag">{r.kind.toUpperCase()}</span>
@@ -1204,13 +1254,18 @@ export function Capacity() {
           <label className="fit-input">
             Will a job of
             <input
+              aria-label="Job accelerator count"
               type="number"
               min={1}
               placeholder="128"
               value={fit}
               onChange={(e) => setFit(e.target.value)}
             />
-            <select value={fitKind} onChange={(e) => setFitKind(e.target.value)}>
+            <select
+              aria-label="Job accelerator type"
+              value={fitKind}
+              onChange={(e) => setFitKind(e.target.value)}
+            >
               {kindsPresent.map((k) => (
                 <option key={k} value={k}>
                   {k.toUpperCase()}

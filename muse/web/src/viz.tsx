@@ -8,7 +8,7 @@ import type { BarTone, Tone } from "./types";
 
 /** A small status dot. */
 export function Dot({ tone }: { tone: Tone }) {
-  return <span className={`vdot ${tone}`} />;
+  return <span className={`vdot ${tone}`} aria-hidden="true" />;
 }
 
 /** A KPI tile: label, big value, an optional inline viz, and a sub-line. `tone`
@@ -179,7 +179,11 @@ export function FilterChip({
   return (
     <label className={accent ? "fv range" : "fv"}>
       {label ? <span className="lbl">{label}</span> : null}
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <select
+        aria-label={label ?? "Time range"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
