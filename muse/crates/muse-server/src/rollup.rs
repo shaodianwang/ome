@@ -4,11 +4,13 @@
 //! refresh task on informer changes and cached on `AppState`; the endpoint only
 //! serves the snapshot.
 //!
-//! "Allocatable" comes from each Node; "allocated" is summed from the accelerator
-//! requests of the Pods scheduled on it. Accelerators are tracked **per kind** —
-//! GPUs and TPUs never share a total (different units). Results roll up fleet-wide
-//! per kind and are grouped by cluster, island, NVLink/ICI domain, and instance
-//! type; every group carries its accelerator `kind`.
+//! "Allocatable" comes from Ready, uncordoned Nodes; "allocated" is summed from the
+//! accelerator requests of the Pods scheduled on those Nodes. NotReady or cordoned
+//! Nodes remain visible as unavailable physical inventory, but contribute no
+//! schedulable/free capacity. Accelerators are tracked **per kind** — GPUs and TPUs
+//! never share a total (different units). Results roll up fleet-wide per kind and
+//! are grouped by cluster, island, NVLink/ICI domain, and instance type; every group
+//! carries its accelerator `kind`.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -104,8 +106,8 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
             if ready {
                 counts.ready += 1;
             }
-            let unschedulable = node_unschedulable(node);
-            if !unschedulable {
+            let available = node_available(node);
+            if available {
                 counts.schedulable += 1;
             }
 
@@ -116,11 +118,13 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
                 continue; // non-accelerator node: counted in totals, skipped in rollups
             };
             counts.accelerator_nodes += 1;
-            // Accelerators on a NotReady or cordoned node exist but can't be scheduled.
-            if !ready || unschedulable {
+            // Keep unavailable physical inventory visible, but do not let it inflate
+            // schedulable totals or the topology groups used for largest-fit results.
+            if !available {
                 let e = unavail.entry(kind).or_insert((0, 0));
                 e.0 += allocatable;
                 e.1 += 1;
+                continue;
             }
 
             let stat = GpuView::new(allocatable, allocated.get(&name).copied().unwrap_or(0));
@@ -233,13 +237,15 @@ fn domain_units(clusters: &[ClusterData], want_kind: &str, keys: &[String]) -> V
             };
             let name = node.meta().name.clone().unwrap_or_default();
             let used = allocated.get(&name).copied().unwrap_or(0);
-            let healthy = node_ready(node) && !node_unschedulable(node);
+            let available = node_available(node);
             let e = units
                 .entry(format!("{}|{dom}", cluster.name))
                 .or_insert_with(|| (0, 0, true, cluster.name.clone(), dom));
             e.0 += chips;
-            e.1 += chips - used;
-            e.2 &= healthy;
+            if available {
+                e.1 += (chips - used).max(0);
+            }
+            e.2 &= available;
         }
     }
     let mut out: Vec<UnitBox> = units
@@ -271,6 +277,11 @@ fn node_unschedulable(node: &Node) -> bool {
         .as_ref()
         .and_then(|s| s.unschedulable)
         .unwrap_or(false)
+}
+
+/// Whether a node can contribute capacity to a new placement right now.
+fn node_available(node: &Node) -> bool {
+    node_ready(node) && !node_unschedulable(node)
 }
 
 /// The most-stranded fragmented units surfaced per size (the operator drill-down).
@@ -318,7 +329,7 @@ fn placement_units(
             let name = node.meta().name.clone().unwrap_or_default();
             let labels = node.meta().labels.clone().unwrap_or_default();
             let used = allocated.get(&name).copied().unwrap_or(0);
-            let healthy = node_ready(node) && !node_unschedulable(node);
+            let available = node_available(node);
             for (key, id, label) in unit_of(&cluster.name, &name, &labels) {
                 let e = units.entry(key).or_insert_with(|| Acc {
                     chips: 0,
@@ -329,8 +340,10 @@ fn placement_units(
                     id,
                 });
                 e.chips += chips;
-                e.free += chips - used;
-                e.healthy &= healthy;
+                if available {
+                    e.free += (chips - used).max(0);
+                }
+                e.healthy &= available;
             }
         }
     }
@@ -379,7 +392,7 @@ fn placement_units(
     let mut out: Vec<PlacementUnits> = by_size
         .into_iter()
         .map(|(label, mut b)| {
-            b.frags.sort_by(|a, c| c.free.cmp(&a.free)); // most stranded first
+            b.frags.sort_by_key(|f| std::cmp::Reverse(f.free)); // most stranded first
             b.frags.truncate(MAX_FRAGMENTS);
             PlacementUnits {
                 label,
@@ -514,4 +527,438 @@ fn into_groups(map: BTreeMap<Key, (usize, GpuView)>) -> Vec<GroupCapacity> {
         .collect();
     groups.sort_by(|a, b| b.free.cmp(&a.free).then(a.name.cmp(&b.name)));
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use ome_client::k8s_openapi::{
+        api::core::v1::{
+            Container, Node, NodeCondition, NodeSpec, NodeStatus, Pod, PodSpec, PodStatus,
+            ResourceRequirements,
+        },
+        apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
+    };
+
+    use super::{build, ClusterData};
+    use crate::protocol::{
+        AccelLost, CapacityReport, GroupCapacity, PlacementUnits, Topology, UnitBox,
+    };
+
+    const ISLAND_LABEL: &str = "capacity.test/island";
+    const DOMAIN_LABEL: &str = "capacity.test/domain";
+
+    #[derive(Clone, Copy)]
+    enum Availability {
+        Healthy,
+        NotReady,
+        Cordoned,
+    }
+
+    struct Placement<'a> {
+        island: &'a str,
+        domain: &'a str,
+        tpu_slice: Option<(&'a str, &'a str)>,
+    }
+
+    fn topology() -> Topology {
+        Topology {
+            island_labels: vec![ISLAND_LABEL.to_owned()],
+            nvlink_labels: vec![DOMAIN_LABEL.to_owned()],
+        }
+    }
+
+    fn accel_resource(kind: &str) -> &'static str {
+        match kind {
+            "gpu" => "nvidia.com/gpu",
+            "tpu" => "google.com/tpu",
+            _ => panic!("unsupported test accelerator kind: {kind}"),
+        }
+    }
+
+    fn node(
+        name: &str,
+        kind: &str,
+        chips: i64,
+        availability: Availability,
+        placement: Placement<'_>,
+    ) -> Arc<Node> {
+        let (ready, cordoned) = match availability {
+            Availability::Healthy => (true, false),
+            Availability::NotReady => (false, false),
+            Availability::Cordoned => (true, true),
+        };
+        let mut labels = BTreeMap::from([
+            (ISLAND_LABEL.to_owned(), placement.island.to_owned()),
+            (DOMAIN_LABEL.to_owned(), placement.domain.to_owned()),
+            (
+                "node.kubernetes.io/instance-type".to_owned(),
+                format!("{kind}.test"),
+            ),
+        ]);
+        if let Some((shape, id)) = placement.tpu_slice {
+            labels.insert(
+                format!("cloud.google.com/gke-tpu-partition-{shape}-id"),
+                id.to_owned(),
+            );
+        }
+        let allocatable =
+            BTreeMap::from([(accel_resource(kind).to_owned(), Quantity(chips.to_string()))]);
+        Arc::new(Node {
+            metadata: ObjectMeta {
+                name: Some(name.to_owned()),
+                labels: Some(labels),
+                ..ObjectMeta::default()
+            },
+            spec: Some(NodeSpec {
+                unschedulable: Some(cordoned),
+                ..NodeSpec::default()
+            }),
+            status: Some(NodeStatus {
+                allocatable: Some(allocatable),
+                conditions: Some(vec![NodeCondition {
+                    type_: "Ready".to_owned(),
+                    status: if ready { "True" } else { "False" }.to_owned(),
+                    ..NodeCondition::default()
+                }]),
+                ..NodeStatus::default()
+            }),
+        })
+    }
+
+    fn pod(name: &str, node_name: &str, kind: &str, chips: i64) -> Arc<Pod> {
+        let requests =
+            BTreeMap::from([(accel_resource(kind).to_owned(), Quantity(chips.to_string()))]);
+        Arc::new(Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_owned()),
+                namespace: Some("workloads".to_owned()),
+                ..ObjectMeta::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some(node_name.to_owned()),
+                containers: vec![Container {
+                    name: "worker".to_owned(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..ResourceRequirements::default()
+                    }),
+                    ..Container::default()
+                }],
+                ..PodSpec::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_owned()),
+                ..PodStatus::default()
+            }),
+        })
+    }
+
+    fn cluster(nodes: Vec<Arc<Node>>, pods: Vec<Arc<Pod>>) -> ClusterData {
+        ClusterData {
+            name: "cluster-a".to_owned(),
+            nodes,
+            pods,
+        }
+    }
+
+    fn group<'a>(groups: &'a [GroupCapacity], name: &str, kind: &str) -> &'a GroupCapacity {
+        groups
+            .iter()
+            .find(|g| g.name == name && g.kind == kind)
+            .unwrap_or_else(|| panic!("missing capacity group {name}/{kind}"))
+    }
+
+    fn assert_group(
+        groups: &[GroupCapacity],
+        name: &str,
+        kind: &str,
+        nodes: usize,
+        allocatable: i64,
+        allocated: i64,
+        free: i64,
+    ) {
+        let actual = group(groups, name, kind);
+        assert_eq!(actual.nodes, nodes);
+        assert_eq!(actual.allocatable, allocatable);
+        assert_eq!(actual.allocated, allocated);
+        assert_eq!(actual.free, free);
+    }
+
+    fn lost<'a>(report: &'a CapacityReport, kind: &str) -> &'a AccelLost {
+        report
+            .unavailable
+            .iter()
+            .find(|u| u.kind == kind)
+            .unwrap_or_else(|| panic!("missing unavailable inventory for {kind}"))
+    }
+
+    fn placement<'a>(units: &'a [PlacementUnits], label: &str) -> &'a PlacementUnits {
+        units
+            .iter()
+            .find(|u| u.label == label)
+            .unwrap_or_else(|| panic!("missing placement bucket {label}"))
+    }
+
+    fn domain<'a>(units: &'a [UnitBox], id: &str) -> &'a UnitBox {
+        units
+            .iter()
+            .find(|u| u.id == id)
+            .unwrap_or_else(|| panic!("missing placement domain {id}"))
+    }
+
+    fn assert_inventory_only(report: &CapacityReport, ready_nodes: usize) {
+        assert_eq!(report.nodes.total, 1);
+        assert_eq!(report.nodes.ready, ready_nodes);
+        assert_eq!(report.nodes.schedulable, 0);
+        assert_eq!(report.nodes.accelerator_nodes, 1);
+        assert!(report.accelerators.is_empty());
+        assert!(report.by_cluster.is_empty());
+        assert!(report.by_island.is_empty());
+        assert!(report.by_nvlink_domain.is_empty());
+        assert!(report.by_instance_type.is_empty());
+
+        let unavailable = lost(report, "gpu");
+        assert_eq!(unavailable.accelerators, 8);
+        assert_eq!(unavailable.nodes, 1);
+
+        let gpu_node = placement(&report.gpu_nodes, "8");
+        assert_eq!(gpu_node.total, 1);
+        assert_eq!(gpu_node.free, 0);
+        assert_eq!(gpu_node.fragmented, 0);
+        assert_eq!(gpu_node.full, 0);
+        assert_eq!(gpu_node.unhealthy, 1);
+
+        let rack = domain(&report.gpu_racks, "domain-a");
+        assert_eq!(rack.chips, 8);
+        assert_eq!(rack.free, 0);
+        assert!(!rack.healthy);
+    }
+
+    #[test]
+    fn healthy_gpu_contributes_to_schedulable_and_topology_capacity() {
+        let report = build(
+            &[cluster(
+                vec![node(
+                    "gpu-healthy",
+                    "gpu",
+                    8,
+                    Availability::Healthy,
+                    Placement {
+                        island: "island-a",
+                        domain: "domain-a",
+                        tpu_slice: None,
+                    },
+                )],
+                vec![],
+            )],
+            &topology(),
+        );
+
+        assert_eq!(report.nodes.total, 1);
+        assert_eq!(report.nodes.ready, 1);
+        assert_eq!(report.nodes.schedulable, 1);
+        assert_eq!(report.nodes.accelerator_nodes, 1);
+        assert_group(&report.accelerators, "gpu", "gpu", 1, 8, 0, 8);
+        assert_group(&report.by_cluster, "cluster-a", "gpu", 1, 8, 0, 8);
+        assert_group(&report.by_island, "island-a", "gpu", 1, 8, 0, 8);
+        assert_group(&report.by_nvlink_domain, "domain-a", "gpu", 1, 8, 0, 8);
+        assert_group(&report.by_instance_type, "gpu.test", "gpu", 1, 8, 0, 8);
+        assert!(report.unavailable.is_empty());
+
+        let gpu_node = placement(&report.gpu_nodes, "8");
+        assert_eq!(gpu_node.total, 1);
+        assert_eq!(gpu_node.free, 1);
+        assert_eq!(gpu_node.unhealthy, 0);
+        let rack = domain(&report.gpu_racks, "domain-a");
+        assert_eq!(rack.chips, 8);
+        assert_eq!(rack.free, 8);
+        assert!(rack.healthy);
+    }
+
+    #[test]
+    fn not_ready_gpu_is_reported_only_as_unavailable_inventory() {
+        let report = build(
+            &[cluster(
+                vec![node(
+                    "gpu-not-ready",
+                    "gpu",
+                    8,
+                    Availability::NotReady,
+                    Placement {
+                        island: "island-a",
+                        domain: "domain-a",
+                        tpu_slice: None,
+                    },
+                )],
+                vec![],
+            )],
+            &topology(),
+        );
+
+        assert_inventory_only(&report, 0);
+    }
+
+    #[test]
+    fn cordoned_gpu_is_reported_only_as_unavailable_inventory() {
+        let report = build(
+            &[cluster(
+                vec![node(
+                    "gpu-cordoned",
+                    "gpu",
+                    8,
+                    Availability::Cordoned,
+                    Placement {
+                        island: "island-a",
+                        domain: "domain-a",
+                        tpu_slice: None,
+                    },
+                )],
+                vec![],
+            )],
+            &topology(),
+        );
+
+        assert_inventory_only(&report, 1);
+    }
+
+    #[test]
+    fn mixed_health_and_allocations_exclude_unavailable_gpu_and_tpu_capacity() {
+        let nodes = vec![
+            node(
+                "gpu-partial",
+                "gpu",
+                8,
+                Availability::Healthy,
+                Placement {
+                    island: "island-a",
+                    domain: "domain-a",
+                    tpu_slice: None,
+                },
+            ),
+            node(
+                "gpu-full",
+                "gpu",
+                8,
+                Availability::Healthy,
+                Placement {
+                    island: "island-b",
+                    domain: "domain-full",
+                    tpu_slice: None,
+                },
+            ),
+            node(
+                "gpu-not-ready",
+                "gpu",
+                8,
+                Availability::NotReady,
+                Placement {
+                    island: "island-a",
+                    domain: "domain-a",
+                    tpu_slice: None,
+                },
+            ),
+            node(
+                "gpu-cordoned",
+                "gpu",
+                4,
+                Availability::Cordoned,
+                Placement {
+                    island: "island-b",
+                    domain: "domain-cordoned",
+                    tpu_slice: None,
+                },
+            ),
+            node(
+                "tpu-partial",
+                "tpu",
+                4,
+                Availability::Healthy,
+                Placement {
+                    island: "island-tpu",
+                    domain: "domain-tpu",
+                    tpu_slice: Some(("2x2x1", "slice-a")),
+                },
+            ),
+            node(
+                "tpu-not-ready",
+                "tpu",
+                4,
+                Availability::NotReady,
+                Placement {
+                    island: "island-tpu",
+                    domain: "domain-tpu",
+                    tpu_slice: Some(("2x2x1", "slice-a")),
+                },
+            ),
+        ];
+        let pods = vec![
+            pod("gpu-partial-work", "gpu-partial", "gpu", 3),
+            pod("gpu-full-work", "gpu-full", "gpu", 8),
+            pod("gpu-down-work", "gpu-not-ready", "gpu", 2),
+            pod("gpu-cordoned-work", "gpu-cordoned", "gpu", 1),
+            pod("tpu-partial-work", "tpu-partial", "tpu", 1),
+            pod("tpu-down-work", "tpu-not-ready", "tpu", 2),
+        ];
+        let report = build(&[cluster(nodes, pods)], &topology());
+
+        assert_eq!(report.nodes.total, 6);
+        assert_eq!(report.nodes.ready, 4);
+        assert_eq!(report.nodes.schedulable, 3);
+        assert_eq!(report.nodes.accelerator_nodes, 6);
+        assert_group(&report.accelerators, "gpu", "gpu", 2, 16, 11, 5);
+        assert_group(&report.accelerators, "tpu", "tpu", 1, 4, 1, 3);
+        assert_group(&report.by_cluster, "cluster-a", "gpu", 2, 16, 11, 5);
+        assert_group(&report.by_cluster, "cluster-a", "tpu", 1, 4, 1, 3);
+        assert_group(&report.by_island, "island-a", "gpu", 1, 8, 3, 5);
+        assert_group(&report.by_island, "island-b", "gpu", 1, 8, 8, 0);
+        assert_group(&report.by_island, "island-tpu", "tpu", 1, 4, 1, 3);
+        assert_group(&report.by_nvlink_domain, "domain-a", "gpu", 1, 8, 3, 5);
+        assert_group(&report.by_nvlink_domain, "domain-full", "gpu", 1, 8, 8, 0);
+        assert_group(&report.by_nvlink_domain, "domain-tpu", "tpu", 1, 4, 1, 3);
+        assert_group(&report.by_instance_type, "gpu.test", "gpu", 2, 16, 11, 5);
+        assert_group(&report.by_instance_type, "tpu.test", "tpu", 1, 4, 1, 3);
+        assert!(report
+            .by_nvlink_domain
+            .iter()
+            .all(|g| g.name != "domain-cordoned"));
+
+        let unavailable_gpu = lost(&report, "gpu");
+        assert_eq!(unavailable_gpu.accelerators, 12);
+        assert_eq!(unavailable_gpu.nodes, 2);
+        let unavailable_tpu = lost(&report, "tpu");
+        assert_eq!(unavailable_tpu.accelerators, 4);
+        assert_eq!(unavailable_tpu.nodes, 1);
+
+        let gpu_eight = placement(&report.gpu_nodes, "8");
+        assert_eq!(gpu_eight.total, 3);
+        assert_eq!(gpu_eight.free, 0);
+        assert_eq!(gpu_eight.fragmented, 1);
+        assert_eq!(gpu_eight.full, 1);
+        assert_eq!(gpu_eight.unhealthy, 1);
+        assert_eq!(gpu_eight.stranded_chips, 5);
+        let gpu_four = placement(&report.gpu_nodes, "4");
+        assert_eq!(gpu_four.total, 1);
+        assert_eq!(gpu_four.unhealthy, 1);
+
+        let mixed_gpu_domain = domain(&report.gpu_racks, "domain-a");
+        assert_eq!(mixed_gpu_domain.chips, 16);
+        assert_eq!(mixed_gpu_domain.free, 5);
+        assert!(!mixed_gpu_domain.healthy);
+        let cordoned_gpu_domain = domain(&report.gpu_racks, "domain-cordoned");
+        assert_eq!(cordoned_gpu_domain.chips, 4);
+        assert_eq!(cordoned_gpu_domain.free, 0);
+        assert!(!cordoned_gpu_domain.healthy);
+
+        let tpu_slice = placement(&report.tpu_slices, "2x2x1");
+        assert_eq!(tpu_slice.chips, 8);
+        assert_eq!(tpu_slice.total, 1);
+        assert_eq!(tpu_slice.unhealthy, 1);
+        assert_eq!(tpu_slice.stranded_chips, 0);
+        let tpu_domain = domain(&report.tpu_subblocks, "domain-tpu");
+        assert_eq!(tpu_domain.chips, 8);
+        assert_eq!(tpu_domain.free, 3);
+        assert!(!tpu_domain.healthy);
+    }
 }

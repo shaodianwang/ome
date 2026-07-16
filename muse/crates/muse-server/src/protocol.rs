@@ -1279,7 +1279,9 @@ fn age(meta: &ObjectMeta) -> Option<String> {
 #[derive(Serialize)]
 pub struct CapacityReport {
     pub nodes: NodeCounts,
-    /// Fleet accelerator totals — one entry per kind (e.g. `gpu`, `tpu`).
+    /// Schedulable accelerator totals — Ready, uncordoned Nodes only — one entry
+    /// per kind (e.g. `gpu`, `tpu`). Physical inventory excluded here is reported
+    /// in `unavailable`.
     pub accelerators: Vec<GroupCapacity>,
     #[serde(rename = "byCluster")]
     pub by_cluster: Vec<GroupCapacity>,
@@ -1394,13 +1396,16 @@ pub struct AccelLost {
 pub struct NodeCounts {
     pub total: usize,
     pub ready: usize,
+    /// Nodes that are both Ready and uncordoned.
     pub schedulable: usize,
     #[serde(rename = "acceleratorNodes")]
     pub accelerator_nodes: usize,
 }
 
-/// Accelerator capacity for one group (a kind total, cluster, island, NVLink/ICI
-/// domain, or instance type), tagged with the accelerator `kind`.
+/// Schedulable accelerator capacity for one group (a kind total, cluster, island,
+/// NVLink/ICI domain, or instance type), tagged with the accelerator `kind`.
+/// NotReady and cordoned Nodes are excluded from all four values and instead
+/// reported in [`CapacityReport::unavailable`].
 #[derive(Serialize)]
 pub struct GroupCapacity {
     pub name: String,
