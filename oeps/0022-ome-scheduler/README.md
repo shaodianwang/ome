@@ -41,7 +41,9 @@ OME itself changes very little. It keeps managing pods directly, as it does toda
 
 Delivery happens in four phases, each useful on its own: **Phase A** is placement, **Phase B** brings quotas and queues by adopting Kueue, **Phase C** adds topology-aware preemption, and **Phase D** lets batch jobs use idle capacity.
 
-**Scope: any accelerator.** The model is deliberately fabric-agnostic. A *domain* is whatever the configured topology label groups — an NVLink clique on GB200, a multi-host TPU slice on GKE, an RDMA island or rack elsewhere, or nothing at all for plain CPU work (which then carries no co-location constraint and is the trivial case). The domain label is a plugin setting (see [The scheduler binary](#the-scheduler-binary-and-how-it-is-deployed)), not baked into the binary, so one build serves GPU, TPU, and CPU pools. **TPU is in v1**: forcing every gang member into a single slice-domain is exactly what stops a multi-host TPU gang from splitting across two slices — a failure OME has hit in production. The one real fabric difference lives *within* a domain (see [Placement](#placement-how-a-gang-gets-scheduled)): an NVLink clique is all-to-all, so any free node in it is interchangeable, whereas a TPU slice is a torus, so a gang that uses less than a full slice needs a contiguous sub-slice. Version 1 places whole-domain gangs — the common serving case for GPU and TPU alike — and treats finer, shape-aware sub-domain placement as another level of the topology hierarchy (see [Multi-level topology](#additional-placement-features)).
+**Current alpha implementation boundary.** The code currently implements topology-aware placement and `Permit` gating for one PodGroup at a time. Standalone-pod domain scoring, partner-gang placement (prefill/decode co-location), replica spreading, custom queue ordering, topology-aware preemption, and the protection layer remain design targets in this provisional OEP. Until partner reservations are implemented, the scheduler deliberately fails closed when it sees the configured placement-group label; producers must omit that label rather than assuming co-location is active.
+
+**Scope: any accelerator.** The model is deliberately fabric-agnostic. A *domain* is whatever the configured topology label groups — an NVLink clique on GB200, a multi-host TPU slice on GKE, an RDMA island or rack elsewhere, or nothing at all for plain CPU work (which then carries no co-location constraint and is the trivial case). A pool can set one topology label in plugin configuration; a PodGroup may override it through a configurable annotation key when one scheduler serves several fabrics. Neither the metadata key nor the label value is baked into the plugin binary, so one build serves GPU, TPU, and CPU pools. **TPU is in v1**: forcing every gang member into a single slice-domain is exactly what stops a multi-host TPU gang from splitting across two slices — a failure OME has hit in production. Read-only inspection of a production 2x2x2 pool verified `cloud.google.com/gke-tpu-partition-2x2x2-id=<slice-id>` as the unique slice label. The key is topology-shaped, so each fleet and TPU shape must verify its own unique-per-slice label instead of assuming that 2x2x2 key. The one real fabric difference lives *within* a domain (see [Placement](#placement-how-a-gang-gets-scheduled)): an NVLink clique is all-to-all, so any free node in it is interchangeable, whereas a TPU slice is a torus, so a gang that uses less than a full slice needs a contiguous sub-slice. Version 1 places whole-domain gangs — the common serving case for GPU and TPU alike — and treats finer, shape-aware sub-domain placement as another level of the topology hierarchy (see [Multi-level topology](#additional-placement-features)).
 
 ## Motivation
 
@@ -156,8 +158,9 @@ kind: PodGroup
 metadata:
   name: svc-a-prefill
   namespace: team-inference
+  annotations:
+    ome.io/topology-key: network.meta.com/domain
   labels:
-    ome.io/placement-group: svc-a     # ties prefill and decode of one service together
     ome.io/role: prefill
 spec:
   minMember: 18                        # the gang: at least 18 placed together
@@ -170,7 +173,6 @@ spec:
 metadata:
   labels:
     scheduling.x-k8s.io/pod-group: svc-a-prefill   # which gang this pod belongs to
-    ome.io/placement-group: svc-a                  # which service group it belongs to
     ome.io/service: svc-a                          # for spreading replicas
     ome.io/role: prefill
 spec:
@@ -181,9 +183,11 @@ spec:
 
 **The hold flag.** Gang pods are created with a scheduling gate. In Phase A, OME removes it immediately, so it changes nothing in practice. In Phase B, Kueue removes it when the team's quota allows. This one field is how quota, and any alternative admission system, plugs in without touching anything else.
 
-**Ordering.** OME creates the PodGroup first, then all gang pods at once. Creating them together is what makes the gang atomic, and it is where that guarantee has always lived in OME.
+**Ordering.** OME creates the PodGroup first, then all gang pods. This ensures the scheduler can resolve the group before it evaluates a member, but creation order alone is not an atomicity guarantee. Atomic admission comes from selecting a gang-aware scheduler through `schedulerName`; the default scheduler ignores PodGroup and may place members independently.
 
 **Policies.** Two per-service knobs, both with values `Required` or `Preferred`. Co-location says whether prefill and decode must share a domain or merely should. Spreading says whether replicas of the same service must land in different domains or merely should. Both matter on NVL72, where a domain is only 18 nodes, so they are per-service settings, not global ones.
+
+Those policy knobs and their placement-group metadata are not implemented in the current alpha. The chart configures the metadata key as `unsupportedPlacementGroupLabel`; seeing it makes the scheduler hold the gang Pending. This is intentional fail-closed behavior until the reservation described under [Review findings](#review-findings-holes-found-and-how-we-close-them) exists.
 
 ### Placement: how a gang gets scheduled
 
@@ -199,7 +203,7 @@ Two correctness details make this safe under concurrency. First, members waiting
 
 **Nodes within the domain.** For whole-node pods any free node works. Scoring is still set to prefer fuller nodes, which becomes important later when pods that use only part of a node are supported.
 
-**Standalone pods.** Pods that are not part of any gang skip all of the above except one thing: they are scored toward domains that are already busy. This stops small services from nibbling one node out of each empty domain and quietly destroying the fleet's ability to host large gangs. This packing only holds if **every** accelerator pod in the pool is scheduled by ome-scheduler: a pod the default scheduler places is invisible to our counting, so it can nibble an empty domain and we never see it. On any pool where R1 matters, per-pod opt-in is therefore not enough — the pool must be exclusively ome-scheduled (see [What can go wrong](#what-can-go-wrong-and-what-happens-then)). Per-pod opt-in is for mixed pools where R1 is best-effort.
+**Standalone pods (design target; not current alpha).** Pods that are not part of any gang will be scored toward domains that are already busy. This stops small services from nibbling one node out of each empty domain and quietly destroying the fleet's ability to host large gangs. This packing only holds if **every** accelerator pod in the pool is scheduled by ome-scheduler: a pod the default scheduler places is invisible to our counting, so it can nibble an empty domain and we never see it. On any pool where R1 matters, per-pod opt-in is therefore not enough — the pool must be exclusively ome-scheduled (see [What can go wrong](#what-can-go-wrong-and-what-happens-then)). Per-pod opt-in is for mixed pools where R1 is best-effort.
 
 **Retrying.** When a gang cannot fit, the scheduler subscribes to the events that could change the answer — a pod freeing capacity, a node appearing, a label changing — and retries the gang when one happens. The retry checks are deliberately cheap and precise, so heavy churn elsewhere in the cluster does not cause pointless retries.
 
@@ -225,7 +229,7 @@ A gang can declare a minimum and a desired size — for example, a decode pool t
 
 #### Clear answers to "why is my gang pending" (version 1)
 
-A lesson from operating Volcano is that pending jobs are opaque. Here, every failed attempt writes the arithmetic onto the PodGroup status: how many nodes the gang needs, which domain came closest and how many nodes it had free, and what blocked it (not enough capacity, spreading rule, or a reservation held by another gang). `kubectl describe podgroup` answers the question without reading scheduler logs, and OME surfaces the same message on the service.
+A lesson from operating Volcano is that pending jobs are opaque. The intended design writes the arithmetic onto the PodGroup status: how many nodes the gang needs, which domain came closest and how many nodes it had free, and what blocked it (not enough capacity, spreading rule, or a reservation held by another gang). `kubectl describe podgroup` would then answer the question without reading scheduler logs, and OME could surface the same message on the service. **This is not implemented in the current alpha:** failed placement is visible in scheduler logs and framework status only; the scheduler does not write PodGroup status or an OME service condition yet.
 
 #### Multi-level topology (version 2, shaped for now)
 
@@ -316,11 +320,11 @@ Pulling in the Kubernetes code requires a known block of Go module redirects; we
 
 **Image and deployment.** A single static binary in a minimal container. It runs as an ordinary Deployment in the `ome-system` namespace with 2 replicas. Only one replica is active at a time; the second takes over automatically if the first dies. This failover uses a mechanism called leader election, on our own dedicated lock so we never interfere with the platform's scheduler. Two replicas are for availability, not speed — one active scheduler is far more than fast enough for our load (see [Test Plan](#test-plan)).
 
-**Permissions.** The scheduler gets its own service account. It can read pods and nodes, write pod-to-node bindings, update pod status, write events, manage its leader lock, read the volume-related objects the built-in plugins need, and read and update PodGroups. It cannot create or delete workload pods.
+**Permissions.** The scheduler gets its own service account. Rather than copying a version-sensitive scheduler permission list, the Helm chart binds it to the API server's auto-reconciled `system:kube-scheduler` and `system:volume-scheduler` ClusterRoles. A chart-owned role adds only access to its dedicated leader Lease and read-only PodGroup access. The upstream scheduler role includes the pod deletion permission used by kube-scheduler internals; it does not grant arbitrary workload-pod creation. Because the built-in roles are reconciled for the cluster release, they also acquire that release's DRA permissions when DRA is enabled. This does not relax the binary version requirement: the scheduler executable must still be built for the supported cluster minor.
 
 **Opt-in.** OME sets `schedulerName: ome-scheduler` on the pods it creates for services that enable this. Nothing else in the cluster is affected. This works identically on GKE Standard, OKE, EKS, and internal clusters. GKE Autopilot is not supported, because Autopilot forbids custom schedulers.
 
-**Configuration.** A standard scheduler configuration file, delivered as a ConfigMap. The important choices: our plugin is enabled at the hooks listed in the [primer](#primer-how-kubernetes-scheduling-works); the built-in spreading plugin is disabled because spreading is the opposite of packing; and node scoring is set to "most allocated," which prefers fuller nodes. Our plugin is also the sole QueueSort (only one may be active), so pending order follows gang age rather than raw pod priority — priority ordering is delegated to Kueue's admission in Phase B. Our plugin's own settings include the domain label to use (`nvidia.com/gpu.clique` by default on NVLink GPU, a multi-host TPU slice-identity label on GKE TPU pools, or a rack label on internal fleets), the gang wait timeout (default 600 seconds), and the default co-location policy.
+**Configuration.** A standard scheduler configuration file, delivered as a ConfigMap. The current alpha enables OMEGangPack through `multiPoint`, which expands it only onto the hooks it actually implements: PreFilter, Filter, PostFilter, Reserve, Permit, and PostBind. Queue ordering remains the upstream `PrioritySort`; custom QueueSort and PreEnqueue behavior are not implemented. PostBind only clears successful-cycle retry bookkeeping; it does not alter the gang's domain commitment. OMEGangPack does not implement Score in the current alpha. The separate built-in soft topology-spread score is disabled because spreading is the opposite of packing, while its hard Filter behavior remains active. The built-in NodeResourcesFit plugin uses "most allocated" for node-level packing; its weights are fleet-specific operational tuning, not part of OMEGangPack's contract. Plugin settings include an optional pool-wide domain label, a configurable PodGroup annotation name for per-gang overrides, configured informer/GC/Permit timeouts, and the placement-group label that currently fails closed. The OME chart supplies the `ome.io/*` metadata names; the generic plugin does not know that API prefix.
 
 ```yaml
 apiVersion: kubescheduler.config.k8s.io/v1
@@ -332,34 +336,25 @@ leaderElection:
 profiles:
 - schedulerName: ome-scheduler
   plugins:
-    queueSort:
-      enabled: [{name: OMEGangPack}]
-      disabled: [{name: PrioritySort}]
-    preEnqueue:
-      enabled: [{name: OMEGangPack}]
-    preFilter:
-      enabled: [{name: OMEGangPack}]
-    filter:
-      enabled: [{name: OMEGangPack}]
+    multiPoint:
+      enabled:
+      - {name: OMEGangPack}
+      disabled:
+      - {name: DefaultPreemption}
     score:
       enabled:
-      - {name: OMEGangPack, weight: 5}
       - {name: NodeResourcesFit, weight: 10}
       disabled:
       - {name: PodTopologySpread}
-    reserve:
-      enabled: [{name: OMEGangPack}]
-    permit:
-      enabled: [{name: OMEGangPack}]
-    postBind:
-      enabled: [{name: OMEGangPack}]
   pluginConfig:
   - name: OMEGangPack
     args:
       topologyKey: nvidia.com/gpu.clique
-      poolSelector: ""            # optional: limit to a labeled slice of the fleet
+      podGroupTopologyKeyAnnotation: ome.io/topology-key
+      unsupportedPlacementGroupLabel: ome.io/placement-group
       defaultPermitTimeoutSeconds: 600
-      defaultColocation: Required
+      podGroupSyncTimeoutSeconds: 30
+      gcIntervalSeconds: 60
   - name: NodeResourcesFit
     args:
       scoringStrategy:
@@ -412,7 +407,7 @@ A deliberate attempt to break this design found the following. Each item states 
 
 **Two group abstractions must be kept in lockstep.** Kueue groups plain pods into its Workload using its own annotations; the scheduler uses PodGroup. OME stamps both, and any disagreement in counts or membership produces gangs that are admitted but unschedulable, or half gated. Change: OME derives both from one source of truth and a validation check refuses pods where the two disagree. On flexible gangs, note the accounting consequence plainly: Kueue charges quota for the desired count even when only the minimum places. That is accepted policy, not an accident.
 
-**Smaller closures.** Gang pods are validated to be whole-node in version 1, because the counting math silently breaks otherwise; fractional gangs wait for version 2. Whether standalone pods go through Kueue is a per-fleet policy decision that must be made explicitly, because mixed accounting misleads both systems. Once Kueue priorities exist, starvation protection orders by tier first and age second, so a low-priority elder cannot reserve a domain ahead of a high-priority gang. The per-domain "largest gang that fits" metric subtracts active reservations, or the hub double-counts capacity. The scheduler's permissions add the DRA objects needed on GB200 fleets. And the test plan gains a Kueue integration tier, exercising the full loop — admission, placement, requeue, preemption, victim re-admission — because that loop is exactly where these bugs live.
+**Smaller closures.** Gang pods are validated to be whole-node in version 1, because the counting math silently breaks otherwise; fractional gangs wait for version 2. Whether standalone pods go through Kueue is a per-fleet policy decision that must be made explicitly, because mixed accounting misleads both systems. Once Kueue priorities exist, starvation protection orders by tier first and age second, so a low-priority elder cannot reserve a domain ahead of a high-priority gang. The per-domain "largest gang that fits" metric subtracts active reservations, or the hub double-counts capacity. Binding the scheduler ServiceAccount to the release-managed `system:kube-scheduler` role supplies the matching DRA permissions when that feature is enabled; the scheduler binary and tests must move to the same Kubernetes minor before those APIs are used. And the test plan gains a Kueue integration tier, exercising the full loop — admission, placement, requeue, preemption, victim re-admission — because that loop is exactly where these bugs live.
 
 **What the review confirmed unchanged.** The interface choices (hold flags, PodGroup, pool labels) absorbed every scenario thrown at them, including Kueue adoption, without modification. Single-threaded decision-making makes domain claims race-free. Rebuilding placement memory from bound pods is sound. And the four-way split of how pods die remains the correct frame for R4 and R5.
 
@@ -461,10 +456,8 @@ Rollback at every step is one field: `schedulerName` back to the default. No inf
 
 ## Open Questions
 
-- **TPU slice-identity label.** The domain model keys off a label that is *unique per slice*. On GKE the topology-shape label (e.g. `cloud.google.com/gke-tpu-topology`) can repeat across slices; the unique-per-slice key must be pinned before implementation, or a gang could be told two physically distinct slices are "one domain." `TBD` — verify against the GKE TPU labels on our pools.
 - **Pool exclusivity policy per fleet.** R1 requires the pool to be exclusively ome-scheduled; which fleets enforce this (taint/label so only our pods land) versus run mixed with best-effort R1 is a per-fleet decision that must be made explicitly.
 - **Standalone pods through Kueue.** Whether non-gang accelerator pods are admitted through Kueue is a per-fleet policy call; mixed accounting misleads both Kueue and the scheduler, so it must be decided, not defaulted.
-- **Score-plugin weight balance.** `OMEGangPack` (weight 5) and `NodeResourcesFit`/`MostAllocated` (weight 10) both push toward "fuller"; the exact weights and how the two scores compose (domain-level vs node-level packing) need tuning against real fragmentation data.
 
 ## Appendix A: a worked example
 
