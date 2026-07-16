@@ -2,12 +2,13 @@ import type { ReactNode } from "react";
 
 import type { DashboardPolicy, MetricsSourceState } from "../api";
 import { DataNotice } from "../components";
-import { metricsRangeLabel, seriesOf } from "../metrics";
-import type { IsvcMetrics } from "../metrics";
+import { latestAlignedRatio, metricsRangeLabel, ratioSeries, seriesOf } from "../metrics";
+import type { IsvcMetrics, MetricPoint } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import type { ReplicaDiagnostics } from "../replicaMetrics";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtPct, fmtRate } from "../util";
 import { Card, Distribution, Dot, GaugeCard, MetricChart, Spark, StatTile } from "../viz";
+import type { Series } from "../viz";
 
 const ACCENT = "var(--accent-2)";
 const RED = "var(--red)";
@@ -26,6 +27,15 @@ const perSec = (v: number | null): ReactNode => (
     <small> /s</small>
   </>
 );
+const tokenRateText = (value: number) => `${fmtRate(value)} tok/s`;
+const perSecondText = (value: number) => `${fmtRate(value)}/s`;
+const plot = (
+  points: MetricPoint[],
+  label: string,
+  color: string,
+  formatValue: (value: number) => string,
+  area = false,
+): Series => ({ points, label, color, formatValue, area });
 
 /**
  * Serving dashboard for one deployment. The visualization is chosen per data
@@ -110,12 +120,8 @@ export function Monitoring({
 
   // Golden signals.
   const qps = g("request_rate").last;
-  const errRate = g("error_rate").last;
-  const errPct = qps && qps > 0 ? ((errRate ?? 0) / qps) * 100 : null;
-  const errSeries = g("error_rate").series.map((e, i) => {
-    const r = g("request_rate").series[i] ?? 0;
-    return r > 0 ? (e / r) * 100 : 0;
-  });
+  const errSeries = ratioSeries(g("error_rate").series, g("request_rate").series, 100);
+  const errPct = latestAlignedRatio(g("error_rate").series, g("request_rate").series, 100);
   const avail = errPct == null ? null : Math.max(0, 100 - errPct);
   const e2e = g("latency_p99").last;
   const p50 = g("latency_p50").last;
@@ -131,8 +137,8 @@ export function Monitoring({
   const hit = g("prefix_cache_hit").last;
 
   const hasPD =
-    g("kv_transfer_latency").series.some((v) => v > 0) ||
-    g("prefill_queue").series.some((v) => v > 0) ||
+    g("kv_transfer_latency").series.some((point) => point.value > 0) ||
+    g("prefill_queue").series.some((point) => point.value > 0) ||
     g("decode_queue").series.length > 1;
 
   return (
@@ -163,13 +169,23 @@ export function Monitoring({
           value={fmtErrPct(errPct)}
           tone={upperThresholdTone(errPct, policy?.errorRate) || undefined}
         >
-          <Spark points={errSeries} color={AMBER} />
+          <Spark points={errSeries} color={AMBER} label="Error rate" formatValue={fmtErrPct} />
         </StatTile>
         <StatTile label="E2E p99" value={fmtLatency(e2e)} sub={`p50 ${fmtLatency(p50)}`}>
-          <Spark points={g("latency_p99").series} color={RED} />
+          <Spark
+            points={g("latency_p99").series}
+            color={RED}
+            label="E2E p99"
+            formatValue={fmtLatency}
+          />
         </StatTile>
         <StatTile label="TTFT p99" value={fmtLatency(ttft)} sub="to first token">
-          <Spark points={g("ttft").series} color={ACCENT} />
+          <Spark
+            points={g("ttft").series}
+            color={ACCENT}
+            label="TTFT p99"
+            formatValue={fmtLatency}
+          />
         </StatTile>
       </div>
 
@@ -255,8 +271,8 @@ export function Monitoring({
                 </>
               }
               series={[
-                { points: g("latency_p99").series, color: RED },
-                { points: g("latency_p50").series, color: CYAN },
+                plot(g("latency_p99").series, "p99", RED, fmtLatency),
+                plot(g("latency_p50").series, "p50", CYAN, fmtLatency),
               ]}
             />
           </div>
@@ -268,18 +284,18 @@ export function Monitoring({
         <MetricChart
           title="Output tokens"
           value={tokRate(g("throughput_tokens").last)}
-          series={[{ points: g("throughput_tokens").series, color: ACCENT, area: true }]}
+          series={[plot(g("throughput_tokens").series, "Output", ACCENT, tokenRateText, true)]}
         />
         <MetricChart
           title="Input tokens"
           value={tokRate(g("input_tokens").last)}
-          series={[{ points: g("input_tokens").series, color: ACCENT, area: true }]}
+          series={[plot(g("input_tokens").series, "Input", ACCENT, tokenRateText, true)]}
         />
         <MetricChart
           title="Requests"
           value={perSec(qps)}
           sub="per second"
-          series={[{ points: g("request_rate").series, color: ACCENT, area: true }]}
+          series={[plot(g("request_rate").series, "Requests", ACCENT, perSecondText, true)]}
         />
       </div>
 
@@ -304,15 +320,15 @@ export function Monitoring({
           value={fmtInt(g("running_reqs").last)}
           sub={`${fmtInt(g("queue_reqs").last)} queued`}
           series={[
-            { points: g("running_reqs").series, color: ACCENT },
-            { points: g("queue_reqs").series, color: AMBER },
+            plot(g("running_reqs").series, "In-flight", ACCENT, fmtInt),
+            plot(g("queue_reqs").series, "Queued", AMBER, fmtInt),
           ]}
         />
         <MetricChart
           title="Preemptions"
           value={perSec(g("preemptions").last)}
           sub="retracted under pressure"
-          series={[{ points: g("preemptions").series, color: AMBER }]}
+          series={[plot(g("preemptions").series, "Preemptions", AMBER, perSecondText)]}
           hideIfZero
         />
       </div>
@@ -325,25 +341,27 @@ export function Monitoring({
               title="KV transfer p99"
               value={fmtLatency(g("kv_transfer_latency").last)}
               sub="prefill → decode"
-              series={[{ points: g("kv_transfer_latency").series, color: ACCENT }]}
+              series={[
+                plot(g("kv_transfer_latency").series, "KV transfer p99", ACCENT, fmtLatency),
+              ]}
             />
             <MetricChart
               title="Prefill queue"
               value={fmtInt(g("prefill_queue").last)}
               sub="bootstrap + inflight"
-              series={[{ points: g("prefill_queue").series, color: AMBER }]}
+              series={[plot(g("prefill_queue").series, "Prefill queue", AMBER, fmtInt)]}
             />
             <MetricChart
               title="Decode queue"
               value={fmtInt(g("decode_queue").last)}
               sub="prealloc + transfer"
-              series={[{ points: g("decode_queue").series, color: AMBER }]}
+              series={[plot(g("decode_queue").series, "Decode queue", AMBER, fmtInt)]}
             />
             <MetricChart
               title="Transfer fails"
               value={perSec(g("pd_transfer_fail").last)}
               sub="bootstrap + transfer"
-              series={[{ points: g("pd_transfer_fail").series, color: RED }]}
+              series={[plot(g("pd_transfer_fail").series, "Transfer failures", RED, perSecondText)]}
               hideIfZero
             />
           </div>

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { MetricsSnapshot } from "./api";
-import { isvcMetrics, metricsQueryRangeSeconds, metricsRangeLabel, perfRows } from "./metrics";
+import {
+  fleetTotals,
+  isvcMetrics,
+  latestAlignedRatio,
+  metricsQueryRangeSeconds,
+  metricsRangeLabel,
+  perfRows,
+  ratioSeries,
+} from "./metrics";
 
 const snapshot: MetricsSnapshot = {
   updatedAt: 4_700,
@@ -45,7 +53,12 @@ describe("metrics range", () => {
   it("derives dashboard labels from returned timestamps", () => {
     expect(metricsQueryRangeSeconds(snapshot, "request_rate")).toBe(3_600);
     expect(metricsRangeLabel(metricsQueryRangeSeconds(snapshot, "request_rate"))).toBe("1h");
-    expect(isvcMetrics(snapshot, "test", "team-a", "model", true).rangeSeconds).toBe(3_600);
+    const metrics = isvcMetrics(snapshot, "test", "team-a", "model", true);
+    expect(metrics.rangeSeconds).toBe(3_600);
+    expect(metrics.by.request_rate.series).toEqual([
+      { at: 1_000, value: 1 },
+      { at: 4_600, value: 2 },
+    ]);
   });
 
   it("stays neutral when no range samples are present", () => {
@@ -108,5 +121,72 @@ describe("metrics range", () => {
       { cluster: "test", namespace: "team-a", isvc: "model", qps: 2 },
       { cluster: "delayed", namespace: "team-a", isvc: "other-model", qps: 2 },
     ]);
+  });
+});
+
+describe("timestamp-aware shaping", () => {
+  it("aggregates fleet samples by timestamp rather than array index", () => {
+    const totals = fleetTotals({
+      updatedAt: 300,
+      clusters: {
+        a: {
+          request_rate: {
+            data: {
+              resultType: "matrix",
+              result: [
+                {
+                  metric: { inferenceservice: "a" },
+                  values: [
+                    [100, "1"],
+                    [200, "2"],
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        b: {
+          request_rate: {
+            data: {
+              resultType: "matrix",
+              result: [
+                {
+                  metric: { inferenceservice: "b" },
+                  values: [
+                    [150, "10"],
+                    [200, "20"],
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    expect(totals.requestSeries).toEqual([
+      { at: 100, value: 1 },
+      { at: 150, value: 10 },
+      { at: 200, value: 22 },
+    ]);
+  });
+
+  it("calculates ratios only for matching timestamps", () => {
+    expect(
+      ratioSeries(
+        [
+          { at: 100, value: 1 },
+          { at: 200, value: 2 },
+        ],
+        [
+          { at: 150, value: 10 },
+          { at: 200, value: 20 },
+        ],
+        100,
+      ),
+    ).toEqual([{ at: 200, value: 10 }]);
+
+    expect(latestAlignedRatio([{ at: 100, value: 1 }], [{ at: 100, value: 10 }], 100)).toBe(10);
+    expect(latestAlignedRatio([{ at: 100, value: 1 }], [{ at: 200, value: 10 }], 100)).toBeNull();
   });
 });

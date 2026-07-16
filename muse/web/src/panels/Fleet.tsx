@@ -15,7 +15,13 @@ import { scopeFleet, unambiguousDeploymentRef } from "../fleet";
 import type { Selected } from "../resource";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import { deploymentHealth, toFeed, toRollouts } from "../map";
-import { fleetTotals, metricsQueryRangeSeconds, metricsRangeLabel, perfRows } from "../metrics";
+import {
+  fleetTotals,
+  metricsQueryRangeSeconds,
+  metricsRangeLabel,
+  perfRows,
+  ratioSeries,
+} from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import {
   ago,
@@ -164,13 +170,14 @@ export function Fleet({
   const errorThresholds = policy?.errorRate
     ? `warning ≥ ${fmtErrPct(policy.errorRate.warningAt)} · critical ≥ ${fmtErrPct(policy.errorRate.criticalAt)}`
     : undefined;
-  const errPctSeries = totals.errorSeries.map((e, i) => {
-    const r = totals.requestSeries[i] ?? 0;
-    return r > 0 ? (e / r) * 100 : 0;
-  });
+  const errPctSeries = ratioSeries(totals.errorSeries, totals.requestSeries, 100);
   const qpsDelta = (() => {
     const s = totals.requestSeries;
-    return s.length >= 2 && s[0] > 0 ? ((s[s.length - 1] - s[0]) / s[0]) * 100 : null;
+    const first = s[0]?.value;
+    const last = s[s.length - 1]?.value;
+    return s.length >= 2 && first != null && first > 0 && last != null
+      ? ((last - first) / first) * 100
+      : null;
   })();
 
   // Allocation-by-cluster rows (scoped).
@@ -286,7 +293,13 @@ export function Fleet({
               : `${qpsDelta >= 0 ? "▲" : "▼"} ${Math.abs(qpsDelta).toFixed(0)}% vs window start`
           }
         >
-          {hasQps ? <Spark points={totals.requestSeries} /> : null}
+          {hasQps ? (
+            <Spark
+              points={totals.requestSeries}
+              label="Fleet QPS"
+              formatValue={(value) => `${fmtRate(value)}/s`}
+            />
+          ) : null}
         </StatTile>
         <StatTile
           label="p99 latency"
@@ -297,7 +310,14 @@ export function Fleet({
               : undefined
           }
         >
-          {hasLatency ? <Spark points={totals.p99Series} color="var(--red)" /> : null}
+          {hasLatency ? (
+            <Spark
+              points={totals.p99Series}
+              color="var(--red)"
+              label="p99 latency"
+              formatValue={fmtLatency}
+            />
+          ) : null}
         </StatTile>
         <StatTile
           label="Error rate"
@@ -305,7 +325,14 @@ export function Fleet({
           sub={!hasErrors || totals.errorPct == null ? undefined : errorThresholds}
           tone={errorTone || undefined}
         >
-          {hasErrors ? <Spark points={errPctSeries} color="var(--amber)" /> : null}
+          {hasErrors ? (
+            <Spark
+              points={errPctSeries}
+              color="var(--amber)"
+              label="Error rate"
+              formatValue={fmtErrPct}
+            />
+          ) : null}
         </StatTile>
         <StatTile
           label="GPU allocated"

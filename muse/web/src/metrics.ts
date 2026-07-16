@@ -5,6 +5,12 @@
 
 import type { MetricsSnapshot, PromResult, PromSeries } from "./api";
 
+/** One finite Prometheus sample. `at` is a Unix timestamp in seconds. */
+export interface MetricPoint {
+  at: number;
+  value: number;
+}
+
 /** One exact InferenceService deployment's serving metrics. */
 export interface PerfRow {
   isvc: string;
@@ -34,10 +40,43 @@ function last(s: PromSeries): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** The full numeric range series (for a sparkline). */
-function nums(s: PromSeries): number[] {
+/** The full finite time series, retaining Prometheus sample timestamps. */
+function points(s: PromSeries): MetricPoint[] {
   const src = s.values ?? (s.value ? [s.value] : []);
-  return src.map((v) => parseFloat(v[1])).filter((n) => Number.isFinite(n));
+  const byTime = new Map<number, number>();
+  for (const [at, raw] of src) {
+    const value = parseFloat(raw);
+    if (Number.isFinite(at) && Number.isFinite(value)) byTime.set(at, value);
+  }
+  return [...byTime].map(([at, value]) => ({ at, value })).sort((a, b) => a.at - b.at);
+}
+
+/** Divide timestamp-aligned samples; unmatched or zero-denominator points are omitted. */
+export function ratioSeries(
+  numerator: MetricPoint[],
+  denominator: MetricPoint[],
+  scale: number,
+): MetricPoint[] {
+  const denominatorByTime = new Map(denominator.map((point) => [point.at, point.value]));
+  return numerator.flatMap((point) => {
+    const divisor = denominatorByTime.get(point.at);
+    return divisor != null && divisor > 0
+      ? [{ at: point.at, value: (point.value / divisor) * scale }]
+      : [];
+  });
+}
+
+/** Latest ratio only when both latest samples describe the same instant. */
+export function latestAlignedRatio(
+  numerator: MetricPoint[],
+  denominator: MetricPoint[],
+  scale: number,
+): number | null {
+  const top = numerator[numerator.length - 1];
+  const bottom = denominator[denominator.length - 1];
+  return top && bottom && top.at === bottom.at && bottom.value > 0
+    ? (top.value / bottom.value) * scale
+    : null;
 }
 
 function rangeSeconds(series: PromSeries[]): number | null {
@@ -136,7 +175,7 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
   }
 
   for (const r of byIsvc.values()) {
-    r.errPct = r.qps && r.qps > 0 ? ((r.errRate ?? 0) / r.qps) * 100 : null;
+    r.errPct = r.qps && r.qps > 0 && r.errRate != null ? (r.errRate / r.qps) * 100 : null;
   }
 
   // Highest-traffic deployments first: order by QPS, then throughput.
@@ -148,7 +187,7 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
 /** One query id's latest scalar + its range series (for a sparkline). */
 export interface IsvcSeries {
   last: number | null;
-  series: number[];
+  series: MetricPoint[];
 }
 /** Per-deployment serving metrics: every curated query id for one isvc on one
  *  cluster. Generic — new queries in metrics-queries.json surface here without
@@ -199,7 +238,7 @@ export function isvcMetrics(
           (x.metric?.namespace != null ? x.metric.namespace === namespace : identityUnambiguous),
       );
       if (qid === "request_rate" && s) requestRangeSeconds = rangeSeconds([s]);
-      by[qid] = s ? { last: last(s), series: nums(s) } : EMPTY_SERIES;
+      by[qid] = s ? { last: last(s), series: points(s) } : EMPTY_SERIES;
     }
   }
   const has = (qid: string) => (by[qid]?.last ?? null) != null || (by[qid]?.series.length ?? 0) > 0;
@@ -216,17 +255,17 @@ export function isvcMetrics(
  *  series for the tile sparklines. */
 export interface FleetTotals {
   throughput: number;
-  throughputSeries: number[];
+  throughputSeries: MetricPoint[];
   requestRate: number;
-  requestSeries: number[];
+  requestSeries: MetricPoint[];
   p50: number | null;
   p99: number | null;
-  /** Worst-deployment p50/p99 over time (element-wise max), for the latency chart. */
-  p50Series: number[];
-  p99Series: number[];
+  /** Worst-deployment p50/p99 at each timestamp, for the latency chart. */
+  p50Series: MetricPoint[];
+  p99Series: MetricPoint[];
   ttft: number | null;
   errorRate: number;
-  errorSeries: number[];
+  errorSeries: MetricPoint[];
   errorPct: number | null;
   running: number;
 }
@@ -248,37 +287,42 @@ export function fleetTotals(snap: MetricsSnapshot | null): FleetTotals {
     running: 0,
   };
   if (!snap?.clusters) return t;
-  // Rates sum across clusters (aligned by index); latency takes the worst.
-  const addInto = (acc: number[], s: PromSeries) => {
-    const series = nums(s);
-    for (let i = 0; i < series.length; i++) acc[i] = (acc[i] ?? 0) + series[i];
+  // Rates sum across timestamp-aligned samples; latency takes the timestamp-local worst.
+  const throughputSeries = new Map<number, number>();
+  const requestSeries = new Map<number, number>();
+  const errorSeries = new Map<number, number>();
+  const p50Series = new Map<number, number>();
+  const p99Series = new Map<number, number>();
+  const addInto = (acc: Map<number, number>, s: PromSeries) => {
+    for (const point of points(s)) acc.set(point.at, (acc.get(point.at) ?? 0) + point.value);
   };
-  const maxInto = (acc: number[], s: PromSeries) => {
-    const series = nums(s);
-    for (let i = 0; i < series.length; i++) acc[i] = Math.max(acc[i] ?? 0, series[i]);
+  const maxInto = (acc: Map<number, number>, s: PromSeries) => {
+    for (const point of points(s)) {
+      acc.set(point.at, Math.max(acc.get(point.at) ?? Number.NEGATIVE_INFINITY, point.value));
+    }
   };
   for (const queries of Object.values(snap.clusters)) {
     for (const s of results(queries.throughput_tokens)) {
       t.throughput += last(s) ?? 0;
-      addInto(t.throughputSeries, s);
+      addInto(throughputSeries, s);
     }
     for (const s of results(queries.request_rate)) {
       t.requestRate += last(s) ?? 0;
-      addInto(t.requestSeries, s);
+      addInto(requestSeries, s);
     }
     for (const s of results(queries.error_rate)) {
       t.errorRate += last(s) ?? 0;
-      addInto(t.errorSeries, s);
+      addInto(errorSeries, s);
     }
     for (const s of results(queries.latency_p99)) {
       const v = last(s);
       if (v != null) t.p99 = Math.max(t.p99 ?? 0, v);
-      maxInto(t.p99Series, s);
+      maxInto(p99Series, s);
     }
     for (const s of results(queries.latency_p50)) {
       const v = last(s);
       if (v != null) t.p50 = Math.max(t.p50 ?? 0, v);
-      maxInto(t.p50Series, s);
+      maxInto(p50Series, s);
     }
     for (const s of results(queries.ttft)) {
       const v = last(s);
@@ -288,7 +332,14 @@ export function fleetTotals(snap: MetricsSnapshot | null): FleetTotals {
       t.running += last(s) ?? 0;
     }
   }
-  t.errorPct = t.requestRate > 0 ? (t.errorRate / t.requestRate) * 100 : null;
+  const sorted = (series: Map<number, number>): MetricPoint[] =>
+    [...series].map(([at, value]) => ({ at, value })).sort((a, b) => a.at - b.at);
+  t.throughputSeries = sorted(throughputSeries);
+  t.requestSeries = sorted(requestSeries);
+  t.errorSeries = sorted(errorSeries);
+  t.p50Series = sorted(p50Series);
+  t.p99Series = sorted(p99Series);
+  t.errorPct = latestAlignedRatio(t.errorSeries, t.requestSeries, 100);
   return t;
 }
 

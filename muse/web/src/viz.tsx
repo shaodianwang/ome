@@ -1,9 +1,16 @@
 // Observability viz primitives — status dots, KPI tiles, gauges, stacked
 // distributions, utilization bar-chart rows, and a capacity heat grid. All
-// current-state (no time-series yet) and purely presentational; color encodes
-// status only.
-import type { ReactNode } from "react";
+// current-state and time-series views; color encodes status or series identity.
+import { useId, useState } from "react";
+import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
+import {
+  formatChartTimestamp,
+  nearestTimestampIndex,
+  splitTimestampGaps,
+  timestampSelectionForKey,
+} from "./chartMath";
+import type { MetricPoint } from "./metrics";
 import type { BarTone, Tone } from "./types";
 
 /** A small status dot. */
@@ -118,46 +125,269 @@ export function UtilRow({
   );
 }
 
-/** A minimal sparkline for a numeric time-series — scales to its own min/max,
- *  presentational only. `color` is any CSS color/var; the stroke stays 1.5px under
- *  the non-uniform scale via `vector-effect`. Fewer than two points renders blank. */
+/** One timestamped chart series and its tooltip presentation. */
+export interface Series {
+  points: MetricPoint[];
+  color: string;
+  label: string;
+  area?: boolean;
+  formatValue: (value: number) => string;
+}
+
+function TimePlot({
+  series,
+  width,
+  height,
+  compact,
+  grid,
+  includeZero,
+  ariaLabel,
+}: {
+  series: Series[];
+  width: number;
+  height: number;
+  compact: boolean;
+  grid: boolean;
+  includeZero: boolean;
+  ariaLabel: string;
+}) {
+  const announcementId = useId();
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const prepared = series.map((item) => {
+    const points = item.points
+      .filter((point) => Number.isFinite(point.at) && Number.isFinite(point.value))
+      .sort((a, b) => a.at - b.at);
+    return { ...item, points };
+  });
+  const allPoints = prepared.flatMap((item) => item.points);
+  if (allPoints.length < 2) {
+    return compact ? (
+      <svg className="spark" width={width} height={height} aria-hidden />
+    ) : (
+      <svg
+        className="chart"
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
+        aria-hidden
+      />
+    );
+  }
+  const timestamps = [...new Set(allPoints.map((point) => point.at))].sort((a, b) => a - b);
+  const plotted = prepared.map((item) => ({
+    ...item,
+    segments: splitTimestampGaps(item.points, timestamps),
+  }));
+  const values = allPoints.map((point) => point.value);
+  const minAt = timestamps[0];
+  const maxAt = timestamps[timestamps.length - 1];
+  const timeSpan = maxAt - minAt || 1;
+  const minValue = includeZero ? Math.min(...values, 0) : Math.min(...values);
+  const maxValue = includeZero ? Math.max(...values, 0) : Math.max(...values);
+  const valueSpan = maxValue - minValue || 1;
+  const x = (at: number) => ((at - minAt) / timeSpan) * width;
+  const y = (value: number) => height - ((value - minValue) / valueSpan) * height;
+  const coordinates = (points: MetricPoint[]) =>
+    points.map((point) => `${x(point.at).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ");
+  const selectedIndex =
+    activeIndex == null ? null : Math.min(activeIndex, Math.max(0, timestamps.length - 1));
+  const activeAt = selectedIndex == null ? null : timestamps[selectedIndex];
+  const activeX = activeAt == null ? null : x(activeAt);
+  const activeRows =
+    activeAt == null
+      ? []
+      : plotted.map((item) => ({
+          ...item,
+          point: item.points.find((point) => point.at === activeAt),
+        }));
+  const activeDescription =
+    activeAt == null
+      ? ""
+      : [
+          formatChartTimestamp(activeAt),
+          ...activeRows.map(
+            (row) => `${row.label}: ${row.point ? row.formatValue(row.point.value) : "no sample"}`,
+          ),
+        ].join(". ");
+  const activePercent = activeX == null ? 50 : (activeX / width) * 100;
+  const tooltipSide = activePercent < 25 ? "start" : activePercent > 75 ? "end" : "center";
+
+  const indexAtClientX = (clientX: number, svg: SVGSVGElement) => {
+    const bounds = svg.getBoundingClientRect();
+    const fraction = Math.min(1, Math.max(0, (clientX - bounds.left) / (bounds.width || 1)));
+    return nearestTimestampIndex(timestamps, minAt + fraction * timeSpan);
+  };
+  const handlePointer = (event: PointerEvent<SVGSVGElement>) => {
+    setActiveIndex(indexAtClientX(event.clientX, event.currentTarget));
+  };
+  const handleKey = (event: KeyboardEvent<SVGSVGElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+    event.preventDefault();
+    setActiveIndex(timestampSelectionForKey(event.key, selectedIndex, timestamps.length));
+  };
+
+  return (
+    <div
+      className={compact ? "metric-plot compact" : "metric-plot"}
+      style={compact ? { width, height } : undefined}
+    >
+      <svg
+        className={compact ? "spark" : "chart"}
+        width={compact ? width : undefined}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
+        role="img"
+        tabIndex={0}
+        aria-label={`${ariaLabel} time series. Use arrow keys to inspect values; Escape closes the tooltip.`}
+        aria-describedby={announcementId}
+        onBlur={() => setActiveIndex(null)}
+        onKeyDown={handleKey}
+        onPointerDown={(event) => {
+          const next = indexAtClientX(event.clientX, event.currentTarget);
+          setActiveIndex((current) =>
+            event.pointerType !== "mouse" && current === next ? null : next,
+          );
+          event.currentTarget.focus({ preventScroll: true });
+        }}
+        onPointerMove={(event) => {
+          if (event.pointerType === "mouse") handlePointer(event);
+        }}
+        onPointerCancel={() => setActiveIndex(null)}
+        onPointerLeave={(event) => {
+          if (event.pointerType === "mouse") setActiveIndex(null);
+        }}
+      >
+        {grid
+          ? [0.25, 0.5, 0.75].map((fraction) => (
+              <line
+                key={fraction}
+                className="grid-ln"
+                x1="0"
+                y1={height * fraction}
+                x2={width}
+                y2={height * fraction}
+              />
+            ))
+          : null}
+        {plotted.flatMap((item, seriesIndex) =>
+          item.area
+            ? item.segments.map((segment, segmentIndex) => {
+                if (segment.length < 2) return null;
+                const firstX = x(segment[0].at).toFixed(1);
+                const lastX = x(segment[segment.length - 1].at).toFixed(1);
+                return (
+                  <polygon
+                    key={`a${seriesIndex}-${segmentIndex}`}
+                    className="chart-area"
+                    points={`${coordinates(segment)} ${lastX},${height} ${firstX},${height}`}
+                    style={{ fill: item.color }}
+                  />
+                );
+              })
+            : [],
+        )}
+        {plotted.flatMap((item, seriesIndex) =>
+          item.segments.map((segment, segmentIndex) =>
+            segment.length > 1 ? (
+              <polyline
+                key={`l${seriesIndex}-${segmentIndex}`}
+                className={compact ? "spark-ln" : "chart-ln"}
+                points={coordinates(segment)}
+                style={{ stroke: item.color }}
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : (
+              <circle
+                key={`l${seriesIndex}-${segmentIndex}`}
+                className="chart-isolated-point"
+                cx={x(segment[0].at)}
+                cy={y(segment[0].value)}
+                r={compact ? 1.5 : 2}
+                style={{ fill: item.color }}
+                vectorEffect="non-scaling-stroke"
+              />
+            ),
+          ),
+        )}
+        {activeX != null ? (
+          <>
+            <line
+              className="chart-crosshair"
+              x1={activeX}
+              y1="0"
+              x2={activeX}
+              y2={height}
+              vectorEffect="non-scaling-stroke"
+              aria-hidden="true"
+            />
+            {activeRows.map((row, index) =>
+              row.point ? (
+                <circle
+                  key={`p${index}`}
+                  className="chart-point"
+                  cx={activeX}
+                  cy={y(row.point.value)}
+                  r={compact ? 2 : 2.5}
+                  style={{ fill: row.color }}
+                  vectorEffect="non-scaling-stroke"
+                  aria-hidden="true"
+                />
+              ) : null,
+            )}
+          </>
+        ) : null}
+      </svg>
+      <span id={announcementId} className="plot-announcement" aria-live="polite" aria-atomic="true">
+        {activeDescription}
+      </span>
+      {activeAt != null ? (
+        <div
+          aria-hidden="true"
+          className={`chart-tooltip ${compact ? "compact" : ""} ${tooltipSide}`}
+          style={{ left: `${activePercent}%` }}
+        >
+          <time dateTime={new Date(activeAt * 1_000).toISOString()}>
+            {formatChartTimestamp(activeAt)}
+          </time>
+          {activeRows.map((row, index) => (
+            <span className="chart-tooltip-row" key={index}>
+              {compact ? null : <i style={{ background: row.color }} aria-hidden="true" />}
+              {compact ? null : <span>{row.label}</span>}
+              <b>{row.point ? row.formatValue(row.point.value) : "—"}</b>
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A compact interactive time-series, scaled to its own value range. */
 export function Spark({
   points,
   color = "var(--accent)",
   width = 108,
-  height = 24,
+  height = 42,
+  label,
+  formatValue,
 }: {
-  points: number[];
+  points: MetricPoint[];
   color?: string;
   width?: number;
   height?: number;
+  label: string;
+  formatValue: (value: number) => string;
 }) {
-  if (points.length < 2) {
-    return <svg className="spark" width={width} height={height} aria-hidden />;
-  }
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const span = max - min || 1;
-  const dx = width / (points.length - 1);
-  const d = points
-    .map((p, i) => `${(i * dx).toFixed(1)},${(height - ((p - min) / span) * height).toFixed(1)}`)
-    .join(" ");
   return (
-    <svg
-      className="spark"
+    <TimePlot
+      series={[{ points, color, label, formatValue }]}
       width={width}
       height={height}
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-      aria-hidden
-    >
-      <polyline
-        className="spark-ln"
-        points={d}
-        style={{ stroke: color }}
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
+      compact
+      grid={false}
+      includeZero={false}
+      ariaLabel={label}
+    />
   );
 }
 
@@ -194,72 +424,28 @@ export function FilterChip({
   );
 }
 
-/** A line/area chart for one or more numeric series — grid lines + polylines
- *  scaled to the combined range, matching the mockup's `.chart` (300×96 viewBox,
- *  non-scaling stroke). Each series: `points` + a CSS `color`; `area` fills under
- *  it. Non-finite points (e.g. NaN latency during idle) are ignored. */
+/** An interactive line/area chart with timestamp-aware scaling and inspection. */
 export function Chart({
   series,
   height = 96,
+  ariaLabel,
 }: {
-  series: { points: number[]; color: string; area?: boolean }[];
+  series: Series[];
   height?: number;
+  ariaLabel: string;
 }) {
   const W = 300;
-  const H = height;
-  const all = series.flatMap((s) => s.points).filter((v) => Number.isFinite(v));
-  if (all.length < 2) {
-    return (
-      <svg className="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden />
-    );
-  }
-  const min = Math.min(...all, 0);
-  const max = Math.max(...all) || 1;
-  const span = max - min || 1;
-  const path = (arr: number[]) =>
-    arr
-      .map((v, i) =>
-        Number.isFinite(v)
-          ? `${((i / (arr.length - 1)) * W).toFixed(1)},${(H - ((v - min) / span) * H).toFixed(1)}`
-          : "",
-      )
-      .filter(Boolean)
-      .join(" ");
   return (
-    <svg className="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-      {[0.25, 0.5, 0.75].map((f) => (
-        <line key={f} className="grid-ln" x1="0" y1={H * f} x2={W} y2={H * f} />
-      ))}
-      {series.map((s, i) =>
-        s.area && s.points.filter((v) => Number.isFinite(v)).length > 1 ? (
-          <polygon
-            key={`a${i}`}
-            className="chart-area"
-            points={`${path(s.points)} ${W},${H} 0,${H}`}
-            style={{ fill: s.color }}
-          />
-        ) : null,
-      )}
-      {series.map((s, i) =>
-        s.points.filter((v) => Number.isFinite(v)).length > 1 ? (
-          <polyline
-            key={`l${i}`}
-            className="chart-ln"
-            points={path(s.points)}
-            style={{ stroke: s.color }}
-            vectorEffect="non-scaling-stroke"
-          />
-        ) : null,
-      )}
-    </svg>
+    <TimePlot
+      series={series}
+      width={W}
+      height={height}
+      compact={false}
+      grid
+      includeZero
+      ariaLabel={ariaLabel}
+    />
   );
-}
-
-/** One chart series: numeric points, a CSS color, and whether to fill under it. */
-export interface Series {
-  points: number[];
-  color: string;
-  area?: boolean;
 }
 
 /** A titled panel card: an optional header (title · sub · actions) over a body.
@@ -310,13 +496,16 @@ export function MetricChart({
   hideIfZero?: boolean;
 }) {
   const plottable = series.some((s) => s.points.length > 1);
-  if (!plottable || (hideIfZero && series.every((s) => s.points.every((v) => v === 0)))) {
+  if (
+    !plottable ||
+    (hideIfZero && series.every((s) => s.points.every((point) => point.value === 0)))
+  ) {
     return null;
   }
   return (
     <Card title={title} sub={sub}>
       <div className="chart-val">{value}</div>
-      <Chart series={series} />
+      <Chart series={series} ariaLabel={typeof title === "string" ? title : "Metric"} />
     </Card>
   );
 }
