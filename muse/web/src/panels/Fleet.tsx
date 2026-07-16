@@ -2,6 +2,8 @@ import { useState } from "react";
 
 import type { DepFilter } from "../App";
 import { api } from "../api";
+import { DataNotice } from "../components";
+import { metricAvailable, metricsHealth } from "../dataState";
 import { scopeFleet, unambiguousDeploymentRef } from "../fleet";
 import type { Selected } from "../resource";
 import { useEventFeed, useLive, useMetrics } from "../live";
@@ -9,6 +11,7 @@ import { deploymentHealth, toFeed, toRollouts } from "../map";
 import { fleetTotals, metricsQueryRangeSeconds, metricsRangeLabel, perfRows } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import {
+  ago,
   emptyText,
   fmtErrPct,
   fmtLatency,
@@ -74,6 +77,27 @@ export function Fleet({
   const availabilityTone = lowerThresholdTone(availPct, policy?.availability);
   const feed = toFeed(scope.events);
   const rolloutCards = toRollouts(scope.rollouts);
+  const metricState = metricsHealth(scope.metrics);
+  const hasQps = metricAvailable(scope.metrics, "request_rate");
+  const hasLatency = metricAvailable(scope.metrics, "latency_p99");
+  const hasErrors = hasQps && metricAvailable(scope.metrics, "error_rate");
+  const sourceIssues = [
+    ["clusters", clusters.error],
+    ["capacity", capacity.error],
+    ["deployments", isvcs.error],
+    ["rollouts", rollouts.error],
+    ["activity", events.error],
+    ["activity stream", events.connection === "reconnecting" ? "stream reconnecting" : null],
+    ["configuration", cfg.error],
+  ].filter((entry): entry is [string, string] => entry[1] != null);
+  const retrySources = () => {
+    clusters.refetch();
+    capacity.refetch();
+    isvcs.refetch();
+    rollouts.refetch();
+    events.refetch();
+    cfg.refetch();
+  };
 
   const gpu = scope.accelerators.find((a) => a.kind === "gpu");
   const tpu = scope.accelerators.find((a) => a.kind === "tpu");
@@ -160,6 +184,44 @@ export function Fleet({
         </div>
       </div>
 
+      {sourceIssues.length ? (
+        <DataNotice
+          tone="danger"
+          title="Some fleet data is stale or unavailable"
+          detail={`${sourceIssues.map(([source]) => source).join(", ")}. ${sourceIssues.some(([source]) => source === "deployments") && isvcs.data ? "Previously loaded deployment status remains visible." : "Affected panels will not report empty data as healthy."}`}
+          action={{ label: "Retry", onClick: retrySources }}
+        />
+      ) : null}
+      {metricsOn && metrics.error ? (
+        <DataNotice
+          tone="danger"
+          title="Live metrics are unavailable"
+          detail={
+            metricState.ready && scope.metrics
+              ? `Showing the last snapshot from ${ago(scope.metrics.updatedAt)}. ${metrics.error}`
+              : metrics.error
+          }
+        />
+      ) : null}
+      {metricsOn && metricState.ready && metricState.queryCount === 0 ? (
+        <DataNotice
+          tone="danger"
+          title="Metrics snapshot is empty"
+          detail="No Prometheus query results were returned. Performance values are unavailable."
+        />
+      ) : null}
+      {metricsOn && metricState.failedQueryCount > 0 ? (
+        <DataNotice
+          tone={metricState.failedQueryCount === metricState.queryCount ? "danger" : "warning"}
+          title={
+            metricState.failedQueryCount === metricState.queryCount
+              ? "Serving metrics failed"
+              : "Serving metrics are partial"
+          }
+          detail={`${metricState.failedQueryCount} of ${metricState.queryCount} query results failed across ${metricState.failedClusters.join(", ")}. Updated ${scope.metrics ? ago(scope.metrics.updatedAt) : "unknown"}.`}
+        />
+      ) : null}
+
       {metricsOn ? (
         <div className="filters">
           <FilterChip
@@ -177,40 +239,52 @@ export function Fleet({
       <div className="tiles">
         <StatTile
           label="Availability"
-          value={fmtPct(availPct)}
-          sub={`${n(health.ready)} serving / ${n(health.total)}`}
+          value={!isvcs.data || availPct == null ? "—" : fmtPct(availPct)}
+          sub={
+            isvcs.error && !isvcs.data
+              ? "deployment status unavailable"
+              : isvcs.loading && !isvcs.data
+                ? "loading deployments"
+                : health.total
+                  ? `${n(health.ready)} serving / ${n(health.total)}`
+                  : "no deployments in scope"
+          }
           tone={availabilityTone || undefined}
         />
         <StatTile
           label="Fleet QPS"
           value={
             <>
-              {fmtRate(totals.requestRate)}
-              <small>/s</small>
+              {hasQps ? fmtRate(totals.requestRate) : "—"}
+              {hasQps ? <small>/s</small> : null}
             </>
           }
           sub={
-            qpsDelta == null
+            !hasQps || qpsDelta == null
               ? undefined
               : `${qpsDelta >= 0 ? "▲" : "▼"} ${Math.abs(qpsDelta).toFixed(0)}% vs window start`
           }
         >
-          <Spark points={totals.requestSeries} />
+          {hasQps ? <Spark points={totals.requestSeries} /> : null}
         </StatTile>
         <StatTile
           label="p99 latency"
-          value={fmtLatency(totals.p99)}
-          sub={`p50 ${fmtLatency(totals.p50)} · TTFT ${fmtLatency(totals.ttft)}`}
+          value={hasLatency ? fmtLatency(totals.p99) : "—"}
+          sub={
+            hasLatency
+              ? `p50 ${fmtLatency(totals.p50)} · TTFT ${fmtLatency(totals.ttft)}`
+              : undefined
+          }
         >
-          <Spark points={totals.p99Series} color="var(--red)" />
+          {hasLatency ? <Spark points={totals.p99Series} color="var(--red)" /> : null}
         </StatTile>
         <StatTile
           label="Error rate"
-          value={fmtErrPct(totals.errorPct)}
-          sub={totals.errorPct == null ? undefined : errorThresholds}
+          value={hasErrors ? fmtErrPct(totals.errorPct) : "—"}
+          sub={!hasErrors || totals.errorPct == null ? undefined : errorThresholds}
           tone={errorTone || undefined}
         >
-          <Spark points={errPctSeries} color="var(--amber)" />
+          {hasErrors ? <Spark points={errPctSeries} color="var(--amber)" /> : null}
         </StatTile>
         <StatTile
           label="GPU allocated"
@@ -223,7 +297,12 @@ export function Fleet({
       {/* Per-model performance detail. */}
       {metricsOn ? (
         <>
-          <h2 className="sec">Performance</h2>
+          <h2 className="sec">
+            Performance
+            {metricState.ready && scope.metrics ? (
+              <span className="who">· updated {ago(scope.metrics.updatedAt)}</span>
+            ) : null}
+          </h2>
           <Card
             title="Models by traffic"
             actions={
@@ -297,7 +376,17 @@ export function Fleet({
                 ) : null}
               </>
             ) : (
-              <div className="muted attn-none">Waiting for serving metrics…</div>
+              <div className="muted attn-none">
+                {metrics.error && !metricState.ready
+                  ? "Serving metrics are unavailable."
+                  : metrics.loading || !metricState.ready
+                    ? "Loading serving metrics…"
+                    : metricState.queryCount === 0
+                      ? "No metrics query results."
+                      : metricState.failedQueryCount === metricState.queryCount
+                        ? "All serving metric queries failed."
+                        : "No serving traffic in the selected window."}
+              </div>
             )}
           </Card>
         </>
@@ -466,7 +555,17 @@ export function Fleet({
               ))}
             </ul>
           ) : (
-            <div className="muted attn-none">All healthy.</div>
+            <div className="muted attn-none">
+              {isvcs.error
+                ? isvcs.data
+                  ? "Status refresh failed; no active alerts in the last snapshot."
+                  : "Deployment status is unavailable."
+                : isvcs.loading && !isvcs.data
+                  ? "Loading deployment status…"
+                  : health.total
+                    ? "All deployments in scope are healthy."
+                    : "No deployments in scope."}
+            </div>
           )}
         </Card>
       </div>
@@ -489,7 +588,13 @@ export function Fleet({
             </div>
           ) : (
             <div className="muted attn-none">
-              {rollouts.loading ? "Loading…" : "Nothing rolling out."}
+              {rollouts.error
+                ? rollouts.data
+                  ? "Rollout refresh failed; no active rollouts in the last snapshot."
+                  : "Rollout status is unavailable."
+                : rollouts.loading
+                  ? "Loading…"
+                  : "Nothing rolling out."}
             </div>
           )}
         </Card>
@@ -497,7 +602,21 @@ export function Fleet({
           <div className="card-head">
             <h3>Recent activity</h3>
             <span className="right">
-              <span className="live">Live</span>
+              <span
+                className={
+                  events.connection === "reconnecting"
+                    ? "live degraded"
+                    : events.connection === "connecting"
+                      ? "live connecting"
+                      : "live"
+                }
+              >
+                {events.connection === "reconnecting"
+                  ? "Reconnecting"
+                  : events.connection === "connecting"
+                    ? "Connecting"
+                    : "Live"}
+              </span>
             </span>
           </div>
           <div className="card-body feed">

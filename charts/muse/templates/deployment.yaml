@@ -60,6 +60,10 @@ spec:
               value: {{ .Values.config.apiserverPreflightTimeoutSecs | quote }}
             - name: MUSE_EVENT_HISTORY_LIMIT
               value: {{ .Values.config.eventHistoryLimit | quote }}
+            {{- with .Values.config.cacheSyncTimeoutSecs }}
+            - name: MUSE_CACHE_SYNC_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}
             - name: MUSE_CAPACITY_REFRESH_SECS
               value: {{ .Values.config.capacityRefreshSecs | quote }}
             {{- with .Values.config.liveInvalidationBatchMs }}

@@ -10,7 +10,9 @@ import type { ResourceRef, Selected } from "./resource";
 export interface ClusterItem {
   name: string;
   ready: boolean;
-  status: "ready" | "syncing";
+  status: "syncing" | "ready" | "failed" | "timed_out";
+  /** Initial informer sync failure or timeout detail. */
+  error?: string;
   /** Apiserver Kubernetes version (e.g. "v1.35.6"). */
   version?: string;
   /** Cloud region from the standard `topology.kubernetes.io/region` node label. */

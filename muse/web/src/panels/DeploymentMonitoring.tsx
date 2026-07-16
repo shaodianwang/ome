@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
 
 import type { DashboardPolicy } from "../api";
+import { DataNotice } from "../components";
 import { metricsRangeLabel, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
-import { fmtErrPct, fmtInt, fmtLatency, fmtRate } from "../util";
+import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate } from "../util";
 import { Card, Distribution, Dot, GaugeCard, MetricChart, Spark, StatTile } from "../viz";
 
 const ACCENT = "var(--accent-2)";
@@ -36,13 +37,47 @@ export function Monitoring({
   m,
   metricsOn,
   policy,
+  loading,
+  error,
+  queryCount,
+  failedQueryCount,
+  updatedAt,
 }: {
   m: IsvcMetrics;
   metricsOn: boolean;
   policy?: DashboardPolicy;
+  loading: boolean;
+  error: string | null;
+  queryCount: number;
+  failedQueryCount: number;
+  updatedAt?: number;
 }) {
   if (!metricsOn) {
     return <div className="muted attn-none">Metrics aren't configured on this console.</div>;
+  }
+  if (error && !m.present) {
+    return <DataNotice tone="danger" title="Serving metrics unavailable" detail={error} />;
+  }
+  if (loading && !m.present) {
+    return <div className="muted attn-none">Loading serving metrics…</div>;
+  }
+  if (queryCount === 0 && !m.present) {
+    return (
+      <DataNotice
+        tone="danger"
+        title="Serving metrics unavailable"
+        detail="No Prometheus query results were returned for this cluster."
+      />
+    );
+  }
+  if (failedQueryCount === queryCount && queryCount > 0 && !m.present) {
+    return (
+      <DataNotice
+        tone="danger"
+        title="Serving metrics failed"
+        detail={`All ${queryCount} query results failed for this cluster.`}
+      />
+    );
   }
   if (!m.present) {
     return <div className="muted attn-none">No serving traffic in the selected window.</div>;
@@ -79,6 +114,19 @@ export function Monitoring({
 
   return (
     <>
+      {error ? (
+        <DataNotice
+          tone="warning"
+          title="Live metrics disconnected"
+          detail={`${updatedAt ? `Showing the snapshot from ${ago(updatedAt)}. ` : ""}${error}`}
+        />
+      ) : failedQueryCount > 0 ? (
+        <DataNotice
+          tone="warning"
+          title="Serving metrics are partial"
+          detail={`${failedQueryCount} of ${queryCount} query results failed${updatedAt ? `; snapshot updated ${ago(updatedAt)}` : ""}.`}
+        />
+      ) : null}
       <h2 className="sec">Health</h2>
       <div className="grid g4">
         <StatTile

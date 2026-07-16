@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use axum::{extract::State, Json};
 use serde_json::Value;
 
@@ -36,11 +34,12 @@ pub async fn list(State(st): State<AppState>) -> Json<Listing> {
                     .filter(|v| !v.is_empty())
                     .cloned()
             });
-            let ready = c.ready.load(Ordering::Relaxed);
+            let cache = c.cache.snapshot();
             to_val(ClusterSummary {
                 name: c.name.clone(),
-                ready,
-                status: if ready { "ready" } else { "syncing" },
+                ready: cache.ready(),
+                status: cache.status(),
+                error: cache.error().map(ToOwned::to_owned),
                 version: c.version.clone(),
                 region,
                 nodes: nodes.len(),

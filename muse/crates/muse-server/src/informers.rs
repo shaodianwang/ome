@@ -18,7 +18,7 @@ use std::{
     fmt::Debug,
     future::Future,
     pin::Pin,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -57,14 +57,93 @@ pub struct ClusterState {
     pub workload_clusters: Lister<WorkloadCluster>,
     pub nodes: Lister<Node>,
     pub pods: Lister<Pod>,
-    /// Flipped to `true` once every informer for this cluster has finished its
-    /// first sync. Listers serve (empty, then filling) before this is set, so the
-    /// console can render a "syncing" cluster immediately.
-    pub ready: Arc<AtomicBool>,
+    /// Initial informer-cache synchronization state.
+    pub cache: CacheState,
 }
 
-/// A future that resolves when one informer's cache has completed its first sync.
-pub type ReadyFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// One cluster's initial informer-cache synchronization phase.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CacheSyncState {
+    #[default]
+    Pending,
+    Ready,
+    Failed(String),
+    TimedOut(String),
+}
+
+impl CacheSyncState {
+    pub fn ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    /// Whether startup can make a fleet-level readiness decision. A timeout is
+    /// settled but recoverable when the still-running initial sync completes.
+    pub fn settled(&self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Pending => "syncing",
+            Self::Ready => "ready",
+            Self::Failed(_) => "failed",
+            Self::TimedOut(_) => "timed_out",
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed(error) | Self::TimedOut(error) => Some(error),
+            Self::Pending | Self::Ready => None,
+        }
+    }
+}
+
+/// Shared state for one cluster's initial informer-cache synchronization.
+#[derive(Clone, Default)]
+pub struct CacheState {
+    state: Arc<RwLock<CacheSyncState>>,
+}
+
+impl CacheState {
+    pub fn snapshot(&self) -> CacheSyncState {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn mark_ready(&self) {
+        self.transition(CacheSyncState::Ready);
+    }
+
+    pub fn mark_failed(&self, error: String) {
+        self.transition(CacheSyncState::Failed(error));
+    }
+
+    pub fn mark_timed_out(&self, error: String) {
+        self.transition(CacheSyncState::TimedOut(error));
+    }
+
+    fn transition(&self, next: CacheSyncState) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let can_transition = matches!(
+            (&*state, &next),
+            (CacheSyncState::Pending, _)
+                | (CacheSyncState::TimedOut(_), CacheSyncState::Ready)
+                | (CacheSyncState::TimedOut(_), CacheSyncState::Failed(_))
+        );
+        if can_transition {
+            *state = next;
+        }
+    }
+}
+
+/// A future that resolves when one informer's initial cache sync finishes.
+pub type ReadyFut = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 
 /// Side channels driven by informer events, grouped so cache construction does
 /// not grow one parameter per downstream projection.
@@ -193,7 +272,7 @@ pub fn build_cluster_state(
         name,
         version,
         client,
-        ready: Arc::new(AtomicBool::new(false)),
+        cache: CacheState::default(),
     };
     (state, readies)
 }
@@ -318,7 +397,10 @@ where
     }
     let store = informer.store();
     readies.push(Box::pin(async move {
-        let _ = store.wait_until_ready().await;
+        store
+            .wait_until_ready()
+            .await
+            .map_err(|error| error.to_string())
     }));
     informer.lister()
 }
@@ -454,7 +536,7 @@ impl Invalidations {
 }
 
 #[cfg(test)]
-mod tests {
+mod invalidation_tests {
     use std::time::Duration;
 
     use super::Invalidations;
@@ -498,9 +580,9 @@ pub fn now_secs() -> u64 {
 // Capacity-stale signal
 // ===========================================================================
 
-/// A coalescing "capacity is stale" signal, fired by the Node/Pod informers when
-/// they observe a change and awaited by the background recompute task. Multiple
-/// marks between waits collapse into one (a burst of pod churn ⇒ one recompute).
+/// A coalescing "capacity is stale" signal, fired by Node/Pod changes and cache
+/// eligibility transitions, then awaited by the background recompute task.
+/// Multiple marks between waits collapse into one.
 #[derive(Clone)]
 pub struct CapacitySignal {
     notify: Arc<tokio::sync::Notify>,
@@ -525,5 +607,54 @@ impl CapacitySignal {
 impl Default for CapacitySignal {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{CacheState, CacheSyncState};
+
+    #[test]
+    fn cache_state_reports_each_settled_outcome() {
+        let state = CacheState::default();
+        assert_eq!(state.snapshot(), CacheSyncState::Pending);
+        assert_eq!(state.snapshot().status(), "syncing");
+
+        state.mark_failed("watcher dropped".to_owned());
+        assert_eq!(
+            state.snapshot(),
+            CacheSyncState::Failed("watcher dropped".to_owned())
+        );
+        assert_eq!(state.snapshot().status(), "failed");
+        assert_eq!(state.snapshot().error(), Some("watcher dropped"));
+
+        let timed_out = CacheState::default();
+        timed_out.mark_timed_out("deadline exceeded".to_owned());
+        assert_eq!(
+            timed_out.snapshot(),
+            CacheSyncState::TimedOut("deadline exceeded".to_owned())
+        );
+        assert_eq!(timed_out.snapshot().status(), "timed_out");
+        assert_eq!(timed_out.snapshot().error(), Some("deadline exceeded"));
+
+        let ready = CacheState::default();
+        ready.mark_ready();
+        assert_eq!(ready.snapshot(), CacheSyncState::Ready);
+    }
+
+    #[test]
+    fn cache_state_keeps_failures_terminal_but_recovers_from_timeout() {
+        let failed = CacheState::default();
+        failed.mark_failed("watcher dropped".to_owned());
+        failed.mark_ready();
+        assert_eq!(
+            failed.snapshot(),
+            CacheSyncState::Failed("watcher dropped".to_owned())
+        );
+
+        let timed_out = CacheState::default();
+        timed_out.mark_timed_out("deadline exceeded".to_owned());
+        timed_out.mark_ready();
+        assert_eq!(timed_out.snapshot(), CacheSyncState::Ready);
     }
 }

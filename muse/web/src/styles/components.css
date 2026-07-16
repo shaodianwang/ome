@@ -224,6 +224,44 @@ table.tbl tbody tr.clickable {
 table.tbl tbody tr.clickable:hover {
   background: var(--hover);
 }
+.data-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  margin: 0 0 var(--s4);
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  line-height: 1.4;
+}
+.data-notice > div {
+  min-width: 0;
+}
+.data-notice strong {
+  color: var(--fg);
+  margin-right: 8px;
+}
+.data-notice span {
+  overflow-wrap: anywhere;
+}
+.data-notice.danger {
+  border-color: color-mix(in srgb, var(--red) 42%, var(--border));
+  background: var(--red-dim);
+}
+.data-notice.danger strong {
+  color: var(--red);
+}
+.data-notice.warning {
+  border-color: color-mix(in srgb, var(--amber) 42%, var(--border));
+  background: var(--amber-dim);
+}
+.data-notice.warning strong {
+  color: var(--amber);
+}
 table.tbl td .sub {
   color: var(--fg-3);
   font-size: var(--t-xs);
@@ -355,6 +393,18 @@ table.tbl thead th.right {
   border-radius: 50%;
   background: var(--green);
   flex: 0 0 auto;
+}
+.live.degraded {
+  color: var(--red);
+}
+.live.degraded::before {
+  background: var(--red);
+}
+.live.connecting {
+  color: var(--amber);
+}
+.live.connecting::before {
+  background: var(--amber);
 }
 .feed-body .t {
   font-size: var(--t-md);

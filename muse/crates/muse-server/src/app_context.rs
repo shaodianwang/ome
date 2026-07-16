@@ -8,7 +8,7 @@
 //! [`AppState::select`].
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -31,10 +31,10 @@ pub struct AppState {
     pub topology: Topology,
     pub feed: Feed,
     pub invalidations: Invalidations,
-    /// Materialized capacity: the fleet rollup and each per-cluster rollup, kept
-    /// current by a background task that recomputes on Node/Pod changes. Serving
-    /// from this keeps `/v1/capacity` latency flat as the fleet grows, instead of
-    /// re-walking every Node × Pod on each request.
+    /// Materialized capacity for ready clusters: the fleet rollup and each
+    /// per-cluster rollup, kept current by a background task that recomputes on
+    /// Node/Pod or cache-state changes. Serving from this keeps `/v1/capacity`
+    /// latency flat as the fleet grows instead of re-walking every Node × Pod.
     capacity: Arc<RwLock<Arc<CapacitySnapshot>>>,
     capacity_limits: rollup::CapacityLimits,
     pub signal: CapacitySignal,
@@ -104,16 +104,48 @@ impl AppState {
         state
     }
 
-    /// Clusters matching `cluster` (one named cluster, or all when None).
+    /// Ready clusters matching `cluster` (one named cluster, or all when None).
+    /// Explicitly selecting a known non-ready cluster is unavailable rather than
+    /// exposing a partial informer cache as authoritative data. Unscoped fleet
+    /// reads wait until every cluster is settled and at least one is ready.
     pub fn select(&self, cluster: Option<&str>) -> Result<Vec<&ClusterState>, ApiError> {
         match cluster {
-            Some(name) => self
-                .clusters
-                .iter()
-                .find(|c| c.name == name)
-                .map(|c| vec![c])
-                .ok_or_else(|| ApiError::NotFound(format!("unknown cluster: {name}"))),
-            None => Ok(self.clusters.iter().collect()),
+            Some(name) => self.ready_cluster(name).map(|cluster| vec![cluster]),
+            None => {
+                self.ensure_fleet_ready()?;
+                Ok(self
+                    .clusters
+                    .iter()
+                    .filter(|cluster| cluster.cache.snapshot().ready())
+                    .collect())
+            }
+        }
+    }
+
+    fn ensure_fleet_ready(&self) -> Result<(), ApiError> {
+        if self.caches_ready() {
+            Ok(())
+        } else {
+            Err(ApiError::Unavailable(
+                "fleet caches have not reached a settled usable state".to_owned(),
+            ))
+        }
+    }
+
+    fn ready_cluster(&self, name: &str) -> Result<&ClusterState, ApiError> {
+        let cluster = self
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .ok_or_else(|| ApiError::NotFound(format!("unknown cluster: {name}")))?;
+        let cache = cluster.cache.snapshot();
+        if cache.ready() {
+            Ok(cluster)
+        } else {
+            Err(ApiError::Unavailable(format!(
+                "cluster {name} cache is {}",
+                cache.status()
+            )))
         }
     }
 
@@ -122,13 +154,21 @@ impl AppState {
         self.chat.as_deref()
     }
 
-    /// Recompute the capacity rollups (fleet + per-cluster) from the current
-    /// informer caches and publish them. Called on a timer by the background
-    /// refresher; walking the caches is CPU-only (no apiserver traffic).
+    /// Whether every registered cluster has reached a settled initial-sync state
+    /// and at least one cluster is ready. A completed partial fleet remains usable,
+    /// but pending or wholly failed fleets must not serve authoritative-looking data.
+    pub fn caches_ready(&self) -> bool {
+        cache_fleet_ready(self.clusters.iter().map(|cluster| &cluster.cache))
+    }
+
+    /// Recompute the capacity rollups (fleet + per-cluster) from ready informer
+    /// caches and publish them. Called by the background refresher; walking the
+    /// caches is CPU-only (no apiserver traffic).
     pub fn refresh_capacity(&self) {
         let all: Vec<rollup::ClusterData> = self
             .clusters
             .iter()
+            .filter(|cluster| cluster.cache.snapshot().ready())
             .map(|c| rollup::ClusterData {
                 name: c.name.clone(),
                 nodes: c.nodes.list(),
@@ -156,18 +196,35 @@ impl AppState {
 
     /// The cached capacity response for one cluster, or the fleet rollup.
     pub fn capacity_snapshot(&self, cluster: Option<&str>) -> Result<Value, ApiError> {
-        let snap = self
-            .capacity
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        match cluster {
+            Some(name) => {
+                self.ready_cluster(name)?;
+            }
+            None => self.ensure_fleet_ready()?,
+        }
+        let snap = loop {
+            let snap = self
+                .capacity
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let ready = self
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.cache.snapshot().ready())
+                .map(|cluster| cluster.name.as_str());
+            if capacity_membership_matches(&snap, ready) {
+                break snap;
+            }
+            // Cache-state transitions normally wake the background refresher.
+            // Close the publication race synchronously before serving capacity.
+            self.refresh_capacity();
+        };
         match cluster {
             None => Ok(snap.fleet.clone()),
-            Some(name) => snap
-                .per_cluster
-                .get(name)
-                .cloned()
-                .ok_or_else(|| ApiError::NotFound(format!("unknown cluster: {name}"))),
+            Some(name) => snap.per_cluster.get(name).cloned().ok_or_else(|| {
+                ApiError::Unavailable(format!("capacity snapshot for cluster {name} is not ready"))
+            }),
         }
     }
 
@@ -209,7 +266,81 @@ impl AppState {
     }
 }
 
+fn cache_fleet_ready<'a>(
+    states: impl IntoIterator<Item = &'a crate::informers::CacheState>,
+) -> bool {
+    let mut any_ready = false;
+    for cache in states {
+        let state = cache.snapshot();
+        if !state.settled() {
+            return false;
+        }
+        any_ready |= state.ready();
+    }
+    any_ready
+}
+
+fn capacity_membership_matches<'a>(
+    snapshot: &CapacitySnapshot,
+    ready_clusters: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let ready: HashSet<&str> = ready_clusters.into_iter().collect();
+    ready.len() == snapshot.per_cluster.len()
+        && ready
+            .iter()
+            .all(|name| snapshot.per_cluster.contains_key(*name))
+}
+
 /// The initial (empty) metrics snapshot, before the first refresh completes.
 fn empty_metrics() -> Arc<Value> {
     Arc::new(json!({ "updatedAt": 0, "clusters": {} }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::Value;
+
+    use super::{cache_fleet_ready, capacity_membership_matches, CapacitySnapshot};
+    use crate::informers::CacheState;
+
+    #[test]
+    fn cache_readiness_requires_a_ready_cluster_and_no_pending_clusters() {
+        let ready = CacheState::default();
+        ready.mark_ready();
+        let pending = CacheState::default();
+
+        assert!(!cache_fleet_ready(std::iter::empty()));
+        assert!(!cache_fleet_ready([&pending]));
+        assert!(!cache_fleet_ready([&ready, &pending]));
+    }
+
+    #[test]
+    fn cache_readiness_accepts_a_settled_partial_fleet() {
+        let ready = CacheState::default();
+        ready.mark_ready();
+        let failed = CacheState::default();
+        failed.mark_failed("watch failed".to_owned());
+        let timed_out = CacheState::default();
+        timed_out.mark_timed_out("sync deadline exceeded".to_owned());
+
+        assert!(cache_fleet_ready([&ready, &failed, &timed_out]));
+        assert!(!cache_fleet_ready([&failed, &timed_out]));
+    }
+
+    #[test]
+    fn capacity_membership_detects_cache_state_transitions() {
+        let snapshot = CapacitySnapshot {
+            fleet: Value::Null,
+            per_cluster: HashMap::from([("ready-a".to_owned(), Value::Null)]),
+        };
+
+        assert!(capacity_membership_matches(&snapshot, ["ready-a"]));
+        assert!(!capacity_membership_matches(
+            &snapshot,
+            ["ready-a", "ready-b"]
+        ));
+        assert!(!capacity_membership_matches(&snapshot, std::iter::empty()));
+    }
 }

@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { EventItem, InvalidationEvent, MetricsSnapshot } from "./api";
 import { METRICS_STREAM_URL, STREAM_URL } from "./api";
+import { metricsTransportState } from "./dataState";
 
 type ActivityListener = (event: EventItem) => void;
 type InvalidationListener = (event: InvalidationEvent) => void;
@@ -19,10 +20,20 @@ type InvalidationListener = (event: InvalidationEvent) => void;
 let source: EventSource | null = null;
 const activityListeners = new Set<ActivityListener>();
 const invalidationListeners = new Set<InvalidationListener>();
+export type StreamConnectionState = "connecting" | "live" | "reconnecting";
+const sourceStatusListeners = new Set<(state: StreamConnectionState) => void>();
+let sourceConnectionState: StreamConnectionState = "connecting";
+
+function publishSourceStatus(state: StreamConnectionState) {
+  sourceConnectionState = state;
+  sourceStatusListeners.forEach((listener) => listener(state));
+}
 
 function ensureSource() {
   if (source) return;
   source = new EventSource(STREAM_URL);
+  source.onopen = () => publishSourceStatus("live");
+  source.onerror = () => publishSourceStatus("reconnecting");
   source.addEventListener("activity", (raw) => {
     const msg = raw as MessageEvent<string>;
     let event: EventItem;
@@ -44,7 +55,6 @@ function ensureSource() {
     if (!Array.isArray(event.resources)) return;
     invalidationListeners.forEach((listener) => listener(event));
   });
-  // EventSource reconnects automatically on error; nothing to do here.
 }
 
 /** Subscribe only to operator-facing activity items. */
@@ -53,6 +63,15 @@ function onActivity(listener: ActivityListener): () => void {
   activityListeners.add(listener);
   return () => {
     activityListeners.delete(listener);
+  };
+}
+
+function onSourceStatus(listener: (state: StreamConnectionState) => void): () => void {
+  ensureSource();
+  sourceStatusListeners.add(listener);
+  listener(sourceConnectionState);
+  return () => {
+    sourceStatusListeners.delete(listener);
   };
 }
 
@@ -76,6 +95,8 @@ export interface LiveState<T> {
   data: T | null;
   error: string | null;
   loading: boolean;
+  /** Epoch seconds of the most recent successful fetch; retained across failures. */
+  lastSuccessAt: number | null;
   refetch: () => void;
 }
 
@@ -99,6 +120,7 @@ export function useLive<T>(fetcher: () => Promise<T>, options: LiveOptions = {})
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null);
 
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
@@ -111,6 +133,7 @@ export function useLive<T>(fetcher: () => Promise<T>, options: LiveOptions = {})
       .then((d) => {
         setData(d);
         setError(null);
+        setLastSuccessAt(Math.floor(Date.now() / 1000));
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -151,7 +174,7 @@ export function useLive<T>(fetcher: () => Promise<T>, options: LiveOptions = {})
     };
   }, [load]);
 
-  return { data, error, loading, refetch: load };
+  return { data, error, loading, lastSuccessAt, refetch: load };
 }
 
 /**
@@ -163,13 +186,18 @@ export function useEventFeed(limit = 60): {
   events: EventItem[];
   error: string | null;
   loading: boolean;
+  connection: StreamConnectionState;
+  refetch: () => void;
 } {
   const [events, setEvents] = useState<EventItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [connection, setConnection] = useState<StreamConnectionState>(sourceConnectionState);
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setLoading(true);
     api
       .events()
       .then((r) => {
@@ -186,15 +214,24 @@ export function useEventFeed(limit = 60): {
       });
 
     const off = onActivity((event) => {
+      setError(null);
       setEvents((prev) => [event, ...prev].slice(0, limit));
     });
+    const offStatus = onSourceStatus(setConnection);
     return () => {
       alive = false;
       off();
+      offStatus();
     };
-  }, [limit]);
+  }, [limit, revision]);
 
-  return { events, error, loading };
+  return {
+    events,
+    error,
+    loading,
+    connection,
+    refetch: () => setRevision((value) => value + 1),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,11 +243,19 @@ export function useEventFeed(limit = 60): {
 
 let metricsSource: EventSource | null = null;
 const metricsListeners = new Set<(snap: MetricsSnapshot) => void>();
+const metricsStatusListeners = new Set<(error: string | null) => void>();
 let lastMetrics: MetricsSnapshot | null = null;
+let metricsConnectionError: string | null = null;
+
+function publishMetricsStatus(error: string | null) {
+  metricsConnectionError = error;
+  metricsStatusListeners.forEach((listener) => listener(error));
+}
 
 function ensureMetricsSource() {
   if (metricsSource) return;
   metricsSource = new EventSource(METRICS_STREAM_URL);
+  metricsSource.onopen = () => publishMetricsStatus(null);
   metricsSource.onmessage = (msg) => {
     let snap: MetricsSnapshot;
     try {
@@ -221,7 +266,9 @@ function ensureMetricsSource() {
     lastMetrics = snap;
     metricsListeners.forEach((l) => l(snap));
   };
-  // EventSource reconnects automatically on error; nothing to do here.
+  metricsSource.onerror = () => {
+    publishMetricsStatus("Live metrics stream disconnected; reconnecting.");
+  };
 }
 
 /**
@@ -229,11 +276,22 @@ function ensureMetricsSource() {
  * on each refresh, so there is no polling — the SSE payload *is* the data. Pass
  * `enabled=false` (e.g. metrics unconfigured) to skip the connection entirely.
  */
-export function useMetrics(enabled = true): { data: MetricsSnapshot | null } {
+export function useMetrics(enabled = true): {
+  data: MetricsSnapshot | null;
+  error: string | null;
+  loading: boolean;
+} {
   const [data, setData] = useState<MetricsSnapshot | null>(lastMetrics);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(metricsConnectionError);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setFetchError(null);
+      setStreamError(null);
+      return;
+    }
     let alive = true;
+    setStreamError(metricsConnectionError);
     // The SSE pushes the snapshot on connect and on every refresh — that's the live
     // path. A one-time GET on mount is a fallback so metrics still show if a proxy
     // drops the stream; it's served from the server's cached snapshot (no upstream
@@ -244,18 +302,32 @@ export function useMetrics(enabled = true): { data: MetricsSnapshot | null } {
         if (!alive) return;
         lastMetrics = s;
         setData(s);
+        setFetchError(null);
       })
-      .catch(() => {});
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setFetchError(e instanceof Error ? e.message : String(e));
+      });
     ensureMetricsSource();
-    if (lastMetrics) setData(lastMetrics);
+    if (lastMetrics) {
+      setData(lastMetrics);
+    }
     const listener = (snap: MetricsSnapshot) => {
-      if (alive) setData(snap);
+      if (!alive) return;
+      setData(snap);
+      setFetchError(null);
+    };
+    const statusListener = (nextError: string | null) => {
+      if (!alive) return;
+      setStreamError(nextError);
     };
     metricsListeners.add(listener);
+    metricsStatusListeners.add(statusListener);
     return () => {
       alive = false;
       metricsListeners.delete(listener);
+      metricsStatusListeners.delete(statusListener);
     };
   }, [enabled]);
-  return { data };
+  return { data, ...metricsTransportState(data, fetchError, streamError, enabled) };
 }

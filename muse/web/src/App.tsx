@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api } from "./api";
+import { summarizeClusterCaches } from "./clusterStatus";
 import {
   BrandMark,
   IconCapacity,
@@ -71,8 +72,7 @@ export default function App() {
     intervalMs: 30_000,
   });
   const items = clusters.data?.items ?? [];
-  const ready = items.filter((c) => c.ready).length;
-  const syncing = items.length - ready;
+  const cacheSummary = summarizeClusterCaches(items);
 
   useEffect(() => {
     const main = mainRef.current;
@@ -140,13 +140,25 @@ export default function App() {
 
         <div className="sidebar-foot">
           <div>
-            <span className={syncing ? "dot syncing" : "dot"} />
-            {items.length ? `${items.length} clusters connected` : "connecting…"}
+            <span
+              className={
+                clusters.error || cacheSummary.unhealthy
+                  ? "dot error"
+                  : cacheSummary.syncing
+                    ? "dot syncing"
+                    : "dot"
+              }
+            />
+            {clusters.error
+              ? "read plane unavailable"
+              : items.length
+                ? `${items.length} clusters connected`
+                : "connecting…"}
           </div>
-          {items.length ? (
-            <div className="sync-line mono">
-              {syncing ? `${syncing} syncing · ${ready} ready` : "all synced"}
-            </div>
+          {clusters.error ? (
+            <div className="sync-line">{clusters.error}</div>
+          ) : items.length ? (
+            <div className="sync-line mono">{cacheSummary.line || "all synced"}</div>
           ) : null}
         </div>
       </aside>

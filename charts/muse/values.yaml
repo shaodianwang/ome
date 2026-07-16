@@ -38,6 +38,11 @@ config:
   listStrategy: auto # auto | streaming | paginated
   apiserverPreflightTimeoutSecs: 15
   eventHistoryLimit: 100
+  # Per-cluster initial informer deadline. Ready/failed/timed-out clusters are
+  # settled for fleet readiness; timed-out clusters keep syncing and can recover.
+  # The pod becomes ready after all clusters are settled and at least one is
+  # ready. Set to null or 0 to wait indefinitely.
+  cacheSyncTimeoutSecs: 300
   capacityRefreshSecs: 10
   # Batch informer changes into one live-query invalidation. This controls the
   # responsiveness vs refetch/SSE load tradeoff; the binary has no baked default.

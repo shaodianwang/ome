@@ -60,6 +60,33 @@ export function EmptyRow({ colSpan, children }: { colSpan: number; children: Rea
   );
 }
 
+/** Compact page-level status for partial or unavailable data, optionally retryable. */
+export function DataNotice({
+  tone,
+  title,
+  detail,
+  action,
+}: {
+  tone: "danger" | "warning";
+  title: string;
+  detail?: ReactNode;
+  action?: { label: string; onClick: () => void };
+}) {
+  return (
+    <div className={`data-notice ${tone}`} role={tone === "danger" ? "alert" : "status"}>
+      <div>
+        <strong>{title}</strong>
+        {detail ? <span>{detail}</span> : null}
+      </div>
+      {action ? (
+        <button type="button" className="btn ghost sm" onClick={action.onClick}>
+          {action.label}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 const PAGE_SIZES = [25, 50, 100];
 
 /** List footer: "X–Y of Z <noun>" plus a page-size selector and prev/next paging.

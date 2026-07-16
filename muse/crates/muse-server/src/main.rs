@@ -30,7 +30,7 @@ mod server;
 mod service;
 mod telemetry;
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
@@ -131,16 +131,20 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             .live_invalidation_batch_ms
             .map(|millis| Duration::from_millis(millis.get())),
     );
-    // Shared signal: Node/Pod changes mark the capacity rollup stale.
+    // Shared signal: Node/Pod and cache-eligibility changes mark capacity stale.
     let signal = informers::CapacitySignal::new();
 
     // Fan out: one informer set per cluster. An unreachable cluster is skipped
     // (logged), not fatal — the fleet view degrades rather than failing.
     let mut clusters = Vec::new();
+    let cache_sync_timeout = config
+        .cache_sync_timeout_secs
+        .map(|seconds| Duration::from_secs(seconds.get()));
     for cluster_ref in config.cluster_refs()? {
         match build_cluster(
             &cluster_ref,
             config.list_strategy,
+            cache_sync_timeout,
             &feed,
             &invalidations,
             &signal,
@@ -199,6 +203,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
 async fn build_cluster(
     cluster_ref: &config::ClusterRef,
     list_strategy: config::ListStrategy,
+    cache_sync_timeout: Option<Duration>,
     feed: &informers::Feed,
     invalidations: &informers::Invalidations,
     signal: &informers::CapacitySignal,
@@ -254,22 +259,88 @@ async fn build_cluster(
             capacity: signal,
         },
     );
-    // Serve immediately and warm the caches in the background; flip the cluster's
-    // ready flag once every informer has finished its first sync. Awaiting the
-    // futures in sequence still completes in max(individual) time — the reflector
-    // tasks all run concurrently, so we only observe their completion here.
-    let ready = state.ready.clone();
+    // Serve immediately and warm the caches in the background. Every readiness
+    // future is observed concurrently so one dropped watcher fails the cluster
+    // promptly even when another watcher is still pending. A timed-out sync keeps
+    // running so the cluster can recover when its initial list eventually lands.
+    let cache = state.cache.clone();
     let invalidations = invalidations.clone();
+    let capacity = signal.clone();
     let name = cluster_ref.name.clone();
     tokio::spawn(async move {
-        for fut in readies {
-            fut.await;
-        }
-        ready.store(true, Ordering::Relaxed);
-        invalidations.mark("Cluster");
-        tracing::info!(cluster = %name, "cache sync complete");
+        observe_cache_sync(readies, cache_sync_timeout, |outcome| {
+            match outcome {
+                CacheSyncOutcome::Ready => {
+                    let recovered =
+                        matches!(cache.snapshot(), informers::CacheSyncState::TimedOut(_));
+                    cache.mark_ready();
+                    tracing::info!(cluster = %name, recovered, "cache sync complete");
+                }
+                CacheSyncOutcome::Failed(error) => {
+                    cache.mark_failed(error.clone());
+                    tracing::error!(cluster = %name, %error, "cache sync failed");
+                }
+                CacheSyncOutcome::TimedOut(deadline) => {
+                    let seconds = deadline.as_secs();
+                    let error =
+                        format!("initial informer sync exceeded configured timeout of {seconds}s");
+                    cache.mark_timed_out(error.clone());
+                    tracing::error!(cluster = %name, %error, "cache sync timed out; continuing in background");
+                }
+            }
+            invalidations.mark("Cluster");
+            capacity.mark();
+        })
+        .await;
     });
     Ok(state)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CacheSyncOutcome {
+    Ready,
+    Failed(String),
+    TimedOut(Duration),
+}
+
+async fn observe_cache_sync(
+    readies: Vec<informers::ReadyFut>,
+    deadline: Option<Duration>,
+    mut observe: impl FnMut(CacheSyncOutcome),
+) {
+    let mut sync = Box::pin(wait_for_cache_sync(readies));
+    match deadline {
+        Some(deadline) => match tokio::time::timeout(deadline, &mut sync).await {
+            Ok(result) => observe(settled_cache_sync_outcome(result)),
+            Err(_) => {
+                observe(CacheSyncOutcome::TimedOut(deadline));
+                observe(settled_cache_sync_outcome(sync.await));
+            }
+        },
+        None => observe(settled_cache_sync_outcome(sync.await)),
+    }
+}
+
+fn settled_cache_sync_outcome(result: Result<(), String>) -> CacheSyncOutcome {
+    match result {
+        Ok(()) => CacheSyncOutcome::Ready,
+        Err(error) => CacheSyncOutcome::Failed(error),
+    }
+}
+
+async fn wait_for_cache_sync(readies: Vec<informers::ReadyFut>) -> Result<(), String> {
+    let mut pending = tokio::task::JoinSet::new();
+    for ready in readies {
+        pending.spawn(ready);
+    }
+    while let Some(result) = pending.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(error) => return Err(format!("informer sync task failed: {error}")),
+        }
+    }
+    Ok(())
 }
 
 /// Parse the minor version from an apiserver `gitVersion` string, e.g.
@@ -296,5 +367,63 @@ async fn client_for(cluster_ref: &config::ClusterRef) -> anyhow::Result<Client> 
             Client::try_from(cfg).with_context(|| format!("kube client for {}", cluster_ref.name))
         }
         None => Client::try_default().await.context("ambient kube client"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future, time::Duration};
+
+    use super::{observe_cache_sync, CacheSyncOutcome};
+    use crate::informers::ReadyFut;
+    use tokio::sync::{mpsc, oneshot};
+
+    fn ready(result: Result<(), &str>) -> ReadyFut {
+        let result = result.map_err(ToOwned::to_owned);
+        Box::pin(async move { result })
+    }
+
+    #[tokio::test]
+    async fn cache_sync_observes_failures_concurrently() {
+        let pending: ReadyFut = Box::pin(future::pending());
+        let mut outcomes = Vec::new();
+        observe_cache_sync(
+            vec![pending, ready(Err("watcher dropped"))],
+            Some(Duration::from_secs(1)),
+            |outcome| outcomes.push(outcome),
+        )
+        .await;
+        assert_eq!(
+            outcomes,
+            [CacheSyncOutcome::Failed("watcher dropped".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_sync_reports_timeout_then_late_recovery() {
+        let (release, released) = oneshot::channel();
+        let pending: ReadyFut =
+            Box::pin(async move { released.await.map_err(|error| error.to_string()) });
+        let (outcomes, mut observed) = mpsc::unbounded_channel();
+        let monitor = tokio::spawn(observe_cache_sync(
+            vec![pending],
+            Some(Duration::from_millis(1)),
+            move |outcome| {
+                outcomes.send(outcome).unwrap();
+            },
+        ));
+
+        assert_eq!(
+            observed.recv().await,
+            Some(CacheSyncOutcome::TimedOut(Duration::from_millis(1)))
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), observed.recv())
+                .await
+                .unwrap(),
+            Some(CacheSyncOutcome::Ready)
+        );
+        monitor.await.unwrap();
     }
 }

@@ -1,20 +1,26 @@
 //! Liveness / readiness / health endpoints.
 //!
-//! muse builds every informer cache (initial list+watch) before it binds the API
-//! listener, so by the time these are reachable the read plane is ready. Liveness
-//! is therefore always 200 (the process is up); readiness mirrors it.
+//! Liveness reports that the process can serve HTTP. Readiness waits until every
+//! registered cluster has reached a settled initial-sync state, then requires at
+//! least one ready cluster. A failed remote cluster therefore does not take a
+//! completed partial fleet offline.
 
-use axum::http::StatusCode;
+use axum::{extract::State, http::StatusCode};
+
+use crate::app_context::AppState;
 
 /// Liveness: the process is up.
 pub async fn livez() -> &'static str {
     "ok"
 }
 
-/// Readiness: muse only serves after the informer caches sync, so once reachable
-/// it is ready.
-pub async fn readyz() -> (StatusCode, &'static str) {
-    (StatusCode::OK, "ok")
+/// Readiness: all registered clusters are terminal and at least one is ready.
+pub async fn readyz(State(st): State<AppState>) -> (StatusCode, &'static str) {
+    if st.caches_ready() {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "informer caches not ready")
+    }
 }
 
 /// Combined health (alias of liveness).

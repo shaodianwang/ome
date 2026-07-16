@@ -11,10 +11,12 @@ import type {
   UnitBox,
 } from "../api";
 import type { Tone } from "../types";
-import { Bar, EmptyRow, Pager } from "../components";
+import { Bar, DataNotice, EmptyRow, Pager } from "../components";
+import { loadClusterCapacity } from "../dataState";
+import type { ClusterCapacityState } from "../dataState";
 import { useLive } from "../live";
 import { upperThresholdTone } from "../policy";
-import { copyText, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct } from "../util";
+import { ago, copyText, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct } from "../util";
 import { Card, Distribution, Dot, Gauge, StatTile, UtilRow } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
@@ -52,6 +54,16 @@ type SortKey = keyof Row;
 
 const kpct = (t: { alloc: number; used: number }) =>
   utilPct({ allocatable: t.alloc, allocated: t.used });
+const unavailableCluster = (cluster: ClusterCapacityState): string => {
+  const status =
+    cluster.status === "timed_out"
+      ? "timed out"
+      : cluster.status === "ready"
+        ? "unavailable"
+        : cluster.status;
+  const detail = cluster.cacheError ?? cluster.capacityError;
+  return `${cluster.name} (${status}${detail ? `: ${detail}` : ""})`;
+};
 const sortVal = (r: Row, k: SortKey): string | number =>
   k === "cluster" || k === "name" || k === "kind" ? String(r[k]).toLowerCase() : r[k];
 
@@ -468,47 +480,40 @@ export function Capacity() {
   const [tab, setTab] = useState(""); // "" = all clusters; else a cluster name
   const [nodes, setNodes] = useState<NodeItem[]>([]);
   const [nodesLoading, setNodesLoading] = useState(false);
+  const [nodesError, setNodesError] = useState<string | null>(null);
+  const [nodeReload, setNodeReload] = useState(0);
   const [nodeQ, setNodeQ] = useState("");
   const [nodePage, setNodePage] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const config = useLive(api.config, { kinds: [] });
   const utilizationPolicy = config.data?.dashboardPolicy?.utilization;
 
   // One scoped-capacity request per cluster, combined client-side so island /
   // domain rows stay attributed to their cluster and kind.
-  const live = useLive(
-    async () => {
-      const cl = await api.clusters();
-      return Promise.all(
-        cl.items.map((c) =>
-          api.capacityForCluster(c.name).then((cap) => ({
-            name: c.name,
-            ready: c.ready,
-            version: c.version,
-            region: c.region,
-            cap,
-          })),
-        ),
-      );
-    },
-    { kinds: ["Capacity", "Cluster"], intervalMs: 30_000 },
-  );
-  const allCaps: {
-    name: string;
-    ready: boolean;
-    version?: string;
-    region?: string;
-    cap: CapacityResp;
-  }[] = live.data ?? [];
+  const live = useLive(() => loadClusterCapacity(api.clusters, api.capacityForCluster), {
+    kinds: ["Capacity", "Cluster"],
+    intervalMs: 30_000,
+  });
+  const allCaps = live.data ?? [];
   // A per-cluster tab scopes the whole page to one cluster; "" is the fleet view.
-  const caps = tab ? allCaps.filter((c) => c.name === tab) : allCaps;
+  const scopedCaps = tab ? allCaps.filter((c) => c.name === tab) : allCaps;
+  const caps = scopedCaps.filter(
+    (cluster): cluster is ClusterCapacityState & { cap: CapacityResp } => cluster.cap != null,
+  );
+  const unavailable = scopedCaps.filter(
+    (cluster) =>
+      cluster.status === "failed" ||
+      cluster.status === "timed_out" ||
+      (cluster.status === "ready" && cluster.capacityError),
+  );
   const active = tab ? allCaps.find((c) => c.name === tab) : undefined;
   // A cluster still warming its informer caches reports partial data (pods sync
   // after nodes → allocated looks like 0, everything looks free). Flag it so the
   // numbers aren't mistaken for steady state.
-  const syncing = caps.filter((c) => !c.ready).map((c) => c.name);
+  const syncing = scopedCaps.filter((c) => c.status === "syncing").map((c) => c.name);
 
   useEffect(() => {
     setPage(0);
@@ -520,17 +525,23 @@ export function Capacity() {
   useEffect(() => {
     if (!tab) {
       setNodes([]);
+      setNodesError(null);
       return;
     }
     let cancelled = false;
+    setNodes([]);
+    setNodesError(null);
     setNodesLoading(true);
     api
       .nodesForCluster(tab)
       .then((r) => {
         if (!cancelled) setNodes(r.items);
       })
-      .catch(() => {
-        if (!cancelled) setNodes([]);
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setNodes([]);
+          setNodesError(error instanceof Error ? error.message : String(error));
+        }
       })
       .finally(() => {
         if (!cancelled) setNodesLoading(false);
@@ -538,7 +549,7 @@ export function Capacity() {
     return () => {
       cancelled = true;
     };
-  }, [tab, live.data]);
+  }, [tab, nodeReload, live.data]);
 
   useEffect(() => {
     setNodePage(0);
@@ -560,6 +571,7 @@ export function Capacity() {
   const tpu = byKind.get("tpu");
   const gpuPct = gpu ? kpct(gpu) : null;
   const tpuPct = tpu ? kpct(tpu) : null;
+  const hasCapacity = caps.length > 0;
   const accelNodes = caps.reduce((s, { cap }) => s + cap.nodes.acceleratorNodes, 0);
   const schedNodes = caps.reduce((s, { cap }) => s + cap.nodes.schedulable, 0);
   const totalNodes = caps.reduce((s, { cap }) => s + cap.nodes.total, 0);
@@ -597,11 +609,15 @@ export function Capacity() {
     }
     setExpanded(name);
     setDetail(null);
+    setDetailError(null);
     setDetailLoading(true);
     api
       .nodeDetail(tab, name)
       .then(setDetail)
-      .catch(() => setDetail(null))
+      .catch((error: unknown) => {
+        setDetail(null);
+        setDetailError(error instanceof Error ? error.message : String(error));
+      })
       .finally(() => setDetailLoading(false));
   };
 
@@ -782,10 +798,47 @@ export function Capacity() {
             onClick={() => setTab(c.name)}
           >
             {c.name}
-            {c.ready ? null : <Dot tone="amber" />}
+            {c.status === "failed"
+              ? " · failed"
+              : c.status === "timed_out"
+                ? " · timed out"
+                : c.status === "syncing"
+                  ? " · syncing"
+                  : c.capacityError
+                    ? " · unavailable"
+                    : ""}
           </button>
         ))}
       </div>
+
+      {live.error ? (
+        <DataNotice
+          tone="danger"
+          title={live.data ? "Capacity refresh failed" : "Capacity unavailable"}
+          detail={
+            live.data && live.lastSuccessAt
+              ? `Showing the last successful snapshot from ${ago(live.lastSuccessAt)}. ${live.error}`
+              : live.error
+          }
+          action={{ label: "Retry", onClick: live.refetch }}
+        />
+      ) : null}
+      {config.error ? (
+        <DataNotice
+          tone="warning"
+          title="Capacity policy unavailable"
+          detail={config.error}
+          action={{ label: "Retry", onClick: config.refetch }}
+        />
+      ) : null}
+      {unavailable.length ? (
+        <DataNotice
+          tone="warning"
+          title="Capacity is partial"
+          detail={`${unavailable.map(unavailableCluster).join(", ")}; fleet totals exclude ${unavailable.length === 1 ? "that cluster" : "those clusters"}.`}
+          action={{ label: "Retry", onClick: live.refetch }}
+        />
+      ) : null}
 
       {active ? (
         <div className="statstrip">
@@ -808,12 +861,14 @@ export function Capacity() {
           <div className="s2">
             <span className="lbl">Nodes</span>
             <span className="val">
-              {n(totalNodes)} · {n(readyNodes)} ready · {n(schedNodes)} sched
+              {active.cap
+                ? `${n(totalNodes)} · ${n(readyNodes)} ready · ${n(schedNodes)} sched`
+                : "Unavailable"}
             </span>
           </div>
           <div className="s2">
             <span className="lbl">Accelerator nodes</span>
-            <span className="val">{n(accelNodes)}</span>
+            <span className="val">{active.cap ? n(accelNodes) : "Unavailable"}</span>
           </div>
         </div>
       ) : null}
@@ -822,7 +877,13 @@ export function Capacity() {
         <StatTile
           label="GPU allocated"
           value={gpuPct == null ? "—" : `${gpuPct}%`}
-          sub={gpu ? `${n(gpu.used)} / ${n(gpu.alloc)} · ${n(gpu.free)} free` : "no GPU clusters"}
+          sub={
+            gpu
+              ? `${n(gpu.used)} / ${n(gpu.alloc)} · ${n(gpu.free)} free`
+              : hasCapacity
+                ? "no GPU capacity reported"
+                : "capacity unavailable"
+          }
         >
           {gpuPct == null ? null : (
             <Gauge pct={gpuPct} tone={upperThresholdTone(gpuPct, utilizationPolicy)} />
@@ -831,7 +892,13 @@ export function Capacity() {
         <StatTile
           label="TPU allocated"
           value={tpuPct == null ? "—" : `${tpuPct}%`}
-          sub={tpu ? `${n(tpu.used)} / ${n(tpu.alloc)} · ${n(tpu.free)} free` : "no TPU clusters"}
+          sub={
+            tpu
+              ? `${n(tpu.used)} / ${n(tpu.alloc)} · ${n(tpu.free)} free`
+              : hasCapacity
+                ? "no TPU capacity reported"
+                : "capacity unavailable"
+          }
         >
           {tpuPct == null ? null : (
             <Gauge pct={tpuPct} tone={upperThresholdTone(tpuPct, utilizationPolicy)} />
@@ -839,22 +906,38 @@ export function Capacity() {
         </StatTile>
         <StatTile
           label="Pending"
-          value={pendingAccel ? n(pendingAccel) : "0"}
-          sub={pendingAccel ? `${n(pendingPods)} pods waiting for capacity` : "none waiting"}
-          tone={pendingAccel > 0 ? "red" : "green"}
+          value={hasCapacity ? (pendingAccel ? n(pendingAccel) : "0") : "—"}
+          sub={
+            hasCapacity
+              ? pendingAccel
+                ? `${n(pendingPods)} pods waiting for capacity`
+                : "none reported in available clusters"
+              : "capacity unavailable"
+          }
+          tone={hasCapacity ? (pendingAccel > 0 ? "red" : "green") : undefined}
         />
         <StatTile
           label="Unavailable"
-          value={unavailAccel ? n(unavailAccel) : "0"}
-          sub={unavailAccel ? `${n(unavailNodes)} nodes NotReady / cordoned` : "all nodes healthy"}
-          tone={unavailAccel > 0 ? "amber" : "green"}
+          value={hasCapacity ? (unavailAccel ? n(unavailAccel) : "0") : "—"}
+          sub={
+            hasCapacity
+              ? unavailAccel
+                ? `${n(unavailNodes)} nodes NotReady / cordoned`
+                : "none reported in available clusters"
+              : "capacity unavailable"
+          }
+          tone={hasCapacity ? (unavailAccel > 0 ? "amber" : "green") : undefined}
         />
       </div>
-      <p className="cap-help">
-        {n(accelNodes)} accelerator nodes across {caps.length} cluster
-        {caps.length === 1 ? "" : "s"} · {n(schedNodes)} schedulable of {n(totalNodes)}. Percentages
-        are <b>allocated</b> (scheduled), not live GPU utilization.
-      </p>
+      {hasCapacity ? (
+        <p className="cap-help">
+          {n(accelNodes)} accelerator nodes across {caps.length} cluster
+          {caps.length === 1 ? "" : "s"} · {n(schedNodes)} schedulable of {n(totalNodes)}.
+          Percentages are <b>allocated</b> (scheduled), not live GPU utilization.
+        </p>
+      ) : live.loading ? (
+        <p className="cap-help">Loading capacity…</p>
+      ) : null}
       {syncing.length ? (
         <p className="cap-syncing">
           ⏳ {syncing.length} cluster{syncing.length > 1 ? "s" : ""} still syncing (
@@ -867,6 +950,13 @@ export function Capacity() {
           <Card title="Node health" sub="why accelerator nodes are unavailable">
             {nodesLoading ? (
               <p className="panel-note">Loading nodes…</p>
+            ) : nodesError ? (
+              <DataNotice
+                tone="danger"
+                title="Node inventory unavailable"
+                detail={nodesError}
+                action={{ label: "Retry", onClick: () => setNodeReload((value) => value + 1) }}
+              />
             ) : nodeIssues.length ? (
               <div className="urows">
                 {nodeIssues.map(([iss, count]) => (
@@ -885,7 +975,9 @@ export function Capacity() {
             )}
           </Card>
           <Card title="Top consumers" sub="namespaces holding the most accelerators">
-            {consumers.length ? (
+            {active.status !== "ready" || active.capacityError ? (
+              <p className="panel-note">Capacity data is unavailable for this cluster.</p>
+            ) : consumers.length ? (
               <div className="urows">
                 {consumers.map((c, i) => (
                   <UtilRow
@@ -1052,8 +1144,10 @@ export function Capacity() {
                                   )}
                                 </div>
                               </div>
+                            ) : detailError ? (
+                              <p className="panel-note txt-bad">{detailError}</p>
                             ) : (
-                              <p className="panel-note">Couldn't load node detail.</p>
+                              <p className="panel-note">Node detail is unavailable.</p>
                             )}
                           </div>
                         </td>
@@ -1065,9 +1159,11 @@ export function Capacity() {
                   <EmptyRow colSpan={6}>
                     {nodesLoading
                       ? "Loading nodes…"
-                      : nodeQ.trim()
-                        ? `No nodes match "${nodeQ}"`
-                        : "No nodes"}
+                      : nodesError
+                        ? "Node inventory unavailable"
+                        : nodeQ.trim()
+                          ? `No nodes match "${nodeQ}"`
+                          : "No nodes"}
                   </EmptyRow>
                 ) : null}
               </tbody>
@@ -1198,7 +1294,9 @@ export function Capacity() {
                     ? `No rows match "${q}"`
                     : live.loading
                       ? "Loading capacity…"
-                      : "No capacity data"}
+                      : live.error || (unavailable.length > 0 && !hasCapacity)
+                        ? "Capacity unavailable"
+                        : "No capacity data"}
                 </EmptyRow>
               ) : null}
             </tbody>

@@ -312,6 +312,14 @@ pub struct Config {
     #[arg(long = "list-strategy", env = "MUSE_LIST_STRATEGY", value_enum)]
     pub list_strategy: ListStrategy,
 
+    /// Maximum seconds allowed for all informers on one connected cluster to
+    /// complete their initial list. A cluster that exceeds the deadline becomes
+    /// `timed_out`; readiness can then serve a completed partial fleet when at
+    /// least one other cluster is ready. No binary default: unset waits without a
+    /// deadline, while the deployment chart supplies its operational policy.
+    #[arg(long = "cache-sync-timeout-secs", env = "MUSE_CACHE_SYNC_TIMEOUT_SECS")]
+    pub cache_sync_timeout_secs: Option<NonZeroU64>,
+
     /// Minimum seconds between capacity recomputes. The rollup is recomputed when
     /// the Node/Pod informers observe a change (coalesced to at most once per this
     /// interval) — not on a timer or per request — so it's reactive without
@@ -880,5 +888,18 @@ mod tests {
     fn zero_chat_response_cap_is_rejected_at_config_parse_time() {
         let result = parse_with(false, false, &["--chat-max-response-bytes=0"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cache_sync_timeout_is_optional_and_requires_positive_seconds() {
+        let config = parse_with(false, false, &[]).unwrap();
+        assert_eq!(config.cache_sync_timeout_secs, None);
+
+        let config = parse_with(false, false, &["--cache-sync-timeout-secs=45"]).unwrap();
+        assert_eq!(
+            config.cache_sync_timeout_secs.map(|value| value.get()),
+            Some(45)
+        );
+        assert!(parse_with(false, false, &["--cache-sync-timeout-secs=0"]).is_err());
     }
 }

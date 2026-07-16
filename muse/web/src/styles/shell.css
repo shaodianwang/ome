@@ -155,6 +155,9 @@
 .sidebar-foot .dot.syncing {
   background: var(--amber);
 }
+.sidebar-foot .dot.error {
+  background: var(--red);
+}
 .sync-line {
   margin-top: 4px;
 }

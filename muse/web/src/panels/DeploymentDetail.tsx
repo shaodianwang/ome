@@ -3,9 +3,11 @@ import type { ReactNode } from "react";
 
 import { api } from "../api";
 import type { EventItem, IsvcDetail } from "../api";
-import { Pill } from "../components";
+import { DataNotice, Pill } from "../components";
+import { metricsHealth } from "../dataState";
 import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
+import type { StreamConnectionState } from "../live";
 import { replicaRollup } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
@@ -55,6 +57,13 @@ export function DeploymentDetail({
   const metricsOn = !!cfg.data?.metrics;
   const metrics = useMetrics(metricsOn);
   const m = isvcMetrics(metrics.data, sel.cluster, sel.name, metricIdentity === "unambiguous");
+  const clusterMetrics = metrics.data
+    ? {
+        updatedAt: metrics.data.updatedAt,
+        clusters: { [sel.cluster]: metrics.data.clusters[sel.cluster] ?? {} },
+      }
+    : null;
+  const metricState = metricsHealth(clusterMetrics);
 
   const activity = feed.events.filter(
     (e) =>
@@ -99,6 +108,27 @@ export function DeploymentDetail({
         </div>
       ) : null}
 
+      {d && detail.error ? (
+        <DataNotice
+          tone="warning"
+          title="Deployment refresh failed"
+          detail={
+            detail.lastSuccessAt
+              ? `Showing status from ${ago(detail.lastSuccessAt)}. ${detail.error}`
+              : detail.error
+          }
+          action={{ label: "Retry", onClick: detail.refetch }}
+        />
+      ) : null}
+      {cfg.error ? (
+        <DataNotice
+          tone="danger"
+          title="Console configuration unavailable"
+          detail={cfg.error}
+          action={{ label: "Retry", onClick: cfg.refetch }}
+        />
+      ) : null}
+
       {!d ? (
         <div className="muted attn-none">
           {detail.error ?? (detail.loading ? "Loading…" : "Not found")}
@@ -141,10 +171,26 @@ export function DeploymentDetail({
                     : "Deployment inventory is unavailable; serving metrics are hidden."}
               </div>
             ) : (
-              <Monitoring m={m} metricsOn={metricsOn} policy={cfg.data?.dashboardPolicy} />
+              <Monitoring
+                m={m}
+                metricsOn={metricsOn}
+                policy={cfg.data?.dashboardPolicy}
+                loading={metrics.loading || !metricState.ready}
+                error={metrics.error}
+                queryCount={metricState.queryCount}
+                failedQueryCount={metricState.failedQueryCount}
+                updatedAt={metrics.data?.updatedAt}
+              />
             )
           ) : null}
-          {tab === "activity" ? <ActivityPane activity={activity} /> : null}
+          {tab === "activity" ? (
+            <ActivityPane
+              activity={activity}
+              error={feed.error}
+              loading={feed.loading}
+              connection={feed.connection}
+            />
+          ) : null}
         </>
       )}
     </section>
@@ -359,20 +405,61 @@ function OverviewPane({
 // ---------------------------------------------------------------------------
 // Activity — recent changes for this deployment (from the shared event feed).
 // ---------------------------------------------------------------------------
-function ActivityPane({ activity }: { activity: EventItem[] }) {
+function ActivityPane({
+  activity,
+  error,
+  loading,
+  connection,
+}: {
+  activity: EventItem[];
+  error: string | null;
+  loading: boolean;
+  connection: StreamConnectionState;
+}) {
   if (!activity.length) {
-    return <div className="muted attn-none">No recent activity.</div>;
+    if (connection === "reconnecting") {
+      return (
+        <DataNotice
+          tone="warning"
+          title="Live activity disconnected"
+          detail="Reconnecting to the event stream."
+        />
+      );
+    }
+    if (error) {
+      return <DataNotice tone="danger" title="Activity unavailable" detail={error} />;
+    }
+    return (
+      <div className="muted attn-none">
+        {loading || connection === "connecting" ? "Loading activity…" : "No recent activity."}
+      </div>
+    );
   }
   return (
-    <Card title="Activity" sub="recent changes">
-      <ul className="mini-feed">
-        {activity.slice(0, 50).map((e, i) => (
-          <li key={i}>
-            <span className="mono">{e.action === "deleted" ? "removed" : "updated"}</span> ·{" "}
-            {ago(e.at)}
-          </li>
-        ))}
-      </ul>
-    </Card>
+    <>
+      {connection === "reconnecting" ? (
+        <DataNotice
+          tone="warning"
+          title="Live activity disconnected"
+          detail="Reconnecting; showing the events already received."
+        />
+      ) : error ? (
+        <DataNotice
+          tone="warning"
+          title="Activity refresh failed"
+          detail="Showing the events already received."
+        />
+      ) : null}
+      <Card title="Activity" sub="recent changes">
+        <ul className="mini-feed">
+          {activity.slice(0, 50).map((e, i) => (
+            <li key={i}>
+              <span className="mono">{e.action === "deleted" ? "removed" : "updated"}</span> ·{" "}
+              {ago(e.at)}
+            </li>
+          ))}
+        </ul>
+      </Card>
+    </>
   );
 }

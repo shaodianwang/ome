@@ -1572,6 +1572,8 @@ pub struct ClusterSummary {
     pub name: String,
     pub ready: bool,
     pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Apiserver Kubernetes version (e.g. "v1.35.6").
     pub version: String,
     /// Cloud region, from the standard `topology.kubernetes.io/region` node label.
