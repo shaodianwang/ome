@@ -9,7 +9,13 @@
 //! RBAC that client already has. The target Prometheus (`namespace/name:port`) and
 //! the query set are both config-driven (`--prom-service`, `--metrics-queries-file`).
 
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    convert::Infallible,
+    future::Future,
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::State,
@@ -21,6 +27,7 @@ use kube::{Api, Error as KubeError};
 use ome_client::k8s_openapi::api::core::v1::Service;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio::task::JoinSet;
 use tokio_stream::{wrappers::WatchStream, StreamExt};
 
 use crate::{
@@ -65,30 +72,136 @@ pub async fn refresh(st: &AppState) {
     let Some(prom) = st.prom.clone() else {
         return;
     };
+    let started = Instant::now();
     let queries = st.metrics_queries();
-    let mut clusters = serde_json::Map::new();
+    let concurrency = st.metrics_query_concurrency();
+    let request_timeout = st.metrics_request_timeout();
+    let mut clusters = st
+        .clusters
+        .iter()
+        .map(|cluster| (cluster.name.clone(), json!({})))
+        .collect::<serde_json::Map<_, _>>();
     let mut sources = serde_json::Map::new();
-    for cluster in st.clusters.iter() {
-        let mut results = serde_json::Map::new();
-        if queries.is_empty() {
-            clusters.insert(cluster.name.clone(), Value::Object(results));
-            continue;
+    let mut query_jobs = Vec::new();
+
+    if !queries.is_empty() {
+        let discovery_prom = prom.clone();
+        let discovery_jobs = st
+            .clusters
+            .iter()
+            .map(|cluster| (cluster.name.clone(), cluster.client.clone()))
+            .collect::<Vec<_>>()
+            .into_iter();
+        let discoveries =
+            collect_with_concurrency(discovery_jobs, concurrency, move |(name, client)| {
+                let prom = discovery_prom.clone();
+                async move {
+                    let result = discover_prom_service(&client, &prom, request_timeout).await;
+                    (name, client, result)
+                }
+            })
+            .await;
+
+        for (name, client, discovery) in discoveries {
+            if let Err(failure) = discovery {
+                log_failure(&name, &prom, &failure);
+                sources.insert(name, failure.to_source_value(&prom));
+                continue;
+            }
+            sources.insert(name.clone(), available_source_value(&prom));
+            query_jobs.extend(
+                queries
+                    .iter()
+                    .cloned()
+                    .map(|query| (name.clone(), client.clone(), query)),
+            );
         }
-        if let Err(failure) = discover_prom_service(&cluster.client, &prom).await {
-            log_failure(&cluster.name, &prom, &failure);
-            sources.insert(cluster.name.clone(), failure.to_source_value(&prom));
-            clusters.insert(cluster.name.clone(), Value::Object(results));
-            continue;
-        }
-        sources.insert(cluster.name.clone(), available_source_value(&prom));
-        for def in queries.iter() {
-            results.insert(def.id.clone(), run_query(&cluster.client, &prom, def).await);
-        }
-        clusters.insert(cluster.name.clone(), Value::Object(results));
     }
+
+    let query_count = query_jobs.len();
+    let query_prom = prom.clone();
+    let query_results = collect_with_concurrency(
+        query_jobs.into_iter(),
+        concurrency,
+        move |(cluster, client, query)| {
+            let prom = query_prom.clone();
+            async move {
+                let query_id = query.id.clone();
+                let value = run_query(&client, &prom, &query, request_timeout).await;
+                (cluster, query_id, value)
+            }
+        },
+    )
+    .await;
+
+    let mut failed_queries = 0usize;
+    for (cluster, query_id, value) in query_results {
+        failed_queries += usize::from(value.get("error").is_some());
+        if let Some(results) = clusters.get_mut(&cluster).and_then(Value::as_object_mut) {
+            results.insert(query_id, value);
+        }
+    }
+
     st.publish_metrics(Arc::new(
         json!({ "updatedAt": now_secs(), "clusters": clusters, "sources": sources }),
     ));
+    let elapsed = started.elapsed();
+    ::metrics::gauge!("muse_metrics_refresh_duration_seconds").set(elapsed.as_secs_f64());
+    tracing::info!(
+        duration_seconds = elapsed.as_secs_f64(),
+        clusters = st.clusters.len(),
+        queries = query_count,
+        failed_queries,
+        "Prometheus metrics snapshot refreshed"
+    );
+}
+
+/// Run serially when no concurrency policy is configured. Otherwise, run at most
+/// `concurrency` jobs at once without allocating one Tokio task per job; each
+/// completed slot admits exactly one pending job.
+async fn collect_with_concurrency<I, F, Fut, T>(
+    mut items: I,
+    concurrency: Option<NonZeroUsize>,
+    operation: F,
+) -> Vec<T>
+where
+    I: Iterator + Send,
+    I::Item: Send + 'static,
+    F: Fn(I::Item) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let Some(concurrency) = concurrency else {
+        let mut results = Vec::new();
+        for item in items {
+            results.push(operation(item).await);
+        }
+        return results;
+    };
+
+    let mut tasks = JoinSet::new();
+    for _ in 0..concurrency.get() {
+        let Some(item) = items.next() else {
+            break;
+        };
+        let operation = operation.clone();
+        tasks.spawn(operation(item));
+    }
+
+    let mut results = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                tracing::error!(error = %error, "metrics refresh worker failed");
+            }
+        }
+        if let Some(item) = items.next() {
+            let operation = operation.clone();
+            tasks.spawn(operation(item));
+        }
+    }
+    results
 }
 
 #[derive(Clone, Debug)]
@@ -142,12 +255,13 @@ fn prom_target(prom: &PromTarget) -> String {
 async fn discover_prom_service(
     client: &kube::Client,
     prom: &PromTarget,
+    request_timeout: Option<Duration>,
 ) -> Result<(), MetricsFailure> {
     let services: Api<Service> = Api::namespaced(client.clone(), &prom.namespace);
-    let service = services
-        .get(&prom.service)
-        .await
-        .map_err(|error| service_discovery_failure(prom, &error))?;
+    let service = match await_with_timeout(request_timeout, services.get(&prom.service)).await {
+        Ok(result) => result.map_err(|error| service_discovery_failure(prom, &error))?,
+        Err(timeout) => return Err(service_discovery_timeout_failure(prom, timeout)),
+    };
     validate_prom_service(&service, prom)
 }
 
@@ -178,7 +292,12 @@ fn validate_prom_service(service: &Service, prom: &PromTarget) -> Result<(), Met
 
 /// Run one query definition against a cluster's Prometheus, returning the raw
 /// Prometheus JSON — or an `{ "error": … }` object on failure (never panics).
-async fn run_query(client: &kube::Client, prom: &PromTarget, def: &QueryDef) -> Value {
+async fn run_query(
+    client: &kube::Client,
+    prom: &PromTarget,
+    def: &QueryDef,
+    request_timeout: Option<Duration>,
+) -> Value {
     let proxy = |sub: &str, qs: &str| {
         format!(
             "/api/v1/namespaces/{}/services/{}:{}/proxy/api/v1/{sub}?{qs}",
@@ -211,7 +330,7 @@ async fn run_query(client: &kube::Client, prom: &PromTarget, def: &QueryDef) -> 
             }
         }
     };
-    match prom_get(client, &path).await {
+    match prom_get(client, &path, request_timeout).await {
         Ok(v) => v,
         Err(e) => json!({ "error": e }),
     }
@@ -219,16 +338,52 @@ async fn run_query(client: &kube::Client, prom: &PromTarget, def: &QueryDef) -> 
 
 /// GET an apiserver service-proxy path on a cluster's client, decoding the
 /// Prometheus JSON body.
-async fn prom_get(client: &kube::Client, path: &str) -> Result<Value, String> {
+async fn prom_get(
+    client: &kube::Client,
+    path: &str,
+    request_timeout: Option<Duration>,
+) -> Result<Value, String> {
     let req = Request::builder()
         .method("GET")
         .uri(path)
         .body(Vec::new())
         .map_err(|e| format!("build metrics request: {e}"))?;
-    client
-        .request::<Value>(req)
-        .await
-        .map_err(|e| format!("prometheus query failed: {e}"))
+    match await_with_timeout(request_timeout, client.request::<Value>(req)).await {
+        Ok(result) => result.map_err(|e| format!("prometheus query failed: {e}")),
+        Err(timeout) => Err(format!(
+            "prometheus query timed out after {}s",
+            timeout.as_secs()
+        )),
+    }
+}
+
+/// Await normally when no deployment deadline is configured. A timeout returns
+/// the configured duration so callers can retain it in their structured error.
+async fn await_with_timeout<T>(
+    timeout: Option<Duration>,
+    future: impl Future<Output = T>,
+) -> Result<T, Duration> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| timeout),
+        None => Ok(future.await),
+    }
+}
+
+fn service_discovery_timeout_failure(
+    prom: &PromTarget,
+    request_timeout: Duration,
+) -> MetricsFailure {
+    MetricsFailure::new(
+        "unavailable",
+        "prometheus_service_discovery_timeout",
+        format!(
+            "timed out discovering Prometheus Service {} after {}s",
+            prom_target(prom),
+            request_timeout.as_secs()
+        ),
+    )
 }
 
 fn service_discovery_failure(prom: &PromTarget, error: &KubeError) -> MetricsFailure {
@@ -282,10 +437,22 @@ fn encode_params(pairs: &[(&str, &str)]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        num::NonZeroUsize,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
     use kube::{error::Status, Error as KubeError};
     use ome_client::k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
-    use super::{service_discovery_failure, validate_prom_service};
+    use super::{
+        collect_with_concurrency, service_discovery_failure, service_discovery_timeout_failure,
+        validate_prom_service,
+    };
     use crate::config::PromTarget;
 
     fn target() -> PromTarget {
@@ -346,5 +513,54 @@ mod tests {
         let source = service_discovery_failure(&prom, &error).to_source_value(&prom);
         assert_eq!(source["status"], "unconfigured");
         assert_eq!(source["error"]["code"], "prometheus_service_not_found");
+    }
+
+    #[test]
+    fn discovery_timeouts_are_reported_as_unavailable() {
+        let prom = target();
+        let source = service_discovery_timeout_failure(&prom, Duration::from_secs(15))
+            .to_source_value(&prom);
+        assert_eq!(source["status"], "unavailable");
+        assert_eq!(
+            source["error"]["code"],
+            "prometheus_service_discovery_timeout"
+        );
+        assert!(source["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("after 15s")));
+    }
+
+    async fn observed_concurrency(limit: Option<NonZeroUsize>) -> (usize, Vec<i32>) {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let task_active = active.clone();
+        let task_maximum = maximum.clone();
+
+        let mut results = collect_with_concurrency(0..12, limit, move |item| {
+            let active = task_active.clone();
+            let maximum = task_maximum.clone();
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                item
+            }
+        })
+        .await;
+        results.sort_unstable();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        (maximum.load(Ordering::SeqCst), results)
+    }
+
+    #[tokio::test]
+    async fn configured_concurrency_bounds_work_and_absence_is_serial() {
+        let (serial_maximum, serial_results) = observed_concurrency(None).await;
+        let (bounded_maximum, bounded_results) = observed_concurrency(NonZeroUsize::new(3)).await;
+
+        assert_eq!(serial_results, (0..12).collect::<Vec<_>>());
+        assert_eq!(bounded_results, serial_results);
+        assert_eq!(serial_maximum, 1);
+        assert_eq!(bounded_maximum, 3);
     }
 }

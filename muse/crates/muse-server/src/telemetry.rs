@@ -69,6 +69,10 @@ pub fn init_metrics(
         "muse_http_request_duration_seconds",
         "HTTP request latency in seconds"
     );
+    metrics::describe_gauge!(
+        "muse_metrics_refresh_duration_seconds",
+        "Duration of the last fleet metrics snapshot refresh in seconds"
+    );
 
     // Histogram bucket rotation — required when using install_recorder.
     let upkeep = handle.clone();

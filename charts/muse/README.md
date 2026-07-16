@@ -86,6 +86,14 @@ cluster's metrics source unconfigured; a failed discovery read marks it unavaila
 Both include a machine-readable code and target details, and skip the query catalog.
 Other resource and capacity views for that cluster remain available.
 
+Metrics requests are bounded per Muse replica by
+`config.metrics.queryConcurrency`, and every Service discovery or PromQL call
+uses `config.metrics.requestTimeoutSecs` as its deadline. Tune the concurrency
+with the replica count and Prometheus capacity in mind; timed-out PromQL calls
+remain visible as individual query errors while the rest of the snapshot publishes.
+Both settings are optional outside the chart: without them, requests run serially
+and wait without a Muse-imposed deadline.
+
 ## Inference test (chat)
 
 Off by default (`config.chat.enabled: false`) — it proxies one request to a

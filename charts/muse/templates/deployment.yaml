@@ -92,6 +92,10 @@ spec:
             {{- end }}
             - name: MUSE_METRICS_REFRESH_SECS
               value: {{ .Values.config.metrics.refreshSecs | quote }}
+            - name: MUSE_METRICS_QUERY_CONCURRENCY
+              value: {{ .Values.config.metrics.queryConcurrency | quote }}
+            - name: MUSE_METRICS_REQUEST_TIMEOUT_SECS
+              value: {{ .Values.config.metrics.requestTimeoutSecs | quote }}
             - name: MUSE_CHAT_ENABLED
               value: {{ .Values.config.chat.enabled | quote }}
             {{- with .Values.config.chat.timeoutSecs }}

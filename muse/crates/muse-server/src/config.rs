@@ -5,7 +5,7 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
 };
 
@@ -91,6 +91,11 @@ fn parse_positive_usize(spec: &str) -> Result<usize, String> {
         return Err(format!("expected a positive integer, got '{spec}'"));
     }
     Ok(value)
+}
+
+fn parse_positive_nonzero_usize(spec: &str) -> Result<NonZeroUsize, String> {
+    let value = parse_positive_usize(spec)?;
+    NonZeroUsize::new(value).ok_or_else(|| format!("expected a positive integer, got '{spec}'"))
 }
 
 fn parse_positive_float(spec: &str) -> Result<f64, String> {
@@ -573,6 +578,28 @@ pub struct Config {
     )]
     pub metrics_refresh_secs: u64,
 
+    /// Maximum number of in-flight Prometheus requests per MUSE replica, shared
+    /// across every workload cluster. This bounds both Service discovery and the
+    /// query catalog instead of spawning one task per cluster/query pair. The
+    /// deployment config owns the load/freshness tradeoff. No binary default:
+    /// absent preserves serial request execution.
+    #[arg(
+        long = "metrics-query-concurrency",
+        env = "MUSE_METRICS_QUERY_CONCURRENCY",
+        value_parser = parse_positive_nonzero_usize
+    )]
+    pub metrics_query_concurrency: Option<NonZeroUsize>,
+
+    /// Maximum seconds for one Service discovery or Prometheus proxy request.
+    /// A timed-out query becomes a per-query error; it does not hold the entire
+    /// snapshot refresh open indefinitely. The deployment config owns this value.
+    /// No binary default: absent waits for each request normally.
+    #[arg(
+        long = "metrics-request-timeout-secs",
+        env = "MUSE_METRICS_REQUEST_TIMEOUT_SECS"
+    )]
+    pub metrics_request_timeout_secs: Option<NonZeroU64>,
+
     /// Path to the dashboard metrics query set: JSON `{ "queries": [ … ] }`, each
     /// `{ id, promql, kind: "instant"|"range", window?, step? }`. No baked-in
     /// queries — engine-specific metric names (e.g. sglang vs vllm) come from this
@@ -668,7 +695,11 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::{
+        fs,
+        num::{NonZeroU64, NonZeroUsize},
+        time::Duration,
+    };
 
     use clap::Parser;
 
@@ -773,6 +804,8 @@ mod tests {
         assert_eq!(config.capacity_max_fragments, 4);
         assert_eq!(config.capacity_max_consumers, 3);
         assert_eq!(config.http_latency_buckets, [0.001, 0.1, 1.0]);
+        assert_eq!(config.metrics_query_concurrency, None);
+        assert_eq!(config.metrics_request_timeout_secs, None);
         assert_eq!(config.cluster_refs().unwrap()[0].name, "test-cluster");
         assert!(config.dashboard_policy.is_none());
     }
@@ -845,6 +878,31 @@ mod tests {
             args.retain(|arg| !arg.starts_with(&format!("--{flag}=")));
             args.push(format!("--{flag}=0"));
             assert!(Config::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn metrics_request_limits_are_optional_and_must_be_positive() {
+        let config = parse_with(
+            false,
+            false,
+            &[
+                "--metrics-query-concurrency=3",
+                "--metrics-request-timeout-secs=15",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            config.metrics_query_concurrency.map(NonZeroUsize::get),
+            Some(3)
+        );
+        assert_eq!(
+            config.metrics_request_timeout_secs.map(NonZeroU64::get),
+            Some(15)
+        );
+
+        for flag in ["metrics-query-concurrency", "metrics-request-timeout-secs"] {
+            assert!(parse_with(false, false, &[&format!("--{flag}=0")]).is_err());
         }
     }
 

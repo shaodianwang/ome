@@ -9,6 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroUsize,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -50,6 +51,10 @@ pub struct AppState {
     /// Optional heartbeat interval shared by every SSE endpoint. Deployment config
     /// owns this value; `None` leaves an otherwise valid stream event-driven.
     sse_keep_alive: Option<Duration>,
+    /// Optional per-replica request parallelism. `None` preserves serial polling.
+    metrics_query_concurrency: Option<NonZeroUsize>,
+    /// Optional deadline for each discovery/query request. `None` waits normally.
+    metrics_request_timeout: Option<Duration>,
     dashboard_policy: Option<DashboardPolicy>,
     /// Latest metrics snapshot, updated by the background refresher and pushed to
     /// SSE subscribers. `watch` retains only the latest value (new subscribers get
@@ -70,6 +75,8 @@ pub struct AppStateConfig {
     pub queries: Arc<Vec<QueryDef>>,
     pub refresh: Duration,
     pub sse_keep_alive: Option<Duration>,
+    pub query_concurrency: Option<NonZeroUsize>,
+    pub request_timeout: Option<Duration>,
     pub capacity_limits: rollup::CapacityLimits,
     pub dashboard_policy: Option<DashboardPolicy>,
 }
@@ -101,6 +108,8 @@ impl AppState {
             metrics_queries: config.queries,
             metrics_refresh: config.refresh,
             sse_keep_alive: config.sse_keep_alive,
+            metrics_query_concurrency: config.query_concurrency,
+            metrics_request_timeout: config.request_timeout,
             dashboard_policy: config.dashboard_policy,
             metrics_tx,
         };
@@ -251,6 +260,16 @@ impl AppState {
     /// Configured interval between SSE keep-alive comments, if any.
     pub fn sse_keep_alive_interval(&self) -> Option<Duration> {
         self.sse_keep_alive
+    }
+
+    /// Optional global in-flight limit for one refresh; absent means serial.
+    pub fn metrics_query_concurrency(&self) -> Option<NonZeroUsize> {
+        self.metrics_query_concurrency
+    }
+
+    /// Optional per-request deadline; absent waits without a Muse deadline.
+    pub fn metrics_request_timeout(&self) -> Option<Duration> {
+        self.metrics_request_timeout
     }
 
     /// Optional UI health classification policy. Missing categories are neutral.

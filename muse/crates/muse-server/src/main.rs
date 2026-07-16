@@ -190,6 +190,10 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             sse_keep_alive: config
                 .sse_keep_alive_secs
                 .map(|seconds| Duration::from_secs(seconds.get())),
+            query_concurrency: config.metrics_query_concurrency,
+            request_timeout: config
+                .metrics_request_timeout_secs
+                .map(|seconds| Duration::from_secs(seconds.get())),
             capacity_limits: rollup::CapacityLimits {
                 max_fragments: config.capacity_max_fragments,
                 max_consumers: config.capacity_max_consumers,
