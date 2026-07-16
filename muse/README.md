@@ -41,7 +41,7 @@ from the placement planner rather than collapsed into a fabricated domain.
 | `GET /v1/clusters` | registered clusters + per-cluster summary |
 | `GET /v1/capacity[?cluster=]` | fleet GPU allocatable/allocated/free, grouped by cluster / RDMA island / NVLink domain / instance type |
 | `GET /v1/{kind}[?cluster=]` | list a kind across clusters; each row tagged with `cluster` |
-| `GET /v1/{kind}/{name}[?raw=true][?cluster=]` | get one (projected view, or full object with `raw=true`) |
+| `GET /v1/{kind}/{name}[?raw=true][?cluster=][?namespace=]` | get one by full identity (projected view, or full object with `raw=true`); `namespace` disambiguates namespaced kinds |
 
 `{kind}` ∈ `inferenceservices`, `basemodels`, `servingruntimes`,
 `inferencereplicas`, `clusterbasemodels`, `clusterservingruntimes`,

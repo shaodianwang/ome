@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { api } from "../api";
 import { Copy } from "../icons";
+import type { Selected } from "../resource";
 import { copyText } from "../util";
 
 /** The endpoints a served model may expose. Engines differ: sglang serves only
@@ -45,16 +46,14 @@ function buildCurl(base: string, path: string, body: string): string {
  *  with your own cert); when the proxy is enabled it also sends the chosen
  *  endpoint live through muse, falling back to the curl on any failure. */
 export function ChatBox({
-  cluster,
-  name,
+  resource,
   endpoint,
   defaultModel,
   enabled,
   timeoutSecs,
   clientGraceSecs,
 }: {
-  cluster: string;
-  name: string;
+  resource: Selected;
   endpoint?: string;
   defaultModel: string;
   enabled: boolean;
@@ -98,7 +97,7 @@ export function ChatBox({
         ? (timeoutSecs + clientGraceSecs) * 1000
         : undefined;
     api
-      .chat(cluster, name, path, baseUrl, parsed, timeoutMs)
+      .chat(resource, path, baseUrl, parsed, timeoutMs)
       .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r, null, 2)))
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));

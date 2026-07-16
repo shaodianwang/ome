@@ -13,7 +13,8 @@ import {
 import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
 import { Fleet } from "./panels/Fleet";
-import type { Selected } from "./types";
+import { isLegacySelected } from "./resource";
+import type { Selected } from "./resource";
 import { Models } from "./panels/Models";
 import { Runtimes } from "./panels/Runtimes";
 import { Workloads } from "./panels/Workloads";
@@ -40,6 +41,7 @@ export default function App() {
   const depCluster = route.cluster;
   const depQ = route.q;
   const sel = route.sel ?? null;
+  const canonicalSel = sel && !isLegacySelected(sel) ? sel : null;
   const [navOpen, setNavOpen] = useState(false);
   const activeNavRef = useRef<HTMLButtonElement>(null);
   const navToggleRef = useRef<HTMLButtonElement>(null);
@@ -179,7 +181,7 @@ export default function App() {
               setCluster={(c) => navigate(wl({ cluster: c || undefined }), { replace: true })}
               query={depQ ?? ""}
               setQuery={(query) => navigate(wl({ q: query || undefined }), { replace: true })}
-              selected={sel}
+              selected={canonicalSel}
               setSelected={(s) => navigate(wl({ sel: s ?? undefined }))}
               openModel={openModel}
               openRuntime={openRuntime}

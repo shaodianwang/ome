@@ -1,7 +1,8 @@
 // Small reusable presentational pieces shared across panels.
 import type { CSSProperties, ReactNode } from "react";
 
-import type { BarTone, Selected, Tone } from "./types";
+import type { Selected } from "./resource";
+import type { BarTone, Tone } from "./types";
 import { num } from "./util";
 import { Track } from "./viz";
 
@@ -136,7 +137,14 @@ export function RefList({
         <li key={`${s.cluster}/${s.namespace ?? ""}/${s.name}`}>
           <button
             className="linkbtn mono"
-            onClick={() => onOpen({ cluster: s.cluster, name: s.name })}
+            onClick={() =>
+              onOpen({
+                cluster: s.cluster,
+                kind: "InferenceService",
+                name: s.name,
+                namespace: s.namespace,
+              })
+            }
           >
             {s.name}
           </button>

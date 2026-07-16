@@ -6,12 +6,24 @@ import { EnvList, Pill, RefList } from "../components";
 import { Copyable, Facts } from "../drawer";
 import { Copy } from "../icons";
 import { useLive } from "../live";
+import { runtimeReference, runtimeUsage } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
-import type { Selected } from "../types";
+import { isLegacySelected, resourceKey, sameResource, selectionKey } from "../resource";
+import type { RouteSelected, Selected } from "../resource";
 import { Card } from "../viz";
 
-type RuntimeRow = RuntimeItem & { scoped: boolean; used: number };
+type RuntimeRow = RuntimeItem & {
+  kind: "ServingRuntime" | "ClusterServingRuntime";
+  used: number;
+};
+
+const runtimeIdentity = (r: RuntimeRow): Selected => ({
+  cluster: r.cluster,
+  kind: r.kind,
+  name: r.name,
+  namespace: r.kind === "ServingRuntime" ? r.namespace : undefined,
+});
 
 /** Last path segment of an image ref — drops the registry/repo prefix for display. */
 const imageShort = (img?: string): string => (img ? (img.split("/").pop() ?? img) : "—");
@@ -61,6 +73,7 @@ const COLUMNS: Column<RuntimeRow>[] = [
         {isMultiNode(r) ? <span className="tag">multi-node</span> : null}
         {isDisaggregated(r) ? <span className="tag">PD</span> : null}
         {r.disabled ? <span className="tag warn">disabled</span> : null}
+        {r.namespace ? <div className="cell-sub muted">{r.namespace}</div> : null}
       </>
     ),
     sort: (r) => r.name.toLowerCase(),
@@ -110,8 +123,8 @@ export function Runtimes({
   setSelected,
   openDeployment,
 }: {
-  selected: Selected | null;
-  setSelected: (sel: Selected | null) => void;
+  selected: RouteSelected | null;
+  setSelected: (sel: RouteSelected | null) => void;
   openDeployment: (sel: Selected) => void;
 }) {
   const scoped = useLive(api.clusterServingRuntimes, {
@@ -131,27 +144,35 @@ export function Runtimes({
   });
   const [filter, setFilter] = useState("all");
 
-  // Count deployments referencing each runtime name, across the fleet.
-  const usage = new Map<string, number>();
-  for (const s of isvcs.data?.items ?? []) {
-    if (s.runtime) usage.set(s.runtime, (usage.get(s.runtime) ?? 0) + 1);
-  }
+  const usage = runtimeUsage(isvcs.data?.items ?? []);
   const rows: RuntimeRow[] = [
     ...(scoped.data?.items ?? []).map((r) => ({
       ...r,
-      scoped: true,
-      used: usage.get(r.name) ?? 0,
+      kind: "ClusterServingRuntime" as const,
+      used:
+        usage.get(
+          resourceKey({ cluster: r.cluster, kind: "ClusterServingRuntime", name: r.name }),
+        ) ?? 0,
     })),
-    ...(nsScoped.data?.items ?? []).map((r) => ({
-      ...r,
-      scoped: false,
-      used: usage.get(r.name) ?? 0,
-    })),
+    ...(nsScoped.data?.items ?? []).map((r) => {
+      const identity: Selected = {
+        cluster: r.cluster,
+        kind: "ServingRuntime",
+        name: r.name,
+        namespace: r.namespace,
+      };
+      return {
+        ...r,
+        kind: "ServingRuntime" as const,
+        used: usage.get(resourceKey(identity)) ?? 0,
+      };
+    }),
   ];
 
   if (selected) {
     return (
       <RuntimePage
+        key={selectionKey(selected)}
         sel={selected}
         isvcs={isvcs.data?.items ?? []}
         openDeployment={openDeployment}
@@ -173,9 +194,9 @@ export function Runtimes({
       searchPlaceholder="Filter by name, framework, architecture…"
       searchFields={(r) => [r.name, r.image, r.architectures?.join(" "), r.formats?.join(" ")]}
       clusterOf={(r) => r.cluster}
-      rowKey={(r) => `${r.scoped ? "c" : "n"}/${r.cluster}/${r.name}`}
+      rowKey={(r) => resourceKey(runtimeIdentity(r))}
       rowTone={(r) => (r.disabled ? "slate" : "green")}
-      onRowClick={(r) => setSelected({ cluster: r.cluster, name: r.name })}
+      onRowClick={(r) => setSelected(runtimeIdentity(r))}
       columns={COLUMNS}
       tabs={TABS}
       filter={filter}
@@ -218,22 +239,31 @@ function RuntimePage({
   openDeployment,
   onBack,
 }: {
-  sel: Selected;
+  sel: RouteSelected;
   isvcs: IsvcItem[];
   openDeployment: (sel: Selected) => void;
   onBack: () => void;
 }) {
-  // Scope isn't carried in the URL, so resolve either kind: cluster-scoped first,
-  // then namespaced.
+  const legacy = isLegacySelected(sel);
   const detail = useLive<RuntimeDetail>(
-    () =>
-      api
-        .clusterServingRuntime(sel.cluster, sel.name)
-        .catch(() => api.servingRuntime(sel.cluster, sel.name)),
-    { kinds: ["ClusterServingRuntime", "ServingRuntime"], throttleMs: 5_000 },
+    () => (legacy ? api.legacyRuntime(sel.cluster, sel.name) : api.runtime(sel)),
+    {
+      kinds: legacy ? ["ClusterServingRuntime", "ServingRuntime"] : [sel.kind],
+      throttleMs: 5_000,
+    },
   );
   const d = detail.data;
-  const serving = isvcs.filter((s) => s.runtime === sel.name);
+  const resolved: Selected | undefined = legacy
+    ? d
+      ? {
+          cluster: sel.cluster,
+          kind: d.namespace ? "ServingRuntime" : "ClusterServingRuntime",
+          name: sel.name,
+          namespace: d.namespace,
+        }
+      : undefined
+    : sel;
+  const serving = resolved ? isvcs.filter((s) => sameResource(runtimeReference(s), resolved)) : [];
 
   return (
     <section className="panel active">
@@ -242,7 +272,9 @@ function RuntimePage({
           ‹ Runtimes
         </button>
         <h1 className="detail-title mono">{sel.name}</h1>
-        <span className="detail-meta">{sel.cluster}</span>
+        <span className="detail-meta">
+          {[resolved?.namespace, sel.cluster].filter(Boolean).join(" · ")}
+        </span>
         {d && isDisaggregated(d) ? <Pill tone="cyan" label="disaggregated" /> : null}
         {d && isMultiNode(d) ? <Pill tone="violet" label="multi-node" /> : null}
         {d?.disabled ? <span className="tag warn">disabled</span> : null}

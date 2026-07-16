@@ -15,6 +15,7 @@ use axum::{
     Json,
 };
 use kube::Resource;
+use ome_client::listers::Lister;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -46,9 +47,20 @@ macro_rules! ome_kinds {
 
         /// Projected detail (or raw object) for one named kind on one cluster. Outer
         /// `None` = not a served OME kind; inner `None` = kind served but not found.
-        fn detail_for(kind: &str, name: &str, raw: bool, c: &ClusterState) -> Option<Option<Value>> {
+        fn detail_for(
+            kind: &str,
+            name: &str,
+            namespace: Option<&str>,
+            raw: bool,
+            c: &ClusterState,
+        ) -> Option<Option<Value>> {
             match kind {
-                $($plural => Some(one(&c.name, c.$field.get(name), raw, $detail)),)*
+                $($plural => Some(one(
+                    &c.name,
+                    lookup_resource(&c.$field, name, namespace),
+                    raw,
+                    $detail,
+                )),)*
                 _ => None,
             }
         }
@@ -87,7 +99,8 @@ pub async fn list_kind(
 }
 
 /// `GET /v1/{kind}/{name}` — projected detail from cache; `?raw=true` for the
-/// full object, `?cluster=` to disambiguate. First match across clusters wins.
+/// full object, `?cluster=` and `?namespace=` to disambiguate. Namespace-less
+/// requests retain the legacy first-name-match behavior.
 pub async fn get_kind(
     Path((kind, name)): Path<(String, String)>,
     Query(params): Query<ViewParams>,
@@ -98,7 +111,7 @@ pub async fn get_kind(
     for c in selected {
         let found = match kind.as_str() {
             "nodes" => node_detail(c, &name, raw, &st.topology),
-            _ => detail_for(&kind, &name, raw, c)
+            _ => detail_for(&kind, &name, params.namespace.as_deref(), raw, c)
                 .ok_or_else(|| ApiError::NotFound(format!("unknown kind: {kind}")))?,
         };
         if let Some(value) = found {
@@ -106,6 +119,23 @@ pub async fn get_kind(
         }
     }
     Err(ApiError::NotFound(format!("{kind}/{name} not found")))
+}
+
+/// Resolve a cached object by full namespaced identity when supplied. Falling
+/// back to name-only keeps existing API URLs working while new console links are
+/// exact. Cluster-scoped resources naturally use the name-only path.
+pub(crate) fn lookup_resource<K>(
+    lister: &Lister<K>,
+    name: &str,
+    namespace: Option<&str>,
+) -> Option<Arc<K>>
+where
+    K: Resource<DynamicType = ()> + Clone + 'static,
+{
+    match namespace {
+        Some(namespace) => lister.get_namespaced(namespace, name),
+        None => lister.get(name),
+    }
 }
 
 /// List rows for one cluster's Nodes, each tagged with the accelerator count
@@ -206,4 +236,37 @@ where
             tagged(view(o.as_ref()), cluster)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use kube::runtime::{reflector, watcher};
+    use ome_client::InferenceService;
+    use serde_json::json;
+
+    use super::*;
+
+    fn isvc(namespace: &str) -> InferenceService {
+        serde_json::from_value(json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "shared", "namespace": namespace },
+            "spec": {}
+        }))
+        .expect("minimal InferenceService should deserialize")
+    }
+
+    #[test]
+    fn namespaced_lookup_disambiguates_duplicate_names() {
+        let (store, mut writer) = reflector::store::<InferenceService>();
+        writer.apply_watcher_event(&watcher::Event::Apply(isvc("team-a")));
+        writer.apply_watcher_event(&watcher::Event::Apply(isvc("team-b")));
+        let lister = Lister::new(store);
+
+        let selected = lookup_resource(&lister, "shared", Some("team-b"))
+            .expect("team-b resource should exist");
+        assert_eq!(selected.meta().namespace.as_deref(), Some("team-b"));
+        assert!(lookup_resource(&lister, "shared", Some("missing")).is_none());
+        assert!(lookup_resource(&lister, "shared", None).is_some());
+    }
 }

@@ -4,7 +4,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use super::error::ApiError;
+use super::{error::ApiError, resources::lookup_resource};
 use crate::{app_context::AppState, protocol::ChatParams};
 
 /// `POST /v1/inferenceservices/{name}/chat` — proxy one OpenAI-style chat request
@@ -23,7 +23,7 @@ pub async fn proxy(
     let url = st
         .select(params.cluster.as_deref())?
         .iter()
-        .find_map(|c| c.inference_services.get(&name))
+        .find_map(|c| lookup_resource(&c.inference_services, &name, params.namespace.as_deref()))
         .and_then(|isvc| isvc.status.as_ref().and_then(|s| s.url.clone()))
         .filter(|u| !u.is_empty())
         .ok_or_else(|| ApiError::Unavailable(format!("{name} has no ready endpoint")))?;

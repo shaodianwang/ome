@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
-import { loadSummary, modelUsage, replicaRollup, toFeed, toRollouts, toWorkloadRows } from "./map";
+import {
+  loadSummary,
+  modelUsage,
+  replicaRollup,
+  runtimeUsage,
+  toFeed,
+  toRollouts,
+  toWorkloadRows,
+} from "./map";
+import { resourceKey } from "./resource";
 import { matches } from "./util";
 
 describe("toRollouts", () => {
@@ -10,6 +19,7 @@ describe("toRollouts", () => {
       {
         cluster: "cw",
         name: "r1",
+        namespace: "team-a",
         deploymentMode: "OMENative",
         ready: false,
         reason: "EngineNotReady",
@@ -18,6 +28,7 @@ describe("toRollouts", () => {
     const [r] = toRollouts(items);
     expect(r.gate.tone).toBe("amber");
     expect(r.note).toBe("EngineNotReady");
+    expect(r.namespace).toBe("team-a");
   });
 });
 
@@ -89,16 +100,89 @@ describe("loadSummary", () => {
 });
 
 describe("modelUsage", () => {
-  it("counts InferenceServices per referenced model name", () => {
+  it("keeps duplicate model names separate by cluster, scope, and namespace", () => {
     const usage = modelUsage([
-      { cluster: "c", name: "a", model: "llama" },
-      { cluster: "c", name: "b", model: "llama" },
-      { cluster: "c", name: "c", model: "mixtral" },
-      { cluster: "c", name: "d" },
+      {
+        cluster: "c",
+        name: "a",
+        model: "llama",
+        modelRef: { kind: "BaseModel", namespace: "team-a", name: "llama" },
+      },
+      {
+        cluster: "c",
+        name: "b",
+        model: "llama",
+        modelRef: { kind: "BaseModel", namespace: "team-b", name: "llama" },
+      },
+      {
+        cluster: "c",
+        name: "c",
+        model: "llama",
+        modelRef: { kind: "ClusterBaseModel", name: "llama" },
+      },
+      {
+        cluster: "other",
+        name: "d",
+        model: "llama",
+        modelRef: { kind: "ClusterBaseModel", name: "llama" },
+      },
     ]);
-    expect(usage.get("llama")).toBe(2);
-    expect(usage.get("mixtral")).toBe(1);
-    expect(usage.size).toBe(2);
+    expect(
+      usage.get(
+        resourceKey({ cluster: "c", kind: "BaseModel", namespace: "team-a", name: "llama" }),
+      ),
+    ).toBe(1);
+    expect(
+      usage.get(
+        resourceKey({ cluster: "c", kind: "BaseModel", namespace: "team-b", name: "llama" }),
+      ),
+    ).toBe(1);
+    expect(usage.get(resourceKey({ cluster: "c", kind: "ClusterBaseModel", name: "llama" }))).toBe(
+      1,
+    );
+    expect(usage.size).toBe(4);
+  });
+});
+
+describe("runtimeUsage", () => {
+  it("keeps namespaced and cluster-scoped runtimes with the same name separate", () => {
+    const usage = runtimeUsage([
+      {
+        cluster: "c",
+        namespace: "team-a",
+        name: "a",
+        runtime: "vllm",
+        runtimeRef: { kind: "ServingRuntime", namespace: "team-a", name: "vllm" },
+      },
+      {
+        cluster: "c",
+        namespace: "team-b",
+        name: "b",
+        runtime: "vllm",
+        runtimeRef: { kind: "ServingRuntime", namespace: "team-b", name: "vllm" },
+      },
+      {
+        cluster: "c",
+        name: "c",
+        runtime: "vllm",
+        runtimeRef: { kind: "ClusterServingRuntime", name: "vllm" },
+      },
+    ]);
+
+    expect(
+      usage.get(
+        resourceKey({
+          cluster: "c",
+          kind: "ServingRuntime",
+          namespace: "team-b",
+          name: "vllm",
+        }),
+      ),
+    ).toBe(1);
+    expect(
+      usage.get(resourceKey({ cluster: "c", kind: "ClusterServingRuntime", name: "vllm" })),
+    ).toBe(1);
+    expect(usage.size).toBe(3);
   });
 });
 

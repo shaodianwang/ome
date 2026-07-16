@@ -4,6 +4,9 @@
 // on :8080, so these are same-origin fetches with no CORS setup. Shapes mirror
 // the server's wire protocol (see crates/muse-server/src/protocol.rs).
 
+import { RESOURCE_PLURALS } from "./resource";
+import type { ResourceRef, Selected } from "./resource";
+
 export interface ClusterItem {
   name: string;
   ready: boolean;
@@ -124,7 +127,9 @@ export interface IsvcItem {
   name: string;
   namespace?: string;
   model?: string;
+  modelRef?: ResourceRef;
   runtime?: string;
+  runtimeRef?: ResourceRef;
   deploymentMode?: string;
   ready?: boolean;
   url?: string;
@@ -399,9 +404,38 @@ async function asJSON<T>(res: Response, path: string): Promise<T> {
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(at(path), { headers: { accept: "application/json" } });
   if (!res.ok) {
-    throw new Error(`${path} → ${res.status} ${res.statusText}`);
+    let code: string | undefined;
+    let message = `${path} → ${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { error?: { code?: string; message?: string } };
+      code = body.error?.code;
+      if (body.error?.message) message = body.error.message;
+    } catch {
+      // Non-JSON error body: retain the status line.
+    }
+    throw new ApiRequestError(res.status, code, message);
   }
   return asJSON<T>(res, path);
+}
+
+class ApiRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
+function fallbackOnNotFound<T>(request: Promise<T>, fallback: () => Promise<T>): Promise<T> {
+  return request.catch((error: unknown) => {
+    if (error instanceof ApiRequestError && error.status === 404 && error.code === "not_found") {
+      return fallback();
+    }
+    throw error;
+  });
 }
 
 async function postJSON<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
@@ -442,6 +476,16 @@ async function postJSON<T>(path: string, body: unknown, timeoutMs?: number): Pro
 
 const enc = encodeURIComponent;
 
+function resourceParams(ref: Selected): URLSearchParams {
+  const sp = new URLSearchParams({ cluster: ref.cluster });
+  if (ref.namespace) sp.set("namespace", ref.namespace);
+  return sp;
+}
+
+function resourcePath(ref: Selected): string {
+  return `/v1/${RESOURCE_PLURALS[ref.kind]}/${enc(ref.name)}?${resourceParams(ref)}`;
+}
+
 export const api = {
   clusters: () => getJSON<ClustersResp>("/v1/clusters"),
   capacity: () => getJSON<CapacityResp>("/v1/capacity"),
@@ -459,33 +503,34 @@ export const api = {
     getJSON<NodeDetail>(`/v1/nodes/${enc(name)}?cluster=${enc(cluster)}`),
   events: () => getJSON<ListResp<EventItem>>("/v1/events"),
   rollouts: () => getJSON<ListResp<RolloutItem>>("/v1/rollouts"),
-  // Per-object detail for the drawers; `cluster` disambiguates same-named
-  // objects across clusters (the server matches the first cluster otherwise).
-  inferenceService: (cluster: string, name: string) =>
-    getJSON<IsvcDetail>(`/v1/inferenceservices/${enc(name)}?cluster=${enc(cluster)}`),
-  baseModel: (cluster: string, name: string) =>
-    getJSON<ModelDetail>(`/v1/basemodels/${enc(name)}?cluster=${enc(cluster)}`),
-  clusterBaseModel: (cluster: string, name: string) =>
-    getJSON<ModelDetail>(`/v1/clusterbasemodels/${enc(name)}?cluster=${enc(cluster)}`),
-  servingRuntime: (cluster: string, name: string) =>
-    getJSON<RuntimeDetail>(`/v1/servingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
-  clusterServingRuntime: (cluster: string, name: string) =>
-    getJSON<RuntimeDetail>(`/v1/clusterservingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
+  // Per-object detail for the drawers; kind + cluster + namespace + name preserve
+  // full identity. Namespace remains optional for backward-compatible deep links.
+  inferenceService: (ref: Selected) =>
+    getJSON<IsvcDetail>(resourcePath({ ...ref, kind: "InferenceService" })),
+  model: (ref: Selected) => getJSON<ModelDetail>(resourcePath(ref)),
+  legacyModel: (cluster: string, name: string) =>
+    fallbackOnNotFound(
+      getJSON<ModelDetail>(resourcePath({ cluster, name, kind: "ClusterBaseModel" })),
+      () => getJSON<ModelDetail>(resourcePath({ cluster, name, kind: "BaseModel" })),
+    ),
+  runtime: (ref: Selected) => getJSON<RuntimeDetail>(resourcePath(ref)),
+  legacyRuntime: (cluster: string, name: string) =>
+    fallbackOnNotFound(
+      getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ClusterServingRuntime" })),
+      () => getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ServingRuntime" })),
+    ),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
   // Latest fleet metrics snapshot (initial load; live updates arrive via SSE).
   metrics: () => getJSON<MetricsSnapshot>("/v1/metrics"),
-  chat: (
-    cluster: string,
-    name: string,
-    path: string,
-    base: string,
-    body: unknown,
-    timeoutMs?: number,
-  ) =>
-    postJSON<ChatResponse>(
-      `/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}&path=${enc(path)}&base=${enc(base)}`,
+  chat: (ref: Selected, path: string, base: string, body: unknown, timeoutMs?: number) => {
+    const sp = resourceParams(ref);
+    sp.set("path", path);
+    sp.set("base", base);
+    return postJSON<ChatResponse>(
+      `/v1/inferenceservices/${enc(ref.name)}/chat?${sp}`,
       body,
       timeoutMs,
-    ),
+    );
+  },
 };

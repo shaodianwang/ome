@@ -9,7 +9,8 @@ import { useEventFeed, useLive, useMetrics } from "../live";
 import { replicaRollup } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
-import type { Selected } from "../types";
+import { selectResource } from "../resource";
+import type { ResourceRef, Selected } from "../resource";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate, num as n } from "../util";
 import { Card, Dot, Gauge, UtilRow } from "../viz";
 import { ChatBox } from "./ChatBox";
@@ -26,20 +27,23 @@ const TABS = [
   { id: "activity", label: "Activity" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
+export type DeploymentMetricIdentity = "loading" | "unavailable" | "ambiguous" | "unambiguous";
 
 export function DeploymentDetail({
   sel,
   onBack,
   openModel,
   openRuntime,
+  metricIdentity,
 }: {
   sel: Selected;
   onBack: () => void;
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
+  metricIdentity: DeploymentMetricIdentity;
 }) {
   const [tab, setTab] = useState<TabId>("overview");
-  const detail = useLive<IsvcDetail>(() => api.inferenceService(sel.cluster, sel.name), {
+  const detail = useLive<IsvcDetail>(() => api.inferenceService(sel), {
     kinds: ["InferenceService"],
     throttleMs: 4_000,
   });
@@ -50,10 +54,14 @@ export function DeploymentDetail({
   // This deployment's serving metrics (from the live snapshot; SSE-pushed).
   const metricsOn = !!cfg.data?.metrics;
   const metrics = useMetrics(metricsOn);
-  const m = isvcMetrics(metrics.data, sel.cluster, sel.name);
+  const m = isvcMetrics(metrics.data, sel.cluster, sel.name, metricIdentity === "unambiguous");
 
   const activity = feed.events.filter(
-    (e) => e.kind === "InferenceService" && e.name === sel.name && e.cluster === sel.cluster,
+    (e) =>
+      e.kind === "InferenceService" &&
+      e.name === sel.name &&
+      e.cluster === sel.cluster &&
+      e.namespace === (d?.namespace ?? sel.namespace),
   );
 
   const status = !d
@@ -124,7 +132,17 @@ export function DeploymentDetail({
             />
           ) : null}
           {tab === "monitoring" ? (
-            <Monitoring m={m} metricsOn={metricsOn} policy={cfg.data?.dashboardPolicy} />
+            metricsOn && metricIdentity !== "unambiguous" ? (
+              <div className="muted attn-none">
+                {metricIdentity === "loading"
+                  ? "Loading deployment identity…"
+                  : metricIdentity === "ambiguous"
+                    ? "Serving metrics are unavailable because this deployment name exists in multiple namespaces."
+                    : "Deployment inventory is unavailable; serving metrics are hidden."}
+              </div>
+            ) : (
+              <Monitoring m={m} metricsOn={metricsOn} policy={cfg.data?.dashboardPolicy} />
+            )
           ) : null}
           {tab === "activity" ? <ActivityPane activity={activity} /> : null}
         </>
@@ -172,6 +190,10 @@ function OverviewPane({
   goMonitoring: () => void;
 }) {
   const showMetrics = metricsOn && m.present;
+  const modelRef: ResourceRef | undefined =
+    d.modelRef ?? (d.model ? { kind: "ClusterBaseModel", name: d.model } : undefined);
+  const runtimeRef: ResourceRef | undefined =
+    d.runtimeRef ?? (d.runtime ? { kind: "ClusterServingRuntime", name: d.runtime } : undefined);
   const standby = (d.placement?.candidates ?? []).filter((c) => c.cluster !== d.placement?.cluster);
   const components = d.components ?? [];
   const ready = replicaRollup(d.components).label;
@@ -210,23 +232,23 @@ function OverviewPane({
             items={[
               [
                 "Model",
-                d.model ? (
+                modelRef ? (
                   <button
                     className="linkbtn mono"
-                    onClick={() => openModel({ cluster: sel.cluster, name: d.model! })}
+                    onClick={() => openModel(selectResource(sel.cluster, modelRef))}
                   >
-                    {d.model}
+                    {modelRef.name}
                   </button>
                 ) : null,
               ],
               [
                 "Runtime",
-                d.runtime ? (
+                runtimeRef ? (
                   <button
                     className="linkbtn mono"
-                    onClick={() => openRuntime({ cluster: sel.cluster, name: d.runtime! })}
+                    onClick={() => openRuntime(selectResource(sel.cluster, runtimeRef))}
                   >
-                    {d.runtime}
+                    {runtimeRef.name}
                   </button>
                 ) : null,
               ],
@@ -240,8 +262,7 @@ function OverviewPane({
 
         <Card title="Invoke & test" sub="OpenAI-compatible">
           <ChatBox
-            cluster={sel.cluster}
-            name={sel.name}
+            resource={sel}
             endpoint={d.url}
             defaultModel={d.model ?? ""}
             enabled={chat}

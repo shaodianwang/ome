@@ -1,12 +1,16 @@
 import type { DepFilter } from "../App";
 import { api } from "../api";
+import { hasUnambiguousDeploymentMetricIdentity } from "../fleet";
 import { useLive } from "../live";
 import { toWorkloadRows } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
-import type { Selected, WorkloadRow } from "../types";
+import { resourceKey } from "../resource";
+import type { Selected } from "../resource";
+import type { WorkloadRow } from "../types";
 import { ageToSecs, hostOf } from "../util";
 import { DeploymentDetail } from "./DeploymentDetail";
+import type { DeploymentMetricIdentity } from "./DeploymentDetail";
 
 const numOr = (s: string, fallback = -1) => {
   const v = parseInt(s, 10);
@@ -21,6 +25,7 @@ const COLUMNS: Column<WorkloadRow>[] = [
     render: (w) => (
       <>
         {w.name}
+        {w.namespace ? <span className="cell-sub muted">{w.namespace}</span> : null}
         {w.reason ? <span className="cell-sub bad">{w.reason}</span> : null}
       </>
     ),
@@ -132,12 +137,21 @@ export function Workloads({
   });
 
   if (selected) {
+    const metricIdentity: DeploymentMetricIdentity = isvcs.error
+      ? "unavailable"
+      : !isvcs.data
+        ? "loading"
+        : hasUnambiguousDeploymentMetricIdentity(isvcs.data.items, selected)
+          ? "unambiguous"
+          : "ambiguous";
     return (
       <DeploymentDetail
+        key={resourceKey(selected)}
         sel={selected}
         onBack={() => setSelected(null)}
         openModel={openModel}
         openRuntime={openRuntime}
+        metricIdentity={metricIdentity}
       />
     );
   }
@@ -149,12 +163,19 @@ export function Workloads({
       rows={toWorkloadRows(isvcs.data?.items ?? [])}
       status={isvcs}
       noun="deployments"
-      searchPlaceholder="Filter by name or model…"
-      searchFields={(w) => [w.name, w.model, w.cluster]}
+      searchPlaceholder="Filter by name, namespace, or model…"
+      searchFields={(w) => [w.name, w.namespace, w.model, w.cluster]}
       clusterOf={(w) => w.cluster}
       rowKey={(w) => w.id}
       rowTone={(w) => w.status.tone}
-      onRowClick={(w) => setSelected({ cluster: w.cluster, name: w.name })}
+      onRowClick={(w) =>
+        setSelected({
+          cluster: w.cluster,
+          kind: "InferenceService",
+          name: w.name,
+          namespace: w.namespace,
+        })
+      }
       columns={COLUMNS}
       tabs={TABS}
       filter={filter}

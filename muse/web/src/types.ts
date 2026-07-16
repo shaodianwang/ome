@@ -1,15 +1,9 @@
 // View-model types for the MUSE console — the shapes the panels render, mapped
 // from the muse read-plane API (see src/map.ts and src/api.ts).
 
+import type { ResourceRef } from "./resource";
 export type Tone = "green" | "amber" | "red" | "blue" | "violet" | "cyan" | "slate";
 export type BarTone = "" | "green" | "amber" | "red" | "violet";
-
-/** A cluster-scoped reference to a named resource — the shape used for detail
- *  views and cross-panel navigation. */
-export interface Selected {
-  cluster: string;
-  name: string;
-}
 
 export interface Pill {
   label: string;
@@ -29,6 +23,7 @@ export interface FeedItem {
 /** Fleet · active rollouts */
 export interface Rollout {
   name: string;
+  namespace?: string;
   barTone: BarTone;
   barPct: number;
   barStriped?: boolean;
@@ -43,9 +38,11 @@ export interface WorkloadRow {
   id: string;
   cluster: string;
   name: string;
-  namespace: string;
+  namespace?: string;
   model: string;
+  modelRef?: ResourceRef;
   runtime: string;
+  runtimeRef?: ResourceRef;
   /** Servable endpoint (status.url), when ready. */
   endpoint?: string;
   /** Rolled-up ready/desired replicas across Components, with a health tone. */

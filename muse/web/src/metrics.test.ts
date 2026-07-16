@@ -45,11 +45,18 @@ describe("metrics range", () => {
   it("derives dashboard labels from returned timestamps", () => {
     expect(metricsQueryRangeSeconds(snapshot, "request_rate")).toBe(3_600);
     expect(metricsRangeLabel(metricsQueryRangeSeconds(snapshot, "request_rate"))).toBe("1h");
-    expect(isvcMetrics(snapshot, "test", "model").rangeSeconds).toBe(3_600);
+    expect(isvcMetrics(snapshot, "test", "model", true).rangeSeconds).toBe(3_600);
   });
 
   it("stays neutral when no range samples are present", () => {
     expect(metricsQueryRangeSeconds(null, "request_rate")).toBeNull();
     expect(metricsRangeLabel(null)).toBeNull();
+  });
+
+  it("refuses name-only selection when deployment identity is ambiguous", () => {
+    const metrics = isvcMetrics(snapshot, "test", "model", false);
+    expect(metrics.present).toBe(false);
+    expect(metrics.rangeSeconds).toBeNull();
+    expect(metrics.by).toEqual({});
   });
 });

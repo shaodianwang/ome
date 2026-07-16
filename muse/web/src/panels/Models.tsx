@@ -7,13 +7,21 @@ import { Pill, RefList } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
 import { Refresh } from "../icons";
 import { useLive } from "../live";
-import { modelUsage, stateTone } from "../map";
+import { modelReference, modelUsage, stateTone } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
-import type { Selected } from "../types";
+import { isLegacySelected, resourceKey, sameResource, selectionKey } from "../resource";
+import type { RouteSelected, Selected } from "../resource";
 import { num } from "../util";
 
-type ModelRow = ModelItem & { scoped: boolean; used: number };
+type ModelRow = ModelItem & { kind: "BaseModel" | "ClusterBaseModel"; used: number };
+
+const modelIdentity = (m: ModelRow): Selected => ({
+  cluster: m.cluster,
+  kind: m.kind,
+  name: m.name,
+  namespace: m.kind === "BaseModel" ? m.namespace : undefined,
+});
 
 /** Parameter size ("405B" / "47B" / "350M") to a comparable number, for sorting. */
 const sizeVal = (s?: string): number => {
@@ -33,6 +41,7 @@ const COLUMNS: Column<ModelRow>[] = [
       <>
         {m.name}
         {m.disabled ? <span className="tag warn">disabled</span> : null}
+        {m.namespace ? <div className="cell-sub muted">{m.namespace}</div> : null}
       </>
     ),
     sort: (m) => m.name.toLowerCase(),
@@ -103,8 +112,8 @@ export function Models({
   setSelected,
   openDeployment,
 }: {
-  selected: Selected | null;
-  setSelected: (sel: Selected | null) => void;
+  selected: RouteSelected | null;
+  setSelected: (sel: RouteSelected | null) => void;
   openDeployment: (sel: Selected) => void;
 }) {
   const base = useLive(api.baseModels, {
@@ -133,10 +142,19 @@ export function Models({
   const rows: ModelRow[] = [
     ...(cluster.data?.items ?? []).map((m) => ({
       ...m,
-      scoped: true,
-      used: usage.get(m.name) ?? 0,
+      kind: "ClusterBaseModel" as const,
+      used:
+        usage.get(resourceKey({ cluster: m.cluster, kind: "ClusterBaseModel", name: m.name })) ?? 0,
     })),
-    ...(base.data?.items ?? []).map((m) => ({ ...m, scoped: false, used: usage.get(m.name) ?? 0 })),
+    ...(base.data?.items ?? []).map((m) => {
+      const identity: Selected = {
+        cluster: m.cluster,
+        kind: "BaseModel",
+        name: m.name,
+        namespace: m.namespace,
+      };
+      return { ...m, kind: "BaseModel" as const, used: usage.get(resourceKey(identity)) ?? 0 };
+    }),
   ];
 
   return (
@@ -165,9 +183,9 @@ export function Models({
         searchPlaceholder="Filter by name, architecture, size, quantization…"
         searchFields={(m) => [m.name, m.architecture, m.source, m.quantization, m.format]}
         clusterOf={(m) => m.cluster}
-        rowKey={(m) => `${m.scoped ? "c" : "n"}/${m.cluster}/${m.name}`}
+        rowKey={(m) => resourceKey(modelIdentity(m))}
         rowTone={(m) => stateTone(m.state)}
-        onRowClick={(m) => setSelected({ cluster: m.cluster, name: m.name })}
+        onRowClick={(m) => setSelected(modelIdentity(m))}
         columns={COLUMNS}
         tabs={TABS}
         filter={filter}
@@ -175,6 +193,7 @@ export function Models({
       />
       {selected ? (
         <ModelDrawer
+          key={selectionKey(selected)}
           sel={selected}
           isvcs={isvcs.data?.items ?? []}
           ftws={ftws.data?.items ?? []}
@@ -202,25 +221,48 @@ function ModelDrawer({
   openDeployment,
   onClose,
 }: {
-  sel: Selected;
+  sel: RouteSelected;
   isvcs: IsvcItem[];
   ftws: FtwItem[];
   openDeployment: (sel: Selected) => void;
   onClose: () => void;
 }) {
-  // Scope isn't carried in the URL, so resolve either kind: cluster-scoped first,
-  // then namespaced.
+  const legacy = isLegacySelected(sel);
   const detail = useLive<ModelDetail>(
-    () =>
-      api.clusterBaseModel(sel.cluster, sel.name).catch(() => api.baseModel(sel.cluster, sel.name)),
-    { kinds: ["ClusterBaseModel", "BaseModel"], throttleMs: 5_000 },
+    () => (legacy ? api.legacyModel(sel.cluster, sel.name) : api.model(sel)),
+    {
+      kinds: legacy ? ["ClusterBaseModel", "BaseModel"] : [sel.kind],
+      throttleMs: 5_000,
+    },
   );
   const d = detail.data;
-  const serving = isvcs.filter((s) => s.model === sel.name);
-  const adapters = ftws.filter((w) => w.baseModel === sel.name);
+  const resolved: Selected | undefined = legacy
+    ? d
+      ? {
+          cluster: sel.cluster,
+          kind: d.namespace ? "BaseModel" : "ClusterBaseModel",
+          name: sel.name,
+          namespace: d.namespace,
+        }
+      : undefined
+    : sel;
+  const serving = resolved ? isvcs.filter((s) => sameResource(modelReference(s), resolved)) : [];
+  const adapters = ftws.filter(
+    (w) =>
+      resolved != null &&
+      w.cluster === resolved.cluster &&
+      w.baseModel === resolved.name &&
+      (resolved.kind === "BaseModel"
+        ? w.baseModelNamespace === resolved.namespace
+        : !w.baseModelNamespace),
+  );
 
   return (
-    <Drawer title={sel.name} subtitle={sel.cluster} onClose={onClose}>
+    <Drawer
+      title={sel.name}
+      subtitle={[resolved?.namespace, sel.cluster].filter(Boolean).join(" · ")}
+      onClose={onClose}
+    >
       {!d ? (
         <div className="muted drawer-empty">
           {detail.error ?? (detail.loading ? "Loading…" : "Not found")}

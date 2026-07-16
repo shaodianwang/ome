@@ -13,6 +13,45 @@ import type {
   RolloutItem,
 } from "./api";
 import { filterSnapshot } from "./metrics";
+import { resourceKey } from "./resource";
+import type { Selected } from "./resource";
+
+const isvcKey = (item: { cluster: string; namespace?: string; name: string }): string =>
+  resourceKey({
+    cluster: item.cluster,
+    kind: "InferenceService",
+    name: item.name,
+    namespace: item.namespace,
+  });
+
+/** Metrics expose deployment name but not namespace; only a unique name is safe to select. */
+export function hasUnambiguousDeploymentMetricIdentity(
+  isvcs: IsvcItem[],
+  selected: Pick<Selected, "cluster" | "namespace" | "name">,
+): boolean {
+  const matches = isvcs.filter(
+    (item) => item.cluster === selected.cluster && item.name === selected.name,
+  );
+  return matches.length === 1 && matches[0].namespace === selected.namespace;
+}
+
+/** Resolve an aggregate metrics row only when it identifies one exact deployment. */
+export function unambiguousDeploymentRef(
+  isvcs: IsvcItem[],
+  clusters: string[],
+  name: string,
+): Selected | undefined {
+  if (clusters.length !== 1) return undefined;
+  const cluster = clusters[0];
+  const matches = isvcs.filter((item) => item.cluster === cluster && item.name === name);
+  if (matches.length !== 1) return undefined;
+  return {
+    cluster,
+    kind: "InferenceService",
+    name,
+    namespace: matches[0].namespace,
+  };
+}
 
 export interface FleetFilter {
   cluster: string; // "all" | cluster name
@@ -53,7 +92,7 @@ export interface FleetScope {
  */
 export function scopeFleet(f: FleetFilter, raw: FleetRaw): FleetScope {
   const kind = new Map((raw.capacity?.byCluster ?? []).map((g) => [g.name, g.kind]));
-  const isvcModel = new Map(raw.isvcs.map((i) => [i.name, i.model ?? ""]));
+  const isvcModel = new Map(raw.isvcs.map((i) => [isvcKey(i), i.model ?? ""]));
   const clusterOk = (cl: string) =>
     (f.cluster === "all" || f.cluster === cl) && (f.accel === "all" || kind.get(cl) === f.accel);
   const modelOk = (m?: string) => f.model === "all" || m === f.model;
@@ -65,12 +104,18 @@ export function scopeFleet(f: FleetFilter, raw: FleetRaw): FleetScope {
   return {
     clusters: raw.clusters.filter((c) => clusterOk(c.name)),
     isvcs: raw.isvcs.filter((i) => clusterOk(i.cluster) && modelOk(i.model)),
-    rollouts: raw.rollouts.filter((r) => clusterOk(r.cluster) && modelOk(isvcModel.get(r.name))),
+    rollouts: raw.rollouts.filter(
+      (r) => clusterOk(r.cluster) && modelOk(isvcModel.get(isvcKey(r))),
+    ),
     events: raw.events.filter((e) => clusterOk(e.cluster)),
     metrics: filterSnapshot(raw.metrics, {
       cluster: f.cluster,
       keepCluster: (c) => f.accel === "all" || kind.get(c) === f.accel,
-      keepIsvc: (i) => f.model === "all" || isvcModel.get(i) === f.model,
+      // Metrics currently identify series by deployment name only. Keep a series
+      // when any exact ISVC identity with that name references the selected model.
+      keepIsvc: (name, cluster) =>
+        f.model === "all" ||
+        raw.isvcs.some((i) => i.cluster === cluster && i.name === name && i.model === f.model),
     }),
     accelerators:
       f.cluster === "all" && f.accel === "all"

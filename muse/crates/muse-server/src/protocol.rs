@@ -798,8 +798,12 @@ pub struct InferenceServiceView {
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "modelRef")]
+    pub model_ref: Option<ResourceRefView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "runtimeRef")]
+    pub runtime_ref: Option<ResourceRefView>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "deploymentMode")]
     pub deployment_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -840,11 +844,27 @@ impl InferenceServiceView {
         let (reason, message) = status.map(not_ready_info).unwrap_or((None, None));
         let model = status.and_then(|s| s.model_status.as_ref());
         let copies = model.and_then(|m| m.model_copies.as_ref());
+        let model_ref = isvc.spec.model.as_ref().and_then(|model| {
+            resource_ref(
+                &model.name,
+                model.kind.as_deref().unwrap_or("ClusterBaseModel"),
+                meta.namespace.as_deref(),
+            )
+        });
+        let runtime_ref = isvc.spec.runtime.as_ref().and_then(|runtime| {
+            resource_ref(
+                &runtime.name,
+                runtime.kind.as_deref().unwrap_or("ClusterServingRuntime"),
+                meta.namespace.as_deref(),
+            )
+        });
         Self {
             name: meta.name.clone().unwrap_or_default(),
             namespace: meta.namespace.clone(),
             model: isvc.spec.model.as_ref().map(|m| m.name.clone()),
+            model_ref,
             runtime: isvc.spec.runtime.as_ref().map(|r| r.name.clone()),
+            runtime_ref,
             deployment_mode: isvc.spec.deployment_mode.as_ref().and_then(enum_str),
             ready,
             url: status.and_then(|s| s.url.clone()).filter(|s| !s.is_empty()),
@@ -859,6 +879,32 @@ impl InferenceServiceView {
             age: age(meta),
         }
     }
+}
+
+/// A resource reference carried by projected API views. `namespace` is present
+/// only for namespaced kinds, so the console can preserve full Kubernetes
+/// identity when it follows a model/runtime link.
+#[derive(Serialize)]
+pub struct ResourceRefView {
+    pub kind: &'static str,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+fn resource_ref(name: &str, kind: &str, owner_namespace: Option<&str>) -> Option<ResourceRefView> {
+    let (kind, namespace) = match kind {
+        "BaseModel" => ("BaseModel", owner_namespace.map(str::to_owned)),
+        "ClusterBaseModel" => ("ClusterBaseModel", None),
+        "ServingRuntime" => ("ServingRuntime", owner_namespace.map(str::to_owned)),
+        "ClusterServingRuntime" => ("ClusterServingRuntime", None),
+        _ => return None,
+    };
+    Some(ResourceRefView {
+        kind,
+        name: name.to_owned(),
+        namespace,
+    })
 }
 
 /// One fan-out candidate cluster in an OEP-0018 placement race.
@@ -1465,6 +1511,9 @@ pub struct ViewParams {
     pub raw: bool,
     /// Restrict the lookup to a single cluster by name.
     pub cluster: Option<String>,
+    /// Namespace of a namespaced resource. Omit only for cluster-scoped kinds or
+    /// legacy callers, which retain the old first-name-match behavior.
+    pub namespace: Option<String>,
 }
 
 /// Query params for the inference test proxy: which cluster the ISVC lives on, and
@@ -1473,6 +1522,8 @@ pub struct ViewParams {
 #[derive(Debug, Default, Deserialize)]
 pub struct ChatParams {
     pub cluster: Option<String>,
+    /// Namespace of the InferenceService. Omit only for legacy callers.
+    pub namespace: Option<String>,
     /// Endpoint path on the model's own URL. Required; it must be an absolute path
     /// (no scheme/host) so it cannot redirect the proxy off the selected base.
     pub path: Option<String>,
@@ -1614,4 +1665,32 @@ pub fn tagged<T: Serialize>(view: T, cluster: &str) -> Value {
         map.insert("cluster".to_owned(), Value::String(cluster.to_owned()));
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_refs_preserve_scope_and_namespace() {
+        let namespaced =
+            resource_ref("shared", "BaseModel", Some("team-a")).expect("BaseModel is supported");
+        assert_eq!(namespaced.kind, "BaseModel");
+        assert_eq!(namespaced.namespace.as_deref(), Some("team-a"));
+
+        let cluster = resource_ref("shared", "ClusterBaseModel", Some("team-a"))
+            .expect("ClusterBaseModel is supported");
+        assert_eq!(cluster.kind, "ClusterBaseModel");
+        assert!(cluster.namespace.is_none());
+
+        let runtime = resource_ref("vllm", "ServingRuntime", Some("team-a"))
+            .expect("ServingRuntime is supported");
+        assert_eq!(runtime.namespace.as_deref(), Some("team-a"));
+
+        let cluster_runtime = resource_ref("vllm", "ClusterServingRuntime", Some("team-a"))
+            .expect("ClusterServingRuntime is supported");
+        assert!(cluster_runtime.namespace.is_none());
+
+        assert!(resource_ref("shared", "OtherModel", Some("team-a")).is_none());
+    }
 }

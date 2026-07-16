@@ -171,8 +171,9 @@ export function isvcMetrics(
   snap: MetricsSnapshot | null,
   cluster: string,
   isvc: string,
+  identityUnambiguous: boolean,
 ): IsvcMetrics {
-  const queries = snap?.clusters?.[cluster];
+  const queries = identityUnambiguous ? snap?.clusters?.[cluster] : undefined;
   const by: Record<string, IsvcSeries> = {};
   let requestRangeSeconds: number | null = null;
   if (queries) {
@@ -282,7 +283,7 @@ export function filterSnapshot(
   opts: {
     cluster?: string;
     keepCluster?: (cluster: string) => boolean;
-    keepIsvc?: (isvc: string) => boolean;
+    keepIsvc?: (isvc: string, cluster: string) => boolean;
   },
 ): MetricsSnapshot | null {
   if (!snap?.clusters) return snap;
@@ -293,7 +294,7 @@ export function filterSnapshot(
     const kept: Record<string, PromResult> = {};
     for (const [qid, res] of Object.entries(queries)) {
       const result = (res?.data?.result ?? []).filter(
-        (s) => !opts.keepIsvc || opts.keepIsvc(s.metric?.inferenceservice ?? ""),
+        (s) => !opts.keepIsvc || opts.keepIsvc(s.metric?.inferenceservice ?? "", cluster),
       );
       kept[qid] = {
         status: res?.status,

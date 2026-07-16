@@ -2,8 +2,8 @@ import { useState } from "react";
 
 import type { DepFilter } from "../App";
 import { api } from "../api";
-import { scopeFleet } from "../fleet";
-import type { Selected } from "../types";
+import { scopeFleet, unambiguousDeploymentRef } from "../fleet";
+import type { Selected } from "../resource";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import { deploymentHealth, toFeed, toRollouts } from "../map";
 import { fleetTotals, metricsQueryRangeSeconds, metricsRangeLabel, perfRows } from "../metrics";
@@ -251,38 +251,43 @@ export function Fleet({
                     </tr>
                   </thead>
                   <tbody>
-                    {perf.slice(0, 12).map((r) => (
-                      <tr
-                        key={r.isvc}
-                        className="link"
-                        onClick={() =>
-                          openDeployment({ cluster: r.clusters[0] ?? "", name: r.isvc })
-                        }
-                      >
-                        <td className="mono">
-                          <button
-                            type="button"
-                            className="row-open"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openDeployment({ cluster: r.clusters[0] ?? "", name: r.isvc });
-                            }}
-                          >
-                            {r.isvc}
-                          </button>
-                        </td>
-                        <td className="muted">{r.clusters.join(", ")}</td>
-                        <td className="tnum">{fmtRate(r.qps)}</td>
-                        <td className="tnum">{fmtLatency(r.p50)}</td>
-                        <td className="tnum">{fmtLatency(r.p99)}</td>
-                        <td className="tnum">{fmtLatency(r.ttft)}</td>
-                        <td className="tnum">{fmtRate(r.throughput)}</td>
-                        <td className="tnum">{fmtPct(r.errPct)}</td>
-                        <td className="tnum muted">
-                          {r.gpuUtil == null ? "—" : `${Math.round(r.gpuUtil)}%`}
-                        </td>
-                      </tr>
-                    ))}
+                    {perf.slice(0, 12).map((r) => {
+                      const target = unambiguousDeploymentRef(scope.isvcs, r.clusters, r.isvc);
+                      return (
+                        <tr
+                          key={r.isvc}
+                          className={target ? "link" : undefined}
+                          onClick={() => target && openDeployment(target)}
+                        >
+                          <td className="mono">
+                            {target ? (
+                              <button
+                                type="button"
+                                className="row-open"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openDeployment(target);
+                                }}
+                              >
+                                {r.isvc}
+                              </button>
+                            ) : (
+                              r.isvc
+                            )}
+                          </td>
+                          <td className="muted">{r.clusters.join(", ")}</td>
+                          <td className="tnum">{fmtRate(r.qps)}</td>
+                          <td className="tnum">{fmtLatency(r.p50)}</td>
+                          <td className="tnum">{fmtLatency(r.p99)}</td>
+                          <td className="tnum">{fmtLatency(r.ttft)}</td>
+                          <td className="tnum">{fmtRate(r.throughput)}</td>
+                          <td className="tnum">{fmtPct(r.errPct)}</td>
+                          <td className="tnum muted">
+                            {r.gpuUtil == null ? "—" : `${Math.round(r.gpuUtil)}%`}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
                 {perf.length > 12 ? (
@@ -473,8 +478,9 @@ export function Fleet({
             <div className="urows">
               {rolloutCards.map((r) => (
                 <UtilRow
-                  key={`${r.cluster}/${r.name}`}
+                  key={`${r.cluster}/${r.namespace ?? ""}/${r.name}`}
                   name={r.name}
+                  tag={r.namespace}
                   pct={r.barPct ?? 0}
                   tone={r.barTone || "amber"}
                   value={r.note}

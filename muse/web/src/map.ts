@@ -4,6 +4,8 @@
 // pipeline) are left empty and the panels render a placeholder.
 
 import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
+import { resourceKey, selectResource } from "./resource";
+import type { ResourceRef, Selected } from "./resource";
 import type { FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
 import { ago } from "./util";
 
@@ -50,6 +52,7 @@ export function toFeed(events: EventItem[]): FeedItem[] {
 export function toRollouts(rollouts: RolloutItem[]): Rollout[] {
   return rollouts.map((r) => ({
     name: r.name,
+    namespace: r.namespace,
     barTone: "amber",
     barPct: r.ready ? 90 : 45,
     barStriped: true,
@@ -108,9 +111,11 @@ export function toWorkloadRows(isvcs: IsvcItem[]): WorkloadRow[] {
       id: `${s.cluster}/${s.namespace ?? ""}/${s.name}`,
       cluster: s.cluster,
       name: s.name,
-      namespace: s.namespace ?? "—",
+      namespace: s.namespace,
       model: s.model ?? "—",
+      modelRef: s.modelRef,
       runtime: s.runtime ?? "—",
+      runtimeRef: s.runtimeRef,
       endpoint: s.url,
       replicas: replicaRollup(s.components),
       load: loadSummary(s),
@@ -121,12 +126,44 @@ export function toWorkloadRows(isvcs: IsvcItem[]): WorkloadRow[] {
   });
 }
 
-/** Count of InferenceServices referencing each model name, across the fleet. */
+function referencedResource(
+  isvc: IsvcItem,
+  ref: ResourceRef | undefined,
+  legacyName: string | undefined,
+  legacyKind: "ClusterBaseModel" | "ClusterServingRuntime",
+): Selected | undefined {
+  const resolved = ref ?? (legacyName ? { kind: legacyKind, name: legacyName } : undefined);
+  return resolved ? selectResource(isvc.cluster, resolved) : undefined;
+}
+
+export function modelReference(isvc: IsvcItem): Selected | undefined {
+  return referencedResource(isvc, isvc.modelRef, isvc.model, "ClusterBaseModel");
+}
+
+export function runtimeReference(isvc: IsvcItem): Selected | undefined {
+  return referencedResource(isvc, isvc.runtimeRef, isvc.runtime, "ClusterServingRuntime");
+}
+
+/** Count InferenceServices by the full identity of the model they reference. */
 export function modelUsage(isvcs: IsvcItem[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const s of isvcs) {
-    if (!s.model) continue;
-    counts.set(s.model, (counts.get(s.model) ?? 0) + 1);
+    const ref = modelReference(s);
+    if (!ref) continue;
+    const key = resourceKey(ref);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Count InferenceServices by the full identity of the runtime they reference. */
+export function runtimeUsage(isvcs: IsvcItem[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const s of isvcs) {
+    const ref = runtimeReference(s);
+    if (!ref) continue;
+    const key = resourceKey(ref);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
 }
