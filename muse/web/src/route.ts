@@ -25,7 +25,6 @@ const PANEL_TO_SLUG: Record<PanelKey, string> = {
   models: "models",
   runtimes: "runtimes",
   capacity: "capacity",
-  deploy: "deploy",
 };
 const SLUG_TO_PANEL: Record<string, PanelKey> = {
   "": "fleet",
@@ -34,7 +33,6 @@ const SLUG_TO_PANEL: Record<string, PanelKey> = {
   models: "models",
   runtimes: "runtimes",
   capacity: "capacity",
-  deploy: "deploy",
 };
 
 const base = import.meta.env.BASE_URL;

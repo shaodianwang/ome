@@ -5,7 +5,6 @@ import {
   BrandMark,
   Close,
   IconCapacity,
-  IconDeploy,
   IconFleet,
   IconModels,
   IconRuntimes,
@@ -14,7 +13,6 @@ import {
 } from "./icons";
 import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
-import { Deploy } from "./panels/Deploy";
 import { Fleet } from "./panels/Fleet";
 import type { Selected } from "./types";
 import { Models } from "./panels/Models";
@@ -23,7 +21,7 @@ import { Workloads } from "./panels/Workloads";
 import { useRoute } from "./route";
 import type { Route } from "./route";
 
-export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "deploy" | "capacity";
+export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "capacity";
 export type DepFilter = "all" | "attention" | "ready";
 
 const LABELS: Record<PanelKey, string> = {
@@ -31,7 +29,6 @@ const LABELS: Record<PanelKey, string> = {
   workloads: "Deployments",
   models: "Models",
   runtimes: "Runtimes",
-  deploy: "Deploy",
   capacity: "Capacity",
 };
 
@@ -133,14 +130,11 @@ export default function App() {
         </div>
 
         <nav className="nav">
-          <div className="nav-group-label">Operate</div>
           {navItem("fleet", "Fleet", IconFleet)}
           {navItem("workloads", "Deployments", IconWorkloads)}
           {navItem("models", "Models", IconModels)}
           {navItem("runtimes", "Runtimes", IconRuntimes)}
           {navItem("capacity", "Capacity", IconCapacity)}
-          <div className="nav-group-label">Provision</div>
-          {navItem("deploy", "Deploy", IconDeploy)}
         </nav>
 
         <div className="sidebar-foot">
@@ -172,10 +166,6 @@ export default function App() {
           <div className="crumbs">
             <b>{LABELS[panel]}</b>
           </div>
-          <div className="spacer" />
-          <div className="avatar" title="Signed in">
-            SL
-          </div>
         </header>
 
         <div className="content">
@@ -184,7 +174,6 @@ export default function App() {
           )}
           {panel === "workloads" && (
             <Workloads
-              goto={goto}
               filter={depFilter}
               setFilter={(f) => navigate(wl({ filter: f }), { replace: true })}
               cluster={depCluster ?? ""}
@@ -199,7 +188,6 @@ export default function App() {
           )}
           {panel === "models" && (
             <Models
-              goto={goto}
               selected={sel}
               setSelected={(s) => navigate({ panel: "models", sel: s ?? undefined })}
               openDeployment={openDeployment}
@@ -212,7 +200,6 @@ export default function App() {
               openDeployment={openDeployment}
             />
           )}
-          {panel === "deploy" && <Deploy />}
           {panel === "capacity" && <Capacity />}
         </div>
       </div>

@@ -1,6 +1,5 @@
-import type { DepFilter, PanelKey } from "../App";
+import type { DepFilter } from "../App";
 import { api } from "../api";
-import { Plus } from "../icons";
 import { useLive } from "../live";
 import { toWorkloadRows } from "../map";
 import type { Column, Tab } from "../ResourceTable";
@@ -104,7 +103,6 @@ const TABS: Tab<WorkloadRow>[] = [
 ];
 
 export function Workloads({
-  goto,
   filter,
   setFilter,
   cluster,
@@ -116,7 +114,6 @@ export function Workloads({
   openModel,
   openRuntime,
 }: {
-  goto: (p: PanelKey) => void;
   filter: DepFilter;
   setFilter: (f: DepFilter) => void;
   cluster: string;
@@ -149,12 +146,6 @@ export function Workloads({
     <ResourceTable<WorkloadRow>
       title="Deployments"
       subtitle="Every model deployment across the fleet. Click a row for detail and a test request."
-      actions={
-        <button className="btn primary" onClick={() => goto("deploy")}>
-          <Plus />
-          New deployment
-        </button>
-      }
       rows={toWorkloadRows(isvcs.data?.items ?? [])}
       status={isvcs}
       noun="deployments"

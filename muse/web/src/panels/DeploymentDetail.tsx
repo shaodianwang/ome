@@ -16,11 +16,10 @@ import { ChatBox } from "./ChatBox";
 import { Monitoring } from "./DeploymentMonitoring";
 
 /** Console-style detail for one deployment, modelled on a cloud console (EC2 /
- *  OCI): a persistent identity header + actions bar over a few substantial tabs.
+ *  OCI): a persistent identity header over a few substantial tabs.
  *  Overview holds config *and* current state (components, conditions, rollout,
  *  placement) — deliberately not split into thin per-facet tabs. Monitoring owns
- *  the time-series; Activity is the change log. Write actions are surfaced but
- *  disabled — MUSE is a read plane until the write path lands. */
+ *  the time-series; Activity is the change log. */
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "monitoring", label: "Monitoring" },
@@ -76,15 +75,6 @@ export function DeploymentDetail({
         <h1 className="detail-title mono">{sel.name}</h1>
         {status ? <Pill tone={status.tone} label={status.label} /> : null}
         <span className="detail-meta">{meta}</span>
-        <div className="detail-actions">
-          <button className="btn primary sm" onClick={() => setTab("overview")}>
-            Test
-          </button>
-          <button className="btn sm" disabled title="Logs — not available yet (needs a log source)">
-            Logs
-          </button>
-          <ManageMenu />
-        </div>
       </div>
 
       {d?.url ? (
@@ -361,55 +351,5 @@ function ActivityPane({ activity }: { activity: EventItem[] }) {
         ))}
       </ul>
     </Card>
-  );
-}
-
-/** The write-action menu. Every item is a mutation MUSE can't perform yet (it's
- *  a read plane), so they're surfaced-but-disabled to show the intended surface
- *  until the write path lands. */
-const MANAGE_ACTIONS: ({ label: string; danger?: boolean } | { sep: true })[] = [
-  { label: "Redeploy" },
-  { label: "Restart" },
-  { label: "Scale" },
-  { label: "Edit config" },
-  { sep: true },
-  { label: "Pause rollout" },
-  { label: "Promote" },
-  { label: "Rollback" },
-  { label: "Migrate" },
-  { sep: true },
-  { label: "Undeploy", danger: true },
-];
-
-function ManageMenu() {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="menu">
-      <button className="btn sm" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        Manage ▾
-      </button>
-      {open ? (
-        <>
-          <button
-            className="menu-backdrop"
-            aria-hidden
-            tabIndex={-1}
-            onClick={() => setOpen(false)}
-          />
-          <div className="menu-list" role="menu">
-            {MANAGE_ACTIONS.map((a, i) =>
-              "sep" in a ? (
-                <hr className="menu-sep" key={i} />
-              ) : (
-                <button className={`menu-item${a.danger ? " danger" : ""}`} key={i} disabled>
-                  {a.label}
-                  <span className="menu-soon">soon</span>
-                </button>
-              ),
-            )}
-          </div>
-        </>
-      ) : null}
-    </div>
   );
 }

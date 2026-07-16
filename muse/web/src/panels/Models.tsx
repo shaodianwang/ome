@@ -1,12 +1,11 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
 
-import type { PanelKey } from "../App";
 import { api } from "../api";
 import type { FtwItem, IsvcItem, ModelDetail, ModelItem } from "../api";
 import { Pill, RefList } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
-import { Plus, Refresh } from "../icons";
+import { Refresh } from "../icons";
 import { useLive } from "../live";
 import { modelUsage, stateTone } from "../map";
 import type { Column, Tab } from "../ResourceTable";
@@ -100,12 +99,10 @@ const TABS: Tab<ModelRow>[] = [
 ];
 
 export function Models({
-  goto,
   selected,
   setSelected,
   openDeployment,
 }: {
-  goto: (p: PanelKey) => void;
   selected: Selected | null;
   setSelected: (sel: Selected | null) => void;
   openDeployment: (sel: Selected) => void;
@@ -181,7 +178,6 @@ export function Models({
           sel={selected}
           isvcs={isvcs.data?.items ?? []}
           ftws={ftws.data?.items ?? []}
-          goto={goto}
           openDeployment={openDeployment}
           onClose={() => setSelected(null)}
         />
@@ -203,14 +199,12 @@ function ModelDrawer({
   sel,
   isvcs,
   ftws,
-  goto,
   openDeployment,
   onClose,
 }: {
   sel: Selected;
   isvcs: IsvcItem[];
   ftws: FtwItem[];
-  goto: (p: PanelKey) => void;
   openDeployment: (sel: Selected) => void;
   onClose: () => void;
 }) {
@@ -239,10 +233,6 @@ function ModelDrawer({
               {serving.length ? `${serving.length} serving` : "unused"}
             </span>
             {d.disabled ? <span className="tag warn">disabled</span> : null}
-            <button className="btn primary sm drawer-cta" onClick={() => goto("deploy")}>
-              <Plus />
-              Deploy
-            </button>
           </div>
 
           <Section title="Overview">
