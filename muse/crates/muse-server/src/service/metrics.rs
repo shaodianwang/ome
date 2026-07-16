@@ -118,6 +118,7 @@ pub async fn refresh(st: &AppState) {
         }
     }
 
+    let evaluation_time = now_secs();
     let query_count = query_jobs.len();
     let query_prom = prom.clone();
     let query_results = collect_with_concurrency(
@@ -127,7 +128,8 @@ pub async fn refresh(st: &AppState) {
             let prom = query_prom.clone();
             async move {
                 let query_id = query.id.clone();
-                let value = run_query(&client, &prom, &query, request_timeout).await;
+                let value =
+                    run_query(&client, &prom, &query, evaluation_time, request_timeout).await;
                 (cluster, query_id, value)
             }
         },
@@ -296,8 +298,20 @@ async fn run_query(
     client: &kube::Client,
     prom: &PromTarget,
     def: &QueryDef,
+    evaluation_time: u64,
     request_timeout: Option<Duration>,
 ) -> Value {
+    let path = match query_path(prom, def, evaluation_time) {
+        Ok(path) => path,
+        Err(error) => return json!({ "error": error }),
+    };
+    match prom_get(client, &path, request_timeout).await {
+        Ok(v) => v,
+        Err(e) => json!({ "error": e }),
+    }
+}
+
+fn query_path(prom: &PromTarget, def: &QueryDef, evaluation_time: u64) -> Result<String, String> {
     let proxy = |sub: &str, qs: &str| {
         format!(
             "/api/v1/namespaces/{}/services/{}:{}/proxy/api/v1/{sub}?{qs}",
@@ -306,34 +320,27 @@ async fn run_query(
     };
     let path = match def.kind {
         QueryType::Instant => {
-            let now = now_secs().to_string();
-            match encode_params(&[("query", def.promql.as_str()), ("time", &now)]) {
-                Ok(qs) => proxy("query", &qs),
-                Err(e) => return json!({ "error": e }),
-            }
+            let at = evaluation_time.to_string();
+            let qs = encode_params(&[("query", def.promql.as_str()), ("time", &at)])?;
+            proxy("query", &qs)
         }
         QueryType::Range => {
             let (Some(window), Some(step)) = (def.window, def.step) else {
-                return json!({ "error": format!("range query '{}' has no window or step", def.id) });
+                return Err(format!("range query '{}' has no window or step", def.id));
             };
-            let end = now_secs();
+            let end = evaluation_time;
             let start = end.saturating_sub(window);
             let step = format!("{step}s");
-            match encode_params(&[
+            let qs = encode_params(&[
                 ("query", def.promql.as_str()),
                 ("start", &start.to_string()),
                 ("end", &end.to_string()),
                 ("step", &step),
-            ]) {
-                Ok(qs) => proxy("query_range", &qs),
-                Err(e) => return json!({ "error": e }),
-            }
+            ])?;
+            proxy("query_range", &qs)
         }
     };
-    match prom_get(client, &path, request_timeout).await {
-        Ok(v) => v,
-        Err(e) => json!({ "error": e }),
-    }
+    Ok(path)
 }
 
 /// GET an apiserver service-proxy path on a cluster's client, decoding the
@@ -450,10 +457,10 @@ mod tests {
     use ome_client::k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 
     use super::{
-        collect_with_concurrency, service_discovery_failure, service_discovery_timeout_failure,
-        validate_prom_service,
+        collect_with_concurrency, query_path, service_discovery_failure,
+        service_discovery_timeout_failure, validate_prom_service,
     };
-    use crate::config::PromTarget;
+    use crate::config::{PromTarget, QueryDef, QueryType};
 
     fn target() -> PromTarget {
         PromTarget {
@@ -528,6 +535,32 @@ mod tests {
         assert!(source["error"]["message"]
             .as_str()
             .is_some_and(|message| message.contains("after 15s")));
+    }
+
+    #[test]
+    fn query_paths_share_the_supplied_evaluation_time() {
+        let mut query = QueryDef {
+            id: "requests".to_owned(),
+            promql: "up".to_owned(),
+            kind: QueryType::Instant,
+            window: None,
+            step: None,
+        };
+
+        let instant = query_path(&target(), &query, 1_700_000_000).unwrap();
+        assert_eq!(
+            instant,
+            "/api/v1/namespaces/ome/services/ome-prometheus:9090/proxy/api/v1/query?query=up&time=1700000000"
+        );
+
+        query.kind = QueryType::Range;
+        query.window = Some(300);
+        query.step = Some(30);
+        let range = query_path(&target(), &query, 1_700_000_000).unwrap();
+        assert_eq!(
+            range,
+            "/api/v1/namespaces/ome/services/ome-prometheus:9090/proxy/api/v1/query_range?query=up&start=1699999700&end=1700000000&step=30s"
+        );
     }
 
     async fn observed_concurrency(limit: Option<NonZeroUsize>) -> (usize, Vec<i32>) {
