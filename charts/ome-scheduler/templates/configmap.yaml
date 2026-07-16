@@ -1,7 +1,8 @@
 # The scheduler's KubeSchedulerConfiguration. One profile whose schedulerName is
 # the opt-in name; OMEGangPack is enabled via multiPoint, which wires it into
-# every extension point it implements (PreFilter, Filter, Reserve, Permit, and
-# its EnqueueExtensions) — no per-hook enumeration to drift.
+# every extension point it implements (PreFilter, Filter, PostFilter, Reserve,
+# Permit, PostBind, and EnqueueExtensions) — no per-hook
+# enumeration to drift.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -35,3 +36,33 @@ data:
               # to restore the built-in behavior.
               - name: DefaultPreemption
             {{- end }}
+          score:
+            enabled:
+              - name: NodeResourcesFit
+                weight: {{ .Values.scheduler.nodeResourcesFit.scoreWeight }}
+            {{- if .Values.scheduler.disablePodTopologySpreadScore }}
+            disabled:
+              # Soft topology spreading directly conflicts with OEP-0022's
+              # packing policy. Hard DoNotSchedule constraints still run via
+              # PodTopologySpread's PreFilter and Filter extension points.
+              - name: PodTopologySpread
+            {{- end }}
+        pluginConfig:
+          - name: OMEGangPack
+            args:
+              {{- with .Values.scheduler.plugin.topologyKey }}
+              topologyKey: {{ . | quote }}
+              {{- end }}
+              podGroupTopologyKeyAnnotation: {{ .Values.scheduler.plugin.podGroupTopologyKeyAnnotation | quote }}
+              unsupportedPlacementGroupLabel: {{ .Values.scheduler.plugin.unsupportedPlacementGroupLabel | quote }}
+              defaultPermitTimeoutSeconds: {{ .Values.scheduler.plugin.defaultPermitTimeoutSeconds }}
+              podGroupSyncTimeoutSeconds: {{ .Values.scheduler.plugin.podGroupSyncTimeoutSeconds }}
+              gcIntervalSeconds: {{ .Values.scheduler.plugin.gcIntervalSeconds }}
+          - name: NodeResourcesFit
+            args:
+              scoringStrategy:
+                type: MostAllocated
+                {{- with .Values.scheduler.nodeResourcesFit.resources }}
+                resources:
+                  {{- toYaml . | nindent 18 }}
+                {{- end }}

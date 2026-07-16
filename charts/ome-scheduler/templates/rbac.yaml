@@ -1,23 +1,50 @@
-# RBAC for ome-scheduler running as a second scheduler. Scoped to what
-# kube-scheduler needs to observe/bind, plus read-only access to the
-# scheduler-plugins PodGroup CR (the plugin's only extra API). Trimmed from the
-# upstream scheduler-plugins chart: no PodGroup/status writes (the plugin only
-# reads MinMember + the topology annotation), and none of the other plugins'
-# resources (ElasticQuota, NodeResourceTopology, AppGroup, …).
+# Reuse the API server's auto-reconciled scheduler roles instead of copying
+# version-sensitive kube-scheduler permissions into this chart. This keeps core,
+# volume, and DRA permissions aligned with the Kubernetes minor installed in the
+# cluster. The chart-owned role below contains only ome-scheduler's distinct
+# leader lock and PodGroup read contract.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.scheduler.name }}-system-scheduler
+  labels:
+    {{- include "ome-scheduler.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-scheduler
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.scheduler.name }}
+  namespace: {{ .Release.Namespace }}
+---
+# Kubernetes binds its in-tree scheduler to this separate role for dynamic
+# volume binding. A second scheduler needs the same version-managed permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.scheduler.name }}-system-volume-scheduler
+  labels:
+    {{- include "ome-scheduler.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:volume-scheduler
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.scheduler.name }}
+  namespace: {{ .Release.Namespace }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Values.scheduler.name }}
+  name: {{ .Values.scheduler.name }}-extras
   labels:
     {{- include "ome-scheduler.labels" . | nindent 4 }}
 rules:
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["", "events.k8s.io"]
-  resources: ["events"]
-  verbs: ["create", "patch", "update"]
-# Leader election (lock named after the scheduler).
+# Leader election uses a scheduler-specific Lease rather than kube-scheduler's
+# built-in lock. RBAC cannot restrict create by resourceName, so create remains
+# lease-wide; reads and updates are restricted to this scheduler's lock.
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["create"]
@@ -25,46 +52,7 @@ rules:
   resourceNames: ["{{ .Values.scheduler.name }}"]
   resources: ["leases"]
   verbs: ["get", "update"]
-# Core scheduling surface.
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["get", "list", "watch", "patch"]
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch", "update", "delete"]
-- apiGroups: [""]
-  resources: ["bindings", "pods/binding"]
-  verbs: ["create"]
-- apiGroups: [""]
-  resources: ["pods/status"]
-  verbs: ["patch", "update"]
-- apiGroups: [""]
-  resources: ["replicationcontrollers", "services"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["apps", "extensions"]
-  resources: ["replicasets"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["apps"]
-  resources: ["statefulsets"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["policy"]
-  resources: ["poddisruptionbudgets"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: [""]
-  resources: ["persistentvolumeclaims", "persistentvolumes"]
-  verbs: ["get", "list", "watch", "patch", "update"]
-# Volume scheduling.
-- apiGroups: ["storage.k8s.io"]
-  resources: ["csinodes", "storageclasses", "csidrivers", "csistoragecapacities", "volumeattachments"]
-  verbs: ["get", "list", "watch"]
-# Delegated authn/authz for the scheduler's secure serving.
-- apiGroups: ["authentication.k8s.io"]
-  resources: ["tokenreviews"]
-  verbs: ["create"]
-- apiGroups: ["authorization.k8s.io"]
-  resources: ["subjectaccessreviews"]
-  verbs: ["create"]
-# OMEGangPack: read the PodGroup CR (gang size + topology annotation).
+# OMEGangPack reads gang size, timeout, and topology metadata from PodGroup.
 - apiGroups: ["scheduling.x-k8s.io"]
   resources: ["podgroups"]
   verbs: ["get", "list", "watch"]
@@ -72,20 +60,20 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ .Values.scheduler.name }}
+  name: {{ .Values.scheduler.name }}-extras
   labels:
     {{- include "ome-scheduler.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ .Values.scheduler.name }}
+  name: {{ .Values.scheduler.name }}-extras
 subjects:
 - kind: ServiceAccount
   name: {{ .Values.scheduler.name }}
   namespace: {{ .Release.Namespace }}
 ---
-# The scheduler reads the extension-apiserver-authentication ConfigMap in
-# kube-system to configure its delegated authn (request-header CA, etc.).
+# The scheduler reads extension-apiserver-authentication in kube-system for its
+# delegated secure-serving authentication configuration.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:

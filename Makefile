@@ -279,6 +279,8 @@ helm-lint: helm ## ⎈ Lint all charts
 	    exit 1; \
 	  fi \
 	done
+	@echo "🧪 Testing ome-scheduler chart contracts..."
+	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-scheduler/tests/render_test.sh
 	@echo "✅ Helm lint complete"
 
 .PHONY: helm-doc
