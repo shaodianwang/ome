@@ -7,7 +7,8 @@ and exposes it through an existing Envoy Gateway — no nginx, no separate front
 ## What it deploys
 
 - **Deployment** `muse-server` (API + UI) + **Service** (ClusterIP `:8080`, metrics `:9090`).
-- **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`.
+- **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`;
+  metrics add `get` on `services` and `services/proxy` for discovery and queries.
 - **HTTPRoute** on the shared Envoy Gateway, serving the console under `/muse` — the
   route strips the prefix (`URLRewrite`), so muse-server serves at root.
 - Optional **ReferenceGrant** and **CiliumNetworkPolicy**.
@@ -73,6 +74,14 @@ clusters:
   - name: cw-use2-1
     kubeconfigSecret: muse-kubeconfig-cw-use2-1
 ```
+
+When fleet metrics are enabled, each remote kubeconfig also needs `get` permission
+for core `services` and `services/proxy`. MUSE validates that the configured
+`config.metrics.promService` and port exist independently in every workload
+cluster before running the query catalog. A missing Service or port marks that
+cluster's metrics source unconfigured; a failed discovery read marks it unavailable.
+Both include a machine-readable code and target details, and skip the query catalog.
+Other resource and capacity views for that cluster remain available.
 
 ## Inference test (chat)
 

@@ -114,7 +114,8 @@ config:
         type: MKS_SERVICEACCOUNT
   # Fleet metrics: muse-server proxies PromQL to each cluster's in-cluster
   # Prometheus (via the apiserver services/proxy on that cluster's client — no
-  # separate credential) and pushes a snapshot to the console over SSE.
+  # separate credential) and pushes a snapshot to the console over SSE. Remote
+  # kubeconfig identities need get access to both services and services/proxy.
   metrics:
     enabled: true # false ⇒ no --prom-service; the console hides its metric panels
     promService: ome/ome-prometheus:9090 # namespace/name:port, applied per cluster

@@ -354,11 +354,23 @@ export interface PromResult {
   data?: { resultType: string; result: PromSeries[] };
   error?: string;
 }
+
+export interface MetricsSourceState {
+  status: "available" | "unconfigured" | "unavailable";
+  target: string;
+  error?: {
+    code: string;
+    message: string;
+    httpStatus?: number;
+  };
+}
 /** The fleet metrics snapshot: per cluster, per query id, a Prometheus result.
  *  Built server-side on a timer and pushed over `METRICS_STREAM_URL`. */
 export interface MetricsSnapshot {
   updatedAt: number;
   clusters: Record<string, Record<string, PromResult>>;
+  /** Per-cluster target discovery. Non-available sources have no query results. */
+  sources?: Record<string, MetricsSourceState>;
 }
 
 /** Minimal OpenAI-style chat completion response (only what the console reads). */

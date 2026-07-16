@@ -293,7 +293,7 @@ fn capacity_membership_matches<'a>(
 
 /// The initial (empty) metrics snapshot, before the first refresh completes.
 fn empty_metrics() -> Arc<Value> {
-    Arc::new(json!({ "updatedAt": 0, "clusters": {} }))
+    Arc::new(json!({ "updatedAt": 0, "clusters": {}, "sources": {} }))
 }
 
 #[cfg(test)]

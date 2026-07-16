@@ -287,7 +287,7 @@ export function filterSnapshot(
   },
 ): MetricsSnapshot | null {
   if (!snap?.clusters) return snap;
-  const out: MetricsSnapshot = { updatedAt: snap.updatedAt, clusters: {} };
+  const out: MetricsSnapshot = { updatedAt: snap.updatedAt, clusters: {}, sources: {} };
   for (const [cluster, queries] of Object.entries(snap.clusters)) {
     if (opts.cluster && opts.cluster !== "all" && opts.cluster !== cluster) continue;
     if (opts.keepCluster && !opts.keepCluster(cluster)) continue;
@@ -303,6 +303,8 @@ export function filterSnapshot(
       };
     }
     out.clusters[cluster] = kept;
+    const source = snap.sources?.[cluster];
+    if (source && out.sources) out.sources[cluster] = source;
   }
   return out;
 }
