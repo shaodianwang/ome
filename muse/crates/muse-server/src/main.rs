@@ -21,6 +21,7 @@
 //!     --nvlink-domain-label network.meta.com/domain
 
 mod app_context;
+mod chat_proxy;
 mod config;
 mod informers;
 mod protocol;
@@ -76,6 +77,30 @@ fn main() -> anyhow::Result<()> {
 async fn run(config: config::Config) -> anyhow::Result<()> {
     telemetry::init_logging(config.log_json);
 
+    // Chat is optional and must fail closed. Missing policy/timeout config or bad
+    // TLS material disables only the proxy; the read plane remains available.
+    let chat = match config.chat_proxy_config() {
+        Ok(Some(chat_config)) => match chat_proxy::ChatProxy::new(
+            chat_config,
+            chat_proxy::ChatTls {
+                client_cert: config.chat_client_cert.clone(),
+                client_key: config.chat_client_key.clone(),
+                ca_cert: config.chat_ca_cert.clone(),
+            },
+        ) {
+            Ok(proxy) => Some(proxy),
+            Err(err) => {
+                tracing::error!(error = %err, "chat proxy configuration invalid; proxy disabled");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(err) => {
+            tracing::error!(error = %err, "chat proxy configuration incomplete; proxy disabled");
+            None
+        }
+    };
+
     let metrics = telemetry::init_metrics()?;
     let metrics_addr = config.metrics_addr();
     tokio::spawn(async move {
@@ -128,17 +153,12 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         topology,
         feed,
         signal,
-        config.chat_enabled,
-        Duration::from_secs(config.chat_timeout_secs.max(1)),
-        Duration::from_secs(config.chat_connect_timeout_secs.max(1)),
-        app_context::ChatTls {
-            client_cert: config.chat_client_cert.clone(),
-            client_key: config.chat_client_key.clone(),
-            ca_cert: config.chat_ca_cert.clone(),
+        chat,
+        app_context::MetricsConfig {
+            prom: config.prom_service.clone(),
+            queries: metrics_queries,
+            refresh: Duration::from_secs(config.metrics_refresh_secs.max(1)),
         },
-        config.prom_service.clone(),
-        metrics_queries,
-        Duration::from_secs(config.metrics_refresh_secs.max(1)),
     );
     server::serve(&config, state).await
 }

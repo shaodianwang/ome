@@ -10,6 +10,8 @@ use serde_json::json;
 
 #[derive(Debug)]
 pub enum ApiError {
+    /// Caller input is malformed or violates a request-level policy.
+    BadRequest(String),
     /// Unknown kind, or a named object not in cache.
     NotFound(String),
     /// A feature is disabled, or a prerequisite isn't ready (e.g. no endpoint yet).
@@ -21,6 +23,7 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ApiError::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", msg),
             ApiError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, "bad_gateway", msg),

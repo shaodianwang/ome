@@ -1457,15 +1457,14 @@ pub struct ViewParams {
 #[derive(Debug, Default, Deserialize)]
 pub struct ChatParams {
     pub cluster: Option<String>,
-    /// Endpoint path on the model's own URL. Defaults to `/v1/chat/completions`.
-    /// Must be an absolute path (no scheme/host) — the handler rejects anything
-    /// else so the proxy can't be redirected off the ISVC's endpoint (SSRF-safe).
+    /// Endpoint path on the model's own URL. Required; it must be an absolute path
+    /// (no scheme/host) so it cannot redirect the proxy off the selected base.
     pub path: Option<String>,
     /// Override the target base URL. Needed because `status.url` often points at an
     /// unreachable/internal gateway (OEP-0023) while the external gateway works —
     /// the console lets the user pick. Accepted only when its host is within the
-    /// deployment's own cluster domain (the handler enforces this), so the proxy
-    /// still can't be aimed at an arbitrary host. Empty ⇒ use `status.url`.
+    /// exact status origin or an explicitly configured host/suffix. Empty means use
+    /// `status.url`; no parent domain is inferred from either hostname.
     pub base: Option<String>,
 }
 
@@ -1525,7 +1524,12 @@ pub struct ConfigResp {
     pub chat: bool,
     /// Total budget (seconds) for one proxied chat request. The console bounds its
     /// own request a little above this so a stalled endpoint can't hang the UI.
-    pub chat_timeout_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_timeout_secs: Option<u64>,
+    /// Extra browser-side time beyond the server budget, supplied by deployment
+    /// config rather than baked into the console.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_client_grace_secs: Option<u64>,
     /// Whether the metrics proxy (`/v1/metrics/*` → a cluster's Prometheus) is
     /// configured; the console hides its metric panels when false.
     pub metrics: bool,

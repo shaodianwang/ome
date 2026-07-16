@@ -300,6 +300,8 @@ export interface AppConfig {
   /** Server-side total budget (seconds) for a chat proxy request; the console
    *  bounds its own request a little above this so a stall can't hang the UI. */
   chatTimeoutSecs?: number;
+  /** Browser-side grace beyond the server timeout, supplied by deployment config. */
+  chatClientGraceSecs?: number;
   /** Whether the metrics proxy is configured server-side; panels hide when false. */
   metrics?: boolean;
 }

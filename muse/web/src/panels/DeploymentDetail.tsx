@@ -127,6 +127,7 @@ export function DeploymentDetail({
               metricsOn={metricsOn}
               chat={cfg.data?.chat === true}
               chatTimeoutSecs={cfg.data?.chatTimeoutSecs}
+              chatClientGraceSecs={cfg.data?.chatClientGraceSecs}
               openModel={openModel}
               openRuntime={openRuntime}
               goMonitoring={() => setTab("monitoring")}
@@ -162,6 +163,7 @@ function OverviewPane({
   metricsOn,
   chat,
   chatTimeoutSecs,
+  chatClientGraceSecs,
   openModel,
   openRuntime,
   goMonitoring,
@@ -172,6 +174,7 @@ function OverviewPane({
   metricsOn: boolean;
   chat: boolean;
   chatTimeoutSecs?: number;
+  chatClientGraceSecs?: number;
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
   goMonitoring: () => void;
@@ -251,6 +254,7 @@ function OverviewPane({
             defaultModel={d.model ?? ""}
             enabled={chat}
             timeoutSecs={chatTimeoutSecs}
+            clientGraceSecs={chatClientGraceSecs}
           />
         </Card>
       </div>

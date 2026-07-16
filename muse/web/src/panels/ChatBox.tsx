@@ -4,10 +4,6 @@ import { api } from "../api";
 import { Copy } from "../icons";
 import { copyText } from "../util";
 
-/** How much longer than the server's own chat budget the console waits before
- *  giving up — enough for the server's specific timeout error to arrive first. */
-const CLIENT_GRACE_MS = 5000;
-
 /** The endpoints a served model may expose. Engines differ: sglang serves only
  *  `/generate` (and ignores `model`); vLLM serves `/v1/chat/completions`
  *  (which requires `model`) and `/generate`. The panel defaults to chat but lets
@@ -55,6 +51,7 @@ export function ChatBox({
   defaultModel,
   enabled,
   timeoutSecs,
+  clientGraceSecs,
 }: {
   cluster: string;
   name: string;
@@ -62,6 +59,7 @@ export function ChatBox({
   defaultModel: string;
   enabled: boolean;
   timeoutSecs?: number;
+  clientGraceSecs?: number;
 }) {
   const [path, setPath] = useState<string>(ENDPOINTS[0].path);
   const [baseUrl, setBaseUrl] = useState(endpoint ?? "");
@@ -95,7 +93,10 @@ export function ChatBox({
     setBusy(true);
     setErr(null);
     setReply(null);
-    const timeoutMs = timeoutSecs != null ? timeoutSecs * 1000 + CLIENT_GRACE_MS : undefined;
+    const timeoutMs =
+      timeoutSecs != null && clientGraceSecs != null
+        ? (timeoutSecs + clientGraceSecs) * 1000
+        : undefined;
     api
       .chat(cluster, name, path, baseUrl, parsed, timeoutMs)
       .then((r) => setReply(r.choices?.[0]?.message?.content ?? JSON.stringify(r, null, 2)))

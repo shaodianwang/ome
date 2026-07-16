@@ -28,7 +28,7 @@ tokio = { version = "1.52.3", features = ["full"] }
 # BroadcastStream: adapt the activity-feed broadcast receiver into a Stream for SSE.
 tokio-stream = { version = "0.1", features = ["sync"] }
 # "fs" (ServeDir/ServeFile): serve the built web console (SPA) from muse-server.
-tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip", "timeout", "request-id", "util", "fs"] }
+tower-http = { version = "0.7", features = ["trace", "compression-gzip", "request-id", "util", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7"] }

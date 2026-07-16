@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use tokio::sync::watch;
 
 use crate::{
+    chat_proxy::ChatProxy,
     config::{PromTarget, QueryDef},
     informers::{CapacitySignal, ClusterState, Feed},
     protocol::{to_val, Topology},
@@ -34,14 +35,9 @@ pub struct AppState {
     /// re-walking every Node × Pod on each request.
     capacity: Arc<RwLock<Arc<CapacitySnapshot>>>,
     pub signal: CapacitySignal,
-    /// Whether the inference test proxy (`POST …/chat`) is enabled.
-    pub chat_enabled: bool,
-    /// Total budget (seconds) for one proxied chat request. Surfaced via
-    /// `/v1/config` so the console can bound its own request a little above this,
-    /// so a stalled endpoint can't leave the UI "Sending…" indefinitely.
-    pub chat_timeout_secs: u64,
-    /// HTTP client for the inference test proxy (timeouts baked in). Cheap to clone.
-    pub http: reqwest::Client,
+    /// Optional inference-test proxy. `None` means disabled or invalidly configured;
+    /// the rest of the read plane remains available.
+    chat: Option<Arc<ChatProxy>>,
     /// The Prometheus to proxy PromQL to (per cluster, via the apiserver
     /// `services/proxy`). `None` ⇒ metrics are unconfigured and the endpoints are off.
     pub prom: Option<PromTarget>,
@@ -60,35 +56,23 @@ struct CapacitySnapshot {
     per_cluster: HashMap<String, Value>,
 }
 
+/// Optional dashboard-metrics service configuration, grouped so AppState's
+/// constructor stays readable as cross-cutting services are added.
+pub struct MetricsConfig {
+    pub prom: Option<PromTarget>,
+    pub queries: Arc<Vec<QueryDef>>,
+    pub refresh: Duration,
+}
+
 impl AppState {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         clusters: Vec<ClusterState>,
         topology: Topology,
         feed: Feed,
         signal: CapacitySignal,
-        chat_enabled: bool,
-        chat_timeout: Duration,
-        chat_connect_timeout: Duration,
-        chat_tls: ChatTls,
-        prom: Option<PromTarget>,
-        metrics_queries: Arc<Vec<QueryDef>>,
-        metrics_refresh: Duration,
+        chat: Option<ChatProxy>,
+        metrics: MetricsConfig,
     ) -> Self {
-        // Client for the inference test proxy. A short connect timeout bounds the
-        // TCP+TLS handshake so an unreachable endpoint fails fast, while the total
-        // timeout still allows for generation. When configured, it presents the
-        // pod's mTLS client cert + trusts the given CA so it can reach a gated
-        // gateway. `unwrap_or_default` (not unwrap): a builder failure falls back to
-        // a default client rather than panicking.
-        let http = chat_tls
-            .apply(
-                reqwest::Client::builder()
-                    .timeout(chat_timeout)
-                    .connect_timeout(chat_connect_timeout),
-            )
-            .build()
-            .unwrap_or_default();
         let (metrics_tx, _) = watch::channel(empty_metrics());
         let state = Self {
             clusters: Arc::new(clusters),
@@ -99,12 +83,10 @@ impl AppState {
                 per_cluster: HashMap::new(),
             }))),
             signal,
-            chat_enabled,
-            chat_timeout_secs: chat_timeout.as_secs(),
-            http,
-            prom,
-            metrics_queries,
-            metrics_refresh,
+            chat: chat.map(Arc::new),
+            prom: metrics.prom,
+            metrics_queries: metrics.queries,
+            metrics_refresh: metrics.refresh,
             metrics_tx,
         };
         // Warm the cache once so the first request is served, not computed.
@@ -123,6 +105,11 @@ impl AppState {
                 .ok_or_else(|| ApiError::NotFound(format!("unknown cluster: {name}"))),
             None => Ok(self.clusters.iter().collect()),
         }
+    }
+
+    /// Configured inference-test proxy, or `None` when the feature is unavailable.
+    pub fn chat_proxy(&self) -> Option<&ChatProxy> {
+        self.chat.as_deref()
     }
 
     /// Recompute the capacity rollups (fleet + per-cluster) from the current
@@ -203,55 +190,4 @@ impl AppState {
 /// The initial (empty) metrics snapshot, before the first refresh completes.
 fn empty_metrics() -> Arc<Value> {
     Arc::new(json!({ "updatedAt": 0, "clusters": {} }))
-}
-
-/// mTLS material for the chat proxy's HTTP client — all optional and config-driven
-/// (the muse pod mounts its service identity; unset ⇒ a plain TLS request).
-#[derive(Clone, Default)]
-pub struct ChatTls {
-    pub client_cert: Option<String>,
-    pub client_key: Option<String>,
-    pub ca_cert: Option<String>,
-}
-
-impl ChatTls {
-    /// Apply the configured client identity + CA to a reqwest builder. A missing or
-    /// unreadable file is logged and skipped (the proxy then sends without it)
-    /// rather than failing muse startup.
-    fn apply(&self, mut b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-        if let Some(cert) = &self.client_cert {
-            match load_identity(cert, self.client_key.as_deref()) {
-                Ok(id) => b = b.identity(id),
-                Err(e) => {
-                    tracing::error!(error = %e, "chat proxy: client cert not loaded; sending without mTLS")
-                }
-            }
-        }
-        if let Some(ca) = &self.ca_cert {
-            match load_ca(ca) {
-                Ok(c) => b = b.add_root_certificate(c),
-                Err(e) => {
-                    tracing::error!(error = %e, "chat proxy: CA not loaded; using system roots")
-                }
-            }
-        }
-        b
-    }
-}
-
-/// Load a client identity from a cert PEM (and an optional separate key PEM; when
-/// omitted the cert file is expected to carry the key too).
-fn load_identity(cert_path: &str, key_path: Option<&str>) -> Result<reqwest::Identity, String> {
-    let mut pem = std::fs::read(cert_path).map_err(|e| format!("read {cert_path}: {e}"))?;
-    if let Some(kp) = key_path {
-        pem.push(b'\n');
-        pem.extend(std::fs::read(kp).map_err(|e| format!("read {kp}: {e}"))?);
-    }
-    reqwest::Identity::from_pem(&pem).map_err(|e| format!("parse client identity: {e}"))
-}
-
-/// Load a CA bundle PEM as a trusted root for the chat proxy.
-fn load_ca(path: &str) -> Result<reqwest::Certificate, String> {
-    let pem = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    reqwest::Certificate::from_pem(&pem).map_err(|e| format!("parse CA cert: {e}"))
 }

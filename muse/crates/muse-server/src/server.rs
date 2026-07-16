@@ -7,13 +7,11 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use axum::{http::StatusCode, Router};
+use axum::Router;
 use tower_http::{
     compression::CompressionLayer,
-    cors::CorsLayer,
     request_id::{PropagateRequestIdLayer, SetRequestIdLayer},
     services::{ServeDir, ServeFile},
-    timeout::TimeoutLayer,
     trace::{DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -27,7 +25,8 @@ use crate::{
 
 /// Assemble the router and its middleware stack. The last `.layer()` is the
 /// outermost at request time, so the effective order is:
-/// CORS → compression → timeout → request-id → trace → metrics → handler.
+/// compression → request-id → trace → metrics → handler. The console and API are
+/// served from one origin, so cross-origin access is not enabled by default.
 pub fn build_app(state: AppState, web_dir: Option<PathBuf>) -> Router {
     let mut router = service::routes();
     // When a built console bundle is provided, serve it at `/` with SPA fallback
@@ -48,12 +47,7 @@ pub fn build_app(state: AppState, web_dir: Option<PathBuf>) -> Router {
         )
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuidV7))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
-        ))
         .layer(CompressionLayer::new())
-        .layer(CorsLayer::permissive())
 }
 
 /// Bind the API listener and serve until a shutdown signal.

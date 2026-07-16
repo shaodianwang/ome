@@ -46,8 +46,28 @@ spec:
               value: {{ .Values.config.capacityRefreshSecs | quote }}
             - name: MUSE_CHAT_ENABLED
               value: {{ .Values.config.chat.enabled | quote }}
+            {{- with .Values.config.chat.timeoutSecs }}
             - name: MUSE_CHAT_TIMEOUT_SECS
-              value: {{ .Values.config.chat.timeoutSecs | quote }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.chat.connectTimeoutSecs }}
+            - name: MUSE_CHAT_CONNECT_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.chat.clientGraceSecs }}
+            - name: MUSE_CHAT_CLIENT_GRACE_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            - name: MUSE_CHAT_ALLOW_HTTP
+              value: {{ .Values.config.chat.allowHttp | quote }}
+            {{- with .Values.config.chat.allowedHosts }}
+            - name: MUSE_CHAT_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.config.chat.allowedHostSuffixes }}
+            - name: MUSE_CHAT_ALLOWED_HOST_SUFFIXES
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- if .Values.config.chat.tls.enabled }}
             # mTLS the chat proxy presents to reach a gated model gateway (certs mounted below).
             - name: MUSE_CHAT_CLIENT_CERT

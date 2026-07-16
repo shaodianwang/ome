@@ -79,3 +79,24 @@ clusters:
 Off by default (`config.chat.enabled: false`) — it proxies one request to a
 model's own endpoint. Enable per environment; when off, the console shows a
 copyable `curl` instead.
+
+The exact `InferenceService.status.url` origin is permitted automatically. If the
+console must target a different external gateway, configure it explicitly; MUSE
+does not infer an allowed parent domain from the status hostname:
+
+```yaml
+config:
+  chat:
+    enabled: true
+    timeoutSecs: 60
+    connectTimeoutSecs: 5
+    clientGraceSecs: 5
+    allowedHosts:
+      - gateway.example.com:8443
+    allowedHostSuffixes:
+      - serving.example.com
+```
+
+Chat targets must use HTTPS unless `allowHttp: true` is explicitly set. Redirects
+are refused rather than followed. The packaged console and API are same-origin;
+the server does not emit permissive CORS headers.

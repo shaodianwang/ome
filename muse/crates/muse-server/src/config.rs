@@ -11,6 +11,8 @@ use std::{
 use anyhow::Context;
 use clap::Parser;
 
+use crate::chat_proxy::ChatProxyConfig;
+
 /// A workload cluster to aggregate: a name + an optional explicit kubeconfig
 /// (None = use the ambient kube config).
 #[derive(Debug, Clone)]
@@ -56,6 +58,18 @@ fn parse_prom_target(spec: &str) -> Result<PromTarget, String> {
         service: service.to_owned(),
         port,
     })
+}
+
+fn parse_positive_secs(spec: &str) -> Result<u64, String> {
+    let value = spec
+        .parse::<u64>()
+        .map_err(|_| format!("expected a positive number of seconds, got '{spec}'"))?;
+    if value == 0 {
+        return Err(format!(
+            "expected a positive number of seconds, got '{spec}'"
+        ));
+    }
+    Ok(value)
 }
 
 /// Whether a dashboard query is an instant (single value per series) or range
@@ -203,31 +217,65 @@ pub struct Config {
     /// and returns the reply. Off by default — it is a human-driven debug tool, not
     /// a serving path, so it is opt-in. When off, the console shows a copyable curl
     /// command instead of a live chat box.
-    #[arg(
-        long = "chat-enabled",
-        env = "MUSE_CHAT_ENABLED",
-        default_value_t = false
-    )]
+    #[arg(long = "chat-enabled", env = "MUSE_CHAT_ENABLED")]
     pub chat_enabled: bool,
 
     /// Total timeout (seconds) for one proxied inference test request — the whole
-    /// budget, which must allow for the model's generation time.
+    /// budget, which must allow for the model's generation time. No binary default:
+    /// when chat is enabled without this value, the proxy stays disabled and the
+    /// rest of MUSE continues serving.
     #[arg(
         long = "chat-timeout-secs",
         env = "MUSE_CHAT_TIMEOUT_SECS",
-        default_value_t = 60
+        value_parser = parse_positive_secs
     )]
-    pub chat_timeout_secs: u64,
+    pub chat_timeout_secs: Option<u64>,
 
     /// Connect timeout (seconds) for a proxied inference test request — bounds just
     /// the TCP+TLS connect, so an unreachable model endpoint fails fast instead of
-    /// stalling until the total `--chat-timeout-secs` elapses.
+    /// stalling until the total `--chat-timeout-secs` elapses. Optional; the total
+    /// timeout still bounds the request when this is absent.
     #[arg(
         long = "chat-connect-timeout-secs",
         env = "MUSE_CHAT_CONNECT_TIMEOUT_SECS",
-        default_value_t = 5
+        value_parser = parse_positive_secs
     )]
-    pub chat_connect_timeout_secs: u64,
+    pub chat_connect_timeout_secs: Option<u64>,
+
+    /// Additional browser-side seconds beyond the server request budget. This lets
+    /// the server's specific timeout response reach the console before its own
+    /// AbortController fires. Optional; no browser deadline is added when absent.
+    #[arg(
+        long = "chat-client-grace-secs",
+        env = "MUSE_CHAT_CLIENT_GRACE_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub chat_client_grace_secs: Option<u64>,
+
+    /// Exact external gateway hosts the caller may select instead of the cached
+    /// InferenceService status URL. Entries may include a non-default port
+    /// (`gateway.example:8443`). Empty means only the exact status origin is valid.
+    #[arg(
+        long = "chat-allowed-host",
+        env = "MUSE_CHAT_ALLOWED_HOSTS",
+        value_delimiter = ','
+    )]
+    pub chat_allowed_hosts: Vec<String>,
+
+    /// Explicit external gateway DNS suffixes. Matching is label-anchored; no suffix
+    /// is inferred from the InferenceService hostname. Non-default ports require an
+    /// exact `--chat-allowed-host` entry.
+    #[arg(
+        long = "chat-allowed-host-suffix",
+        env = "MUSE_CHAT_ALLOWED_HOST_SUFFIXES",
+        value_delimiter = ','
+    )]
+    pub chat_allowed_host_suffixes: Vec<String>,
+
+    /// Permit plaintext HTTP chat targets. Off when absent; enable only for a
+    /// controlled development environment.
+    #[arg(long = "chat-allow-http", env = "MUSE_CHAT_ALLOW_HTTP")]
+    pub chat_allow_http: bool,
 
     /// Client certificate (PEM) the chat proxy presents for mTLS to the model's
     /// gateway. The muse pod mounts its service identity here; with
@@ -300,5 +348,74 @@ impl Config {
         } else {
             self.clusters.clone()
         }
+    }
+
+    /// Build the optional chat proxy's effective settings. Enabling the feature
+    /// without an explicit total timeout is a configuration error that the caller
+    /// handles by leaving chat disabled; no timeout is silently invented here.
+    pub fn chat_proxy_config(&self) -> Result<Option<ChatProxyConfig>, String> {
+        if !self.chat_enabled {
+            return Ok(None);
+        }
+        let timeout_secs = self.chat_timeout_secs.ok_or_else(|| {
+            "chat proxy enabled without MUSE_CHAT_TIMEOUT_SECS; proxy will remain disabled"
+                .to_owned()
+        })?;
+        Ok(Some(ChatProxyConfig {
+            timeout: std::time::Duration::from_secs(timeout_secs),
+            connect_timeout: self
+                .chat_connect_timeout_secs
+                .map(std::time::Duration::from_secs),
+            client_grace: self
+                .chat_client_grace_secs
+                .map(std::time::Duration::from_secs),
+            allowed_hosts: self.chat_allowed_hosts.clone(),
+            allowed_host_suffixes: self.chat_allowed_host_suffixes.clone(),
+            allow_http: self.chat_allow_http,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+
+    use super::Config;
+
+    #[test]
+    fn enabled_chat_without_timeout_degrades_to_disabled_config() {
+        let config = Config::try_parse_from(["muse", "--chat-enabled"]).unwrap();
+        assert!(config.chat_proxy_config().is_err());
+    }
+
+    #[test]
+    fn chat_timeout_and_target_policy_are_config_driven() {
+        let config = Config::try_parse_from([
+            "muse",
+            "--chat-enabled",
+            "--chat-timeout-secs=75",
+            "--chat-connect-timeout-secs=4",
+            "--chat-client-grace-secs=6",
+            "--chat-allowed-host=gateway.example:8443",
+            "--chat-allowed-host-suffix=serving.example",
+            "--chat-allow-http",
+        ])
+        .unwrap();
+        let chat = config.chat_proxy_config().unwrap().unwrap();
+
+        assert_eq!(chat.timeout, Duration::from_secs(75));
+        assert_eq!(chat.connect_timeout, Some(Duration::from_secs(4)));
+        assert_eq!(chat.client_grace, Some(Duration::from_secs(6)));
+        assert_eq!(chat.allowed_hosts, ["gateway.example:8443"]);
+        assert_eq!(chat.allowed_host_suffixes, ["serving.example"]);
+        assert!(chat.allow_http);
+    }
+
+    #[test]
+    fn zero_chat_timeout_is_rejected_at_config_parse_time() {
+        let result = Config::try_parse_from(["muse", "--chat-timeout-secs=0"]);
+        assert!(result.is_err());
     }
 }
