@@ -1,0 +1,28 @@
+title: "MUSE write plane: create/edit OME resources via pull request"
+oep-number: "0021.1"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-07-15
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follows OEP-0021 (the MUSE read+write layer). This follow-up resolves that
+# document's open fork #2 (direct-write vs GitOps) in favor of a pull request on
+# every write, and resolves its Auth/identity Open Question. It writes to no
+# cluster: muse-writer holds a GitHub credential, not kube write-RBAC.
+see-also:
+  - "/oeps/0021-muse-console"             # parent: the read+write layer; this resolves its fork #2 + Auth Open Question
+  - "/oeps/0018-multi-cluster-placement"  # the placement the emitted source InferenceService rides
+  - "/oeps/0019-control-plane-split"      # process-split precedent for running muse-writer as its own binary
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

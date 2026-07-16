@@ -16,6 +16,7 @@ see-also:
   - "/oeps/0018.2-multi-cluster-performance" # the watch-funnel / caching transport the read plane rides on
   - "/oeps/0019-control-plane-split"      # precedent for running a named subset of the control plane as its own process
   - "/oeps/0009-ome-cluster-cache-integration" # model distribution / weight movement context (convert + Meta->GCP transfer)
+  - "/oeps/0021.1-muse-write-plane"       # follow-up: resolves this doc's fork #2 (PR-per-write) + the Auth/identity Open Question
 
 stage: alpha
 
