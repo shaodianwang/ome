@@ -1,7 +1,9 @@
 package placement
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
@@ -157,7 +159,7 @@ func TestSetHoldsNoReservation(t *testing.T) {
 func TestRetainOnlyReleasesDeadGangs(t *testing.T) {
 	p := New()
 	p.Choose("live", topology.FreeByDomain{"a": 5}, 2) // reserves 2 in a
-	p.Choose("dead", topology.FreeByDomain{"a": 5}, 2) // reserves 2 more in a
+	p.Choose("dead", topology.FreeByDomain{"b": 5}, 2) // reserves 2 in b
 
 	if released := p.RetainOnly(map[string]bool{"live": true}); released != 1 {
 		t.Fatalf("RetainOnly released %d, want 1", released)
@@ -168,22 +170,117 @@ func TestRetainOnlyReleasesDeadGangs(t *testing.T) {
 	if _, ok := p.Get("live"); !ok {
 		t.Fatal("live gang's pin must be retained")
 	}
-	// dead's reservation was returned: a of 5 now shows 3 free (5 - live's 2), so a
-	// gang of 3 fits where before (5 - 2 - 2 = 1) it did not.
-	if d, ok := p.Choose("new", topology.FreeByDomain{"a": 5}, 3); !ok || d != "a" {
-		t.Fatalf("new Choose = %q,%v want a,true (dead reservation reclaimed)", d, ok)
+	// dead's reservation was returned, so b can be claimed again.
+	if d, ok := p.Choose("new", topology.FreeByDomain{"b": 5}, 3); !ok || d != "b" {
+		t.Fatalf("new Choose = %q,%v want b,true (dead reservation reclaimed)", d, ok)
 	}
 }
 
-// TestPartnerGangFollowsSharedGroup: prefill and decode share one placement
-// group, so the partner gang lands in the same domain the first gang pinned —
-// this is the co-location mechanism, even with a different size.
-func TestPartnerGangFollowsSharedGroup(t *testing.T) {
+// TestPinnedGroupFollows verifies repeat decisions for one gang. Partner gang
+// identities are rejected by the plugin until a multi-gang reservation contract
+// is implemented.
+func TestPinnedGroupFollows(t *testing.T) {
 	p := New()
 	free := topology.FreeByDomain{"x": 20, "y": 8}
 	d1, _ := p.Choose("svc-a", free, 8)  // prefill gang -> y (fullest that fits 8)
 	d2, ok := p.Choose("svc-a", free, 4) // decode gang, same group, smaller
 	if !ok || d2 != d1 {
 		t.Fatalf("partner Choose = %q,%v want %q (co-located via shared group)", d2, ok, d1)
+	}
+}
+
+func TestReservationsConflictOnOverlappingPhysicalNodes(t *testing.T) {
+	p := New()
+	if d, _, ok := p.ChooseInTopologyOnNodes("A", "fabric-a", topology.FreeByDomain{"a": 2}, map[string][]string{"a": {"n1", "n2"}}, 2); !ok || d != "a" {
+		t.Fatalf("A Choose = %q,%v want shared,true", d, ok)
+	}
+	if d, _, ok := p.ChooseInTopologyOnNodes("B", "fabric-b", topology.FreeByDomain{"b": 2}, map[string][]string{"b": {"n1", "n2"}}, 1); ok || d != "" {
+		t.Fatalf("B Choose = %q,%v want no fit; topology keys overlap the same physical nodes", d, ok)
+	}
+	if d, _, ok := p.ChooseInTopologyOnNodes("C", "fabric-b", topology.FreeByDomain{"c": 2}, map[string][]string{"c": {"n3", "n4"}}, 1); !ok || d != "c" {
+		t.Fatalf("C Choose = %q,%v want c,true for disjoint physical nodes", d, ok)
+	}
+}
+
+func TestReleaseIfRejectsStaleCommitmentOwner(t *testing.T) {
+	p := New()
+	_, first, ok := p.ChooseInTopologyOnNodes("gang", "fabric", topology.FreeByDomain{"a": 1}, map[string][]string{"a": {"n1"}}, 1)
+	if !ok {
+		t.Fatal("first pin failed")
+	}
+	if !p.ReleaseIf("gang", first, nil) {
+		t.Fatal("first owner should release its commitment")
+	}
+	_, second, ok := p.ChooseInTopologyOnNodes("gang", "fabric", topology.FreeByDomain{"b": 1}, map[string][]string{"b": {"n2"}}, 1)
+	if !ok || second == first {
+		t.Fatal("retry must receive a distinct ownership token")
+	}
+	if p.ReleaseIf("gang", first, nil) {
+		t.Fatal("stale owner released the retry commitment")
+	}
+	if domain, _, _, pinned := p.GetOwned("gang"); !pinned || domain.Name != "b" {
+		t.Fatalf("retry pin = %+v,%v, want b,true", domain, pinned)
+	}
+}
+
+func TestCommitmentDoesNotMatchRecreatedOwner(t *testing.T) {
+	p := New()
+	_, oldToken, ok := p.ChooseForOwnerInTopologyOnNodes("team/pf", "old-uid", "fabric",
+		topology.FreeByDomain{"a": 1}, map[string][]string{"a": {"n1"}}, 1)
+	if !ok {
+		t.Fatal("old owner failed to pin")
+	}
+	_, _, _, found, ownerMatch := p.GetOwnedBy("team/pf", "new-uid")
+	if !found || ownerMatch {
+		t.Fatalf("GetOwnedBy recreated owner = found %v match %v, want true,false", found, ownerMatch)
+	}
+	if _, _, ok := p.ChooseForOwnerInTopologyOnNodes("team/pf", "new-uid", "fabric",
+		topology.FreeByDomain{"b": 1}, map[string][]string{"b": {"n2"}}, 1); ok {
+		t.Fatal("new owner inherited old same-name commitment")
+	}
+	if !p.ReleaseIf("team/pf", oldToken, nil) {
+		t.Fatal("old owned commitment should be releasable")
+	}
+}
+
+func TestReleaseIfSerializesSiblingRejectionBeforeRepin(t *testing.T) {
+	p := New()
+	_, token, ok := p.ChooseInTopologyOnNodes("gang", "fabric", topology.FreeByDomain{"a": 1}, map[string][]string{"a": {"n1"}}, 1)
+	if !ok {
+		t.Fatal("initial pin failed")
+	}
+	callbackStarted := make(chan struct{})
+	allowCallbackReturn := make(chan struct{})
+	releaseDone := make(chan struct{})
+	go func() {
+		p.ReleaseIf("gang", token, func() {
+			close(callbackStarted)
+			<-allowCallbackReturn
+		})
+		close(releaseDone)
+	}()
+	<-callbackStarted
+
+	repinDone := make(chan struct{})
+	repinStarted := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		close(repinStarted)
+		p.ChooseInTopologyOnNodes("gang", "fabric", topology.FreeByDomain{"b": 1}, map[string][]string{"b": {"n2"}}, 1)
+		close(repinDone)
+	}()
+	<-repinStarted
+	select {
+	case <-repinDone:
+		t.Fatal("retry pinned before old-attempt sibling rejection completed")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(allowCallbackReturn)
+	<-releaseDone
+	wg.Wait()
+	if domain, _, _, pinned := p.GetOwned("gang"); !pinned || domain.Name != "b" {
+		t.Fatalf("retry pin = %+v,%v, want b,true", domain, pinned)
 	}
 }

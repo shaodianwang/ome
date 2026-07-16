@@ -2,9 +2,14 @@ package gangpack
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/klog/v2"
+	"k8s.io/kube-scheduler/framework"
+
+	"github.com/ome-projects/ome/scheduler/pkg/placement"
 )
 
 // Reserve drains one whole node from the gang's domain reservation: this member
@@ -15,12 +20,13 @@ import (
 // the not-yet-placed capacity, and draining it as members land avoids
 // double-counting against the snapshot. A pod that is not a pinned gang member
 // reserves nothing.
-func (g *GangPack) Reserve(_ context.Context, _ *framework.CycleState, pod *v1.Pod, _ string) *framework.Status {
-	if g.pgReader == nil {
-		return nil
-	}
-	if gang, ok := resolveGang(pod, g.pgReader); ok {
-		g.pins.Place(gang.key)
+func (g *GangPack) Reserve(_ context.Context, state framework.CycleState, _ *v1.Pod, _ string) *framework.Status {
+	if pin := readPin(state); pin != nil {
+		_, drained := g.pins.PlaceIf(pin.gang.key, pin.commitment)
+		if drained {
+			g.clearFailedDomains(pin.gang)
+			g.activateReservationBlocked()
+		}
 	}
 	return nil
 }
@@ -42,21 +48,156 @@ func (g *GangPack) Reserve(_ context.Context, _ *framework.CycleState, pod *v1.P
 // The gang key comes from the pod's OWN pod-group label, not a PodGroup lookup, so
 // the pin and reservation are still released even if the PodGroup was deleted
 // mid-flight (which is when Unreserve tends to fire) — otherwise they would leak.
-func (g *GangPack) Unreserve(_ context.Context, _ *framework.CycleState, pod *v1.Pod, _ string) {
-	ns, name, ok := podGroupNameOf(pod)
-	if !ok {
+func (g *GangPack) Unreserve(_ context.Context, state framework.CycleState, pod *v1.Pod, _ string) {
+	pin := readPin(state)
+	if pin == nil {
 		return
 	}
-	key := ns + "/" + name
+	g.releaseAttempt(pin, pod, false)
+}
+
+func (g *GangPack) releaseAttempt(pin *pinState, pod *v1.Pod, failedDomain bool) bool {
+	key := pin.gang.key
+	token := pin.commitment
 	// Count the unwind once per gang: only the first member's Unreserve actually
-	// releases the pin; rejected siblings re-enter here and find it already gone.
-	if g.pins.Release(key) {
-		gangUnwindTotal.Inc()
-		pinnedGroups.Set(float64(g.pins.Len()))
-	}
-	g.handle.IterateOverWaitingPods(func(wp framework.WaitingPod) {
-		if sameGang(wp.GetPod(), key) {
-			wp.Reject(Name, "gang "+key+" unwound after a member failed to schedule")
+	// releases the matching attempt. Rejected siblings from an older attempt cannot
+	// release or reject a newer retry because the token must still own the pin.
+	released := g.pins.ReleaseIf(key, token, func() {
+		if failedDomain {
+			g.markFailedDomain(pin.gang, placement.Domain{TopologyKey: pin.topologyKey, Name: pin.domain})
+		}
+		if g.handle != nil {
+			g.handle.IterateOverWaitingPods(func(wp framework.WaitingPod) {
+				if sameGang(wp.GetPod(), key) && g.attemptFor(wp.GetPod()) == token {
+					wp.Reject(Name, "gang "+key+" unwound after a member failed to schedule")
+				}
+			})
 		}
 	})
+	if released {
+		gangUnwindTotal.Inc()
+		pinnedGroups.Set(float64(g.pins.Len()))
+		g.activateReservationBlocked()
+	}
+	g.forgetAttempt(pod, token)
+	return released
+}
+
+func (g *GangPack) hasWaitingAttempt(key string, token uint64) bool {
+	if g.handle == nil {
+		return false
+	}
+	found := false
+	g.handle.IterateOverWaitingPods(func(wp framework.WaitingPod) {
+		if sameGang(wp.GetPod(), key) && g.attemptFor(wp.GetPod()) == token {
+			found = true
+		}
+	})
+	return found
+}
+
+// releaseStaleGang removes a name-keyed commitment when its PodGroup is absent.
+// The immutable UID check in pinGang handles the corresponding recreate case.
+func (g *GangPack) releaseStaleGang(key string) {
+	if g.pins == nil {
+		return
+	}
+	_, token, _, found := g.pins.GetOwned(key)
+	if !found {
+		return
+	}
+	g.releaseAttempt(&pinState{gang: gangInfo{key: key}, commitment: token}, nil, false)
+	g.failedMu.Lock()
+	for failedKey := range g.failedDomains {
+		if strings.HasPrefix(failedKey, key+"\x00") {
+			delete(g.failedDomains, failedKey)
+		}
+	}
+	g.failedMu.Unlock()
+}
+
+func podAttemptKey(pod *v1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	if pod.UID != "" {
+		return string(pod.UID)
+	}
+	if pod.Name != "" {
+		return pod.Namespace + "/" + pod.Name
+	}
+	// Unit-test pods may omit API identity; the same object is retained by the
+	// fake WaitingPod, so pointer identity is sufficient there.
+	return fmt.Sprintf("%p", pod)
+}
+
+func (g *GangPack) rememberAttempt(pod *v1.Pod, token uint64) {
+	key := podAttemptKey(pod)
+	if key == "" {
+		return
+	}
+	g.attemptMu.Lock()
+	if g.attemptByPod == nil {
+		g.attemptByPod = make(map[string]uint64)
+	}
+	g.attemptByPod[key] = token
+	g.attemptMu.Unlock()
+}
+
+func (g *GangPack) attemptFor(pod *v1.Pod) uint64 {
+	key := podAttemptKey(pod)
+	g.attemptMu.RLock()
+	token := g.attemptByPod[key]
+	g.attemptMu.RUnlock()
+	return token
+}
+
+func (g *GangPack) forgetAttempt(pod *v1.Pod, token uint64) {
+	key := podAttemptKey(pod)
+	g.attemptMu.Lock()
+	if g.attemptByPod[key] == token {
+		delete(g.attemptByPod, key)
+	}
+	g.attemptMu.Unlock()
+}
+
+func (g *GangPack) rememberReservationBlocked(pod *v1.Pod) {
+	key := podAttemptKey(pod)
+	if key == "" {
+		return
+	}
+	g.blockedMu.Lock()
+	if g.reservationBlocked == nil {
+		g.reservationBlocked = make(map[string]*v1.Pod)
+	}
+	g.reservationBlocked[key] = pod
+	g.blockedMu.Unlock()
+}
+
+func (g *GangPack) forgetReservationBlocked(pod *v1.Pod) {
+	g.blockedMu.Lock()
+	delete(g.reservationBlocked, podAttemptKey(pod))
+	g.blockedMu.Unlock()
+}
+
+func (g *GangPack) activateReservationBlocked() {
+	if g.handle == nil {
+		return
+	}
+	g.blockedMu.Lock()
+	pods := g.reservationBlocked
+	g.reservationBlocked = make(map[string]*v1.Pod)
+	g.blockedMu.Unlock()
+	if len(pods) > 0 {
+		g.handle.Activate(klog.Background(), pods)
+	}
+}
+
+// PostBind clears successful-cycle bookkeeping. Failed binding cycles take the
+// Unreserve path instead.
+func (g *GangPack) PostBind(_ context.Context, state framework.CycleState, pod *v1.Pod, _ string) {
+	if pin := readPin(state); pin != nil {
+		g.forgetAttempt(pod, pin.commitment)
+	}
+	g.forgetReservationBlocked(pod)
 }

@@ -3,9 +3,11 @@ package gangpack
 import (
 	"context"
 	"testing"
+	"time"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kube-scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
@@ -17,12 +19,12 @@ import (
 // Unschedulable.
 func TestPinGang(t *testing.T) {
 	g := &GangPack{pins: placement.New()}
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("n1", "a", "4")), nodeInfo(gpuNode("n2", "a", "4")), // a: 2 free
 		nodeInfo(gpuNode("n3", "b", "4")), nodeInfo(gpuNode("n4", "b", "4")), nodeInfo(gpuNode("n5", "b", "4")), // b: 3 free
 	}
 	pod := gpuPod("4")
-	st := framework.NewCycleState()
+	st := newCycleState()
 
 	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, pod)
 	if !status.IsSuccess() {
@@ -37,7 +39,7 @@ func TestPinGang(t *testing.T) {
 	}
 
 	// A gang larger than any domain cannot be placed.
-	_, s2 := g.pinGang(framework.NewCycleState(), nodes, gangInfo{key: "team/big", minMember: 10, topologyKey: testKey}, pod)
+	_, s2 := g.pinGang(newCycleState(), nodes, gangInfo{key: "team/big", minMember: 10, topologyKey: testKey}, pod)
 	if s2.IsSuccess() || s2.Code() != framework.Unschedulable {
 		t.Fatalf("oversized gang status = %v, want Unschedulable", s2)
 	}
@@ -52,12 +54,13 @@ func TestPinGang(t *testing.T) {
 func TestPinGangAdoptsBoundMembers(t *testing.T) {
 	g := &GangPack{pins: placement.New()}
 	placed := gangPod("team", "pf") // a member already bound in domain a
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("a1", "a", "4"), placed),
 		nodeInfo(gpuNode("a2", "a", "4")),
+		nodeInfo(gpuNode("a3", "a", "4")),
 		nodeInfo(gpuNode("b1", "b", "4")),
 	}
-	st := framework.NewCycleState()
+	st := newCycleState()
 
 	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey}, gangPod("team", "pf"))
 	if !status.IsSuccess() {
@@ -66,14 +69,18 @@ func TestPinGangAdoptsBoundMembers(t *testing.T) {
 	if d, ok := g.pins.Get("team/pf"); !ok || d != "a" {
 		t.Fatalf("adopted pin = %q,%v, want a,true", d, ok)
 	}
-	if !g.pins.Committed("team/pf") {
-		t.Fatal("adopted pin should be committed (remaining==0)")
+	if g.pins.Committed("team/pf") {
+		t.Fatal("partial adopted gang must retain reservations for missing members")
+	}
+	reservations := g.pins.Reservations()
+	if len(reservations) != 1 || reservations[0].Remaining != 2 {
+		t.Fatalf("adopted reservation = %+v, want 2 remaining members", reservations)
 	}
 	if pin := readPin(st); pin == nil || pin.domain != "a" {
 		t.Fatalf("cycle pin = %+v, want domain a", pin)
 	}
-	if res == nil || !res.NodeNames.Equal(sets.New("a1", "a2")) {
-		t.Fatalf("narrowed to %v, want {a1,a2}", res.NodeNames)
+	if res == nil || !res.NodeNames.Equal(sets.New("a1", "a2", "a3")) {
+		t.Fatalf("narrowed to %v, want {a1,a2,a3}", res.NodeNames)
 	}
 }
 
@@ -84,11 +91,11 @@ func TestPinGangAdoptsBoundMembers(t *testing.T) {
 func TestPinGangReplansStalePin(t *testing.T) {
 	g := &GangPack{pins: placement.New()}
 	g.pins.Set("team/pf", "gone") // pinned to a domain that no longer exists
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("b1", "b", "4")),
 		nodeInfo(gpuNode("b2", "b", "4")),
 	}
-	st := framework.NewCycleState()
+	st := newCycleState()
 
 	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gpuPod("4"))
 	if !status.IsSuccess() {
@@ -99,6 +106,41 @@ func TestPinGangReplansStalePin(t *testing.T) {
 	}
 	if res == nil || !res.NodeNames.Equal(sets.New("b1", "b2")) {
 		t.Fatalf("narrowed to %v, want {b1,b2}", res.NodeNames)
+	}
+}
+
+func TestPinGangDoesNotReuseRecreatedPodGroupPin(t *testing.T) {
+	waitingPod := gangPod("team", "pf")
+	waitingPod.Name = "old-waiter"
+	waiter := &fakeWaitingPod{pod: waitingPod}
+	g := &GangPack{pins: placement.New(), handle: &fakeHandle{waiting: []framework.WaitingPod{waiter}}}
+	_, oldToken, ok := g.pins.ChooseForOwnerInTopologyOnNodes("team/pf", "old-uid", testKey,
+		topology.FreeByDomain{"old": 1}, map[string][]string{"old": {"old-1"}}, 1)
+	if !ok || oldToken == 0 {
+		t.Fatal("failed to establish old PodGroup commitment")
+	}
+	g.rememberAttempt(waitingPod, oldToken)
+	nodes := []framework.NodeInfo{nodeInfo(gpuNode("new-1", "new", "4"))}
+	state := newCycleState()
+	_, status := g.pinGang(state, nodes, gangInfo{
+		key: "team/pf", uid: "new-uid", minMember: 1, topologyKey: testKey,
+	}, gangGPUPod("team", "pf", "4"))
+	if status.Code() != framework.Unschedulable {
+		t.Fatalf("first recreated PodGroup cycle = %v, want stale-attempt unwind", status)
+	}
+	if !waiter.rejected {
+		t.Fatal("old PodGroup waiter was not rejected before the recreated group retried")
+	}
+	state = newCycleState()
+	_, status = g.pinGang(state, nodes, gangInfo{
+		key: "team/pf", uid: "new-uid", minMember: 1, topologyKey: testKey,
+	}, gangGPUPod("team", "pf", "4"))
+	if !status.IsSuccess() || readPin(state).domain != "new" {
+		t.Fatalf("recreated PodGroup pin = %+v, %v, want new domain", readPin(state), status)
+	}
+	_, token, _, found, ownerMatch := g.pins.GetOwnedBy("team/pf", "new-uid")
+	if !found || !ownerMatch || token == oldToken {
+		t.Fatalf("new commitment = token %d found=%v ownerMatch=%v; old token=%d", token, found, ownerMatch, oldToken)
 	}
 }
 
@@ -116,12 +158,12 @@ func TestPinGangReplansOnFullDomain(t *testing.T) {
 		t.Fatalf("precondition: Choose = %q,%v, want a,true", d, ok)
 	}
 	// Snapshot now: "a" is full (its node occupied by another gang's pod), "b" free.
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("a1", "a", "4"), gpuPod("4")), // occupied by a non-pf pod
 		nodeInfo(gpuNode("b1", "b", "4")),
 		nodeInfo(gpuNode("b2", "b", "4")),
 	}
-	st := framework.NewCycleState()
+	st := newCycleState()
 
 	res, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
 	if !status.IsSuccess() {
@@ -148,13 +190,13 @@ func TestPinGangReplansOnFullDomain(t *testing.T) {
 func TestPinGangReplansOffCordonedDomain(t *testing.T) {
 	g := &GangPack{pins: placement.New()}
 	g.pins.Set("team/pf", "a") // pinned to a
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(cordoned(gpuNode("a1", "a", "4"))), // a: cordoned (has gpu, unschedulable)
 		nodeInfo(cordoned(gpuNode("a2", "a", "4"))),
 		nodeInfo(gpuNode("b1", "b", "4")), // b: schedulable
 		nodeInfo(gpuNode("b2", "b", "4")),
 	}
-	_, status := g.pinGang(framework.NewCycleState(), nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
+	_, status := g.pinGang(newCycleState(), nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
 	if !status.IsSuccess() {
 		t.Fatalf("pinGang status = %v, want Success (re-plan off the cordoned domain)", status)
 	}
@@ -171,47 +213,44 @@ func TestPinGangKeepsPinWhenMemberBound(t *testing.T) {
 	g.pins.Set("team/pf", "a")
 	// Domain "a": one node holds a pf member (bound), a second node is full with
 	// another gang's pod — so "a" cannot fit a fresh member, but pf lives here.
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")), // pf's own bound member
 		nodeInfo(gpuNode("a2", "a", "4"), gpuPod("4")),           // occupied by another gang
 		nodeInfo(gpuNode("b1", "b", "4")),                        // free elsewhere
 	}
-	st := framework.NewCycleState()
+	st := newCycleState()
 
 	_, status := g.pinGang(st, nodes, gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
-	if !status.IsSuccess() {
-		t.Fatalf("pinGang status = %v, want Success (keep pin, don't strand bound member)", status)
+	if status.Code() != framework.Unschedulable {
+		t.Fatalf("pinGang status = %v, want Unschedulable while pinned domain cannot complete", status)
 	}
 	if d, ok := g.pins.Get("team/pf"); !ok || d != "a" {
 		t.Fatalf("pin = %q,%v, want a,true (must not re-plan away from a bound member)", d, ok)
 	}
 }
 
-// TestPreFilterSkips: PreFilter returns Skip (no constraint, Filter skipped) when
-// the plugin has no PodGroup reader wired yet, when the pod carries no pod-group
-// label (not a gang member), or when its PodGroup is present but declares no domain
-// gang (non-positive minMember, or no topology key). None of these touch the node
-// snapshot, so no Handle is needed.
-func TestPreFilterSkips(t *testing.T) {
+// TestPreFilterClassifiesPods verifies standalone pods continue to Filter for the
+// reservation barrier, while every labeled but unresolved/invalid pod fails closed.
+func TestPreFilterClassifiesPods(t *testing.T) {
 	ctx := context.Background()
 
 	nilReader := &GangPack{pins: placement.New()} // pgReader nil -> inert
-	if _, st := nilReader.PreFilter(ctx, framework.NewCycleState(), gangPod("team", "x")); st.Code() != framework.Skip {
-		t.Fatalf("nil-reader PreFilter = %v, want Skip", st)
+	if _, st := nilReader.PreFilter(ctx, newCycleState(), gangPod("team", "x"), nil); st.Code() != framework.Unschedulable {
+		t.Fatalf("nil-reader PreFilter = %v, want Unschedulable", st)
 	}
 
-	// No pod-group label -> not a gang member -> Skip.
+	// No pod-group label -> Success, keeping Filter active for reservation checks.
 	nonMember := &GangPack{pins: placement.New(), pgReader: fakeReader{}}
-	res, st := nonMember.PreFilter(ctx, framework.NewCycleState(), gangPod("team", ""))
-	if res != nil || st.Code() != framework.Skip {
-		t.Fatalf("non-member PreFilter = %v,%v, want nil,Skip", res, st)
+	res, st := nonMember.PreFilter(ctx, newCycleState(), gangPod("team", ""), nil)
+	if res != nil || !st.IsSuccess() {
+		t.Fatalf("non-member PreFilter = %v,%v, want nil,Success", res, st)
 	}
 
-	// PodGroup present but declares no topology key -> nothing to pin -> Skip.
+	// PodGroup present but declares no topology key -> fail closed.
 	noTopo := &GangPack{pins: placement.New(), pgReader: fakeReader{"team/x": {min: 3, topo: ""}}}
-	res, st = noTopo.PreFilter(ctx, framework.NewCycleState(), gangPod("team", "x"))
-	if res != nil || st.Code() != framework.Skip {
-		t.Fatalf("no-topology-key PreFilter = %v,%v, want nil,Skip", res, st)
+	res, st = noTopo.PreFilter(ctx, newCycleState(), gangPod("team", "x"), nil)
+	if res != nil || st.Code() != framework.Unschedulable {
+		t.Fatalf("no-topology-key PreFilter = %v,%v, want nil,Unschedulable", res, st)
 	}
 }
 
@@ -222,11 +261,169 @@ func TestPreFilterSkips(t *testing.T) {
 // break all-or-nothing; holding requeues it until the PodGroup appears.
 func TestPreFilterHoldsWhenPodGroupMissing(t *testing.T) {
 	g := &GangPack{pins: placement.New(), pgReader: fakeReader{}} // reader present, group absent
-	res, st := g.PreFilter(context.Background(), framework.NewCycleState(), gangPod("team", "pf"))
+	res, st := g.PreFilter(context.Background(), newCycleState(), gangPod("team", "pf"), nil)
 	if res != nil {
 		t.Fatalf("PreFilter result = %v, want nil", res)
 	}
 	if st.Code() != framework.Unschedulable {
 		t.Fatalf("PreFilter for uncached PodGroup = %v, want Unschedulable (hold, not Skip)", st)
+	}
+}
+
+func TestPreFilterUsesConfiguredTopologyWhenPodGroupHasNoOverride(t *testing.T) {
+	pod := gangGPUPod("team", "pf", "4")
+	g := &GangPack{
+		handle:      &fakeHandle{snapshot: []framework.NodeInfo{nodeInfo(gpuNode("n1", "a", "4"))}},
+		topologyKey: testKey,
+		pins:        placement.New(),
+		pgReader:    fakeReader{"team/pf": {min: 1, to: time.Minute}},
+	}
+	state := newCycleState()
+	result, status := g.PreFilter(context.Background(), state, pod, g.handle.(*fakeHandle).snapshot)
+	if !status.IsSuccess() {
+		t.Fatalf("PreFilter = %v, want configured topology fallback to succeed", status)
+	}
+	if result == nil || !result.NodeNames.Equal(sets.New("n1")) {
+		t.Fatalf("nodes = %v, want n1", result)
+	}
+	if pin := readPin(state); pin == nil || pin.topologyKey != testKey {
+		t.Fatalf("pin = %+v, want configured topology key", pin)
+	}
+}
+
+func TestPreFilterHoldsInvalidGangConfiguration(t *testing.T) {
+	cases := []struct {
+		name   string
+		facts  fakeReader
+		mutate func(*v1.Pod)
+	}{
+		{name: "non-positive minMember", facts: fakeReader{"team/pf": {min: 0, topo: testKey}}},
+		{name: "missing topology key", facts: fakeReader{"team/pf": {min: 2}}},
+		{name: "unsupported partner placement group", facts: fakeReader{"team/pf": {min: 2, topo: testKey, to: time.Minute}}, mutate: func(p *v1.Pod) {
+			p.Labels[placementGroupLabel] = "service"
+		}},
+		{name: "unsupported empty partner placement group", facts: fakeReader{"team/pf": {min: 2, topo: testKey, to: time.Minute}}, mutate: func(p *v1.Pod) {
+			p.Labels[placementGroupLabel] = ""
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := gangPod("team", "pf")
+			if tc.mutate != nil {
+				tc.mutate(pod)
+			}
+			g := &GangPack{
+				pins:                           placement.New(),
+				pgReader:                       tc.facts,
+				podGroupTopologyKeyAnnotation:  topologyKeyAnnotation,
+				unsupportedPlacementGroupLabel: placementGroupLabel,
+			}
+			_, status := g.PreFilter(context.Background(), newCycleState(), pod, nil)
+			if status.Code() != framework.Unschedulable {
+				t.Fatalf("PreFilter = %v, want Unschedulable", status)
+			}
+			if _, pinned := g.pins.Get("team/pf"); pinned {
+				t.Fatal("invalid gang must never be pinned")
+			}
+		})
+	}
+}
+
+func TestPreFilterRejectsPlacementGroupOnPodGroup(t *testing.T) {
+	for _, value := range []string{"service", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			g := &GangPack{
+				pins:                           placement.New(),
+				podGroupTopologyKeyAnnotation:  topologyKeyAnnotation,
+				unsupportedPlacementGroupLabel: placementGroupLabel,
+				pgReader: fakePlacementReader{
+					fakeReader: fakeReader{"team/pf": {min: 2, topo: testKey, to: time.Minute}},
+					group:      value,
+				},
+			}
+			_, status := g.PreFilter(context.Background(), newCycleState(), gangPod("team", "pf"), nil)
+			if status.Code() != framework.Unschedulable {
+				t.Fatalf("PreFilter = %v, want explicit unsupported placement-group rejection", status)
+			}
+		})
+	}
+}
+
+func TestPinGangUsesAllHeterogeneousMemberTemplates(t *testing.T) {
+	current := gangGPUPod("team", "pf", "4")
+	current.Name = "small"
+	large := gangGPUPod("team", "pf", "8")
+	large.Name = "large"
+	g := &GangPack{
+		pins:      placement.New(),
+		podLister: fakeGangPodLister{pods: []*v1.Pod{current, large}},
+	}
+	nodes := []framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4")), nodeInfo(gpuNode("a2", "a", "4")),
+		nodeInfo(gpuNode("b1", "b", "8")), nodeInfo(gpuNode("b2", "b", "8")),
+	}
+	result, status := g.pinGang(newCycleState(), nodes,
+		gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, current)
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang = %v, want Success", status)
+	}
+	if domain, _ := g.pins.Get("team/pf"); domain != "b" {
+		t.Fatalf("pin = %q, want b (only domain fitting the large sibling)", domain)
+	}
+	if !result.NodeNames.Equal(sets.New("b1", "b2")) {
+		t.Fatalf("candidates = %v, want b nodes", result.NodeNames)
+	}
+}
+
+func TestPinGangPreservesMatchingForConstrainedSibling(t *testing.T) {
+	current := gangGPUPod("team", "pf", "4")
+	current.Name = "flexible"
+	constrained := gangGPUPod("team", "pf", "4")
+	constrained.Name = "constrained"
+	constrained.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": "n1"}
+	n1, n2 := gpuNode("n1", "a", "4"), gpuNode("n2", "a", "4")
+	n1.Labels["kubernetes.io/hostname"] = "n1"
+	n2.Labels["kubernetes.io/hostname"] = "n2"
+	g := &GangPack{pins: placement.New(), podLister: fakeGangPodLister{pods: []*v1.Pod{current, constrained}}}
+	result, status := g.pinGang(newCycleState(), []framework.NodeInfo{nodeInfo(n1), nodeInfo(n2)},
+		gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, current)
+	if !status.IsSuccess() {
+		t.Fatalf("pinGang = %v, want Success", status)
+	}
+	if !result.NodeNames.Equal(sets.New("n2")) {
+		t.Fatalf("flexible candidates = %v, want only n2 so n1 remains for constrained sibling", result.NodeNames)
+	}
+}
+
+func TestPinGangFailsClosedWhenBoundMembersAreSplit(t *testing.T) {
+	member := func() *v1.Pod {
+		p := gangGPUPod("team", "pf", "4")
+		return p
+	}
+	nodes := []framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "8"), member()),
+		nodeInfo(gpuNode("b1", "b", "8"), member()),
+		nodeInfo(gpuNode("a2", "a", "8")),
+	}
+	g := &GangPack{pins: placement.New()}
+	_, status := g.pinGang(newCycleState(), nodes,
+		gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey}, gangGPUPod("team", "pf", "4"))
+	if status.Code() != framework.UnschedulableAndUnresolvable {
+		t.Fatalf("split gang status = %v, want UnschedulableAndUnresolvable", status)
+	}
+	if _, pinned := g.pins.Get("team/pf"); pinned {
+		t.Fatal("split gang must not be adopted into an arbitrary domain")
+	}
+}
+
+func TestPinGangWaitsForMissingMemberTemplates(t *testing.T) {
+	current := gangGPUPod("team", "pf", "4")
+	current.Name = "only"
+	g := &GangPack{pins: placement.New(), podLister: fakeGangPodLister{pods: []*v1.Pod{current}}}
+	_, status := g.pinGang(newCycleState(), []framework.NodeInfo{
+		nodeInfo(gpuNode("a1", "a", "4")), nodeInfo(gpuNode("a2", "a", "4")),
+	}, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, current)
+	if status.Code() != framework.Unschedulable {
+		t.Fatalf("pinGang = %v, want Unschedulable until all templates are visible", status)
 	}
 }

@@ -7,7 +7,9 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kube-scheduler/framework"
+	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
@@ -21,9 +23,9 @@ func gpuNode(name, domain, alloc string) *v1.Node {
 	if domain != "" {
 		labels[testKey] = domain
 	}
-	status := v1.NodeStatus{}
+	status := v1.NodeStatus{Allocatable: v1.ResourceList{v1.ResourcePods: resource.MustParse("110")}}
 	if alloc != "" {
-		status.Allocatable = v1.ResourceList{gpu: resource.MustParse(alloc)}
+		status.Allocatable[gpu] = resource.MustParse(alloc)
 	}
 	return &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Status: status}
 }
@@ -85,7 +87,7 @@ func TestNodeSchedulable(t *testing.T) {
 // framework's Filter then rejects, wedging the gang.
 func TestFreeByDomainExcludesUnschedulable(t *testing.T) {
 	pod := gpuPod("4")
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(cordoned(gpuNode("a1", "a", "4"))),     // a: cordoned
 		nodeInfo(tainted(gpuNode("a2", "a", "4"), "x")), // a: untolerated taint
 		nodeInfo(gpuNode("b1", "b", "4")),               // b: free
@@ -99,8 +101,8 @@ func TestFreeByDomainExcludesUnschedulable(t *testing.T) {
 	}
 }
 
-func nodeInfo(node *v1.Node, pods ...*v1.Pod) *framework.NodeInfo {
-	ni := framework.NewNodeInfo(pods...)
+func nodeInfo(node *v1.Node, pods ...*v1.Pod) framework.NodeInfo {
+	ni := schedulerframework.NewNodeInfo(pods...)
 	ni.SetNode(node)
 	return ni
 }
@@ -123,7 +125,7 @@ func TestDomainOf(t *testing.T) {
 // pod's resource (allocatable > 0 for it) participate; free = the pod fits; an
 // all-occupied domain still appears at 0; irrelevant and no-label nodes ignored.
 func TestFreeByDomain(t *testing.T) {
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("n1", "a", "4")),              // free
 		nodeInfo(gpuNode("n2", "a", "4")),              // free
 		nodeInfo(gpuNode("n3", "a", "4"), gpuPod("4")), // occupied -> a stays 2
@@ -134,9 +136,90 @@ func TestFreeByDomain(t *testing.T) {
 	}
 	// The gang pod declares what it needs (gpu: 4); free-ness comes from that fit.
 	got := freeByDomain(nodes, testKey, gpuPod("4"))
-	want := topology.FreeByDomain{"a": 2, "b": 1, "d": 0}
+	want := topology.FreeByDomain{"a": 2, "b": 1, "c": 0, "d": 0}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("freeByDomain = %v want %v", got, want)
+	}
+}
+
+func TestNodeFitsPodChecksStandardResourcesAndPodCapacity(t *testing.T) {
+	node := gpuNode("n", "a", "4")
+	node.Status.Allocatable[v1.ResourceCPU] = resource.MustParse("2")
+	node.Status.Allocatable[v1.ResourceMemory] = resource.MustParse("2Gi")
+	pod := gangGPUPod("team", "pf", "4")
+	pod.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("1500m")
+	pod.Spec.Containers[0].Resources.Requests[v1.ResourceMemory] = resource.MustParse("1Gi")
+	if !nodeFitsPod(nodeInfo(node), pod) {
+		t.Fatal("pod should fit all advertised resources")
+	}
+	cpuUsed := gpuPod("0")
+	cpuUsed.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("1")
+	if nodeFitsPod(nodeInfo(node, cpuUsed), pod) {
+		t.Fatal("remaining CPU is insufficient")
+	}
+	node.Status.Allocatable[v1.ResourcePods] = resource.MustParse("1")
+	if nodeFitsPod(nodeInfo(node, &v1.Pod{}), gpuPod("1")) {
+		t.Fatal("node pod capacity is exhausted")
+	}
+}
+
+func TestNodeFitsPodChecksSelectorAndRequiredAffinity(t *testing.T) {
+	node := gpuNode("n", "a", "4")
+	node.Labels["pool"] = "serving"
+	pod := gpuPod("4")
+	pod.Spec.NodeSelector = map[string]string{"pool": "other"}
+	if nodeFitsPod(nodeInfo(node), pod) {
+		t.Fatal("nodeSelector mismatch must reject the node")
+	}
+	pod.Spec.NodeSelector = nil
+	pod.Spec.Affinity = &v1.Affinity{NodeAffinity: &v1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{NodeSelectorTerms: []v1.NodeSelectorTerm{{
+			MatchExpressions: []v1.NodeSelectorRequirement{{Key: "pool", Operator: v1.NodeSelectorOpIn, Values: []string{"other"}}},
+		}}},
+	}}
+	if nodeFitsPod(nodeInfo(node), pod) {
+		t.Fatal("required node affinity mismatch must reject the node")
+	}
+}
+
+func TestFeasibleByDomainMatchesHeterogeneousMembers(t *testing.T) {
+	aGPU := gpuNode("a-gpu", "a", "8")
+	aGPU.Labels["kind"] = "gpu"
+	aCPU := gpuNode("a-cpu", "a", "4")
+	aCPU.Labels["kind"] = "cpu"
+	b1 := gpuNode("b1", "b", "8")
+	b1.Labels["kind"] = "cpu"
+	b2 := gpuNode("b2", "b", "8")
+	b2.Labels["kind"] = "cpu"
+	large := gpuPod("8")
+	large.Spec.NodeSelector = map[string]string{"kind": "gpu"}
+	small := gpuPod("4")
+	small.Spec.NodeSelector = map[string]string{"kind": "cpu"}
+
+	got := feasibleByDomain([]framework.NodeInfo{nodeInfo(aGPU), nodeInfo(aCPU), nodeInfo(b1), nodeInfo(b2)}, testKey, []*v1.Pod{large, small})
+	if got["a"] != 2 || got["b"] != 0 {
+		t.Fatalf("feasibleByDomain = %v, want a:2 b:0", got)
+	}
+}
+
+func TestFeasibleAtLeastIgnoresInfeasibleSurplusMember(t *testing.T) {
+	n1 := gpuNode("n1", "a", "4")
+	n1.Labels["pool"] = "usable"
+	n2 := gpuNode("n2", "a", "4")
+	n2.Labels["pool"] = "usable"
+	nodes := []framework.NodeInfo{nodeInfo(n1), nodeInfo(n2)}
+	current := gangGPUPod("team", "pf", "4")
+	impossible := gangGPUPod("team", "pf", "4")
+	impossible.Spec.NodeSelector = map[string]string{"pool": "absent"}
+	feasible := gangGPUPod("team", "pf", "4")
+
+	free := feasibleAtLeastByDomain(nodes, testKey, []*v1.Pod{current, impossible, feasible}, 2)
+	if free["a"] < 2 {
+		t.Fatalf("free = %v, want current plus a feasible surplus member", free)
+	}
+	candidates := matchingCandidateNodesForNeed(nodes, testKey, "a", []*v1.Pod{current, impossible, feasible}, 2)
+	if !candidates.Equal(sets.New("n1", "n2")) {
+		t.Fatalf("candidates = %v, want both nodes", candidates)
 	}
 }
 
@@ -145,7 +228,7 @@ func TestFreeByDomain(t *testing.T) {
 // Only the named gang's pods in the named domain count: a sibling gang's members,
 // this gang's members in another domain, and non-gang pods are all excluded.
 func TestPlacedInDomain(t *testing.T) {
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")),     // pf in a  -> count
 		nodeInfo(gpuNode("a2", "a", "4"), gangPod("team", "pf")),     // pf in a  -> count
 		nodeInfo(gpuNode("a3", "a", "4"), gangPod("team", "decode")), // other gang -> skip

@@ -2,8 +2,12 @@ package gangpack
 
 import (
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/klog/v2"
+	"k8s.io/kube-scheduler/framework"
+	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
+
+func newCycleState() framework.CycleState { return schedulerframework.NewCycleState() }
 
 // fakeWaitingPod is a minimal framework.WaitingPod for tests: it records whether
 // Allow/Reject was called. The embedded nil interface satisfies the methods we
@@ -24,8 +28,18 @@ func (w *fakeWaitingPod) Reject(string, string) { w.rejected = true }
 // scan. The embedded nil Handle satisfies the rest.
 type fakeHandle struct {
 	framework.Handle
-	waiting  []framework.WaitingPod
-	snapshot []*framework.NodeInfo // nodes (with their pods) the bound scan sees
+	waiting   []framework.WaitingPod
+	snapshot  []framework.NodeInfo // nodes (with their pods) the bound scan sees
+	activated map[string]*v1.Pod
+}
+
+func (h *fakeHandle) Activate(_ klog.Logger, pods map[string]*v1.Pod) {
+	if h.activated == nil {
+		h.activated = make(map[string]*v1.Pod)
+	}
+	for key, pod := range pods {
+		h.activated[key] = pod
+	}
 }
 
 func (h *fakeHandle) IterateOverWaitingPods(f func(framework.WaitingPod)) {
@@ -40,20 +54,20 @@ func (h *fakeHandle) SnapshotSharedLister() framework.SharedLister {
 
 // fakeSharedLister / fakeNodeInfoLister expose a fixed node slice; only List is
 // exercised (by boundSiblings). The rest return empty/not-found.
-type fakeSharedLister struct{ nodes []*framework.NodeInfo }
+type fakeSharedLister struct{ nodes []framework.NodeInfo }
 
 func (l *fakeSharedLister) NodeInfos() framework.NodeInfoLister {
 	return &fakeNodeInfoLister{nodes: l.nodes}
 }
 func (l *fakeSharedLister) StorageInfos() framework.StorageInfoLister { return nil }
 
-type fakeNodeInfoLister struct{ nodes []*framework.NodeInfo }
+type fakeNodeInfoLister struct{ nodes []framework.NodeInfo }
 
-func (l *fakeNodeInfoLister) List() ([]*framework.NodeInfo, error) { return l.nodes, nil }
-func (l *fakeNodeInfoLister) HavePodsWithAffinityList() ([]*framework.NodeInfo, error) {
+func (l *fakeNodeInfoLister) List() ([]framework.NodeInfo, error) { return l.nodes, nil }
+func (l *fakeNodeInfoLister) HavePodsWithAffinityList() ([]framework.NodeInfo, error) {
 	return nil, nil
 }
-func (l *fakeNodeInfoLister) HavePodsWithRequiredAntiAffinityList() ([]*framework.NodeInfo, error) {
+func (l *fakeNodeInfoLister) HavePodsWithRequiredAntiAffinityList() ([]framework.NodeInfo, error) {
 	return nil, nil
 }
-func (l *fakeNodeInfoLister) Get(string) (*framework.NodeInfo, error) { return nil, nil }
+func (l *fakeNodeInfoLister) Get(string) (framework.NodeInfo, error) { return nil, nil }

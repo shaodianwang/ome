@@ -23,7 +23,7 @@ func BenchmarkChoose(b *testing.B) {
 				raw[fmt.Sprintf("dom-%d", d)] = 32
 			}
 			for i := 0; i < n; i++ {
-				p.byGroup[fmt.Sprintf("bg-%d", i)] = &commitment{domain: fmt.Sprintf("dom-%d", i%domains), remaining: 1}
+				p.byGroup[fmt.Sprintf("bg-%d", i)] = &commitment{domain: Domain{Name: fmt.Sprintf("dom-%d", i%domains)}, remaining: 1}
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

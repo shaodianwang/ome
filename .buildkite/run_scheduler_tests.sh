@@ -10,7 +10,7 @@
 #
 # No xet/Rust here — the scheduler links no CGo staticlib. It does need
 # envtest binaries for the integration suite, so it reuses run_tests.sh's
-# setup-envtest + IPv6 advertise-address shim (pinned to 1.33 to match the
+# setup-envtest + IPv6 advertise-address shim (pinned to 1.35 to match the
 # module's k8s version, not the root's 1.30).
 set -eu
 
@@ -26,9 +26,9 @@ export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
 make envtest
 
 # Same advertise-address shim as run_tests.sh (mks-cpu IPv6), but the
-# scheduler module targets k8s 1.33, so fetch matching envtest assets.
-echo "--- setup-envtest use 1.33 ---"
-./bin/setup-envtest use 1.33 2>&1 | tee /tmp/envtest.log
+# scheduler module targets k8s 1.35, so fetch matching envtest assets.
+echo "--- setup-envtest use 1.35 ---"
+./bin/setup-envtest use 1.35 2>&1 | tee /tmp/envtest.log
 ENVTEST_ASSETS="$(awk '/^Path:/ {print $2}' /tmp/envtest.log)"
 echo "envtest assets at: $ENVTEST_ASSETS"
 if [ -z "$ENVTEST_ASSETS" ] || [ ! -d "$ENVTEST_ASSETS" ]; then

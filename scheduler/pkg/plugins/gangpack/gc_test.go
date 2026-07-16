@@ -5,7 +5,8 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kube-scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
@@ -14,10 +15,24 @@ import (
 // fakeGangPodLister stands in for the informer-backed live-gang lister.
 type fakeGangPodLister struct {
 	keys map[string]bool
+	pods []*v1.Pod
 	err  error
 }
 
 func (f fakeGangPodLister) liveGangKeys() (map[string]bool, error) { return f.keys, f.err }
+func (f fakeGangPodLister) gangPods(namespace, name string) ([]*v1.Pod, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []*v1.Pod
+	for _, pod := range f.pods {
+		ns, pg, ok := podGroupNameOf(pod)
+		if ok && ns == namespace && pg == name {
+			out = append(out, pod)
+		}
+	}
+	return out, nil
+}
 
 // TestGCPinsReleasesDeadGangs: gcPins releases pins for gangs with no live pods
 // and keeps those that still have some.
@@ -50,7 +65,7 @@ func TestGCReconcilePreservesUnplacedGang(t *testing.T) {
 	}
 
 	// Snapshot: "a" has 3 nodes, none holding a pf member (A never placed).
-	snapshot := []*framework.NodeInfo{
+	snapshot := []framework.NodeInfo{
 		nodeInfo(gpuNode("a1", "a", "4")),
 		nodeInfo(gpuNode("a2", "a", "4")),
 		nodeInfo(gpuNode("a3", "a", "4")),
@@ -71,37 +86,29 @@ func TestGCReconcilePreservesUnplacedGang(t *testing.T) {
 	}
 }
 
-// TestGCReconcilesPartialLeak: once a gang has placed some members, the snapshot
-// tells the true remaining need; a reservation stuck higher than that (a Place
-// that never ran) is reclaimed so the surplus nodes free up for other gangs.
-func TestGCReconcilesPartialLeak(t *testing.T) {
+// TestGCDoesNotReadOrRewriteLiveReservations: lifecycle callbacks own
+// reservation accounting. GC only reaps dead gang keys and must not consult the
+// framework snapshot from its background goroutine.
+func TestGCDoesNotRewriteLiveReservations(t *testing.T) {
 	pins := placement.New()
 	// Gang A pinned "a" reserving 3, but only its actual placement matters now.
 	pins.Choose("team/pf", topology.FreeByDomain{"a": 5}, 3)
 
-	// Snapshot: "a" has 5 nodes; 2 hold pf members (A placed 2), 3 free. A's true
-	// remaining need is 1, but its reservation is still the stuck 3.
-	snapshot := []*framework.NodeInfo{
-		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")),
-		nodeInfo(gpuNode("a2", "a", "4"), gangPod("team", "pf")),
-		nodeInfo(gpuNode("a3", "a", "4")),
-		nodeInfo(gpuNode("a4", "a", "4")),
-		nodeInfo(gpuNode("a5", "a", "4")),
-	}
 	g := &GangPack{
 		pins:      pins,
-		handle:    &fakeHandle{snapshot: snapshot},
-		pgReader:  fakeReader{"team/pf": {min: 3, topo: testKey}},
 		podLister: fakeGangPodLister{keys: map[string]bool{"team/pf": true}},
 	}
 
 	g.gcPins()
 
-	// A now reserves 1 (3 minMember - 2 placed). Of the 3 raw free nodes, A holds 1,
-	// leaving 2 — a gang of 2 must fit. Before reconcile A reserved 3, so eff was
-	// 3 - 3 = 0 and this failed.
-	if d, ok := pins.Choose("team/other", topology.FreeByDomain{"a": 3}, 2); !ok || d != "a" {
-		t.Fatalf("other Choose = %q,%v want a,true (partial leak reclaimed to remaining=1)", d, ok)
+	// GC preserves all three claims; Reserve is the only path that converts them
+	// into assumed-pod occupancy.
+	if _, ok := pins.Choose("team/other", topology.FreeByDomain{"a": 3}, 2); ok {
+		t.Fatal("other gang must remain blocked while A has one outstanding member")
+	}
+	reservations := pins.Reservations()
+	if len(reservations) != 1 || reservations[0].Remaining != 3 {
+		t.Fatalf("reservations = %+v, want three untouched claims", reservations)
 	}
 }
 
@@ -150,5 +157,63 @@ func TestLiveGangKeys(t *testing.T) {
 	}
 	if len(keys) != 2 || !keys["team/pf"] || !keys["team/decode"] {
 		t.Fatalf("keys = %v, want {team/pf, team/decode}", keys)
+	}
+}
+
+func TestLiveGangKeysExcludesTerminalAndDeletingPods(t *testing.T) {
+	deleting := gangPod("team", "deleting")
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	succeeded := gangPod("team", "succeeded")
+	succeeded.Status.Phase = v1.PodSucceeded
+	failed := gangPod("team", "failed")
+	failed.Status.Phase = v1.PodFailed
+	l := &informerPodLister{list: func() ([]*v1.Pod, error) {
+		return []*v1.Pod{deleting, succeeded, failed, gangPod("team", "live")}, nil
+	}}
+	keys, err := l.liveGangKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || !keys["team/live"] {
+		t.Fatalf("live keys = %v, want only team/live", keys)
+	}
+}
+
+func TestGCPinsReleasesRecreatedPodGroupOwner(t *testing.T) {
+	pins := placement.New()
+	if _, _, ok := pins.ChooseForOwnerInTopologyOnNodes("team/pf", "old-uid", testKey,
+		topology.FreeByDomain{"a": 1}, map[string][]string{"a": {"a1"}}, 1); !ok {
+		t.Fatal("failed to establish old owner")
+	}
+	g := &GangPack{
+		pins:      pins,
+		podLister: fakeGangPodLister{keys: map[string]bool{"team/pf": true}},
+		pgReader:  fakeReader{"team/pf": {min: 1, topo: testKey, uid: "new-uid"}},
+	}
+	g.gcPins()
+	if _, ok := pins.Get("team/pf"); ok {
+		t.Fatal("same-name pin from old PodGroup UID survived GC")
+	}
+}
+
+func TestGCPinsRejectsWaitersForTerminalGang(t *testing.T) {
+	pins := placement.New()
+	_, token, ok := pins.ChooseForOwnerInTopologyOnNodes("team/pf", "pg-uid", testKey,
+		topology.FreeByDomain{"a": 1}, map[string][]string{"a": {"a1"}}, 1)
+	if !ok {
+		t.Fatal("failed to establish commitment")
+	}
+	pod := gangPod("team", "pf")
+	pod.Name = "waiter"
+	waiter := &fakeWaitingPod{pod: pod}
+	g := &GangPack{
+		pins: pins, handle: &fakeHandle{waiting: []framework.WaitingPod{waiter}},
+		podLister: fakeGangPodLister{keys: map[string]bool{}},
+	}
+	g.rememberAttempt(pod, token)
+	g.gcPins()
+	if !waiter.rejected {
+		t.Fatal("GC released terminal gang pin without rejecting its Permit waiter")
 	}
 }

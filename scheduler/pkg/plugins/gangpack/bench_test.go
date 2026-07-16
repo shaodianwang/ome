@@ -5,17 +5,16 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kube-scheduler/framework"
 )
 
-// BenchmarkFreeByDomain measures the per-cycle node projection. PreFilter runs
-// this over the WHOLE node snapshot for every gang pod, so its cost scales with
-// cluster size — the sub-benchmarks make that visible.
+// BenchmarkFreeByDomain measures the all-domain projection paid when an unplaced
+// gang chooses or replans a domain. Pinned members match only within their domain.
 func BenchmarkFreeByDomain(b *testing.B) {
 	pod := gpuPod("4")
 	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("nodes=%d", n), func(b *testing.B) {
-			nodes := make([]*framework.NodeInfo, 0, n)
+			nodes := make([]framework.NodeInfo, 0, n)
 			for i := 0; i < n; i++ {
 				// ~18 nodes per NVL72-style domain.
 				dom := fmt.Sprintf("dom-%d", i/18)
@@ -39,10 +38,9 @@ type benchWaitingPod struct {
 func (w *benchWaitingPod) GetPod() *v1.Pod { return w.pod }
 func (w *benchWaitingPod) Allow(string)    {}
 
-// BenchmarkPermitCountWaiting measures the sibling scan in Permit, which walks
-// ALL waiting pods to count same-gang members. With many gangs gating at once,
-// this is the cost each arriving member pays.
-func BenchmarkPermitCountWaiting(b *testing.B) {
+// BenchmarkWaitingPodIteration measures the waiting-pod scan used to release or
+// unwind same-attempt siblings. Permit readiness itself uses reservation state.
+func BenchmarkWaitingPodIteration(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("waiting=%d", n), func(b *testing.B) {
 			waiting := make([]framework.WaitingPod, 0, n)

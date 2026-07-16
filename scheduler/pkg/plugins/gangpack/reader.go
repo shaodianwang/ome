@@ -17,17 +17,22 @@ type informerReader struct {
 	// func rather than the lister interface so the read path is unit-testable
 	// without standing up an informer.
 	getPG func(namespace, name string) (*schedv1alpha1.PodGroup, error)
+	// defaultPermitTimeout is supplied by plugin configuration. Zero means no
+	// fallback; the PodGroup must then declare ScheduleTimeoutSeconds itself.
+	defaultPermitTimeout  time.Duration
+	topologyKeyAnnotation string
+	placementGroupLabel   string
 }
 
 var _ podGroupReader = &informerReader{}
 
 // factsFromPodGroup extracts the placement facts the plugin needs from a
 // PodGroup: the gang size (Spec.MinMember), the domain topology key the workload
-// declared (the topologyKeyAnnotation), and the gate timeout (the standard
-// Spec.ScheduleTimeoutSeconds, falling back to defaultPermitTimeout when unset).
+// declared (using the configured annotation key), and the gate timeout (the standard
+// Spec.ScheduleTimeoutSeconds, falling back to the configured value when unset).
 // A PodGroup without the topology annotation yields an empty key, which
 // resolveGang treats as unresolvable (no domain to pin to).
-func factsFromPodGroup(pg *schedv1alpha1.PodGroup) (minMember int, topologyKey string, timeout time.Duration) {
+func factsFromPodGroup(pg *schedv1alpha1.PodGroup, topologyKeyAnnotation string, defaultPermitTimeout time.Duration) (minMember int, topologyKey string, timeout time.Duration) {
 	if pg == nil {
 		return 0, "", defaultPermitTimeout
 	}
@@ -39,20 +44,28 @@ func factsFromPodGroup(pg *schedv1alpha1.PodGroup) (minMember int, topologyKey s
 }
 
 // get resolves a PodGroup into (minMember, topologyKey, timeout, found). Any
-// lookup error or a missing PodGroup is reported as not-found — the pod is then
-// left unconstrained, never rejected on a transient read.
-func (r *informerReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, found bool) {
+// lookup error or missing PodGroup is reported as not-found; PreFilter holds a
+// labeled member until the informer can validate the group.
+func (r *informerReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, uid string, found bool) {
 	pg, err := r.getPG(namespace, name)
 	if err != nil || pg == nil {
-		return 0, "", 0, false
+		return 0, "", 0, "", false
 	}
-	mm, tk, to := factsFromPodGroup(pg)
-	return mm, tk, to, true
+	mm, tk, to := factsFromPodGroup(pg, r.topologyKeyAnnotation, r.defaultPermitTimeout)
+	return mm, tk, to, string(pg.UID), true
 }
 
-// podGroupSyncTimeout bounds how long newInformerReader waits for the initial
-// PodGroup cache sync before proceeding. A var so tests can shorten it.
-var podGroupSyncTimeout = 30 * time.Second
+func (r *informerReader) placementGroup(namespace, name string) (string, bool) {
+	pg, err := r.getPG(namespace, name)
+	if err != nil || pg == nil {
+		return "", false
+	}
+	if r.placementGroupLabel == "" {
+		return "", false
+	}
+	value, present := pg.Labels[r.placementGroupLabel]
+	return value, present
+}
 
 // newInformerReader builds a PodGroup informer from the scheduler's shared
 // kubeconfig, starts it, and returns a reader backed by its lister. ctx bounds
@@ -63,10 +76,10 @@ var podGroupSyncTimeout = 30 * time.Second
 // normally — gang behavior activates once the CRD and its PodGroups exist and the
 // informer syncs. So the initial cache sync is best-effort and time-bounded: when
 // the CRD is present it returns as soon as the cache syncs (sub-second); when it
-// is absent we stop waiting after podGroupSyncTimeout rather than hanging New()
-// forever. The informer keeps retrying under ctx, so a CRD installed later is
-// picked up automatically.
-func newInformerReader(ctx context.Context, cfg *rest.Config) (*informerReader, error) {
+// is absent we stop waiting after the configured sync timeout rather than
+// hanging New() forever. With no configured timeout, startup does not block.
+// The informer keeps retrying under ctx, so a CRD installed later is picked up.
+func newInformerReader(ctx context.Context, cfg *rest.Config, topologyKeyAnnotation, placementGroupLabel string, defaultPermitTimeout, syncTimeout time.Duration) (*informerReader, error) {
 	client, err := schedclient.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -75,11 +88,16 @@ func newInformerReader(ctx context.Context, cfg *rest.Config) (*informerReader, 
 	lister := factory.Scheduling().V1alpha1().PodGroups().Lister()
 	factory.Start(ctx.Done())
 
-	syncCtx, cancel := context.WithTimeout(ctx, podGroupSyncTimeout)
-	defer cancel()
-	factory.WaitForCacheSync(syncCtx.Done())
+	if syncTimeout > 0 {
+		syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
+		defer cancel()
+		factory.WaitForCacheSync(syncCtx.Done())
+	}
 
 	return &informerReader{
+		defaultPermitTimeout:  defaultPermitTimeout,
+		topologyKeyAnnotation: topologyKeyAnnotation,
+		placementGroupLabel:   placementGroupLabel,
 		getPG: func(namespace, name string) (*schedv1alpha1.PodGroup, error) {
 			return lister.PodGroups(namespace).Get(name)
 		},

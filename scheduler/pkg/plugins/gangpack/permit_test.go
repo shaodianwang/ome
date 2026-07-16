@@ -3,34 +3,26 @@ package gangpack
 import (
 	"context"
 	"testing"
+	"time"
 
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kube-scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
-// TestPermitCountsBoundSiblingsWhenCommitted: once a gang is fully committed
-// (remaining==0), the gate counts already-BOUND members (not in the waiting set)
-// toward minMember. This admits a member arriving into an already-running gang —
-// controller churn/recreate, a pod beyond minMember, a preempted member
-// re-gating, or a straggler after restart — instead of wedging it at the gate.
-func TestPermitCountsBoundSiblingsWhenCommitted(t *testing.T) {
-	// A 3-member gang, fully committed in domain a with 2 members already bound.
+func TestPermitAdmitsCommittedGangWithoutSnapshotRead(t *testing.T) {
 	pins := placement.New()
-	pins.Set("team/pf", "a") // committed: remaining==0
-	snapshot := []*framework.NodeInfo{
-		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")),
-		nodeInfo(gpuNode("a2", "a", "4"), gangPod("team", "pf")),
-	}
+	pins.Set("team/pf", "a")
 	g := &GangPack{
-		handle:   &fakeHandle{snapshot: snapshot}, // no waiting siblings
+		handle:   &fakeHandle{},
 		pins:     pins,
 		pgReader: fakeReader{"team/pf": {min: 3, topo: testKey}},
 	}
 
-	// The arriving member has 0 waiting siblings but 2 bound; 2+0+1 = 3 = minMember.
-	status, _ := g.Permit(context.Background(), framework.NewCycleState(), gangPod("team", "pf"), "a3")
+	state := newCycleState()
+	writePin(state, "a", gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey, timeout: time.Minute})
+	status, _ := g.Permit(context.Background(), state, gangPod("team", "pf"), "a3")
 	if status.IsWait() {
 		t.Fatal("gate wedged: committed gang with 2 bound siblings + arriving member = 3 should admit, not wait")
 	}
@@ -39,14 +31,48 @@ func TestPermitCountsBoundSiblingsWhenCommitted(t *testing.T) {
 	}
 }
 
-// TestPermitFormingGangDoesNotScanBound: a still-forming gang (remaining>0) never
-// counts bound siblings — it holds until enough members wait — so all-or-nothing
-// is preserved and the gate never pays the snapshot scan during normal formation.
+func TestPermitDoesNotDoubleCountAssumedWaitingPods(t *testing.T) {
+	pins := placement.New()
+	_, token, ok := pins.ChooseInTopologyOnNodes("team/pf", testKey,
+		topology.FreeByDomain{"a": 4}, map[string][]string{"a": {"a1", "a2", "a3", "a4"}}, 4)
+	if !ok {
+		t.Fatal("failed to reserve gang")
+	}
+	// Two members have reached Reserve. Both are already assumed in the snapshot,
+	// and one is also in the waiting set; only two of four members have arrived.
+	pins.PlaceIf("team/pf", token)
+	pins.PlaceIf("team/pf", token)
+	waiterPod := gangPod("team", "pf")
+	waiterPod.Name = "waiter"
+	current := gangPod("team", "pf")
+	current.Name = "current"
+	waiter := &fakeWaitingPod{pod: waiterPod}
+	g := &GangPack{pins: pins, handle: &fakeHandle{
+		waiting: []framework.WaitingPod{waiter},
+		snapshot: []framework.NodeInfo{
+			nodeInfo(gpuNode("a1", "a", "4"), waiterPod),
+			nodeInfo(gpuNode("a2", "a", "4"), current),
+		},
+	}}
+	g.rememberAttempt(waiterPod, token)
+	state := newCycleState()
+	writePin(state, "a", gangInfo{key: "team/pf", minMember: 4, topologyKey: testKey, timeout: time.Minute}, token)
+	status, _ := g.Permit(context.Background(), state, current, "a2")
+	if !status.IsWait() {
+		t.Fatalf("Permit = %v, want Wait with only two committed arrivals", status)
+	}
+	if waiter.allowed {
+		t.Fatal("waiting sibling was released before the commitment reached minMember")
+	}
+}
+
+// TestPermitFormingGangDoesNotScanBound: a still-forming gang (remaining>0)
+// holds until its reservation drains, regardless of snapshot contents.
 func TestPermitFormingGangDoesNotScanBound(t *testing.T) {
 	pins := placement.New()
 	pins.Choose("team/pf", topology.FreeByDomain{"a": 5}, 3) // pinned, remaining==3, not committed
 	// A snapshot that WOULD satisfy the gate if (wrongly) counted.
-	snapshot := []*framework.NodeInfo{
+	snapshot := []framework.NodeInfo{
 		nodeInfo(gpuNode("a1", "a", "4"), gangPod("team", "pf")),
 		nodeInfo(gpuNode("a2", "a", "4"), gangPod("team", "pf")),
 	}
@@ -55,7 +81,9 @@ func TestPermitFormingGangDoesNotScanBound(t *testing.T) {
 		pins:     pins,
 		pgReader: fakeReader{"team/pf": {min: 3, topo: testKey}},
 	}
-	status, _ := g.Permit(context.Background(), framework.NewCycleState(), gangPod("team", "pf"), "a3")
+	state := newCycleState()
+	writePin(state, "a", gangInfo{key: "team/pf", minMember: 3, topologyKey: testKey, timeout: time.Minute})
+	status, _ := g.Permit(context.Background(), state, gangPod("team", "pf"), "a3")
 	if !status.IsWait() {
 		t.Fatalf("forming gang (remaining>0) must wait, not count bound siblings; got %v", status)
 	}
@@ -63,24 +91,6 @@ func TestPermitFormingGangDoesNotScanBound(t *testing.T) {
 
 // TestGateDecision: the gang releases when the members already waiting plus the
 // arriving one reach minMember — not before.
-func TestGateDecision(t *testing.T) {
-	cases := []struct {
-		waiting, minMember int
-		release            bool
-	}{
-		{0, 1, true},  // singleton gang: the first (only) member completes it
-		{0, 3, false}, // 1st of 3 -> wait
-		{1, 3, false}, // 2nd of 3 -> wait
-		{2, 3, true},  // 3rd of 3 -> release all
-		{5, 3, true},  // already over (flexible/extra) -> release
-	}
-	for _, c := range cases {
-		if got := gateDecision(c.waiting, c.minMember); got != c.release {
-			t.Fatalf("gateDecision(%d,%d) = %v, want %v", c.waiting, c.minMember, got, c.release)
-		}
-	}
-}
-
 func TestSameGang(t *testing.T) {
 	if !sameGang(gangPod("team", "pf"), "team/pf") {
 		t.Fatal("pod in team/pf should match gang key team/pf")
@@ -93,5 +103,42 @@ func TestSameGang(t *testing.T) {
 	}
 	if sameGang(gangPod("team", ""), "team/pf") {
 		t.Fatal("non-gang pod matches nothing")
+	}
+}
+
+func TestPermitRejectsLabeledPodWithoutValidatedState(t *testing.T) {
+	g := &GangPack{}
+	status, _ := g.Permit(context.Background(), newCycleState(), gangPod("team", "pf"), "n")
+	if status.Code() != framework.Unschedulable {
+		t.Fatalf("Permit = %v, want Unschedulable", status)
+	}
+}
+
+func TestPermitIgnoresWaitingPodsFromOlderAttempt(t *testing.T) {
+	pins := placement.New()
+	_, oldToken, ok := pins.ChooseInTopologyOnNodes("team/pf", testKey,
+		topology.FreeByDomain{"a": 2}, map[string][]string{"a": {"a1", "a2"}}, 2)
+	if !ok || !pins.ReleaseIf("team/pf", oldToken, nil) {
+		t.Fatal("failed to establish old attempt")
+	}
+	_, newToken, ok := pins.ChooseInTopologyOnNodes("team/pf", testKey,
+		topology.FreeByDomain{"b": 2}, map[string][]string{"b": {"b1", "b2"}}, 2)
+	if !ok {
+		t.Fatal("failed to establish retry")
+	}
+	oldWaiter := &fakeWaitingPod{pod: gangPod("team", "pf")}
+	h := &fakeHandle{waiting: []framework.WaitingPod{oldWaiter}}
+	g := &GangPack{handle: h, pins: pins}
+	g.rememberAttempt(oldWaiter.pod, oldToken)
+	current := gangPod("team", "pf")
+	state := newCycleState()
+	writePin(state, "b", gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey, timeout: time.Minute}, newToken)
+
+	status, _ := g.Permit(context.Background(), state, current, "b1")
+	if !status.IsWait() {
+		t.Fatalf("Permit = %v, want Wait; old-attempt waiter must not complete retry", status)
+	}
+	if oldWaiter.allowed {
+		t.Fatal("old-attempt waiter was allowed by retry")
 	}
 }

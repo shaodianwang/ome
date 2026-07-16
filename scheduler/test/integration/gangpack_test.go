@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedconfig "k8s.io/kubernetes/pkg/scheduler/apis/config"
@@ -22,8 +25,10 @@ import (
 func enableGangPack(p *schedconfig.Plugins) {
 	p.PreFilter.Enabled = append(p.PreFilter.Enabled, schedconfig.Plugin{Name: gangpack.Name})
 	p.Filter.Enabled = append(p.Filter.Enabled, schedconfig.Plugin{Name: gangpack.Name})
+	p.PostFilter.Enabled = append(p.PostFilter.Enabled, schedconfig.Plugin{Name: gangpack.Name})
 	p.Permit.Enabled = append(p.Permit.Enabled, schedconfig.Plugin{Name: gangpack.Name})
 	p.Reserve.Enabled = append(p.Reserve.Enabled, schedconfig.Plugin{Name: gangpack.Name})
+	p.PostBind.Enabled = append(p.PostBind.Enabled, schedconfig.Plugin{Name: gangpack.Name})
 }
 
 // gangPackOptions builds the scheduler.Options that register and enable the
@@ -36,6 +41,16 @@ func gangPackOptions(t *testing.T) []scheduler.Option {
 		t.Fatalf("default scheduler config: %v", err)
 	}
 	enableGangPack(cfg.Profiles[0].Plugins)
+	cfg.Profiles[0].PluginConfig = append(cfg.Profiles[0].PluginConfig, schedconfig.PluginConfig{
+		Name: gangpack.Name,
+		Args: &runtime.Unknown{Raw: []byte(`{
+			"podGroupTopologyKeyAnnotation":"` + topologyKeyAnnotation + `",
+			"unsupportedPlacementGroupLabel":"ome.io/placement-group",
+			"defaultPermitTimeoutSeconds":30,
+			"podGroupSyncTimeoutSeconds":5,
+			"gcIntervalSeconds":60
+		}`)},
+	})
 	return []scheduler.Option{
 		scheduler.WithProfiles(cfg.Profiles...),
 		scheduler.WithFrameworkOutOfTreeRegistry(fwkruntime.Registry{gangpack.Name: gangpack.New}),
@@ -148,6 +163,172 @@ func TestGangGateHoldsUntilComplete(t *testing.T) {
 			t.Errorf("pod %s bound to %s, want g1/g2", name, node)
 		}
 	}
+}
+
+func TestLabeledGangWithMissingTopologyStaysPending(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-invalid-topology"
+	createNamespace(t, tc, ns)
+	if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode("it1", "a", 1), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	pg := schedutil.MakePG("gang", ns, 1, nil, nil) // deliberately no topology annotation
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod("invalid-0", ns, "gang"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	ensureNotBound(t, tc, ns, "invalid-0", 3*time.Second)
+
+	current, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Get(tc.Ctx, "gang", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get podgroup: %v", err)
+	}
+	current.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Update(tc.Ctx, current, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("repair podgroup: %v", err)
+	}
+	if node := waitForPodBound(t, tc, ns, "invalid-0", 30*time.Second); node != "it1" {
+		t.Fatalf("repaired gang bound to %s, want it1", node)
+	}
+}
+
+func TestHeterogeneousGangChoosesDomainForEveryMember(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-heterogeneous"
+	createNamespace(t, tc, ns)
+	for _, node := range []struct {
+		name, domain string
+		gpus         int64
+	}{{"ha1", "a", 1}, {"ha2", "a", 1}, {"hb1", "b", 2}, {"hb2", "b", 2}} {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(node.name, node.domain, node.gpus), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", node.name, err)
+		}
+	}
+	pg := schedutil.MakePG("gang", ns, 2, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+	small := makeGangPod("hetero-small", ns, "gang")
+	large := makeGangPod("hetero-large", ns, "gang")
+	large.Spec.Containers[0].Resources.Requests[gpuResource] = *resource.NewQuantity(2, resource.DecimalSI)
+	large.Spec.Containers[0].Resources.Limits[gpuResource] = *resource.NewQuantity(2, resource.DecimalSI)
+	for _, pod := range []*v1.Pod{small, large} {
+		if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, pod, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create pod %s: %v", pod.Name, err)
+		}
+	}
+	for _, name := range []string{small.Name, large.Name} {
+		if domain := domainOfNode(t, tc, waitForPodBound(t, tc, ns, name, 30*time.Second)); domain != "b" {
+			t.Errorf("pod %s landed in domain %s, want b", name, domain)
+		}
+	}
+}
+
+func TestHeterogeneousGangPreservesConstrainedSiblingNode(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-matching"
+	createNamespace(t, tc, ns)
+	for _, name := range []string{"match-1", "match-2"} {
+		node := makeGPUNode(name, "a", 1)
+		node.Labels[v1.LabelHostname] = name
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, node, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", name, err)
+		}
+	}
+	pg := schedutil.MakePG("gang", ns, 2, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+	flexible := makeGangPod("a-flexible", ns, "gang")
+	flexible.Spec.Affinity = &v1.Affinity{NodeAffinity: &v1.NodeAffinity{PreferredDuringSchedulingIgnoredDuringExecution: []v1.PreferredSchedulingTerm{{
+		Weight: 100,
+		Preference: v1.NodeSelectorTerm{MatchExpressions: []v1.NodeSelectorRequirement{{
+			Key: v1.LabelHostname, Operator: v1.NodeSelectorOpIn, Values: []string{"match-1"},
+		}}},
+	}}}}
+	constrained := makeGangPod("b-constrained", ns, "gang")
+	constrained.Spec.NodeSelector = map[string]string{v1.LabelHostname: "match-1"}
+	for _, pod := range []*v1.Pod{flexible, constrained} {
+		if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, pod, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create pod %s: %v", pod.Name, err)
+		}
+	}
+	if node := waitForPodBound(t, tc, ns, constrained.Name, 30*time.Second); node != "match-1" {
+		t.Fatalf("constrained pod bound to %s, want match-1", node)
+	}
+	if node := waitForPodBound(t, tc, ns, flexible.Name, 30*time.Second); node != "match-2" {
+		t.Fatalf("flexible pod bound to %s, want match-2 preserving match-1", node)
+	}
+}
+
+func TestSplitBoundGangFailsClosed(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-split"
+	createNamespace(t, tc, ns)
+	for _, node := range []*v1.Node{makeGPUNode("split-a", "a", 2), makeGPUNode("split-b", "b", 2)} {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, node, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", node.Name, err)
+		}
+	}
+	pg := schedutil.MakePG("gang", ns, 3, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+	for name, node := range map[string]string{"bound-a": "split-a", "bound-b": "split-b"} {
+		pod := makeGangPod(name, ns, "gang")
+		pod.Spec.NodeName = node
+		if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, pod, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create split member %s: %v", name, err)
+		}
+	}
+	pending := makeGangPod("pending", ns, "gang")
+	if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, pending, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pending member: %v", err)
+	}
+	ensureNotBound(t, tc, ns, pending.Name, 3*time.Second)
+}
+
+// TestAssumedWaitersDoNotOpenPermitGate proves that assumed waiting pods are not
+// counted once through the snapshot and again through the waiting set. With only
+// two arrivals in a four-member gang, neither pod may bind.
+func TestAssumedWaitersDoNotOpenPermitGate(t *testing.T) {
+	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
+	defer tc.teardown(t)
+
+	const ns = "gang-permit-count"
+	createNamespace(t, tc, ns)
+	for _, name := range []string{"pc1", "pc2", "pc3", "pc4"} {
+		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(name, "a", 1), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create node %s: %v", name, err)
+		}
+	}
+	pg := schedutil.MakePG("gang", ns, 4, nil, nil)
+	pg.Annotations = map[string]string{topologyKeyAnnotation: domainLabelKey}
+	timeout := int32(60)
+	pg.Spec.ScheduleTimeoutSeconds = &timeout
+	if _, err := tc.SchedClient.SchedulingV1alpha1().PodGroups(ns).Create(tc.Ctx, pg, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create podgroup: %v", err)
+	}
+	for _, name := range []string{"pc-0", "pc-1"} {
+		if _, err := tc.ClientSet.CoreV1().Pods(ns).Create(tc.Ctx, makeGangPod(name, ns, "gang"), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create pod %s: %v", name, err)
+		}
+	}
+	ensureNotBound(t, tc, ns, "pc-0", 3*time.Second)
+	ensureNotBound(t, tc, ns, "pc-1", 3*time.Second)
 }
 
 // TestIncompleteGangTimesOutThenRecovers is the failure-cleanup guarantee: a
@@ -289,8 +470,7 @@ func TestTwoGangsDoNotOverCommitDomain(t *testing.T) {
 // scheduler restart the in-memory pins are gone, but a gang that was already
 // partially placed must still complete — its straggler adopts the domain its
 // bound siblings sit in (not a fresh best-fit that could strand them), and the
-// gate counts those bound siblings toward minMember (they are not in the waiting
-// set).
+// rebuilt reservation accounts for those already-bound members at the gate.
 //
 // We model "a prior instance placed 2 of a 3-member gang" by creating those two
 // pods already assigned to nodes BEFORE starting the scheduler — so its initial
@@ -341,7 +521,7 @@ func TestGangRecoversAfterSchedulerRestart(t *testing.T) {
 	}
 	node := waitForPodBound(t, tc, ns, "rg-2", 30*time.Second)
 	if node != "ra3" {
-		t.Errorf("straggler rg-2 bound to %s, want ra3 (adopt domain a + gate counts bound siblings)", node)
+		t.Errorf("straggler rg-2 bound to %s, want ra3 (adopt domain a + rebuilt gate commitment)", node)
 	}
 }
 

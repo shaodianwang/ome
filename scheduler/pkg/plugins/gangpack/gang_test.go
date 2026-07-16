@@ -8,19 +8,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	topologyKeyAnnotation = "testing.example/topology-key"
+	placementGroupLabel   = "testing.example/placement-group"
+)
+
 // fakeReader stands in for the live PodGroup informer: key "ns/name" -> facts.
 type fakeReader map[string]struct {
 	min  int
 	topo string
 	to   time.Duration
+	uid  string
 }
 
-func (f fakeReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, found bool) {
+type fakePlacementReader struct {
+	fakeReader
+	group string
+}
+
+func (f fakePlacementReader) placementGroup(_, _ string) (string, bool) { return f.group, true }
+
+func (f fakeReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, uid string, found bool) {
 	v, ok := f[namespace+"/"+name]
 	if !ok {
-		return 0, "", 0, false
+		return 0, "", 0, "", false
 	}
-	return v.min, v.topo, v.to, true
+	return v.min, v.topo, v.to, v.uid, true
 }
 
 func gangPod(namespace, pg string) *v1.Pod {

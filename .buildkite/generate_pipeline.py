@@ -270,7 +270,7 @@ def ci_steps() -> str:
             # the root pipeline's `go test ./...` never reaches it. This is
             # the only step that builds + tests the OMEGangPack plugin, its
             # pure topology/placement packages, and the envtest integration
-            # harness. Bootstraps its own envtest (1.33, matching the
+            # harness. Bootstraps its own envtest (1.35, matching the
             # module's k8s pin); runs in parallel with the rest of the fan-out.
             command: |
               sh .buildkite/run_scheduler_tests.sh

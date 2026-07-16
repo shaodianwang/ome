@@ -10,11 +10,9 @@ import (
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
-// Pins records, per placement group, the domain that group's gangs are pinned
-// to. The first pod of a group chooses a domain via best-fit; every later
-// member — and the partner gang, which shares the placement group — follows the
-// pin. That is what turns the framework's one-pod-at-a-time scheduling into a
-// group decision.
+// Pins records the domain each gang is pinned to. The first pod chooses a domain
+// via best-fit and every later member follows the pin. Partner-gang placement
+// groups are not represented until their reservation semantics are defined.
 //
 // A pin also carries a capacity reservation: the whole nodes the gang has
 // committed to its domain but not yet filled. A gang's members arrive one
@@ -31,12 +29,31 @@ import (
 type Pins struct {
 	mu      sync.Mutex
 	byGroup map[string]*commitment
-	// reserved is the running per-domain sum of every group's outstanding
-	// reservation (Σ commitment.remaining). It is a denormalized aggregate so
-	// Choose subtracts reservations in O(domains) instead of O(groups) — the
-	// difference between O(gangs) and O(1) per pin at fleet scale. Kept exactly in
-	// step with byGroup by every mutator.
-	reserved map[string]int
+	nextID  uint64
+	// reserved is the running per-domain sum of outstanding reservations. Choose
+	// uses it as an exclusive-domain barrier for heterogeneous forming gangs.
+	reserved map[Domain]int
+	// reservedNodes is the physical-node projection of every outstanding domain
+	// reservation. Topology keys are only alternate ways to partition the same
+	// nodes, so reservations must conflict by node identity as well as by
+	// (topologyKey, domain) metadata.
+	reservedNodes map[string]int
+}
+
+// Domain identifies one topology domain without assuming that domain values are
+// globally unique. Two workloads may use different topology keys with the same
+// value, and their reservations must not interfere.
+type Domain struct {
+	TopologyKey string
+	Name        string
+}
+
+// Reservation is an outstanding whole-node claim in a topology domain.
+type Reservation struct {
+	Group     string
+	Domain    Domain
+	Remaining int
+	Nodes     []string
 }
 
 // commitment is a group's placement decision: the pinned domain plus the count
@@ -45,60 +62,141 @@ type Pins struct {
 // pin was rebuilt from already-bound members on failover) — which is the signal
 // the gate uses to know it must also count bound siblings, not just waiting ones.
 type commitment struct {
-	domain    string
+	domain    Domain
+	owner     string
 	remaining int
+	id        uint64
+	nodes     map[string]struct{}
 }
 
 // New returns an empty pin store.
 func New() *Pins {
 	return &Pins{
-		byGroup:  make(map[string]*commitment),
-		reserved: make(map[string]int),
+		byGroup:       make(map[string]*commitment),
+		reserved:      make(map[Domain]int),
+		reservedNodes: make(map[string]int),
 	}
+}
+
+func (p *Pins) nextCommitmentID() uint64 {
+	p.nextID++
+	return p.nextID
+}
+
+func nodeSet(nodes []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		if node != "" {
+			out[node] = struct{}{}
+		}
+	}
+	return out
 }
 
 // addReservation adjusts the per-domain aggregate by delta, dropping the key when
 // it reaches zero so the map stays bounded by live domains. Caller holds the lock.
-func (p *Pins) addReservation(domain string, delta int) {
+func (p *Pins) addReservation(domain Domain, delta int) {
 	p.reserved[domain] += delta
 	if p.reserved[domain] <= 0 {
 		delete(p.reserved, domain)
 	}
 }
 
+// setRemaining updates both logical-domain and physical-node reservation
+// indexes. Caller holds p.mu.
+func (p *Pins) setRemaining(c *commitment, remaining int) {
+	if remaining < 0 {
+		remaining = 0
+	}
+	wasReserved := c.remaining > 0
+	willReserve := remaining > 0
+	p.addReservation(c.domain, remaining-c.remaining)
+	if wasReserved != willReserve {
+		delta := -1
+		if willReserve {
+			delta = 1
+		}
+		for node := range c.nodes {
+			p.reservedNodes[node] += delta
+			if p.reservedNodes[node] <= 0 {
+				delete(p.reservedNodes, node)
+			}
+		}
+	}
+	c.remaining = remaining
+}
+
 // Choose returns the domain the group is committed to. If the group is already
 // pinned, that domain is returned as-is — regardless of current free counts,
 // because members are already reserved there; if the gang can no longer complete
 // there the caller unwinds via Release and calls Choose again. If the group is
-// not yet pinned, Choose best-fits over the EFFECTIVE free counts — the given raw
-// free minus every other group's outstanding reservation — so it never picks
-// capacity another gang has already committed to. It then pins the winner and
+// not yet pinned, Choose best-fits over domains without an outstanding
+// reservation, so it never treats heterogeneous claims as fungible slots. It
+// then pins the winner and
 // reserves gangSize whole nodes there. ok is false only when the group is
 // unpinned and no domain currently fits the gang (the gang waits, still
 // unpinned).
 func (p *Pins) Choose(group string, rawFree topology.FreeByDomain, gangSize int) (domain string, ok bool) {
+	return p.ChooseInTopology(group, "", rawFree, gangSize)
+}
+
+// ChooseInTopology is Choose with an explicit topology label namespace.
+func (p *Pins) ChooseInTopology(group, topologyKey string, rawFree topology.FreeByDomain, gangSize int) (domain string, ok bool) {
+	domain, _, ok = p.ChooseInTopologyOnNodes(group, topologyKey, rawFree, nil, gangSize)
+	return domain, ok
+}
+
+// ChooseInTopologyOnNodes is ChooseInTopology with the physical membership of
+// each candidate domain. Physical membership prevents two different topology
+// keys from reserving overlapping nodes. The returned id owns this commitment;
+// lifecycle callbacks must present it before mutating or releasing the pin.
+func (p *Pins) ChooseInTopologyOnNodes(group, topologyKey string, rawFree topology.FreeByDomain, nodesByDomain map[string][]string, gangSize int) (domain string, id uint64, ok bool) {
+	return p.ChooseForOwnerInTopologyOnNodes(group, "", topologyKey, rawFree, nodesByDomain, gangSize)
+}
+
+// ChooseForOwnerInTopologyOnNodes binds the commitment to an external owner
+// identity. GangPack uses the PodGroup UID so a delete/recreate with the same
+// namespace/name cannot inherit the old object's placement decision.
+func (p *Pins) ChooseForOwnerInTopologyOnNodes(group, owner, topologyKey string, rawFree topology.FreeByDomain, nodesByDomain map[string][]string, gangSize int) (domain string, id uint64, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if c, pinned := p.byGroup[group]; pinned {
-		return c.domain, true
+		if c.owner != owner {
+			return "", 0, false
+		}
+		return c.domain.Name, c.id, true
 	}
 
-	// Effective free = raw free minus the outstanding reservation on each domain
-	// (this group is not reserved yet). Subtract from the per-domain aggregate in
-	// O(domains) rather than scanning every pinned group.
+	// A forming gang exclusively owns its domain. Integer slot subtraction is not
+	// sound for heterogeneous pods: a reservation for a large or selector-bound
+	// member cannot be replaced by an arbitrary smaller slot. Hold the domain until
+	// the reservation drains into real snapshot occupancy.
 	eff := make(topology.FreeByDomain, len(rawFree))
 	for d, f := range rawFree {
-		eff[d] = f - p.reserved[d]
+		blocked := p.reserved[Domain{TopologyKey: topologyKey, Name: d}] > 0
+		for _, node := range nodesByDomain[d] {
+			if p.reservedNodes[node] > 0 {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			eff[d] = 0
+		} else {
+			eff[d] = f
+		}
 	}
 
 	d, fit := topology.BestFit(eff, gangSize)
 	if !fit {
-		return "", false
+		return "", 0, false
 	}
-	p.byGroup[group] = &commitment{domain: d, remaining: gangSize}
-	p.addReservation(d, gangSize)
-	return d, true
+	dom := Domain{TopologyKey: topologyKey, Name: d}
+	c := &commitment{domain: dom, owner: owner, id: p.nextCommitmentID(), nodes: nodeSet(nodesByDomain[d])}
+	p.byGroup[group] = c
+	p.setRemaining(c, gangSize)
+	return d, c.id, true
 }
 
 // Place records that one of a group's members has landed on a real node in its
@@ -107,12 +205,20 @@ func (p *Pins) Choose(group string, rawFree topology.FreeByDomain, gangSize int)
 // the two from double-counting the same node. No-op for an unpinned group or a
 // reservation already at zero.
 func (p *Pins) Place(group string) {
+	p.PlaceIf(group, 0)
+}
+
+// PlaceIf drains one reservation only when id owns the current commitment.
+// id==0 is retained for the package's compatibility helpers and tests. drained
+// reports that the last outstanding claim became real snapshot occupancy.
+func (p *Pins) PlaceIf(group string, id uint64) (placed, drained bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if c, ok := p.byGroup[group]; ok && c.remaining > 0 {
-		c.remaining--
-		p.addReservation(c.domain, -1)
+	if c, ok := p.byGroup[group]; ok && (id == 0 || c.id == id) && c.remaining > 0 {
+		p.setRemaining(c, c.remaining-1)
+		return true, c.remaining == 0
 	}
+	return false, false
 }
 
 // Len returns the number of groups currently pinned (with an outstanding
@@ -132,6 +238,17 @@ func (p *Pins) Domains() map[string]string {
 	defer p.mu.Unlock()
 	out := make(map[string]string, len(p.byGroup))
 	for group, c := range p.byGroup {
+		out[group] = c.domain.Name
+	}
+	return out
+}
+
+// PinnedDomains returns domain names together with their topology keys.
+func (p *Pins) PinnedDomains() map[string]Domain {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]Domain, len(p.byGroup))
+	for group, c := range p.byGroup {
 		out[group] = c.domain
 	}
 	return out
@@ -142,9 +259,34 @@ func (p *Pins) Get(group string) (domain string, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if c, ok := p.byGroup[group]; ok {
-		return c.domain, true
+		return c.domain.Name, true
 	}
 	return "", false
+}
+
+// GetOwned returns the current commitment metadata needed by a scheduling
+// cycle. The id prevents callbacks from an older cycle from mutating a newer
+// retry's commitment.
+func (p *Pins) GetOwned(group string) (domain Domain, id uint64, remaining int, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.byGroup[group]
+	if !ok {
+		return Domain{}, 0, 0, false
+	}
+	return c.domain, c.id, c.remaining, true
+}
+
+// GetOwnedBy returns a commitment and whether it belongs to owner. The two
+// booleans distinguish an absent pin from a stale same-name owner's pin.
+func (p *Pins) GetOwnedBy(group, owner string) (domain Domain, id uint64, remaining int, found, ownerMatch bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, found := p.byGroup[group]
+	if !found {
+		return Domain{}, 0, 0, false, false
+	}
+	return c.domain, c.id, c.remaining, true, c.owner == owner
 }
 
 // Committed reports whether a group is pinned with no outstanding reservation
@@ -154,10 +296,18 @@ func (p *Pins) Get(group string) (domain string, ok bool) {
 // still-forming gang has remaining>0, so this stays false and the gate never
 // pays the bound-sibling scan while a gang is filling normally.
 func (p *Pins) Committed(group string) bool {
+	return p.CommittedIf(group, 0)
+}
+
+// CommittedIf reports whether the owned attempt has converted every reserved
+// slot into an assumed or bound pod. Permit uses this instead of combining the
+// scheduler snapshot with waiting pods, because waiting pods are already assumed
+// in that snapshot and would otherwise be counted twice.
+func (p *Pins) CommittedIf(group string, id uint64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.byGroup[group]
-	return ok && c.remaining == 0
+	return ok && (id == 0 || c.id == id) && c.remaining == 0
 }
 
 // Set pins a group to a domain without best-fit. Used on leader failover to
@@ -165,13 +315,97 @@ func (p *Pins) Committed(group string) bool {
 // where those pods are. Those pods are real occupancy in the snapshot, so the
 // rebuilt commitment holds no outstanding reservation.
 func (p *Pins) Set(group, domain string) {
+	p.SetReservation(group, "", domain, 0)
+}
+
+// SetReservation rebuilds a pin and its still-outstanding reservation.
+func (p *Pins) SetReservation(group, topologyKey, domain string, remaining int) {
+	p.SetReservationOnNodes(group, topologyKey, domain, remaining, nil)
+}
+
+// SetReservationOnNodes rebuilds a commitment from bound members and returns
+// its ownership id. Physical domain membership is recorded for cross-topology
+// exclusion while the remaining reservation is non-zero.
+func (p *Pins) SetReservationOnNodes(group, topologyKey, domain string, remaining int, nodes []string) uint64 {
+	return p.SetReservationForOwnerOnNodes(group, "", topologyKey, domain, remaining, nodes)
+}
+
+// SetReservationForOwnerOnNodes rebuilds an owner-bound commitment from members
+// already present in the snapshot.
+func (p *Pins) SetReservationForOwnerOnNodes(group, owner, topologyKey, domain string, remaining int, nodes []string) uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if remaining < 0 {
+		remaining = 0
+	}
 	// Drop any prior commitment's reservation before overwriting.
 	if old, ok := p.byGroup[group]; ok {
-		p.addReservation(old.domain, -old.remaining)
+		p.setRemaining(old, 0)
 	}
-	p.byGroup[group] = &commitment{domain: domain, remaining: 0}
+	dom := Domain{TopologyKey: topologyKey, Name: domain}
+	c := &commitment{domain: dom, owner: owner, id: p.nextCommitmentID(), nodes: nodeSet(nodes)}
+	p.byGroup[group] = c
+	p.setRemaining(c, remaining)
+	return c.id
+}
+
+// Owners returns the owner identity recorded for every live commitment.
+func (p *Pins) Owners() map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]string, len(p.byGroup))
+	for group, c := range p.byGroup {
+		out[group] = c.owner
+	}
+	return out
+}
+
+// ReleaseIfOwner drops a commitment only when owner still identifies it.
+func (p *Pins) ReleaseIfOwner(group, owner string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.byGroup[group]
+	if !ok || c.owner != owner {
+		return false
+	}
+	delete(p.byGroup, group)
+	p.setRemaining(c, 0)
+	return true
+}
+
+// Reservations returns a stable snapshot of outstanding claims. Callers use it
+// to keep ordinary pods out of a domain while a gang is still forming.
+func (p *Pins) Reservations() []Reservation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]Reservation, 0, len(p.byGroup))
+	for group, c := range p.byGroup {
+		if c.remaining > 0 {
+			nodes := make([]string, 0, len(c.nodes))
+			for node := range c.nodes {
+				nodes = append(nodes, node)
+			}
+			out = append(out, Reservation{Group: group, Domain: c.domain, Remaining: c.remaining, Nodes: nodes})
+		}
+	}
+	return out
+}
+
+// BlocksNode reports whether a forming gang has an outstanding claim on this
+// physical node. Commitments created through compatibility helpers may not have
+// physical membership; labels provide the conservative metadata fallback.
+func (p *Pins) BlocksNode(name string, nodeLabels map[string]string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reservedNodes[name] > 0 {
+		return true
+	}
+	for _, c := range p.byGroup {
+		if c.remaining > 0 && len(c.nodes) == 0 && nodeLabels[c.domain.TopologyKey] == c.domain.Name {
+			return true
+		}
+	}
+	return false
 }
 
 // RetainOnly releases every pinned group NOT present in live, returning how many
@@ -187,7 +421,7 @@ func (p *Pins) RetainOnly(live map[string]bool) int {
 	for group, c := range p.byGroup {
 		if !live[group] {
 			delete(p.byGroup, group)
-			p.addReservation(c.domain, -c.remaining)
+			p.setRemaining(c, 0)
 			released++
 		}
 	}
@@ -220,8 +454,7 @@ func (p *Pins) Reconcile(want map[string]int) {
 			r = 0
 		}
 		if r != c.remaining {
-			p.addReservation(c.domain, r-c.remaining)
-			c.remaining = r
+			p.setRemaining(c, r)
 		}
 	}
 }
@@ -231,13 +464,24 @@ func (p *Pins) Reconcile(want map[string]int) {
 // may pick a different domain. It reports whether a pin was actually present, so
 // callers can act once per gang even though the unwind re-enters per member.
 func (p *Pins) Release(group string) bool {
+	return p.ReleaseIf(group, 0, nil)
+}
+
+// ReleaseIf drops a commitment only when id still owns it. The callback runs
+// while the store is locked, closing the window in which a new retry could pin
+// before old waiting siblings have been rejected. id==0 is the compatibility
+// form used by package-level callers that do not carry lifecycle ownership.
+func (p *Pins) ReleaseIf(group string, id uint64, beforeUnlock func()) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.byGroup[group]
-	if !ok {
+	if !ok || (id != 0 && c.id != id) {
 		return false
 	}
 	delete(p.byGroup, group)
-	p.addReservation(c.domain, -c.remaining)
+	p.setRemaining(c, 0)
+	if beforeUnlock != nil {
+		beforeUnlock()
+	}
 	return true
 }

@@ -49,10 +49,13 @@ func TestReconcileShrinksToPlacedRemainder(t *testing.T) {
 	p.Choose("A", topology.FreeByDomain{"a": 5}, 3) // reserves 3 in a
 	// A placed 2 members (say via the snapshot); it still needs 1 reserved.
 	p.Reconcile(map[string]int{"A": 1})
-	// A domain of 5 with 2 placed shows 3 raw free; A reserves 1, so a gang of 2
-	// fits the other 2.
+	// Any remaining heterogeneous claim owns the domain exclusively.
+	if d, ok := p.Choose("B", topology.FreeByDomain{"a": 3}, 2); ok || d != "" {
+		t.Fatalf("B Choose = %q,%v want empty,false while A is still forming", d, ok)
+	}
+	p.Reconcile(map[string]int{"A": 0})
 	if d, ok := p.Choose("B", topology.FreeByDomain{"a": 3}, 2); !ok || d != "a" {
-		t.Fatalf("B Choose = %q,%v want a,true (A's reservation shrunk to 1)", d, ok)
+		t.Fatalf("B Choose after A commits = %q,%v want a,true", d, ok)
 	}
 }
 

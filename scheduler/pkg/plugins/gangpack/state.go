@@ -1,6 +1,6 @@
 package gangpack
 
-import "k8s.io/kubernetes/pkg/scheduler/framework"
+import "k8s.io/kube-scheduler/framework"
 
 // pinStateKey identifies the per-scheduling-cycle pin that PreFilter records and
 // Filter enforces. It is internal CycleState plumbing — it never leaves the
@@ -12,6 +12,8 @@ const pinStateKey framework.StateKey = "gangpack.pin"
 type pinState struct {
 	domain      string
 	topologyKey string
+	gang        gangInfo
+	commitment  uint64
 }
 
 // Clone satisfies framework.StateData. The struct is value-only, so a shallow
@@ -22,13 +24,20 @@ func (s *pinState) Clone() framework.StateData {
 }
 
 // writePin records the pinned domain for this cycle (called by PreFilter).
-func writePin(state *framework.CycleState, domain, topologyKey string) {
-	state.Write(pinStateKey, &pinState{domain: domain, topologyKey: topologyKey})
+func writePin(state framework.CycleState, domain string, gang gangInfo, commitment ...uint64) {
+	var id uint64
+	if len(commitment) > 0 {
+		id = commitment[0]
+	}
+	state.Write(pinStateKey, &pinState{domain: domain, topologyKey: gang.topologyKey, gang: gang, commitment: id})
 }
 
 // readPin returns the pin recorded for this cycle, or nil when none was recorded
 // (the pod is not a pinned gang member — Filter then imposes no domain constraint).
-func readPin(state *framework.CycleState) *pinState {
+func readPin(state framework.CycleState) *pinState {
+	if state == nil {
+		return nil
+	}
 	v, err := state.Read(pinStateKey)
 	if err != nil {
 		return nil

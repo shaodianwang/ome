@@ -5,7 +5,10 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kube-scheduler/framework"
+
+	"github.com/ome-projects/ome/scheduler/pkg/placement"
+	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
 // TestPluginName pins the registered plugin name referenced from the scheduler
@@ -13,6 +16,18 @@ import (
 func TestPluginName(t *testing.T) {
 	if got := (&GangPack{}).Name(); got != Name {
 		t.Fatalf("Name() = %q, want %q", got, Name)
+	}
+}
+
+func TestFilterProtectsOutstandingGangReservationFromStandalonePod(t *testing.T) {
+	g := &GangPack{pins: placement.New()}
+	g.pins.ChooseInTopology("team/pf", testKey, topology.FreeByDomain{"a": 2}, 2)
+	state := newCycleState() // standalone pod has no gang pin
+	if status := g.Filter(context.Background(), state, gpuPod("4"), nodeInfo(gpuNode("a1", "a", "4"))); status.Code() != framework.UnschedulableAndUnresolvable {
+		t.Fatalf("reserved-domain Filter = %v, want UnschedulableAndUnresolvable", status)
+	}
+	if status := g.Filter(context.Background(), state, gpuPod("4"), nodeInfo(gpuNode("b1", "b", "4"))); !status.IsSuccess() {
+		t.Fatalf("unreserved-domain Filter = %v, want Success", status)
 	}
 }
 
@@ -27,13 +42,13 @@ func TestFilterEnforcesPinnedDomain(t *testing.T) {
 	pod := &v1.Pod{}
 
 	// No pin recorded -> any node passes.
-	st := framework.NewCycleState()
+	st := newCycleState()
 	if s := g.Filter(ctx, st, pod, nodeInfo(gpuNode("n0", "a", "4"))); !s.IsSuccess() {
 		t.Fatalf("no-pin Filter = %v, want Success", s)
 	}
 
 	// Pin the gang to domain "a".
-	writePin(st, "a", testKey)
+	writePin(st, "a", gangInfo{topologyKey: testKey})
 
 	if s := g.Filter(ctx, st, pod, nodeInfo(gpuNode("n1", "a", "4"))); !s.IsSuccess() {
 		t.Fatalf("in-domain Filter = %v, want Success", s)

@@ -5,7 +5,7 @@ import (
 
 	compmetrics "k8s.io/component-base/metrics"
 	"k8s.io/component-base/metrics/testutil"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kube-scheduler/framework"
 
 	"github.com/ome-projects/ome/scheduler/pkg/placement"
 )
@@ -15,13 +15,13 @@ import (
 // Deltas (not absolutes) keep the test independent of the shared global registry.
 func TestPinMetrics(t *testing.T) {
 	g := &GangPack{pins: placement.New()}
-	nodes := []*framework.NodeInfo{
+	nodes := []framework.NodeInfo{
 		nodeInfo(gpuNode("n1", "a", "4")), nodeInfo(gpuNode("n2", "a", "4")),
 	}
 	pod := gpuPod("4")
 
 	pinnedBefore := counterValue(t, gangPinTotal.WithLabelValues("pinned"))
-	g.pinGang(framework.NewCycleState(), nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, pod)
+	g.pinGang(newCycleState(), nodes, gangInfo{key: "team/pf", minMember: 2, topologyKey: testKey}, pod)
 	if d := counterValue(t, gangPinTotal.WithLabelValues("pinned")) - pinnedBefore; d != 1 {
 		t.Fatalf("pinned counter delta = %v, want 1", d)
 	}
@@ -30,7 +30,7 @@ func TestPinMetrics(t *testing.T) {
 	}
 
 	noFitBefore := counterValue(t, gangPinTotal.WithLabelValues("no_fit"))
-	g.pinGang(framework.NewCycleState(), nodes, gangInfo{key: "team/big", minMember: 9, topologyKey: testKey}, pod)
+	g.pinGang(newCycleState(), nodes, gangInfo{key: "team/big", minMember: 9, topologyKey: testKey}, pod)
 	if d := counterValue(t, gangPinTotal.WithLabelValues("no_fit")) - noFitBefore; d != 1 {
 		t.Fatalf("no_fit counter delta = %v, want 1", d)
 	}
