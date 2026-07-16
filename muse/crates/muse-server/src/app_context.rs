@@ -1,10 +1,11 @@
 //! The application context: `AppState`, the handle every request runs against.
 //!
 //! It holds one [`ClusterState`] per workload cluster, the topology labels, the
-//! activity feed, a background-refreshed capacity snapshot, and a
-//! background-refreshed metrics snapshot (pushed to SSE subscribers). Cheap to
-//! clone (an `Arc` and a few small handles), so Axum clones it per request. Reads
-//! aggregate across all clusters by default, or one via [`AppState::select`].
+//! activity feed, independent live-query invalidations, a background-refreshed
+//! capacity snapshot, and a background-refreshed metrics snapshot (pushed to SSE
+//! subscribers). Cheap to clone (an `Arc` and a few small handles), so Axum clones
+//! it per request. Reads aggregate across all clusters by default, or one via
+//! [`AppState::select`].
 
 use std::{
     collections::HashMap,
@@ -18,7 +19,7 @@ use tokio::sync::watch;
 use crate::{
     chat_proxy::ChatProxy,
     config::{PromTarget, QueryDef},
-    informers::{CapacitySignal, ClusterState, Feed},
+    informers::{CapacitySignal, ClusterState, Feed, Invalidations},
     protocol::{to_val, Topology},
     rollup,
     service::error::ApiError,
@@ -29,6 +30,7 @@ pub struct AppState {
     pub clusters: Arc<Vec<ClusterState>>,
     pub topology: Topology,
     pub feed: Feed,
+    pub invalidations: Invalidations,
     /// Materialized capacity: the fleet rollup and each per-cluster rollup, kept
     /// current by a background task that recomputes on Node/Pod changes. Serving
     /// from this keeps `/v1/capacity` latency flat as the fleet grows, instead of
@@ -69,6 +71,7 @@ impl AppState {
         clusters: Vec<ClusterState>,
         topology: Topology,
         feed: Feed,
+        invalidations: Invalidations,
         signal: CapacitySignal,
         chat: Option<ChatProxy>,
         metrics: MetricsConfig,
@@ -78,6 +81,7 @@ impl AppState {
             clusters: Arc::new(clusters),
             topology,
             feed,
+            invalidations,
             capacity: Arc::new(RwLock::new(Arc::new(CapacitySnapshot {
                 fleet: Value::Null,
                 per_cluster: HashMap::new(),
@@ -135,6 +139,9 @@ impl AppState {
             .collect();
         *self.capacity.write().unwrap_or_else(|e| e.into_inner()) =
             Arc::new(CapacitySnapshot { fleet, per_cluster });
+        // Publish only after replacing the snapshot. A client reacting to this
+        // signal therefore cannot refetch the old capacity calculation.
+        self.invalidations.mark("Capacity");
     }
 
     /// The cached capacity response for one cluster, or the fleet rollup.

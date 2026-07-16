@@ -1,7 +1,8 @@
-//! The activity feed as HTTP: `GET /v1/events` (recent changes, newest first) and
-//! `GET /v1/stream` (the same feed as live Server-Sent Events). Both read the
-//! in-memory `informers::Feed` on `AppState`; the stream lets the console update on
-//! change instead of polling. Two routes, one concern — kept together.
+//! Live resource changes as HTTP: `GET /v1/events` returns human-facing activity,
+//! while `GET /v1/stream` carries separately named `activity` and `invalidation`
+//! Server-Sent Events. Invalidations include status-only and high-volume resource
+//! changes that activity intentionally suppresses, without coupling cache refresh
+//! to how an operator-facing feed is formatted.
 
 use std::convert::Infallible;
 
@@ -10,7 +11,10 @@ use axum::{
     response::sse::{Event as SseEvent, KeepAlive, Sse},
     Json,
 };
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio_stream::{
+    wrappers::{BroadcastStream, WatchStream},
+    StreamExt,
+};
 
 use crate::{
     app_context::AppState,
@@ -27,22 +31,33 @@ pub async fn list(Query(params): Query<ListParams>, State(st): State<AppState>) 
     Json(Listing::new(items.into_iter().map(to_val).collect()))
 }
 
-/// `GET /v1/stream` — Server-Sent Events of live resource changes (the activity
-/// feed as it happens), so the UI updates on change instead of polling. Each
-/// message is a `FeedEvent` as JSON; `?cluster=` is intentionally not supported
-/// (the client filters), and a keep-alive comment holds idle connections open.
+/// `GET /v1/stream` — named Server-Sent Events for human-facing activity and
+/// query-cache invalidation. `?cluster=` is intentionally not supported (the
+/// client scopes fetched data), and a keep-alive comment holds idle connections
+/// open.
 pub async fn stream(
     State(st): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
-    let live = BroadcastStream::new(st.feed.subscribe())
+    let activity = BroadcastStream::new(st.feed.subscribe())
         // Drop lagged-subscriber errors; the next event resyncs the client.
         .filter_map(|res| res.ok())
         .map(|event| {
             let sse = SseEvent::default()
+                .event("activity")
                 .json_data(&event)
                 .unwrap_or_else(|_| SseEvent::default().comment("encode error"));
             Ok::<_, Infallible>(sse)
         });
+    let invalidations = WatchStream::new(st.invalidations.subscribe())
+        .filter_map(|event| event)
+        .map(|event| {
+            let sse = SseEvent::default()
+                .event("invalidation")
+                .json_data(event.as_ref())
+                .unwrap_or_else(|_| SseEvent::default().comment("encode error"));
+            Ok::<_, Infallible>(sse)
+        });
+    let live = activity.merge(invalidations);
     // Emit one comment immediately so a buffering proxy in front (e.g. the Vite
     // dev proxy) flushes the response headers and the client's `onopen` fires
     // right away, instead of waiting for the first change or the keep-alive.

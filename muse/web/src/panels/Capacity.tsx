@@ -480,7 +480,7 @@ export function Capacity() {
         ),
       );
     },
-    { kinds: [], intervalMs: 30_000 },
+    { kinds: ["Capacity", "Cluster"], intervalMs: 30_000 },
   );
   const allCaps: {
     name: string;
@@ -502,6 +502,8 @@ export function Capacity() {
   }, [kind, dim, q, pageSize, tab]);
 
   // Lazily load the selected cluster's nodes (node explorer + health breakdown).
+  // A fresh capacity snapshot follows every Node/Pod change, so use its identity
+  // as the refresh revision instead of opening another stream or polling here.
   useEffect(() => {
     if (!tab) {
       setNodes([]);
@@ -523,7 +525,7 @@ export function Capacity() {
     return () => {
       cancelled = true;
     };
-  }, [tab]);
+  }, [tab, live.data]);
 
   useEffect(() => {
     setNodePage(0);

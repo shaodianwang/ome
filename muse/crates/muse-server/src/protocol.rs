@@ -1412,8 +1412,9 @@ pub struct GroupCapacity {
 }
 
 // ===========================================================================
-// Activity feed — `GET /v1/events` rows + `GET /v1/stream` messages, stored and
-// broadcast by `informers::Feed`.
+// Live updates — activity rows are human-facing history, while invalidations are
+// compact cache-refresh hints. Both travel over `/v1/stream` as distinct named
+// SSE events so changing activity presentation cannot break live query refresh.
 // ===========================================================================
 
 /// One observed change to a watched resource.
@@ -1428,6 +1429,16 @@ pub struct FeedEvent {
     pub action: &'static str,
     /// Wall-clock seconds since the Unix epoch when muse observed the change.
     pub at: u64,
+}
+
+/// Resource/query domains whose cached HTTP projections may have changed.
+///
+/// A single event can cover a burst across several domains. Values are stable
+/// protocol names such as `InferenceService`, `Node`, and the derived `Capacity`
+/// projection; clients match only the domains used by their query.
+#[derive(Clone, Debug, Serialize)]
+pub struct InvalidationEvent {
+    pub resources: Vec<String>,
 }
 
 // ===========================================================================

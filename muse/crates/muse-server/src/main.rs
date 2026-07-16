@@ -5,11 +5,11 @@
 //! Built on the OME Rust SDK (`ome_client`): one `SharedInformerFactory` per
 //! cluster, each backing a `Lister` per kind (the factory's generic
 //! `lister::<K>()` also covers built-ins like `Node`/`Pod`). `informers` builds a
-//! cluster's watches (listers + activity feed + capacity signal), `app_context`
-//! holds the shared state, `service` has the HTTP endpoints (one module per
-//! endpoint) and the route table, `protocol` defines the wire types, `rollup`
-//! does the Node×Pod GPU capacity aggregation, `server` runs the listener, and
-//! `telemetry` handles logging, metrics, and the per-request middleware.
+//! cluster's watches (listers + activity + invalidation + capacity signals),
+//! `app_context` holds the shared state, `service` has the HTTP endpoints (one
+//! module per endpoint) and the route table, `protocol` defines the wire types,
+//! `rollup` does the Node×Pod GPU capacity aggregation, `server` runs the listener,
+//! and `telemetry` handles logging, metrics, and the per-request middleware.
 //!
 //! Clusters come from `--cluster name=/path/to/kubeconfig` (repeatable); with
 //! none given, the ambient kube config is used as a single cluster "default". A
@@ -114,8 +114,15 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         nvlink_labels: config.nvlink_domain_labels.clone(),
     };
 
-    // Shared activity feed: OME informer changes across all clusters flow here.
+    // Shared activity feed: curated, human-facing OME changes flow here.
     let feed = informers::Feed::new(100);
+    // Query invalidations are independent from activity and cover every informer
+    // update. Deployment config owns their batching/load tradeoff.
+    let invalidations = informers::Invalidations::new(
+        config
+            .live_invalidation_batch_ms
+            .map(|millis| Duration::from_millis(millis.get())),
+    );
     // Shared signal: Node/Pod changes mark the capacity rollup stale.
     let signal = informers::CapacitySignal::new();
 
@@ -123,7 +130,15 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
     // (logged), not fatal — the fleet view degrades rather than failing.
     let mut clusters = Vec::new();
     for cluster_ref in config.cluster_refs() {
-        match build_cluster(&cluster_ref, config.list_strategy, &feed, &signal).await {
+        match build_cluster(
+            &cluster_ref,
+            config.list_strategy,
+            &feed,
+            &invalidations,
+            &signal,
+        )
+        .await
+        {
             Ok(state) => clusters.push(state),
             Err(err) => {
                 tracing::error!(cluster = %cluster_ref.name, error = %err, "skipping unreachable cluster");
@@ -152,6 +167,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         clusters,
         topology,
         feed,
+        invalidations,
         signal,
         chat,
         app_context::MetricsConfig {
@@ -170,6 +186,7 @@ async fn build_cluster(
     cluster_ref: &config::ClusterRef,
     list_strategy: config::ListStrategy,
     feed: &informers::Feed,
+    invalidations: &informers::Invalidations,
     signal: &informers::CapacitySignal,
 ) -> anyhow::Result<informers::ClusterState> {
     let client = client_for(cluster_ref).await?;
@@ -210,20 +227,25 @@ async fn build_cluster(
         client,
         &factory,
         &ome,
-        feed,
-        signal,
+        informers::ChangeSinks {
+            feed,
+            invalidations,
+            capacity: signal,
+        },
     );
     // Serve immediately and warm the caches in the background; flip the cluster's
     // ready flag once every informer has finished its first sync. Awaiting the
     // futures in sequence still completes in max(individual) time — the reflector
     // tasks all run concurrently, so we only observe their completion here.
     let ready = state.ready.clone();
+    let invalidations = invalidations.clone();
     let name = cluster_ref.name.clone();
     tokio::spawn(async move {
         for fut in readies {
             fut.await;
         }
         ready.store(true, Ordering::Relaxed);
+        invalidations.mark("Cluster");
         tracing::info!(cluster = %name, "cache sync complete");
     });
     Ok(state)

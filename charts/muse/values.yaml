@@ -31,6 +31,9 @@ config:
   webDir: /web # the image bakes the console here; "" ⇒ API-only
   listStrategy: auto # auto | streaming | paginated
   capacityRefreshSecs: 10
+  # Batch informer changes into one live-query invalidation. This controls the
+  # responsiveness vs refetch/SSE load tradeoff; the binary has no baked default.
+  liveInvalidationBatchMs: 1000
   chat: # in-console inference test proxy (POST /v1/.../chat)
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60

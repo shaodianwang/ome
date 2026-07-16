@@ -2,9 +2,10 @@
 //!
 //! For each workload cluster, [`build_cluster_state`] starts one informer per kind
 //! and returns a [`ClusterState`] — the bundle of listers every read serves from.
-//! The same informers drive two side-channels: OME-kind changes are pushed into
-//! the [`Feed`] (the activity stream behind `/v1/events` + `/v1/stream`), and
-//! Node/Pod changes fire the [`CapacitySignal`] so the capacity rollup recomputes.
+//! The same informers drive three side-channels: curated OME changes are pushed
+//! into the human-facing [`Feed`], every change marks [`Invalidations`] for live
+//! queries, and Node/Pod changes fire the [`CapacitySignal`] so the cached
+//! capacity rollup recomputes.
 //!
 //! A kind whose CRD is absent on a cluster gets an empty lister and no informer,
 //! so a missing CRD never 404-loops on its initial list. Nothing here blocks on
@@ -13,12 +14,12 @@
 //! cluster is fully warm.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fmt::Debug,
     future::Future,
     pin::Pin,
     sync::{atomic::AtomicBool, Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use kube::{Client, Resource};
@@ -30,9 +31,9 @@ use ome_client::{
     InferenceService, ServingRuntime, WorkloadCluster,
 };
 use serde::de::DeserializeOwned;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::protocol::FeedEvent;
+use crate::protocol::{FeedEvent, InvalidationEvent};
 
 // ===========================================================================
 // Per-cluster listers
@@ -65,6 +66,14 @@ pub struct ClusterState {
 /// A future that resolves when one informer's cache has completed its first sync.
 pub type ReadyFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 
+/// Side channels driven by informer events, grouped so cache construction does
+/// not grow one parameter per downstream projection.
+pub struct ChangeSinks<'a> {
+    pub feed: &'a Feed,
+    pub invalidations: &'a Invalidations,
+    pub capacity: &'a CapacitySignal,
+}
+
 /// Build every informer for one cluster, returning immediately (caches warm in
 /// the background) along with a readiness future per started informer.
 ///
@@ -85,17 +94,20 @@ pub fn build_cluster_state(
     client: Client,
     factory: &SharedInformerFactory,
     ome: &HashSet<String>,
-    feed: &Feed,
-    signal: &CapacitySignal,
+    changes: ChangeSinks<'_>,
 ) -> (ClusterState, Vec<ReadyFut>) {
     let mut readies = Vec::new();
     let cluster = name.clone();
     // OME kinds feed the activity stream. Nodes/pods drive capacity, so they
     // signal the recompute task on change instead (never the high-volume feed).
     let f = |kind| FeedSub {
-        feed: feed.clone(),
+        feed: changes.feed.clone(),
         cluster: cluster.clone(),
         kind,
+    };
+    let i = |resource| InvalidationSub {
+        invalidations: changes.invalidations.clone(),
+        resource,
     };
     let state = ClusterState {
         inference_services: warm(
@@ -103,6 +115,7 @@ pub fn build_cluster_state(
             present::<InferenceService>(ome),
             &mut readies,
             Some(f("InferenceService")),
+            Some(i("InferenceService")),
             None,
         ),
         base_models: warm(
@@ -110,6 +123,7 @@ pub fn build_cluster_state(
             present::<BaseModel>(ome),
             &mut readies,
             Some(f("BaseModel")),
+            Some(i("BaseModel")),
             None,
         ),
         serving_runtimes: warm(
@@ -117,6 +131,7 @@ pub fn build_cluster_state(
             present::<ServingRuntime>(ome),
             &mut readies,
             Some(f("ServingRuntime")),
+            Some(i("ServingRuntime")),
             None,
         ),
         inference_replicas: warm(
@@ -124,6 +139,7 @@ pub fn build_cluster_state(
             present::<InferenceReplica>(ome),
             &mut readies,
             Some(f("InferenceReplica")),
+            Some(i("InferenceReplica")),
             None,
         ),
         cluster_base_models: warm(
@@ -131,6 +147,7 @@ pub fn build_cluster_state(
             present::<ClusterBaseModel>(ome),
             &mut readies,
             Some(f("ClusterBaseModel")),
+            Some(i("ClusterBaseModel")),
             None,
         ),
         cluster_serving_runtimes: warm(
@@ -138,6 +155,7 @@ pub fn build_cluster_state(
             present::<ClusterServingRuntime>(ome),
             &mut readies,
             Some(f("ClusterServingRuntime")),
+            Some(i("ClusterServingRuntime")),
             None,
         ),
         fine_tuned_weights: warm(
@@ -145,6 +163,7 @@ pub fn build_cluster_state(
             present::<FineTunedWeight>(ome),
             &mut readies,
             Some(f("FineTunedWeight")),
+            Some(i("FineTunedWeight")),
             None,
         ),
         workload_clusters: warm(
@@ -152,10 +171,25 @@ pub fn build_cluster_state(
             present::<WorkloadCluster>(ome),
             &mut readies,
             Some(f("WorkloadCluster")),
+            Some(i("WorkloadCluster")),
             None,
         ),
-        nodes: warm::<Node>(factory, true, &mut readies, None, Some(signal.clone())),
-        pods: warm::<Pod>(factory, true, &mut readies, None, Some(signal.clone())),
+        nodes: warm::<Node>(
+            factory,
+            true,
+            &mut readies,
+            None,
+            Some(i("Node")),
+            Some(changes.capacity.clone()),
+        ),
+        pods: warm::<Pod>(
+            factory,
+            true,
+            &mut readies,
+            None,
+            Some(i("Pod")),
+            Some(changes.capacity.clone()),
+        ),
         name,
         version,
         client,
@@ -171,17 +205,25 @@ struct FeedSub {
     kind: &'static str,
 }
 
+/// Wiring for a kind's cache-invalidation subscriber.
+struct InvalidationSub {
+    invalidations: Invalidations,
+    resource: &'static str,
+}
+
 /// Start (lazily) the informer for kind `K` if the cluster serves it, returning
 /// its live-but-warming lister and pushing a readiness future onto `readies`. A
 /// kind the cluster doesn't serve gets an empty lister and starts no informer.
 /// When `feed` is set, a background task forwards the informer's change events
-/// into the activity feed. When `on_change` is set (nodes/pods), each event marks
-/// the capacity rollup stale so the recompute task reacts to real changes.
+/// into the human-facing activity feed. `invalidate` observes every update,
+/// including status-only changes filtered out of activity. When `on_change` is
+/// set (nodes/pods), each event also marks the capacity rollup stale.
 fn warm<K>(
     factory: &SharedInformerFactory,
     present: bool,
     readies: &mut Vec<ReadyFut>,
     feed: Option<FeedSub>,
+    invalidate: Option<InvalidationSub>,
     on_change: Option<CapacitySignal>,
 ) -> Lister<K>
 where
@@ -198,6 +240,16 @@ where
         return empty_lister::<K>();
     }
     let informer = factory.informer_lazy::<K>();
+    if let Some(sub) = invalidate {
+        let mut rx = informer.subscribe();
+        tokio::spawn(async move {
+            while let Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) = rx.recv().await {
+                // A lag still means at least one projection changed. The next
+                // HTTP fetch reads the latest informer snapshot.
+                sub.invalidations.mark(sub.resource);
+            }
+        });
+    }
     if let Some(signal) = on_change {
         let mut rx = informer.subscribe();
         tokio::spawn(async move {
@@ -336,6 +388,101 @@ impl Feed {
     /// A receiver for live events as they're recorded (for the SSE stream).
     pub fn subscribe(&self) -> broadcast::Receiver<FeedEvent> {
         self.tx.subscribe()
+    }
+}
+
+// ===========================================================================
+// Live query invalidations — independent from human-facing activity.
+// ===========================================================================
+
+/// Coalesces informer changes into compact resource-domain invalidations.
+///
+/// The optional batch window is deployment configuration. When absent, marks
+/// already queued in the same scheduler turn are drained into one event; this
+/// preserves live updates without silently choosing a timing policy in code.
+/// `watch` also collapses updates for a slow SSE consumer to the latest batch.
+#[derive(Clone)]
+pub struct Invalidations {
+    marks: mpsc::UnboundedSender<&'static str>,
+    updates: watch::Sender<Option<Arc<InvalidationEvent>>>,
+}
+
+impl Invalidations {
+    pub fn new(batch_window: Option<Duration>) -> Self {
+        let (marks, mut pending) = mpsc::unbounded_channel();
+        let (updates, _) = watch::channel(None);
+        let publisher = updates.clone();
+        tokio::spawn(async move {
+            while let Some(first) = pending.recv().await {
+                let mut resources = BTreeSet::from([first]);
+                if let Some(window) = batch_window {
+                    let deadline = tokio::time::sleep(window);
+                    tokio::pin!(deadline);
+                    loop {
+                        tokio::select! {
+                            () = &mut deadline => break,
+                            next = pending.recv() => match next {
+                                Some(resource) => { resources.insert(resource); }
+                                None => break,
+                            },
+                        }
+                    }
+                } else {
+                    while let Ok(resource) = pending.try_recv() {
+                        resources.insert(resource);
+                    }
+                }
+                publisher.send_replace(Some(Arc::new(InvalidationEvent {
+                    resources: resources.into_iter().map(str::to_owned).collect(),
+                })));
+            }
+        });
+        Self { marks, updates }
+    }
+
+    /// Mark one resource or derived query domain stale. Marks are cheap and the
+    /// publisher deduplicates them within the configured batch window.
+    pub fn mark(&self, resource: &'static str) {
+        let _ = self.marks.send(resource);
+    }
+
+    /// Subscribe to future invalidation batches. The retained latest batch lets
+    /// a reconnecting SSE consumer immediately converge again.
+    pub fn subscribe(&self) -> watch::Receiver<Option<Arc<InvalidationEvent>>> {
+        self.updates.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::Invalidations;
+
+    #[tokio::test]
+    async fn invalidations_batch_and_deduplicate_resources() {
+        let invalidations = Invalidations::new(Some(Duration::from_millis(5)));
+        let mut updates = invalidations.subscribe();
+
+        invalidations.mark("Pod");
+        invalidations.mark("InferenceService");
+        invalidations.mark("Pod");
+
+        updates.changed().await.unwrap();
+        let update = updates.borrow().clone().unwrap();
+        assert_eq!(update.resources, ["InferenceService", "Pod"]);
+    }
+
+    #[tokio::test]
+    async fn invalidations_work_without_a_timing_policy() {
+        let invalidations = Invalidations::new(None);
+        let mut updates = invalidations.subscribe();
+
+        invalidations.mark("Capacity");
+
+        updates.changed().await.unwrap();
+        let update = updates.borrow().clone().unwrap();
+        assert_eq!(update.resources, ["Capacity"]);
     }
 }
 

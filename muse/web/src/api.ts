@@ -283,6 +283,11 @@ export interface EventItem {
   at: number;
 }
 
+/** Compact live-query refresh hint, delivered separately from activity items. */
+export interface InvalidationEvent {
+  resources: string[];
+}
+
 export interface RolloutItem {
   cluster: string;
   name: string;
@@ -338,7 +343,7 @@ export interface ChatResponse {
 const BASE = import.meta.env.BASE_URL;
 const at = (path: string) => BASE + path.replace(/^\//, "");
 
-/** SSE endpoint for live resource-change events (see `live.ts`). */
+/** SSE endpoint for named activity and query-invalidation events (see `live.ts`). */
 export const STREAM_URL = at("/v1/stream");
 
 /** SSE endpoint for the live metrics snapshot, pushed on each server-side refresh

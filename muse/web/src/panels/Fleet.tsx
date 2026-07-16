@@ -30,11 +30,11 @@ export function Fleet({
   openDeployment: (s: Selected) => void;
 }) {
   const clusters = useLive(api.clusters, {
-    kinds: ["InferenceService"],
+    kinds: ["Cluster", "InferenceService", "Node"],
     throttleMs: 8_000,
     intervalMs: 30_000,
   });
-  const capacity = useLive(api.capacity, { kinds: [], intervalMs: 30_000 });
+  const capacity = useLive(api.capacity, { kinds: ["Capacity"], intervalMs: 30_000 });
   const isvcs = useLive(api.inferenceServices, {
     kinds: ["InferenceService"],
     throttleMs: 5_000,

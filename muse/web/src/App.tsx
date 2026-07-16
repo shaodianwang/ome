@@ -57,7 +57,10 @@ export default function App() {
   const openRuntime = (s: Selected) => navigate({ panel: "runtimes", sel: s });
 
   // Sidebar connection status, from the same read plane the panels use.
-  const clusters = useLive(api.clusters, { kinds: ["InferenceService"], intervalMs: 30_000 });
+  const clusters = useLive(api.clusters, {
+    kinds: ["Cluster", "InferenceService", "Node"],
+    intervalMs: 30_000,
+  });
   const items = clusters.data?.items ?? [];
   const ready = items.filter((c) => c.ready).length;
   const syncing = items.length - ready;

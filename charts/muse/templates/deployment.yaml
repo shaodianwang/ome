@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.config.listStrategy | quote }}
             - name: MUSE_CAPACITY_REFRESH_SECS
               value: {{ .Values.config.capacityRefreshSecs | quote }}
+            - name: MUSE_LIVE_INVALIDATION_BATCH_MS
+              value: {{ .Values.config.liveInvalidationBatchMs | quote }}
             - name: MUSE_CHAT_ENABLED
               value: {{ .Values.config.chat.enabled | quote }}
             {{- with .Values.config.chat.timeoutSecs }}

@@ -1,45 +1,75 @@
-// Live data plumbing: a single shared SSE connection + a fetch hook that refetches
-// on relevant change events instead of polling on a timer.
+// Live data plumbing: one shared SSE connection carrying two independent named
+// event types. Activity is operator-facing history; invalidations are compact
+// resource-domain hints that drive query refreshes, including status-only changes.
 //
 // One EventSource is shared across all panels (the browser caps connections per
-// origin, and we only need one). Each `useLive` subscriber refetches when an event
-// for a kind it cares about arrives, debounced so a burst of changes coalesces.
-// Capacity/cluster counts are driven by node/pod churn, which the server keeps out
-// of the stream (too noisy) — those pass an `intervalMs` for a slow safety refresh.
+// origin, and we only need one). Each `useLive` subscriber refetches when an
+// invalidation for a resource it depends on arrives, debounced so a burst of
+// changes coalesces. Activity formatting never participates in that decision.
 
 import { useEffect, useRef, useState } from "react";
 
 import { api } from "./api";
-import type { EventItem, MetricsSnapshot } from "./api";
+import type { EventItem, InvalidationEvent, MetricsSnapshot } from "./api";
 import { METRICS_STREAM_URL, STREAM_URL } from "./api";
 
-type Listener = (event: EventItem) => void;
+type ActivityListener = (event: EventItem) => void;
+type InvalidationListener = (event: InvalidationEvent) => void;
 
 let source: EventSource | null = null;
-const listeners = new Set<Listener>();
+const activityListeners = new Set<ActivityListener>();
+const invalidationListeners = new Set<InvalidationListener>();
 
 function ensureSource() {
   if (source) return;
   source = new EventSource(STREAM_URL);
-  source.onmessage = (msg) => {
+  source.addEventListener("activity", (raw) => {
+    const msg = raw as MessageEvent<string>;
     let event: EventItem;
     try {
       event = JSON.parse(msg.data) as EventItem;
     } catch {
       return;
     }
-    listeners.forEach((l) => l(event));
-  };
+    activityListeners.forEach((listener) => listener(event));
+  });
+  source.addEventListener("invalidation", (raw) => {
+    const msg = raw as MessageEvent<string>;
+    let event: InvalidationEvent;
+    try {
+      event = JSON.parse(msg.data) as InvalidationEvent;
+    } catch {
+      return;
+    }
+    if (!Array.isArray(event.resources)) return;
+    invalidationListeners.forEach((listener) => listener(event));
+  });
   // EventSource reconnects automatically on error; nothing to do here.
 }
 
-/** Subscribe to the shared change stream; returns an unsubscribe fn. */
-function onStream(listener: Listener): () => void {
+/** Subscribe only to operator-facing activity items. */
+function onActivity(listener: ActivityListener): () => void {
   ensureSource();
-  listeners.add(listener);
+  activityListeners.add(listener);
   return () => {
-    listeners.delete(listener);
+    activityListeners.delete(listener);
   };
+}
+
+/** Subscribe only to resource-domain query invalidations. */
+function onInvalidation(listener: InvalidationListener): () => void {
+  ensureSource();
+  invalidationListeners.add(listener);
+  return () => {
+    invalidationListeners.delete(listener);
+  };
+}
+
+/** Whether a batched invalidation affects a query's resource dependencies. */
+export function shouldInvalidate(event: InvalidationEvent, kinds?: string[]): boolean {
+  if (kinds?.length === 0) return false;
+  if (!kinds) return true;
+  return event.resources.some((resource) => kinds.includes(resource));
 }
 
 export interface LiveState<T> {
@@ -94,9 +124,9 @@ export function useLive<T>(fetcher: () => Promise<T>, options: LiveOptions = {})
     // a refetch storm. `kinds: []` opts out of the stream entirely.
     let lastRun = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const off = onStream((event) => {
+    const off = onInvalidation((event) => {
       const opts = optionsRef.current;
-      if (opts.kinds && !opts.kinds.includes(event.kind)) return;
+      if (!shouldInvalidate(event, opts.kinds)) return;
       const throttle = opts.throttleMs ?? 3000;
       const wait = Math.max(0, throttle - (Date.now() - lastRun));
       clearTimeout(timer);
@@ -155,7 +185,7 @@ export function useEventFeed(limit = 60): {
         if (alive) setLoading(false);
       });
 
-    const off = onStream((event) => {
+    const off = onActivity((event) => {
       setEvents((prev) => [event, ...prev].slice(0, limit));
     });
     return () => {

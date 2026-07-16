@@ -5,6 +5,7 @@
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroU64,
     path::{Path, PathBuf},
 };
 
@@ -184,6 +185,16 @@ pub struct Config {
         default_value_t = 10
     )]
     pub capacity_refresh_secs: u64,
+
+    /// Milliseconds to batch Kubernetes informer changes before publishing one
+    /// live-query invalidation. This bounds SSE and refetch churn while retaining
+    /// every changed resource domain. No binary default: deployment config owns
+    /// the responsiveness/load tradeoff; absent means no time-based delay.
+    #[arg(
+        long = "live-invalidation-batch-ms",
+        env = "MUSE_LIVE_INVALIDATION_BATCH_MS"
+    )]
+    pub live_invalidation_batch_ms: Option<NonZeroU64>,
 
     /// Node label(s) naming the accelerator's outer topology domain — the RDMA
     /// island / network fabric for GPUs, or the physical block for TPUs — used to
