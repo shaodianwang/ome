@@ -17,6 +17,7 @@ WORKDIR /web
 COPY muse/web/package.json ./
 RUN npm install
 COPY muse/web/ ./
+RUN npm run check
 RUN npm run build
 
 # 2) Build the Rust server (per target arch).

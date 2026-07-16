@@ -27,6 +27,18 @@ topology flag accepts a comma-separated candidate list (first present wins), so
 one config covers clusters that label topology differently. An unreachable
 cluster is skipped, not fatal.
 
+## Verify
+
+```sh
+make ci
+```
+
+This checks Rust formatting and Clippy, runs the Rust tests, installs the web
+dependencies without writing a lockfile, and tests and builds the console.
+Buildkite runs the equivalent Rust group on a native Rust image. The existing
+`muse-server` image build runs the web checks in its cached Node stage before
+the production web build.
+
 The topology flags have **no default** — the correct label keys are
 provider/cluster-specific, so they must be supplied for your environment (flag,
 `MUSE_RDMA_ISLAND_LABEL` / `MUSE_NVLINK_DOMAIN_LABEL` env, or GitOps). Nodes

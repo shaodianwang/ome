@@ -486,7 +486,10 @@ mod tests {
 
         let spec = pod.spec.as_ref().unwrap();
         assert_eq!(spec.node_name.as_deref(), Some("node-1"));
-        assert_eq!(pod.status.as_ref().unwrap().phase.as_deref(), Some("Running"));
+        assert_eq!(
+            pod.status.as_ref().unwrap().phase.as_deref(),
+            Some("Running")
+        );
         let c = &spec.containers[0];
         assert_eq!(
             c.resources.as_ref().unwrap().requests.as_ref().unwrap()["nvidia.com/gpu"].0,

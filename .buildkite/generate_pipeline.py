@@ -39,6 +39,7 @@ ECR_REGISTRY = os.environ.get(
 PROD_ECR_REGISTRY = f"{PROD_AWS_ACCOUNT_ID}.dkr.ecr.{AWS_REGION}.amazonaws.com"
 
 CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
+MUSE_RUST_CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/rust:1.95-bookworm"
 
 # cf-docker-image plugin handles ECR auth + multi-arch builds. The plugin
 # is fetched from mslsrc/dev at job-submit time. See prod_inference for
@@ -281,6 +282,26 @@ def ci_steps() -> str:
                     containers:
                       - name: container-0
                         image: "{CI_IMAGE}"
+
+          # The muse-server image build owns web install/check/build in its
+          # cached Node stage. Keep this independent step Rust-native.
+          - label: ":rust: MUSE Rust Checks"
+            key: "muse-rust-checks"
+{_gh_status("muse-rust-checks")}
+            command: |
+              apt-get update
+              apt-get install -y --no-install-recommends build-essential cmake perl pkg-config
+              rustup component add rustfmt clippy
+              rustc --version
+              make -C muse ci-rust
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+              - kubernetes:
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{MUSE_RUST_CI_IMAGE}"
 
           - label: ":helm: Helm Lint"
             key: "helm-lint"
