@@ -111,9 +111,10 @@ func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, ownerN
 
 	return &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodGroupName(ownerName, plan.Component, inst.Index),
-			Namespace: owner.GetNamespace(),
-			Labels:    labels,
+			Name:        query.PodGroupName(ownerName, plan.Component, inst.Index),
+			Namespace:   owner.GetNamespace(),
+			Labels:      labels,
+			Annotations: podGroupAnnotations(plan.TopologyKey),
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(owner, ownerGVK),
 			},
@@ -134,6 +135,22 @@ func podGroupLabels(isvcName string, component workload.ComponentType, instanceI
 		"ome.io/component":        string(component),
 		query.LabelManagedBy:      query.ManagedByOMENative,
 		query.LabelInstanceIdx:    fmt.Sprintf("%d", instanceIdx),
+	}
+}
+
+// podGroupAnnotations stamps the gang topology-domain key the OME gang
+// scheduler plugin reads (query.AnnotationTopologyKey = "ome.io/topology-key").
+// Without it the plugin skips domain pinning and the gang can fragment
+// (leader placed, worker Pending on the partition podAffinity) — see the
+// AnnotationTopologyKey docstring. Returns nil (no annotations) when the
+// component declares no topology key, so single-domain / non-topology gangs
+// are unaffected and don't churn on an empty-string annotation.
+func podGroupAnnotations(topologyKey string) map[string]string {
+	if topologyKey == "" {
+		return nil
+	}
+	return map[string]string{
+		query.AnnotationTopologyKey: topologyKey,
 	}
 }
 
@@ -201,6 +218,7 @@ func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, c, target, func() error {
 		target.Labels = desired.Labels
+		target.Annotations = desired.Annotations
 		target.OwnerReferences = desired.OwnerReferences
 		target.Spec.MinMember = desired.Spec.MinMember
 		target.Spec.ScheduleTimeoutSeconds = desired.Spec.ScheduleTimeoutSeconds
@@ -214,7 +232,8 @@ func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 
 // podGroupMatches reports whether the cached PodGroup already carries
 // the exact fields the EnsurePodGroup mutate closure reconciles —
-// Labels, OwnerReferences, Spec.MinMember, Spec.ScheduleTimeoutSeconds.
+// Labels, Annotations, OwnerReferences, Spec.MinMember,
+// Spec.ScheduleTimeoutSeconds.
 // Returning true lets EnsurePodGroup skip the CreateOrUpdate on the
 // no-drift steady-state path. Must stay in lockstep with the mutate
 // closure: any field that closure writes must be compared here, or a
@@ -227,6 +246,12 @@ func podGroupMatches(existing, desired *schedulingv1alpha1.PodGroup) bool {
 		return false
 	}
 	if !equality.Semantic.DeepEqual(existing.Labels, desired.Labels) {
+		return false
+	}
+	// The topology-key annotation gates gang domain-pinning; drift here
+	// (e.g. a PodGroup created before this field was stamped) must trigger
+	// a reconcile so the scheduler starts pinning the gang to a domain.
+	if !equality.Semantic.DeepEqual(existing.Annotations, desired.Annotations) {
 		return false
 	}
 	return equality.Semantic.DeepEqual(existing.OwnerReferences, desired.OwnerReferences)

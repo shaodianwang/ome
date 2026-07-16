@@ -163,6 +163,53 @@ func TestBuildPodGroup_Shape(t *testing.T) {
 	}
 }
 
+// TestBuildPodGroup_TopologyKeyAnnotation verifies the gang topology-domain
+// key is stamped as the ome.io/topology-key annotation the OME gang scheduler
+// plugin (OMEGangPack) reads to pin the gang to one free partition. It is set
+// when the ComponentPlan declares a TopologyKey and absent (nil map) when it
+// doesn't, so non-topology gangs don't churn on an empty-string annotation.
+func TestBuildPodGroup_TopologyKeyAnnotation(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	inst := core.InstancePlan{
+		Index: 0,
+		Runners: []core.RunnerPlan{
+			{Name: "leader", Size: 1},
+			{Name: "worker", Size: 1},
+		},
+	}
+
+	t.Run("declared topology key is stamped", func(t *testing.T) {
+		plan := core.ComponentPlan{
+			Component:            workload.ComponentEngine,
+			InstanceReadyTimeout: 5 * time.Minute,
+			TopologyKey:          "cloud.google.com/gke-tpu-partition-2x2x2-id",
+		}
+		pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+		if err != nil {
+			t.Fatalf("BuildPodGroup: %v", err)
+		}
+		if got := pg.Annotations[query.AnnotationTopologyKey]; got != "cloud.google.com/gke-tpu-partition-2x2x2-id" {
+			t.Errorf("annotation %s: got %q want cloud.google.com/gke-tpu-partition-2x2x2-id",
+				query.AnnotationTopologyKey, got)
+		}
+	})
+
+	t.Run("no topology key means no annotations", func(t *testing.T) {
+		plan := core.ComponentPlan{
+			Component:            workload.ComponentEngine,
+			InstanceReadyTimeout: 5 * time.Minute,
+			// TopologyKey deliberately unset.
+		}
+		pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+		if err != nil {
+			t.Fatalf("BuildPodGroup: %v", err)
+		}
+		if pg.Annotations != nil {
+			t.Errorf("annotations: got %v want nil (no topology key declared)", pg.Annotations)
+		}
+	})
+}
+
 // TestBuildPodGroup_TimeoutClamp covers the three clamp regions —
 // zero (floor), in-range (passthrough), too-big (cap).
 func TestBuildPodGroup_TimeoutClamp(t *testing.T) {

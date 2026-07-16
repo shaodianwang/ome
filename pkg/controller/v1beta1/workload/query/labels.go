@@ -30,8 +30,21 @@ const (
 	// the byte level (we don't import the type here to keep the query
 	// package dep-free of the optional scheduler-plugins API).
 	// Single-pod Instances do NOT carry this label — no PodGroup, no gang.
-	LabelPodGroup      = "scheduling.x-k8s.io/pod-group"
-	ManagedByOMENative = "OMENative"
+	LabelPodGroup = "scheduling.x-k8s.io/pod-group"
+	// AnnotationTopologyKey is the gang topology-domain key stamped on the
+	// PodGroup object (NOT on pods). The OME gang scheduler plugin
+	// (OMEGangPack) reads `pg.Annotations["ome.io/topology-key"]` and, when
+	// non-empty, pins the whole gang to a single free topology domain (e.g. a
+	// `cloud.google.com/gke-tpu-partition-2x2x2-id` value) before binding any
+	// member — the all-or-nothing, whole-partition placement multi-host TPU
+	// needs. When absent, the plugin skips domain pinning and the gang can
+	// fragment (leader placed, worker Pending on the partition podAffinity).
+	// The value is ComponentPlan.TopologyKey — the same key already used for
+	// the pods' partition podAffinity. Matches the plugin's private
+	// `topologyKeyAnnotation` const byte-for-byte (the scheduler is a separate
+	// module, so the string is duplicated rather than imported).
+	AnnotationTopologyKey = "ome.io/topology-key"
+	ManagedByOMENative    = "OMENative"
 )
 
 // RevisionHashFromControllerRevisionName extracts the trailing
