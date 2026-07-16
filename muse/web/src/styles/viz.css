@@ -32,7 +32,7 @@
   font-size: var(--t-2xl);
   font-weight: 300;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
 .tile-val small {
@@ -167,7 +167,7 @@ h2.sec .who {
   font-size: var(--t-xl);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   margin-bottom: 6px;
 }
 .chart-val small {
@@ -465,7 +465,8 @@ h2.sec .who {
   font-size: var(--t-xl);
   font-weight: 500;
   margin: 0;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 .detail-meta {
   color: var(--fg-3);
@@ -1174,4 +1175,109 @@ th.right .sort-arrow {
   align-items: center;
   gap: 6px;
   font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .tiles,
+  .tiles.cap-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--s2);
+  }
+  .tile {
+    padding: var(--s3);
+  }
+  .tile-val {
+    font-size: var(--t-xl);
+  }
+  .grid.g4 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .filters {
+    align-items: stretch;
+  }
+  .fv {
+    min-width: 0;
+  }
+  .fv select {
+    min-width: 0;
+    max-width: 145px;
+  }
+  h2.sec {
+    margin-top: var(--s4);
+  }
+  .panel-alert,
+  .detail-endpoint {
+    align-items: flex-start;
+  }
+  .detail-head {
+    align-items: flex-start;
+    margin-bottom: var(--s3);
+  }
+  .detail-title {
+    flex: 1 1 calc(100% - 90px);
+  }
+  .detail-meta {
+    flex: 1 1 100%;
+    padding-left: var(--s2);
+  }
+  .detail-actions {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .detail-endpoint {
+    flex-wrap: wrap;
+  }
+  .dtabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+  }
+  .dtab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding-inline: var(--s3);
+  }
+  .statstrip {
+    gap: var(--s3);
+  }
+  .fleet-status {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .fleet-status-bar {
+    flex: 1 1 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+  .place-tbl {
+    min-width: 460px;
+  }
+  .place-tbl.perf-tbl {
+    min-width: 760px;
+  }
+  .pager {
+    align-items: stretch;
+  }
+  .pager-ctrls {
+    width: 100%;
+    justify-content: space-between;
+    gap: var(--s2);
+  }
+  .page-of {
+    min-width: 42px;
+  }
+}
+
+@media (max-width: 380px) {
+  .tiles,
+  .tiles.cap-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pager-ctrls {
+    flex-wrap: wrap;
+  }
+  .page-size {
+    flex: 1 1 100%;
+  }
 }

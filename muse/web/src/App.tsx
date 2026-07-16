@@ -1,12 +1,16 @@
+import { useEffect, useRef, useState } from "react";
+
 import { api } from "./api";
 import {
   BrandMark,
+  Close,
   IconCapacity,
   IconDeploy,
   IconFleet,
   IconModels,
   IconRuntimes,
   IconWorkloads,
+  Menu,
 } from "./icons";
 import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
@@ -40,6 +44,10 @@ export default function App() {
   const depCluster = route.cluster;
   const depQ = route.q;
   const sel = route.sel ?? null;
+  const [navOpen, setNavOpen] = useState(false);
+  const activeNavRef = useRef<HTMLButtonElement>(null);
+  const navToggleRef = useRef<HTMLButtonElement>(null);
+  const mainRef = useRef<HTMLDivElement>(null);
   // A workloads route carrying the current list filters (tab / cluster / search),
   // so navigating into a detail and back restores them.
   const wl = (over: Partial<Route>): Route => ({
@@ -50,7 +58,10 @@ export default function App() {
     ...over,
   });
 
-  const goto = (p: PanelKey) => navigate({ panel: p });
+  const goto = (p: PanelKey) => {
+    setNavOpen(false);
+    navigate({ panel: p });
+  };
   const openDeployments = (f: DepFilter) => navigate({ panel: "workloads", filter: f });
   const openDeployment = (s: Selected) => navigate({ panel: "workloads", sel: s });
   const openModel = (s: Selected) => navigate({ panel: "models", sel: s });
@@ -65,16 +76,53 @@ export default function App() {
   const ready = items.filter((c) => c.ready).length;
   const syncing = items.length - ready;
 
+  useEffect(() => {
+    const main = mainRef.current;
+    if (!navOpen) {
+      main?.removeAttribute("inert");
+      return;
+    }
+    const navToggle = navToggleRef.current;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNavOpen(false);
+    };
+    const onResize = () => setNavOpen(false);
+    main?.setAttribute("inert", "");
+    activeNavRef.current?.focus();
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onResize);
+    return () => {
+      main?.removeAttribute("inert");
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onResize);
+      navToggle?.focus();
+    };
+  }, [navOpen]);
+
   const navItem = (key: PanelKey, label: string, Icon: typeof IconFleet) => (
-    <div className={`nav-item ${panel === key ? "active" : ""}`} onClick={() => goto(key)}>
+    <button
+      type="button"
+      className={`nav-item ${panel === key ? "active" : ""}`}
+      onClick={() => goto(key)}
+      aria-current={panel === key ? "page" : undefined}
+      aria-label={label}
+      title={label}
+      ref={panel === key ? activeNavRef : undefined}
+    >
       <Icon className="ico" />
       <span>{label}</span>
-    </div>
+    </button>
   );
 
   return (
-    <div className="app">
-      <aside className="sidebar">
+    <div className={`app${navOpen ? " nav-open" : ""}`}>
+      <button
+        type="button"
+        className="nav-scrim"
+        aria-label="Close navigation"
+        onClick={() => setNavOpen(false)}
+      />
+      <aside className="sidebar" id="primary-navigation" aria-label="Primary navigation">
         <div className="brand">
           <div className="logo">
             <BrandMark />
@@ -108,8 +156,19 @@ export default function App() {
         </div>
       </aside>
 
-      <div className="main">
+      <div className="main" ref={mainRef}>
         <header className="topbar">
+          <button
+            type="button"
+            className="icon-btn nav-toggle"
+            aria-label={navOpen ? "Close navigation" : "Open navigation"}
+            aria-controls="primary-navigation"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen((open) => !open)}
+            ref={navToggleRef}
+          >
+            {navOpen ? <Close /> : <Menu />}
+          </button>
           <div className="crumbs">
             <b>{LABELS[panel]}</b>
           </div>

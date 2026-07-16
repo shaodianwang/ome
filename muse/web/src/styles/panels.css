@@ -1,7 +1,7 @@
 /* model registry */
 .model-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
   gap: var(--s4);
 }
 .mcard {
@@ -492,7 +492,7 @@
 /* RDMA heatmap */
 .island-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
   gap: var(--s3);
 }
 .island {
@@ -548,7 +548,7 @@
 /* TPU slices */
 .slice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
   gap: var(--s3);
 }
 .slice {
@@ -594,7 +594,7 @@
 /* GPU pools */
 .pool-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
   gap: var(--s3);
 }
 .pool {
@@ -769,5 +769,53 @@ td .free-strong {
   }
   .yaml-card {
     position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .form-section {
+    padding: var(--s4);
+  }
+  .form-section .sec-desc {
+    margin: 6px 0 var(--s4);
+  }
+  .sec-indent,
+  .field-row,
+  .radio-cards,
+  .canary-preview {
+    margin-left: 0;
+  }
+  .field-row,
+  .radio-cards,
+  .radio-cards.cols-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .card-body.pad-lg {
+    padding: var(--s4);
+  }
+  .kv.summary {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+  .cap-section {
+    margin-bottom: var(--s6);
+  }
+  .cap-section-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .cap-section-head .right {
+    width: 100%;
+    margin-left: 0;
+  }
+  .cap-controls > .input,
+  .cap-controls > .seg {
+    width: 100%;
+  }
+  .pool {
+    padding-inline: var(--s4);
+  }
+  .pool .nums,
+  .legend {
+    flex-wrap: wrap;
   }
 }

@@ -74,6 +74,7 @@ table.tbl tbody tr.rowlink:hover {
   display: flex;
   flex-direction: column;
   animation: slidein 0.18s ease;
+  min-width: 0;
 }
 @keyframes slidein {
   from {
@@ -116,6 +117,7 @@ table.tbl tbody tr.rowlink:hover {
   display: flex;
   flex-direction: column;
   gap: var(--s5);
+  min-width: 0;
 }
 .drawer-empty {
   padding: var(--s6) 0;
@@ -556,4 +558,51 @@ pre.argbox {
 }
 .drawer-cta {
   margin-left: auto;
+}
+
+@media (max-width: 600px) {
+  .drawer {
+    width: 100%;
+    max-width: none;
+    border-left: 0;
+  }
+  .drawer-head {
+    padding: var(--s3) var(--s4);
+    padding-top: max(var(--s3), env(safe-area-inset-top));
+  }
+  .drawer-body {
+    padding: var(--s4);
+    padding-bottom: max(var(--s4), env(safe-area-inset-bottom));
+    gap: var(--s4);
+  }
+  .drawer-title h2 {
+    font-size: var(--t-base);
+  }
+  .facts {
+    grid-template-columns: 104px minmax(0, 1fr);
+  }
+  .cond-top {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .cond-reason {
+    width: 100%;
+    margin-left: 16px;
+  }
+  .chat-field,
+  .chat-field.grow {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .tryit .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .drawer-scrim {
+    animation: none;
+  }
 }

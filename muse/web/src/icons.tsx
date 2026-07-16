@@ -101,6 +101,12 @@ export const Search = (p: P) => (
   </svg>
 );
 
+export const Menu = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
+  </svg>
+);
+
 export const Refresh = (p: P) => (
   <svg {...base(p)}>
     <path

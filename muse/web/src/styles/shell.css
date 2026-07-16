@@ -3,10 +3,15 @@
    ============================================================ */
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: 100vh;
   position: relative;
   z-index: 1;
+}
+
+.nav-scrim,
+.nav-toggle {
+  display: none;
 }
 
 /* ---- sidebar ---- */
@@ -72,6 +77,8 @@
   margin-top: var(--s2);
 }
 .nav-item {
+  appearance: none;
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -84,6 +91,9 @@
   user-select: none;
   position: relative;
   border: 1px solid transparent;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   transition:
     background 0.12s,
     color 0.12s;
@@ -163,6 +173,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 100vh;
 }
 .topbar {
   height: var(--topbar-h);
@@ -308,6 +319,9 @@
 .content {
   padding: var(--s6) var(--s7) var(--s8);
   overflow-y: auto;
+  overflow-x: hidden;
+  min-width: 0;
+  max-width: 100%;
 }
 .panel {
   display: none;
@@ -317,6 +331,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--s4);
+  min-width: 0;
 }
 @keyframes fade {
   from {
@@ -340,7 +355,7 @@
   font-size: var(--t-2xl);
   margin: 0 0 4px;
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 .page-head p {
   margin: 0;
@@ -351,4 +366,144 @@
 .page-head .actions {
   display: flex;
   gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1400px) {
+  .content {
+    padding-inline: var(--s6);
+  }
+}
+
+/* Compact navigation rail leaves the working surface wide enough on tablets
+   while keeping every destination one click away. */
+@media (min-width: 721px) and (max-width: 1100px) {
+  .app {
+    grid-template-columns: 68px minmax(0, 1fr);
+  }
+  .brand {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .brand .word,
+  .nav-group-label,
+  .nav-item > span,
+  .sidebar-foot {
+    display: none;
+  }
+  .nav {
+    padding: var(--s3) var(--s2);
+  }
+  .nav-item {
+    justify-content: center;
+    min-height: 42px;
+    padding: 10px;
+  }
+  .nav-item .ico {
+    width: 18px;
+    height: 18px;
+  }
+  .nav-item.active::before {
+    top: 9px;
+    bottom: 9px;
+  }
+  .topbar {
+    padding-inline: var(--s5);
+  }
+  .content {
+    padding: var(--s5) var(--s5) var(--s7);
+  }
+}
+
+/* The rail becomes an off-canvas menu on narrow screens. The main surface
+   stays full width; navigation and its scrim form a separate fixed layer. */
+@media (max-width: 720px) {
+  .app {
+    display: block;
+    min-height: 100dvh;
+  }
+  .main {
+    min-height: 100dvh;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 60;
+    width: min(82vw, 280px);
+    height: 100dvh;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform 0.18s ease,
+      visibility 0s linear 0.18s;
+    box-shadow: var(--shadow);
+  }
+  .app.nav-open .sidebar {
+    transform: translateX(0);
+    visibility: visible;
+    transition-delay: 0s;
+  }
+  .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    border: 0;
+    padding: 0;
+    background: rgba(0, 0, 0, 0.58);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    touch-action: none;
+    transition:
+      opacity 0.18s ease,
+      visibility 0s linear 0.18s;
+  }
+  .app.nav-open .nav-scrim {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+  .nav-toggle {
+    display: grid;
+    flex: 0 0 auto;
+  }
+  .nav-toggle svg {
+    width: 17px;
+    height: 17px;
+  }
+  .topbar {
+    height: var(--topbar-h);
+    gap: var(--s3);
+    padding-inline: var(--s3);
+  }
+  .content {
+    padding: var(--s4) var(--s3) var(--s7);
+  }
+  .page-head {
+    align-items: stretch;
+  }
+  .page-head h1 {
+    font-size: var(--t-xl);
+  }
+  .page-head p {
+    font-size: var(--t-sm);
+  }
+  .page-head .actions {
+    width: 100%;
+  }
+  .page-head .actions > .btn:only-child {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .sidebar,
+  .nav-scrim {
+    animation: none;
+    transition: none;
+  }
 }
