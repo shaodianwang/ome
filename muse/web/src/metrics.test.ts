@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { MetricsSnapshot } from "./api";
-import { isvcMetrics, metricsQueryRangeSeconds, metricsRangeLabel } from "./metrics";
+import { isvcMetrics, metricsQueryRangeSeconds, metricsRangeLabel, perfRows } from "./metrics";
 
 const snapshot: MetricsSnapshot = {
   updatedAt: 4_700,
@@ -12,7 +12,7 @@ const snapshot: MetricsSnapshot = {
           resultType: "matrix",
           result: [
             {
-              metric: { inferenceservice: "model" },
+              metric: { namespace: "team-a", inferenceservice: "model" },
               values: [
                 [1_000, "1"],
                 [4_600, "2"],
@@ -28,7 +28,7 @@ const snapshot: MetricsSnapshot = {
           resultType: "matrix",
           result: [
             {
-              metric: { inferenceservice: "other-model" },
+              metric: { namespace: "team-a", inferenceservice: "other-model" },
               values: [
                 [1_100, "1"],
                 [4_700, "2"],
@@ -45,7 +45,7 @@ describe("metrics range", () => {
   it("derives dashboard labels from returned timestamps", () => {
     expect(metricsQueryRangeSeconds(snapshot, "request_rate")).toBe(3_600);
     expect(metricsRangeLabel(metricsQueryRangeSeconds(snapshot, "request_rate"))).toBe("1h");
-    expect(isvcMetrics(snapshot, "test", "model", true).rangeSeconds).toBe(3_600);
+    expect(isvcMetrics(snapshot, "test", "team-a", "model", true).rangeSeconds).toBe(3_600);
   });
 
   it("stays neutral when no range samples are present", () => {
@@ -53,10 +53,60 @@ describe("metrics range", () => {
     expect(metricsRangeLabel(null)).toBeNull();
   });
 
-  it("refuses name-only selection when deployment identity is ambiguous", () => {
-    const metrics = isvcMetrics(snapshot, "test", "model", false);
+  it("selects an exact namespace even when inventory identity is ambiguous", () => {
+    const metrics = isvcMetrics(snapshot, "test", "team-a", "model", false);
+    expect(metrics.present).toBe(true);
+    expect(metrics.identityScoped).toBe(true);
+  });
+
+  it("refuses a legacy name-only series when deployment identity is ambiguous", () => {
+    const legacy: MetricsSnapshot = {
+      updatedAt: snapshot.updatedAt,
+      clusters: {
+        test: {
+          request_rate: {
+            data: {
+              resultType: "matrix",
+              result: [
+                {
+                  metric: { inferenceservice: "model" },
+                  values: [[4_600, "2"]],
+                },
+                {
+                  metric: { namespace: "team-b", inferenceservice: "other-model" },
+                  values: [[4_600, "3"]],
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+    const metrics = isvcMetrics(legacy, "test", "team-a", "model", false);
     expect(metrics.present).toBe(false);
+    expect(metrics.identityScoped).toBe(false);
     expect(metrics.rangeSeconds).toBeNull();
-    expect(metrics.by).toEqual({});
+    expect(metrics.by.request_rate).toEqual({ last: null, series: [] });
+  });
+
+  it("keeps same-named deployments in separate namespace rows", () => {
+    const sameName = structuredClone(snapshot);
+    sameName.clusters.test.request_rate.data?.result.push({
+      metric: { namespace: "team-b", inferenceservice: "model" },
+      values: [[4_600, "9"]],
+    });
+
+    expect(
+      perfRows(sameName).map(({ cluster, namespace, isvc, qps }) => ({
+        cluster,
+        namespace,
+        isvc,
+        qps,
+      })),
+    ).toEqual([
+      { cluster: "test", namespace: "team-b", isvc: "model", qps: 9 },
+      { cluster: "test", namespace: "team-a", isvc: "model", qps: 2 },
+      { cluster: "delayed", namespace: "team-a", isvc: "other-model", qps: 2 },
+    ]);
   });
 });

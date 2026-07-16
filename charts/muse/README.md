@@ -137,3 +137,17 @@ individual category to `null` to render that metric neutrally. Percentage metric
 use 0..100 and cache metrics use 0..1 fractions. The chart's values file carries
 the default policy and the server exposes the effective typed policy via
 `/v1/config`.
+
+## Serving metric identity
+
+The bundled query set aggregates historical dashboard signals by
+`namespace,inferenceservice`, so deployments with the same name stay separate.
+Replica diagnostics are engine-only instant queries grouped by
+`namespace,inferenceservice,pod,component`; router signals remain deployment-level
+because a router request cannot be attributed to one engine pod. Keeping replica
+queries instant avoids returning a per-pod time series for the entire fleet on
+every refresh.
+
+The bundled OME Prometheus scrape config supplies all four labels. A custom
+Prometheus or PodMonitor pipeline must preserve them for exact deployment and
+replica selection.

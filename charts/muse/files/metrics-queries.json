@@ -1,138 +1,173 @@
 {
-  "_comment": "Curated fleet-dashboard query set, loaded by muse-server (--metrics-queries-file), rendered as a ConfigMap by the chart. ENGINE- AND TOPOLOGY-AGNOSTIC: each query unions the metric sources present in the fleet via PromQL `or`, so no source is baked into the binary \u2014 add engines/proxies by editing this file. Source hierarchy for user-facing SLIs is router (the SMG reverse proxy, `router_*` / `smg_*`, component=router) \u2192 engine (`sglang:*` / `vllm:*`, component=engine): the router sees true client-facing traffic (and per-deployment status codes), while the engine sees per-replica internals. Token/latency-breakdown/cache/PD metrics are engine-only (the router emits none). Latency histograms use `_bucket` + histogram_quantile; usage gauges (token_usage, kv_cache_usage_perc) are 0..1 fractions (render as %); PD (prefill/decode) metrics are sglang-only and simply resolve empty on non-PD deployments. All queries group by `inferenceservice` (the deployment), which every layer carries via the ome-inferenceservice-pods scrape relabeling.",
+  "_comment": "Curated fleet-dashboard query set, loaded by muse-server (--metrics-queries-file), rendered as a ConfigMap by the chart. ENGINE- AND TOPOLOGY-AGNOSTIC: each deployment query unions the metric sources present in the fleet via PromQL `or`, so no source is baked into the binary \u2014 add engines/proxies by editing this file. Source hierarchy for user-facing SLIs is router (the SMG reverse proxy, `router_*` / `smg_*`, component=router) \u2192 engine (`sglang:*` / `vllm:*`, component=engine): the router sees true client-facing traffic (and per-deployment status codes), while the engine sees per-replica internals. Token/latency-breakdown/cache/PD metrics are engine-only (the router emits none). Latency histograms use `_bucket` + histogram_quantile; usage gauges (token_usage, kv_cache_usage_perc) are 0..1 fractions (render as %); PD (prefill/decode) metrics are sglang-only and simply resolve empty on non-PD deployments. Deployment queries group by `namespace,inferenceservice`; `replica_*` queries are engine-only instant diagnostics grouped by `namespace,inferenceservice,pod,component`, avoiding fleet-wide per-pod range cardinality. These labels come from the ome-inferenceservice-pods scrape relabeling.",
   "queries": [
     {
       "id": "request_rate",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(router_requests_total[5m])) or sum by (inferenceservice) (rate(sglang:e2e_request_latency_seconds_count[5m])) or sum by (inferenceservice) (rate(vllm:e2e_request_latency_seconds_count[5m]))"
+      "promql": "sum by (namespace, inferenceservice) (rate(router_requests_total[5m])) or sum by (namespace, inferenceservice) (rate(sglang:e2e_request_latency_seconds_count[5m])) or sum by (namespace, inferenceservice) (rate(vllm:e2e_request_latency_seconds_count[5m]))"
     },
     {
       "id": "error_rate",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(router_requests_total{status=~\"5..\"}[5m])) or sum by (inferenceservice) (rate(sglang:num_aborted_requests_total[5m]))"
+      "promql": "sum by (namespace, inferenceservice) (rate(router_requests_total{status=~\"5..\"}[5m])) or sum by (namespace, inferenceservice) (rate(sglang:num_aborted_requests_total[5m]))"
     },
     {
       "id": "latency_p99",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(router_request_duration_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(router_request_duration_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
     },
     {
       "id": "latency_p50",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "histogram_quantile(0.50, sum by (inferenceservice, le) (rate(router_request_duration_seconds_bucket[5m]))) or histogram_quantile(0.50, sum by (inferenceservice, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.50, sum by (inferenceservice, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
+      "promql": "histogram_quantile(0.50, sum by (namespace, inferenceservice, le) (rate(router_request_duration_seconds_bucket[5m]))) or histogram_quantile(0.50, sum by (namespace, inferenceservice, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.50, sum by (namespace, inferenceservice, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
     },
     {
       "id": "ttft",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(router_ttft_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:time_to_first_token_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))"
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(router_ttft_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(sglang:time_to_first_token_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))"
     },
     {
       "id": "tpot",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:inter_token_latency_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(vllm:inter_token_latency_seconds_bucket[5m])))"
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(sglang:inter_token_latency_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(vllm:inter_token_latency_seconds_bucket[5m])))"
     },
     {
       "id": "queue_time",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:queue_time_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (inferenceservice, le) (rate(vllm:request_queue_time_seconds_bucket[5m])))"
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(sglang:queue_time_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(vllm:request_queue_time_seconds_bucket[5m])))"
     },
     {
       "id": "throughput_tokens",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(sglang:generation_tokens_total[5m])) or sum by (inferenceservice) (rate(vllm:generation_tokens_total[5m]))"
+      "promql": "sum by (namespace, inferenceservice) (rate(sglang:generation_tokens_total[5m])) or sum by (namespace, inferenceservice) (rate(vllm:generation_tokens_total[5m]))"
     },
     {
       "id": "input_tokens",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(sglang:prompt_tokens_total[5m])) or sum by (inferenceservice) (rate(vllm:prompt_tokens_total[5m]))"
+      "promql": "sum by (namespace, inferenceservice) (rate(sglang:prompt_tokens_total[5m])) or sum by (namespace, inferenceservice) (rate(vllm:prompt_tokens_total[5m]))"
     },
     {
       "id": "running_reqs",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (router_pool_inflight_reqs) or sum by (inferenceservice) (sglang:num_running_reqs) or sum by (inferenceservice) (vllm:num_requests_running)"
+      "promql": "sum by (namespace, inferenceservice) (router_pool_inflight_reqs) or sum by (namespace, inferenceservice) (sglang:num_running_reqs) or sum by (namespace, inferenceservice) (vllm:num_requests_running)"
     },
     {
       "id": "queue_reqs",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (sglang:num_queue_reqs) or sum by (inferenceservice) (vllm:num_requests_waiting)"
+      "promql": "sum by (namespace, inferenceservice) (sglang:num_queue_reqs) or sum by (namespace, inferenceservice) (vllm:num_requests_waiting)"
     },
     {
       "id": "kv_cache_usage",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "avg by (inferenceservice) (sglang:token_usage) or avg by (inferenceservice) (vllm:kv_cache_usage_perc)"
+      "promql": "avg by (namespace, inferenceservice) (sglang:token_usage) or avg by (namespace, inferenceservice) (vllm:kv_cache_usage_perc)"
     },
     {
       "id": "prefix_cache_hit",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(sglang:cached_tokens_total[5m])) / clamp_min(sum by (inferenceservice) (rate(sglang:prompt_tokens_total[5m])), 1) or sum by (inferenceservice) (rate(vllm:prefix_cache_hits_total[5m])) / clamp_min(sum by (inferenceservice) (rate(vllm:prefix_cache_queries_total[5m])), 1)"
+      "promql": "sum by (namespace, inferenceservice) (rate(sglang:cached_tokens_total[5m])) / clamp_min(sum by (namespace, inferenceservice) (rate(sglang:prompt_tokens_total[5m])), 1) or sum by (namespace, inferenceservice) (rate(vllm:prefix_cache_hits_total[5m])) / clamp_min(sum by (namespace, inferenceservice) (rate(vllm:prefix_cache_queries_total[5m])), 1)"
     },
     {
       "id": "preemptions",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(vllm:num_preemptions_total[5m])) or sum by (inferenceservice) (rate(sglang:num_retracted_requests_total[5m]))"
+      "promql": "sum by (namespace, inferenceservice) (rate(vllm:num_preemptions_total[5m])) or sum by (namespace, inferenceservice) (rate(sglang:num_retracted_requests_total[5m]))"
     },
     {
       "id": "pool_healthy",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (router_pool_healthy_count)"
+      "promql": "sum by (namespace, inferenceservice) (router_pool_healthy_count)"
     },
     {
       "id": "kv_transfer_latency",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "histogram_quantile(0.99, sum by (inferenceservice, le) (rate(sglang:kv_transfer_latency_ms_bucket[5m]))) / 1000"
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, le) (rate(sglang:kv_transfer_latency_ms_bucket[5m]))) / 1000"
     },
     {
       "id": "prefill_queue",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) ({__name__=~\"sglang:num_prefill_(bootstrap|inflight)_queue_reqs\"})"
+      "promql": "sum by (namespace, inferenceservice) ({__name__=~\"sglang:num_prefill_(bootstrap|inflight)_queue_reqs\"})"
     },
     {
       "id": "decode_queue",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) ({__name__=~\"sglang:num_decode_(prealloc|transfer)_queue_reqs\"})"
+      "promql": "sum by (namespace, inferenceservice) ({__name__=~\"sglang:num_decode_(prealloc|transfer)_queue_reqs\"})"
     },
     {
       "id": "pd_transfer_fail",
       "kind": "range",
       "window": 21600,
       "step": 300,
-      "promql": "sum by (inferenceservice) (rate(sglang:num_transfer_failed_reqs_total[5m])) + sum by (inferenceservice) (rate(sglang:num_bootstrap_failed_reqs_total[5m]))"
+      "promql": "sum by (namespace, inferenceservice) (rate(sglang:num_transfer_failed_reqs_total[5m])) + sum by (namespace, inferenceservice) (rate(sglang:num_bootstrap_failed_reqs_total[5m]))"
+    },
+    {
+      "id": "replica_request_rate",
+      "kind": "instant",
+      "promql": "sum by (namespace, inferenceservice, pod, component) (rate(sglang:e2e_request_latency_seconds_count[5m])) or sum by (namespace, inferenceservice, pod, component) (rate(vllm:e2e_request_latency_seconds_count[5m]))"
+    },
+    {
+      "id": "replica_throughput_tokens",
+      "kind": "instant",
+      "promql": "sum by (namespace, inferenceservice, pod, component) (rate(sglang:generation_tokens_total[5m])) or sum by (namespace, inferenceservice, pod, component) (rate(vllm:generation_tokens_total[5m]))"
+    },
+    {
+      "id": "replica_latency_p99",
+      "kind": "instant",
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, pod, component, le) (rate(sglang:e2e_request_latency_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, pod, component, le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))"
+    },
+    {
+      "id": "replica_ttft",
+      "kind": "instant",
+      "promql": "histogram_quantile(0.99, sum by (namespace, inferenceservice, pod, component, le) (rate(sglang:time_to_first_token_seconds_bucket[5m]))) or histogram_quantile(0.99, sum by (namespace, inferenceservice, pod, component, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))"
+    },
+    {
+      "id": "replica_running_reqs",
+      "kind": "instant",
+      "promql": "sum by (namespace, inferenceservice, pod, component) (sglang:num_running_reqs) or sum by (namespace, inferenceservice, pod, component) (vllm:num_requests_running)"
+    },
+    {
+      "id": "replica_queue_reqs",
+      "kind": "instant",
+      "promql": "sum by (namespace, inferenceservice, pod, component) (sglang:num_queue_reqs) or sum by (namespace, inferenceservice, pod, component) (vllm:num_requests_waiting)"
+    },
+    {
+      "id": "replica_kv_cache_usage",
+      "kind": "instant",
+      "promql": "avg by (namespace, inferenceservice, pod, component) (sglang:token_usage) or avg by (namespace, inferenceservice, pod, component) (vllm:kv_cache_usage_perc)"
     }
   ]
 }

@@ -315,7 +315,7 @@ export function Fleet({
         />
       </div>
 
-      {/* Per-model performance detail. */}
+      {/* Per-deployment performance detail. */}
       {metricsOn ? (
         <>
           <h2 className="sec">
@@ -325,7 +325,7 @@ export function Fleet({
             ) : null}
           </h2>
           <Card
-            title="Models by traffic"
+            title="Deployments by traffic"
             actions={
               <span className="right">
                 <button className="linkbtn" onClick={() => openDeployments("all")}>
@@ -352,10 +352,15 @@ export function Fleet({
                   </thead>
                   <tbody>
                     {perf.slice(0, 12).map((r) => {
-                      const target = unambiguousDeploymentRef(scope.isvcs, r.clusters, r.isvc);
+                      const target = unambiguousDeploymentRef(
+                        scope.isvcs,
+                        r.cluster,
+                        r.namespace,
+                        r.isvc,
+                      );
                       return (
                         <tr
-                          key={r.isvc}
+                          key={`${r.cluster}/${r.namespace ?? ""}/${r.isvc}`}
                           className={target ? "link" : undefined}
                           onClick={() => target && openDeployment(target)}
                         >
@@ -369,13 +374,15 @@ export function Fleet({
                                   openDeployment(target);
                                 }}
                               >
-                                {r.isvc}
+                                {r.namespace ? `${r.namespace}/${r.isvc}` : r.isvc}
                               </button>
+                            ) : r.namespace ? (
+                              `${r.namespace}/${r.isvc}`
                             ) : (
                               r.isvc
                             )}
                           </td>
-                          <td className="muted">{r.clusters.join(", ")}</td>
+                          <td className="muted">{r.cluster}</td>
                           <td className="tnum">{fmtRate(r.qps)}</td>
                           <td className="tnum">{fmtLatency(r.p50)}</td>
                           <td className="tnum">{fmtLatency(r.p99)}</td>

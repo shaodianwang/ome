@@ -126,8 +126,9 @@ config:
     requestTimeoutSecs: 15 # deadline for each discovery/PromQL request
     queriesFile: /etc/muse/metrics/metrics-queries.json # mount path (internal)
     # Default query set ships from charts/muse/files/metrics-queries.json
-    # (engine/topology-agnostic: router → sglang → vllm). Override per environment
-    # with a list of { id, kind: instant|range, promql, window, step }.
+    # (deployment ranges: router → sglang → vllm; engine replica diagnostics:
+    # instant only). Override per environment with a list of
+    # { id, kind: instant|range, promql, window, step }.
     queries: []
   # jemalloc tuning (MALLOC_CONF). A background thread purges freed pages back to
   # the OS after a short decay, so RSS drops after the initial-list allocation

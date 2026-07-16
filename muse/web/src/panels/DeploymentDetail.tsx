@@ -11,6 +11,7 @@ import type { StreamConnectionState } from "../live";
 import { replicaRollup } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
+import { replicaDiagnostics } from "../replicaMetrics";
 import { selectResource } from "../resource";
 import type { ResourceRef, Selected } from "../resource";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate, num as n } from "../util";
@@ -56,7 +57,15 @@ export function DeploymentDetail({
   // This deployment's serving metrics (from the live snapshot; SSE-pushed).
   const metricsOn = !!cfg.data?.metrics;
   const metrics = useMetrics(metricsOn);
-  const m = isvcMetrics(metrics.data, sel.cluster, sel.name, metricIdentity === "unambiguous");
+  const namespace = d?.namespace ?? sel.namespace;
+  const m = isvcMetrics(
+    metrics.data,
+    sel.cluster,
+    namespace,
+    sel.name,
+    metricIdentity === "unambiguous",
+  );
+  const replicas = replicaDiagnostics(metrics.data, sel.cluster, namespace, sel.name);
   const metricsSource = metrics.data?.sources?.[sel.cluster];
   const clusterMetrics = metrics.data
     ? {
@@ -164,7 +173,7 @@ export function DeploymentDetail({
             />
           ) : null}
           {tab === "monitoring" ? (
-            metricsOn && metricIdentity !== "unambiguous" ? (
+            metricsOn && !m.identityScoped ? (
               <div className="muted attn-none">
                 {metricIdentity === "loading"
                   ? "Loading deployment identity…"
@@ -175,6 +184,7 @@ export function DeploymentDetail({
             ) : (
               <Monitoring
                 m={m}
+                replicas={replicas}
                 metricsOn={metricsOn}
                 policy={cfg.data?.dashboardPolicy}
                 loading={metrics.loading || !metricState.ready}

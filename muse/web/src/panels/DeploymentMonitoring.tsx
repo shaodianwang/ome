@@ -5,7 +5,8 @@ import { DataNotice } from "../components";
 import { metricsRangeLabel, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
-import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate } from "../util";
+import type { ReplicaDiagnostics } from "../replicaMetrics";
+import { ago, fmtErrPct, fmtInt, fmtLatency, fmtPct, fmtRate } from "../util";
 import { Card, Distribution, Dot, GaugeCard, MetricChart, Spark, StatTile } from "../viz";
 
 const ACCENT = "var(--accent-2)";
@@ -35,6 +36,7 @@ const perSec = (v: number | null): ReactNode => (
  */
 export function Monitoring({
   m,
+  replicas,
   metricsOn,
   policy,
   loading,
@@ -45,6 +47,7 @@ export function Monitoring({
   source,
 }: {
   m: IsvcMetrics;
+  replicas: ReplicaDiagnostics;
   metricsOn: boolean;
   policy?: DashboardPolicy;
   loading: boolean;
@@ -54,10 +57,11 @@ export function Monitoring({
   updatedAt?: number;
   source?: MetricsSourceState;
 }) {
+  const hasServingData = m.present || replicas.rows.length > 0;
   if (!metricsOn) {
     return <div className="muted attn-none">Metrics aren't configured on this console.</div>;
   }
-  if (source && source.status !== "available" && !m.present) {
+  if (source && source.status !== "available" && !hasServingData) {
     const unconfigured = source.status === "unconfigured";
     const forbidden = source.error?.code === "prometheus_service_discovery_forbidden";
     return (
@@ -74,13 +78,13 @@ export function Monitoring({
       />
     );
   }
-  if (error && !m.present) {
+  if (error && !hasServingData) {
     return <DataNotice tone="danger" title="Serving metrics unavailable" detail={error} />;
   }
-  if (loading && !m.present) {
+  if (loading && !hasServingData) {
     return <div className="muted attn-none">Loading serving metrics…</div>;
   }
-  if (queryCount === 0 && !m.present) {
+  if (queryCount === 0 && !hasServingData) {
     return (
       <DataNotice
         tone="danger"
@@ -89,7 +93,7 @@ export function Monitoring({
       />
     );
   }
-  if (failedQueryCount === queryCount && queryCount > 0 && !m.present) {
+  if (failedQueryCount === queryCount && queryCount > 0 && !hasServingData) {
     return (
       <DataNotice
         tone="danger"
@@ -98,7 +102,7 @@ export function Monitoring({
       />
     );
   }
-  if (!m.present) {
+  if (!hasServingData) {
     return <div className="muted attn-none">No serving traffic in the selected window.</div>;
   }
   const g = (id: string) => seriesOf(m, id);
@@ -168,6 +172,53 @@ export function Monitoring({
           <Spark points={g("ttft").series} color={ACCENT} />
         </StatTile>
       </div>
+
+      {replicas.configured ? (
+        <>
+          <h2 className="sec">Replica performance</h2>
+          <Card
+            title="Engine replicas"
+            sub={`current metrics${updatedAt ? ` · updated ${ago(updatedAt)}` : ""}`}
+          >
+            {replicas.rows.length ? (
+              <table className="place-tbl perf-tbl" aria-label="Engine replica performance">
+                <thead>
+                  <tr>
+                    <th>Replica pod</th>
+                    <th>Component</th>
+                    <th>QPS</th>
+                    <th>p99</th>
+                    <th>TTFT</th>
+                    <th>tok/s</th>
+                    <th>In-flight</th>
+                    <th>Queued</th>
+                    <th>KV cache</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {replicas.rows.map((row) => (
+                    <tr key={`${row.namespace}/${row.component}/${row.pod}`}>
+                      <td className="mono">{row.pod}</td>
+                      <td>{row.component}</td>
+                      <td className="tnum">{fmtRate(row.qps)}</td>
+                      <td className="tnum">{fmtLatency(row.p99)}</td>
+                      <td className="tnum">{fmtLatency(row.ttft)}</td>
+                      <td className="tnum">{fmtRate(row.throughput)}</td>
+                      <td className="tnum">{fmtInt(row.running)}</td>
+                      <td className="tnum">{fmtInt(row.queued)}</td>
+                      <td className="tnum">
+                        {row.kvCache == null ? "—" : fmtPct(row.kvCache * 100)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="muted attn-none">No engine replica metrics in this snapshot.</div>
+            )}
+          </Card>
+        </>
+      ) : null}
 
       {e2e != null && ttft != null ? (
         <>

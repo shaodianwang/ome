@@ -24,7 +24,7 @@ const isvcKey = (item: { cluster: string; namespace?: string; name: string }): s
     namespace: item.namespace,
   });
 
-/** Metrics expose deployment name but not namespace; only a unique name is safe to select. */
+/** Legacy metrics without namespace labels are safe only for a unique deployment name. */
 export function hasUnambiguousDeploymentMetricIdentity(
   isvcs: IsvcItem[],
   selected: Pick<Selected, "cluster" | "namespace" | "name">,
@@ -38,12 +38,16 @@ export function hasUnambiguousDeploymentMetricIdentity(
 /** Resolve an aggregate metrics row only when it identifies one exact deployment. */
 export function unambiguousDeploymentRef(
   isvcs: IsvcItem[],
-  clusters: string[],
+  cluster: string,
+  namespace: string | undefined,
   name: string,
 ): Selected | undefined {
-  if (clusters.length !== 1) return undefined;
-  const cluster = clusters[0];
-  const matches = isvcs.filter((item) => item.cluster === cluster && item.name === name);
+  const matches = isvcs.filter(
+    (item) =>
+      item.cluster === cluster &&
+      item.name === name &&
+      (namespace == null || item.namespace === namespace),
+  );
   if (matches.length !== 1) return undefined;
   return {
     cluster,
@@ -111,11 +115,15 @@ export function scopeFleet(f: FleetFilter, raw: FleetRaw): FleetScope {
     metrics: filterSnapshot(raw.metrics, {
       cluster: f.cluster,
       keepCluster: (c) => f.accel === "all" || kind.get(c) === f.accel,
-      // Metrics currently identify series by deployment name only. Keep a series
-      // when any exact ISVC identity with that name references the selected model.
-      keepIsvc: (name, cluster) =>
+      keepIsvc: (name, cluster, namespace) =>
         f.model === "all" ||
-        raw.isvcs.some((i) => i.cluster === cluster && i.name === name && i.model === f.model),
+        raw.isvcs.some(
+          (i) =>
+            i.cluster === cluster &&
+            i.name === name &&
+            (namespace == null || i.namespace === namespace) &&
+            i.model === f.model,
+        ),
     }),
     accelerators:
       f.cluster === "all" && f.accel === "all"

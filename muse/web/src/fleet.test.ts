@@ -11,7 +11,9 @@ const isvc = (cluster: string, namespace: string): IsvcItem => ({
 
 describe("unambiguousDeploymentRef", () => {
   it("returns the sole full deployment identity", () => {
-    expect(unambiguousDeploymentRef([isvc("member-a", "team-a")], ["member-a"], "chat")).toEqual({
+    expect(
+      unambiguousDeploymentRef([isvc("member-a", "team-a")], "member-a", "team-a", "chat"),
+    ).toEqual({
       cluster: "member-a",
       kind: "InferenceService",
       namespace: "team-a",
@@ -19,10 +21,12 @@ describe("unambiguousDeploymentRef", () => {
     });
   });
 
-  it("rejects rows aggregated across clusters or namespaces", () => {
+  it("uses namespace labels and rejects an ambiguous legacy row", () => {
     const deployments = [isvc("member-a", "team-a"), isvc("member-a", "team-b")];
-    expect(unambiguousDeploymentRef(deployments, ["member-a"], "chat")).toBeUndefined();
-    expect(unambiguousDeploymentRef(deployments, ["member-a", "member-b"], "chat")).toBeUndefined();
+    expect(unambiguousDeploymentRef(deployments, "member-a", "team-b", "chat")?.namespace).toBe(
+      "team-b",
+    );
+    expect(unambiguousDeploymentRef(deployments, "member-a", undefined, "chat")).toBeUndefined();
   });
 });
 

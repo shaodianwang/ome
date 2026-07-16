@@ -5,18 +5,19 @@
 
 import type { MetricsSnapshot, PromResult, PromSeries } from "./api";
 
-/** One InferenceService's fleet-wide serving metrics (merged across clusters). */
+/** One exact InferenceService deployment's serving metrics. */
 export interface PerfRow {
   isvc: string;
-  clusters: string[];
+  namespace?: string;
+  cluster: string;
   /** Request rate, per second (QPS). */
   qps: number | null;
-  /** p50 / p99 end-to-end latency, seconds (worst across clusters). */
+  /** p50 / p99 end-to-end latency, seconds. */
   p50: number | null;
   p99: number | null;
   /** p99 time-to-first-token, seconds. */
   ttft: number | null;
-  /** Generation throughput, tokens/s (summed across clusters). */
+  /** Generation throughput for this deployment, tokens/s. */
   throughput: number | null;
   /** Aborted-request rate (per second) and as a % of requests. */
   errRate: number | null;
@@ -84,21 +85,22 @@ export function metricsRangeLabel(seconds: number | null): string | null {
 }
 
 /**
- * Fold a snapshot into one row per InferenceService. Counts (throughput, running,
- * queue, errors) sum across clusters an isvc is placed in; p99 takes the worst;
- * the throughput sparkline uses the longest available series. Series without an
- * `inferenceservice` label (controller/runtime internals) are skipped. Rows are
- * sorted by throughput then running, so the busiest models surface first.
+ * Fold a snapshot into one row per cluster/namespace/InferenceService identity.
+ * Series without an `inferenceservice` label are skipped. Legacy query sets that
+ * lack `namespace` still remain isolated per cluster instead of being merged
+ * fleet-wide. Rows are sorted by QPS then throughput.
  */
 export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
   if (!snap?.clusters) return [];
   const byIsvc = new Map<string, PerfRow>();
-  const row = (isvc: string, cluster: string): PerfRow => {
-    let r = byIsvc.get(isvc);
+  const row = (isvc: string, namespace: string | undefined, cluster: string): PerfRow => {
+    const key = `${cluster}\u0000${namespace ?? ""}\u0000${isvc}`;
+    let r = byIsvc.get(key);
     if (!r) {
       r = {
         isvc,
-        clusters: [],
+        namespace,
+        cluster,
         qps: null,
         p50: null,
         p99: null,
@@ -108,12 +110,12 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
         errPct: null,
         gpuUtil: null,
       };
-      byIsvc.set(isvc, r);
+      byIsvc.set(key, r);
     }
-    if (!r.clusters.includes(cluster)) r.clusters.push(cluster);
     return r;
   };
-  // Latencies take the worst across clusters; rates sum across them.
+  // If a query returns multiple source series for one deployment, rates sum and
+  // latencies take the worst value.
   const worst = (cur: number | null, v: number | null) => (v == null ? cur : Math.max(cur ?? 0, v));
   const add = (cur: number | null, v: number | null) => (cur ?? 0) + (v ?? 0);
 
@@ -122,7 +124,7 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
       for (const s of results(queries[qid])) {
         const isvc = s.metric?.inferenceservice;
         if (!isvc) continue;
-        f(row(isvc, cluster), s);
+        f(row(isvc, s.metric?.namespace, cluster), s);
       }
     };
     apply("request_rate", (r, s) => (r.qps = add(r.qps, last(s))));
@@ -137,7 +139,7 @@ export function perfRows(snap: MetricsSnapshot | null): PerfRow[] {
     r.errPct = r.qps && r.qps > 0 ? ((r.errRate ?? 0) / r.qps) * 100 : null;
   }
 
-  // "Top models by traffic": order by QPS, then throughput.
+  // Highest-traffic deployments first: order by QPS, then throughput.
   return [...byIsvc.values()].sort(
     (a, b) => (b.qps ?? 0) - (a.qps ?? 0) || (b.throughput ?? 0) - (a.throughput ?? 0),
   );
@@ -155,6 +157,8 @@ export interface IsvcSeries {
 export interface IsvcMetrics {
   /** Whether this deployment has any serving signal in the snapshot. */
   present: boolean;
+  /** Whether namespace labels (or unique inventory identity) make selection safe. */
+  identityScoped: boolean;
   /** Actual time span represented by the returned range samples. */
   rangeSeconds: number | null;
   /** By query id (`latency_p99`, `tpot`, `kv_transfer_latency`, …). */
@@ -170,15 +174,30 @@ export function seriesOf(m: IsvcMetrics, qid: string): IsvcSeries {
 export function isvcMetrics(
   snap: MetricsSnapshot | null,
   cluster: string,
+  namespace: string | undefined,
   isvc: string,
   identityUnambiguous: boolean,
 ): IsvcMetrics {
-  const queries = identityUnambiguous ? snap?.clusters?.[cluster] : undefined;
+  const queries = snap?.clusters?.[cluster];
   const by: Record<string, IsvcSeries> = {};
   let requestRangeSeconds: number | null = null;
+  let namespaceScoped = false;
   if (queries) {
     for (const [qid, res] of Object.entries(queries)) {
-      const s = results(res).find((x) => x.metric?.inferenceservice === isvc);
+      if (qid.startsWith("replica_")) continue;
+      const candidates = results(res);
+      if (
+        candidates.some(
+          (x) => x.metric?.inferenceservice === isvc && x.metric?.namespace === namespace,
+        )
+      ) {
+        namespaceScoped = true;
+      }
+      const s = candidates.find(
+        (x) =>
+          x.metric?.inferenceservice === isvc &&
+          (x.metric?.namespace != null ? x.metric.namespace === namespace : identityUnambiguous),
+      );
       if (qid === "request_rate" && s) requestRangeSeconds = rangeSeconds([s]);
       by[qid] = s ? { last: last(s), series: nums(s) } : EMPTY_SERIES;
     }
@@ -186,6 +205,7 @@ export function isvcMetrics(
   const has = (qid: string) => (by[qid]?.last ?? null) != null || (by[qid]?.series.length ?? 0) > 0;
   return {
     present: has("request_rate") || has("latency_p99") || has("running_reqs"),
+    identityScoped: identityUnambiguous || namespaceScoped,
     rangeSeconds: requestRangeSeconds,
     by,
   };
@@ -283,7 +303,7 @@ export function filterSnapshot(
   opts: {
     cluster?: string;
     keepCluster?: (cluster: string) => boolean;
-    keepIsvc?: (isvc: string, cluster: string) => boolean;
+    keepIsvc?: (isvc: string, cluster: string, namespace?: string) => boolean;
   },
 ): MetricsSnapshot | null {
   if (!snap?.clusters) return snap;
@@ -294,7 +314,9 @@ export function filterSnapshot(
     const kept: Record<string, PromResult> = {};
     for (const [qid, res] of Object.entries(queries)) {
       const result = (res?.data?.result ?? []).filter(
-        (s) => !opts.keepIsvc || opts.keepIsvc(s.metric?.inferenceservice ?? "", cluster),
+        (s) =>
+          !opts.keepIsvc ||
+          opts.keepIsvc(s.metric?.inferenceservice ?? "", cluster, s.metric?.namespace),
       );
       kept[qid] = {
         status: res?.status,
