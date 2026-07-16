@@ -11,20 +11,10 @@
 # (meta-p2p / NIXL), NOT NVLink, so the two gangs do NOT need to share a domain;
 # each just needs internal co-location.
 #
-# CO-LOCATION IS LEADER-ANCHORED (per component):
-#   leader -> NO affinity: it's the free "anchor" for its gang's domain.
-#   worker -> requiredDuringScheduling podAffinity to ITS component's leader
-#             (component + ome.io/runner=leader + instance-index), topologyKey
-#             network.meta.com/domain -> the whole gang lands in the leader's domain.
-# We anchor to the LEADER (scoped by component + instance-index) rather than a broad
-# self-podAffinity over all component pods: the broad form collapses every instance's
-# gang (and, across components, conflates engine vs decoder) into one domain once
-# minReplicas>1, whereas anchoring scopes each gang to its own leader.
-# SCHEDULING IS CAPACITY-BOUND, not an affinity bootstrap problem: each gang-scheduled
-# 4-node gang stays Pending until a domain has 4 GPU-free nodes (the same affinity
-# co-places fine when a domain has room). NOTE: for minReplicas>1 the worker selector's
-# ome.io/instance-index must be templated per-instance (static "0" is correct only for
-# a single instance; OME does not do this today).
+# Each component declares topologyKey. OME generates leader-anchored affinity scoped
+# to that component and instance, and publishes the same key on its PodGroups.
+# topologyKey does not select a scheduler: configure schedulerName on the referenced
+# ServingRuntime (or each leader/worker) only after installing a gang-aware scheduler.
 #
 # Pods:
 #   sglang-tier5-42b-bf16-pd-engine-0-leader-0   + engine-0-worker-0..2    (prefill, domain A)
@@ -45,6 +35,7 @@ spec:
   engine:                      # prefill — multi-node gang
     minReplicas: 1
     maxReplicas: 1
+    topologyKey: network.meta.com/domain
     leader:
       priorityClassName: staging
       # NO affinity — the leader anchors the prefill gang's NVLink domain.
@@ -53,17 +44,6 @@ spec:
     worker:
       size: 3                  # 1 leader + 3 workers = 4 nodes (tp16)
       priorityClassName: staging
-      # Workers co-locate with the ENGINE leader -> whole prefill gang in one domain.
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - topologyKey: network.meta.com/domain
-              labelSelector:
-                matchLabels:
-                  ome.io/inferenceservice: sglang-tier5-42b-bf16-pd
-                  component: engine
-                  ome.io/runner: leader
-                  ome.io/instance-index: "0"
       runner:
         name: ome-container
     lifecycle:
@@ -72,6 +52,7 @@ spec:
   decoder:                     # decode — multi-node gang (its own domain)
     minReplicas: 1
     maxReplicas: 1
+    topologyKey: network.meta.com/domain
     leader:
       priorityClassName: staging
       # NO affinity — the leader anchors the decode gang's (separate) domain.
@@ -80,17 +61,6 @@ spec:
     worker:
       size: 3
       priorityClassName: staging
-      # Workers co-locate with the DECODER leader (component=decoder, NOT engine).
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - topologyKey: network.meta.com/domain
-              labelSelector:
-                matchLabels:
-                  ome.io/inferenceservice: sglang-tier5-42b-bf16-pd
-                  component: decoder
-                  ome.io/runner: leader
-                  ome.io/instance-index: "0"
       runner:
         name: ome-container
     lifecycle:

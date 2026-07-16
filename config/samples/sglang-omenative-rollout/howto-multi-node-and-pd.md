@@ -144,10 +144,11 @@ becomes its own multi-node gang. (Verify with `--dry-run=server`.)
    none of the lifecycle/rollout features.)
 2. **`worker.size` must be ≥ 1.** There's no schema minimum on it today, so a
    `0` or negative slips past the apiserver and fails later — set it explicitly.
-3. **Gang scheduling needs the scheduler-plugins `PodGroup` CRD installed.** If
-   it's absent, OME doesn't fail — it *degrades* to ordinary (non-gang)
-   scheduling, so a partially-scheduled gang can sit half-up. Confirm the CRD
-   exists in clusters where you rely on all-or-nothing placement.
+3. **Gang scheduling needs the scheduler-plugins `PodGroup` CRD and a gang-aware
+   scheduler selected with `schedulerName`.** The CRD alone does not change the
+   default scheduler. Without both, the workload degrades to ordinary
+   scheduling, so a partially scheduled gang can sit half-up. Confirm both in
+   clusters where you rely on all-or-nothing placement.
 4. **The router becomes the entrypoint.** Once you add a `router`, external
    traffic goes to it, not the engine. That's what you want for PD; just know
    your URL now points at the router.

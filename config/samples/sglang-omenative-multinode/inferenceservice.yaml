@@ -35,6 +35,11 @@ spec:
   engine:
     minReplicas: 1            # 1 instance = 1 leader + worker.size workers (one gang)
     maxReplicas: 1
+    # OME derives per-instance worker affinity and the PodGroup contract from
+    # this node-label key. This does not select a scheduler: set
+    # spec.schedulerName on the referenced ServingRuntime (or schedulerName on
+    # both leader and worker) only after installing a gang-aware scheduler.
+    topologyKey: network.meta.com/domain
     # priorityClassName MUST live under leader/worker for a multi-node gang — at
     # the engine (component) level it is DROPPED (same OME #461 gap as volumes),
     # leaving the gang at priority 0 (lowest tier, can't preempt). Mirror of the
@@ -42,35 +47,11 @@ spec:
     # Declaring leader + worker is what makes this component multi-node.
     leader:
       priorityClassName: staging
-      # LEADER-ANCHORED co-location: the leader carries NO affinity (it's the free
-      # "anchor"); each worker (below) requires the leader's network.meta.com/domain so
-      # the whole gang lands in ONE NVLink (MNNVL) domain — needed for the tp16 NCCL
-      # all-reduce. We anchor to the LEADER (runner=leader + this instance-index) rather
-      # than a broad self-podAffinity over all component=engine pods, because the broad
-      # form collapses every instance's gang into a single domain once minReplicas>1,
-      # whereas anchoring scopes each gang to its own leader. (Both co-place fine for a
-      # single instance; the gang is then capacity-bound — see the worker note.)
       runner:
         name: ome-container   # template (image/command/resources) comes from the runtime
     worker:
       size: 3                 # 3 worker pods → 1 leader + 3 workers = 4 nodes
       priorityClassName: staging   # under worker (not engine level) — OME #461
-      # Workers co-locate with THE LEADER → the whole gang lands in the leader's MNNVL
-      # domain. Scheduling is CAPACITY-bound: this coscheduling 4-node gang stays Pending
-      # until some domain has 4 GPU-free nodes — NOT an affinity bootstrap problem (the
-      # same affinity co-places fine when a domain has room). For minReplicas>1,
-      # ome.io/instance-index must be templated per-instance so each gang follows its OWN
-      # leader (static "0" is correct only for a single instance; OME does not do this yet).
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - topologyKey: network.meta.com/domain
-              labelSelector:
-                matchLabels:
-                  ome.io/inferenceservice: sglang-tier5-42b-bf16
-                  component: engine
-                  ome.io/runner: leader
-                  ome.io/instance-index: "0"
       runner:
         name: ome-container
     lifecycle:

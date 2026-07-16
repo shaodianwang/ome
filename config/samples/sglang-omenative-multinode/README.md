@@ -62,8 +62,10 @@ for p in leader-0 worker-0 worker-1 worker-2; do
 done
 ```
 
-> **Gang scheduling** needs the scheduler-plugins `PodGroup` CRD. Without it OME degrades to
-> ordinary scheduling, so a partially-scheduled gang can sit half-up.
+> **Gang scheduling** needs both the scheduler-plugins `PodGroup` CRD and a
+> gang-aware scheduler selected with `schedulerName`; the CRD alone does not
+> change default-scheduler behavior. Without both, the workload degrades to
+> ordinary scheduling and a partially scheduled gang can sit half-up.
 >
 > **The router** depends on the engine leader: it discovers backends via `--label-selector
 > component=engine,ome.io/runner=leader,…` and stays `0/1` (restart-looping) until the

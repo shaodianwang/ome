@@ -26,6 +26,14 @@ OME injects them automatically for any **multi-pod** Instance whose runner
 slice-selector label. Single-pod (single-host) TPU pods keep GKE's default
 single-host env, which is correct for one host.
 
+The InferenceService also declares the GKE partition label key explicitly as
+`engine.topologyKey`. OME uses that config value for worker-to-leader affinity
+and for the PodGroup topology contract; it does not infer provider-specific
+label names from the pod's node selector. `topologyKey` does not select or
+install a scheduler. To use ome-scheduler, install its chart and then set
+`spec.schedulerName: ome-scheduler` on the ClusterServingRuntime; without that
+opt-in, the default scheduler ignores the PodGroup contract.
+
 ## Apply
 
 ```sh

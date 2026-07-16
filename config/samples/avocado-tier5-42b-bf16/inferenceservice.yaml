@@ -30,33 +30,19 @@ spec:
   engine:
     minReplicas: 5            # 1 instance = 1 leader + worker.size workers (one gang)
     maxReplicas: 5
+    # OME generates per-instance worker-to-leader affinity and stamps this same
+    # key on the gang PodGroup. This does not select a scheduler: set
+    # spec.schedulerName on the referenced ServingRuntime (or schedulerName on
+    # both leader and worker) only after installing a gang-aware scheduler.
+    topologyKey: network.meta.com/domain
     # priorityClassName MUST live under leader/worker for a multi-node gang — at the
     # engine (component) level it is DROPPED (OME #461). Set your prod priority class
     # under leader/worker if the 4-node gang would otherwise sit Pending.
     leader:
-      # LEADER-ANCHORED co-location: leader carries NO affinity (the anchor); each
-      # worker requires the leader's network.meta.com/domain so the whole gang lands
-      # in ONE NVLink (MNNVL) domain — needed for the tp16 NCCL all-reduce.
       runner:
         name: ome-container   # image/command/resources come from the runtime
     worker:
       size: 3                 # 3 workers + 1 leader = 4 nodes
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            # Each worker co-locates with the leader OF ITS OWN gang. matchLabelKeys
-            # ANDs this pod's own ome.io/instance-index value into the selector, so the
-            # static YAML stays correct for ANY replica count — no hardcoded "0".
-            # (k8s >=1.31 matchLabelKeys; this cluster is 1.35. Workers→leader with the
-            # leader left free, to avoid the self-affinity bootstrap deadlock.)
-            - topologyKey: network.meta.com/domain
-              labelSelector:
-                matchLabels:
-                  ome.io/inferenceservice: avocado-tier5-42b-bf16
-                  component: engine
-                  ome.io/runner: leader
-              matchLabelKeys:
-                - ome.io/instance-index
       runner:
         name: ome-container
     lifecycle:
