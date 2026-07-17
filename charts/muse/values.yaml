@@ -154,6 +154,13 @@ config:
 service:
   port: 8080
   metricsPort: 9090
+  api:
+    # Headless service whose pod endpoints are registered in SMC for
+    # mks-http-fe. This bypasses the interactive, TLS-terminating console
+    # gateway for server-to-server API clients.
+    enabled: true
+    nameSuffix: api
+    smcTierName: muse-api.muse.msl-mks-cp-lco-0.mks
 
 # Gateway API exposure: attach an HTTPRoute to an existing (platform-owned) Envoy
 # Gateway. The console is served under pathPrefix; the route strips the prefix

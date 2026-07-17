@@ -7,6 +7,8 @@ and exposes it through an existing Envoy Gateway — no nginx, no separate front
 ## What it deploys
 
 - **Deployment** `muse-server` (API + UI) + **Service** (ClusterIP `:8080`, metrics `:9090`).
+- **Headless Service** `muse-api` for direct, server-to-server API access through
+  the MKS HTTP frontend.
 - **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`;
   metrics add `get` on `services` and `services/proxy` for discovery and queries.
 - **HTTPRoute** on the shared Envoy Gateway, serving the console under `/muse` — the
@@ -65,6 +67,22 @@ kubectl get gateway ingress-eg-https -n envoy-gateway-system \
 
 e.g. `2401:db00:72ff:c8b6::` →
 `https://sv6-2401-db00-72ff-c8b6-0000-0000-0000-0000---8443.silfra.facebook.net/muse`
+
+### Server-to-server API access
+
+The chart also creates a single-port headless Service annotated for MKS SMC
+registration. Internal clients can reach the API without traversing the
+interactive console gateway:
+
+```bash
+curl \
+  -H "service_endpoint: muse-api.muse.msl-mks-cp-lco-0.mks" \
+  https://mks-http-fe.fbinfra.net/v1/clusters
+```
+
+Set `service.api.smcTierName` to the target cluster's tier name when deploying in
+another cluster, or set `service.api.enabled=false` when direct API access is not
+needed.
 
 ## Watching workload clusters
 
