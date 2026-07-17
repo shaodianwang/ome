@@ -417,10 +417,11 @@ prometheus:
     type: ClusterIP
     port: 9090
   storage:
-    # emptyDir size cap. ~30 min retention at 15s scrape interval
-    # for a typical OME cluster fits well under 1Gi; the cap exists
-    # to protect the node from runaway disk use.
-    sizeLimit: 2Gi
+    # emptyDir size cap. Prometheus keeps the active head and WAL beyond the
+    # configured retention window, and compaction temporarily needs space for
+    # both source and output blocks. 8Gi covers a moderate high-cardinality
+    # inference fleet while still protecting the node from runaway disk use.
+    sizeLimit: 8Gi
   nodeSelector: {}
   tolerations: []
   affinity: {}

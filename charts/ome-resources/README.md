@@ -74,7 +74,7 @@ OME Resources and Controller
 | ome.omeAgent.tag | string | `"v0.1.2"` |  |
 | ome.omeAgent.vaultId | string | `"ocid1.vault.oc1.ap-osaka-1.dummy.dummy-vault"` |  |
 | ome.version | string | `"v0.1.2"` |  |
-| prometheus.enabled | bool | `false` | Bundle a single-replica Prometheus for KEDA autoscaling input. See [Bundled Prometheus](#bundled-prometheus). |
+| prometheus.enabled | bool | `true` | Bundle a single-replica Prometheus for KEDA autoscaling input. See [Bundled Prometheus](#bundled-prometheus). |
 | prometheus.retention | string | `"30m"` | TSDB retention window. Short by design — autoscaling input only. |
 | prometheus.scrapeInterval | string | `"15s"` |  |
 | prometheus.image.repository | string | `"prom/prometheus"` |  |
@@ -85,7 +85,7 @@ OME Resources and Controller
 | prometheus.resources.requests.memory | string | `"512Mi"` |  |
 | prometheus.service.port | int | `9090` |  |
 | prometheus.service.type | string | `"ClusterIP"` |  |
-| prometheus.storage.sizeLimit | string | `"2Gi"` | emptyDir size cap. Protects the node from runaway disk use. |
+| prometheus.storage.sizeLimit | string | `"8Gi"` | emptyDir size cap. Covers active head, WAL, and compaction overlap for a moderate high-cardinality inference fleet. |
 
 ## Bundled Prometheus
 
@@ -119,6 +119,9 @@ observability install. Defaults reflect that explicitly:
 
 - Single replica, no HA.
 - `emptyDir` storage (no PVC, no PV).
+- 8 GiB default `emptyDir` cap (`prometheus.storage.sizeLimit`) to accommodate
+  active head, WAL, and compaction overlap; override it for the fleet's actual
+  series count and ingestion rate.
 - 30 minute default retention (`prometheus.retention`) — sized to KEDA
   query windows, not dashboards or alerts.
 - No Alertmanager, no recording rules, no `remote_write`.
