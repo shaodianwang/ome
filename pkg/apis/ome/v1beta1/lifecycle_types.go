@@ -513,10 +513,13 @@ type RollingUpdate struct {
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
 }
 
-// InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
+// InPlaceUpdateStrategy tunes per-pod lifecycle drain timing.
 type InPlaceUpdateStrategy struct {
 	// GracePeriodSeconds is the time OMENative waits between marking the
-	// pod not-ready and applying the in-place mutation.
+	// pod not-ready and applying an in-place mutation. SurgeThenDrain also
+	// waits this long after EndpointSlice removal before deleting the old pod,
+	// allowing persistent load-balancer connections to drain while its workers
+	// remain available.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	GracePeriodSeconds *int32 `json:"gracePeriodSeconds,omitempty"`

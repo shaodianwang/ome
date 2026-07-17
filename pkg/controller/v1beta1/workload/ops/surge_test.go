@@ -86,6 +86,7 @@ func makeCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, name 
 // surgePlan builds the single-Instance ComponentPlan a SurgeThenDrain
 // test consumes.
 func surgePlan() workload.ComponentPlan {
+	zeroGrace := int32(0)
 	return workload.ComponentPlan{
 		Component: workload.ComponentEngine,
 		Replicas:  1,
@@ -97,7 +98,61 @@ func surgePlan() workload.ComponentPlan {
 		InstanceReadyTimeout: 30 * time.Minute,
 		UpdateStrategy: workload.UpdateStrategy{
 			Type: workload.UpdateStrategySurgeThenDrain,
+			InPlaceUpdateStrategy: &workload.InPlaceUpdateStrategy{
+				GracePeriodSeconds: &zeroGrace,
+			},
 		},
+	}
+}
+
+func TestWaitForSurgeDrainSettle(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := surgePlan()
+	grace := int32(30)
+	plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", plan.InstanceReadyTimeout); err != nil {
+		t.Fatalf("stamp surge: %v", err)
+	}
+	if err := patchInstanceStatusSurgeStepDrain(context.Background(), input, 0); err != nil {
+		t.Fatalf("stamp drain: %v", err)
+	}
+
+	status := &input.ObservedState.InstanceStatuses[0]
+	status.Phase = workload.InstancePhaseUpdating
+	status.Operation = &workload.InstanceOperation{
+		Type:           workload.InstanceOperationUpdate,
+		Step:           updateStepSurgeDrain,
+		TargetRevision: "rev-x",
+		LastProgressAt: metav1.Now(),
+	}
+
+	settled, err := waitForSurgeDrainSettle(context.Background(), input, plan, 0)
+	if err != nil {
+		t.Fatalf("start settle: %v", err)
+	}
+	if settled {
+		t.Fatalf("new settle phase must not allow immediate deletion")
+	}
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("read settle status: %v", err)
+	}
+	got := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation
+	if got == nil || got.Step != updateStepSurgeDrainSettle {
+		t.Fatalf("step after EndpointSlice drain: got %+v, want %s", got, updateStepSurgeDrainSettle)
+	}
+
+	status.Operation.Step = updateStepSurgeDrainSettle
+	status.Operation.LastProgressAt = metav1.NewTime(time.Now().Add(-31 * time.Second))
+	settled, err = waitForSurgeDrainSettle(context.Background(), input, plan, 0)
+	if err != nil {
+		t.Fatalf("finish settle: %v", err)
+	}
+	if !settled {
+		t.Fatalf("settle phase should complete after grace period")
 	}
 }
 

@@ -28,6 +28,12 @@ const (
 	// surge contributes an extra pod alive — the unavailability gate
 	// doesn't apply; the surge gate does).
 	updateStepSurgeDrain = "SurgeDrain"
+	// updateStepSurgeDrainSettle is entered after EndpointSlice confirms
+	// the old pod is no longer eligible for new traffic. The controller
+	// keeps the pod alive in this step so persistent load-balancer
+	// connections can age out while both the router and its workers are
+	// still available, then deletes it after the configured grace period.
+	updateStepSurgeDrainSettle = "SurgeDrainSettle"
 )
 
 // UpdateStepInPlace is the exported alias for the in-place step name.
@@ -44,6 +50,16 @@ const UpdateStepSurge = updateStepSurge
 
 // UpdateStepSurgeDrain is the exported alias for the surge-drain step name.
 const UpdateStepSurgeDrain = updateStepSurgeDrain
+
+// UpdateStepSurgeDrainSettle is the exported alias for the post-unroute
+// connection-settle step.
+const UpdateStepSurgeDrainSettle = updateStepSurgeDrainSettle
+
+func isSurgeUpdateStep(step string) bool {
+	return step == updateStepSurge ||
+		step == updateStepSurgeDrain ||
+		step == updateStepSurgeDrainSettle
+}
 
 // patchInstanceStatusUpdating idempotently stamps Phase=Updating with the
 // Update operation in Step=InPlace at targetRev. Skip-write requires
@@ -122,8 +138,8 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 // bumping Incarnation (different pod NAME — ordinal slot — keeps old
 // and new distinct without reusing identity). ActiveOrdinal is not yet
 // advanced; it stays on the old slot until promote completes. The
-// idempotency guard requires Step in {Surge, SurgeDrain} so the
-// helper does not regress an in-flight SurgeDrain back to Surge when
+// idempotency guard accepts every surge lifecycle step so the helper
+// does not regress an in-flight drain or settle back to Surge when
 // surgeUpdate re-runs the entry stamp on a subsequent pass; it does
 // require Type==Update so a prior recreate / in-place write at the
 // same target doesn't short-circuit (those writes use the same
@@ -142,7 +158,7 @@ func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.Rec
 		// corrective edit changes TargetRevision, so the guard falls
 		// through and the re-surge proceeds (the #711 recovery path).
 		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
-			(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
+			isSurgeUpdateStep(s.Operation.Step) &&
 			s.TargetRevision == targetRev &&
 			(s.Phase == workload.InstancePhaseUpdating || s.Phase == workload.InstancePhaseFailed) {
 			return false
@@ -176,10 +192,28 @@ func patchInstanceStatusSurgeStepDrain(ctx context.Context, input workload.Recon
 			s.Operation.Type != workload.InstanceOperationUpdate {
 			return false
 		}
-		if s.Operation.Step == updateStepSurgeDrain {
+		if s.Operation.Step == updateStepSurgeDrain || s.Operation.Step == updateStepSurgeDrainSettle {
 			return false
 		}
 		s.Operation.Step = updateStepSurgeDrain
+		s.Operation.LastProgressAt = now
+		return true
+	})
+}
+
+// patchInstanceStatusSurgeStepSettle records the instant EndpointSlice
+// convergence was first observed. LastProgressAt is the durable start of the
+// connection-settle interval, so controller restarts do not shorten the wait.
+func patchInstanceStatusSurgeStepSettle(ctx context.Context, input workload.ReconcileInput, idx int32) error {
+	now := metav1.NewTime(time.Now())
+	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+		if s.Operation == nil || s.Operation.Type != workload.InstanceOperationUpdate {
+			return false
+		}
+		if s.Operation.Step == updateStepSurgeDrainSettle {
+			return false
+		}
+		s.Operation.Step = updateStepSurgeDrainSettle
 		s.Operation.LastProgressAt = now
 		return true
 	})

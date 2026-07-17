@@ -991,6 +991,24 @@ func TestCheckSurgeGate_SurgeDrainStepAlsoCounts(t *testing.T) {
 	}
 }
 
+func TestCheckSurgeGate_SurgeDrainSettleStepAlsoCounts(t *testing.T) {
+	isvc := mkSurgeFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
+			Replicas: 5,
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+				Index:     0,
+				Phase:     v1beta1.OMENativeInstanceUpdating,
+				Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "SurgeDrainSettle"},
+			}},
+		}},
+	}
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	if allowed {
+		t.Errorf("SurgeDrainSettle step must count toward in-flight surge budget")
+	}
+}
+
 func TestCheckSurgeGate_OtherStepsDoNotCount(t *testing.T) {
 	// Step=Drain (recreate) and Step=InPlace are NOT surge — they don't
 	// add an extra pod. Gate must not count them.

@@ -395,7 +395,7 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 
 // unavailableInFlight counts a Component's Instances currently taken OUT
 // of serving rotation by an in-flight operation (Drain for recreate,
-// InPlace for in-place patch). Surge / SurgeDrain / GangSurgeTarget ADD a
+// InPlace for in-place patch). Surge lifecycle steps / GangSurgeTarget ADD a
 // pod (or a whole replacement gang) rather than remove one, so they are
 // excluded. Mirrors workload.CurrentUnavailableInFlight on the v1beta1
 // status shape.
@@ -412,7 +412,7 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 			continue
 		}
 		switch s.Operation.Step {
-		case "Surge", "SurgeDrain", "GangSurgeTarget":
+		case "Surge", "SurgeDrain", "SurgeDrainSettle", "GangSurgeTarget":
 			// surge (single-pod or gang replacement) adds capacity, it
 			// doesn't remove a pod from rotation
 		default:
@@ -679,7 +679,7 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 //     MaxSurgeBudget for the Component.
 //
 // currentInFlightSurge = count of Instances whose Operation.Step is
-// the surge step (Surge or SurgeDrain) — those are the Instances that
+// a surge lifecycle step — those are the Instances that
 // already have an extra pod alive from a prior wake-up.
 func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason string) {
 	if ctx.ShortCircuit {
@@ -698,12 +698,13 @@ func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason str
 		if s.Operation == nil {
 			continue
 		}
-		// Surge mechanism uses two op steps: "Surge" (creating new
-		// pod) and "SurgeDrain" (waiting drain on old). Both contribute
-		// an extra pod alive. Other steps (Drain for recreate, InPlace
+		// Surge mechanism uses "Surge" (creating new pod), "SurgeDrain"
+		// (waiting for EndpointSlice removal), and "SurgeDrainSettle"
+		// (aging out persistent connections). All contribute an extra pod
+		// alive. Other steps (Drain for recreate, InPlace
 		// for in-place patch) are NOT surge — they don't add pods.
 		switch s.Operation.Step {
-		case "Surge", "SurgeDrain":
+		case "Surge", "SurgeDrain", "SurgeDrainSettle":
 			currentInFlight++
 		}
 	}

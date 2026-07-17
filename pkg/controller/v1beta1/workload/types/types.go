@@ -308,8 +308,9 @@ type UpdateStrategy struct {
 	// Component.
 	RollingUpdate *RollingUpdate
 
-	// InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
-	// Ignored when Type is RecreatePod.
+	// InPlaceUpdateStrategy tunes lifecycle drain timing. Its grace period
+	// also provides the post-unroute connection-settle window before a
+	// SurgeThenDrain source pod is deleted.
 	InPlaceUpdateStrategy *InPlaceUpdateStrategy
 }
 
@@ -337,7 +338,9 @@ type RollingUpdate struct {
 // Workload-owned mirror of v1beta1.InPlaceUpdateStrategy.
 type InPlaceUpdateStrategy struct {
 	// GracePeriodSeconds is the time OMENative waits between marking
-	// the pod not-ready and applying the in-place mutation.
+	// the pod not-ready and applying an in-place mutation. SurgeThenDrain
+	// also waits this long after EndpointSlice removal before deletion so
+	// persistent load-balancer connections can drain while workers live.
 	GracePeriodSeconds *int32
 
 	// MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False

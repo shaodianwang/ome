@@ -153,8 +153,8 @@ func TestPerComponentMaxUnavailableBudget_Percent(t *testing.T) {
 }
 
 // TestCurrentSurgeInFlight verifies the per-Instance step-set counter
-// the dispatcher feeds into the budget projection. Only Surge /
-// SurgeDrain steps contribute; other ops (Drain, InPlace) don't add
+// the dispatcher feeds into the budget projection. Only surge lifecycle
+// steps contribute; other ops (Drain, InPlace) don't add
 // pods.
 func TestCurrentSurgeInFlight(t *testing.T) {
 	for _, tc := range []struct {
@@ -171,6 +171,9 @@ func TestCurrentSurgeInFlight(t *testing.T) {
 		}, want: 1},
 		{name: "one SurgeDrain step", in: []workload.InstanceStatus{
 			{Index: 0, Operation: &workload.InstanceOperation{Step: "SurgeDrain"}},
+		}, want: 1},
+		{name: "one SurgeDrainSettle step", in: []workload.InstanceStatus{
+			{Index: 0, Operation: &workload.InstanceOperation{Step: "SurgeDrainSettle"}},
 		}, want: 1},
 		{name: "two surge variants and one in-place skipped", in: []workload.InstanceStatus{
 			{Index: 0, Operation: &workload.InstanceOperation{Step: "Surge"}},
@@ -189,7 +192,7 @@ func TestCurrentSurgeInFlight(t *testing.T) {
 }
 
 // TestCurrentUnavailableInFlight verifies the dual counter — Updating
-// minus the Surge / SurgeDrain steps (which don't take a pod offline).
+// minus the surge lifecycle steps (which preserve steady capacity).
 func TestCurrentUnavailableInFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -211,6 +214,9 @@ func TestCurrentUnavailableInFlight(t *testing.T) {
 		}, want: 0},
 		{name: "Updating + SurgeDrain skipped", in: []workload.InstanceStatus{
 			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "SurgeDrain"}},
+		}, want: 0},
+		{name: "Updating + SurgeDrainSettle skipped", in: []workload.InstanceStatus{
+			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "SurgeDrainSettle"}},
 		}, want: 0},
 		{name: "Updating without Operation counted (defensive)", in: []workload.InstanceStatus{
 			{Index: 0, Phase: workload.InstancePhaseUpdating},

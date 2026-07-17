@@ -95,7 +95,8 @@ func HeldByPartition(ru *RollingUpdate, index int32) bool {
 // in-flight SurgeThenDrain operation — those that already have an
 // extra pod alive from a prior wake-up. The dispatcher consults this
 // before deciding whether to start ONE MORE surge this wake-up. The
-// step-set { "Surge", "SurgeDrain" } mirrors the coordination-group
+// step-set { "Surge", "SurgeDrain", "SurgeDrainSettle" } mirrors the
+// coordination-group
 // CheckSurge accounting in
 // pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/ratio.go
 // — both layers see the same in-flight signal so the budget math is
@@ -110,7 +111,7 @@ func CurrentSurgeInFlight(statuses []InstanceStatus) int32 {
 		// old pod hasn't been deleted yet). Other ops (Drain for
 		// recreate, InPlace for in-place patch) don't add pods.
 		switch s.Operation.Step {
-		case "Surge", "SurgeDrain":
+		case "Surge", "SurgeDrain", "SurgeDrainSettle":
 			n++
 		}
 	}
@@ -126,7 +127,7 @@ func CurrentSurgeInFlight(statuses []InstanceStatus) int32 {
 // check, similar to how coordination.CheckUnavailability counts
 // (replicas - serving).
 //
-// We exclude Surge / SurgeDrain steps because those don't take pods
+// We exclude surge lifecycle steps because those don't take pods
 // offline (a new pod surges IN before the old one drains OUT). Other
 // Updating steps (InPlace, Drain) DO take the pod offline, so they
 // count.
@@ -144,7 +145,7 @@ func CurrentUnavailableInFlight(statuses []InstanceStatus) int32 {
 			continue
 		}
 		switch s.Operation.Step {
-		case "Surge", "SurgeDrain":
+		case "Surge", "SurgeDrain", "SurgeDrainSettle":
 			// Surge doesn't take a pod offline.
 			continue
 		default:

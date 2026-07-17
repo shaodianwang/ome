@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,12 +30,14 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //	Phase 1 (Surge):   Op{Step=Surge}. Create the surge pod at
 //	                   ordinal=1-ActiveOrdinal with target revision.
 //	                   Wait surge pod ContainersReady.
-//	Phase 2 (Drain):   Op.Step=Drain. Mark surge pod serving=True
+//	Phase 2 (Drain):   Op.Step=SurgeDrain. Mark surge pod serving=True
 //	                   (joins LB rotation). Mark old pod
 //	                   serving=False (leaves rotation). Wait
-//	                   drain.IsPodDrained on per-revision routed
-//	                   Service. Delete old pod.
-//	Phase 3 (Promote): Old pod gone. Advance InstanceStatus.
+//	                   drain.IsPodDrained on per-revision routed Service.
+//	Phase 3 (Settle):  Op.Step=SurgeDrainSettle. Keep the old pod alive
+//	                   for the configured grace period so persistent
+//	                   connections age out, then delete it.
+//	Phase 4 (Promote): Old pod gone. Advance InstanceStatus.
 //	                   ActiveOrdinal to the new slot, set Phase=Ready,
 //	                   RunningRevision=target, clear Operation.
 //
@@ -46,7 +49,7 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //     wire-up commit) caps concurrent surges across Instances.
 //   - no in-place patching — different pod NAMES throughout.
 //   - target stability across reconciles: once an Operation is recorded
-//     with Step=Surge / SurgeDrain and TargetRevision=X, the in-flight
+//     with a surge lifecycle Step and TargetRevision=X, the in-flight
 //     surge is committed to driving to X. Spec bumps mid-surge are
 //     picked up by the NEXT reconcile after this surge promotes —
 //     detectUpdateTrigger fires because RunningRevision=X != target=Y.
@@ -101,8 +104,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// never escalates pins itself to a dead rev and holds the maxSurge budget until
 	// instanceReadyTimeout (the p416 deadlock). A surge that IS about to promote
 	// (Ready) skips this and keeps the X-2 pin below so its promote stamps the rev
-	// its pods actually run. Only Step=Surge — a SurgeDrain surge is past the point
-	// of no return (source already draining) and finishes its cycle.
+	// its pods actually run. Only Step=Surge — later surge steps are past the
+	// point of no return (source already draining) and finish their cycle.
 	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil &&
 		s.Phase != workload.InstancePhaseFailed && s.Operation != nil &&
 		s.Operation.Type == workload.InstanceOperationUpdate &&
@@ -143,7 +146,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// surgeTargetName pins the revision this surge is committed to
 	// driving to. On the FIRST pass (no in-flight Op) it equals
 	// target.Name — the rev the dispatcher just decided to roll to. On
-	// SUBSEQUENT passes (Op.Step in {Surge, SurgeDrain} from a prior
+	// SUBSEQUENT passes (an in-flight surge Op from a prior
 	// reconcile) it is the rev that was recorded when the surge was
 	// stamped — even if `target` has since moved because of a fresh
 	// spec bump. Pinning prevents the state machine from declaring the
@@ -164,7 +167,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		runningRevName = s.RunningRevision
 		instanceFailed = s.Phase == workload.InstancePhaseFailed
 		if !instanceFailed && s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
-			(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
+			isSurgeUpdateStep(s.Operation.Step) &&
 			s.Operation.TargetRevision != "" {
 			// Normal in-flight surge: stay pinned to the committed rev (X-2
 			// anti-corruption). A FAILED surge instead re-commits to the current
@@ -191,7 +194,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	wasNotSurging := true
 	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil &&
 		s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
-		(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) {
+		isSurgeUpdateStep(s.Operation.Step) {
 		wasNotSurging = false
 	}
 	if err := patchInstanceStatusSurgingForUpdate(ctx, input, inst.Index, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
@@ -270,6 +273,13 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 				return false, nil
 			}
 		}
+		settled, err := waitForSurgeDrainSettle(ctx, input, plan, inst.Index)
+		if err != nil {
+			return false, err
+		}
+		if !settled {
+			return false, nil
+		}
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
@@ -336,6 +346,13 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 				return false, nil
 			}
 		}
+		settled, err := waitForSurgeDrainSettle(ctx, input, plan, inst.Index)
+		if err != nil {
+			return false, err
+		}
+		if !settled {
+			return false, nil
+		}
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
@@ -371,6 +388,28 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		"OMENative %s surge to revision %s complete (activeOrdinal=%d)",
 		instanceKey(input.Key.Component, inst.Index), surgeTargetName, newOrdinal)
 	return true, nil
+}
+
+func waitForSurgeDrainSettle(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, idx int32) (bool, error) {
+	grace := 30 * time.Second
+	if strategy := plan.UpdateStrategy.InPlaceUpdateStrategy; strategy != nil && strategy.GracePeriodSeconds != nil {
+		grace = time.Duration(*strategy.GracePeriodSeconds) * time.Second
+	}
+	if grace <= 0 {
+		return true, nil
+	}
+
+	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
+	if status == nil || status.Operation == nil || status.Operation.Step != updateStepSurgeDrainSettle {
+		if err := patchInstanceStatusSurgeStepSettle(ctx, input, idx); err != nil {
+			return false, fmt.Errorf("transition surge step to settle (instance=%d): %w", idx, err)
+		}
+		return false, nil
+	}
+	if status.Operation.LastProgressAt.IsZero() {
+		return false, nil
+	}
+	return !time.Now().Before(status.Operation.LastProgressAt.Add(grace)), nil
 }
 
 // partitionPodsBySurgeOrdinal buckets pods by the LabelPodOrdinal label
