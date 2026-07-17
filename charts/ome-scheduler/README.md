@@ -151,6 +151,7 @@ suite still uses the default scheduler and does not duplicate that coverage.
 | `scheduler.nodeResourcesFit.*` | see values | `MostAllocated` score weight and resource weights. |
 | `scheduler.metrics.service.enabled` | `true` | Create the authenticated HTTPS metrics Service. |
 | `scheduler.podDisruptionBudget.*` | enabled / `1` | Keep one scheduler available; `minAvailable` must be lower than replicas. |
+| `scheduler.resources.requests.memory` / `.limits.memory` | `4Gi` / `12Gi` | Accommodate cluster-wide informer caches and startup LIST peaks; override for constrained clusters. |
 | `scheduler.affinity` | required hostname anti-affinity | Keep the active scheduler and standby on different nodes. |
 
 See [`values.yaml`](values.yaml) for the full set.

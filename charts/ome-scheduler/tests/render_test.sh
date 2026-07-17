@@ -52,6 +52,15 @@ assert_contains 'topologyKey: kubernetes.io/hostname'
 assert_contains 'whenUnsatisfiable: ScheduleAnyway'
 assert_contains 'maxUnavailable: 1'
 assert_contains 'maxSurge: 0'
+assert_contains $'        resources:\n          limits:\n            cpu: "2"\n            memory: 12Gi\n          requests:\n            cpu: 200m\n            memory: 4Gi'
+
+# Resource sizing remains configurable for constrained clusters.
+custom_resources="$("${helm_bin}" template ome-scheduler "${chart_dir}" \
+  --kube-version "${kube_version}" \
+  --set scheduler.resources.requests.memory=1Gi \
+  --set scheduler.resources.limits.memory=2Gi)"
+grep -Fq $'        resources:\n          limits:\n            cpu: "2"\n            memory: 2Gi\n          requests:\n            cpu: 200m\n            memory: 1Gi' \
+  <<<"${custom_resources}" || fail "custom scheduler memory resources were not rendered"
 
 # Core and volume permissions come from the cluster's version-managed roles;
 # the chart-owned role is restricted to the distinct Lease/PodGroup contract.

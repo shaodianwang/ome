@@ -114,12 +114,16 @@ scheduler:
     minAvailable: 1
 
   resources:
+    # kube-scheduler informers cache cluster-wide Pods, Nodes, and PodGroups.
+    # Startup LIST processing temporarily uses more memory than steady state,
+    # so size the default for large production clusters; constrained/dev
+    # clusters can override these values.
     requests:
       cpu: 200m
-      memory: 512Mi
+      memory: 4Gi
     limits:
       cpu: "2"
-      memory: 1Gi
+      memory: 12Gi
 
   nodeSelector: {}
   # Keep the active scheduler and its standby off the same node. Required
