@@ -1213,13 +1213,16 @@ th.right .sort-arrow {
   }
 }
 /* threshold-colored KPI values */
-.tile-val.green {
+.tile-val.green,
+.chart-val.green {
   color: var(--green);
 }
-.tile-val.amber {
+.tile-val.amber,
+.chart-val.amber {
   color: var(--amber);
 }
-.tile-val.red {
+.tile-val.red,
+.chart-val.red {
   color: var(--red);
 }
 /* latency-phase segments for the request-lifecycle bar */

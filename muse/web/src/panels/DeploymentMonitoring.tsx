@@ -9,16 +9,7 @@ import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import { replicaIdentity, selectReplica } from "../replicaMetrics";
 import type { ReplicaDiagnostics } from "../replicaMetrics";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtPct, fmtRate } from "../util";
-import {
-  Card,
-  Distribution,
-  Dot,
-  FilterChip,
-  GaugeCard,
-  MetricChart,
-  Spark,
-  StatTile,
-} from "../viz";
+import { Card, Distribution, Dot, FilterChip, MetricChart, Spark, StatTile } from "../viz";
 import type { Series } from "../viz";
 
 const ACCENT = "var(--accent-2)";
@@ -40,6 +31,7 @@ const perSec = (v: number | null): ReactNode => (
 );
 const tokenRateText = (value: number) => `${fmtRate(value)} tok/s`;
 const perSecondText = (value: number) => `${fmtRate(value)}/s`;
+const fractionPercentText = (value: number) => fmtPct(value * 100);
 const plot = (
   points: MetricPoint[],
   label: string,
@@ -52,8 +44,8 @@ const plot = (
  * Serving dashboard for one deployment. The visualization is chosen per data
  * shape: golden signals as threshold-colored stats; the request latency as a
  * queue→prefill→decode lifecycle bar (derived, engine-agnostic); throughput as
- * area charts; bounded saturation (KV cache, prefix hit) as gauges; rare events
- * as charts that appear only when non-zero.
+ * area charts; cache saturation and efficiency as time series; rare events as
+ * charts that appear only when non-zero.
  */
 export function Monitoring({
   m,
@@ -330,17 +322,21 @@ export function Monitoring({
 
       <h2 className="sec">Saturation &amp; efficiency</h2>
       <div className="grid g2">
-        <GaugeCard
-          title="KV cache"
-          frac={kv}
-          tone={upperThresholdTone(kv, policy?.kvCache)}
-          sub="utilization"
+        <MetricChart
+          title="KV cache usage"
+          value={kv == null ? "—" : fractionPercentText(kv)}
+          sub="current utilization"
+          tone={upperThresholdTone(kv, policy?.kvCache) || undefined}
+          series={[plot(g("kv_cache_usage").series, "KV cache usage", AMBER, fractionPercentText)]}
         />
-        <GaugeCard
+        <MetricChart
           title="Prefix cache hit"
-          frac={hit}
-          tone={lowerThresholdTone(hit, policy?.prefixCache)}
-          sub="higher is better"
+          value={hit == null ? "—" : fractionPercentText(hit)}
+          sub="current ratio · higher is better"
+          tone={lowerThresholdTone(hit, policy?.prefixCache) || undefined}
+          series={[
+            plot(g("prefix_cache_hit").series, "Prefix cache hit", CYAN, fractionPercentText),
+          ]}
         />
       </div>
       <div className="grid g2">

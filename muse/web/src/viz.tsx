@@ -487,12 +487,14 @@ export function MetricChart({
   value,
   sub,
   series,
+  tone,
   hideIfZero = false,
 }: {
   title: ReactNode;
   value: ReactNode;
   sub?: ReactNode;
   series: Series[];
+  tone?: BarTone;
   hideIfZero?: boolean;
 }) {
   const plottable = series.some((s) => s.points.length > 1);
@@ -504,7 +506,7 @@ export function MetricChart({
   }
   return (
     <Card title={title} sub={sub}>
-      <div className="chart-val">{value}</div>
+      <div className={tone ? `chart-val ${tone}` : "chart-val"}>{value}</div>
       <Chart series={series} ariaLabel={typeof title === "string" ? title : "Metric"} />
     </Card>
   );
