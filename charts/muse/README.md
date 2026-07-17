@@ -94,6 +94,9 @@ remain visible as individual query errors while the rest of the snapshot publish
 Both settings are optional outside the chart: without them, requests run serially
 and wait without a Muse-imposed deadline.
 
+`config.metrics.refreshSecs` controls both the shared snapshot refresh and the
+delay before the browser replaces a terminally closed metrics stream.
+
 ## Inference test (chat)
 
 Off by default (`config.chat.enabled: false`) — it proxies one request to a

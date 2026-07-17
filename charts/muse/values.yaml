@@ -121,7 +121,7 @@ config:
   metrics:
     enabled: true # false ⇒ no --prom-service; the console hides its metric panels
     promService: ome/ome-prometheus:9090 # namespace/name:port, applied per cluster
-    refreshSecs: 15 # background poll interval (one poll/interval regardless of viewers)
+    refreshSecs: 15 # background poll and terminal metrics-SSE reconnect cadence
     queryConcurrency: 8 # max in-flight discovery/PromQL requests per Muse replica
     requestTimeoutSecs: 15 # deadline for each discovery/PromQL request
     queriesFile: /etc/muse/metrics/metrics-queries.json # mount path (internal)

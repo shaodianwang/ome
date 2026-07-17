@@ -338,6 +338,8 @@ export interface AppConfig {
   chatClientGraceSecs?: number;
   /** Whether the metrics proxy is configured server-side; panels hide when false. */
   metrics?: boolean;
+  /** Shared server refresh and terminal metrics-stream reconnect cadence. */
+  metricsRefreshSecs?: number;
   dashboardPolicy?: DashboardPolicy;
 }
 

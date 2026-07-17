@@ -1647,6 +1647,8 @@ pub struct ConfigResp {
     /// Whether the metrics proxy (`/v1/metrics/*` → a cluster's Prometheus) is
     /// configured; the console hides its metric panels when false.
     pub metrics: bool,
+    /// Shared server refresh and terminal browser reconnect cadence.
+    pub metrics_refresh_secs: u64,
     /// Optional health classification policy. Omitted when no categories are
     /// configured, which tells the console to render neutral status.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1694,5 +1696,19 @@ mod tests {
         assert!(cluster_runtime.namespace.is_none());
 
         assert!(resource_ref("shared", "OtherModel", Some("team-a")).is_none());
+    }
+
+    #[test]
+    fn console_config_exposes_metrics_refresh_policy() {
+        let response = ConfigResp {
+            chat: false,
+            chat_timeout_secs: None,
+            chat_client_grace_secs: None,
+            metrics: true,
+            metrics_refresh_secs: 15,
+            dashboard_policy: None,
+        };
+        let value = serde_json::to_value(response).expect("config response serializes");
+        assert_eq!(value.get("metricsRefreshSecs"), Some(&Value::from(15)));
     }
 }

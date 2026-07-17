@@ -56,7 +56,7 @@ export function DeploymentDetail({
 
   // This deployment's serving metrics (from the live snapshot; SSE-pushed).
   const metricsOn = !!cfg.data?.metrics;
-  const metrics = useMetrics(metricsOn);
+  const metrics = useMetrics(metricsOn, cfg.data?.metricsRefreshSecs);
   const namespace = d?.namespace ?? sel.namespace;
   const m = isvcMetrics(
     metrics.data,

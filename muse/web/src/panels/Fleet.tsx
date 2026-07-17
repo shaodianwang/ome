@@ -77,7 +77,7 @@ export function Fleet({
   const events = useEventFeed(30);
   const cfg = useLive(api.config, { kinds: [] });
   const metricsOn = !!cfg.data?.metrics;
-  const metrics = useMetrics(metricsOn);
+  const metrics = useMetrics(metricsOn, cfg.data?.metricsRefreshSecs);
 
   const [fCluster, setFCluster] = useState("all");
   const [fModel, setFModel] = useState("all");

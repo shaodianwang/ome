@@ -13,6 +13,8 @@ import { api } from "./api";
 import type { EventItem, InvalidationEvent, MetricsSnapshot } from "./api";
 import { METRICS_STREAM_URL, STREAM_URL } from "./api";
 import { metricsTransportState } from "./dataState";
+import { createMetricsStream } from "./metricsStream";
+import type { MetricsEventSource } from "./metricsStream";
 
 type ActivityListener = (event: EventItem) => void;
 type InvalidationListener = (event: InvalidationEvent) => void;
@@ -241,49 +243,30 @@ export function useEventFeed(limit = 60): {
 // whole app, and subscribers never poll.
 // ---------------------------------------------------------------------------
 
-let metricsSource: EventSource | null = null;
-const metricsListeners = new Set<(snap: MetricsSnapshot) => void>();
-const metricsStatusListeners = new Set<(error: string | null) => void>();
-let lastMetrics: MetricsSnapshot | null = null;
-let metricsConnectionError: string | null = null;
-
-function publishMetricsStatus(error: string | null) {
-  metricsConnectionError = error;
-  metricsStatusListeners.forEach((listener) => listener(error));
-}
-
-function ensureMetricsSource() {
-  if (metricsSource) return;
-  metricsSource = new EventSource(METRICS_STREAM_URL);
-  metricsSource.onopen = () => publishMetricsStatus(null);
-  metricsSource.onmessage = (msg) => {
-    let snap: MetricsSnapshot;
-    try {
-      snap = JSON.parse(msg.data) as MetricsSnapshot;
-    } catch {
-      return;
-    }
-    lastMetrics = snap;
-    metricsListeners.forEach((l) => l(snap));
-  };
-  metricsSource.onerror = () => {
-    publishMetricsStatus("Live metrics stream disconnected; reconnecting.");
-  };
-}
+const metricsStream = createMetricsStream(METRICS_STREAM_URL, {
+  createSource: (url) => new EventSource(url) as unknown as MetricsEventSource,
+  scheduleReconnect: (callback, delayMs) => {
+    const timer = setTimeout(callback, delayMs);
+    return () => clearTimeout(timer);
+  },
+});
 
 /**
  * Subscribe to the live fleet metrics snapshot. The server pushes a fresh snapshot
  * on each refresh, so there is no polling — the SSE payload *is* the data. Pass
  * `enabled=false` (e.g. metrics unconfigured) to skip the connection entirely.
  */
-export function useMetrics(enabled = true): {
+export function useMetrics(
+  enabled = true,
+  reconnectSecs?: number,
+): {
   data: MetricsSnapshot | null;
   error: string | null;
   loading: boolean;
 } {
-  const [data, setData] = useState<MetricsSnapshot | null>(lastMetrics);
+  const [data, setData] = useState<MetricsSnapshot | null>(metricsStream.currentSnapshot());
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [streamError, setStreamError] = useState<string | null>(metricsConnectionError);
+  const [streamError, setStreamError] = useState<string | null>(null);
   useEffect(() => {
     if (!enabled) {
       setFetchError(null);
@@ -291,7 +274,7 @@ export function useMetrics(enabled = true): {
       return;
     }
     let alive = true;
-    setStreamError(metricsConnectionError);
+    metricsStream.configureReconnect(reconnectSecs);
     // The SSE pushes the snapshot on connect and on every refresh — that's the live
     // path. A one-time GET on mount is a fallback so metrics still show if a proxy
     // drops the stream; it's served from the server's cached snapshot (no upstream
@@ -300,34 +283,29 @@ export function useMetrics(enabled = true): {
       .metrics()
       .then((s) => {
         if (!alive) return;
-        lastMetrics = s;
-        setData(s);
+        metricsStream.publishSnapshot(s);
         setFetchError(null);
       })
       .catch((e: unknown) => {
         if (!alive) return;
         setFetchError(e instanceof Error ? e.message : String(e));
       });
-    ensureMetricsSource();
-    if (lastMetrics) {
-      setData(lastMetrics);
-    }
-    const listener = (snap: MetricsSnapshot) => {
-      if (!alive) return;
-      setData(snap);
-      setFetchError(null);
-    };
-    const statusListener = (nextError: string | null) => {
-      if (!alive) return;
-      setStreamError(nextError);
-    };
-    metricsListeners.add(listener);
-    metricsStatusListeners.add(statusListener);
+    const current = metricsStream.currentSnapshot();
+    if (current) setData(current);
+    const unsubscribe = metricsStream.subscribe({
+      onSnapshot: (snapshot) => {
+        if (!alive) return;
+        setData(snapshot);
+        setFetchError(null);
+      },
+      onStatus: (nextError) => {
+        if (alive) setStreamError(nextError);
+      },
+    });
     return () => {
       alive = false;
-      metricsListeners.delete(listener);
-      metricsStatusListeners.delete(statusListener);
+      unsubscribe();
     };
-  }, [enabled]);
+  }, [enabled, reconnectSecs]);
   return { data, ...metricsTransportState(data, fetchError, streamError, enabled) };
 }
