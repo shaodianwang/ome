@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { DashboardPolicy, MetricsSourceState } from "../api";
@@ -5,9 +6,19 @@ import { DataNotice } from "../components";
 import { latestAlignedRatio, metricsRangeLabel, ratioSeries, seriesOf } from "../metrics";
 import type { IsvcMetrics, MetricPoint } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
+import { replicaIdentity, selectReplica } from "../replicaMetrics";
 import type { ReplicaDiagnostics } from "../replicaMetrics";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtPct, fmtRate } from "../util";
-import { Card, Distribution, Dot, GaugeCard, MetricChart, Spark, StatTile } from "../viz";
+import {
+  Card,
+  Distribution,
+  Dot,
+  FilterChip,
+  GaugeCard,
+  MetricChart,
+  Spark,
+  StatTile,
+} from "../viz";
 import type { Series } from "../viz";
 
 const ACCENT = "var(--accent-2)";
@@ -67,6 +78,16 @@ export function Monitoring({
   updatedAt?: number;
   source?: MetricsSourceState;
 }) {
+  const [selectedReplicaIdentity, setSelectedReplicaIdentity] = useState("");
+  const selectedReplica = selectReplica(replicas.rows, selectedReplicaIdentity);
+  const activeReplicaIdentity = selectedReplica ? replicaIdentity(selectedReplica) : "";
+
+  useEffect(() => {
+    if (selectedReplicaIdentity !== activeReplicaIdentity) {
+      setSelectedReplicaIdentity(activeReplicaIdentity);
+    }
+  }, [activeReplicaIdentity, selectedReplicaIdentity]);
+
   const hasServingData = m.present || replicas.rows.length > 0;
   if (!metricsOn) {
     return <div className="muted attn-none">Metrics aren't configured on this console.</div>;
@@ -194,41 +215,49 @@ export function Monitoring({
           <h2 className="sec">Replica performance</h2>
           <Card
             title="Engine replicas"
-            sub={`current metrics${updatedAt ? ` · updated ${ago(updatedAt)}` : ""}`}
+            sub={`${replicas.rows.length} replica${replicas.rows.length === 1 ? "" : "s"} · current metrics${updatedAt ? ` · updated ${ago(updatedAt)}` : ""}`}
           >
-            {replicas.rows.length ? (
-              <table className="place-tbl perf-tbl" aria-label="Engine replica performance">
-                <thead>
-                  <tr>
-                    <th>Replica pod</th>
-                    <th>Component</th>
-                    <th>QPS</th>
-                    <th>p99</th>
-                    <th>TTFT</th>
-                    <th>tok/s</th>
-                    <th>In-flight</th>
-                    <th>Queued</th>
-                    <th>KV cache</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {replicas.rows.map((row) => (
-                    <tr key={`${row.namespace}/${row.component}/${row.pod}`}>
-                      <td className="mono">{row.pod}</td>
-                      <td>{row.component}</td>
-                      <td className="tnum">{fmtRate(row.qps)}</td>
-                      <td className="tnum">{fmtLatency(row.p99)}</td>
-                      <td className="tnum">{fmtLatency(row.ttft)}</td>
-                      <td className="tnum">{fmtRate(row.throughput)}</td>
-                      <td className="tnum">{fmtInt(row.running)}</td>
-                      <td className="tnum">{fmtInt(row.queued)}</td>
-                      <td className="tnum">
-                        {row.kvCache == null ? "—" : fmtPct(row.kvCache * 100)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            {selectedReplica ? (
+              <>
+                <div className="replica-controls">
+                  <FilterChip
+                    label="Replica"
+                    value={activeReplicaIdentity}
+                    options={replicas.rows.map((row) => ({
+                      value: replicaIdentity(row),
+                      label: `${row.pod} · ${row.component}`,
+                    }))}
+                    onChange={setSelectedReplicaIdentity}
+                  />
+                  <div className="replica-context">
+                    <span>
+                      <span className="eyebrow">Component</span> {selectedReplica.component}
+                    </span>
+                    <span>
+                      <span className="eyebrow">Namespace</span>{" "}
+                      <span className="mono">{selectedReplica.namespace}</span>
+                    </span>
+                  </div>
+                </div>
+                <div
+                  className="tiles replica-metrics"
+                  role="group"
+                  aria-label={`Metrics for pod ${selectedReplica.pod}, component ${selectedReplica.component}, namespace ${selectedReplica.namespace}`}
+                >
+                  <StatTile label="QPS" value={fmtRate(selectedReplica.qps)} />
+                  <StatTile label="p99" value={fmtLatency(selectedReplica.p99)} />
+                  <StatTile label="TTFT" value={fmtLatency(selectedReplica.ttft)} />
+                  <StatTile label="tok/s" value={fmtRate(selectedReplica.throughput)} />
+                  <StatTile label="In-flight" value={fmtInt(selectedReplica.running)} />
+                  <StatTile label="Queued" value={fmtInt(selectedReplica.queued)} />
+                  <StatTile
+                    label="KV cache"
+                    value={
+                      selectedReplica.kvCache == null ? "—" : fmtPct(selectedReplica.kvCache * 100)
+                    }
+                  />
+                </div>
+              </>
             ) : (
               <div className="muted attn-none">No engine replica metrics in this snapshot.</div>
             )}
