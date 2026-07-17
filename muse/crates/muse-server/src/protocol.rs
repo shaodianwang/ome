@@ -1631,6 +1631,24 @@ impl DashboardPolicy {
     }
 }
 
+/// One operator-configured window offered by the Deployment Monitoring range
+/// selector. The label is carried over the API rather than invented by the UI.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetricsTimeRangeOption {
+    pub id: String,
+    pub label: String,
+    pub seconds: u64,
+}
+
+/// The Deployment Monitoring range choices and their explicit initial selection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetricsTimeRanges {
+    pub default: String,
+    pub options: Vec<MetricsTimeRangeOption>,
+}
+
 /// Console feature flags and display policy for `GET /v1/config`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1653,6 +1671,10 @@ pub struct ConfigResp {
     /// configured, which tells the console to render neutral status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dashboard_policy: Option<DashboardPolicy>,
+    /// Optional Deployment Monitoring range selector policy. Omitted means the
+    /// console shows the full cached query range without a selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics_time_ranges: Option<MetricsTimeRanges>,
 }
 
 /// Serialize any value to JSON, or `Null` on failure.

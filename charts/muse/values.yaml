@@ -124,6 +124,21 @@ config:
     refreshSecs: 15 # background poll and terminal metrics-SSE reconnect cadence
     queryConcurrency: 8 # max in-flight discovery/PromQL requests per Muse replica
     requestTimeoutSecs: 15 # deadline for each discovery/PromQL request
+    # Deployment Monitoring filters the already-fetched range in the browser; it
+    # never issues viewer-specific Prometheus queries. The selected window must be
+    # no shorter than every query step and no longer than every query window.
+    timeRanges:
+      default: 15m
+      options:
+        - id: 15m
+          label: 15m
+          seconds: 900
+        - id: 1h
+          label: 1h
+          seconds: 3600
+        - id: 6h
+          label: 6h
+          seconds: 21600
     queriesFile: /etc/muse/metrics/metrics-queries.json # mount path (internal)
     # Default query set ships from charts/muse/files/metrics-queries.json
     # (deployment ranges: router → sglang → vllm; engine replica diagnostics:

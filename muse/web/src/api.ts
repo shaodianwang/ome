@@ -328,6 +328,19 @@ export interface DashboardPolicy {
   prefixCache?: LowerThresholdPolicy;
 }
 
+/** One operator-configured Deployment Monitoring window. */
+export interface MetricsTimeRangeOption {
+  id: string;
+  label: string;
+  seconds: number;
+}
+
+/** Available Monitoring windows and their explicit initial selection. */
+export interface MetricsTimeRanges {
+  default: string;
+  options: MetricsTimeRangeOption[];
+}
+
 /** Feature flags and display policy from `GET /v1/config` (read once at load). */
 export interface AppConfig {
   chat: boolean;
@@ -341,6 +354,7 @@ export interface AppConfig {
   /** Shared server refresh and terminal metrics-stream reconnect cadence. */
   metricsRefreshSecs?: number;
   dashboardPolicy?: DashboardPolicy;
+  metricsTimeRanges?: MetricsTimeRanges;
 }
 
 /** One Prometheus result series: instant queries carry `value`, range queries
@@ -370,6 +384,8 @@ export interface MetricsSourceState {
  *  Built server-side on a timer and pushed over `METRICS_STREAM_URL`. */
 export interface MetricsSnapshot {
   updatedAt: number;
+  /** Shared Prometheus evaluation timestamp for every query in this snapshot. */
+  evaluatedAt?: number;
   clusters: Record<string, Record<string, PromResult>>;
   /** Per-cluster target discovery. Non-available sources have no query results. */
   sources?: Record<string, MetricsSourceState>;

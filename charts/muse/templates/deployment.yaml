@@ -139,6 +139,10 @@ spec:
               value: {{ .Values.config.metrics.promService | quote }}
             - name: MUSE_METRICS_QUERIES_FILE
               value: {{ .Values.config.metrics.queriesFile | quote }}
+            {{- with .Values.config.metrics.timeRanges }}
+            - name: MUSE_METRICS_TIME_RANGES_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             {{- end }}
           ports:
             - name: http

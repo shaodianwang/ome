@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
-import type { DashboardPolicy, MetricsSourceState } from "../api";
+import type { DashboardPolicy, MetricsSourceState, MetricsTimeRanges } from "../api";
 import { DataNotice } from "../components";
-import { latestAlignedRatio, metricsRangeLabel, ratioSeries, seriesOf } from "../metrics";
+import {
+  latestAlignedRatio,
+  metricsRangeLabel,
+  ratioSeries,
+  seriesOf,
+  sliceIsvcMetrics,
+} from "../metrics";
 import type { IsvcMetrics, MetricPoint } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import { replicaIdentity, selectReplica } from "../replicaMetrics";
@@ -52,6 +58,7 @@ export function Monitoring({
   replicas,
   metricsOn,
   policy,
+  timeRanges,
   loading,
   error,
   queryCount,
@@ -63,6 +70,7 @@ export function Monitoring({
   replicas: ReplicaDiagnostics;
   metricsOn: boolean;
   policy?: DashboardPolicy;
+  timeRanges?: MetricsTimeRanges;
   loading: boolean;
   error: string | null;
   queryCount: number;
@@ -70,9 +78,41 @@ export function Monitoring({
   updatedAt?: number;
   source?: MetricsSourceState;
 }) {
+  const [selectedTimeRangeId, setSelectedTimeRangeId] = useState("");
   const [selectedReplicaIdentity, setSelectedReplicaIdentity] = useState("");
+  const activeTimeRange =
+    timeRanges?.options.find((option) => option.id === selectedTimeRangeId) ??
+    timeRanges?.options.find((option) => option.id === timeRanges.default);
+  const visibleMetrics = activeTimeRange ? sliceIsvcMetrics(m, activeTimeRange.seconds) : m;
   const selectedReplica = selectReplica(replicas.rows, selectedReplicaIdentity);
   const activeReplicaIdentity = selectedReplica ? replicaIdentity(selectedReplica) : "";
+  const timeRangeControl = activeTimeRange ? (
+    <div className="filters">
+      <FilterChip
+        label="Range"
+        value={activeTimeRange.id}
+        options={(timeRanges?.options ?? []).map((option) => ({
+          value: option.id,
+          label: option.label,
+        }))}
+        onChange={setSelectedTimeRangeId}
+        accent
+      />
+    </div>
+  ) : null;
+  const metricsNotice = error ? (
+    <DataNotice
+      tone="warning"
+      title="Live metrics disconnected"
+      detail={`${updatedAt ? `Showing the snapshot from ${ago(updatedAt)}. ` : ""}${error}`}
+    />
+  ) : failedQueryCount > 0 ? (
+    <DataNotice
+      tone="warning"
+      title="Serving metrics are partial"
+      detail={`${failedQueryCount} of ${queryCount} query results failed${updatedAt ? `; snapshot updated ${ago(updatedAt)}` : ""}.`}
+    />
+  ) : null;
 
   useEffect(() => {
     if (selectedReplicaIdentity !== activeReplicaIdentity) {
@@ -80,11 +120,12 @@ export function Monitoring({
     }
   }, [activeReplicaIdentity, selectedReplicaIdentity]);
 
-  const hasServingData = m.present || replicas.rows.length > 0;
+  const hasAnyServingData = m.present || replicas.rows.length > 0;
+  const hasVisibleData = visibleMetrics.present || replicas.rows.length > 0;
   if (!metricsOn) {
     return <div className="muted attn-none">Metrics aren't configured on this console.</div>;
   }
-  if (source && source.status !== "available" && !hasServingData) {
+  if (source && source.status !== "available" && !hasAnyServingData) {
     const unconfigured = source.status === "unconfigured";
     const forbidden = source.error?.code === "prometheus_service_discovery_forbidden";
     return (
@@ -101,13 +142,13 @@ export function Monitoring({
       />
     );
   }
-  if (error && !hasServingData) {
+  if (error && !hasAnyServingData) {
     return <DataNotice tone="danger" title="Serving metrics unavailable" detail={error} />;
   }
-  if (loading && !hasServingData) {
+  if (loading && !hasAnyServingData) {
     return <div className="muted attn-none">Loading serving metrics…</div>;
   }
-  if (queryCount === 0 && !hasServingData) {
+  if (queryCount === 0 && !hasAnyServingData) {
     return (
       <DataNotice
         tone="danger"
@@ -116,7 +157,7 @@ export function Monitoring({
       />
     );
   }
-  if (failedQueryCount === queryCount && queryCount > 0 && !hasServingData) {
+  if (failedQueryCount === queryCount && queryCount > 0 && !hasAnyServingData) {
     return (
       <DataNotice
         tone="danger"
@@ -125,11 +166,17 @@ export function Monitoring({
       />
     );
   }
-  if (!hasServingData) {
-    return <div className="muted attn-none">No serving traffic in the selected window.</div>;
+  if (!hasVisibleData) {
+    return (
+      <>
+        {metricsNotice}
+        {timeRangeControl}
+        <div className="muted attn-none">No serving traffic in the selected window.</div>
+      </>
+    );
   }
-  const g = (id: string) => seriesOf(m, id);
-  const rangeLabel = metricsRangeLabel(m.rangeSeconds);
+  const g = (id: string) => seriesOf(visibleMetrics, id);
+  const rangeLabel = metricsRangeLabel(visibleMetrics.rangeSeconds);
 
   // Golden signals.
   const qps = g("request_rate").last;
@@ -156,19 +203,8 @@ export function Monitoring({
 
   return (
     <>
-      {error ? (
-        <DataNotice
-          tone="warning"
-          title="Live metrics disconnected"
-          detail={`${updatedAt ? `Showing the snapshot from ${ago(updatedAt)}. ` : ""}${error}`}
-        />
-      ) : failedQueryCount > 0 ? (
-        <DataNotice
-          tone="warning"
-          title="Serving metrics are partial"
-          detail={`${failedQueryCount} of ${queryCount} query results failed${updatedAt ? `; snapshot updated ${ago(updatedAt)}` : ""}.`}
-        />
-      ) : null}
+      {metricsNotice}
+      {timeRangeControl}
       <h2 className="sec">Health</h2>
       <div className="grid g4">
         <StatTile

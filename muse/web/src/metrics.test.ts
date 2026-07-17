@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { MetricsSnapshot } from "./api";
+import type { IsvcMetrics } from "./metrics";
 import {
   fleetTotals,
   isvcMetrics,
@@ -9,6 +10,7 @@ import {
   metricsRangeLabel,
   perfRows,
   ratioSeries,
+  sliceIsvcMetrics,
 } from "./metrics";
 
 const snapshot: MetricsSnapshot = {
@@ -188,5 +190,73 @@ describe("timestamp-aware shaping", () => {
 
     expect(latestAlignedRatio([{ at: 100, value: 1 }], [{ at: 100, value: 10 }], 100)).toBe(10);
     expect(latestAlignedRatio([{ at: 100, value: 1 }], [{ at: 200, value: 10 }], 100)).toBeNull();
+  });
+
+  it("slices every deployment series against one inclusive timestamp window", () => {
+    const metrics: IsvcMetrics = {
+      present: true,
+      identityScoped: true,
+      evaluatedAt: 300,
+      rangeSeconds: 200,
+      by: {
+        request_rate: {
+          last: 3,
+          series: [
+            { at: 100, value: 1 },
+            { at: 200, value: 2 },
+            { at: 300, value: 3 },
+          ],
+        },
+        latency_p99: {
+          last: 0.2,
+          series: [
+            { at: 100, value: 0.1 },
+            { at: 150, value: 0.2 },
+          ],
+        },
+        current_only: { last: 7, series: [] },
+      },
+    };
+
+    const sliced = sliceIsvcMetrics(metrics, 100);
+
+    expect(sliced.by.request_rate).toEqual({
+      last: 3,
+      series: [
+        { at: 200, value: 2 },
+        { at: 300, value: 3 },
+      ],
+    });
+    expect(sliced.by.latency_p99).toEqual({ last: null, series: [] });
+    expect(sliced.by.current_only).toEqual({ last: 7, series: [] });
+    expect(sliced.rangeSeconds).toBe(100);
+    expect(sliced.evaluatedAt).toBe(300);
+    expect(sliced.present).toBe(true);
+    expect(metrics.by.request_rate.series).toHaveLength(3);
+  });
+
+  it("does not treat an old deployment's final samples as the current window", () => {
+    const metrics: IsvcMetrics = {
+      present: true,
+      identityScoped: true,
+      evaluatedAt: 1_000,
+      rangeSeconds: 200,
+      by: {
+        request_rate: {
+          last: 3,
+          series: [
+            { at: 100, value: 1 },
+            { at: 200, value: 2 },
+            { at: 300, value: 3 },
+          ],
+        },
+      },
+    };
+
+    const sliced = sliceIsvcMetrics(metrics, 100);
+
+    expect(sliced.by.request_rate).toEqual({ last: null, series: [] });
+    expect(sliced.present).toBe(false);
+    expect(sliced.rangeSeconds).toBeNull();
   });
 });

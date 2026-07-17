@@ -4,6 +4,7 @@
 //! Helm chart; local-development values live in `muse/config/dev.env`.
 
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
@@ -12,7 +13,10 @@ use std::{
 use anyhow::Context;
 use clap::Parser;
 
-use crate::{chat_proxy::ChatProxyConfig, protocol::DashboardPolicy};
+use crate::{
+    chat_proxy::ChatProxyConfig,
+    protocol::{DashboardPolicy, MetricsTimeRanges},
+};
 
 /// A workload cluster to aggregate: a name + an optional explicit kubeconfig
 /// (None = use the ambient kube config).
@@ -182,6 +186,54 @@ fn parse_dashboard_policy(spec: &str) -> Result<DashboardPolicy, String> {
     Ok(policy)
 }
 
+fn validate_metrics_time_ranges(ranges: &MetricsTimeRanges) -> Result<(), String> {
+    if ranges.default.trim().is_empty() {
+        return Err("metrics time-range default must not be empty".to_owned());
+    }
+    if ranges.options.is_empty() {
+        return Err("metrics time-range options must not be empty".to_owned());
+    }
+
+    let mut ids = HashSet::new();
+    for option in &ranges.options {
+        if option.id.trim().is_empty() {
+            return Err("metrics time-range option id must not be empty".to_owned());
+        }
+        if option.label.trim().is_empty() {
+            return Err(format!(
+                "metrics time-range option '{}' must have a label",
+                option.id
+            ));
+        }
+        if option.seconds == 0 {
+            return Err(format!(
+                "metrics time-range option '{}' must use positive seconds",
+                option.id
+            ));
+        }
+        if !ids.insert(option.id.as_str()) {
+            return Err(format!(
+                "metrics time-range option id '{}' is duplicated",
+                option.id
+            ));
+        }
+    }
+    if !ids.contains(ranges.default.as_str()) {
+        return Err(format!(
+            "metrics time-range default '{}' does not match an option id",
+            ranges.default
+        ));
+    }
+    Ok(())
+}
+
+fn parse_metrics_time_ranges(spec: &str) -> Result<MetricsTimeRanges, String> {
+    let ranges = serde_json::from_str(spec)
+        .map_err(|error| format!("invalid metrics time-range JSON: {error}"))?;
+    validate_metrics_time_ranges(&ranges)?;
+    Ok(ranges)
+}
+
 fn parse_non_empty(spec: &str) -> Result<String, String> {
     let value = spec.trim();
     if value.is_empty() {
@@ -232,6 +284,47 @@ pub fn load_queries(path: &Path) -> anyhow::Result<Vec<QueryDef>> {
         }
     }
     Ok(file.queries)
+}
+
+/// Ensure every configured UI range is fully represented by every range query.
+/// The selector is optional, so callers can disable only it on an incompatible
+/// custom query catalog while retaining the full fetched metrics snapshot.
+pub fn validate_metrics_time_ranges_against_queries(
+    ranges: &MetricsTimeRanges,
+    queries: &[QueryDef],
+) -> Result<(), String> {
+    validate_metrics_time_ranges(ranges)?;
+
+    // load_queries already rejects range queries without positive window/step values.
+    let minimum_window = queries
+        .iter()
+        .filter(|query| matches!(query.kind, QueryType::Range))
+        .filter_map(|query| query.window)
+        .min();
+    let maximum_step = queries
+        .iter()
+        .filter(|query| matches!(query.kind, QueryType::Range))
+        .filter_map(|query| query.step)
+        .max();
+
+    let (Some(minimum_window), Some(maximum_step)) = (minimum_window, maximum_step) else {
+        return Err("metrics time ranges require at least one range query".to_owned());
+    };
+    for option in &ranges.options {
+        if option.seconds < maximum_step {
+            return Err(format!(
+                "metrics time-range option '{}' ({}s) is shorter than the largest query step ({}s)",
+                option.id, option.seconds, maximum_step
+            ));
+        }
+        if option.seconds > minimum_window {
+            return Err(format!(
+                "metrics time-range option '{}' ({}s) exceeds the smallest query window ({}s)",
+                option.id, option.seconds, minimum_window
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// How an informer fetches its initial state from an apiserver.
@@ -600,6 +693,17 @@ pub struct Config {
     )]
     pub metrics_request_timeout_secs: Option<NonZeroU64>,
 
+    /// Deployment Monitoring range selector configuration as one JSON object:
+    /// `{ "default": "15m", "options": [{ "id", "label", "seconds" }] }`.
+    /// The deployment owns every option and the default. Unset keeps the full
+    /// cached query range visible and omits the selector.
+    #[arg(
+        long = "metrics-time-ranges-json",
+        env = "MUSE_METRICS_TIME_RANGES_JSON",
+        value_parser = parse_metrics_time_ranges
+    )]
+    pub metrics_time_ranges: Option<MetricsTimeRanges>,
+
     /// Path to the dashboard metrics query set: JSON `{ "queries": [ … ] }`, each
     /// `{ id, promql, kind: "instant"|"range", window?, step? }`. No baked-in
     /// queries — engine-specific metric names (e.g. sglang vs vllm) come from this
@@ -703,7 +807,9 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{load_queries, Config};
+    use super::{
+        load_queries, validate_metrics_time_ranges_against_queries, Config, QueryDef, QueryType,
+    };
 
     fn configured_args(chat_enabled: bool, allow_http: bool) -> Vec<String> {
         [
@@ -806,8 +912,70 @@ mod tests {
         assert_eq!(config.http_latency_buckets, [0.001, 0.1, 1.0]);
         assert_eq!(config.metrics_query_concurrency, None);
         assert_eq!(config.metrics_request_timeout_secs, None);
+        assert_eq!(config.metrics_time_ranges, None);
         assert_eq!(config.cluster_refs().unwrap()[0].name, "test-cluster");
         assert!(config.dashboard_policy.is_none());
+    }
+
+    #[test]
+    fn metrics_time_ranges_are_config_driven_and_validated() {
+        let config = parse_with(
+            false,
+            false,
+            &[r#"--metrics-time-ranges-json={"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"1h","label":"1h","seconds":3600}]}"#],
+        )
+        .unwrap();
+        let ranges = config.metrics_time_ranges.unwrap();
+        assert_eq!(ranges.default, "15m");
+        assert_eq!(ranges.options[0].seconds, 900);
+
+        for invalid in [
+            r#"{"default":"15m","options":[]}"#,
+            r#"{"default":"missing","options":[{"id":"15m","label":"15m","seconds":900}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":0}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"15m","label":"other","seconds":3600}]}"#,
+        ] {
+            let arg = format!("--metrics-time-ranges-json={invalid}");
+            assert!(
+                parse_with(false, false, &[&arg]).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_time_ranges_must_fit_every_range_query() {
+        let config = parse_with(
+            false,
+            false,
+            &[r#"--metrics-time-ranges-json={"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"6h","label":"6h","seconds":21600}]}"#],
+        )
+        .unwrap();
+        let ranges = config.metrics_time_ranges.unwrap();
+        let query = |id: &str, window: u64, step: u64| QueryDef {
+            id: id.to_owned(),
+            promql: "up".to_owned(),
+            kind: QueryType::Range,
+            window: Some(window),
+            step: Some(step),
+        };
+
+        assert!(validate_metrics_time_ranges_against_queries(
+            &ranges,
+            &[query("wide", 21_600, 300), query("dense", 43_200, 60)],
+        )
+        .is_ok());
+        assert!(validate_metrics_time_ranges_against_queries(
+            &ranges,
+            &[query("short", 3_600, 300)],
+        )
+        .is_err());
+        assert!(validate_metrics_time_ranges_against_queries(
+            &ranges,
+            &[query("sparse", 21_600, 1_800)],
+        )
+        .is_err());
+        assert!(validate_metrics_time_ranges_against_queries(&ranges, &[]).is_err());
     }
 
     #[test]

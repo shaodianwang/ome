@@ -144,9 +144,12 @@ pub async fn refresh(st: &AppState) {
         }
     }
 
-    st.publish_metrics(Arc::new(
-        json!({ "updatedAt": now_secs(), "clusters": clusters, "sources": sources }),
-    ));
+    st.publish_metrics(Arc::new(json!({
+        "updatedAt": now_secs(),
+        "evaluatedAt": evaluation_time,
+        "clusters": clusters,
+        "sources": sources
+    })));
     let elapsed = started.elapsed();
     ::metrics::gauge!("muse_metrics_refresh_duration_seconds").set(elapsed.as_secs_f64());
     tracing::info!(

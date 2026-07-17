@@ -21,7 +21,7 @@ use crate::{
     chat_proxy::ChatProxy,
     config::{PromTarget, QueryDef},
     informers::{CapacitySignal, ClusterState, Feed, Invalidations},
-    protocol::{to_val, DashboardPolicy, Topology},
+    protocol::{to_val, DashboardPolicy, MetricsTimeRanges, Topology},
     rollup,
     service::error::ApiError,
 };
@@ -56,6 +56,7 @@ pub struct AppState {
     /// Optional deadline for each discovery/query request. `None` waits normally.
     metrics_request_timeout: Option<Duration>,
     dashboard_policy: Option<DashboardPolicy>,
+    metrics_time_ranges: Option<MetricsTimeRanges>,
     /// Latest metrics snapshot, updated by the background refresher and pushed to
     /// SSE subscribers. `watch` retains only the latest value (new subscribers get
     /// it immediately) — exactly the "current fleet metrics" semantics.
@@ -79,6 +80,7 @@ pub struct AppStateConfig {
     pub request_timeout: Option<Duration>,
     pub capacity_limits: rollup::CapacityLimits,
     pub dashboard_policy: Option<DashboardPolicy>,
+    pub metrics_time_ranges: Option<MetricsTimeRanges>,
 }
 
 impl AppState {
@@ -111,6 +113,7 @@ impl AppState {
             metrics_query_concurrency: config.query_concurrency,
             metrics_request_timeout: config.request_timeout,
             dashboard_policy: config.dashboard_policy,
+            metrics_time_ranges: config.metrics_time_ranges,
             metrics_tx,
         };
         // Warm the cache once so the first request is served, not computed.
@@ -277,6 +280,11 @@ impl AppState {
         self.dashboard_policy.as_ref()
     }
 
+    /// Optional operator-configured range choices for Deployment Monitoring.
+    pub fn metrics_time_ranges(&self) -> Option<&MetricsTimeRanges> {
+        self.metrics_time_ranges.as_ref()
+    }
+
     /// Publish a freshly-built metrics snapshot; new + existing SSE subscribers see
     /// it, and it's retained for the next `GET /v1/metrics`. `send_replace` never
     /// fails on zero subscribers (unlike `send`), so the latest value always sticks.
@@ -322,7 +330,7 @@ fn capacity_membership_matches<'a>(
 
 /// The initial (empty) metrics snapshot, before the first refresh completes.
 fn empty_metrics() -> Arc<Value> {
-    Arc::new(json!({ "updatedAt": 0, "clusters": {}, "sources": {} }))
+    Arc::new(json!({ "updatedAt": 0, "evaluatedAt": 0, "clusters": {}, "sources": {} }))
 }
 
 #[cfg(test)]

@@ -94,8 +94,14 @@ remain visible as individual query errors while the rest of the snapshot publish
 Both settings are optional outside the chart: without them, requests run serially
 and wait without a Muse-imposed deadline.
 
-`config.metrics.refreshSecs` controls both the shared snapshot refresh and the
-delay before the browser replaces a terminally closed metrics stream.
+Deployment Monitoring range choices come from `config.metrics.timeRanges`. Muse
+still fetches each query's configured maximum `window` once per refresh and sends
+that shared cached snapshot to every console; changing the selector only filters
+the returned timestamps in the browser. Each option must be at least the largest
+configured query `step` and at most the smallest configured query `window`.
+Consequently, the bundled 5-minute step yields at most four samples in a 15-minute
+view. Lower the query-set `step` when an environment needs denser charts, accounting
+for the corresponding Prometheus evaluation and snapshot-size increase.
 
 ## Inference test (chat)
 

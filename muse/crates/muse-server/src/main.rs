@@ -168,13 +168,30 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
 
     // Load the curated dashboard query set (if configured). A read/parse failure
     // degrades to an empty snapshot rather than failing startup.
-    let metrics_queries = std::sync::Arc::new(match config.metrics_queries_file.as_deref() {
+    let metrics_queries = match config.metrics_queries_file.as_deref() {
         Some(path) => config::load_queries(path).unwrap_or_else(|err| {
             tracing::error!(error = %err, "failed to load metrics queries; snapshot will be empty");
             Vec::new()
         }),
         None => Vec::new(),
-    });
+    };
+    let metrics_time_ranges = if config.prom_service.is_some() {
+        config.metrics_time_ranges.clone().and_then(|ranges| {
+            match config::validate_metrics_time_ranges_against_queries(&ranges, &metrics_queries) {
+                Ok(()) => Some(ranges),
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "metrics time-range configuration is incompatible; selector disabled"
+                    );
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    let metrics_queries = std::sync::Arc::new(metrics_queries);
 
     let state = app_context::AppState::new(
         clusters,
@@ -199,6 +216,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
                 max_consumers: config.capacity_max_consumers,
             },
             dashboard_policy,
+            metrics_time_ranges,
         },
     );
     server::serve(&config, state).await

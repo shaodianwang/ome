@@ -187,6 +187,7 @@ export function DeploymentDetail({
                 replicas={replicas}
                 metricsOn={metricsOn}
                 policy={cfg.data?.dashboardPolicy}
+                timeRanges={cfg.data?.metricsTimeRanges}
                 loading={metrics.loading || !metricState.ready}
                 error={metrics.error}
                 queryCount={metricState.queryCount}

@@ -13,5 +13,6 @@ pub async fn get(State(st): State<AppState>) -> Json<ConfigResp> {
         metrics: st.metrics_enabled(),
         metrics_refresh_secs: st.metrics_refresh_interval().as_secs(),
         dashboard_policy: st.dashboard_policy().cloned(),
+        metrics_time_ranges: st.metrics_time_ranges().cloned(),
     })
 }

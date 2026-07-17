@@ -198,6 +198,8 @@ export interface IsvcMetrics {
   present: boolean;
   /** Whether namespace labels (or unique inventory identity) make selection safe. */
   identityScoped: boolean;
+  /** Shared Prometheus evaluation timestamp used as the trailing-window anchor. */
+  evaluatedAt: number | null;
   /** Actual time span represented by the returned range samples. */
   rangeSeconds: number | null;
   /** By query id (`latency_p99`, `tpot`, `kv_transfer_latency`, …). */
@@ -208,6 +210,41 @@ const EMPTY_SERIES: IsvcSeries = { last: null, series: [] };
 
 export function seriesOf(m: IsvcMetrics, qid: string): IsvcSeries {
   return m.by[qid] ?? EMPTY_SERIES;
+}
+
+/**
+ * Restrict one deployment's already-fetched time series to a trailing window.
+ * Every query shares one Prometheus evaluation timestamp, so stale samples cannot
+ * redefine "now" independently. Instant values have no range to filter and remain intact.
+ */
+export function sliceIsvcMetrics(m: IsvcMetrics, seconds: number): IsvcMetrics {
+  if (!Number.isFinite(seconds) || seconds <= 0) return m;
+  if (m.evaluatedAt == null || !Number.isFinite(m.evaluatedAt)) return m;
+
+  const cutoff = m.evaluatedAt - seconds;
+  const by = Object.fromEntries(
+    Object.entries(m.by).map(([queryId, item]) => {
+      if (item.series.length === 0) return [queryId, item];
+      const series = item.series.filter((point) => point.at >= cutoff);
+      return [queryId, { last: series[series.length - 1]?.value ?? null, series }];
+    }),
+  );
+  const requestSeries = by.request_rate?.series ?? [];
+  const has = (queryId: string) => {
+    const item = by[queryId];
+    return (item?.last ?? null) != null || (item?.series.length ?? 0) > 0;
+  };
+
+  return {
+    identityScoped: m.identityScoped,
+    evaluatedAt: m.evaluatedAt,
+    present: has("request_rate") || has("latency_p99") || has("running_reqs"),
+    rangeSeconds:
+      requestSeries.length > 1
+        ? requestSeries[requestSeries.length - 1].at - requestSeries[0].at
+        : null,
+    by,
+  };
 }
 
 export function isvcMetrics(
@@ -245,6 +282,7 @@ export function isvcMetrics(
   return {
     present: has("request_rate") || has("latency_p99") || has("running_reqs"),
     identityScoped: identityUnambiguous || namespaceScoped,
+    evaluatedAt: snap?.evaluatedAt ?? snap?.updatedAt ?? null,
     rangeSeconds: requestRangeSeconds,
     by,
   };
@@ -358,7 +396,12 @@ export function filterSnapshot(
   },
 ): MetricsSnapshot | null {
   if (!snap?.clusters) return snap;
-  const out: MetricsSnapshot = { updatedAt: snap.updatedAt, clusters: {}, sources: {} };
+  const out: MetricsSnapshot = {
+    updatedAt: snap.updatedAt,
+    evaluatedAt: snap.evaluatedAt,
+    clusters: {},
+    sources: {},
+  };
   for (const [cluster, queries] of Object.entries(snap.clusters)) {
     if (opts.cluster && opts.cluster !== "all" && opts.cluster !== cluster) continue;
     if (opts.keepCluster && !opts.keepCluster(cluster)) continue;
