@@ -384,10 +384,17 @@ podMonitor:
 # or alerting; retention is deliberately short and storage is emptyDir.
 prometheus:
   enabled: true
-  # Retention window. Short by design — this Prometheus exists for
-  # autoscaling input, not long-term observability. Keeps emptyDir
-  # usage bounded.
+  # Retention window for persisted TSDB blocks. Short by design — this
+  # Prometheus exists for autoscaling input, not long-term observability.
+  # This does not bound the mutable head/WAL, which can span Prometheus's
+  # two-hour production block duration.
   retention: 30m
+  # Size-based TSDB retention guard. Prometheus counts the head/WAL when
+  # evaluating this limit but can delete only persisted blocks. 6GB is
+  # about 70% of the 8Gi emptyDir cap, leaving space for the mutable head,
+  # WAL checkpoints, and compaction. Set empty to disable; when overriding,
+  # keep this at no more than 80-85% of storage.sizeLimit.
+  retentionSize: 6GB
   scrapeInterval: 15s
   # Namespaces to discover InferenceService pods in. Empty = all namespaces
   # (discovery is already server-side filtered to ome.io/inferenceservice pods,
@@ -420,7 +427,8 @@ prometheus:
     # emptyDir size cap. Prometheus keeps the active head and WAL beyond the
     # configured retention window, and compaction temporarily needs space for
     # both source and output blocks. 8Gi covers a moderate high-cardinality
-    # inference fleet while still protecting the node from runaway disk use.
+    # inference fleet while still protecting the node from runaway disk use;
+    # retentionSize cannot delete the mutable head or WAL.
     sizeLimit: 8Gi
   nodeSelector: {}
   tolerations: []

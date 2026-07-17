@@ -59,6 +59,9 @@ spec:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
             - --storage.tsdb.retention.time={{ .Values.prometheus.retention }}
+            {{- with .Values.prometheus.retentionSize }}
+            - --storage.tsdb.retention.size={{ . }}
+            {{- end }}
             - --web.enable-lifecycle
             - --web.listen-address=:9090
           ports:

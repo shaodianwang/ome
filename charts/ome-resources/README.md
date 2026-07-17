@@ -75,7 +75,8 @@ OME Resources and Controller
 | ome.omeAgent.vaultId | string | `"ocid1.vault.oc1.ap-osaka-1.dummy.dummy-vault"` |  |
 | ome.version | string | `"v0.1.2"` |  |
 | prometheus.enabled | bool | `true` | Bundle a single-replica Prometheus for KEDA autoscaling input. See [Bundled Prometheus](#bundled-prometheus). |
-| prometheus.retention | string | `"30m"` | TSDB retention window. Short by design — autoscaling input only. |
+| prometheus.retention | string | `"30m"` | Persisted-block retention window. It does not bound the mutable head/WAL. |
+| prometheus.retentionSize | string | `"6GB"` | TSDB size-retention guard. Keep at no more than 80-85% of `prometheus.storage.sizeLimit`; empty disables it. |
 | prometheus.scrapeInterval | string | `"15s"` |  |
 | prometheus.image.repository | string | `"prom/prometheus"` |  |
 | prometheus.image.tag | string | `"v3.0.1"` |  |
@@ -89,19 +90,19 @@ OME Resources and Controller
 
 ## Bundled Prometheus
 
-`prometheus.enabled=true` deploys a single-replica Prometheus alongside
-the controller. It exists for one purpose: to be the metrics source
-that KEDA `prometheus` triggers point at when an InferenceService's
+The chart enables a single-replica Prometheus alongside the controller by
+default. It exists for one purpose: to be the metrics source that KEDA
+`prometheus` triggers point at when an InferenceService's
 [OEP-0013][oep-0013] autoscaler asks for one.
 
-**Enable when**: your cluster does NOT already run a Prometheus that
-scrapes OME pods. Operators with an existing cluster Prometheus
-should leave this disabled and configure their KEDA triggers'
-`serverAddress` to point at the existing instance.
+Keep it enabled when your cluster does not already run a Prometheus that
+scrapes OME pods. Operators with an existing cluster Prometheus should disable
+the bundled instance and configure their KEDA triggers' `serverAddress` to
+point at the existing instance.
 
 ```sh
 helm upgrade ome-resources ./charts/ome-resources \
-  --set prometheus.enabled=true
+  --set prometheus.enabled=false
 ```
 
 KEDA triggers then address it via the cluster-local Service DNS:
@@ -118,12 +119,19 @@ trigger:
 observability install. Defaults reflect that explicitly:
 
 - Single replica, no HA.
-- `emptyDir` storage (no PVC, no PV).
+- Non-durable `emptyDir` storage (no PVC, no PV); replacement pods start with
+  an empty TSDB.
 - 8 GiB default `emptyDir` cap (`prometheus.storage.sizeLimit`) to accommodate
   active head, WAL, and compaction overlap; override it for the fleet's actual
   series count and ingestion rate.
-- 30 minute default retention (`prometheus.retention`) — sized to KEDA
-  query windows, not dashboards or alerts.
+- 30 minute time retention (`prometheus.retention`) for persisted blocks,
+  sized to KEDA query windows rather than dashboards or alerts. Prometheus's
+  mutable head and WAL can span its two-hour production block duration, so
+  time retention alone is not a disk bound.
+- 6 GB size retention (`prometheus.retentionSize`) below the 8 GiB
+  `emptyDir` cap. Prometheus counts the head/WAL toward this policy but cannot
+  delete them; large fleets must also increase `prometheus.storage.sizeLimit`
+  or reduce scrape cardinality/rate.
 - No Alertmanager, no recording rules, no `remote_write`.
 - Scrapes only OME-owned pods (selector: `ome.io/inferenceservice`)
   plus the OME control-plane pods opting in via the standard

@@ -12,9 +12,18 @@ fail() {
 rendered="$("${helm_bin}" template ome-resources "${chart_dir}" --namespace ome)"
 grep -Fq 'sizeLimit: 8Gi' <<<"${rendered}" ||
   fail "default Prometheus storage sizeLimit is not 8Gi"
+grep -Fq -- '--storage.tsdb.retention.size=6GB' <<<"${rendered}" ||
+  fail "default Prometheus size retention is not 6GB"
 
 overridden="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
   --set prometheus.storage.sizeLimit=16Gi)"
 grep -Fq 'sizeLimit: 16Gi' <<<"${overridden}" ||
   fail "Prometheus storage sizeLimit override was not rendered"
+
+without_size_retention="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-string prometheus.retentionSize=)"
+if grep -Fq -- '--storage.tsdb.retention.size=' <<<"${without_size_retention}"; then
+  fail "Prometheus size retention was rendered when disabled"
+fi
