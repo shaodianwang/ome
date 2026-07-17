@@ -1729,6 +1729,7 @@ mod tests {
             metrics: true,
             metrics_refresh_secs: 15,
             dashboard_policy: None,
+            metrics_time_ranges: None,
         };
         let value = serde_json::to_value(response).expect("config response serializes");
         assert_eq!(value.get("metricsRefreshSecs"), Some(&Value::from(15)));
