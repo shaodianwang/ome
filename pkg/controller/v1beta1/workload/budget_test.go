@@ -215,6 +215,29 @@ func TestCurrentUnavailableInFlight(t *testing.T) {
 		{name: "Updating without Operation counted (defensive)", in: []workload.InstanceStatus{
 			{Index: 0, Phase: workload.InstancePhaseUpdating},
 		}, want: 1},
+		{name: "Failed update + Drain remains counted while retrying", in: []workload.InstanceStatus{
+			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: "Drain",
+			}},
+		}, want: 1},
+		{name: "Failed update + InPlace remains counted while retrying", in: []workload.InstanceStatus{
+			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: "InPlace",
+			}},
+		}, want: 1},
+		{name: "Failed update + Surge skipped because source remains online", in: []workload.InstanceStatus{
+			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: "Surge",
+			}},
+		}, want: 0},
+		{name: "Failed restart is outside the update budget", in: []workload.InstanceStatus{
+			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationRestart, Step: "Drain",
+			}},
+		}, want: 0},
+		{name: "Failed without an operation is outside the in-flight budget", in: []workload.InstanceStatus{
+			{Index: 0, Phase: workload.InstancePhaseFailed},
+		}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := workload.CurrentUnavailableInFlight(tc.in)
@@ -464,12 +487,11 @@ func TestReconcile_PerComponentMaxSurge_NilDefersToGroupGate(t *testing.T) {
 	}
 }
 
-// TestReconcile_PerComponentMaxUnavailable_DeniesAtBudget pins the
-// non-surge strategy branch. Setup: RecreatePod strategy,
-// MaxUnavailable=1, one Instance already in Phase=Updating + Step=Drain
-// (charged to priorUnavailInFlight=1). The other Instance must be
-// gated.
-func TestReconcile_PerComponentMaxUnavailable_DeniesAtBudget(t *testing.T) {
+// TestReconcile_FailedUpdateHoldsMaxUnavailableBudget is the two-replica
+// outage regression. Once the first RecreatePod update times out, its
+// preserved Update/Drain operation must keep MaxUnavailable=1 exhausted while
+// that Instance retries. The other healthy Instance must remain gated.
+func TestReconcile_FailedUpdateHoldsMaxUnavailableBudget(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	deps := workload.Deps{Client: c}
@@ -477,10 +499,10 @@ func TestReconcile_PerComponentMaxUnavailable_DeniesAtBudget(t *testing.T) {
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 2
 	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		// Index 0: already draining (Step=Drain takes pod offline).
+		// Index 0: replacement timed out after the source was drained.
 		{
 			Index: 0, Incarnation: 2,
-			Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev",
+			Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
 			Operation: &workload.InstanceOperation{
 				Type: workload.InstanceOperationUpdate, Step: "Drain",
 			},

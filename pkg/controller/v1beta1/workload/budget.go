@@ -117,11 +117,14 @@ func CurrentSurgeInFlight(statuses []InstanceStatus) int32 {
 	return n
 }
 
-// CurrentUnavailableInFlight counts InstanceStatuses currently in
-// Updating (non-surge step) — those whose pod is offline or being
-// patched in place. Used as the prior-pass anchor for the per-
-// Component MaxUnavailable budget check, similar to how
-// coordination.CheckUnavailability counts (replicas - serving).
+// CurrentUnavailableInFlight counts InstanceStatuses currently in an
+// unavailable Update (non-surge step) — those whose pod is offline or being
+// patched in place. A Failed Instance whose Update operation is preserved for
+// retry still consumes the budget; otherwise the dispatcher can start another
+// healthy Instance in the same wake-up and take the whole Component offline.
+// Used as the prior-pass anchor for the per-Component MaxUnavailable budget
+// check, similar to how coordination.CheckUnavailability counts
+// (replicas - serving).
 //
 // We exclude Surge / SurgeDrain steps because those don't take pods
 // offline (a new pod surges IN before the old one drains OUT). Other
@@ -130,7 +133,10 @@ func CurrentSurgeInFlight(statuses []InstanceStatus) int32 {
 func CurrentUnavailableInFlight(statuses []InstanceStatus) int32 {
 	var n int32
 	for _, s := range statuses {
-		if s.Phase != InstancePhaseUpdating {
+		updating := s.Phase == InstancePhaseUpdating
+		failedUpdate := s.Phase == InstancePhaseFailed && s.Operation != nil &&
+			s.Operation.Type == InstanceOperationUpdate
+		if !updating && !failedUpdate {
 			continue
 		}
 		if s.Operation == nil {
