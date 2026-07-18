@@ -543,27 +543,30 @@ func EscalateStuckPodFailures(ctx context.Context, input ReconcileInput, p Escal
 }
 
 // podsForStuckCheck returns the pods whose stuck state should escalate s.
-// It is s's own pods plus — when s owns an in-flight gang surge — the
-// surge index's pods. A gang surge's replacement gang lives at a SEPARATE
-// index (s.Operation.SurgeIndex) whose InstanceStatus carries only a
-// transient marker (or none at all), so a bad-revision surge gang wedged in
-// ImagePullBackOff would otherwise never escalate the SOURCE Instance and
-// the rollout would hang forever at Phase=Updating. Attributing the surge
-// pods to the source lets the source escalate to Phase=Failed, from which
-// the gang update path abandons the wedged surge and re-drives the
-// corrective target.
+// During a gang Update surge, inspect the replacement gang exclusively: the
+// source stays on the prior revision by design and may be the broken workload
+// this corrective rollout is replacing. Treating that old failure as a surge
+// failure makes the recovery path delete each replacement immediately. An
+// empty replacement bucket is also intentional while its pods are created.
+//
+// Migrate also uses SurgeIndex, including as a reverse sibling pointer on its
+// target status. Preserve its existing own-plus-sibling behavior here; its
+// failure semantics are separate from the gang Update state machine.
 func podsForStuckCheck(s InstanceStatus, byIdx map[int32][]*corev1.Pod) []*corev1.Pod {
 	own := byIdx[s.Index]
 	if s.Operation == nil || s.Operation.SurgeIndex == nil {
 		return own
 	}
-	surge := byIdx[*s.Operation.SurgeIndex]
-	if len(surge) == 0 {
+	sibling := byIdx[*s.Operation.SurgeIndex]
+	if s.Operation.Type == InstanceOperationUpdate {
+		return sibling
+	}
+	if len(sibling) == 0 {
 		return own
 	}
-	out := make([]*corev1.Pod, 0, len(own)+len(surge))
+	out := make([]*corev1.Pod, 0, len(own)+len(sibling))
 	out = append(out, own...)
-	out = append(out, surge...)
+	out = append(out, sibling...)
 	return out
 }
 

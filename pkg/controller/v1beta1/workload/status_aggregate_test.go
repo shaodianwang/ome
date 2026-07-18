@@ -527,6 +527,103 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 	}
 }
 
+// TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource pins corrective
+// rollout behavior: once a replacement gang is in flight, a terminal failure
+// on the old source must not be attributed to that surge. Otherwise the gang
+// recovery path abandons each new replacement before it can start.
+func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
+	prev := workload.StuckPodFailureGracePeriod
+	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
+	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+
+	now := time.Now()
+	oldStuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "rev-old"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}},
+		},
+	}
+	replacementHealthy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-2-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "rev-new"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+	replacementStuck := replacementHealthy.DeepCopy()
+	replacementStuck.Name = "engine-2-worker-0"
+	replacementStuck.Status.ContainerStatuses[0].State = corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+	}
+
+	for _, tc := range []struct {
+		name         string
+		replacement  []*corev1.Pod
+		wantPhase    workload.InstancePhase
+		wantEventPod string
+	}{
+		{name: "replacement pods not created yet", wantPhase: workload.InstancePhaseUpdating},
+		{name: "replacement pods healthy", replacement: []*corev1.Pod{replacementHealthy}, wantPhase: workload.InstancePhaseUpdating},
+		{name: "replacement pod also stuck", replacement: []*corev1.Pod{replacementStuck}, wantPhase: workload.InstancePhaseFailed, wantEventPod: replacementStuck.Name},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			surgeIdx := int32(2)
+			insts := []workload.InstanceStatus{{
+				Index:           0,
+				Phase:           workload.InstancePhaseUpdating,
+				RunningRevision: "rev-old",
+				Operation: &workload.InstanceOperation{
+					Type:       workload.InstanceOperationUpdate,
+					Step:       "Surge",
+					SurgeIndex: &surgeIdx,
+				},
+			}}
+			var eventPod string
+			input := workload.ReconcileInput{
+				MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+					for i := range insts {
+						if insts[i].Index == idx {
+							mutate(&insts[i])
+						}
+					}
+					return nil
+				},
+				WarnInstanceFailed: func(_ int32, podName, _ string) { eventPod = podName },
+			}
+
+			err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+				Instances: insts,
+				PodsByIndex: map[int32][]*corev1.Pod{
+					0: {oldStuck},
+					2: tc.replacement,
+				},
+				CurrentRevisionHash: "rev-new",
+				RevisionHashLabel:   "ome.io/revision-hash",
+			})
+			if err != nil {
+				t.Fatalf("EscalateStuckPodFailures: %v", err)
+			}
+			if insts[0].Phase != tc.wantPhase {
+				t.Errorf("source Phase: got %q want %q", insts[0].Phase, tc.wantPhase)
+			}
+			if eventPod != tc.wantEventPod {
+				t.Errorf("event pod: got %q want %q", eventPod, tc.wantEventPod)
+			}
+		})
+	}
+}
+
 // TestEscalateStuckPodFailures_AlreadyFailedNoOp pins the idempotency:
 // the escalator must not re-fire on an already-Failed Instance even
 // though the wedged pod is still in front of it.
