@@ -40,6 +40,8 @@ PROD_ECR_REGISTRY = f"{PROD_AWS_ACCOUNT_ID}.dkr.ecr.{AWS_REGION}.amazonaws.com"
 
 CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
 MUSE_RUST_CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/rust:1.95-bookworm"
+GO_BUILDER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25"
+RUST_BUILDER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/rust:1-bookworm"
 
 # cf-docker-image plugin handles ECR auth + multi-arch builds. The plugin
 # is fetched from mslsrc/dev at job-submit time. See prod_inference for
@@ -54,9 +56,10 @@ CF_DOCKER_PLUGIN_RUNTIME_IMAGE = (
     f"{ECR_REGISTRY}/msl_infra/prod-inference-ci-base"
     "@sha256:fd2e3c825cd063a8b4cd3d7440bf00696c9f8a7f8132e5a7d1e38a3df2f542e8"
 )
+DOCKER_PLUGIN_REF = "https://github.com/buildkite-plugins/docker-buildkite-plugin.git#v5.13.0"
 
-DEFAULT_QUEUE = "mks-cpu"
-BUILD_QUEUE = "mks-cpu"
+DEFAULT_QUEUE = "tw-cpu-x86"
+BUILD_QUEUE = "tw-cpu-x86"
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
@@ -95,6 +98,37 @@ def _gh_status(key: str, indent: int = 12) -> str:
     )
 
 
+def _tw_docker_plugin(image: str, indent: int = 6) -> str:
+    """Emit the TW docker plugin block for a command step.
+
+    TW agents run the Buildkite job on the host and use this plugin to launch the
+    command in the requested workload image. The identity/cert mounts mirror the
+    shared MSL TW helper so cloud_oss, curl, Go, Helm, and crane can authenticate
+    from the TW host identity and cert mounts.
+    """
+    pad = " " * indent
+    return (
+        f'{pad}- "{DOCKER_PLUGIN_REF}":\n'
+        f'{pad}    image: "{image}"\n'
+        f"{pad}    mount-buildkite-agent: true\n"
+        f"{pad}    propagate-environment: true\n"
+        f"{pad}    environment:\n"
+        f"{pad}      - GIT_TERMINAL_PROMPT=0\n"
+        f"{pad}      - SSL_CERT_FILE=/etc/meta/certs/ca-bundle.crt\n"
+        f"{pad}      - SSL_CERT_DIR=/etc/ssl/certs:/etc/meta/certs\n"
+        f"{pad}      - PATH=/opt/cloud.cli:/opt/cloud.cli/bin:/go/bin:/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin\n"
+        f"{pad}    volumes:\n"
+        f"{pad}      - /etc/pki/tls/certs:/etc/meta/certs:ro\n"
+        f"{pad}      - /etc/pki/ca-trust:/etc/pki/ca-trust:ro\n"
+        f"{pad}      - /etc/fbwhoami:/etc/fbwhoami:ro\n"
+        f"{pad}      - /etc/smc.tiers:/etc/smc.tiers:ro\n"
+        f"{pad}      - /var/facebook/rootcanal:/var/facebook/rootcanal:ro\n"
+        f"{pad}      - /var/facebook/x509_identities:/var/facebook/x509_identities:ro\n"
+        f"{pad}      - /var/facebook/tupperware/tls:/var/facebook/tupperware/tls:ro\n"
+        f"{pad}      - /data/buildkite/cloud.cli:/opt/cloud.cli:ro\n"
+    )
+
+
 def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str = "") -> str:
     """Emit a CI step that runs `make <target>` then `git diff --exit-code`.
 
@@ -127,11 +161,7 @@ def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str 
         f"    agents:\n"
         f'      queue: "{DEFAULT_QUEUE}"\n'
         f"    plugins:\n"
-        f"      - kubernetes:\n"
-        f"          podSpec:\n"
-        f"            containers:\n"
-        f"              - name: container-0\n"
-        f'                image: "{CI_IMAGE}"\n'
+        f"{_tw_docker_plugin(CI_IMAGE)}\n"
     )
 
 
@@ -152,11 +182,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           - label: ":golang: Vet"
             key: "vet"
@@ -166,11 +192,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           - label: ":test_tube: Unit Tests + Coverage"
             key: "test"
@@ -180,11 +202,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           - label: ":test_tube: Integration Tests"
             key: "integration-test"
@@ -198,11 +216,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           - label: ":test_tube: Integration Tests (KIND)"
             key: "integration-test-kind"
@@ -219,8 +233,8 @@ def ci_steps() -> str:
             # Requires Docker on the agent host; run_kind_tests.sh bails
             # out with a clear error if `docker info` fails.
             #
-            # soft_fail: mks-cpu Kubernetes-pod agents don't expose a
-            # Docker daemon, so the step currently bails out at the
+            # soft_fail: containerized Buildkite jobs don't expose a
+            # Docker daemon by default, so this can bail out at the
             # `docker info` check. Keeping it non-blocking so the signal
             # is visible (and turns green once we either move this step
             # to a DinD/sysbox-capable queue or stand up a Docker-on-pod
@@ -231,11 +245,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           - label: ":racing_car: Perf Tests"
             key: "perf-test"
@@ -257,11 +267,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           - label: ":test_tube: Scheduler Module"
             key: "scheduler-test"
@@ -277,11 +283,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
 
           # The muse-server image build owns web install/check/build in its
           # cached Node stage. Keep this independent step Rust-native.
@@ -297,11 +299,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{MUSE_RUST_CI_IMAGE}"
+{_tw_docker_plugin(MUSE_RUST_CI_IMAGE, indent=14)}
 
           - label: ":helm: Helm Lint"
             key: "helm-lint"
@@ -311,11 +309,7 @@ def ci_steps() -> str:
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CI_IMAGE}"
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
         """
     )
     # Drift checks: each runs a regen target and fails if the working
@@ -359,6 +353,13 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
     _mirror_image_step which copies the manifest at the registry layer
     — no rebuild, no layer re-upload.
     """
+    build_args = _image_build_args(label)
+    args_block = ""
+    if build_args:
+        args_block = "                  args:\n" + "\n".join(
+            f'                    - "{arg}"' for arg in build_args
+        ) + "\n"
+
     return textwrap.dedent(
         f"""\
           - label: ":docker: Build {label}"
@@ -370,23 +371,26 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
             env:
               BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
             plugins:
-              - kubernetes:
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
               - "{CF_DOCKER_IMAGE_PLUGIN}":
                   ecr-name: "msl_infra/{ecr_name}"
                   environment: "dev"
                   region: "{AWS_REGION}"
                   dockerfile: "{dockerfile}"
                   build-context: "."
+{args_block.rstrip()}
                   platforms: ["linux/amd64", "linux/arm64"]
                   push-branches: "main"
                   tags: ["latest", "{COMMIT[:8]}"]
                   login: true
+                  tw-buildkit: true
         """
     )
+
+
+def _image_build_args(label: str) -> list[str]:
+    if label == "muse-server":
+        return [f"RUST_BUILDER_IMAGE={RUST_BUILDER_IMAGE}"]
+    return [f"GO_BUILDER_IMAGE={GO_BUILDER_IMAGE}"]
 
 
 def _mirror_image_step(label: str, ecr_name: str) -> str:
@@ -409,23 +413,12 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
             command: |
               sh .buildkite/mirror_image.sh --only-main msl_infra/{ecr_name} latest "{short_sha}"
             plugins:
-              - kubernetes:
-                  metadata:
-                    annotations:
-                      identity.mks.meta.com/default: "true"
-                      identity.mks.meta.com/inject-auth-tools: "true"
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
+{_tw_docker_plugin(CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=14)}
         """
     )
 
 
 def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
-    # MKS identity annotations bind the pod to the cluster's default
-    # IAM role so `aws ecr get-login-password` works without static
-    # creds; same path the cf-docker-image plugin uses for image push.
     if isinstance(depends_on, list):
         deps = "\n".join(f'              - "{d}"' for d in depends_on)
         depends_block = f"depends_on:\n{deps}"
@@ -442,15 +435,7 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
-              - kubernetes:
-                  metadata:
-                    annotations:
-                      identity.mks.meta.com/default: "true"
-                      identity.mks.meta.com/inject-auth-tools: "true"
-                  podSpec:
-                    containers:
-                      - name: container-0
-                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
+{_tw_docker_plugin(CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=14)}
         """
     )
 

@@ -3,9 +3,10 @@
 # Can be overridden with --build-arg BASE_IMAGE=ubuntu:24.04
 # Note: Ubuntu 22.04 has glibc 2.35, but golang:1.24 requires glibc 2.38+
 ARG BASE_IMAGE=oraclelinux:10-slim
+ARG GO_BUILDER_IMAGE=golang:1.25
 
 # Build the model-agent binary
-FROM golang:1.25 AS builder
+FROM ${GO_BUILDER_IMAGE} AS builder
 
 # Install Rust and Cargo for building the XET library
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

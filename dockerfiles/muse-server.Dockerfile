@@ -6,6 +6,7 @@
 # Configurable runtime base (mirrors manager.Dockerfile); override with
 # --build-arg BASE_IMAGE=ubuntu:24.04.
 ARG BASE_IMAGE=oraclelinux:10-slim
+ARG RUST_BUILDER_IMAGE=rust:1-bookworm
 
 # 1) Build the web console. Runs on the native builder arch (BUILDPLATFORM) since
 #    the output is arch-independent JS. MUSE_WEB_BASE is the sub-path the console
@@ -21,7 +22,7 @@ RUN npm run check
 RUN npm run build
 
 # 2) Build the Rust server (per target arch).
-FROM rust:1-bookworm AS builder
+FROM ${RUST_BUILDER_IMAGE} AS builder
 # rustls' crypto backend (ring / aws-lc-rs) needs a C toolchain, cmake and perl.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
