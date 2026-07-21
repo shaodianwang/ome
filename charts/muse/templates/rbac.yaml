@@ -22,6 +22,14 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "pods"]
     verbs: ["get", "list", "watch"]
+  {{- if .Values.config.logs.enabled }}
+  # Log streaming follows pod logs through the apiserver. Remote workload
+  # clusters must grant the same to their mounted kubeconfig identities; until
+  # they do, the stream reports per-pod permission notices.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  {{- end }}
   {{- if .Values.config.metrics.enabled }}
   # Metrics validates the configured Prometheus Service once per cluster before
   # querying it through the apiserver proxy. Keep these permissions read-only.

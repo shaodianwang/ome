@@ -133,6 +133,83 @@ spec:
             - name: MUSE_CHAT_CA_CERT
               value: {{ .Values.config.chat.tls.caCert | quote }}
             {{- end }}
+            # Pod log fan-in streaming (GET /v1/logs/stream). Every knob is
+            # required when enabled; the server disables only this feature (with
+            # a logged reason) if one is missing or the buffer budget is exceeded.
+            - name: MUSE_LOGS_ENABLED
+              value: {{ .Values.config.logs.enabled | quote }}
+            {{- with .Values.config.logs.maxSessions }}
+            - name: MUSE_LOGS_MAX_SESSIONS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.maxPodsPerSession }}
+            - name: MUSE_LOGS_MAX_PODS_PER_SESSION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.maxTailsPerCluster }}
+            - name: MUSE_LOGS_MAX_TAILS_PER_CLUSTER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.bufferLines }}
+            - name: MUSE_LOGS_BUFFER_LINES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.lineBytesMax }}
+            - name: MUSE_LOGS_LINE_BYTES_MAX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.maxLinesPerSec }}
+            - name: MUSE_LOGS_MAX_LINES_PER_SEC
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.tailLinesMax }}
+            - name: MUSE_LOGS_TAIL_LINES_MAX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.catchupLines }}
+            - name: MUSE_LOGS_CATCHUP_LINES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.podRefreshSecs }}
+            - name: MUSE_LOGS_POD_REFRESH_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.sessionMaxSecs }}
+            - name: MUSE_LOGS_SESSION_MAX_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.startStaggerMs }}
+            - name: MUSE_LOGS_START_STAGGER_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.noticeIntervalSecs }}
+            - name: MUSE_LOGS_NOTICE_INTERVAL_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.tailRetryBackoffSecs }}
+            - name: MUSE_LOGS_TAIL_RETRY_BACKOFF_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.flushIntervalMs }}
+            - name: MUSE_LOGS_FLUSH_INTERVAL_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.batchMaxLines }}
+            - name: MUSE_LOGS_BATCH_MAX_LINES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.clientBufferLines }}
+            - name: MUSE_LOGS_CLIENT_BUFFER_LINES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.maxBufferBytes }}
+            - name: MUSE_LOGS_MAX_BUFFER_BYTES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.logs.sinceOptions }}
+            - name: MUSE_LOGS_SINCE_OPTIONS_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             {{- if .Values.config.metrics.enabled }}
             # Fleet metrics proxy → each cluster's Prometheus; query set mounted below.
             - name: MUSE_PROM_SERVICE

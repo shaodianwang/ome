@@ -106,6 +106,14 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         }
     };
 
+    // Log streaming is optional and fails closed the same way: incomplete or
+    // over-budget knob config disables only this feature, with the reason
+    // logged; the read plane remains available.
+    let logs = config.logs_config().unwrap_or_else(|err| {
+        tracing::error!(error = %err, "log streaming configuration invalid; feature disabled");
+        None
+    });
+
     let metrics = telemetry::init_metrics(
         &config.http_latency_buckets,
         Duration::from_secs(config.metrics_upkeep_secs),
@@ -217,6 +225,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             },
             dashboard_policy,
             metrics_time_ranges,
+            logs,
         },
     );
     server::serve(&config, state).await

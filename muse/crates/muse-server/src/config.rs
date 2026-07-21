@@ -16,6 +16,7 @@ use clap::Parser;
 use crate::{
     chat_proxy::ChatProxyConfig,
     protocol::{DashboardPolicy, MetricsTimeRanges},
+    service::logs::LogsConfig,
 };
 
 /// A workload cluster to aggregate: a name + an optional explicit kubeconfig
@@ -83,6 +84,18 @@ fn parse_positive_bytes(spec: &str) -> Result<u64, String> {
         .map_err(|_| format!("expected a positive number of bytes, got '{spec}'"))?;
     if value == 0 {
         return Err(format!("expected a positive number of bytes, got '{spec}'"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_millis(spec: &str) -> Result<u64, String> {
+    let value = spec
+        .parse::<u64>()
+        .map_err(|_| format!("expected a positive number of milliseconds, got '{spec}'"))?;
+    if value == 0 {
+        return Err(format!(
+            "expected a positive number of milliseconds, got '{spec}'"
+        ));
     }
     Ok(value)
 }
@@ -186,45 +199,49 @@ fn parse_dashboard_policy(spec: &str) -> Result<DashboardPolicy, String> {
     Ok(policy)
 }
 
-fn validate_metrics_time_ranges(ranges: &MetricsTimeRanges) -> Result<(), String> {
+/// Validate a `{ default, options: [{ id, label, seconds }] }` selector policy.
+/// `context` labels the failing knob (e.g. "metrics time-range") so both the
+/// metrics range selector and the log since selector share one validator.
+fn validate_time_options(context: &str, ranges: &MetricsTimeRanges) -> Result<(), String> {
     if ranges.default.trim().is_empty() {
-        return Err("metrics time-range default must not be empty".to_owned());
+        return Err(format!("{context} default must not be empty"));
     }
     if ranges.options.is_empty() {
-        return Err("metrics time-range options must not be empty".to_owned());
+        return Err(format!("{context} options must not be empty"));
     }
 
     let mut ids = HashSet::new();
     for option in &ranges.options {
         if option.id.trim().is_empty() {
-            return Err("metrics time-range option id must not be empty".to_owned());
+            return Err(format!("{context} option id must not be empty"));
         }
         if option.label.trim().is_empty() {
             return Err(format!(
-                "metrics time-range option '{}' must have a label",
+                "{context} option '{}' must have a label",
                 option.id
             ));
         }
         if option.seconds == 0 {
             return Err(format!(
-                "metrics time-range option '{}' must use positive seconds",
+                "{context} option '{}' must use positive seconds",
                 option.id
             ));
         }
         if !ids.insert(option.id.as_str()) {
-            return Err(format!(
-                "metrics time-range option id '{}' is duplicated",
-                option.id
-            ));
+            return Err(format!("{context} option id '{}' is duplicated", option.id));
         }
     }
     if !ids.contains(ranges.default.as_str()) {
         return Err(format!(
-            "metrics time-range default '{}' does not match an option id",
+            "{context} default '{}' does not match an option id",
             ranges.default
         ));
     }
     Ok(())
+}
+
+fn validate_metrics_time_ranges(ranges: &MetricsTimeRanges) -> Result<(), String> {
+    validate_time_options("metrics time-range", ranges)
 }
 
 fn parse_metrics_time_ranges(spec: &str) -> Result<MetricsTimeRanges, String> {
@@ -232,6 +249,13 @@ fn parse_metrics_time_ranges(spec: &str) -> Result<MetricsTimeRanges, String> {
         .map_err(|error| format!("invalid metrics time-range JSON: {error}"))?;
     validate_metrics_time_ranges(&ranges)?;
     Ok(ranges)
+}
+
+fn parse_logs_since_options(spec: &str) -> Result<MetricsTimeRanges, String> {
+    let options = serde_json::from_str(spec)
+        .map_err(|error| format!("invalid logs since-option JSON: {error}"))?;
+    validate_time_options("logs since-option", &options)?;
+    Ok(options)
 }
 
 fn parse_non_empty(spec: &str) -> Result<String, String> {
@@ -711,6 +735,189 @@ pub struct Config {
     #[arg(long = "metrics-queries-file", env = "MUSE_METRICS_QUERIES_FILE")]
     pub metrics_queries_file: Option<PathBuf>,
 
+    /// Enable pod log streaming: `GET /v1/logs/stream` fans in the follow-mode
+    /// logs of every pod behind one InferenceService as a single SSE response.
+    /// Requires the read credential of each cluster to allow `get pods/log`.
+    #[arg(
+        long = "logs-enabled",
+        env = "MUSE_LOGS_ENABLED",
+        action = clap::ArgAction::Set,
+        required = true
+    )]
+    pub logs_enabled: bool,
+
+    /// Maximum concurrent log-stream sessions per replica; further requests get
+    /// 503. No binary default: when logs are enabled without this value, the
+    /// feature stays disabled and the rest of MUSE continues serving (the same
+    /// contract as every knob below).
+    #[arg(
+        long = "logs-max-sessions",
+        env = "MUSE_LOGS_MAX_SESSIONS",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_max_sessions: Option<usize>,
+
+    /// Maximum pods tailed by one session. Excess pods (sorted component, then
+    /// name) are not tailed and the client is told via a notice event.
+    #[arg(
+        long = "logs-max-pods-per-session",
+        env = "MUSE_LOGS_MAX_PODS_PER_SESSION",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_max_pods_per_session: Option<usize>,
+
+    /// Maximum concurrent pod log streams per workload cluster, shared across
+    /// every session — bounds the apiserver/kubelet log-follow load.
+    #[arg(
+        long = "logs-max-tails-per-cluster",
+        env = "MUSE_LOGS_MAX_TAILS_PER_CLUSTER",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_max_tails_per_cluster: Option<usize>,
+
+    /// Per-session in-flight line buffer between the pod tails and the SSE
+    /// egress. When full, tails block (bounded memory by design) rather than
+    /// buffer without limit.
+    #[arg(
+        long = "logs-buffer-lines",
+        env = "MUSE_LOGS_BUFFER_LINES",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_buffer_lines: Option<usize>,
+
+    /// Maximum bytes kept of a single log line; longer lines are truncated and
+    /// flagged in the frame.
+    #[arg(
+        long = "logs-line-bytes-max",
+        env = "MUSE_LOGS_LINE_BYTES_MAX",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_line_bytes_max: Option<usize>,
+
+    /// Per-session egress rate limit in lines per second. Lines above the rate
+    /// are dropped and counted; the client sees the count via a notice event.
+    #[arg(
+        long = "logs-max-lines-per-sec",
+        env = "MUSE_LOGS_MAX_LINES_PER_SEC",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_max_lines_per_sec: Option<usize>,
+
+    /// Upper bound for the caller's `?tail=` history request; larger values are
+    /// clamped, not rejected.
+    #[arg(
+        long = "logs-tail-lines-max",
+        env = "MUSE_LOGS_TAIL_LINES_MAX",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_tail_lines_max: Option<usize>,
+
+    /// History depth for tails that start mid-session — pods that appear during
+    /// a rollout, and streams reopened after an error — so a restart never
+    /// replays the caller's full `?tail=` again.
+    #[arg(
+        long = "logs-catchup-lines",
+        env = "MUSE_LOGS_CATCHUP_LINES",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_catchup_lines: Option<usize>,
+
+    /// Seconds between roster resyncs against the pod cache: new pods start
+    /// tails, removed pods stop them, and the client gets a roster snapshot on
+    /// every change.
+    #[arg(
+        long = "logs-pod-refresh-secs",
+        env = "MUSE_LOGS_POD_REFRESH_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub logs_pod_refresh_secs: Option<u64>,
+
+    /// Hard lifetime of one session in seconds; the stream closes cleanly after
+    /// a final notice and the client may reconnect.
+    #[arg(
+        long = "logs-session-max-secs",
+        env = "MUSE_LOGS_SESSION_MAX_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub logs_session_max_secs: Option<u64>,
+
+    /// Milliseconds between consecutive tail starts within one batch, spreading
+    /// the log-follow connection burst instead of opening them all at once.
+    #[arg(
+        long = "logs-start-stagger-ms",
+        env = "MUSE_LOGS_START_STAGGER_MS",
+        value_parser = parse_positive_millis
+    )]
+    pub logs_start_stagger_ms: Option<u64>,
+
+    /// Minimum seconds between dropped-line notices, so a sustained overrun
+    /// reports a running count instead of a notice per frame.
+    #[arg(
+        long = "logs-notice-interval-secs",
+        env = "MUSE_LOGS_NOTICE_INTERVAL_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub logs_notice_interval_secs: Option<u64>,
+
+    /// Seconds to wait before reopening one pod's log stream after it ends or
+    /// errors (forbidden, deleted, kubelet EOF). Errors never end the session.
+    #[arg(
+        long = "logs-tail-retry-backoff-secs",
+        env = "MUSE_LOGS_TAIL_RETRY_BACKOFF_SECS",
+        value_parser = parse_positive_secs
+    )]
+    pub logs_tail_retry_backoff_secs: Option<u64>,
+
+    /// Milliseconds between egress flushes: buffered lines are batched into SSE
+    /// frames on this tick rather than one event per line.
+    #[arg(
+        long = "logs-flush-interval-ms",
+        env = "MUSE_LOGS_FLUSH_INTERVAL_MS",
+        value_parser = parse_positive_millis
+    )]
+    pub logs_flush_interval_ms: Option<u64>,
+
+    /// Maximum lines carried by one SSE frame; a flush emits several frames
+    /// when a burst exceeds this.
+    #[arg(
+        long = "logs-batch-max-lines",
+        env = "MUSE_LOGS_BATCH_MAX_LINES",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_batch_max_lines: Option<usize>,
+
+    /// Scrollback lines the console should retain client-side, served through
+    /// `GET /v1/config` — display policy, not a server-side bound.
+    #[arg(
+        long = "logs-client-buffer-lines",
+        env = "MUSE_LOGS_CLIENT_BUFFER_LINES",
+        value_parser = parse_positive_usize
+    )]
+    pub logs_client_buffer_lines: Option<usize>,
+
+    /// Upper bound in bytes for the worst-case buffered log memory:
+    /// max-sessions x buffer-lines x line-bytes-max must not exceed it. The
+    /// deployment derives this from its memory limit; an over-budget knob
+    /// combination disables the feature with a logged reason instead of
+    /// risking the pod's memory limit.
+    #[arg(
+        long = "logs-max-buffer-bytes",
+        env = "MUSE_LOGS_MAX_BUFFER_BYTES",
+        value_parser = parse_positive_bytes
+    )]
+    pub logs_max_buffer_bytes: Option<u64>,
+
+    /// Log-viewer since selector configuration as one JSON object:
+    /// `{ "default": "15m", "options": [{ "id", "label", "seconds" }] }` — the
+    /// same shape as the metrics range selector. Unset omits the selector;
+    /// the stream still honors an explicit `?sinceSecs=`.
+    #[arg(
+        long = "logs-since-options-json",
+        env = "MUSE_LOGS_SINCE_OPTIONS_JSON",
+        value_parser = parse_logs_since_options
+    )]
+    pub logs_since_options: Option<MetricsTimeRanges>,
+
     /// Directory of the built web console (the SPA) to serve at `/`, with the
     /// API under `/v1`. Unset ⇒ API-only (the console is served elsewhere). The
     /// container image bakes the bundle in and sets this; override to point at
@@ -795,6 +1002,97 @@ impl Config {
             allow_http: self.chat_allow_http,
         }))
     }
+
+    /// Build the optional log-streaming settings. Enabling the feature without
+    /// every operational knob — or with a knob combination whose worst-case
+    /// buffered bytes exceed the configured budget — is a configuration error
+    /// the caller handles by leaving log streaming disabled; no value is
+    /// invented here.
+    pub fn logs_config(&self) -> Result<Option<LogsConfig>, String> {
+        fn require<T>(value: Option<T>, var: &str) -> Result<T, String> {
+            value.ok_or_else(|| {
+                format!("log streaming enabled without {var}; log streaming will remain disabled")
+            })
+        }
+        fn lines_i64(value: usize, var: &str) -> Result<i64, String> {
+            i64::try_from(value)
+                .map_err(|_| format!("{var} exceeds the apiserver line-count range"))
+        }
+
+        if !self.logs_enabled {
+            return Ok(None);
+        }
+        let max_sessions = require(self.logs_max_sessions, "MUSE_LOGS_MAX_SESSIONS")?;
+        let buffer_lines = require(self.logs_buffer_lines, "MUSE_LOGS_BUFFER_LINES")?;
+        let line_bytes_max = require(self.logs_line_bytes_max, "MUSE_LOGS_LINE_BYTES_MAX")?;
+        let max_buffer_bytes = require(self.logs_max_buffer_bytes, "MUSE_LOGS_MAX_BUFFER_BYTES")?;
+
+        // Worst case, every session's line buffer is full of maximum-length
+        // lines at once. Keeping that product under an explicit budget (the
+        // deployment derives it from its memory limit) turns a risky knob
+        // combination into a visible configuration error.
+        let worst_case = (max_sessions as u128) * (buffer_lines as u128) * (line_bytes_max as u128);
+        if worst_case > u128::from(max_buffer_bytes) {
+            return Err(format!(
+                "MUSE_LOGS_MAX_SESSIONS x MUSE_LOGS_BUFFER_LINES x MUSE_LOGS_LINE_BYTES_MAX \
+                 = {worst_case} bytes exceeds MUSE_LOGS_MAX_BUFFER_BYTES = {max_buffer_bytes}; \
+                 lower those knobs or raise the budget; log streaming will remain disabled"
+            ));
+        }
+
+        Ok(Some(LogsConfig {
+            max_sessions,
+            max_pods_per_session: require(
+                self.logs_max_pods_per_session,
+                "MUSE_LOGS_MAX_PODS_PER_SESSION",
+            )?,
+            max_tails_per_cluster: require(
+                self.logs_max_tails_per_cluster,
+                "MUSE_LOGS_MAX_TAILS_PER_CLUSTER",
+            )?,
+            buffer_lines,
+            line_bytes_max,
+            max_lines_per_sec: require(self.logs_max_lines_per_sec, "MUSE_LOGS_MAX_LINES_PER_SEC")?,
+            tail_lines_max: lines_i64(
+                require(self.logs_tail_lines_max, "MUSE_LOGS_TAIL_LINES_MAX")?,
+                "MUSE_LOGS_TAIL_LINES_MAX",
+            )?,
+            catchup_lines: lines_i64(
+                require(self.logs_catchup_lines, "MUSE_LOGS_CATCHUP_LINES")?,
+                "MUSE_LOGS_CATCHUP_LINES",
+            )?,
+            pod_refresh: std::time::Duration::from_secs(require(
+                self.logs_pod_refresh_secs,
+                "MUSE_LOGS_POD_REFRESH_SECS",
+            )?),
+            session_max: std::time::Duration::from_secs(require(
+                self.logs_session_max_secs,
+                "MUSE_LOGS_SESSION_MAX_SECS",
+            )?),
+            start_stagger: std::time::Duration::from_millis(require(
+                self.logs_start_stagger_ms,
+                "MUSE_LOGS_START_STAGGER_MS",
+            )?),
+            notice_interval: std::time::Duration::from_secs(require(
+                self.logs_notice_interval_secs,
+                "MUSE_LOGS_NOTICE_INTERVAL_SECS",
+            )?),
+            tail_retry_backoff: std::time::Duration::from_secs(require(
+                self.logs_tail_retry_backoff_secs,
+                "MUSE_LOGS_TAIL_RETRY_BACKOFF_SECS",
+            )?),
+            flush_interval: std::time::Duration::from_millis(require(
+                self.logs_flush_interval_ms,
+                "MUSE_LOGS_FLUSH_INTERVAL_MS",
+            )?),
+            batch_max_lines: require(self.logs_batch_max_lines, "MUSE_LOGS_BATCH_MAX_LINES")?,
+            client_buffer_lines: require(
+                self.logs_client_buffer_lines,
+                "MUSE_LOGS_CLIENT_BUFFER_LINES",
+            )?,
+            since_options: self.logs_since_options.clone(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -838,8 +1136,45 @@ mod tests {
         .chain([
             format!("--chat-enabled={chat_enabled}"),
             format!("--chat-allow-http={allow_http}"),
+            "--logs-enabled=false".to_owned(),
         ])
         .collect()
+    }
+
+    /// The full operational knob set for an enabled log-stream feature. The
+    /// budget is exactly the worst-case product (4 x 64 x 1024), so tests can
+    /// tip it over by lowering one factor's budget.
+    fn logs_knobs() -> Vec<String> {
+        [
+            "--logs-max-sessions=4",
+            "--logs-max-pods-per-session=8",
+            "--logs-max-tails-per-cluster=32",
+            "--logs-buffer-lines=64",
+            "--logs-line-bytes-max=1024",
+            "--logs-max-lines-per-sec=100",
+            "--logs-tail-lines-max=500",
+            "--logs-catchup-lines=10",
+            "--logs-pod-refresh-secs=5",
+            "--logs-session-max-secs=60",
+            "--logs-start-stagger-ms=25",
+            "--logs-notice-interval-secs=5",
+            "--logs-tail-retry-backoff-secs=10",
+            "--logs-flush-interval-ms=200",
+            "--logs-batch-max-lines=50",
+            "--logs-client-buffer-lines=1000",
+            "--logs-max-buffer-bytes=262144",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn parse_with_logs(extra: &[&str]) -> Result<Config, clap::Error> {
+        let mut args = configured_args(false, false);
+        args.retain(|arg| arg != "--logs-enabled=false");
+        args.push("--logs-enabled=true".to_owned());
+        args.extend(extra.iter().map(|value| (*value).to_owned()));
+        Config::try_parse_from(args)
     }
 
     fn parse_with(
@@ -1133,6 +1468,107 @@ mod tests {
             Some(45)
         );
         assert!(parse_with(false, false, &["--cache-sync-timeout-secs=0"]).is_err());
+    }
+
+    #[test]
+    fn enabled_logs_without_knobs_degrade_to_disabled_config() {
+        let config = parse_with_logs(&[]).unwrap();
+        let err = config.logs_config().unwrap_err();
+        assert!(err.contains("MUSE_LOGS_MAX_SESSIONS"));
+
+        let mut partial = logs_knobs();
+        partial.retain(|arg| !arg.starts_with("--logs-flush-interval-ms="));
+        let partial: Vec<&str> = partial.iter().map(String::as_str).collect();
+        let config = parse_with_logs(&partial).unwrap();
+        let err = config.logs_config().unwrap_err();
+        assert!(err.contains("MUSE_LOGS_FLUSH_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn disabled_logs_yield_no_config_without_error() {
+        let config = parse_with(false, false, &[]).unwrap();
+        assert!(config.logs_config().unwrap().is_none());
+    }
+
+    #[test]
+    fn logs_limits_and_timings_are_config_driven() {
+        let knobs = logs_knobs();
+        let knobs: Vec<&str> = knobs.iter().map(String::as_str).collect();
+        let config = parse_with_logs(&knobs).unwrap();
+        let logs = config.logs_config().unwrap().unwrap();
+
+        assert_eq!(logs.max_sessions, 4);
+        assert_eq!(logs.max_pods_per_session, 8);
+        assert_eq!(logs.max_tails_per_cluster, 32);
+        assert_eq!(logs.buffer_lines, 64);
+        assert_eq!(logs.line_bytes_max, 1024);
+        assert_eq!(logs.max_lines_per_sec, 100);
+        assert_eq!(logs.tail_lines_max, 500);
+        assert_eq!(logs.catchup_lines, 10);
+        assert_eq!(logs.pod_refresh, Duration::from_secs(5));
+        assert_eq!(logs.session_max, Duration::from_secs(60));
+        assert_eq!(logs.start_stagger, Duration::from_millis(25));
+        assert_eq!(logs.notice_interval, Duration::from_secs(5));
+        assert_eq!(logs.tail_retry_backoff, Duration::from_secs(10));
+        assert_eq!(logs.flush_interval, Duration::from_millis(200));
+        assert_eq!(logs.batch_max_lines, 50);
+        assert_eq!(logs.client_buffer_lines, 1000);
+        assert!(logs.since_options.is_none());
+    }
+
+    #[test]
+    fn logs_buffer_budget_rejects_an_over_budget_knob_combination() {
+        let mut knobs = logs_knobs();
+        knobs.retain(|arg| !arg.starts_with("--logs-max-buffer-bytes="));
+        // One byte under the 4 x 64 x 1024 worst case.
+        knobs.push("--logs-max-buffer-bytes=262143".to_owned());
+        let knobs: Vec<&str> = knobs.iter().map(String::as_str).collect();
+        let config = parse_with_logs(&knobs).unwrap();
+
+        let err = config.logs_config().unwrap_err();
+        assert!(err.contains("MUSE_LOGS_MAX_BUFFER_BYTES"));
+        assert!(err.contains("262144"));
+    }
+
+    #[test]
+    fn logs_since_options_are_validated_like_the_metrics_ranges() {
+        let knobs = logs_knobs();
+        let mut valid: Vec<&str> = knobs.iter().map(String::as_str).collect();
+        valid.push(
+            r#"--logs-since-options-json={"default":"15m","options":[{"id":"5m","label":"5m","seconds":300},{"id":"15m","label":"15m","seconds":900}]}"#,
+        );
+        let config = parse_with_logs(&valid).unwrap();
+        let since = config
+            .logs_config()
+            .unwrap()
+            .unwrap()
+            .since_options
+            .unwrap();
+        assert_eq!(since.default, "15m");
+        assert_eq!(since.options[0].seconds, 300);
+
+        for invalid in [
+            r#"{"default":"15m","options":[]}"#,
+            r#"{"default":"missing","options":[{"id":"15m","label":"15m","seconds":900}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":0}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"15m","label":"other","seconds":3600}]}"#,
+        ] {
+            let arg = format!("--logs-since-options-json={invalid}");
+            assert!(parse_with_logs(&[&arg]).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn zero_valued_logs_knobs_are_rejected_at_parse_time() {
+        for flag in [
+            "--logs-max-sessions=0",
+            "--logs-buffer-lines=0",
+            "--logs-flush-interval-ms=0",
+            "--logs-pod-refresh-secs=0",
+            "--logs-max-buffer-bytes=0",
+        ] {
+            assert!(parse_with_logs(&[flag]).is_err(), "accepted {flag}");
+        }
     }
 
     #[test]

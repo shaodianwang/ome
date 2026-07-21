@@ -23,7 +23,10 @@ use crate::{
     informers::{CapacitySignal, ClusterState, Feed, Invalidations},
     protocol::{to_val, DashboardPolicy, MetricsTimeRanges, Topology},
     rollup,
-    service::error::ApiError,
+    service::{
+        error::ApiError,
+        logs::{LogsConfig, LogsState},
+    },
 };
 
 #[derive(Clone)]
@@ -42,6 +45,9 @@ pub struct AppState {
     /// Optional inference-test proxy. `None` means disabled or invalidly configured;
     /// the rest of the read plane remains available.
     chat: Option<Arc<ChatProxy>>,
+    /// Optional pod log streaming. `None` means disabled or invalidly
+    /// configured; the rest of the read plane remains available.
+    logs: Option<Arc<LogsState>>,
     /// The Prometheus to proxy PromQL to (per cluster, via the apiserver
     /// `services/proxy`). `None` ⇒ metrics are unconfigured and the endpoints are off.
     pub prom: Option<PromTarget>,
@@ -81,6 +87,8 @@ pub struct AppStateConfig {
     pub capacity_limits: rollup::CapacityLimits,
     pub dashboard_policy: Option<DashboardPolicy>,
     pub metrics_time_ranges: Option<MetricsTimeRanges>,
+    /// Optional log-streaming settings; `None` keeps the feature off.
+    pub logs: Option<LogsConfig>,
 }
 
 impl AppState {
@@ -94,6 +102,14 @@ impl AppState {
         config: AppStateConfig,
     ) -> Self {
         let (metrics_tx, _) = watch::channel(empty_metrics());
+        // The per-cluster tail gates cover exactly the registered clusters —
+        // the same set every request selects from.
+        let logs = config.logs.map(|logs_config| {
+            Arc::new(LogsState::new(
+                logs_config,
+                clusters.iter().map(|cluster| cluster.name.clone()),
+            ))
+        });
         let state = Self {
             clusters: Arc::new(clusters),
             topology,
@@ -106,6 +122,7 @@ impl AppState {
             capacity_limits: config.capacity_limits,
             signal,
             chat: chat.map(Arc::new),
+            logs,
             prom: config.prom,
             metrics_queries: config.queries,
             metrics_refresh: config.refresh,
@@ -169,6 +186,11 @@ impl AppState {
     /// Configured inference-test proxy, or `None` when the feature is unavailable.
     pub fn chat_proxy(&self) -> Option<&ChatProxy> {
         self.chat.as_deref()
+    }
+
+    /// Configured log streaming, or `None` when the feature is unavailable.
+    pub fn logs(&self) -> Option<&LogsState> {
+        self.logs.as_deref()
     }
 
     /// Whether every registered cluster has reached a settled initial-sync state

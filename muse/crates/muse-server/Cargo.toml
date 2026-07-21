@@ -13,6 +13,9 @@ path = "src/main.rs"
 anyhow = "1.0.103"
 axum = "0.8.9"
 clap = { version = "4", features = ["derive", "env"] }
+# io (AsyncBufReadExt) + TryStreamExt: read kube's follow-mode pod log streams
+# line by line for the log fan-in endpoint.
+futures-util = { version = "0.3", default-features = false, features = ["io", "std"] }
 # http-proxy: respect HTTP(S)_PROXY/NO_PROXY so a remote cluster reachable only
 # via a corporate proxy works (e.g. msl-cw-use2-dev-2).
 kube = { version = "4.0.0", features = ["client", "runtime", "rustls-tls", "http-proxy"] }
