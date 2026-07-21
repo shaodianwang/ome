@@ -7,9 +7,10 @@ deployment (InferenceService), and muse-server tails every matching pod ×
 container on the target cluster, aggregates the lines server-side, and delivers
 them to the console as **one SSE stream**. This is a **read-plane** feature —
 `pods/log` is a read verb, no write plane involved — and it is **config-gated
-and fail-closed**: absent config ⇒ the Logs tab is hidden and no tailing code
-path exists at runtime. It ships **disabled** (`enabled: false` in the chart),
-and because one MUSE deployment aggregates many workload clusters, enablement
+and fail-closed**: absent config ⇒ the Logs tab is hidden and every stream
+request is refused with an explicit 503 before any tailing machinery runs.
+It ships **disabled** (`enabled: false` in the chart), and because one MUSE
+deployment aggregates many workload clusters, enablement
 is **per cluster**: a cluster becomes tailable only when it is added to the
 `config.logs.clusters` allowlist, after its `pods/log` RBAC grant has landed
 (§8).
@@ -103,21 +104,27 @@ Parameters:
 | `namespace`, `isvc` | The deployment to tail (required). |
 | `component` | Optional narrowing to one component (engine / decoder / router). |
 | `pod`, `container` | Optional narrowing to a single pod and/or container. |
-| `tail` | Catch-up lines per tail on join (≤ `tailLinesMax`). |
+| `tail` | Catch-up lines per tail on join; values above `tailLinesMax` are clamped to it, not rejected. |
 | `sinceSecs` | Alternative catch-up: lines newer than now−N seconds. Also the reconnect-resume knob (§4.4). |
 | `grep` | **Reserved, ignored in v1**: the server accepts the parameter and does not apply it (no 4xx), so server-side filtering (§11) can land without a protocol change. |
 
-Requests are validated against config before any tail starts: unknown or
-non-log-enabled cluster, feature disabled, or over-cap values are a fast 4xx,
-never a half-open stream. The reserved `grep` param is the one deliberate
-exception to that strictness — accepted and ignored, per the table above.
+Requests are validated against config before any tail starts — never a
+half-open stream. A missing required param (`cluster`, `namespace`, `isvc`),
+a non-positive or non-numeric `tail`/`sinceSecs`, or an unknown or
+non-log-enabled cluster is a fast 400; feature-disabled and session-cap
+refusals are a 503 (§4.3). An over-cap `tail` is **clamped** to
+`tailLinesMax`, not rejected — an oversized history request streams the
+maximum rather than erroring. The reserved `grep` param is the other
+deliberate softness — accepted and ignored, per the table above.
 
 ### 4.3 Fan-in pipeline (per session)
 
 One session = one HTTP request = one task tree. The flow, in order:
 
-1. **Global session semaphore** (`maxSessions`). Full ⇒ immediate 429-class
-   refusal. Sessions are the unit of accounting; everything below is owned by
+1. **Global session semaphore** (`maxSessions`). Full ⇒ immediate 503
+   refusal, the same status the disabled feature returns — at-capacity and
+   not-enabled are both "service unavailable", never a half-open stream.
+   Sessions are the unit of accounting; everything below is owned by
    the session and torn down with it.
 2. **Pod roster** from the **existing cached Pod lister**, selected by the
    `ome.io/inferenceservice` label (plus the `component` label when narrowing).
@@ -132,7 +139,7 @@ One session = one HTTP request = one task tree. The flow, in order:
    since_seconds })` on the retained per-cluster client. `timestamps: true`
    always — kubelet's RFC3339 stamps are the interleave key and the SSE event
    id (§4.5).
-4. **Jittered starts + per-cluster tail semaphore.** Tail starts are staggered
+4. **Staggered starts + per-cluster tail semaphore.** Tail starts are staggered
    by `startStaggerMs` so a 48-pod session doesn't hit the apiserver with 48
    simultaneous `pods/log` upgrades, and every tail (across *all* sessions)
    holds a permit from a per-cluster semaphore (`maxTailsPerCluster`). Both are
@@ -169,9 +176,11 @@ fast enough for human log-watching.
 **Per-tail failure isolation.** A tail that fails — 403 because the member
 cluster hasn't granted `pods/log` yet, a rotated/deleted pod, a kubelet EOF or
 connection reset — emits a `tail-error` notice and is retried with a flat
-`tailRetryBackoffSecs` backoff (until the roster drops the pod). Notices are
-rate-limited per session by `noticeIntervalSecs` so a crash-looping pod cannot
-flood the stream with its own failure reports. **One bad pod or one bad
+`tailRetryBackoffSecs` backoff (until the roster drops the pod); a reopened
+stream resumes with `catchupLines`, never the caller's original history
+request. That backoff is also the flood bound: a crash-looping pod reports at
+most one `tail-error` per retry cycle (`noticeIntervalSecs` separately paces
+the `dropped` counters, §4.3). **One bad pod or one bad
 cluster never terminates the session**; the operator sees exactly which tails
 are degraded and why.
 
@@ -206,11 +215,12 @@ Three event types:
 
 | Event | Payload | Notes |
 |---|---|---|
-| `log` | `{ "p": pod, "ct": container, "co": component, "ls": [[ts, line], …] }` | One batch of lines from one pod × container. Short keys are deliberate: at `maxLinesPerSec` the envelope overhead is material. `ts` is the kubelet RFC3339 timestamp; `line` is the raw line, truncated at `lineBytesMax`. |
-| `pods` | roster snapshot `[{ pod, component, containers, state }, …]` | Sent once on session start and again on every roster change, so the console's pod filter chips and per-pod hues never drift from what is actually being tailed. |
-| `notice` | `{ "kind": "truncated-pods" \| "tail-error" \| "tail-ended" \| "session-end" \| "dropped", … }` | Out-of-band session/tail conditions with kind-specific fields (pod, error class, drop count, retry-in). Rendered inline in the log view, rate-limited by `noticeIntervalSecs`. |
+| `log` | `{ "p": pod, "ct": container, "co": component, "ls": [[ts, line], …] }` | One batch of lines from one pod × container. Short keys are deliberate: at `maxLinesPerSec` the envelope overhead is material. `ts` is the kubelet RFC3339 timestamp; `line` is the raw line, truncated at `lineBytesMax` — a truncated line carries a third `true` element (`[ts, line, true]`). `co` is omitted for pods without a component label. |
+| `pods` | roster snapshot `{ "pods": [{ name, component, phase, containers }, …], "total": N, "capped": bool }` | Sent once on session start and again on every roster change, so the console's pod filter chips and per-pod hues never drift from what is actually being tailed. `total` counts every matching pod; `capped: true` flags a roster cut at `maxPodsPerSession` (only the retained pods are listed). `component` is omitted for pods without the label. |
+| `notice` | `{ "kind": "truncated-pods" \| "tail-error" \| "tail-ended" \| "session-end" \| "dropped", … }` | Out-of-band session/tail conditions with kind-specific camelCase fields (pod, container, error, counts). Rendered inline in the log view; `dropped` notices are paced by `noticeIntervalSecs`, `tail-error` recurrence by the retry backoff (§4.4). |
 
-Every `log` event sets the SSE `id:` field to the timestamp of its last line.
+Every `log` event sets the SSE `id:` field to the timestamp of its last line
+(skipped for the rare batch whose last line carried no parseable timestamp).
 This is a **coarse, global cursor**: it marks how far the *merged* stream has
 progressed, not where each per-pod tail is. With N independent tails, a pod
 whose last delivered line is older than the global cursor still has
@@ -225,7 +235,7 @@ without a protocol change.
 
 ```
 kubelet ×N ──pods/log follow──► tail tasks (per pod×container, kube-rs log_stream)
-                                   │  jittered starts, per-cluster tail semaphore
+                                   │  staggered starts, per-cluster tail semaphore
                                    ▼
                      bounded mpsc (bufferLines × lineBytesMax, BLOCKING send)
                                    │  lossless: full buffer ⇒ tail blocks ⇒ TCP backpressure
@@ -265,24 +275,28 @@ Chart-supplied values (the binary carries none of these):
 | `bufferLines` | `512` | Per-session bounded channel capacity. |
 | `lineBytesMax` | `8192` | Per-line byte cap (longer lines truncated). |
 | `maxLinesPerSec` | `2000` | Session egress token-bucket rate. |
-| `tailLinesMax` | `5000` | Upper bound on the `tail` query param. |
-| `catchupLines` | `10` | Catch-up lines for pods joining mid-session. |
+| `tailLinesMax` | `5000` | Upper bound the `tail` query param is clamped to (§4.2). |
+| `catchupLines` | `10` | Catch-up lines for pods joining mid-session and for streams reopened after an error. |
 | `podRefreshSecs` | `5` | Roster resync interval (lister diff). |
 | `sessionMaxSecs` | `3600` | Hard session lifetime (reclamation valve). |
-| `startStaggerMs` | `25` | Jitter between tail starts. |
+| `startStaggerMs` | `25` | Delay between consecutive tail starts (spreads the connect burst). |
 | `noticeIntervalSecs` | `5` | Per-session notice rate limit. |
 | `tailRetryBackoffSecs` | `10` | Backoff before retrying a failed tail. |
 | `flushIntervalMs` | `200` | SSE batch flush interval. |
 | `batchMaxLines` | `500` | Max lines per `log` event. |
 | `clientBufferLines` | `5000` | Console ring-buffer size, served to the UI via `GET /v1/config` (§6). |
-| `sinceOptionsJson` | `{"default":"15m","options":["5m","15m","1h","6h"]}` | The console's "since" selector. Parsed and validated at startup exactly like `metricsTimeRanges` (non-empty options, unique ids, default ∈ options); invalid ⇒ startup error, not a silent fallback. |
+| `maxBufferBytes` | `134217728` | Budget for the worst-case buffered log memory (see below). The deployment derives it from its memory limit; the binary carries no budget of its own. |
+| `sinceOptions` | `{ default: "15m", options: [{ id, label, seconds }, …] }` — e.g. ids `5m`/`15m`/`1h`/`6h` | The console's "since" selector, rendered into the `MUSE_LOGS_SINCE_OPTIONS_JSON` flag. Exactly the `metricsTimeRanges` shape, validated at startup by the same selector validator (non-empty options, unique ids, positive seconds, default ∈ option ids); invalid ⇒ startup error, not a silent fallback. |
 
-**Memory bound, validated at startup.** Worst-case buffered log memory is
+**Memory bound, checked at startup.** Worst-case buffered log memory is
 `maxSessions × bufferLines × lineBytesMax` = 16 × 512 × 8 KiB ≈ **64 MiB**. A
-cross-field check in `Config::validate()` (beside the existing latency-bucket
-and cluster-name checks) computes this product against the configured pod
-memory budget and rejects a combination that could not fit — the operator
-finds out at deploy time, not as an OOMKill under load.
+cross-field check when the `logs` block is assembled compares this product
+against `maxBufferBytes` — the explicit budget the deployment derives from its
+memory limit (the chart supplies 128 MiB, double the default worst case, so
+one knob can be raised without redoing the math). An over-budget combination
+leaves the feature disabled with a logged reason — the same contract as a
+missing knob — so the operator finds out at deploy time, not as an OOMKill
+under load.
 
 ## 6. ConfigResp additions
 
@@ -295,7 +309,7 @@ The console never hardcodes these numbers; `GET /v1/config` (`ConfigResp` in
 | `logs: bool` | Feature on/off. `false` ⇒ the Logs tab is not rendered at all. |
 | `logsClusters` | The log-enabled cluster allowlist (§5 `clusters`). The console renders the Logs tab only for deployments on these clusters — a cluster whose grant hasn't landed shows **no tab**, not a permanently-403ing one. Omitted when disabled. |
 | `logsCaps` | `{ maxPodsPerSession, tailLinesMax, maxLinesPerSec }` — the caps the UI must reflect (input clamping, truncation hints). Omitted when disabled. |
-| `logsSinceOptions` | The validated `sinceOptionsJson` payload driving the "since" selector. Omitted when disabled. |
+| `logsSinceOptions` | The validated `sinceOptions` payload driving the "since" selector. Omitted when disabled, or when no selector is configured. |
 | `logsClientBufferLines` | Ring-buffer size for the console log view. Omitted when disabled. |
 
 Disabled is an explicit `logs: false` — the same non-error signal shape the
@@ -310,12 +324,13 @@ catalog and chat features use — never a 404 the frontend has to interpret.
   clusters (§5 `clusters`), and only pods matching the deployment label
   selector. There is no free-form pod-name/namespace tailing beyond what the
   roster resolves.
-- **No credentials in the stream.** Tail errors surface an error class
-  (`403`, `gone`, `eof`) and the pod name — never tokens, kubeconfig paths, or
-  raw apiserver responses.
-- **Fail closed.** No config ⇒ no routes registered. Missing RBAC on a member
-  cluster ⇒ per-pod `tail-error` notices (§4.4), never a crash and never an
-  escalation path.
+- **No credentials in the stream.** Tail errors surface a short reason
+  (stream failed to open / read failed / ended) plus the pod and container
+  names — never tokens, kubeconfig paths, or raw apiserver responses.
+- **Fail closed.** No config ⇒ every request to the endpoint is refused with
+  an explicit 503 before any stream machinery is touched, and the console
+  never renders the tab. Missing RBAC on a member cluster ⇒ per-pod
+  `tail-error` notices (§4.4), never a crash and never an escalation path.
 
 ## 8. RBAC & rollout
 
@@ -338,7 +353,7 @@ Rollout checklist, per cluster:
    `config.logs.enabled` to `true` if this is the environment's first
    log-enabled cluster).
 4. Confirm in the console: open a deployment on that cluster, Logs tab, no
-   `tail-error kind: 403` notices.
+   `tail-error` notices reporting a forbidden stream.
 
 **The allowlist is the rollout gate; 403 handling is the safety net.** A
 cluster whose grant hasn't landed is simply absent from
@@ -445,4 +460,7 @@ no magic numbers in TSX.
 
 ## Status
 
-Draft — 2026-07-20, author MUSE (design), pending review
+Server implemented — `muse/crates/muse-server/src/service/logs/` (endpoint,
+roster, session, throttle) plus `config.rs` and `charts/muse` (§5, §8); the
+console Logs tab (§9) has not landed yet. Spec trued up to the shipped server
+implementation 2026-07-20.
