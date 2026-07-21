@@ -1,0 +1,216 @@
+/* Deployment Logs tab: the toolbar, the virtualized log pane, and per-pod
+   prefix hues. Colors and spacing come from base.css tokens; the two geometry
+   values the virtualizer mirrors (`--log-row-h`) and the pane height are
+   design constants scoped to `.logview`. */
+
+.logview {
+  /* Fixed row height for the virtualizer; ROW_PX in LogsPane.tsx must match. */
+  --log-row-h: 20px;
+  --log-pane-h: 480px;
+  --log-pfx-w: 172px;
+}
+
+/* ---- toolbar ---- */
+.logbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: var(--s2) var(--s3);
+}
+.logbar .grow {
+  flex: 1;
+}
+.logbar .fv input[type="text"] {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  outline: none;
+  width: 230px;
+}
+.logbar .fv input[type="text"]::placeholder {
+  color: var(--fg-faint);
+}
+.logstat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---- persistent bars between the toolbar and the pane ---- */
+.log-capbar {
+  border: 1px solid var(--border);
+  border-top: 0;
+}
+
+/* ---- log pane ---- */
+.logpane-wrap {
+  position: relative;
+}
+.logpane {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+  height: var(--log-pane-h);
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+}
+.logpane-canvas {
+  position: relative;
+  overflow: hidden;
+}
+.logpane-slice {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+.log-empty {
+  padding: var(--s3);
+  color: var(--fg-3);
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+}
+
+/* ---- rows: fixed height so the virtualizer can address them by index ---- */
+.logline {
+  display: flex;
+  gap: var(--s3);
+  padding: 0 var(--s3);
+  white-space: pre;
+  height: var(--log-row-h);
+  line-height: var(--log-row-h);
+}
+.logline:hover {
+  background: var(--hover);
+}
+.log-ts {
+  color: var(--fg-faint);
+  flex: none;
+  /* "HH:MM:SS.mmm" — keep the column width stable when a timestamp is absent. */
+  width: 12ch;
+}
+.log-pfx {
+  flex: none;
+  width: var(--log-pfx-w);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  text-align: right;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
+}
+.log-pfx:hover {
+  text-decoration: underline;
+}
+.log-msg {
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.log-msg mark {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+.log-cut {
+  color: var(--fg-faint);
+}
+
+/* Pod-prefix hues: a fixed palette from the base.css series/state tokens;
+   a stable hash of the pod name picks the class (LOG_HUE_COUNT must match). */
+.loghue-0 {
+  color: var(--cyan);
+}
+.loghue-1 {
+  color: var(--violet);
+}
+.loghue-2 {
+  color: var(--green);
+}
+.loghue-3 {
+  color: var(--amber);
+}
+.loghue-4 {
+  color: color-mix(in srgb, var(--cyan) 55%, var(--green));
+}
+.loghue-5 {
+  color: color-mix(in srgb, var(--violet) 55%, var(--red));
+}
+
+/* ---- inline notice and marker rows (same fixed height as log lines) ---- */
+.log-noticerow {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+  padding: 0 var(--s3);
+  height: var(--log-row-h);
+  line-height: var(--log-row-h);
+  color: var(--amber);
+  background: var(--amber-dim);
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.log-marker {
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--s3);
+  height: var(--log-row-h);
+  line-height: var(--log-row-h);
+  color: var(--fg-faint);
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* ---- follow-resume chip, floating over the pane ---- */
+.log-resume {
+  position: absolute;
+  bottom: var(--s2);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent-dim);
+  color: var(--accent-fg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-pill);
+  padding: 3px 12px;
+  font: inherit;
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+.log-resume:hover {
+  background: var(--hover);
+}
+
+/* ---- wrap mode: variable-height rows, no virtualization ---- */
+.logpane.wrap .logline {
+  height: auto;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.logpane.wrap .log-msg {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

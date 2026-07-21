@@ -356,6 +356,16 @@ export interface MetricsTimeRanges {
   options: MetricsTimeRangeOption[];
 }
 
+/** The log-stream limits the console reflects in its viewer controls. */
+export interface LogsCaps {
+  /** Pods one log stream tails at most; excess pods are announced, not tailed. */
+  maxPodsPerSession: number;
+  /** Upper bound the server clamps `?tail=` to; the console caps its input. */
+  tailLinesMax: number;
+  /** Per-session egress rate; lines above it are dropped and counted. */
+  maxLinesPerSec: number;
+}
+
 /** Feature flags and display policy from `GET /v1/config` (read once at load). */
 export interface AppConfig {
   chat: boolean;
@@ -370,6 +380,20 @@ export interface AppConfig {
   metricsRefreshSecs?: number;
   dashboardPolicy?: DashboardPolicy;
   metricsTimeRanges?: MetricsTimeRanges;
+  /** Whether pod log streaming is available; the Logs tab hides when false. */
+  logs?: boolean;
+  /** Clusters allowlisted for log streaming: the Logs tab renders only for
+   *  deployments on these clusters, so a cluster whose log permissions haven't
+   *  landed shows no tab rather than a failing one. Omitted when disabled. */
+  logsClusters?: string[];
+  /** The log-stream caps the UI must reflect. Omitted when disabled. */
+  logsCaps?: LogsCaps;
+  /** The log viewer's "since" selector — same shape as `metricsTimeRanges`.
+   *  Omitted means no selector. */
+  logsSinceOptions?: MetricsTimeRanges;
+  /** Scrollback lines the console retains, supplied by deployment config
+   *  rather than baked into the console. Omitted when disabled. */
+  logsClientBufferLines?: number;
 }
 
 /** One Prometheus result series: instant queries carry `value`, range queries
@@ -424,6 +448,10 @@ export const STREAM_URL = at("/v1/stream");
 /** SSE endpoint for the live metrics snapshot, pushed on each server-side refresh
  *  (see `useMetrics` in `live.ts`). The console subscribes once and never polls. */
 export const METRICS_STREAM_URL = at("/v1/metrics/stream");
+
+/** SSE endpoint for the pod log fan-in (see `logStream.ts`). Each open Logs tab
+ *  owns one dedicated connection; parameters select and narrow the session. */
+export const LOGS_STREAM_URL = at("/v1/logs/stream");
 
 /**
  * Parse a response body as JSON, turning a non-JSON payload into a legible error
