@@ -1,0 +1,362 @@
+<!doctype html>
+<!-- MOCKUP ONLY — design draft for the deployment-page runtime card + logs tab.
+     Class names and tokens mirror muse/web/src/styles/* so implementation maps 1:1.
+     Not part of the build; safe to delete. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MUSE mockup — deployment page: runtime card + logs tab</title>
+<style>
+/* ==== tokens copied from muse/web/src/styles/base.css ==== */
+:root {
+  --bg: #121416; --bg-2: #171a1d; --panel: #1c1f22; --panel-2: #22262a;
+  --hover: #272c30; --border: #30363b; --border-2: #485158;
+  --fg: #f2f4f5; --fg-2: #c3c9cd; --fg-3: #969fa5; --fg-faint: #747e84;
+  --accent: #d9dee1; --accent-2: #f3f5f6; --accent-dim: #2c3135;
+  --accent-fg: #f3f5f6; --accent-contrast: #17191b;
+  --green: #72c993; --green-dim: #172a20; --amber: #e3b65f; --amber-dim: #2d2516;
+  --red: #ed8372; --red-dim: #311c19;
+  --violet: #9867c5; --violet-dim: #140f18; --cyan: #b5f4fa; --cyan-dim: #102326;
+  --code-bg: #0e1012;
+  --t-xs: 11px; --t-sm: 12px; --t-md: 13px; --t-base: 14px; --t-lg: 16px; --t-xl: 19px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  --radius: 6px; --radius-sm: 4px; --radius-pill: 999px;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--sans); font-size: var(--t-base); line-height: 1.45;
+  -webkit-font-smoothing: antialiased; padding: var(--s6) clamp(16px, 4vw, 48px);
+}
+.mono { font-family: var(--mono); font-feature-settings: "tnum" 1, "zero" 1; }
+.muted { color: var(--fg-3); font-size: var(--t-sm); }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius); border: 3px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ==== mockup banner (not part of the design) ==== */
+.mock-banner {
+  border: 1px dashed var(--border-2); border-radius: var(--radius);
+  color: var(--fg-3); font-size: var(--t-sm); padding: var(--s2) var(--s3); margin-bottom: var(--s5);
+}
+.mock-banner b { color: var(--fg-2); }
+
+/* ==== existing console classes (mirrored from viz.css / components.css / drawer.css) ==== */
+.detail-head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s5); }
+.backlink { background: none; border: 0; color: var(--fg-3); font-size: var(--t-sm); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); font-family: inherit; }
+.backlink:hover { color: var(--fg); background: var(--hover); }
+.detail-title { font-size: var(--t-xl); font-weight: 500; margin: 0; overflow-wrap: anywhere; }
+.detail-meta { color: var(--fg-3); font-size: var(--t-sm); }
+
+.dtabs { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--border); margin-bottom: var(--s5); }
+.dtab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 8px 15px; color: var(--fg-3); font: inherit; font-size: var(--t-md); cursor: pointer; }
+.dtab:hover { color: var(--fg-2); }
+.dtab.active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+
+.statstrip { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s6); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s3) var(--s4); margin-bottom: var(--s4); }
+.statstrip .s2 { display: flex; flex-direction: column; gap: 2px; }
+.statstrip .lbl { font-size: var(--t-sm); color: var(--fg-2); }
+.statstrip .val { font-size: var(--t-lg); font-weight: 500; font-variant-numeric: tabular-nums; }
+.strip-link { margin-left: auto; }
+
+.detail-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s4); }
+.detail-grid2 + .detail-grid2 { margin-top: var(--s4); }
+@media (max-width: 900px) { .detail-grid2 { grid-template-columns: 1fr; } }
+
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.card-head { display: flex; align-items: center; gap: var(--s3); padding: 11px var(--s4); border-bottom: 1px solid var(--border); }
+.card-head h3 { margin: 0; font-size: var(--t-base); font-weight: 600; }
+.card-head .sub { color: var(--fg-3); font-size: var(--t-sm); }
+.card-head .right { margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
+.card-body { padding: var(--s4); min-width: 0; overflow-x: auto; }
+
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent-2); font: inherit; font-size: var(--t-sm); cursor: pointer; }
+.linkbtn:hover { text-decoration: underline; }
+
+.facts { display: grid; grid-template-columns: 130px 1fr; gap: 6px var(--s3); margin: 0; font-size: var(--t-sm); }
+.facts .fact { display: contents; }
+.facts dt { color: var(--fg-3); }
+.facts dd { margin: 0; color: var(--fg); overflow-wrap: anywhere; }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-xs); font-weight: 600; padding: 3px 9px; border-radius: var(--radius-pill); border: 1px solid transparent; white-space: nowrap; line-height: 1.4; }
+.pill .pdot { width: 6px; height: 6px; border-radius: 50%; }
+.pill.green { background: var(--green-dim); color: var(--green); border-color: color-mix(in srgb, var(--green) 30%, transparent); }
+.pill.green .pdot { background: var(--green); }
+.pill.violet { background: var(--violet-dim); color: var(--violet); border-color: color-mix(in srgb, var(--violet) 30%, transparent); }
+.pill.violet .pdot { background: var(--violet); }
+.pill.slate { background: var(--bg-2); color: var(--fg-2); border-color: var(--border-2); }
+.pill.slate .pdot { background: var(--fg-3); }
+.tag { font-size: var(--t-xs); font-family: var(--mono); color: var(--fg-2); background: var(--bg-2); border: 1px solid var(--border); padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+
+.copyable { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.copybtn { background: none; border: 0; color: var(--fg-3); cursor: pointer; font-size: var(--t-xs); padding: 0 2px; }
+.copybtn:hover { color: var(--fg); }
+
+.collapse { margin-top: var(--s2); }
+.collapse > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: var(--s2); font-size: var(--t-xs); color: var(--fg-3); user-select: none; padding: 4px 0; }
+.collapse > summary::-webkit-details-marker { display: none; }
+.collapse > summary::before { content: "▸"; color: var(--accent-2); }
+.collapse[open] > summary::before { content: "▾"; }
+.collapse > summary:hover { color: var(--fg-2); }
+pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; margin: var(--s1) 0 var(--s2); font-family: var(--mono); font-size: var(--t-xs); line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--fg-2); }
+.envlist { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-family: var(--mono); font-size: var(--t-xs); color: var(--fg-3); }
+.envlist li { padding-left: var(--s4); text-indent: calc(-1 * var(--s4)); line-height: 1.6; overflow-wrap: anywhere; }
+.envk { color: var(--fg); font-weight: 500; }
+
+.cond-row { display: flex; align-items: center; gap: var(--s2); padding: 5px 0; border-bottom: 1px solid var(--border); font-size: var(--t-sm); }
+.cond-row:last-child { border-bottom: 0; }
+.cond-rs { margin-left: auto; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.green { background: var(--green); } .dot.amber { background: var(--amber); } .dot.slate { background: var(--fg-3); }
+
+.urow { display: grid; grid-template-columns: 1fr 120px 60px; align-items: center; gap: var(--s3); padding: 6px 0; font-size: var(--t-sm); }
+.urow .track { height: 6px; background: var(--bg-2); border-radius: var(--radius-pill); overflow: hidden; }
+.urow .fill { height: 100%; background: var(--green); }
+.urow .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg-2); }
+
+.fv { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--fg-3); }
+.fv select, .fv input[type="text"] { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 8px; font: inherit; font-size: var(--t-sm); }
+.fv input[type="text"] { width: 200px; font-family: var(--mono); font-size: var(--t-xs); }
+.btn { background: var(--panel-2); color: var(--fg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 10px; font: inherit; font-size: var(--t-sm); cursor: pointer; }
+.btn:hover { background: var(--hover); color: var(--fg); }
+.btn[aria-pressed="true"] { background: var(--accent-dim); color: var(--accent-fg); border-color: var(--border-2); }
+
+.data-notice { display: flex; gap: var(--s2); align-items: baseline; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--s2) var(--s3); font-size: var(--t-sm); color: var(--fg-2); background: var(--bg-2); }
+.data-notice.warning { border-color: color-mix(in srgb, var(--amber) 35%, transparent); background: var(--amber-dim); }
+.data-notice.warning strong { color: var(--amber); font-weight: 600; }
+
+/* ==== NEW classes proposed by this design (would live in styles/logs.css) ==== */
+.rt-role { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--border); font-size: var(--t-xs); font-weight: 600; color: var(--fg-3); letter-spacing: 0.02em; text-transform: uppercase; }
+.rt-serves { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.logbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; padding: var(--s2) var(--s3); }
+.logbar .grow { flex: 1; }
+.logstat { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.logpane { position: relative; background: var(--code-bg); border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); height: 480px; overflow-y: auto; padding: var(--s2) 0; font-family: var(--mono); font-size: var(--t-xs); line-height: 1.7; }
+.logline { display: flex; gap: var(--s3); padding: 0 var(--s3); white-space: pre; }
+.logline:hover { background: var(--hover); }
+.log-ts { color: var(--fg-faint); flex: none; }
+.log-pfx { flex: none; width: 172px; overflow: hidden; text-overflow: ellipsis; cursor: pointer; text-align: right; }
+.log-pfx:hover { text-decoration: underline; }
+.log-msg { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; }
+/* pod-prefix hues: fixed palette from base.css series/state tokens, hash(pod) -> class */
+.loghue-0 { color: var(--cyan); } .loghue-1 { color: var(--violet); }
+.loghue-2 { color: var(--green); } .loghue-3 { color: var(--amber); }
+.loghue-4 { color: color-mix(in srgb, var(--cyan) 55%, var(--green)); }
+.loghue-5 { color: color-mix(in srgb, var(--violet) 55%, var(--red)); }
+.log-noticerow { display: flex; gap: var(--s2); padding: 2px var(--s3); color: var(--amber); background: var(--amber-dim); font-family: var(--sans); font-size: var(--t-sm); }
+.log-resume { position: sticky; bottom: var(--s2); margin: 0 auto; display: block; width: max-content; background: var(--accent-dim); color: var(--accent-fg); border: 1px solid var(--border-2); border-radius: var(--radius-pill); padding: 3px 12px; font: inherit; font-size: var(--t-sm); cursor: pointer; }
+.log-footnotice { margin-top: var(--s3); }
+</style>
+</head>
+<body>
+
+<div class="mock-banner">
+  <b>Mockup</b> — deployment page additions: inline <b>Runtime card</b> (Overview tab, with command/args + env)
+  and the new <b>Logs tab</b> (stern-like aggregated streaming). Click the tabs. Static data; classes and
+  tokens mirror the real stylesheets.
+</div>
+
+<div class="detail-head">
+  <button class="backlink">← Deployments</button>
+  <h1 class="detail-title mono">avocado-t5-ome-inferq-513</h1>
+  <span class="pill green"><span class="pdot"></span>Ready</span>
+  <span class="detail-meta">InferenceService · sdg-prod · msl-cw-use2-1</span>
+</div>
+
+<div class="dtabs" role="tablist">
+  <button class="dtab active" data-tab="overview">Overview</button>
+  <button class="dtab" data-tab="monitoring">Monitoring</button>
+  <button class="dtab" data-tab="logs">Logs</button>
+  <button class="dtab" data-tab="activity">Activity</button>
+</div>
+
+<!-- ============================ OVERVIEW TAB ============================ -->
+<section id="tab-overview">
+  <div class="statstrip">
+    <div class="s2"><span class="lbl">Replicas</span><span class="val">203/203</span></div>
+    <div class="s2"><span class="lbl">QPS</span><span class="val">1.2k</span></div>
+    <div class="s2"><span class="lbl">p99</span><span class="val">840 ms</span></div>
+    <div class="s2"><span class="lbl">Error</span><span class="val">0.02%</span></div>
+    <div class="s2"><span class="lbl">In-flight</span><span class="val">4,812</span></div>
+    <button class="linkbtn strip-link">Monitoring →</button>
+  </div>
+
+  <div class="detail-grid2">
+    <div class="card">
+      <div class="card-head"><h3>Details</h3></div>
+      <div class="card-body">
+        <dl class="facts">
+          <div class="fact"><dt>Model</dt><dd><button class="linkbtn mono">avocado-v7p2-ckpt312</button></dd></div>
+          <div class="fact"><dt>Mode</dt><dd>OMENative</dd></div>
+          <div class="fact"><dt>Namespace</dt><dd>sdg-prod</dd></div>
+          <div class="fact"><dt>Cluster</dt><dd>msl-cw-use2-1</dd></div>
+          <div class="fact"><dt>Age</dt><dd>14d</dd></div>
+        </dl>
+        <!-- NOTE: the old "Runtime" facts row moves to the card on the right -->
+      </div>
+    </div>
+
+    <!-- ============ NEW: Runtime overview card ============ -->
+    <div class="card">
+      <div class="card-head">
+        <h3>Runtime</h3>
+        <span class="sub">ClusterServingRuntime</span>
+        <div class="right"><button class="linkbtn">Open →</button></div>
+      </div>
+      <div class="card-body">
+        <dl class="facts">
+          <div class="fact"><dt>Name</dt>
+            <dd><span class="mono">srt-avocado-v7p2-ckpt312-nvfp4</span>
+                <span class="pill slate" title="spec.runtime was omitted; resolved from the serving-runtime label on running pods">auto-selected</span></dd></div>
+          <div class="fact"><dt>Image</dt>
+            <dd><span class="copyable"><span class="mono">sglang:v0.5.8-cu129-nvfp4</span><button class="copybtn" title="Copy full image ref">⧉</button></span></dd></div>
+          <div class="fact"><dt>Topology</dt>
+            <dd>engine multi-node ×2 · decoder ×1 <span class="pill violet">PD</span></dd></div>
+          <div class="fact"><dt>Serves</dt>
+            <dd><span class="rt-serves"><span class="tag">safetensors</span><span class="tag">nvfp4</span><span class="tag">AvocadoForCausalLM</span><span class="tag">30B–110B</span></span></dd></div>
+          <div class="fact"><dt>Protocols</dt><dd><span class="tag">openAI</span></dd></div>
+        </dl>
+
+        <!-- per-container collapsed sections: command/args + env -->
+        <div class="rt-role">engine</div>
+        <details class="collapse">
+          <summary>Command &amp; args (17)</summary>
+          <pre class="argbox">python3 -m sglang.launch_server
+  --model-path /mnt/models
+  --disaggregation-mode prefill
+  --tp-size 8
+  --quantization modelopt_fp4
+  --page-size 64
+  --mem-fraction-static 0.82
+  --schedule-conservativeness 0.9
+  --host 0.0.0.0 --port 8080</pre>
+        </details>
+        <details class="collapse" open>
+          <summary>Env (5)</summary>
+          <ul class="envlist">
+            <li><span class="envk">GLOO_SOCKET_IFNAME</span>=eth0</li>
+            <li><span class="envk">NCCL_IB_HCA</span>=mlx5</li>
+            <li><span class="envk">SGLANG_DISAGGREGATION_HEARTBEAT_INTERVAL</span>=5</li>
+            <li><span class="envk">HF_TOKEN</span> ← secret/hf-secret.token</li>
+            <li><span class="envk">MODEL_CACHE_ROOT</span>=/dev/shm/model</li>
+          </ul>
+        </details>
+
+        <div class="rt-role">decoder</div>
+        <details class="collapse">
+          <summary>Command &amp; args (15)</summary>
+          <pre class="argbox">python3 -m sglang.launch_server
+  --model-path /mnt/models
+  --disaggregation-mode decode
+  --tp-size 8 …</pre>
+        </details>
+        <details class="collapse">
+          <summary>Env (4)</summary>
+          <ul class="envlist"><li class="muted">…</li></ul>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <div class="detail-grid2">
+    <div class="card">
+      <div class="card-head"><h3>Components</h3><span class="sub">203/203 ready</span></div>
+      <div class="card-body">
+        <div class="urow"><span>engine <span class="muted">· rev 7c2f1 · Stable</span></span><span class="track"><span class="fill" style="width:100%"></span></span><span class="v">128/128</span></div>
+        <div class="urow"><span>decoder <span class="muted">· rev 7c2f1 · Stable</span></span><span class="track"><span class="fill" style="width:100%"></span></span><span class="v">75/75</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Conditions</h3></div>
+      <div class="card-body">
+        <div class="cond-row"><span class="dot green"></span><span class="mono">Ready</span><span class="cond-rs">True</span></div>
+        <div class="cond-row"><span class="dot green"></span><span class="mono">EngineReady</span><span class="cond-rs">True</span></div>
+        <div class="cond-row"><span class="dot green"></span><span class="mono">DecoderReady</span><span class="cond-rs">True</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- degraded states of the runtime card, for design review -->
+  <div class="detail-grid2">
+    <div class="card">
+      <div class="card-head"><h3>Runtime</h3><span class="sub">degraded state A</span></div>
+      <div class="card-body">
+        <p class="muted">Runtime auto-selected — resolves when replicas are running.</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Runtime</h3><span class="sub">degraded state B</span><div class="right"><button class="linkbtn">Open →</button></div></div>
+      <div class="card-body">
+        <div class="data-notice warning"><strong>Runtime not found</strong><span>srt-avocado-v7p1 is referenced but no longer exists on msl-cw-use2-1.</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ LOGS TAB ============================ -->
+<section id="tab-logs" hidden>
+  <div class="logbar">
+    <label class="fv"><span>Component</span>
+      <select><option>All</option><option selected>engine</option><option>decoder</option></select></label>
+    <label class="fv"><span>Pod</span>
+      <select><option selected>All (48 of 203)</option><option>engine-0-leader-0</option><option>engine-1-leader-0</option><option>…</option></select></label>
+    <label class="fv"><span>Container</span>
+      <select><option selected>All</option><option>ome-container</option><option>serving-agent</option></select></label>
+    <label class="fv"><span>Since</span>
+      <select><option>5m</option><option selected>15m</option><option>1h</option><option>6h</option></select></label>
+    <label class="fv"><input type="text" placeholder="grep (client-side, / for regex)" /></label>
+    <label class="fv"><span>highlight</span><select><option selected>highlight</option><option>filter</option></select></label>
+    <span class="grow"></span>
+    <span class="logstat"><span class="dot green"></span>Live · 48 pods · 4.1k lines</span>
+    <button class="btn" aria-pressed="true">Follow</button>
+    <button class="btn">Pause</button>
+    <button class="btn">Wrap</button>
+    <button class="btn">Clear</button>
+  </div>
+
+  <div class="logpane">
+    <div class="log-noticerow">⚠ streaming 48 of 203 pods (server cap) — narrow by component or pod to change the set</div>
+    <div class="logline"><span class="log-ts">15:04:01.113</span><span class="log-pfx loghue-0" title="avocado-t5-ome-inferq-513-engine-0-leader-0 — click to filter">engine-0-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 12, #new-token: 8192, #cached-token: 51203, token usage: 0.61, #queue-req: 3</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.201</span><span class="log-pfx loghue-1">engine-1-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 8, #new-token: 6144, #cached-token: 40161, token usage: 0.58, #queue-req: 1</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.244</span><span class="log-pfx loghue-2">decoder-0-leader-0</span><span class="log-msg">Decode batch. #running-req: 231, #token: 104857, token usage: 0.72, gen throughput (token/s): 5123.4</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.309</span><span class="log-pfx loghue-3">decoder-4-leader-0</span><span class="log-msg">Decode batch. #running-req: 198, #token: 98301, token usage: 0.69, gen throughput (token/s): 4877.0</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.377</span><span class="log-pfx loghue-0">engine-0-leader-0</span><span class="log-msg">KV transfer to decoder-4 done: 12 seqs, 8.2 GB, 412 ms</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.402</span><span class="log-pfx loghue-4">engine-7-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 15, #new-token: 10240, #cached-token: 61150, token usage: 0.64, #queue-req: 6</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.463</span><span class="log-pfx loghue-5">engine-12-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 4, #new-token: 3072, #cached-token: 18716, token usage: 0.55, #queue-req: 0</span></div>
+    <div class="log-noticerow">engine-9-leader-0: tail error 403 (pods/log not granted on msl-cw-use2-1) — retrying in 10s</div>
+    <div class="logline"><span class="log-ts">15:04:01.518</span><span class="log-pfx loghue-2">decoder-0-leader-0</span><span class="log-msg">Decode batch. #running-req: 235, #token: 106114, token usage: 0.73, gen throughput (token/s): 5210.9</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.598</span><span class="log-pfx loghue-1">engine-1-leader-0</span><span class="log-msg">[serving-agent] heartbeat ok, model copies: 1 loaded</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.633</span><span class="log-pfx loghue-3">decoder-4-leader-0</span><span class="log-msg">Decode batch. #running-req: 201, #token: 99870, token usage: 0.70, gen throughput (token/s): 4901.2</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.702</span><span class="log-pfx loghue-4">engine-7-leader-0</span><span class="log-msg">KV transfer to decoder-0 done: 15 seqs, 10.1 GB, 388 ms</span></div>
+    <div class="logline"><span class="log-ts">15:04:01.771</span><span class="log-pfx loghue-0">engine-0-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 9, #new-token: 7168, #cached-token: 44520, token usage: 0.62, #queue-req: 2</span></div>
+    <button class="log-resume">↓ 214 new lines — resume follow</button>
+  </div>
+
+  <div class="data-notice log-footnotice">
+    <strong>Session</strong>
+    <span>hard limit 60m (server config) — the stream reconnects automatically with <span class="mono">sinceSecs</span> resume; caps, since-options and buffer size all come from <span class="mono">/v1/config</span>.</span>
+  </div>
+</section>
+
+<!-- ============================ STUB TABS ============================ -->
+<section id="tab-monitoring" hidden><p class="muted">Not part of this mockup — unchanged Monitoring tab.</p></section>
+<section id="tab-activity" hidden><p class="muted">Not part of this mockup — unchanged Activity tab.</p></section>
+
+<script>
+  // mockup-only tab switcher
+  const tabs = document.querySelectorAll(".dtab");
+  tabs.forEach((t) =>
+    t.addEventListener("click", () => {
+      tabs.forEach((x) => x.classList.toggle("active", x === t));
+      ["overview", "monitoring", "logs", "activity"].forEach((id) => {
+        document.getElementById("tab-" + id).hidden = id !== t.dataset.tab;
+      });
+    })
+  );
+</script>
+</body>
+</html>
