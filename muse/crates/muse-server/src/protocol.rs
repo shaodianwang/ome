@@ -827,6 +827,13 @@ pub struct InferenceServiceView {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
+    /// The runtime the operator actually resolves for this service (see
+    /// [`ResolvedRuntimeRefView`]). Filled by the resource endpoints, which hold
+    /// the runtime caches this is resolved against; absent when the runtime name
+    /// matches no cached runtime. `runtime`/`runtimeRef` above keep carrying the
+    /// spec declaration verbatim.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "resolvedRuntimeRef")]
+    pub resolved_runtime_ref: Option<ResolvedRuntimeRefView>,
 }
 
 impl InferenceServiceView {
@@ -877,6 +884,7 @@ impl InferenceServiceView {
             reason,
             message,
             age: age(meta),
+            resolved_runtime_ref: None,
         }
     }
 }
@@ -890,6 +898,21 @@ pub struct ResourceRefView {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+}
+
+/// The runtime identity an InferenceService actually uses, resolved the way the
+/// operator resolves the name: a namespaced ServingRuntime shadows a
+/// ClusterServingRuntime with the same name, and the kind declared on the spec is
+/// not consulted. `source` records where the name came from — `"spec"` when
+/// declared on the InferenceService, `"pods"` when read from the labels of the
+/// service's running pods (the only place an auto-selected runtime is recorded).
+#[derive(Serialize)]
+pub struct ResolvedRuntimeRefView {
+    pub kind: &'static str,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub source: &'static str,
 }
 
 fn resource_ref(name: &str, kind: &str, owner_namespace: Option<&str>) -> Option<ResourceRefView> {

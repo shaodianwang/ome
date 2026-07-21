@@ -77,6 +77,23 @@ describe("resource identity requests", () => {
     expect(namespaced.searchParams.has("namespace")).toBe(false);
   });
 
+  it("tries the namespaced runtime first, then the cluster-scoped one", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: "not_found", message: "not found" } }, 404),
+      )
+      .mockResolvedValueOnce(jsonResponse({ name: "vllm" }));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(api.legacyRuntime("member-a", "vllm")).resolves.toMatchObject({ name: "vllm" });
+
+    const namespaced = new URL(fetch.mock.calls[0][0], "http://muse.test");
+    const clusterScoped = new URL(fetch.mock.calls[1][0], "http://muse.test");
+    expect(namespaced.pathname).toBe("/v1/servingruntimes/vllm");
+    expect(clusterScoped.pathname).toBe("/v1/clusterservingruntimes/vllm");
+  });
+
   it("does not change resource scope after an operational failure", async () => {
     const fetch = vi
       .fn()

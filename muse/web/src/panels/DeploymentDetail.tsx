@@ -8,7 +8,7 @@ import { metricsHealth } from "../dataState";
 import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import type { StreamConnectionState } from "../live";
-import { replicaRollup } from "../map";
+import { replicaRollup, runtimeRefOf } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
 import { replicaDiagnostics } from "../replicaMetrics";
@@ -253,7 +253,7 @@ function OverviewPane({
   const modelRef: ResourceRef | undefined =
     d.modelRef ?? (d.model ? { kind: "ClusterBaseModel", name: d.model } : undefined);
   const runtimeRef: ResourceRef | undefined =
-    d.runtimeRef ?? (d.runtime ? { kind: "ClusterServingRuntime", name: d.runtime } : undefined);
+    runtimeRefOf(d) ?? (d.runtime ? { kind: "ClusterServingRuntime", name: d.runtime } : undefined);
   const standby = (d.placement?.candidates ?? []).filter((c) => c.cluster !== d.placement?.cluster);
   const components = d.components ?? [];
   const ready = replicaRollup(d.components).label;

@@ -5,6 +5,7 @@ import {
   loadSummary,
   modelUsage,
   replicaRollup,
+  runtimeReference,
   runtimeUsage,
   toFeed,
   toRollouts,
@@ -183,6 +184,70 @@ describe("runtimeUsage", () => {
       usage.get(resourceKey({ cluster: "c", kind: "ClusterServingRuntime", name: "vllm" })),
     ).toBe(1);
     expect(usage.size).toBe(3);
+  });
+
+  it("counts under the operator-resolved identity, not the declared one", () => {
+    // The spec declares ClusterServingRuntime, but a namespaced ServingRuntime
+    // with the same name shadows it — the server's resolved ref wins.
+    const usage = runtimeUsage([
+      {
+        cluster: "c",
+        namespace: "team-a",
+        name: "a",
+        runtime: "vllm",
+        runtimeRef: { kind: "ClusterServingRuntime", name: "vllm" },
+        resolvedRuntimeRef: {
+          kind: "ServingRuntime",
+          namespace: "team-a",
+          name: "vllm",
+          source: "spec",
+        },
+      },
+    ]);
+    expect(
+      usage.get(
+        resourceKey({ cluster: "c", kind: "ServingRuntime", namespace: "team-a", name: "vllm" }),
+      ),
+    ).toBe(1);
+    expect(usage.size).toBe(1);
+  });
+});
+
+describe("runtimeReference", () => {
+  it("prefers the resolved ref, then the declared ref, then the legacy name", () => {
+    const resolved = runtimeReference({
+      cluster: "c",
+      name: "a",
+      runtimeRef: { kind: "ClusterServingRuntime", name: "vllm" },
+      resolvedRuntimeRef: {
+        kind: "ServingRuntime",
+        namespace: "team-a",
+        name: "vllm",
+        source: "spec",
+      },
+    });
+    expect(resolved).toMatchObject({ kind: "ServingRuntime", namespace: "team-a", name: "vllm" });
+
+    const declared = runtimeReference({
+      cluster: "c",
+      name: "b",
+      runtimeRef: { kind: "ClusterServingRuntime", name: "vllm" },
+    });
+    expect(declared).toMatchObject({ kind: "ClusterServingRuntime", name: "vllm" });
+
+    const legacy = runtimeReference({ cluster: "c", name: "c", runtime: "vllm" });
+    expect(legacy).toMatchObject({ kind: "ClusterServingRuntime", name: "vllm" });
+  });
+
+  it("links an auto-selected runtime resolved from pod labels", () => {
+    // No spec.runtime: the detail response carries only the pods-sourced ref.
+    const ref = runtimeReference({
+      cluster: "c",
+      namespace: "team-a",
+      name: "a",
+      resolvedRuntimeRef: { kind: "ClusterServingRuntime", name: "sglang", source: "pods" },
+    });
+    expect(ref).toMatchObject({ cluster: "c", kind: "ClusterServingRuntime", name: "sglang" });
   });
 });
 

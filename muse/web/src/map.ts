@@ -115,7 +115,7 @@ export function toWorkloadRows(isvcs: IsvcItem[]): WorkloadRow[] {
       model: s.model ?? "—",
       modelRef: s.modelRef,
       runtime: s.runtime ?? "—",
-      runtimeRef: s.runtimeRef,
+      runtimeRef: runtimeRefOf(s),
       endpoint: s.url,
       replicas: replicaRollup(s.components),
       load: loadSummary(s),
@@ -140,8 +140,19 @@ export function modelReference(isvc: IsvcItem): Selected | undefined {
   return referencedResource(isvc, isvc.modelRef, isvc.model, "ClusterBaseModel");
 }
 
+/** The runtime ref to show for an ISVC: the operator-resolved identity when the
+ *  server supplies it, else the spec declaration (whose kind can be wrong — the
+ *  operator never consults it). */
+export function runtimeRefOf(isvc: IsvcItem): ResourceRef | undefined {
+  const resolved = isvc.resolvedRuntimeRef;
+  if (resolved) {
+    return { kind: resolved.kind, name: resolved.name, namespace: resolved.namespace };
+  }
+  return isvc.runtimeRef;
+}
+
 export function runtimeReference(isvc: IsvcItem): Selected | undefined {
-  return referencedResource(isvc, isvc.runtimeRef, isvc.runtime, "ClusterServingRuntime");
+  return referencedResource(isvc, runtimeRefOf(isvc), isvc.runtime, "ClusterServingRuntime");
 }
 
 /** Count InferenceServices by the full identity of the model they reference. */

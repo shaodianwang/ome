@@ -95,8 +95,9 @@ impl Prune for Node {
 impl Prune for Pod {
     fn prune(&mut self) {
         drop_managed_fields(self);
-        // The capacity rollup is the only reader of cached Pods; it needs only the
-        // node name, each container's resource requests, and the phase. Keep those
+        // Cached Pods have two readers: the capacity rollup (node name, container
+        // resource requests, phase) and InferenceService runtime attribution
+        // (labels — an auto-selected runtime is recorded only there). Keep those
         // and drop everything else — env, volumes, probes, ports, init containers,
         // status conditions/containerStatuses, annotations — which is the bulk of a
         // Pod and, at ~10^5 pods, the bulk of the whole cache. A future Pod reader

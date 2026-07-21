@@ -124,6 +124,18 @@ export interface ComponentItem {
   url?: string;
 }
 
+/** The runtime the operator actually resolves for an ISVC: a namespaced
+ *  ServingRuntime shadows a ClusterServingRuntime with the same name, and the
+ *  kind declared on the spec is not consulted. `source` says where the name came
+ *  from — the spec, or the labels of the service's running pods (the only record
+ *  of an auto-selected runtime; supplied on detail responses only). */
+export interface ResolvedRuntimeRef {
+  kind: "ServingRuntime" | "ClusterServingRuntime";
+  name: string;
+  namespace?: string;
+  source: "spec" | "pods";
+}
+
 export interface IsvcItem {
   cluster: string;
   name: string;
@@ -132,6 +144,9 @@ export interface IsvcItem {
   modelRef?: ResourceRef;
   runtime?: string;
   runtimeRef?: ResourceRef;
+  /** Operator-resolved runtime identity; preferred over `runtimeRef`, which
+   *  echoes the spec declaration verbatim. */
+  resolvedRuntimeRef?: ResolvedRuntimeRef;
   deploymentMode?: string;
   ready?: boolean;
   url?: string;
@@ -546,10 +561,11 @@ export const api = {
       () => getJSON<ModelDetail>(resourcePath({ cluster, name, kind: "BaseModel" })),
     ),
   runtime: (ref: Selected) => getJSON<RuntimeDetail>(resourcePath(ref)),
+  // Namespaced first, matching how the operator resolves a runtime name.
   legacyRuntime: (cluster: string, name: string) =>
     fallbackOnNotFound(
-      getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ClusterServingRuntime" })),
-      () => getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ServingRuntime" })),
+      getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ServingRuntime" })),
+      () => getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ClusterServingRuntime" })),
     ),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
