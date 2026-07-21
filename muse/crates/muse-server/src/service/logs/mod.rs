@@ -13,7 +13,12 @@ mod roster;
 mod session;
 mod throttle;
 
-use std::{collections::HashMap, convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    convert::Infallible,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     extract::{Query, State},
@@ -31,6 +36,11 @@ use crate::{app_context::AppState, protocol::MetricsTimeRanges};
 /// default.
 #[derive(Clone, Debug)]
 pub struct LogsConfig {
+    /// Per-cluster allowlist: only these clusters serve log streams. A
+    /// request for any other cluster is refused before a stream opens, and
+    /// the console hides the Logs tab for it. Empty means the feature is
+    /// enabled but no cluster serves logs yet.
+    pub clusters: BTreeSet<String>,
     /// Concurrent sessions per replica; admission returns 503 beyond this.
     pub max_sessions: usize,
     /// Pods tailed by one session; excess pods are reported, not tailed.
@@ -79,8 +89,12 @@ pub struct LogsState {
 impl LogsState {
     pub fn new(config: LogsConfig, clusters: impl IntoIterator<Item = String>) -> Self {
         let sessions = Arc::new(Semaphore::new(config.max_sessions));
+        // Gates exist only for allowlisted clusters — the same set the
+        // endpoint admits — so capacity is never reserved for a cluster that
+        // cannot serve logs.
         let cluster_tails = clusters
             .into_iter()
+            .filter(|name| config.clusters.contains(name))
             .map(|name| (name, Arc::new(Semaphore::new(config.max_tails_per_cluster))))
             .collect();
         Self {
@@ -90,13 +104,18 @@ impl LogsState {
         }
     }
 
+    /// Whether a cluster is allowlisted for log streaming.
+    fn cluster_enabled(&self, cluster: &str) -> bool {
+        self.config.clusters.contains(cluster)
+    }
+
     /// Take one session slot, or `None` when the replica is at capacity.
     fn try_admit(&self) -> Option<OwnedSemaphorePermit> {
         self.sessions.clone().try_acquire_owned().ok()
     }
 
-    /// The per-cluster tail gate. Every cluster registered at startup has one;
-    /// `None` only for a name outside that set.
+    /// The per-cluster tail gate. Every allowlisted cluster registered at
+    /// startup has one; `None` only for a name outside that set.
     fn tail_gate(&self, cluster: &str) -> Option<Arc<Semaphore>> {
         self.cluster_tails.get(cluster).cloned()
     }
@@ -124,6 +143,9 @@ pub struct LogStreamParams {
     pub tail: Option<String>,
     /// Only lines newer than this many seconds at session start.
     pub since_secs: Option<String>,
+    /// Reserved for server-side filtering: accepted and ignored, so filtering
+    /// can move server-side later without a protocol change.
+    pub grep: Option<String>,
 }
 
 /// `GET /v1/logs/stream` — SSE fan-in of the matching pods' follow-mode logs:
@@ -137,6 +159,16 @@ pub async fn stream(
         .logs()
         .ok_or_else(|| ApiError::Unavailable("log streaming is disabled".to_owned()))?;
     let cluster_name = require_param(params.cluster.as_deref(), "cluster")?.to_owned();
+    // Per-cluster gate: only allowlisted clusters serve logs, so a cluster
+    // whose log permissions haven't landed is refused fast instead of
+    // streaming per-pod permission notices.
+    if !logs.cluster_enabled(&cluster_name) {
+        return Err(ApiError::BadRequest(format!(
+            "log streaming is not enabled for cluster {cluster_name}"
+        )));
+    }
+    // The reserved filter param is deliberately accepted and ignored.
+    let _ = params.grep;
     let request = session::SessionRequest {
         namespace: require_param(params.namespace.as_deref(), "namespace")?.to_owned(),
         isvc: require_param(params.isvc.as_deref(), "isvc")?.to_owned(),
@@ -226,7 +258,67 @@ fn parse_since(spec: Option<&str>) -> Result<Option<i64>, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_since, parse_tail, require_param};
+    use std::time::Duration;
+
+    use super::{parse_since, parse_tail, require_param, LogStreamParams, LogsConfig, LogsState};
+
+    fn config_with_allowlist(clusters: &[&str]) -> LogsConfig {
+        LogsConfig {
+            clusters: clusters.iter().map(|name| (*name).to_owned()).collect(),
+            max_sessions: 2,
+            max_pods_per_session: 4,
+            max_tails_per_cluster: 8,
+            buffer_lines: 16,
+            line_bytes_max: 512,
+            max_lines_per_sec: 100,
+            tail_lines_max: 500,
+            catchup_lines: 10,
+            pod_refresh: Duration::from_secs(5),
+            session_max: Duration::from_secs(60),
+            start_stagger: Duration::from_millis(1),
+            notice_interval: Duration::from_secs(5),
+            tail_retry_backoff: Duration::from_secs(1),
+            flush_interval: Duration::from_millis(50),
+            batch_max_lines: 10,
+            client_buffer_lines: 100,
+            since_options: None,
+        }
+    }
+
+    #[test]
+    fn only_allowlisted_clusters_are_admitted_and_gated() {
+        let registered = ["cw".to_owned(), "gcp".to_owned()];
+        let state = LogsState::new(config_with_allowlist(&["cw"]), registered);
+
+        // Admission refuses the registered-but-unlisted cluster before any
+        // stream machinery is touched; only the allowlisted cluster holds a
+        // tail-capacity gate.
+        assert!(state.cluster_enabled("cw"));
+        assert!(!state.cluster_enabled("gcp"));
+        assert!(!state.cluster_enabled("unknown"));
+        assert!(state.tail_gate("cw").is_some());
+        assert!(state.tail_gate("gcp").is_none());
+
+        // Ships-dark posture: enabled feature, empty allowlist, no cluster
+        // admitted.
+        let dark = LogsState::new(config_with_allowlist(&[]), ["cw".to_owned()]);
+        assert!(!dark.cluster_enabled("cw"));
+        assert!(dark.tail_gate("cw").is_none());
+    }
+
+    #[test]
+    fn reserved_grep_param_is_accepted_not_rejected() {
+        let uri: axum::http::Uri =
+            "/v1/logs/stream?cluster=cw&namespace=team-a&isvc=llama&grep=error"
+                .parse()
+                .unwrap();
+        let axum::extract::Query(params) =
+            axum::extract::Query::<LogStreamParams>::try_from_uri(&uri)
+                .expect("the reserved grep param must not reject the request");
+        assert_eq!(params.grep.as_deref(), Some("error"));
+        assert_eq!(params.cluster.as_deref(), Some("cw"));
+        assert_eq!(params.isvc.as_deref(), Some("llama"));
+    }
 
     #[test]
     fn required_params_reject_missing_and_blank_values() {

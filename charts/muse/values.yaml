@@ -147,11 +147,21 @@ config:
     queries: []
   # Pod log streaming: GET /v1/logs/stream fans in the follow-mode logs of every
   # pod behind one InferenceService on one cluster as a single SSE response.
-  # Needs `get pods/log` on each cluster's read credential — granted below for
-  # the in-cluster case; member clusters grant it in their own GitOps. Until a
-  # cluster grants it, the feature degrades to per-pod permission notices.
+  # Ships dark, and rollout is two-step per environment:
+  #   1. flip `enabled: true` — registers the feature (routes, RBAC below,
+  #      console feature flag) with no cluster serving logs yet;
+  #   2. add each cluster to `clusters` once its read credential grants
+  #      `get pods/log` (granted below for the in-cluster case; member clusters
+  #      grant it in their own GitOps).
+  # The allowlist is the gate: an unlisted cluster gets no Logs tab and its
+  # stream requests are refused fast. The 403 tail-notice path remains only as
+  # the safety net for a grant that is revoked or still propagating.
   logs:
-    enabled: true
+    enabled: false
+    # Per-cluster allowlist. Every name must match a configured cluster name
+    # (validated at startup; a typo fails the deploy rather than shipping a
+    # silently dark cluster). Empty ⇒ no cluster serves logs even when enabled.
+    clusters: []
     maxSessions: 16          # concurrent log sessions per replica; 503 beyond
     maxPodsPerSession: 48    # pods tailed per session (component→name order; excess announced)
     maxTailsPerCluster: 256  # concurrent pod log streams per cluster, across sessions

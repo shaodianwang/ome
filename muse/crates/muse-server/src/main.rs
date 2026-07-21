@@ -113,6 +113,15 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         tracing::error!(error = %err, "log streaming configuration invalid; feature disabled");
         None
     });
+    // Enabled with an empty allowlist is the deliberate ships-dark posture,
+    // but say so: an operator expecting a live Logs tab should find the
+    // reason here, not in a silent UI.
+    if logs.as_ref().is_some_and(|logs| logs.clusters.is_empty()) {
+        tracing::warn!(
+            "log streaming is enabled with an empty cluster allowlist; no cluster serves logs \
+             until one is added"
+        );
+    }
 
     let metrics = telemetry::init_metrics(
         &config.http_latency_buckets,

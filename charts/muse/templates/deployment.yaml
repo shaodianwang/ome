@@ -138,6 +138,10 @@ spec:
             # a logged reason) if one is missing or the buffer budget is exceeded.
             - name: MUSE_LOGS_ENABLED
               value: {{ .Values.config.logs.enabled | quote }}
+            {{- with .Values.config.logs.clusters }}
+            - name: MUSE_LOGS_CLUSTERS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.config.logs.maxSessions }}
             - name: MUSE_LOGS_MAX_SESSIONS
               value: {{ . | quote }}

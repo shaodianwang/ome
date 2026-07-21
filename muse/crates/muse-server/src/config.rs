@@ -746,6 +746,21 @@ pub struct Config {
     )]
     pub logs_enabled: bool,
 
+    /// Clusters allowlisted for log streaming (comma-separated cluster names).
+    /// Enablement is per cluster because one deployment aggregates many
+    /// workload clusters whose `pods/log` grants land independently: only
+    /// listed clusters serve log streams, and the console shows the Logs tab
+    /// only for them. Every name must match a configured cluster (validated
+    /// at startup). Empty with the feature enabled means no cluster serves
+    /// logs yet — the fail-closed posture while per-cluster grants land.
+    #[arg(
+        long = "logs-clusters",
+        env = "MUSE_LOGS_CLUSTERS",
+        value_delimiter = ',',
+        value_parser = parse_non_empty
+    )]
+    pub logs_clusters: Vec<String>,
+
     /// Maximum concurrent log-stream sessions per replica; further requests get
     /// 503. No binary default: when logs are enabled without this value, the
     /// feature stays disabled and the rest of MUSE continues serving (the same
@@ -942,6 +957,24 @@ impl Config {
                 "MUSE_LOCAL_CLUSTER_NAME is required when no explicit clusters are configured"
             );
         }
+        // The log-stream allowlist may only name configured clusters: a typo
+        // would ship a silently dark cluster, indistinguishable from the
+        // intended posture, so an unknown name fails startup instead.
+        if !self.logs_clusters.is_empty() {
+            let known: std::collections::BTreeSet<String> = self
+                .cluster_refs()?
+                .into_iter()
+                .map(|cluster| cluster.name)
+                .collect();
+            for name in &self.logs_clusters {
+                if !known.contains(name) {
+                    anyhow::bail!(
+                        "MUSE_LOGS_CLUSTERS names unknown cluster '{name}'; configured clusters: {}",
+                        known.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1041,6 +1074,10 @@ impl Config {
         }
 
         Ok(Some(LogsConfig {
+            // Per-cluster gate. Empty is deliberately valid: the feature can
+            // ship enabled with no cluster serving logs until each cluster's
+            // log permissions land and it is allowlisted.
+            clusters: self.logs_clusters.iter().cloned().collect(),
             max_sessions,
             max_pods_per_session: require(
                 self.logs_max_pods_per_session,
@@ -1514,6 +1551,39 @@ mod tests {
         assert_eq!(logs.batch_max_lines, 50);
         assert_eq!(logs.client_buffer_lines, 1000);
         assert!(logs.since_options.is_none());
+        assert!(logs.clusters.is_empty());
+    }
+
+    #[test]
+    fn logs_cluster_allowlist_is_validated_against_configured_clusters() {
+        let knobs = logs_knobs();
+
+        // Naming the configured cluster passes validation and reaches the
+        // effective settings.
+        let mut valid: Vec<&str> = knobs.iter().map(String::as_str).collect();
+        valid.push("--logs-clusters=test-cluster");
+        let config = parse_with_logs(&valid).unwrap();
+        config.validate().unwrap();
+        let logs = config.logs_config().unwrap().unwrap();
+        assert!(logs.clusters.contains("test-cluster"));
+
+        // An empty allowlist is the valid ships-dark posture: the feature is
+        // enabled but no cluster serves logs.
+        let empty: Vec<&str> = knobs.iter().map(String::as_str).collect();
+        let config = parse_with_logs(&empty).unwrap();
+        config.validate().unwrap();
+        assert!(config.logs_config().unwrap().unwrap().clusters.is_empty());
+
+        // An unknown name anywhere in the comma list fails startup.
+        let mut unknown: Vec<&str> = knobs.iter().map(String::as_str).collect();
+        unknown.push("--logs-clusters=test-cluster,phantom");
+        let config = parse_with_logs(&unknown).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("phantom"), "unexpected error: {err}");
+        assert!(err.contains("test-cluster"), "unexpected error: {err}");
+
+        // Blank entries are rejected at parse time, not silently kept.
+        assert!(parse_with_logs(&["--logs-clusters=test-cluster,,"]).is_err());
     }
 
     #[test]

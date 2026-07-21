@@ -162,10 +162,24 @@ async fn run(ctx: SessionContext, events: EventSender) {
                 let desired = roster::tail_keys(&selection, ctx.request.container.as_deref());
                 let active: BTreeSet<TailKey> = tails.keys().cloned().collect();
                 let (to_start, to_stop) = roster::diff(&active, &desired);
+                let mut client_gone = false;
                 for key in to_stop {
                     if let Some(handle) = tails.remove(&key) {
                         handle.abort();
                     }
+                    // A vanished pod ends its tail with a notice, so the
+                    // console shows a deliberate stop instead of silence.
+                    let notice = Notice::TailEnded {
+                        pod: &key.pod,
+                        container: &key.container,
+                    };
+                    if send_notice(&events, &notice).await.is_err() {
+                        client_gone = true;
+                        break;
+                    }
+                }
+                if client_gone {
+                    break;
                 }
                 start_tails(&ctx, &lines_tx, &mut tails, to_start, TailStart::Catchup);
             }
@@ -422,6 +436,8 @@ enum Notice<'a> {
         container: &'a str,
         error: &'a str,
     },
+    /// A pod left the roster; its tail ended deliberately, with no retry.
+    TailEnded { pod: &'a str, container: &'a str },
     /// The configured session lifetime elapsed; the stream closes cleanly.
     SessionEnd { after_secs: u64 },
 }
@@ -673,6 +689,14 @@ mod tests {
             })
             .unwrap(),
             json!({ "kind": "tail-error", "pod": "pod-a", "container": "main", "error": "forbidden" })
+        );
+        assert_eq!(
+            serde_json::to_value(Notice::TailEnded {
+                pod: "pod-a",
+                container: "main",
+            })
+            .unwrap(),
+            json!({ "kind": "tail-ended", "pod": "pod-a", "container": "main" })
         );
         assert_eq!(
             serde_json::to_value(Notice::SessionEnd { after_secs: 3600 }).unwrap(),
