@@ -56,7 +56,6 @@ export interface LogLineRow {
   seq: number;
   pod: string;
   container: string;
-  component?: string;
   /** Kubelet RFC3339 timestamp; empty when the runtime omitted it. */
   ts: string;
   /** `ts` parsed to epoch milliseconds, or null when empty/unparseable. */
@@ -94,10 +93,6 @@ export class LogRing {
     return this.rows.length - this.head;
   }
 
-  at(index: number): LogRow | undefined {
-    return index >= 0 && index < this.length ? this.rows[this.head + index] : undefined;
-  }
-
   push(row: LogRow): void {
     this.rows.push(row);
     if (this.length > this.capacity) {
@@ -132,7 +127,6 @@ export class LogRing {
 export interface LogRosterPod {
   name: string;
   component?: string;
-  phase: string;
   containers: string[];
 }
 /** A `pods` roster snapshot: the tailed pods plus how many matched in total. */
@@ -167,7 +161,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export function parseLogFrame(data: string): Omit<LogLineRow, "seq">[] {
   const frame = parseJson(data);
   if (!isRecord(frame)) return [];
-  const { p: pod, ct: container, co: component, ls: lines } = frame;
+  const { p: pod, ct: container, ls: lines } = frame;
   if (typeof pod !== "string" || typeof container !== "string" || !Array.isArray(lines)) return [];
   const rows: Omit<LogLineRow, "seq">[] = [];
   for (const entry of lines) {
@@ -179,7 +173,6 @@ export function parseLogFrame(data: string): Omit<LogLineRow, "seq">[] {
       kind: "line",
       pod,
       container,
-      component: typeof component === "string" ? component : undefined,
       ts,
       tsMs: Number.isFinite(parsed) ? parsed : null,
       text: entry[1],
@@ -199,7 +192,6 @@ export function parseRoster(data: string): LogRoster | null {
     pods.push({
       name: entry.name,
       component: typeof entry.component === "string" ? entry.component : undefined,
-      phase: typeof entry.phase === "string" ? entry.phase : "",
       containers: Array.isArray(entry.containers)
         ? entry.containers.filter((c): c is string => typeof c === "string")
         : [],
@@ -260,21 +252,16 @@ export function podHue(pod: string): number {
 // Client-side grep
 // -----------------------------------------------------------------------------
 
-/** A compiled grep: `regex` is case-insensitive and non-global (safe to reuse). */
-export interface Grep {
-  regex: RegExp;
-  test: (text: string) => boolean;
-}
-
 const escapeLiteral = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Compile the grep box: a literal (case-insensitive) substring by default;
  * wrap the pattern in slashes (`/pattern/`) for a regular expression, matching
  * the toolbar hint. An invalid regex falls back to a literal match of the raw
- * input, so a half-typed pattern never blanks the pane.
+ * input, so a half-typed pattern never blanks the pane. The compiled regex is
+ * case-insensitive and non-global, so `test` is safe to reuse across lines.
  */
-export function compileGrep(input: string): Grep | null {
+export function compileGrep(input: string): RegExp | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
   let regex: RegExp | null = null;
@@ -285,14 +272,12 @@ export function compileGrep(input: string): Grep | null {
       regex = null;
     }
   }
-  regex ??= new RegExp(escapeLiteral(trimmed), "i");
-  const compiled = regex;
-  return { regex: compiled, test: (text) => compiled.test(text) };
+  return regex ?? new RegExp(escapeLiteral(trimmed), "i");
 }
 
 /** Split a line into plain/matched segments for highlight rendering. */
-export function grepSegments(text: string, grep: Grep): { text: string; hit: boolean }[] {
-  const global = new RegExp(grep.regex.source, "gi");
+export function grepSegments(text: string, grep: RegExp): { text: string; hit: boolean }[] {
+  const global = new RegExp(grep.source, "gi");
   const segments: { text: string; hit: boolean }[] = [];
   let consumed = 0;
   for (const match of text.matchAll(global)) {
@@ -361,10 +346,6 @@ export interface LogStreamState {
   cap: { shown: number; total: number } | null;
   /** Lines accepted into the buffer since the last clear. */
   lineCount: number;
-  /** Lines the server dropped under its egress rate cap. */
-  droppedByServer: number;
-  /** Reconnect-overlap duplicates removed client-side. */
-  deduped: number;
 }
 
 export interface LogStream {
@@ -399,8 +380,6 @@ export function createLogStream(
   let roster: LogRoster | null = null;
   let cap: { shown: number; total: number } | null = null;
   let lineCount = 0;
-  let droppedByServer = 0;
-  let deduped = 0;
   /** Newest line timestamp seen — the reconnect resume cursor. */
   let lastTsMs: number | null = null;
   /** Overlap keys active for the current post-reconnect connection. */
@@ -415,7 +394,6 @@ export function createLogStream(
     if (!lines.length) return;
     for (const line of lines) {
       if (overlap?.has(dedupeKey(line.pod, line.ts, line.text))) {
-        deduped += 1;
         continue;
       }
       if (line.tsMs != null && (lastTsMs == null || line.tsMs > lastTsMs)) {
@@ -445,10 +423,6 @@ export function createLogStream(
         if (!cap && typeof notice.shown === "number" && typeof notice.total === "number") {
           cap = { shown: notice.shown, total: notice.total };
         }
-        break;
-      case "dropped":
-        if (typeof notice.count === "number") droppedByServer += notice.count;
-        pushRow({ kind: "notice", text: noticeText(notice) });
         break;
       case "session-end":
         pushRow({ kind: "marker", text: noticeText(notice) });
@@ -513,7 +487,7 @@ export function createLogStream(
 
   return {
     ring,
-    state: () => ({ phase, roster, cap, lineCount, droppedByServer, deduped }),
+    state: () => ({ phase, roster, cap, lineCount }),
     start() {
       if (source || stopped) return;
       connect(logStreamUrl(endpoint, params));
@@ -528,8 +502,6 @@ export function createLogStream(
     clearRows() {
       ring.clear();
       lineCount = 0;
-      droppedByServer = 0;
-      deduped = 0;
       options.onUpdate();
     },
   };

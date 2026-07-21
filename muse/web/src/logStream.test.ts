@@ -66,9 +66,6 @@ describe("LogRing", () => {
     expect(ring.length).toBe(3);
     expect(ring.evicted).toBe(2);
     expect(ring.snapshot().map((row) => row.seq)).toEqual([2, 3, 4]);
-    expect(ring.at(0)?.seq).toBe(2);
-    expect(ring.at(3)).toBeUndefined();
-    expect(ring.at(-1)).toBeUndefined();
   });
 
   it("clear resets contents and the eviction counter", () => {
@@ -84,7 +81,7 @@ describe("LogRing", () => {
 });
 
 describe("parseLogFrame", () => {
-  it("parses batched pairs and the truncated triple, carrying the component", () => {
+  it("parses batched pairs and the truncated triple", () => {
     const rows = parseLogFrame(
       JSON.stringify({
         p: "llama-engine-0",
@@ -101,7 +98,6 @@ describe("parseLogFrame", () => {
     expect(rows[0]).toMatchObject({
       pod: "llama-engine-0",
       container: "main",
-      component: "engine",
       ts: "2026-07-20T15:04:01.113Z",
       text: "hello",
       truncated: false,
@@ -116,7 +112,6 @@ describe("parseLogFrame", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].tsMs).toBeNull();
-    expect(rows[0].component).toBeUndefined();
   });
 
   it("yields no rows for malformed payloads instead of throwing", () => {
@@ -364,7 +359,6 @@ describe("log stream controller", () => {
       .filter((row) => row.kind === "line")
       .map((row) => (row.kind === "line" ? row.text : ""));
     expect(texts).toEqual(["old", "newest", "fresh"]);
-    expect(stream.state().deduped).toBe(2);
     expect(stream.state().lineCount).toBe(3);
   });
 
@@ -390,7 +384,7 @@ describe("log stream controller", () => {
     expect(sources).toHaveLength(1);
   });
 
-  it("turns notices into inline rows and counters, keeping truncated-pods out of the flow", () => {
+  it("turns notices into inline rows, keeping truncated-pods out of the flow", () => {
     const { sources, stream } = harness();
     stream.start();
     sources[0].onopen?.();
@@ -403,7 +397,6 @@ describe("log stream controller", () => {
     sources[0].emit("notice", { kind: "tail-error", pod: "p1", container: "main", error: "403" });
     sources[0].emit("notice", { kind: "session-end", afterSecs: 3600 });
 
-    expect(stream.state().droppedByServer).toBe(12);
     const rows = stream.ring.snapshot();
     expect(rows.map((row) => row.kind)).toEqual(["notice", "notice", "marker"]);
     expect(rows[0]).toMatchObject({ text: "12 lines dropped by the server rate limit" });
@@ -420,7 +413,6 @@ describe("log stream controller", () => {
     stream.clearRows();
     expect(stream.ring.length).toBe(0);
     expect(stream.state().lineCount).toBe(0);
-    expect(stream.state().droppedByServer).toBe(0);
     expect(sources[0].closeCalls).toBe(0);
 
     sources[0].emit("log", frame("llama-engine-0", [["2026-07-20T15:04:02.100Z", "two"]]));

@@ -611,15 +611,4 @@ mod tests {
         let named = isvc_with_runtime("team-a", "svc", Some("missing"));
         assert!(resolved_runtime_ref(&named, &runtimes, &cluster_runtimes, None).is_none());
     }
-
-    #[test]
-    fn list_rows_never_resolve_from_pods() {
-        let runtimes = lister_of::<ServingRuntime>(vec![]);
-        let cluster_runtimes = lister_of(vec![cluster_serving_runtime("vllm")]);
-        let isvc = isvc_with_runtime("team-a", "svc", None);
-
-        // Without a pod lister — the list-row path — an auto-selected runtime
-        // stays unresolved even though the runtime it would name is cached.
-        assert!(resolved_runtime_ref(&isvc, &runtimes, &cluster_runtimes, None).is_none());
-    }
 }

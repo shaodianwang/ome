@@ -57,12 +57,6 @@ pub async fn stream(State(st): State<AppState>) -> Response {
             Ok::<_, Infallible>(sse)
         });
     let live = activity.merge(invalidations);
-    // Emit one comment immediately so a buffering proxy in front (e.g. the Vite
-    // dev proxy) flushes the response headers and the client's `onopen` fires
-    // right away, instead of waiting for the first change or the keep-alive.
-    let hello = tokio_stream::once(Ok::<_, Infallible>(
-        SseEvent::default().comment("connected"),
-    ));
     let keep_alive = st.sse_keep_alive_interval();
-    sse::response(hello.chain(live), keep_alive)
+    sse::response(live, keep_alive)
 }

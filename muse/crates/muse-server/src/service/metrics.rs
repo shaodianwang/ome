@@ -53,14 +53,8 @@ pub async fn stream(State(st): State<AppState>) -> Response {
             .unwrap_or_else(|_| SseEvent::default().comment("encode error"));
         Ok::<_, Infallible>(sse)
     });
-    // Emit a comment immediately so a buffering proxy in front (the gateway) flushes
-    // the response headers and the client's `onopen` fires right away, instead of
-    // holding the first snapshot — mirrors the activity stream (`events::stream`).
-    let hello = tokio_stream::once(Ok::<_, Infallible>(
-        SseEvent::default().comment("connected"),
-    ));
     let keep_alive = st.sse_keep_alive_interval();
-    sse::response(hello.chain(live), keep_alive)
+    sse::response(live, keep_alive)
 }
 
 /// Poll every cluster's Prometheus for the curated query set and publish one

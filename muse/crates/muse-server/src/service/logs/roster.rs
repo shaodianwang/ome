@@ -1,5 +1,5 @@
-//! Roster selection and diffing: which pods — and which of their containers —
-//! one session tails, recomputed from the cached pod lister on every resync.
+//! Roster selection: which pods — and which of their containers — one session
+//! tails, recomputed from the cached pod lister on every resync.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -28,7 +28,9 @@ pub(super) struct RosterPod {
 }
 
 /// The capped roster: the retained pods plus how many matched in total.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Serialized as-is as the `pods` snapshot pushed on session start and on
+/// every roster change.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct RosterSelection {
     pub pods: Vec<RosterPod>,
     pub total: usize,
@@ -145,25 +147,14 @@ pub(super) fn tail_keys(selection: &RosterSelection, container: Option<&str>) ->
         .collect()
 }
 
-/// The tail starts and stops that converge `active` onto `desired`.
-pub(super) fn diff(
-    active: &BTreeSet<TailKey>,
-    desired: &BTreeSet<TailKey>,
-) -> (Vec<TailKey>, Vec<TailKey>) {
-    let start = desired.difference(active).cloned().collect();
-    let stop = active.difference(desired).cloned().collect();
-    (start, stop)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use ome_client::k8s_openapi::api::core::v1::Pod;
     use serde_json::json;
 
-    use super::{diff, select, tail_keys, RosterFilter, TailKey};
+    use super::{select, tail_keys, RosterFilter, TailKey};
 
     fn pod(
         name: &str,
@@ -311,23 +302,5 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].pod, "llama-engine-0");
         assert_eq!(keys[0].container, "sidecar");
-    }
-
-    #[test]
-    fn diff_yields_the_starts_and_stops_that_converge_the_tails() {
-        let key = |pod: &str| TailKey {
-            pod: pod.to_owned(),
-            container: "main".to_owned(),
-        };
-        let active: BTreeSet<TailKey> = [key("a"), key("b")].into();
-        let desired: BTreeSet<TailKey> = [key("b"), key("c")].into();
-
-        let (start, stop) = diff(&active, &desired);
-        assert_eq!(start, [key("c")]);
-        assert_eq!(stop, [key("a")]);
-
-        let (none_start, none_stop) = diff(&desired, &desired);
-        assert!(none_start.is_empty());
-        assert!(none_stop.is_empty());
     }
 }

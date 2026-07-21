@@ -15,18 +15,16 @@ mod throttle;
 
 use std::{
     collections::{BTreeSet, HashMap},
-    convert::Infallible,
     sync::Arc,
     time::Duration,
 };
 
 use axum::{
     extract::{Query, State},
-    response::{sse::Event as SseEvent, Response},
+    response::Response,
 };
 use serde::Deserialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_stream::StreamExt;
 
 use super::{error::ApiError, sse};
 use crate::{app_context::AppState, protocol::MetricsTimeRanges};
@@ -176,7 +174,7 @@ pub async fn stream(
         pod: params.pod,
         container: params.container,
         tail_lines: parse_tail(params.tail.as_deref(), logs.config.tail_lines_max)?,
-        since_seconds: parse_since(params.since_secs.as_deref())?,
+        since_seconds: parse_positive_i64(params.since_secs.as_deref(), "sinceSecs")?,
     };
 
     let selected = st.select(Some(&cluster_name))?;
@@ -205,16 +203,7 @@ pub async fn stream(
         },
         permit,
     );
-    // Emit one comment immediately so a buffering proxy in front flushes the
-    // response headers and the client's `onopen` fires right away — mirrors
-    // the activity and metrics streams.
-    let hello = tokio_stream::once(Ok::<_, Infallible>(
-        SseEvent::default().comment("connected"),
-    ));
-    Ok(sse::response(
-        hello.chain(live),
-        st.sse_keep_alive_interval(),
-    ))
+    Ok(sse::response(live, st.sse_keep_alive_interval()))
 }
 
 fn require_param<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, ApiError> {
@@ -224,43 +213,36 @@ fn require_param<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, ApiE
     }
 }
 
+/// Parse an optional positive-integer query parameter; `name` labels the
+/// error for the caller.
+fn parse_positive_i64(spec: Option<&str>, name: &str) -> Result<Option<i64>, ApiError> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let value = spec
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!("{name} must be a positive integer, got '{spec}'"))
+        })?;
+    Ok(Some(value))
+}
+
 /// Parse `?tail=` and clamp it to the configured cap — an oversized request
 /// streams the maximum rather than erroring.
 fn parse_tail(spec: Option<&str>, tail_lines_max: i64) -> Result<Option<i64>, ApiError> {
-    let Some(spec) = spec else {
-        return Ok(None);
-    };
-    let value = spec
-        .parse::<i64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            ApiError::BadRequest(format!("tail must be a positive integer, got '{spec}'"))
-        })?;
-    Ok(Some(value.min(tail_lines_max)))
-}
-
-fn parse_since(spec: Option<&str>) -> Result<Option<i64>, ApiError> {
-    let Some(spec) = spec else {
-        return Ok(None);
-    };
-    let value = spec
-        .parse::<i64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            ApiError::BadRequest(format!(
-                "sinceSecs must be a positive integer, got '{spec}'"
-            ))
-        })?;
-    Ok(Some(value))
+    let value = parse_positive_i64(spec, "tail")?;
+    Ok(value.map(|value| value.min(tail_lines_max)))
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{parse_since, parse_tail, require_param, LogStreamParams, LogsConfig, LogsState};
+    use super::{
+        parse_positive_i64, parse_tail, require_param, LogStreamParams, LogsConfig, LogsState,
+    };
 
     fn config_with_allowlist(clusters: &[&str]) -> LogsConfig {
         LogsConfig {
@@ -346,9 +328,12 @@ mod tests {
 
     #[test]
     fn since_secs_must_be_a_positive_integer() {
-        assert_eq!(parse_since(None).unwrap(), None);
-        assert_eq!(parse_since(Some("900")).unwrap(), Some(900));
-        assert!(parse_since(Some("0")).is_err());
-        assert!(parse_since(Some("soon")).is_err());
+        assert_eq!(parse_positive_i64(None, "sinceSecs").unwrap(), None);
+        assert_eq!(
+            parse_positive_i64(Some("900"), "sinceSecs").unwrap(),
+            Some(900)
+        );
+        assert!(parse_positive_i64(Some("0"), "sinceSecs").is_err());
+        assert!(parse_positive_i64(Some("soon"), "sinceSecs").is_err());
     }
 }

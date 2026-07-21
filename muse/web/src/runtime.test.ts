@@ -1,23 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { RuntimeItem } from "./api";
-import { argLines, fmtRes, imageShort, serves, servesTags, topologySummary } from "./runtime";
+import { argLines, serves, servesTags, topologySummary } from "./runtime";
 
 const rt = (overrides: Partial<RuntimeItem>): RuntimeItem => ({
   cluster: "cw",
   name: "srt",
   ...overrides,
-});
-
-describe("imageShort", () => {
-  it("keeps only the last path segment of an image ref", () => {
-    expect(imageShort("ghcr.io/org/sglang:v0.5.8-cu129")).toBe("sglang:v0.5.8-cu129");
-    expect(imageShort("sglang:v0.5.8")).toBe("sglang:v0.5.8");
-  });
-
-  it("renders a dash when no image is declared", () => {
-    expect(imageShort(undefined)).toBe("—");
-  });
 });
 
 describe("serves", () => {
@@ -62,17 +51,6 @@ describe("topologySummary", () => {
   it("is null without components", () => {
     expect(topologySummary([])).toBeNull();
     expect(topologySummary(undefined)).toBeNull();
-  });
-});
-
-describe("fmtRes", () => {
-  it("joins resource name/quantity pairs", () => {
-    expect(fmtRes({ cpu: "4", "nvidia.com/gpu": "8" })).toBe("cpu 4 · nvidia.com/gpu 8");
-  });
-
-  it("is null for an empty or missing map", () => {
-    expect(fmtRes({})).toBeNull();
-    expect(fmtRes(undefined)).toBeNull();
   });
 });
 

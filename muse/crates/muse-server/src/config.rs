@@ -66,38 +66,26 @@ fn parse_prom_target(spec: &str) -> Result<PromTarget, String> {
     })
 }
 
-fn parse_positive_secs(spec: &str) -> Result<u64, String> {
-    let value = spec
-        .parse::<u64>()
-        .map_err(|_| format!("expected a positive number of seconds, got '{spec}'"))?;
-    if value == 0 {
-        return Err(format!(
-            "expected a positive number of seconds, got '{spec}'"
-        ));
+fn parse_positive_u64(spec: &str, unit: &str) -> Result<u64, String> {
+    match spec.parse::<u64>() {
+        Ok(value) if value > 0 => Ok(value),
+        _ => Err(format!(
+            "expected a positive number of {unit}, got '{spec}'"
+        )),
     }
-    Ok(value)
+}
+
+// clap `value_parser` needs fn items, so each unit keeps a named wrapper.
+fn parse_positive_secs(spec: &str) -> Result<u64, String> {
+    parse_positive_u64(spec, "seconds")
 }
 
 fn parse_positive_bytes(spec: &str) -> Result<u64, String> {
-    let value = spec
-        .parse::<u64>()
-        .map_err(|_| format!("expected a positive number of bytes, got '{spec}'"))?;
-    if value == 0 {
-        return Err(format!("expected a positive number of bytes, got '{spec}'"));
-    }
-    Ok(value)
+    parse_positive_u64(spec, "bytes")
 }
 
 fn parse_positive_millis(spec: &str) -> Result<u64, String> {
-    let value = spec
-        .parse::<u64>()
-        .map_err(|_| format!("expected a positive number of milliseconds, got '{spec}'"))?;
-    if value == 0 {
-        return Err(format!(
-            "expected a positive number of milliseconds, got '{spec}'"
-        ));
-    }
-    Ok(value)
+    parse_positive_u64(spec, "milliseconds")
 }
 
 fn parse_positive_usize(spec: &str) -> Result<usize, String> {

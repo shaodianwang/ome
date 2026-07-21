@@ -27,7 +27,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    roster::{self, RosterFilter, RosterPod, RosterSelection, TailKey},
+    roster::{self, RosterFilter, RosterSelection, TailKey},
     throttle::TokenBucket,
     LogsConfig,
 };
@@ -78,7 +78,7 @@ async fn run(ctx: SessionContext, events: EventSender) {
     let (lines_tx, mut lines_rx) = mpsc::channel::<TailEvent>(cfg.buffer_lines);
 
     let mut selection = current_roster(&ctx);
-    if send_roster(&events, &selection).await.is_err() {
+    if send_json(&events, "pods", &selection, None).await.is_err() {
         return;
     }
     if selection.capped {
@@ -145,7 +145,7 @@ async fn run(ctx: SessionContext, events: EventSender) {
                 if next == selection {
                     continue;
                 }
-                if send_roster(&events, &next).await.is_err() {
+                if send_json(&events, "pods", &next, None).await.is_err() {
                     break;
                 }
                 if next.capped && !selection.capped {
@@ -161,7 +161,8 @@ async fn run(ctx: SessionContext, events: EventSender) {
                 components = component_index(&selection);
                 let desired = roster::tail_keys(&selection, ctx.request.container.as_deref());
                 let active: BTreeSet<TailKey> = tails.keys().cloned().collect();
-                let (to_start, to_stop) = roster::diff(&active, &desired);
+                let to_start: Vec<TailKey> = desired.difference(&active).cloned().collect();
+                let to_stop: Vec<TailKey> = active.difference(&desired).cloned().collect();
                 let mut client_gone = false;
                 for key in to_stop {
                     if let Some(handle) = tails.remove(&key) {
@@ -532,23 +533,6 @@ fn frames(
         }
     }
     out
-}
-
-/// The roster snapshot pushed on session start and on every roster change.
-#[derive(Serialize)]
-struct RosterSnapshot<'a> {
-    pods: &'a [RosterPod],
-    total: usize,
-    capped: bool,
-}
-
-async fn send_roster(events: &EventSender, selection: &RosterSelection) -> Result<(), ()> {
-    let snapshot = RosterSnapshot {
-        pods: &selection.pods,
-        total: selection.total,
-        capped: selection.capped,
-    };
-    send_json(events, "pods", &snapshot, None).await
 }
 
 async fn send_notice(events: &EventSender, notice: &Notice<'_>) -> Result<(), ()> {
