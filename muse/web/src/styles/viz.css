@@ -1198,6 +1198,23 @@ th.right .sort-arrow {
   font-variant-numeric: tabular-nums;
 }
 /* ---- deployment overview: main column + About sidebar ---- */
+/* The detail view reads as a page, not a full-bleed sheet: cap and center it
+   so ultra-wide viewports don't stretch cards into mostly-empty panels. */
+.detail-page {
+  width: 100%;
+  max-width: 1320px;
+  margin-inline: auto;
+}
+/* Long copyable values (endpoint URLs, image refs) wrap inside their card
+   instead of forcing a horizontal scrollbar on the card body. */
+.overview-main .copyable .mono,
+.overview-side .copyable .mono {
+  width: fit-content;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .overview-cols {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;

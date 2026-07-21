@@ -110,7 +110,7 @@ export function DeploymentDetail({
   const meta = [sel.cluster, d?.namespace, d?.deploymentMode, d?.age].filter(Boolean).join(" · ");
 
   return (
-    <section className="panel active">
+    <section className="panel active detail-page">
       <button className="backlink" onClick={onBack}>
         ‹ Deployments
       </button>
@@ -392,37 +392,35 @@ function OverviewPane({
             </Card>
           )}
 
-          <div className="detail-grid2">
-            <Card title="Invoke & test" sub="OpenAI-compatible">
-              <ChatBox
-                resource={sel}
-                endpoint={d.url}
-                defaultModel={d.model ?? ""}
-                enabled={chat}
-                timeoutSecs={chatTimeoutSecs}
-                clientGraceSecs={chatClientGraceSecs}
-              />
-            </Card>
+          <Card title="Invoke & test" sub="OpenAI-compatible">
+            <ChatBox
+              resource={sel}
+              endpoint={d.url}
+              defaultModel={d.model ?? ""}
+              enabled={chat}
+              timeoutSecs={chatTimeoutSecs}
+              clientGraceSecs={chatClientGraceSecs}
+            />
+          </Card>
 
-            {d.placement?.cluster || standby.length ? (
-              <Card title="Placement" sub="where it runs">
-                {d.placement?.cluster ? (
-                  <div className="place-row">
-                    <Dot tone="green" />
-                    <span className="mono">{d.placement.cluster}</span>
-                    <span className="muted">active</span>
-                  </div>
-                ) : null}
-                {standby.map((c, i) => (
-                  <div className="place-row" key={i}>
-                    <Dot tone="slate" />
-                    <span className="mono">{c.cluster}</span>
-                    <span className="muted">standby</span>
-                  </div>
-                ))}
-              </Card>
-            ) : null}
-          </div>
+          {d.placement?.cluster || standby.length ? (
+            <Card title="Placement" sub="where it runs">
+              {d.placement?.cluster ? (
+                <div className="place-row">
+                  <Dot tone="green" />
+                  <span className="mono">{d.placement.cluster}</span>
+                  <span className="muted">active</span>
+                </div>
+              ) : null}
+              {standby.map((c, i) => (
+                <div className="place-row" key={i}>
+                  <Dot tone="slate" />
+                  <span className="mono">{c.cluster}</span>
+                  <span className="muted">standby</span>
+                </div>
+              ))}
+            </Card>
+          ) : null}
         </div>
 
         <aside className="overview-side">
