@@ -9,11 +9,14 @@ them to the console as **one SSE stream**. This is a **read-plane** feature —
 `pods/log` is a read verb, no write plane involved — and it is **config-gated
 and fail-closed**: absent config ⇒ the Logs tab is hidden and every stream
 request is refused with an explicit 503 before any tailing machinery runs.
-It ships **disabled** (`enabled: false` in the chart), and because one MUSE
-deployment aggregates many workload clusters, enablement
-is **per cluster**: a cluster becomes tailable only when it is added to the
-`config.logs.clusters` allowlist, after its `pods/log` RBAC grant has landed
-(§8).
+The chart ships with the feature **on for every configured cluster**
+(`enabled: true` + `allClusters: true` — an operator decision favoring log
+visibility on a single-tenant console). Enablement is still **per cluster**
+underneath: the allowlist is derived from the configured cluster list, and an
+environment preferring a gradual rollout sets `allClusters: false` and lists
+clusters explicitly as their `pods/log` grants land (§8). A cluster whose
+grant has not landed shows retrying permission notices (§4.4), not a hidden
+tab.
 
 The approved UI design is `muse/docs/mockups/deployment-page.html` (runtime
 card + Logs tab); the frontend summary is §9.
@@ -267,7 +270,7 @@ Chart-supplied values (the binary carries none of these):
 
 | Key | Chart value | Meaning |
 |---|---|---|
-| `enabled` | `false` | Master switch for the environment (one muse-server deployment). Off ⇒ no routes, no tails, tab hidden. Ships `false` to match the disabled-by-default posture (§1); an environment flips it when its first cluster completes the RBAC checklist (§8). |
+| `enabled` | `true` | Master switch for the environment (one muse-server deployment). Off ⇒ no routes, no tails, tab hidden. Ships `true` together with `allClusters: true` (§1); an environment preferring a dark launch sets it `false` or narrows the allowlist. |
 | `clusters` | `[]` | **Per-cluster allowlist** — the per-cluster half of the gate, since one MUSE instance aggregates many workload clusters. Only listed clusters can be tailed; requests for unlisted clusters are a fast 4xx (§4.2) and the console hides the Logs tab for them (§6). Validated at startup against the configured cluster names (unknown name ⇒ startup error), same discipline as the existing cluster-name checks. A cluster is added only after its `pods/log` grant is verified (§8). |
 | `maxSessions` | `16` | Global concurrent session cap (the semaphore in §4.3). |
 | `maxPodsPerSession` | `48` | Roster cap; overflow ⇒ `truncated-pods` notice. |

@@ -147,23 +147,20 @@ config:
     queries: []
   # Pod log streaming: GET /v1/logs/stream fans in the follow-mode logs of every
   # pod behind one InferenceService on one cluster as a single SSE response.
-  # Ships dark, and rollout is two-step per environment:
-  #   1. flip `enabled: true` — registers the feature (routes, RBAC below,
-  #      console feature flag) with no cluster serving logs yet;
-  #   2. add each cluster to `clusters` once its read credential grants
-  #      `get pods/log` (granted below for the in-cluster case; member clusters
-  #      grant it in their own GitOps).
-  # The allowlist is the gate: an unlisted cluster gets no Logs tab and its
-  # stream requests are refused fast. The 403 tail-notice path remains only as
-  # the safety net for a grant that is revoked or still propagating.
+  # Enabled for every configured cluster by default (operator decision: the
+  # console is single-tenant and log visibility beats a quiet default). A
+  # cluster whose read credential lacks `get pods/log` shows retrying
+  # permission notices until the grant lands in that cluster's own GitOps
+  # (granted below for the in-cluster case). Set `allClusters: false` and use
+  # the explicit `clusters` list for a gradual per-cluster rollout instead.
   logs:
-    enabled: false
+    enabled: true
     # Allowlist every configured cluster (derived from `clusters` above, or
     # `localClusterName` when running single-cluster/ambient). Takes precedence
     # over the explicit list below; new clusters are covered automatically.
     # Expect 403 tail notices on clusters whose `get pods/log` grant has not
     # landed yet.
-    allClusters: false
+    allClusters: true
     # Per-cluster allowlist. Every name must match a configured cluster name
     # (validated at startup; a typo fails the deploy rather than shipping a
     # silently dark cluster). Empty ⇒ no cluster serves logs even when enabled.
