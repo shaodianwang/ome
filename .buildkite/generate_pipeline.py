@@ -129,6 +129,17 @@ def _tw_docker_plugin(
         f"{pad}      - GIT_TERMINAL_PROMPT=0\n"
         f"{pad}      - SSL_CERT_FILE=/etc/meta/certs/ca-bundle.crt\n"
         f"{pad}      - SSL_CERT_DIR=/etc/ssl/certs:/etc/meta/certs\n"
+        # Bare names pass the value from the TW agent's process env into
+        # the container (propagate-environment only carries the Buildkite
+        # job env, not agent env). These wire the TW-provisioned AWS
+        # credential chain (cloud_oss path + config-file/credential-
+        # process + S32M endpoint) through to _ecr_login.sh — mirrors
+        # prod_inference's TW CPU plugin config.
+        f"{pad}      - CLOUD_OSS_PATH\n"
+        f"{pad}      - AWS_CONFIG_FILE\n"
+        f"{pad}      - AWS_SHARED_CREDENTIALS_FILE\n"
+        f"{pad}      - S32M_ENDPOINT\n"
+        f"{pad}      - AWS_ENDPOINT_URL_S3\n"
         f"{pad}      - PATH=/opt/cloud.cli:/opt/cloud.cli/bin:/go/bin:/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin\n"
         f"{pad}    volumes:\n"
         f"{pad}      - /etc/pki/tls/certs:/etc/meta/certs:ro\n"

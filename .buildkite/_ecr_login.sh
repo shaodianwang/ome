@@ -44,8 +44,13 @@ ecr_login_for() {
   esac
 
   token=""
+  # No x509 pem-path precondition here (an earlier version required
+  # /var/facebook/x509_identities/combined.pem): identity file layouts
+  # differ between MKS and TW, and a wrong path guess silently disables
+  # this tier. If identity material is really absent, cloud_oss itself
+  # fails and we fall through — same as prod_inference's copy.
   cloud_oss_bin="${CLOUD_OSS_PATH:-/opt/cf/cloud_oss/cloud_oss}"
-  if [ -x "$cloud_oss_bin" ] && [ -f /var/facebook/x509_identities/combined.pem ]; then
+  if [ -x "$cloud_oss_bin" ]; then
     # Capture cloud_oss output explicitly so a non-zero exit falls through
     # to the next tier instead of silently feeding empty stdin to the
     # downstream login (which would "succeed" with an empty password and
