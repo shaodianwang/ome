@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { api, isNotFoundError } from "./api";
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -104,5 +104,24 @@ describe("resource identity requests", () => {
 
     await expect(api.legacyRuntime("member-a", "vllm")).rejects.toThrow("cache warming");
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("distinguishes a definitive not-found from a transient failure", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: "not_found", message: "not found" } }, 404),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: "unavailable", message: "cache warming" } }, 503),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(
+      api.runtime({ cluster: "member-a", kind: "ClusterServingRuntime", name: "vllm" }),
+    ).rejects.toSatisfy(isNotFoundError);
+    await expect(
+      api.runtime({ cluster: "member-a", kind: "ClusterServingRuntime", name: "vllm" }),
+    ).rejects.toSatisfy((e) => !isNotFoundError(e));
   });
 });

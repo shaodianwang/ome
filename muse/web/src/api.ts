@@ -476,11 +476,16 @@ class ApiRequestError extends Error {
   }
 }
 
+/** True when the server definitively reported the resource as nonexistent — as
+ *  opposed to a transient transport or server failure. Callers use this to show
+ *  "does not exist" only when the API actually said so. */
+export function isNotFoundError(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status === 404 && error.code === "not_found";
+}
+
 function fallbackOnNotFound<T>(request: Promise<T>, fallback: () => Promise<T>): Promise<T> {
   return request.catch((error: unknown) => {
-    if (error instanceof ApiRequestError && error.status === 404 && error.code === "not_found") {
-      return fallback();
-    }
+    if (isNotFoundError(error)) return fallback();
     throw error;
   });
 }

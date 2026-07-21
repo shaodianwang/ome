@@ -563,6 +563,26 @@ pre.argbox {
   color: var(--fg);
   font-weight: 500;
 }
+/* Uppercase per-container role divider in the deployment page's runtime card. */
+.rt-role {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+/* Wrapping tag row: what a runtime serves, and its wire protocols. */
+.rt-serves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 @media (max-width: 600px) {
   .drawer {
     width: 100%;

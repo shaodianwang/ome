@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { Close, Copy } from "./icons";
-import { copyText } from "./util";
+import { COPY_FEEDBACK_MS, copyText } from "./util";
 
 /** Right-side slide-over. Click-scrim or Escape closes; body scrolls. */
 export function Drawer({
@@ -131,12 +131,13 @@ export function Facts({ items }: { items: [string, ReactNode][] }) {
   );
 }
 
-/** Monospace value with a copy-to-clipboard button. */
-export function Copyable({ text }: { text: string }) {
+/** Monospace value with a copy-to-clipboard button. `display` substitutes a
+ *  short label for the copied text (e.g. an image tag for its full ref). */
+export function Copyable({ text, display }: { text: string; display?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="copyable">
-      <span className="mono">{text}</span>
+      <span className="mono">{display ?? text}</span>
       <button
         className="icon-btn sm"
         title="Copy"
@@ -145,7 +146,7 @@ export function Copyable({ text }: { text: string }) {
           void copyText(text).then((ok) => {
             if (!ok) return;
             setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
+            setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
           });
         }}
       >

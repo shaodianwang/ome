@@ -1,9 +1,12 @@
 // Small reusable presentational pieces shared across panels.
+import { useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
+import { Copy } from "./icons";
 import type { Selected } from "./resource";
+import { argLines } from "./runtime";
 import type { BarTone, Tone } from "./types";
-import { num } from "./util";
+import { COPY_FEEDBACK_MS, num } from "./util";
 import { Track } from "./viz";
 
 export function Pill({ tone, label, style }: { tone: Tone; label: string; style?: CSSProperties }) {
@@ -187,6 +190,42 @@ export function RefList({
         </li>
       ))}
     </ul>
+  );
+}
+
+/** A serving container's command: collapsible (collapsed by default) with a copy of
+ *  the single-line invocation; expands to one flag per line. */
+export function CommandBlock({
+  label = "Command",
+  command,
+  args,
+}: {
+  label?: string;
+  command?: string[];
+  args?: string[];
+}) {
+  const [copied, setCopied] = useState(false);
+  const oneLine = [...(command ?? []), ...(args ?? [])].join(" ");
+  return (
+    <details className="collapse">
+      <summary>
+        {label}
+        <button
+          className="icon-btn sm collapse-copy"
+          title="Copy command"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            void navigator.clipboard?.writeText(oneLine);
+            setCopied(true);
+            setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+          }}
+        >
+          {copied ? "✓" : <Copy />}
+        </button>
+      </summary>
+      <pre className="argbox">{argLines(command, args)}</pre>
+    </details>
   );
 }
 

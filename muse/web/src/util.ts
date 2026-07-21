@@ -5,6 +5,9 @@
  *  domain, so the placement planner excludes it. */
 export const UNASSIGNED_GROUP = "unassigned";
 
+/** How long a copy button shows its "copied" confirmation before reverting. */
+export const COPY_FEEDBACK_MS = 1200;
+
 /**
  * Case-insensitive "does any field contain the query?" — the filter behind every
  * panel search box. An empty query matches everything; `undefined` fields are

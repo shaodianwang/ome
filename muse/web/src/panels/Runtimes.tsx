@@ -2,15 +2,15 @@ import { useState } from "react";
 
 import { api } from "../api";
 import type { IsvcItem, RuntimeDetail, RuntimeItem } from "../api";
-import { EnvList, Pill, RefList } from "../components";
+import { CommandBlock, EnvList, Pill, RefList } from "../components";
 import { Copyable, Facts } from "../drawer";
-import { Copy } from "../icons";
 import { useLive } from "../live";
 import { runtimeReference, runtimeUsage } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
 import { isLegacySelected, resourceKey, sameResource, selectionKey } from "../resource";
 import type { RouteSelected, Selected } from "../resource";
+import { fmtRes, imageShort, isDisaggregated, isMultiNode, serves } from "../runtime";
 import { Card } from "../viz";
 
 type RuntimeRow = RuntimeItem & {
@@ -25,42 +25,11 @@ const runtimeIdentity = (r: RuntimeRow): Selected => ({
   namespace: r.kind === "ServingRuntime" ? r.namespace : undefined,
 });
 
-/** Last path segment of an image ref — drops the registry/repo prefix for display. */
-const imageShort = (img?: string): string => (img ? (img.split("/").pop() ?? img) : "—");
-
-/** Join up to two entries, else "first +N". */
-const summ = (a?: string[]): string =>
-  !a || a.length === 0 ? "—" : a.length <= 2 ? a.join(", ") : `${a[0]} +${a.length - 1}`;
-
-/** What a runtime serves at a glance: architectures if declared, else formats. */
-const serves = (r: RuntimeItem): string =>
-  r.architectures?.length ? summ(r.architectures) : summ(r.formats);
-
-/** Prefill/decode disaggregated = a decoder component is present. */
-const isDisaggregated = (r: RuntimeItem): boolean =>
-  !!r.components?.some((c) => c.role === "decoder");
-/** Any component runs a multi-node worker group. */
-const isMultiNode = (r: RuntimeItem): boolean => !!r.components?.some((c) => c.multiNode);
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Format a resource map as "cpu 4 · memory 32Gi · nvidia.com/gpu 8", or null. */
-const fmtRes = (m?: Record<string, string>): string | null =>
-  m && Object.keys(m).length
-    ? Object.entries(m)
-        .map(([k, v]) => `${k} ${v}`)
-        .join(" · ")
-    : null;
-
-/** Lay a command out one flag per line: the executable (and short flags) on the
- *  first line, then each `--long-flag` with its values on its own indented line. */
-const argLines = (command?: string[], args?: string[]): string => {
-  const lines: string[] = [];
-  for (const t of [...(command ?? []), ...(args ?? [])]) {
-    if (t.startsWith("--") || lines.length === 0) lines.push(t);
-    else lines[lines.length - 1] += ` ${t}`;
-  }
-  return lines.map((l, i) => (i === 0 ? l : `  ${l}`)).join("\n");
-};
+/** Row scope at a glance: cluster-wide, or pinned to its namespace. */
+const scopeLabel = (r: RuntimeRow): string =>
+  r.kind === "ClusterServingRuntime" ? "cluster" : `ns:${r.namespace ?? "—"}`;
 
 const COLUMNS: Column<RuntimeRow>[] = [
   {
@@ -73,7 +42,9 @@ const COLUMNS: Column<RuntimeRow>[] = [
         {isMultiNode(r) ? <span className="tag">multi-node</span> : null}
         {isDisaggregated(r) ? <span className="tag">PD</span> : null}
         {r.disabled ? <span className="tag warn">disabled</span> : null}
-        {r.namespace ? <div className="cell-sub muted">{r.namespace}</div> : null}
+        <span className="cell-sub">
+          <span className="pill slate">{scopeLabel(r)}</span>
+        </span>
       </>
     ),
     sort: (r) => r.name.toLowerCase(),
@@ -115,6 +86,18 @@ const TABS: Tab<RuntimeRow>[] = [
     label: "Disaggregated",
     match: isDisaggregated,
     empty: "No PD-disaggregated runtimes.",
+  },
+  {
+    key: "cluster",
+    label: "Cluster",
+    match: (r) => r.kind === "ClusterServingRuntime",
+    empty: "No cluster-scoped runtimes.",
+  },
+  {
+    key: "namespaced",
+    label: "Namespaced",
+    match: (r) => r.kind === "ServingRuntime",
+    empty: "No namespaced runtimes.",
   },
 ];
 
@@ -192,7 +175,13 @@ export function Runtimes({
       }}
       noun="runtimes"
       searchPlaceholder="Filter by name, framework, architecture…"
-      searchFields={(r) => [r.name, r.image, r.architectures?.join(" "), r.formats?.join(" ")]}
+      searchFields={(r) => [
+        r.name,
+        r.namespace,
+        r.image,
+        r.architectures?.join(" "),
+        r.formats?.join(" "),
+      ]}
       clusterOf={(r) => r.cluster}
       rowKey={(r) => resourceKey(runtimeIdentity(r))}
       rowTone={(r) => (r.disabled ? "slate" : "green")}
@@ -202,34 +191,6 @@ export function Runtimes({
       filter={filter}
       setFilter={setFilter}
     />
-  );
-}
-
-/** A serving container's command: collapsible (collapsed by default) with a copy of
- *  the single-line invocation; expands to one flag per line. */
-function CommandBlock({ command, args }: { command?: string[]; args?: string[] }) {
-  const [copied, setCopied] = useState(false);
-  const oneLine = [...(command ?? []), ...(args ?? [])].join(" ");
-  return (
-    <details className="collapse">
-      <summary>
-        Command
-        <button
-          className="icon-btn sm collapse-copy"
-          title="Copy command"
-          onClick={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            void navigator.clipboard?.writeText(oneLine);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          }}
-        >
-          {copied ? "✓" : <Copy />}
-        </button>
-      </summary>
-      <pre className="argbox">{argLines(command, args)}</pre>
-    </details>
   );
 }
 

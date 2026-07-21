@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import type { ReactNode } from "react";
 
-import { api } from "../api";
-import type { EventItem, IsvcDetail } from "../api";
-import { DataNotice, Pill } from "../components";
+import { api, isNotFoundError } from "../api";
+import type { EventItem, IsvcDetail, RuntimeDetail } from "../api";
+import { CommandBlock, DataNotice, EnvList, Pill } from "../components";
 import { metricsHealth } from "../dataState";
 import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
@@ -12,8 +12,9 @@ import { replicaRollup, runtimeRefOf } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
 import { replicaDiagnostics } from "../replicaMetrics";
-import { selectResource } from "../resource";
+import { resourceKey, selectResource } from "../resource";
 import type { ResourceRef, Selected } from "../resource";
+import { imageShort, isDisaggregated, servesTags, topologySummary } from "../runtime";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate, num as n } from "../util";
 import { Card, Dot, Gauge, UtilRow } from "../viz";
 import { ChatBox } from "./ChatBox";
@@ -254,6 +255,7 @@ function OverviewPane({
     d.modelRef ?? (d.model ? { kind: "ClusterBaseModel", name: d.model } : undefined);
   const runtimeRef: ResourceRef | undefined =
     runtimeRefOf(d) ?? (d.runtime ? { kind: "ClusterServingRuntime", name: d.runtime } : undefined);
+  const runtimeSel = runtimeRef ? selectResource(sel.cluster, runtimeRef) : undefined;
   const standby = (d.placement?.candidates ?? []).filter((c) => c.cluster !== d.placement?.cluster);
   const components = d.components ?? [];
   const ready = replicaRollup(d.components).label;
@@ -301,17 +303,6 @@ function OverviewPane({
                   </button>
                 ) : null,
               ],
-              [
-                "Runtime",
-                runtimeRef ? (
-                  <button
-                    className="linkbtn mono"
-                    onClick={() => openRuntime(selectResource(sel.cluster, runtimeRef))}
-                  >
-                    {runtimeRef.name}
-                  </button>
-                ) : null,
-              ],
               ["Mode", d.deploymentMode],
               ["Namespace", d.namespace],
               ["Cluster", sel.cluster],
@@ -320,16 +311,18 @@ function OverviewPane({
           />
         </Card>
 
-        <Card title="Invoke & test" sub="OpenAI-compatible">
-          <ChatBox
-            resource={sel}
-            endpoint={d.url}
-            defaultModel={d.model ?? ""}
-            enabled={chat}
-            timeoutSecs={chatTimeoutSecs}
-            clientGraceSecs={chatClientGraceSecs}
+        {runtimeSel ? (
+          <RuntimeOverviewCard
+            key={resourceKey(runtimeSel)}
+            sel={runtimeSel}
+            source={d.resolvedRuntimeRef?.source}
+            openRuntime={openRuntime}
           />
-        </Card>
+        ) : (
+          <Card title="Runtime">
+            <p className="muted">Runtime auto-selected — resolves when replicas are running.</p>
+          </Card>
+        )}
       </div>
 
       <div className="detail-grid2 section-gap">
@@ -370,6 +363,19 @@ function OverviewPane({
           ) : null}
         </Card>
 
+        <Card title="Invoke & test" sub="OpenAI-compatible">
+          <ChatBox
+            resource={sel}
+            endpoint={d.url}
+            defaultModel={d.model ?? ""}
+            enabled={chat}
+            timeoutSecs={chatTimeoutSecs}
+            clientGraceSecs={chatClientGraceSecs}
+          />
+        </Card>
+      </div>
+
+      <div className="detail-grid2 section-gap">
         <Card title="Conditions">
           {d.conditions && d.conditions.length ? (
             d.conditions.map((c, i) => (
@@ -385,6 +391,25 @@ function OverviewPane({
             <div className="muted">No conditions reported.</div>
           )}
         </Card>
+
+        {d.placement?.cluster || standby.length ? (
+          <Card title="Placement" sub="where it runs">
+            {d.placement?.cluster ? (
+              <div className="place-row">
+                <Dot tone="green" />
+                <span className="mono">{d.placement.cluster}</span>
+                <span className="muted">active</span>
+              </div>
+            ) : null}
+            {standby.map((c, i) => (
+              <div className="place-row" key={i}>
+                <Dot tone="slate" />
+                <span className="mono">{c.cluster}</span>
+                <span className="muted">standby</span>
+              </div>
+            ))}
+          </Card>
+        ) : null}
       </div>
 
       {d.canary ? (
@@ -393,26 +418,145 @@ function OverviewPane({
           <p className="panel-note">{d.canary.trafficWeight}% of traffic on the new revision.</p>
         </Card>
       ) : null}
-
-      {d.placement?.cluster || standby.length ? (
-        <Card title="Placement" sub="where it runs" className="section-gap">
-          {d.placement?.cluster ? (
-            <div className="place-row">
-              <Dot tone="green" />
-              <span className="mono">{d.placement.cluster}</span>
-              <span className="muted">active</span>
-            </div>
-          ) : null}
-          {standby.map((c, i) => (
-            <div className="place-row" key={i}>
-              <Dot tone="slate" />
-              <span className="mono">{c.cluster}</span>
-              <span className="muted">standby</span>
-            </div>
-          ))}
-        </Card>
-      ) : null}
     </>
+  );
+}
+
+/** Inline runtime summary for the deployment overview: identity, image, node
+ *  topology, what it serves, and each serving container's command and
+ *  environment. Fetch failures degrade to a notice inside the card so the rest
+ *  of the overview always renders. */
+function RuntimeOverviewCard({
+  sel,
+  source,
+  openRuntime,
+}: {
+  sel: Selected;
+  source?: "spec" | "pods";
+  openRuntime: (sel: Selected) => void;
+}) {
+  // A definitive not-found resolves to `null`, so the card can tell "this
+  // runtime does not exist" apart from a transient fetch failure (which
+  // surfaces via `error` and must not assert nonexistence).
+  const detail = useLive<RuntimeDetail | null>(
+    () =>
+      api.runtime(sel).catch((e: unknown) => {
+        if (isNotFoundError(e)) return null;
+        throw e;
+      }),
+    { kinds: ["ServingRuntime", "ClusterServingRuntime"], throttleMs: 5_000 },
+  );
+  const d = detail.data;
+  const open = (
+    <span className="right">
+      <button className="linkbtn" onClick={() => openRuntime(sel)}>
+        Open →
+      </button>
+    </span>
+  );
+  const sub = [sel.kind, sel.namespace].filter(Boolean).join(" · ");
+  if (!d) {
+    return (
+      <Card title="Runtime" sub={sub} actions={open}>
+        {detail.loading ? (
+          <div className="muted">Loading runtime…</div>
+        ) : detail.error ? (
+          <div className="muted" title={detail.error}>
+            Runtime details unavailable right now.
+          </div>
+        ) : (
+          <DataNotice
+            tone="warning"
+            title="Runtime not found"
+            detail={`${sel.name} is referenced but does not exist on ${sel.cluster}.`}
+          />
+        )}
+      </Card>
+    );
+  }
+  const tags = servesTags(d);
+  const topology = topologySummary(d.components);
+  return (
+    <Card title="Runtime" sub={sub} actions={open}>
+      <Facts
+        items={[
+          [
+            "Name",
+            <>
+              <span className="mono">{d.name}</span>
+              {source === "pods" ? (
+                <>
+                  {" "}
+                  <span
+                    className="pill slate"
+                    title="spec.runtime was omitted; resolved from the serving-runtime label on running pods"
+                  >
+                    auto-selected
+                  </span>
+                </>
+              ) : null}
+            </>,
+          ],
+          ["Image", d.image ? <Copyable text={d.image} display={imageShort(d.image)} /> : null],
+          [
+            "Topology",
+            topology ? (
+              <>
+                {topology}
+                {isDisaggregated(d) ? (
+                  <>
+                    {" "}
+                    <span className="pill violet">PD</span>
+                  </>
+                ) : null}
+              </>
+            ) : null,
+          ],
+          [
+            "Serves",
+            tags.length ? (
+              <span className="rt-serves">
+                {tags.map((t) => (
+                  <span key={t} className="tag">
+                    {t}
+                  </span>
+                ))}
+              </span>
+            ) : null,
+          ],
+          [
+            "Protocols",
+            d.protocols?.length ? (
+              <span className="rt-serves">
+                {d.protocols.map((p) => (
+                  <span key={p} className="tag">
+                    {p}
+                  </span>
+                ))}
+              </span>
+            ) : null,
+          ],
+        ]}
+      />
+      {(d.containers ?? []).map((c) => (
+        <Fragment key={c.role}>
+          <div className="rt-role">{c.role}</div>
+          {c.command?.length || c.args?.length ? (
+            <CommandBlock
+              label={`Command & args (${(c.command?.length ?? 0) + (c.args?.length ?? 0)})`}
+              command={c.command}
+              args={c.args}
+            />
+          ) : null}
+          {c.env?.length ? (
+            <details className="collapse">
+              <summary>Env ({c.env.length})</summary>
+              <EnvList env={c.env} />
+            </details>
+          ) : null}
+        </Fragment>
+      ))}
+    </Card>
   );
 }
 
