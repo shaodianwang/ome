@@ -41,6 +41,12 @@ func mkSequentialParent() *v1beta1.InferenceService {
 	}
 }
 
+// mkIR creates an InferenceReplica for the given component of parent "llama".
+// Callers stamp status fields to set up test scenarios.
+func mkIR(c v1beta1.ComponentType, replicas int32) *v1beta1.InferenceReplica {
+	return baselineIR("llama-"+string(c), "default", replicas)
+}
+
 func setObservedGen(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen int64) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
@@ -62,17 +68,18 @@ func setObservedGen(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen
 // AND deny the engine while the decoder (first in Order) is in flight.
 func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 	g := gomega.NewWithT(t)
-	r, _ := newReconciler(t)
-	ir := baselineIR("llama-engine", "default", 1) // Component=engine, ParentRef=llama
-
-	parent := mkSequentialParent()
 	// Moment-of-bump: both Components lag isvc.Generation=2 ⇒ both in
 	// flight. The active selector picks decoder (first in Order); the
-	// engine must wait.
-	setObservedGen(parent, v1beta1.DecoderComponent, 1)
-	setObservedGen(parent, v1beta1.EngineComponent, 1)
+	// engine must wait. Seed IR objects with ObservedGeneration=1.
+	decoderIR := mkIR(v1beta1.DecoderComponent, 1)
+	decoderIR.Status.ObservedGeneration = 1
+	engineIR := mkIR(v1beta1.EngineComponent, 1)
+	engineIR.Status.ObservedGeneration = 1
+	r, _ := newReconciler(t, decoderIR, engineIR)
 
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	parent := mkSequentialParent()
+
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil(),
 		"UpdateGate must be wired on the IR path when the parent declares coordination")
 
@@ -87,14 +94,20 @@ func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 // becomes the active Sequential Component and is allowed to roll.
 func TestBuildReconcileInput_SequentialReleasesActiveComponent(t *testing.T) {
 	g := gomega.NewWithT(t)
-	r, _ := newReconciler(t)
-	ir := baselineIR("llama-engine", "default", 1)
+	// Decoder converged (ObservedGeneration caught up to parent Generation=2)
+	// ⇒ not in flight. Engine still lagging (gen=1) ⇒ it is the active
+	// Sequential Component. Seed BOTH IRs so the gate reads their fresh status
+	// (the group is not idle — engine is genuinely in flight — so this exercises
+	// the active-component release path, not the "Sequential group idle" bypass).
+	decoderIR := mkIR(v1beta1.DecoderComponent, 1)
+	decoderIR.Status.ObservedGeneration = 2
+	engineIR := mkIR(v1beta1.EngineComponent, 1)
+	engineIR.Status.ObservedGeneration = 1
+	r, _ := newReconciler(t, decoderIR, engineIR)
 
 	parent := mkSequentialParent()
-	setObservedGen(parent, v1beta1.DecoderComponent, 2) // caught up ⇒ not in flight
-	setObservedGen(parent, v1beta1.EngineComponent, 1)  // still lagging ⇒ engine's turn
 
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, _ := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -109,9 +122,9 @@ func TestBuildReconcileInput_SequentialReleasesActiveComponent(t *testing.T) {
 func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, _ := newReconciler(t)
-	ir := baselineIR("llama-engine", "default", 1)
+	engineIR := baselineIR("llama-engine", "default", 1)
 
-	input := r.buildReconcileInput(context.Background(), ir, nil)
+	input := r.buildReconcileInput(context.Background(), engineIR, nil)
 	g.Expect(input.UpdateGate).To(gomega.BeNil(),
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
@@ -127,10 +140,10 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 func TestBuildReconcileInput_WiresMigrationWhenParentSet(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, _ := newReconciler(t)
-	ir := baselineIR("llama-engine", "default", 1)
+	engineIR := baselineIR("llama-engine", "default", 1)
 
 	parent := mkSequentialParent() // any non-nil ISVC named "llama"
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 
 	g.Expect(input.DetectMigrationRequest).NotTo(gomega.BeNil(),
 		"DetectMigrationRequest must be wired on the IR path when the parent is resolvable")
@@ -140,7 +153,7 @@ func TestBuildReconcileInput_WiresMigrationWhenParentSet(t *testing.T) {
 	g.Expect(input.LedgerOwnerGVK).To(gomega.Equal(isvcGVK))
 
 	// Nil parent ⇒ migration dormant.
-	nilInput := r.buildReconcileInput(context.Background(), ir, nil)
+	nilInput := r.buildReconcileInput(context.Background(), engineIR, nil)
 	g.Expect(nilInput.DetectMigrationRequest).To(gomega.BeNil(),
 		"no parent ⇒ migration has no ISVC to read ⇒ DetectMigrationRequest stays nil")
 	g.Expect(nilInput.LedgerOwner).To(gomega.BeNil())
@@ -190,11 +203,11 @@ func mkRatioParent(tol int32, engServing, decServing int32) *v1beta1.InferenceSe
 // gate should read for a PEER Component, not the parent's lagged
 // projection.
 func peerIR(component v1beta1.ComponentType, replicas, serving int32) *v1beta1.InferenceReplica {
-	ir := baselineIR("llama-"+string(component), "default", replicas)
-	ir.Spec.Component = component
-	ir.Status.Replicas = replicas
-	ir.Status.ServingReplicas = serving
-	return ir
+	engineIR := baselineIR("llama-"+string(component), "default", replicas)
+	engineIR.Spec.Component = component
+	engineIR.Status.Replicas = replicas
+	engineIR.Status.ServingReplicas = serving
+	return engineIR
 }
 
 // TestBuildReconcileInput_GateReadsFreshPeerStatus is the regression guard
@@ -225,18 +238,20 @@ func TestBuildReconcileInput_GateReadsFreshPeerStatus(t *testing.T) {
 
 	// Decoder is genuinely behind: fresh IR serving 3/4 (one pod out).
 	decoder := peerIR(v1beta1.DecoderComponent, 4, 3)
-	r, _ := newReconciler(t, decoder)
 
-	// Engine IR being reconciled: at full serving 4/4, about to surge.
-	ir := baselineIR("llama-engine", "default", 4)
-	ir.Status.Replicas = 4
-	ir.Status.ServingReplicas = 4
+	// Engine IR being reconciled: at full serving 4/4, about to surge. Seed it
+	// into the client too, so the gate reads the engine's OWN fresh status (not
+	// nil) and the denial is genuinely driven by the decoder's fresh 3/4.
+	engineIR := baselineIR("llama-engine", "default", 4)
+	engineIR.Status.Replicas = 4
+	engineIR.Status.ServingReplicas = 4
+	r, _ := newReconciler(t, decoder, engineIR)
 
 	// Parent projection is STALE: it still reports the decoder fully
 	// serving (4/4), which is the lagged irprojector rollup.
 	parent := mkRatioParent(25, 4, 4)
 
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -256,17 +271,16 @@ func TestBuildReconcileInput_GateFreshPeerReleasesWhenBalanced(t *testing.T) {
 
 	// Decoder is caught up: fresh IR serving 4/4.
 	decoder := peerIR(v1beta1.DecoderComponent, 4, 4)
-	r, _ := newReconciler(t, decoder)
-
-	ir := baselineIR("llama-engine", "default", 4)
-	ir.Status.Replicas = 4
-	ir.Status.ServingReplicas = 4
+	engineIR := baselineIR("llama-engine", "default", 4)
+	engineIR.Status.Replicas = 4
+	engineIR.Status.ServingReplicas = 4
+	r, _ := newReconciler(t, decoder, engineIR)
 
 	// Parent projection is irrelevant here (stamp it stale-low to prove the
 	// gate prefers the fresh peer IR): decoder projected at 3/4.
 	parent := mkRatioParent(25, 4, 3)
 
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -302,14 +316,14 @@ func TestBuildReconcileInput_SequentialGateReadsFreshPeerStatus(t *testing.T) {
 	decoder.Status.UpdateRevision = "llama-decoder-v2"
 	r, _ := newReconciler(t, decoder)
 
-	ir := baselineIR("llama-engine", "default", 1) // Component=engine
+	engineIR := baselineIR("llama-engine", "default", 1) // Component=engine
 
 	parent := mkSequentialParent() // Generation=2, Order=[decoder, engine]
 	// STALE projection: both Components look converged (decoder "done").
 	setObservedGen(parent, v1beta1.DecoderComponent, 2)
 	setObservedGen(parent, v1beta1.EngineComponent, 2)
 
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -329,14 +343,14 @@ func TestBuildReconcileInput_SequentialGateReadsFreshPeerStatus(t *testing.T) {
 func TestBuildReconcileInput_ThreadsGangSchedulingAvailable(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, _ := newReconciler(t)
-	ir := baselineIR("llama-engine", "default", 1)
+	engineIR := baselineIR("llama-engine", "default", 1)
 
 	r.GangSchedulingAvailable = true
-	g.Expect(r.buildReconcileInput(context.Background(), ir, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeTrue(),
+	g.Expect(r.buildReconcileInput(context.Background(), engineIR, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeTrue(),
 		"DesiredSpec.GangSchedulingAvailable must follow the controller flag (true) so EnsurePodGroups runs")
 
 	r.GangSchedulingAvailable = false
-	g.Expect(r.buildReconcileInput(context.Background(), ir, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeFalse(),
+	g.Expect(r.buildReconcileInput(context.Background(), engineIR, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeFalse(),
 		"flag false ⇒ DesiredSpec false ⇒ EnsurePodGroups skips (CRD absent / degradation surface)")
 }
 
@@ -368,9 +382,9 @@ func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r, _ := newReconciler(t)
-			ir := baselineIR("llama-engine", "default", 1)
-			ir.Spec.Paused = tc.irPaused
-			got := r.buildReconcileInput(context.Background(), ir, tc.parent).DesiredSpec.Paused
+			engineIR := baselineIR("llama-engine", "default", 1)
+			engineIR.Spec.Paused = tc.irPaused
+			got := r.buildReconcileInput(context.Background(), engineIR, tc.parent).DesiredSpec.Paused
 			if got != tc.wantPaused {
 				t.Fatalf("DesiredSpec.Paused: got %v want %v", got, tc.wantPaused)
 			}
@@ -388,10 +402,14 @@ func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) 
 // read it, would let the tiebreaker fire again and over-drain).
 func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 	g := gomega.NewWithT(t)
-	r, _ := newReconciler(t)
-	ir := baselineIR("llama-engine", "default", 4) // engine, parent llama
-	ir.Status.Replicas = 4
-	ir.Status.ServingReplicas = 3 // FRESH: one engine pod already out of rotation
+	engineIR := baselineIR("llama-engine", "default", 4) // engine, parent llama
+	engineIR.Status.Replicas = 4
+	engineIR.Status.ServingReplicas = 3 // FRESH: one engine pod already out of rotation
+	// Peer decoder is balanced at 4/4 (fresh); only the engine is down. Seed
+	// both so the gate reads the engine's OWN fresh 3/4 (not nil) — the drain
+	// denial must be driven by that, not by the engine being absent.
+	decoderIR := peerIR(v1beta1.DecoderComponent, 4, 4)
+	r, _ := newReconciler(t, engineIR, decoderIR)
 
 	tol := int32(25)
 	parent := &v1beta1.InferenceService{
@@ -429,7 +447,7 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 		},
 	}
 
-	input := r.buildReconcileInput(context.Background(), ir, parent)
+	input := r.buildReconcileInput(context.Background(), engineIR, parent)
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, reason := input.UpdateGate(workload.UpdateStrategyRecreatePod, 0, 0)

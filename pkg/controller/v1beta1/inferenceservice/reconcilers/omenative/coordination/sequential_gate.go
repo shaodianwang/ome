@@ -1,12 +1,15 @@
 package coordination
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 )
 
 // conditionAvailable is the Component-level condition type stamped by
@@ -50,10 +53,10 @@ const conditionAvailable = "Available"
 // only calls this gate on startingFresh, matching CheckRatioGate /
 // CheckUnavailabilityGate.
 //
-// Reads exclusively from isvc.Spec + isvc.Status (no client / cache
-// hits) so it is safe to call from the hot dispatcher loop.
-func CheckSequentialGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
-	return ResolveGateContext(isvc, component).CheckSequential()
+// Reads authoritative InferenceReplica status via the provided context and
+// reader.
+func CheckSequentialGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
+	return ResolveGateContext(ctx, reads, isvc, component).CheckSequential()
 }
 
 // CheckSequential is the GateContext-aware variant of
@@ -77,10 +80,10 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 		return true, "Sequential group missing Order"
 	}
 
-	// Compute per-Component RolloutInFlight observations from live ISVC
-	// status — mirrors buildComponentObservation's revision-hash check
+	// Compute per-Component RolloutInFlight observations from authoritative
+	// IR status — mirrors buildComponentObservation's revision-hash check
 	// but on the much smaller subset the gate needs.
-	observations := observeSequentialComponentsForGate(isvc, group.Components)
+	observations := observeSequentialComponentsForGate(ctx.Ctx, ctx.Reads, isvc, group.Components)
 	active, hasActive := activeSequentialComponent(group.Order, observations)
 	if !hasActive {
 		// No Component in flight at all — the group is idle (the
@@ -112,7 +115,7 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 	// time.Since(entered) is always past soakDuration.
 	if group.Soak > 0 {
 		if prev := previousCompletedComponentForGate(group.Order, observations, component); prev != "" {
-			completed := previousComponentReadyAt(isvc, prev)
+			completed := previousComponentReadyAt(ctx.Ctx, ctx.Reads, isvc, prev)
 			if !completed.IsZero() {
 				elapsed := time.Since(completed)
 				if elapsed < group.Soak {
@@ -127,7 +130,7 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 }
 
 // observeSequentialComponentsForGate builds the per-Component
-// RolloutInFlight observations the gate needs from the live ISVC
+// RolloutInFlight observations the gate needs from authoritative IR
 // status. Mirrors buildComponentObservation's revision-hash compare
 // but skips the pod-count / desired-replicas fields the gate doesn't
 // consult. Returns one ComponentObservation per `components` entry —
@@ -162,17 +165,18 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 // that Component (its pods' RunningRevision already matches target.Name)
 // and the gate is never consulted. Once AggregateAndWriteStatus runs
 // and bumps ObservedGeneration, the noise clears.
-func observeSequentialComponentsForGate(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) map[v1beta1.ComponentType]ComponentObservation {
+func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) map[v1beta1.ComponentType]ComponentObservation {
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
 		obs := ComponentObservation{Component: c}
-		if cs, ok := isvc.Status.Components[c]; ok && cs.Lifecycle != nil {
-			currentHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.CurrentRevision)
-			targetHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.UpdateRevision)
+		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		if summary != nil {
+			currentHash := revisionHashFromName(isvc.Name, c, summary.CurrentRevision)
+			targetHash := revisionHashFromName(isvc.Name, c, summary.UpdateRevision)
 			obs.CurrentRevisionHash = currentHash
 			obs.TargetRevisionHash = targetHash
 			revisionSkew := targetHash != "" && targetHash != currentHash
-			generationSkew := cs.Lifecycle.ObservedGeneration < isvc.Generation
+			generationSkew := summary.ObservedGeneration < isvc.Generation
 			obs.RolloutInFlight = revisionSkew || generationSkew
 		}
 		out[c] = obs
@@ -230,12 +234,12 @@ func previousCompletedComponentForGate(order []v1beta1.ComponentType, observatio
 // no-op. The Available condition tracks the actual rollout-completion
 // moment because `apimeta.SetStatusCondition` only updates
 // LastTransitionTime on real status transitions (False→True).
-func previousComponentReadyAt(isvc *v1beta1.InferenceService, prev v1beta1.ComponentType) time.Time {
-	cs, ok := isvc.Status.Components[prev]
-	if !ok || cs.Lifecycle == nil {
+func previousComponentReadyAt(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, prev v1beta1.ComponentType) time.Time {
+	summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, prev)
+	if summary == nil {
 		return time.Time{}
 	}
-	for _, cond := range cs.Lifecycle.Conditions {
+	for _, cond := range summary.Conditions {
 		if cond.Type != conditionAvailable {
 			continue
 		}

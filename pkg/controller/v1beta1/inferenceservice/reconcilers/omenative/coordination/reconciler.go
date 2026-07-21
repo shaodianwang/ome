@@ -13,6 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -226,14 +227,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// Write per-Component Traffic[] from observed pod distribution
 	// (producer-side contract feeding the HTTPRoute weighted-
 	// backendRef consumer).
-	updateTrafficStatus(in.ISVC, componentsTouched, perRevisionPods, in.TrafficWeightDeadbandPercent)
+	updateTrafficStatus(ctx, in.Client, in.ISVC, componentsTouched, perRevisionPods, in.TrafficWeightDeadbandPercent)
 
 	// Drive the per-group state machine.
 	for _, g := range groups {
 		if err := ValidateGroupShape(g); err != nil {
 			return nil, fmt.Errorf("invalid coordination group shape: %w", err)
 		}
-		obs := buildGroupObservation(in.ISVC, g, perRevisionPods)
+		obs := buildGroupObservation(ctx, in.Client, in.ISVC, g, perRevisionPods)
 		// Snapshot Original on first observation, then preserve it
 		// across reconciles via the previously-written ObservedRatio.
 		// Always refresh Current + NewPods from the live observation.
@@ -457,7 +458,7 @@ func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceServi
 	return out
 }
 
-func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionPods map[v1beta1.ComponentType]map[string]int32, deadbandPercent int32) {
+func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionPods map[v1beta1.ComponentType]map[string]int32, deadbandPercent int32) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
@@ -470,7 +471,7 @@ func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.Co
 		for _, n := range hashes {
 			total += n
 		}
-		latestHash := latestRevisionHash(isvc, c)
+		latestHash := latestRevisionHash(ctx, reads, isvc.Namespace, isvc.Name, c)
 		weights := ComputeWeightsFromPods(hashes, total, latestHash)
 		traffic := BuildTrafficTargets(isvc.Name, c, weights)
 		// Only write when something changed.
@@ -501,22 +502,18 @@ func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.Co
 }
 
 // latestRevisionHash returns the ControllerRevision hash this
-// Component is converging toward. Read from
-// LifecycleStatus.UpdateRevision; falls back to
-// CurrentRevision.
-func latestRevisionHash(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) string {
-	if isvc == nil {
+// Component is converging toward. Read from authoritative IR
+// status UpdateRevision; falls back to CurrentRevision.
+func latestRevisionHash(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) string {
+	summary, _ := irprojector.ComponentIRStatus(ctx, reads, namespace, isvcName, c)
+	if summary == nil {
 		return ""
 	}
-	cs, ok := isvc.Status.Components[c]
-	if !ok || cs.Lifecycle == nil {
-		return ""
+	if name := summary.UpdateRevision; name != "" {
+		return revisionHashFromName(isvcName, c, name)
 	}
-	if name := cs.Lifecycle.UpdateRevision; name != "" {
-		return revisionHashFromName(isvc.Name, c, name)
-	}
-	if name := cs.Lifecycle.CurrentRevision; name != "" {
-		return revisionHashFromName(isvc.Name, c, name)
+	if name := summary.CurrentRevision; name != "" {
+		return revisionHashFromName(isvcName, c, name)
 	}
 	return ""
 }
@@ -536,14 +533,15 @@ func revisionHashFromName(isvc string, c v1beta1.ComponentType, name string) str
 }
 
 // buildGroupObservation builds the GroupObservation the state machine
-// consumes from observed pod counts + LifecycleStatus.
-func buildGroupObservation(isvc *v1beta1.InferenceService, g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]map[string]int32) GroupObservation {
+// consumes from observed pod counts + authoritative IR status.
+func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]map[string]int32) GroupObservation {
 	obs := GroupObservation{
 		Group:      g,
 		Components: make(map[v1beta1.ComponentType]ComponentObservation, len(g.Components)),
 	}
 	for _, c := range g.Components {
-		obs.Components[c] = buildComponentObservation(isvc, c, perRevisionPods[c])
+		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		obs.Components[c] = buildComponentObservation(isvc.Name, summary, c, perRevisionPods[c])
 	}
 	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
 		obs.PausedGlobal = true
@@ -552,23 +550,22 @@ func buildGroupObservation(isvc *v1beta1.InferenceService, g ResolvedGroup, perR
 }
 
 // buildComponentObservation aggregates one Component's observation from
-// LifecycleStatus and per-revision pod counts.
-func buildComponentObservation(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, perRevisionPods map[string]int32) ComponentObservation {
+// the authoritative InferenceReplica status and per-revision pod counts.
+func buildComponentObservation(isvcName string, summary *v1beta1.InferenceReplicaStatus, c v1beta1.ComponentType, perRevisionPods map[string]int32) ComponentObservation {
 	out := ComponentObservation{
 		Component: c,
 	}
-	cs, ok := isvc.Status.Components[c]
-	if !ok || cs.Lifecycle == nil {
+	if summary == nil {
 		return out
 	}
-	out.DesiredReplicas = cs.Lifecycle.Replicas
+	out.DesiredReplicas = summary.Replicas
 	out.TotalPods = sumPodCounts(perRevisionPods)
-	out.ReadyPods = cs.Lifecycle.ReadyReplicas
-	out.ServingPods = cs.Lifecycle.ServingReplicas
-	out.NewRevisionPods = cs.Lifecycle.UpdatedReplicas
-	out.NewRevisionReadyPods = cs.Lifecycle.UpdatedReadyReplicas
-	currentHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.CurrentRevision)
-	targetHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.UpdateRevision)
+	out.ReadyPods = summary.ReadyReplicas
+	out.ServingPods = summary.ServingReplicas
+	out.NewRevisionPods = summary.UpdatedReplicas
+	out.NewRevisionReadyPods = summary.UpdatedReadyReplicas
+	currentHash := revisionHashFromName(isvcName, c, summary.CurrentRevision)
+	targetHash := revisionHashFromName(isvcName, c, summary.UpdateRevision)
 	out.CurrentRevisionHash = currentHash
 	out.TargetRevisionHash = targetHash
 	out.RolloutInFlight = targetHash != "" && targetHash != currentHash
@@ -581,7 +578,7 @@ func buildComponentObservation(isvc *v1beta1.InferenceService, c v1beta1.Compone
 	// group's Failed phase — operators see Phase=Failed instead of the
 	// rollout sitting at Surging / Waiting indefinitely after a per-
 	// Instance deadline blew past.
-	failedInstances := collectFailedInstanceIndices(cs.Lifecycle.InstanceStatuses)
+	failedInstances := collectFailedInstanceIndices(summary.InstanceStatuses)
 	if len(failedInstances) > 0 {
 		out.Failed = true
 		out.FailureMessage = formatFailedInstancesMessage(c, failedInstances)

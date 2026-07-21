@@ -87,15 +87,16 @@ var _ = ginkgo.Describe("OMENative auto-migration multi-Instance surge fan-out (
 			c := freshISVC(g, ns.Name, isvcName)
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
 			creating := map[int32]struct{}{}
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			for _, s := range insts {
 				if s.Phase == v1beta1.OMENativeInstanceCreating {
 					creating[s.Index] = struct{}{}
 				}
 			}
 			g.Expect(creating).To(HaveLen(replicas),
 				"expected %d source Instances stuck in Phase=Creating; got %+v",
-				replicas, cs.Lifecycle.InstanceStatuses)
+				replicas, insts)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// 100ms sampler pins the capacity-floor invariant for the whole

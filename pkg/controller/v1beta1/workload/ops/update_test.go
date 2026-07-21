@@ -53,7 +53,7 @@ func TestUpdate_NilClient(t *testing.T) {
 // by the pre-patch Get.
 func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -101,8 +101,8 @@ func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(isvc, pod, slice).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir, pod, slice).
 		WithInterceptorFuncs(interceptor.Funcs{Get: flipServingOnGet}).
 		Build()
 
@@ -135,7 +135,7 @@ func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
 // InPlaceIfPossible advances by patching the pod's container image.
 func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -147,7 +147,7 @@ func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false /* drained */)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
@@ -179,7 +179,7 @@ func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 // previous revision.
 func TestUpdate_InPlace_RestampsRevisionHashLabel(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -195,7 +195,7 @@ func TestUpdate_InPlace_RestampsRevisionHashLabel(t *testing.T) {
 	}
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false /* drained */)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
@@ -226,8 +226,8 @@ func TestUpdate_InPlace_RestampsRevisionHashLabel(t *testing.T) {
 // RunningRevision.
 func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 1,
 		Phase:       v1beta1.OMENativeInstanceUpdating,
@@ -251,7 +251,7 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 	// gate would hold the rollout in the "patched spec, not yet rolled"
 	// state.
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Image: "llama:v2"}}
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
@@ -272,9 +272,7 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 		t.Errorf("serving should have been flipped True after in-place convergence")
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready", s.Phase)
 	}
@@ -296,8 +294,8 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 // expose stale runtime to traffic on the new revision pointer.
 func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 1,
 		Phase:       v1beta1.OMENativeInstanceUpdating,
@@ -319,7 +317,7 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 	// Container hasn't been rolled yet: runtime still on v1 even though
 	// spec was just patched to v2.
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Image: "llama:v1"}}
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
@@ -340,9 +338,7 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 		t.Errorf("serving must NOT flip True while runtime image still lags spec")
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.RunningRevision == tcr.Name {
 		t.Errorf("RunningRevision must NOT advance to target until runtime rolls")
 	}
@@ -354,7 +350,7 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 // rather than erroring.
 func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -366,7 +362,7 @@ func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) 
 	}
 	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}}}
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true /* still Ready */)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 	// Recorded running spec carries the env var; the target drops it.
 	runningSpec := &corev1.PodSpec{Containers: []corev1.Container{
 		{Name: "main", Image: "llama:v1", Env: []corev1.EnvVar{{Name: "X", Value: "1"}}},
@@ -385,9 +381,7 @@ func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) 
 	}
 
 	// Recreate path should have bumped Incarnation.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Incarnation != 2 {
 		t.Errorf("Incarnation: got %d want 2 (recreate bumped it)", s.Incarnation)
 	}
@@ -398,7 +392,7 @@ func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) 
 // silently routing to recreate.
 func TestUpdate_InPlaceOnly_RejectsBigDiff(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceOnly,
@@ -409,7 +403,7 @@ func TestUpdate_InPlaceOnly_RejectsBigDiff(t *testing.T) {
 		{Name: "main", Image: "llama:v1", Env: []corev1.EnvVar{{Name: "X", Value: "1"}}},
 	}
 	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}}}
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	runningSpec := &corev1.PodSpec{Containers: []corev1.Container{
 		{Name: "main", Image: "llama:v1", Env: []corev1.EnvVar{{Name: "X", Value: "1"}}},
 	}}
@@ -433,30 +427,29 @@ func TestUpdate_InPlaceOnly_RejectsBigDiff(t *testing.T) {
 // state doesn't short-circuit the bump.
 func TestUpdate_StrategyChangeMidRollout_RecreateStillBumpsIncarnation(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	target := legacyTargetSpecImage("llama:v2")
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	// Pre-stamp the in-place state at the same target.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	cs.Lifecycle.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
-	cs.Lifecycle.InstanceStatuses[0].TargetRevision = tcr.Name
-	cs.Lifecycle.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+	ir2 := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: legacyIRName(isvc, workload.ComponentEngine)}, ir2); err != nil {
+		t.Fatalf("re-read IR: %v", err)
+	}
+	ir2.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
+	ir2.Status.InstanceStatuses[0].TargetRevision = tcr.Name
+	ir2.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
 		Type:           v1beta1.InstanceOperationUpdate,
 		Step:           updateStepInPlace,
 		TargetRevision: tcr.Name,
 	}
-	fresh.Status.Components[v1beta1.EngineComponent] = cs
-	if err := c.Status().Update(context.Background(), fresh); err != nil {
+	if err := c.Status().Update(context.Background(), ir2); err != nil {
 		t.Fatalf("seed in-place status: %v", err)
 	}
-	isvc.Status = fresh.Status
 
 	// Now the strategy flips to RecreatePod.
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
@@ -475,9 +468,7 @@ func TestUpdate_StrategyChangeMidRollout_RecreateStillBumpsIncarnation(t *testin
 		t.Fatalf("expected done=false: recreate is multi-pass")
 	}
 
-	final := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), final)
-	s := final.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Incarnation != 2 {
 		t.Errorf("Incarnation: got %d want 2 (recreate must bump even though in-place wrote first)", s.Incarnation)
 	}
@@ -494,7 +485,7 @@ func TestUpdate_StrategyChangeMidRollout_RecreateStillBumpsIncarnation(t *testin
 // recorded baseline.
 func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -503,7 +494,7 @@ func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 	// NOTE: deliberately not calling legacySeedRunningRevision — Instance
 	// has no recorded baseline.
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
@@ -517,9 +508,7 @@ func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 	if done {
 		t.Fatalf("expected done=false: recreate is multi-pass")
 	}
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Incarnation != 2 {
 		t.Errorf("Incarnation: got %d want 2 (recreate path bumped)", s.Incarnation)
 	}
@@ -530,7 +519,7 @@ func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 // bumps Incarnation, drains old pods.
 func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyRecreatePod,
@@ -539,7 +528,7 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
@@ -553,9 +542,7 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	}
 
 	// RecreatePod strategy is explicit recreate — Incarnation bumped to 2.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Incarnation != 2 {
 		t.Errorf("Incarnation: got %d want 2", s.Incarnation)
 	}
@@ -575,7 +562,7 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 // source is stamped Phase=Updating with an in-flight surge Operation.
 func TestUpdate_MultiPodGangSurges(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategySurgeThenDrain,
@@ -585,7 +572,7 @@ func TestUpdate_MultiPodGangSurges(t *testing.T) {
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	// Multi-pod plan (TotalPods()=2) under SurgeThenDrain → gang surge.
@@ -606,9 +593,7 @@ func TestUpdate_MultiPodGangSurges(t *testing.T) {
 	// Gang surge stamps the SOURCE Phase=Updating but must NOT bump its
 	// Incarnation (that would be a recreate). The replacement gang comes
 	// up at a fresh index instead.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("Phase: got %q want Updating", s.Phase)
 	}
@@ -625,13 +610,13 @@ func TestUpdate_MultiPodGangSurges(t *testing.T) {
 // Incarnation bump (a recreate would bump it).
 func TestGangSurgeUpdate_StampsReplacementAtNewIndex(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategySurgeThenDrain},
 	}
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
@@ -644,9 +629,7 @@ func TestGangSurgeUpdate_StampsReplacementAtNewIndex(t *testing.T) {
 		t.Fatalf("expected done=false on the surge-stamp pass")
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	statuses := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses
+	statuses := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)
 	if len(statuses) != 2 {
 		t.Fatalf("expected 2 instance statuses (source + replacement at a new index), got %d: %+v", len(statuses), statuses)
 	}
@@ -870,9 +853,9 @@ func TestChooseUpdateMode(t *testing.T) {
 // the in-flight Update on the next pass.
 func TestDetectUpdateTrigger_PhaseUpdatingAlwaysTrue(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
+	c := legacyNewFakeClient(t, isvc, ir)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 	target := legacyTargetSpecImage("llama:v1")
@@ -892,9 +875,9 @@ func TestDetectUpdateTrigger_PhaseUpdatingAlwaysTrue(t *testing.T) {
 // it terminates.
 func TestDetectUpdateTrigger_PhaseMigratingSuppressed(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceMigrating
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceMigrating
+	c := legacyNewFakeClient(t, isvc, ir)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 	target := legacyTargetSpecImage("llama:v2")
@@ -915,12 +898,12 @@ func TestDetectUpdateTrigger_PhaseMigratingSuppressed(t *testing.T) {
 // promoted surge briefly looks like a stale-revision Instance.
 func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
 		Type: v1beta1.InstanceOperationMigrate,
 		Step: "CreatePods",
 	}
-	c := legacyNewFakeClient(t, isvc)
+	c := legacyNewFakeClient(t, isvc, ir)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 	target := legacyTargetSpecImage("llama:v2")
@@ -939,13 +922,13 @@ func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 // RunningRevision matches the target CR name — no update.
 func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc, ir)
 	target := legacyTargetSpecImage("llama:v1")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = tcr.Name
+	ir.Status.InstanceStatuses[0].RunningRevision = tcr.Name
 	// Re-store with the running revision pinned.
-	if err := c.Status().Update(context.Background(), isvc); err != nil {
+	if err := c.Status().Update(context.Background(), ir); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
@@ -966,14 +949,14 @@ func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 // treated like Ready for the revision comparison.
 func TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc, ir)
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
-	st := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses
+	st := ir.Status.InstanceStatuses
 	st[0].Phase = v1beta1.OMENativeInstanceFailed
 	st[0].RunningRevision = "llama-70b-engine-oldrev" // != tcr.Name (the corrective target)
-	if err := c.Status().Update(context.Background(), isvc); err != nil {
+	if err := c.Status().Update(context.Background(), ir); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
@@ -993,9 +976,9 @@ func TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch(t *testing.T) {
 // is v2 — must trigger.
 func TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
@@ -1017,10 +1000,10 @@ func TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate(t *testing.T) {
 // fast-path.
 func TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	target := legacyTargetSpecImage("llama:v1")
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
@@ -1034,9 +1017,7 @@ func TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision(t *testing
 	}
 
 	// Backfill should have happened.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.RunningRevision != tcr.Name {
 		t.Errorf("RunningRevision: got %q want %q (backfill)", s.RunningRevision, tcr.Name)
 	}
@@ -1046,9 +1027,9 @@ func TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision(t *testing
 // blocks the Update trigger — Create owns the lifecycle until Ready.
 func TestDetectUpdateTrigger_PhaseCreatingNotInterruptible(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
+	c := legacyNewFakeClient(t, isvc, ir)
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
@@ -1090,9 +1071,9 @@ func TestPodImagesMatch(t *testing.T) {
 // already-ready Instance does NOT bump the ResourceVersion.
 func TestPatchInstanceStatusReadyOnRevision_SkipsWriteWhenIdempotent(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = "rev-abc"
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].RunningRevision = "rev-abc"
+	c := legacyNewFakeClient(t, isvc, ir)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	// Already in the target shape — write should be a no-op.
 	if err := patchInstanceStatusReadyOnRevision(context.Background(), input, 0, "rev-abc"); err != nil {
@@ -1187,7 +1168,7 @@ func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
 // the pod.
 func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -1207,7 +1188,7 @@ func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 		"a":                 "1",
 		"linkerd.io/inject": "enabled", // webhook-set, foreign
 	}
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	// Running revision encodes the OMENative-owned annotation set {a:1}.
 	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
@@ -1247,7 +1228,7 @@ func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 // damage on every spec edit.
 func TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{
 			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
@@ -1263,7 +1244,7 @@ func TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec(t *testing.T) {
 		"b":                 "2",
 		"linkerd.io/inject": "enabled",
 	}
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	// Previous revision authored {a, b}.
 	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})
@@ -1301,7 +1282,7 @@ func TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec(t *testing.T) {
 // carries them in the first place).
 func TestUpdate_InPlaceUpdate_LifecycleAnnotationFilterStillWorks(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Annotations = map[string]string{
 		"ome.io/rollout-paused": "true",
 	}
@@ -1316,7 +1297,7 @@ func TestUpdate_InPlaceUpdate_LifecycleAnnotationFilterStillWorks(t *testing.T) 
 	spec := legacyTargetSpecImage("llama:v1")
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	pod.Annotations = map[string]string{"a": "1"}
-	c := legacyNewFakeClient(t, isvc, pod)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
 	// Running revision's PodMeta has {a:1}; the lifecycle annotation
 	// "ome.io/rollout-paused" is intentionally NOT included here
 	// because the production reconciler calls revision.TemplateMeta
@@ -1444,18 +1425,21 @@ var (
 	_ = query.LabelInstanceIdx
 )
 
-// seedRunningRevisionOnStatus sets InstanceStatus[idx].RunningRevision on
-// the in-memory ISVC so legacyTestInput projects it into ObservedState
-// (where recreateRevisionCause reads the "from" revision). Returns the
-// revision name written.
-func seedRunningRevisionOnStatus(isvc *v1beta1.InferenceService, idx int32, rev string) {
-	cs := isvc.Status.Components[v1beta1.EngineComponent]
-	for i := range cs.Lifecycle.InstanceStatuses {
-		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
-			cs.Lifecycle.InstanceStatuses[i].RunningRevision = rev
+// seedRunningRevisionOnStatus sets InstanceStatus[idx].RunningRevision on the
+// InferenceReplica (the source of truth) so legacyTestInput projects it into
+// ObservedState (where recreateRevisionCause reads the "from" revision).
+func seedRunningRevisionOnStatus(c client.Client, isvc *v1beta1.InferenceService, idx int32, rev string) {
+	ir := &v1beta1.InferenceReplica{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: legacyIRName(isvc, workload.ComponentEngine)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
+		return
+	}
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == idx {
+			ir.Status.InstanceStatuses[i].RunningRevision = rev
 		}
 	}
-	isvc.Status.Components[v1beta1.EngineComponent] = cs
+	_ = c.Status().Update(context.Background(), ir)
 }
 
 // A revision-roll recreate must record a "revision <from> -> <to>" cause
@@ -1464,16 +1448,15 @@ func seedRunningRevisionOnStatus(isvc *v1beta1.InferenceService, idx int32, rev 
 // debuggability surface for "why did this gang recreate".
 func TestRecreateUpdate_StampsRevisionCauseOnOperationReason(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreatePod},
 	}
-	seedRunningRevisionOnStatus(isvc, 0, "llama-70b-engine-oldrev")
-
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
+	seedRunningRevisionOnStatus(c, isvc, 0, "llama-70b-engine-oldrev")
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)
@@ -1483,11 +1466,7 @@ func TestRecreateUpdate_StampsRevisionCauseOnOperationReason(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("re-read ISVC: %v", err)
-	}
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Operation == nil {
 		t.Fatalf("Operation: nil, want recreate Update operation")
 	}
@@ -1505,16 +1484,15 @@ func TestRecreateUpdate_StampsRevisionCauseOnOperationReason(t *testing.T) {
 // the old pods are drained.
 func TestRecreateUpdate_EmitsFromToRevisionEvent(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
 		UpdateStrategy: &v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreatePod},
 	}
-	seedRunningRevisionOnStatus(isvc, 0, "llama-70b-engine-oldrev")
-
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	target := legacyTargetSpecImage("llama:v2")
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
-	c := legacyNewFakeClient(t, isvc, pod, slice)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
+	seedRunningRevisionOnStatus(c, isvc, 0, "llama-70b-engine-oldrev")
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)

@@ -154,25 +154,36 @@ func getDerivedOn(member cluster, namespace, name string) (*v1beta1.InferenceSer
 	return derived, true
 }
 
-// admitDerivedOn simulates the member-side admission path: it marks the derived
-// ISVC's Engine instance Admitted in status, which is the signal the control
-// plane's placer reads to declare this cluster the race winner. No OME reconciler
-// runs on the members, so the suite plays the role Kueue + the worker reconciler
-// would in production.
+// admitDerivedOn simulates the member-side admission path: it stamps the Engine
+// component's InferenceReplica (<name>-engine) with an admitted instance, which
+// is the authoritative signal the control plane's placer reads to declare this
+// cluster the race winner. No OME reconciler runs on the members, so the suite
+// plays the role Kueue + the worker reconciler would in production.
 func admitDerivedOn(member cluster, namespace, name string) {
+	irName := name + "-" + string(v1beta1.EngineComponent)
 	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
-		derived := &v1beta1.InferenceService{}
-		g.Expect(member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: name}, derived)).To(gomega.Succeed())
-		derived.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Lifecycle: &v1beta1.LifecycleStatus{
-					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-						{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
+		ir := &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: irName},
+			// Minimal valid spec so the Create passes CRD schema validation on
+			// bare members (the sim path has no manager to pre-create the IR).
+			Spec: v1beta1.InferenceReplicaSpec{
+				ParentRef: v1beta1.ParentReference{Name: name},
+				Component: v1beta1.EngineComponent,
+				Runners: []v1beta1.Runner{{
+					Name: v1beta1.RunnerNameDefault,
+					Size: 1,
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "sim:latest"}}},
 					},
-				},
+				}},
 			},
 		}
-		g.Expect(member.client.Status().Update(member.ctx, derived)).To(gomega.Succeed())
+		g.Expect(client.IgnoreAlreadyExists(member.client.Create(member.ctx, ir))).To(gomega.Succeed())
+		g.Expect(member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: irName}, ir)).To(gomega.Succeed())
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
+		}
+		g.Expect(member.client.Status().Update(member.ctx, ir)).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 

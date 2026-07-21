@@ -1,6 +1,7 @@
 package coordination
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -8,9 +9,39 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
+
+// fakeClientForSeqISVC creates a fake client seeded with InferenceReplica objects
+// built from the ISVC's Status.Components, for sequential gate tests.
+func fakeClientForSeqISVC(isvc *v1beta1.InferenceService) client.Client {
+	if isvc == nil || isvc.Status.Components == nil {
+		return fake.NewClientBuilder().WithScheme(testScheme()).Build()
+	}
+	var irs []client.Object
+	for c, cs := range isvc.Status.Components {
+		if cs.Lifecycle == nil {
+			continue
+		}
+		ir := &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      isvc.Name + "-" + string(c),
+				Namespace: isvc.Namespace,
+			},
+			Status: v1beta1.InferenceReplicaStatus{
+				ObservedGeneration: cs.Lifecycle.ObservedGeneration,
+				CurrentRevision:    cs.Lifecycle.CurrentRevision,
+				UpdateRevision:     cs.Lifecycle.UpdateRevision,
+				Conditions:         cs.Lifecycle.Conditions,
+			},
+		}
+		irs = append(irs, ir)
+	}
+	return fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(irs...).Build()
+}
 
 // --- activeSequentialComponent (pure helper shared with state machine) ---
 
@@ -167,14 +198,16 @@ func setComponentAvailableAt(isvc *v1beta1.InferenceService, c v1beta1.Component
 }
 
 func TestCheckSequentialGate_NilISVC(t *testing.T) {
-	allowed, _ := CheckSequentialGate(nil, v1beta1.EngineComponent)
+	allowed, _ := CheckSequentialGate(context.Background(), nil, nil, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("nil ISVC should bypass the gate")
 	}
 }
 
 func TestCheckSequentialGate_NoCoordBlock(t *testing.T) {
-	allowed, _ := CheckSequentialGate(&v1beta1.InferenceService{}, v1beta1.EngineComponent)
+	isvc := &v1beta1.InferenceService{}
+	client := fakeClientForSeqISVC(isvc)
+	allowed, _ := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("no coord block should bypass the gate")
 	}
@@ -183,7 +216,8 @@ func TestCheckSequentialGate_NoCoordBlock(t *testing.T) {
 func TestCheckSequentialGate_ComponentNotInAnyGroup(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	// Router isn't in the [decoder, engine] group.
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.RouterComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.RouterComponent)
 	if !allowed {
 		t.Errorf("component outside any coord group must bypass: %s", reason)
 	}
@@ -200,7 +234,8 @@ func TestCheckSequentialGate_NonSequentialGroupBypasses(t *testing.T) {
 			},
 		},
 	}
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("BlueGreen group must bypass Sequential gate: %s", reason)
 	}
@@ -217,7 +252,8 @@ func TestCheckSequentialGate_IdleGroupBypasses(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev1")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("idle group must bypass: %s", reason)
 	}
@@ -229,7 +265,8 @@ func TestCheckSequentialGate_ActiveComponentAllowed(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent)
 	if !allowed {
 		t.Errorf("decoder is active; gate must allow: %s", reason)
 	}
@@ -242,7 +279,8 @@ func TestCheckSequentialGate_NonActiveComponentDenied(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
 		t.Errorf("engine must wait while decoder rolls: %s", reason)
 	}
@@ -266,7 +304,8 @@ func TestCheckSequentialGate_LaterComponentActiveDeniesEarlier(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent)
 	if allowed {
 		t.Errorf("decoder must defer to active engine: %s", reason)
 	}
@@ -284,7 +323,8 @@ func TestCheckSequentialGate_SoakHoldsActiveComponent(t *testing.T) {
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
 	setComponentAvailableAt(isvc, v1beta1.DecoderComponent, time.Now().Add(-1*time.Second))
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
 		t.Errorf("soak window must hold engine: %s", reason)
 	}
@@ -301,7 +341,8 @@ func TestCheckSequentialGate_SoakReleasesAfterDuration(t *testing.T) {
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
 	setComponentAvailableAt(isvc, v1beta1.DecoderComponent, time.Now().Add(-soak-1*time.Second))
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("soak elapsed; gate must allow: %s", reason)
 	}
@@ -315,7 +356,8 @@ func TestCheckSequentialGate_SoakNotArmedForFirstComponent(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", soak)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent)
 	if !allowed {
 		t.Errorf("first Component must not be soak-held: %s", reason)
 	}
@@ -330,7 +372,8 @@ func TestCheckSequentialGate_SoakWithoutPriorAvailableBypasses(t *testing.T) {
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
 	// No Available condition on decoder.
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("missing prior Available must bypass soak: %s", reason)
 	}
@@ -354,7 +397,8 @@ func TestCheckSequentialGate_SoakWithPriorAvailableFalseBypasses(t *testing.T) {
 		LastTransitionTime: metav1.Now(),
 	}}
 	isvc.Status.Components[v1beta1.DecoderComponent] = cs
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("Available=False must not arm soak clock: %s", reason)
 	}
@@ -399,7 +443,8 @@ func TestCheckSequentialGate_PostDecoderConvergence_AllowsEngine(t *testing.T) {
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "OLD", "NEW")
 	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 2)
 
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("post-decoder-convergence + soak elapsed: engine MUST be allowed, got denied: %s", reason)
 	}
@@ -427,7 +472,8 @@ func TestCheckSequentialGate_SoakWindowRespected(t *testing.T) {
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "OLD", "NEW")
 	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 2)
 
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
 		t.Errorf("within-soak-window: engine MUST be denied, got allowed: %s", reason)
 	}
@@ -471,7 +517,8 @@ func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
 
 	// Engine must wait — decoder is first in Order and the gen-skew
 	// signal pins decoder as the active Sequential Component.
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
 		t.Errorf("engine must be gated at moment-of-bump: %s", reason)
 	}
@@ -483,7 +530,8 @@ func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
 	}
 
 	// Decoder is the active Sequential Component — gate must allow.
-	if allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent); !allowed {
+	client = fakeClientForSeqISVC(isvc)
+	if allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent); !allowed {
 		t.Errorf("decoder is the active Component at moment-of-bump: %s", reason)
 	}
 }
@@ -500,7 +548,8 @@ func TestCheckSequentialGate_GenerationSkewOnlyOneComponent(t *testing.T) {
 	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 4) // stale
 	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 5)  // caught up
 
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
 		t.Errorf("engine must wait while decoder has gen-skew: %s", reason)
 	}
@@ -521,10 +570,12 @@ func TestCheckSequentialGate_GenerationCaughtUpAndIdleBypasses(t *testing.T) {
 	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 7)
 	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 7)
 
-	if allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent); !allowed {
+	client := fakeClientForSeqISVC(isvc)
+	if allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent); !allowed {
 		t.Errorf("converged group must bypass gate: %s", reason)
 	}
-	if allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent); !allowed {
+	client = fakeClientForSeqISVC(isvc)
+	if allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent); !allowed {
 		t.Errorf("converged group must bypass gate: %s", reason)
 	}
 }
@@ -546,7 +597,8 @@ func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
 			},
 		},
 	}
-	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	client := fakeClientForSeqISVC(isvc)
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("order-less group must not wedge dispatcher: %s", reason)
 	}
@@ -796,7 +848,7 @@ var _ = corev1.EventTypeWarning
 // CheckUnavailabilityGate / CheckSequentialGate wrappers.
 
 func TestResolveGateContext_NilISVC(t *testing.T) {
-	ctx := ResolveGateContext(nil, v1beta1.EngineComponent)
+	ctx := ResolveGateContext(context.Background(), nil, nil, v1beta1.EngineComponent)
 	if !ctx.ShortCircuit {
 		t.Fatalf("nil ISVC: want ShortCircuit=true, got %+v", ctx)
 	}
@@ -807,7 +859,7 @@ func TestResolveGateContext_NilISVC(t *testing.T) {
 
 func TestResolveGateContext_NoCoordBlock(t *testing.T) {
 	isvc := &v1beta1.InferenceService{}
-	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	ctx := ResolveGateContext(context.Background(), nil, isvc, v1beta1.EngineComponent)
 	if !ctx.ShortCircuit {
 		t.Fatalf("no coord block: want ShortCircuit=true, got %+v", ctx)
 	}
@@ -829,7 +881,7 @@ func TestResolveGateContext_ComponentNotInAnyGroup(t *testing.T) {
 			},
 		},
 	}
-	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	ctx := ResolveGateContext(context.Background(), nil, isvc, v1beta1.EngineComponent)
 	if !ctx.ShortCircuit {
 		t.Fatalf("not in any group: want ShortCircuit=true, got %+v", ctx)
 	}
@@ -851,7 +903,7 @@ func TestResolveGateContext_ResolvesGroup(t *testing.T) {
 			},
 		},
 	}
-	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	ctx := ResolveGateContext(context.Background(), nil, isvc, v1beta1.EngineComponent)
 	if ctx.ShortCircuit {
 		t.Fatalf("resolved group: want ShortCircuit=false, got %+v", ctx)
 	}

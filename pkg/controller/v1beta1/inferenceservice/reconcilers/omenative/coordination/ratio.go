@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 )
 
 // RatioState carries the cross-Component replica counts the
@@ -539,9 +540,13 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 			orig = 1
 		}
 		state.Original[c] = orig
-		if cs, ok := isvc.Status.Components[c]; ok && cs.Lifecycle != nil {
-			state.Current[c] = cs.Lifecycle.Replicas
-			state.NewPods[c] = cs.Lifecycle.UpdatedReplicas
+
+		// Read from authoritative IR status.
+		summary, _ := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, isvc.Namespace, isvc.Name, c)
+
+		if summary != nil {
+			state.Current[c] = summary.Replicas
+			state.NewPods[c] = summary.UpdatedReplicas
 			// Serving is what the band check projects against — live
 			// traffic capacity, not rollout progress.
 			// Net out the transient gang-surge PEAK (replacement gang
@@ -550,13 +555,13 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 			// single-pod Component whose surge flip is atomic. Without this
 			// a gang's N+1 peak is mistaken for durable capacity and the
 			// gate authorizes a drain that settles the ratio out of band.
-			serving := cs.Lifecycle.ServingReplicas - servingSurgePeakInFlight(cs.Lifecycle.InstanceStatuses)
+			serving := summary.ServingReplicas - servingSurgePeakInFlight(summary.InstanceStatuses)
 			if serving < 0 {
 				serving = 0
 			}
 			state.Serving[c] = serving
 			// Operation-tracked in-flight drains (fresh; see RatioState doc).
-			state.InFlightUnavail[c] = unavailableInFlight(cs.Lifecycle.InstanceStatuses)
+			state.InFlightUnavail[c] = unavailableInFlight(summary.InstanceStatuses)
 		}
 	}
 	// Account for pods this wake-up has already started pulling out of
@@ -629,11 +634,15 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
 	}
-	cs, ok := ctx.ISVC.Status.Components[ctx.Component]
-	if !ok || cs.Lifecycle == nil {
+
+	// Read from authoritative IR status.
+	summary, _ := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, ctx.ISVC.Namespace, ctx.ISVC.Name, ctx.Component)
+
+	if summary == nil {
 		return true, "no observation yet"
 	}
-	desired := cs.Lifecycle.Replicas
+
+	desired := summary.Replicas
 	if desired <= 0 {
 		desired = 1
 	}
@@ -641,7 +650,7 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 	// (containers-running count) — in-place drain flips serving=False
 	// before kubelet sees a container restart, so ReadyReplicas would
 	// still report all pods Ready while half are actually out of rotation.
-	currentUnavailable := desired - cs.Lifecycle.ServingReplicas
+	currentUnavailable := desired - summary.ServingReplicas
 	if currentUnavailable < 0 {
 		currentUnavailable = 0
 	}
@@ -685,16 +694,20 @@ func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason str
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
 	}
-	cs, ok := ctx.ISVC.Status.Components[ctx.Component]
-	if !ok || cs.Lifecycle == nil {
+
+	// Read from authoritative IR status.
+	summary, _ := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, ctx.ISVC.Namespace, ctx.ISVC.Name, ctx.Component)
+
+	if summary == nil {
 		return true, "no observation yet"
 	}
-	desired := cs.Lifecycle.Replicas
+
+	desired := summary.Replicas
 	if desired <= 0 {
 		desired = 1
 	}
 	var currentInFlight int32
-	for _, s := range cs.Lifecycle.InstanceStatuses {
+	for _, s := range summary.InstanceStatuses {
 		if s.Operation == nil {
 			continue
 		}

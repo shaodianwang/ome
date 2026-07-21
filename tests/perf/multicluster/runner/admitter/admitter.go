@@ -5,7 +5,8 @@
 // declared component) to declare that member the race winner. envtest runs no
 // OME reconciler on the members, so this admitter plays that role: it watches
 // the member's derived ISVCs and, after a configurable per-member admit delay,
-// flips every declared component's status to an admitted instance.
+// stamps an admitted instance onto every declared component's InferenceReplica
+// (the authoritative per-instance status the placer now reads).
 //
 // The per-member delay is what makes the race deterministic: a member with a
 // short delay admits first and wins; a member with a long delay loses and has
@@ -18,6 +19,8 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -80,8 +83,8 @@ func New(c client.Client, admitDelay time.Duration, concurrency int, clockNow fu
 
 var _ reconcile.Reconciler = (*Reconciler)(nil)
 
-// Reconcile drives one derived ISVC toward admitted. It is a no-op once the
-// derived already reports an admitted instance on every declared component.
+// Reconcile drives one derived ISVC toward admitted. It is a no-op once every
+// declared component's InferenceReplica already reports an admitted instance.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	derived := &v1beta1.InferenceService{}
 	if err := r.client.Get(ctx, req.NamespacedName, derived); err != nil {
@@ -91,7 +94,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if allComponentsAdmitted(derived) {
+	done, err := r.allComponentsAdmitted(ctx, derived)
+	if err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if done {
 		return ctrl.Result{}, nil
 	}
 
@@ -102,8 +109,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return ctrl.Result{RequeueAfter: r.admitDelay - elapsed}, nil
 	}
 
-	markAdmitted(derived)
-	if err := r.client.Status().Update(ctx, derived); err != nil {
+	if err := r.markAdmitted(ctx, derived); err != nil {
 		// Conflict / transient: a requeue retries with a fresh object.
 		return ctrl.Result{Requeue: true}, client.IgnoreNotFound(err)
 	}
@@ -148,47 +154,98 @@ func declaredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType 
 	return out
 }
 
-// markAdmitted sets an admitted, ready instance on every declared component —
-// the status shape the placer's AllComponentsAdmitted reads to pick a winner.
-func markAdmitted(derived *v1beta1.InferenceService) {
-	comps := derived.Status.Components
-	if comps == nil {
-		comps = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
-	}
+// componentIRName is the per-component InferenceReplica name the placer reads
+// (and this admitter writes): "<isvcName>-<component>". Mirrors the production
+// projector's naming so the placer's IR Get resolves to the object we stamp.
+func componentIRName(isvcName string, comp v1beta1.ComponentType) string {
+	return isvcName + "-" + string(comp)
+}
+
+// markAdmitted stamps an admitted, ready instance onto every declared
+// component's InferenceReplica — the authoritative per-instance status the
+// placer's AllComponentsAdmitted now reads (from the IR, not the ISVC's
+// LifecycleStatus) to pick a winner. Each IR is created if absent, then its
+// status subresource is written.
+func (r *Reconciler) markAdmitted(ctx context.Context, derived *v1beta1.InferenceService) error {
 	for _, comp := range declaredComponents(derived) {
-		comps[comp] = v1beta1.ComponentStatusSpec{
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-					{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
-				},
+		ir := &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: derived.Namespace,
+				Name:      componentIRName(derived.Name, comp),
+			},
+			// Minimal valid spec so the Create passes CRD schema validation on
+			// bare members (no manager pre-creates the IR). Ignored when the IR
+			// already exists (Create returns AlreadyExists).
+			Spec: v1beta1.InferenceReplicaSpec{
+				ParentRef: v1beta1.ParentReference{Name: derived.Name},
+				Component: comp,
+				Runners: []v1beta1.Runner{{
+					Name: v1beta1.RunnerNameDefault,
+					Size: 1,
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "sim:latest"}}},
+					},
+				}},
 			},
 		}
-	}
-	derived.Status.Components = comps
-}
-
-// allComponentsAdmitted reports whether every declared component already has an
-// admitted instance (the steady state the admitter leaves a winner in). Kept
-// local so the admitter has no dependency on the placement package internals.
-func allComponentsAdmitted(isvc *v1beta1.InferenceService) bool {
-	declared := declaredComponents(isvc)
-	if len(declared) == 0 {
-		return false
-	}
-	for _, comp := range declared {
-		cs, ok := isvc.Status.Components[comp]
-		if !ok || !hasAdmittedInstance(cs) {
-			return false
+		if err := r.client.Create(ctx, ir); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		// Re-read for the current resourceVersion before the status write (the
+		// IR may already exist from a prior reconcile or the worker path).
+		if err := r.client.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: ir.Name}, ir); err != nil {
+			return err
+		}
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
+		}
+		if err := r.client.Status().Update(ctx, ir); err != nil {
+			return err
 		}
 	}
-	return true
+	return nil
 }
 
-func hasAdmittedInstance(cs v1beta1.ComponentStatusSpec) bool {
-	if cs.Lifecycle == nil {
+// allComponentsAdmitted reports whether every declared component's
+// InferenceReplica already has an admitted instance (the steady state the
+// admitter leaves a winner in). Kept local so the admitter has no dependency on
+// the placement package internals.
+func (r *Reconciler) allComponentsAdmitted(ctx context.Context, isvc *v1beta1.InferenceService) (bool, error) {
+	declared := declaredComponents(isvc)
+	if len(declared) == 0 {
+		return false, nil
+	}
+	for _, comp := range declared {
+		st, err := r.componentIRStatus(ctx, isvc.Namespace, isvc.Name, comp)
+		if err != nil {
+			return false, err
+		}
+		if !hasAdmittedInstance(st) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// componentIRStatus reads one component's InferenceReplica status, returning
+// (nil, nil) when the IR does not exist yet (treated as "no admitted instance").
+func (r *Reconciler) componentIRStatus(ctx context.Context, namespace, isvcName string, comp v1beta1.ComponentType) (*v1beta1.InferenceReplicaStatus, error) {
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: namespace, Name: componentIRName(isvcName, comp)}
+	if err := r.client.Get(ctx, key, ir); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &ir.Status, nil
+}
+
+func hasAdmittedInstance(st *v1beta1.InferenceReplicaStatus) bool {
+	if st == nil {
 		return false
 	}
-	for _, inst := range cs.Lifecycle.InstanceStatuses {
+	for _, inst := range st.InstanceStatuses {
 		if inst.Admitted {
 			return true
 		}

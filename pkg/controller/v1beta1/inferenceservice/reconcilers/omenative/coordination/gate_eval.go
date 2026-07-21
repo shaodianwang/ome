@@ -1,8 +1,11 @@
 package coordination
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -43,10 +46,11 @@ import (
 // RatioGateBypassed event + metric fire so operators see why the gate
 // did not run.
 //
-// Reads exclusively from isvc.Spec + isvc.Status (no client / cache hits),
-// so it is safe to call from the hot dispatcher loop on either path.
-// recorder may be nil (the event is best-effort observability).
+// Reads authoritative InferenceReplica status via the provided context and
+// reader. recorder may be nil (the event is best-effort observability).
 func EvaluateUpdateGate(
+	ctx context.Context,
+	reads client.Reader,
 	isvc *v1beta1.InferenceService,
 	component v1beta1.ComponentType,
 	recorder record.EventRecorder,
@@ -56,7 +60,7 @@ func EvaluateUpdateGate(
 	// ResolveGateContext is paid once so the shared prelude (ResolveGroups +
 	// MembershipFor + nil-isvc / no-coord short-circuit) runs once instead of
 	// four times -- see the coordination.GateContext docs.
-	ctx := ResolveGateContext(isvc, component)
+	gateCtx := ResolveGateContext(ctx, reads, isvc, component)
 
 	inPlace := strategy == workloadtypes.UpdateStrategyInPlaceIfPossible ||
 		strategy == workloadtypes.UpdateStrategyInPlaceOnly
@@ -71,7 +75,7 @@ func EvaluateUpdateGate(
 		if strategy == workloadtypes.UpdateStrategySurgeThenDrain || strategy == "" {
 			projDelta = 1
 		}
-		if ok, reason := ctx.CheckRatio(inFlightUnavail, projDelta); !ok {
+		if ok, reason := gateCtx.CheckRatio(inFlightUnavail, projDelta); !ok {
 			return false, reason
 		}
 	} else {
@@ -84,16 +88,16 @@ func EvaluateUpdateGate(
 	}
 
 	if strategy == workloadtypes.UpdateStrategySurgeThenDrain || strategy == "" {
-		if ok, reason := ctx.CheckSurge(inFlightSurge); !ok {
+		if ok, reason := gateCtx.CheckSurge(inFlightSurge); !ok {
 			return false, reason
 		}
 	} else {
-		if ok, reason := ctx.CheckUnavailability(inFlightUnavail); !ok {
+		if ok, reason := gateCtx.CheckUnavailability(inFlightUnavail); !ok {
 			return false, reason
 		}
 	}
 
-	if ok, reason := ctx.CheckSequential(); !ok {
+	if ok, reason := gateCtx.CheckSequential(); !ok {
 		return false, reason
 	}
 	return true, ""

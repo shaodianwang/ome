@@ -7,13 +7,12 @@ import (
 
 // WorkloadClusterReady is the condition type reporting whether the control
 // plane can currently reach the workload cluster. It is the ONLY status this
-// registry carries — capacity is never mirrored here (OEP-0018); a placer
+// registry carries — capacity is never mirrored here; a placer
 // reads capacity live from the cluster's own Kueue.
 const WorkloadClusterReady = "Ready"
 
 // WorkloadCluster registers a workload cluster OME can place workloads onto
-// (OEP-0018) — typically a GPU cluster. Cluster-scoped: it is fleet-level
-// infrastructure, not a namespaced workload.
+// typically a GPU cluster. Cluster-scoped: it is fleet-level infrastructure, not a namespaced workload.
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:openapi-gen=true

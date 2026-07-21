@@ -214,14 +214,15 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 		// write would fail and no InstanceStatus would ever appear.
 		ginkgo.By("asserting member2's gated instance status is written (no apiserver rejection of the null-deadline status)")
 		gomega.Eventually(func(g gomega.Gomega) {
-			d, ok := getDerivedOn(member2Cluster, isvcNS, isvcName)
-			g.Expect(ok).To(gomega.BeTrue())
-			cs, ok := d.Status.Components[v1beta1.EngineComponent]
-			g.Expect(ok).To(gomega.BeTrue(), "engine component status must be written for the gated instance")
-			g.Expect(cs.Lifecycle).NotTo(gomega.BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(gomega.BeEmpty(),
+			// The authoritative per-instance status now lives on the component's
+			// InferenceReplica (<isvcName>-engine), not the ISVC's LifecycleStatus.
+			ir := &v1beta1.InferenceReplica{}
+			g.Expect(member2Cluster.client.Get(member2Cluster.ctx,
+				types.NamespacedName{Namespace: isvcNS, Name: isvcName + "-" + string(v1beta1.EngineComponent)}, ir)).
+				To(gomega.Succeed(), "engine InferenceReplica status must be written for the gated instance")
+			g.Expect(ir.Status.InstanceStatuses).NotTo(gomega.BeEmpty(),
 				"a gated instance must still record an InstanceStatus (the #607 null-deadline write path)")
-			for _, is := range cs.Lifecycle.InstanceStatuses {
+			for _, is := range ir.Status.InstanceStatuses {
 				g.Expect(is.Admitted).To(gomega.BeFalse(), "member2's instance must stay un-admitted under zero quota")
 			}
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())

@@ -153,9 +153,8 @@ func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 	g.Expect(om.LabelSelector).To(gomega.ContainSubstring("component=engine"))
 	g.Expect(om.CollisionCount).NotTo(gomega.BeNil())
 	g.Expect(*om.CollisionCount).To(gomega.Equal(int32(0)))
-	g.Expect(om.InstanceStatuses).To(gomega.HaveLen(1))
-	g.Expect(om.InstanceStatuses[0].Index).To(gomega.Equal(int32(0)))
-	g.Expect(om.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceReady))
+	// Per-Instance detail is deliberately NOT projected onto the ISVC summary;
+	// the authoritative source is the IR, read via ComponentIRStatus.
 	g.Expect(om.Conditions).To(gomega.HaveLen(1))
 	g.Expect(om.Conditions[0].Type).To(gomega.Equal("Available"))
 
@@ -485,11 +484,13 @@ func TestAggregateIRStatus_NoWriteWhenUnchanged(t *testing.T) {
 		"a no-op AggregateIRStatus pass must perform ZERO writes (ResourceVersion unchanged)")
 }
 
-// TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses pins the
-// aliasing guard: the IR.Status.InstanceStatuses slice must not be
-// aliased into the LifecycleStatus — downstream mutations
-// would clobber the IR controller's source-of-truth.
-func TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses(t *testing.T) {
+// TestIrStatusToComponentStatus_DeepCopiesCollisionCount pins the
+// aliasing guard for the fields the projector still copies. The
+// CollisionCount pointer must be a fresh allocation so downstream
+// mutations of the ISVC summary don't clobber the IR's source-of-truth.
+// (Per-Instance detail is intentionally no longer projected onto the
+// summary — the IR is read directly via ComponentIRStatus.)
+func TestIrStatusToComponentStatus_DeepCopiesCollisionCount(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := &v1beta1.InferenceReplica{
 		Status: v1beta1.InferenceReplicaStatus{
@@ -500,12 +501,7 @@ func TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses(t *testing.T) {
 		},
 	}
 	out := IRStatusToComponentStatus(ir)
-	g.Expect(out.InstanceStatuses).To(gomega.HaveLen(1))
-
-	// Mutate the output, verify the IR is unaffected.
-	out.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceFailed
-	g.Expect(ir.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceReady),
-		"mutating the output InstanceStatuses must NOT alias back to the IR")
+	g.Expect(out).NotTo(gomega.BeNil())
 
 	// CollisionCount pointer must NOT be aliased.
 	*out.CollisionCount = 99

@@ -8,8 +8,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	types "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -115,6 +117,66 @@ func minimalPlan() workload.ComponentPlan {
 			}},
 		},
 	}
+}
+
+func roundTripMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(context.Context, int32, func(*workload.InstanceStatus) bool) error {
+	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+		ir := &v1beta1.InferenceReplica{}
+		key := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name + "-" + string(component)}
+		create := false
+		if err := c.Get(ctx, key, ir); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("get IR: %w", err)
+			}
+			ir = &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
+			create = true
+		}
+		pos := -1
+		for i, s := range ir.Status.InstanceStatuses {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		slot := v1beta1.OMENativeInstanceStatus{Index: idx}
+		if pos != -1 {
+			slot = ir.Status.InstanceStatuses[pos]
+		}
+		w := v1beta1convert.InstanceStatusToWorkload(slot)
+		if !mutate(&w) {
+			return nil
+		}
+		updated := v1beta1convert.InstanceStatusFromWorkload(w)
+		if pos == -1 {
+			ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, updated)
+		} else {
+			ir.Status.InstanceStatuses[pos] = updated
+		}
+		if create {
+			bare := &v1beta1.InferenceReplica{ObjectMeta: ir.ObjectMeta}
+			if err := c.Create(ctx, bare); err != nil {
+				return fmt.Errorf("create IR: %w", err)
+			}
+			bare.Status = ir.Status
+			ir = bare
+		}
+		return c.Status().Update(ctx, ir)
+	}
+}
+
+// instanceStatusByIndex looks up an InstanceStatus on the component's InferenceReplica.
+func instanceStatusByIndex(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name + "-" + string(component)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
+		return nil
+	}
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == idx {
+			return &ir.Status.InstanceStatuses[i]
+		}
+	}
+	return nil
 }
 
 // TestReconcile_NilClient_Errors asserts the nil-deps.Client guard
@@ -508,27 +570,25 @@ func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
 	scheme := makeScheme(t)
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					Lifecycle: &v1beta1.LifecycleStatus{
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-							Index:           0,
-							Incarnation:     1,
-							Phase:           v1beta1.OMENativeInstanceUpdating,
-							RunningRevision: "llama-70b-engine-priorrev",
-						}},
-					},
-				},
-			},
+	}
+	// Index 0's InstanceStatus on IR.
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "llama-70b-engine"},
+		Status: v1beta1.InferenceReplicaStatus{
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+				Index:           0,
+				Incarnation:     1,
+				Phase:           v1beta1.OMENativeInstanceUpdating,
+				RunningRevision: "llama-70b-engine-priorrev",
+			}},
 		},
 	}
 	// Index 0's existing in-flight pod, so the Update pass operates on a
 	// real pod and the fresh-pass create can't accidentally collide.
 	pod0 := enginePod(isvc.Name, isvc.Namespace, 0)
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(isvc, pod0).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir, pod0).Build()
 	deps := workload.Deps{Client: c}
 
 	in := minimalInput(t)
@@ -583,7 +643,7 @@ func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("get isvc: %v", err)
 	}
-	s0 := instanceStatusByIndex(fresh, v1beta1.EngineComponent, 0)
+	s0 := instanceStatusByIndex(c, fresh, v1beta1.EngineComponent, 0)
 	if s0 == nil || s0.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("index 0 must remain Phase=Updating (Create promote must not run on it); got %+v", s0)
 	}
@@ -645,7 +705,7 @@ func TestReconcile_NoBudget_NoGate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(isvc).Build()
 	deps := workload.Deps{Client: c}
 
@@ -708,7 +768,7 @@ func TestReconcile_NoBudget_NoGate(t *testing.T) {
 	}
 	started := int32(0)
 	for i := int32(0); i < replicas; i++ {
-		s := instanceStatusByIndex(fresh, v1beta1.EngineComponent, i)
+		s := instanceStatusByIndex(c, fresh, v1beta1.EngineComponent, i)
 		if s != nil && s.Phase == v1beta1.OMENativeInstanceUpdating {
 			started++
 		}
@@ -740,65 +800,6 @@ func enginePod(isvc, ns string, idx int32) *corev1.Pod {
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
 	}
-}
-
-// roundTripMutateInstance returns a MutateInstance that persists through
-// the fake client's status subresource (appending a slot for an absent
-// index), so the dispatcher's per-index status writes survive for
-// post-reconcile assertions. Mirrors the production retry-wrapped
-// callback minus the conflict retry the fake client never needs.
-func roundTripMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(context.Context, int32, func(*workload.InstanceStatus) bool) error {
-	v1component := v1beta1.ComponentType(component)
-	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		fresh := &v1beta1.InferenceService{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
-			return fmt.Errorf("get isvc: %w", err)
-		}
-		if fresh.Status.Components == nil {
-			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
-		}
-		cs := fresh.Status.Components[v1component]
-		if cs.Lifecycle == nil {
-			cs.Lifecycle = &v1beta1.LifecycleStatus{}
-		}
-		pos := -1
-		for i, s := range cs.Lifecycle.InstanceStatuses {
-			if s.Index == idx {
-				pos = i
-				break
-			}
-		}
-		slot := v1beta1.OMENativeInstanceStatus{Index: idx}
-		if pos != -1 {
-			slot = cs.Lifecycle.InstanceStatuses[pos]
-		}
-		w := v1beta1convert.InstanceStatusToWorkload(slot)
-		if !mutate(&w) {
-			return nil
-		}
-		updated := v1beta1convert.InstanceStatusFromWorkload(w)
-		if pos == -1 {
-			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
-		} else {
-			cs.Lifecycle.InstanceStatuses[pos] = updated
-		}
-		fresh.Status.Components[v1component] = cs
-		return c.Status().Update(ctx, fresh)
-	}
-}
-
-// instanceStatusByIndex looks up an InstanceStatus on the ISVC snapshot.
-func instanceStatusByIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.Lifecycle == nil {
-		return nil
-	}
-	for i := range cs.Lifecycle.InstanceStatuses {
-		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
-			return &cs.Lifecycle.InstanceStatuses[i]
-		}
-	}
-	return nil
 }
 
 // listCountingReader wraps a client.Reader and counts PodList List calls.
@@ -898,7 +899,7 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 		enginePod(isvc.Name, isvc.Namespace, 2),
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(objs...).Build()
 	deps := workload.Deps{Client: c, APIReader: c}
 
@@ -932,12 +933,12 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("get isvc: %v", err)
 	}
-	s1 := instanceStatusByIndex(fresh, v1beta1.EngineComponent, 1)
+	s1 := instanceStatusByIndex(c, fresh, v1beta1.EngineComponent, 1)
 	if s1 == nil || s1.Phase != v1beta1.OMENativeInstanceRestarting {
 		t.Errorf("index 1 (Failed pod) must flip to Restarting; got %+v", s1)
 	}
 	for _, idx := range []int32{0, 2} {
-		s := instanceStatusByIndex(fresh, v1beta1.EngineComponent, idx)
+		s := instanceStatusByIndex(c, fresh, v1beta1.EngineComponent, idx)
 		// Healthy indices must not be dragged into a restart. The dispatcher
 		// short-circuits on the first restarting Instance, so their status
 		// stays at its observed Ready (or is simply never written).

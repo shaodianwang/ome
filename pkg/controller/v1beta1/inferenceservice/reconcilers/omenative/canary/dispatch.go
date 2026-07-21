@@ -357,7 +357,7 @@ func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.In
 			}
 		}
 	}
-	return coordination.LatestRevisionHash(isvc, c)
+	return coordination.LatestRevisionHash(ctx, reads, isvc, c)
 }
 
 // primaryComponent is the externally-routed Component the canary group drives its

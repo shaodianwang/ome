@@ -70,8 +70,9 @@ var _ = ginkgo.Describe("OMENative Update path (extras)", ginkgo.Ordered, func()
 			c := freshISVC(g, ns.Name, "inplaceonly-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "inplaceonly-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -144,10 +145,11 @@ var _ = ginkgo.Describe("OMENative Update path (extras)", ginkgo.Ordered, func()
 			c := freshISVC(g, ns.Name, "recreate-env-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(int64(1)))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
+			insts := instanceStatuses(g, ns.Name, "recreate-env-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(insts[0].Incarnation).To(Equal(int64(1)))
+			g.Expect(insts[0].ActiveOrdinal).To(Equal(int32(0)),
 				"initial Instance must start at ordinal 0")
 
 			pod := &corev1.Pod{}
@@ -172,14 +174,15 @@ var _ = ginkgo.Describe("OMENative Update path (extras)", ginkgo.Ordered, func()
 			c := freshISVC(g, ns.Name, "recreate-env-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "recreate-env-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			// Surge promotes to the alternate ordinal but keeps Incarnation:
 			// the ordinal slot distinguishes old from new, not the label.
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(1)),
+			g.Expect(insts[0].ActiveOrdinal).To(Equal(int32(1)),
 				"surge must advance ActiveOrdinal to the alternate slot")
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(int64(1)),
-				"surge must NOT bump Incarnation (that is the recreate counter); got %d", cs.Lifecycle.InstanceStatuses[0].Incarnation)
+			g.Expect(insts[0].Incarnation).To(Equal(int64(1)),
+				"surge must NOT bump Incarnation (that is the recreate counter); got %d", insts[0].Incarnation)
 
 			// The new canonical pod lives at ordinal 1, has a fresh UID,
 			// and carries the new env var.

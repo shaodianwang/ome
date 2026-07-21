@@ -250,8 +250,8 @@ func TestValidateFromNode_GangUnscheduledDefers(t *testing.T) {
 // spec; the worker spec is nil for single-pod revisions.
 func TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	c := legacyNewFakeClient(t, isvc)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc, ir)
 
 	leader := &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "llama:v1"}}}
 	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama:v1"}}}
@@ -264,9 +264,11 @@ func TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureControllerRevisionWithWorker: %v", err)
 	}
-	// Point instance 0's running revision at the gang CR (mutates through
-	// the shared Lifecycle pointer + slice backing array).
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = cr.Name
+	// Point instance 0's running revision at the gang CR (update IR).
+	ir.Status.InstanceStatuses[0].RunningRevision = cr.Name
+	if err := c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("update IR RunningRevision: %v", err)
+	}
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	gotCR, gotLeader, gotWorker, err := surgeRevisionAndSpec(context.Background(), legacyTestDeps(c), input, 0)

@@ -77,8 +77,9 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-ready-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "evt-ready-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			eventHasReasonInvolving(g, ns.Name, "InstanceReady", "InferenceService", "evt-ready-isvc")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -105,8 +106,9 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-restart-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "evt-restart-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("force-deleting the live engine pod to trigger Restart")
@@ -148,8 +150,9 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-inplace-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for i, inst := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "evt-inplace-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for i, inst := range insts {
 				g.Expect(inst.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"Instance %d should be Ready before bumping image (got Phase=%s)",
 					i, inst.Phase)
@@ -180,8 +183,9 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-recreate-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "evt-recreate-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -216,8 +220,9 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-idem-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "evt-idem-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("counting InstanceReady Event objects emitted before any disturbance")
@@ -285,8 +290,9 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-orphan-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "evt-orphan-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("planting a deliberate orphan-shaped pod that the orphan-scan will find")

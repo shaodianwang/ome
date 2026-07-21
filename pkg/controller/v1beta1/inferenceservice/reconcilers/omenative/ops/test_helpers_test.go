@@ -23,26 +23,6 @@ import (
 // / timeouts / update tests relied on were removed alongside those tests
 // when the legacy OMENative direct path was retired.
 
-// findInstanceStatusForISVCTest is the test-local replacement for the
-// removed query.FindInstanceStatus. The workload-side query package no
-// longer takes a v1beta1.InferenceService handle (workload boundary
-// purge); adapters now scan their typed status surface directly.
-func findInstanceStatusForISVCTest(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
-	if isvc == nil {
-		return nil
-	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.Lifecycle == nil {
-		return nil
-	}
-	for i := range cs.Lifecycle.InstanceStatuses {
-		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
-			return &cs.Lifecycle.InstanceStatuses[i]
-		}
-	}
-	return nil
-}
-
 // minimalISVC builds an ISVC with the minimum metadata the detectors need.
 func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	mr := replicas
@@ -91,7 +71,9 @@ func resetExpectations(t *testing.T) {
 // newFakeClientWithDiscovery builds a controller-runtime fake client with
 // the schemes the omenative/ops tests touch (corev1 + v1beta1 +
 // discoveryv1 + appsv1). The status subresource is registered so
-// Status().Update mirrors API-server behavior.
+// Status().Update mirrors API-server behavior. Detectors read per-instance
+// state from the authoritative InferenceReplica, so fixtures seed the IR
+// directly (see stuckInstanceFixture) — pass it alongside the ISVC.
 func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()

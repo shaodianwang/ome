@@ -80,9 +80,10 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 			} {
 				cs := c.Status.Components[comp]
 				g.Expect(cs.Lifecycle).NotTo(BeNil(), "%s missing OMENative status", comp)
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
+				insts := instanceStatuses(g, ns.Name, "mixed-strat-kcg3", comp)
+				g.Expect(insts).To(HaveLen(1))
+				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(insts[0].ActiveOrdinal).To(Equal(int32(0)),
 					"%s must start at ordinal 0", comp)
 			}
 
@@ -115,8 +116,9 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 			} {
 				cs := c.Status.Components[comp]
 				g.Expect(cs.Lifecycle).NotTo(BeNil())
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				insts := instanceStatuses(g, ns.Name, "mixed-strat-kcg3", comp)
+				g.Expect(insts).To(HaveLen(1))
+				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"%s must reconverge to Ready after the bump", comp)
 			}
 
@@ -130,16 +132,16 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 			g.Expect(string(ePod.UID)).To(Equal(engineUIDv1),
 				"engine UID must be preserved (InPlaceIfPossible + image-only diff = in-place patch); "+
 					"got %s expected %s", string(ePod.UID), engineUIDv1)
-			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
+			engInsts := instanceStatuses(g, ns.Name, "mixed-strat-kcg3", v1beta1.EngineComponent)
+			g.Expect(engInsts[0].ActiveOrdinal).To(Equal(int32(0)),
 				"engine InPlaceIfPossible must NOT advance ActiveOrdinal")
 
 			// Decoder: default SurgeThenDrain + image diff →
 			// surge-to-ordinal-1 path → old pod at ordinal 0 gone,
 			// new pod at ordinal 1 with a fresh UID. ActiveOrdinal
 			// advances 0 → 1.
-			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(decCS.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(1)),
+			decInsts := instanceStatuses(g, ns.Name, "mixed-strat-kcg3", v1beta1.DecoderComponent)
+			g.Expect(decInsts[0].ActiveOrdinal).To(Equal(int32(1)),
 				"decoder SurgeThenDrain must advance ActiveOrdinal 0 → 1")
 
 			dPod := &corev1.Pod{}

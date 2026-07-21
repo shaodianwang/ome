@@ -708,7 +708,7 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate in the OEP-0018 placement race.",
+				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate in the",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"cluster": {
@@ -3682,7 +3682,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 				Properties: map[string]spec.Schema{
 					"deploymentMode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — OEP-0007 native lifecycle-managed pods (also\n    handles multi-node serving when Leader/Worker are present)\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch\n\nPDDisaggregated is a SHAPE descriptor derived from engine+decoder pairing; it is not a valid dispatch backend and is rejected by the CRD enum. A component with Leader/Worker resolves to OMENative. VirtualDeployment is legacy and not supported here.",
+							Description: "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — Native lifecycle-managed pods (also\n    handles multi-node serving when Leader/Worker are present)\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -3882,7 +3882,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 					},
 					"placement": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Placement reports OEP-0018 multi-cluster placement of this ISVC, set by the control-plane fan-out controller. Empty on workload clusters and on single-cluster deployments.",
+							Description: "Placement reports multi-cluster placement of this ISVC, set by the control-plane fan-out controller. Empty on workload clusters and on single-cluster deployments.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus"),
 						},
 					},
@@ -4832,33 +4832,11 @@ func schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref common.ReferenceCallback) c
 							},
 						},
 					},
-					"instanceStatuses": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"index",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "InstanceStatuses reports per-Instance state.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"),
-									},
-								},
-							},
-						},
-					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
@@ -5688,7 +5666,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 					},
 					"admitted": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the OEP-0018 control plane to decide the fan-out race winner.",
+							Description: "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the control plane to decide the fan-out race winner.",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},
@@ -5815,7 +5793,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "PlacementStatus is the OEP-0018 multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
+				Description: "PlacementStatus is the multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"cluster": {
@@ -5834,7 +5812,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 					},
 					"endpoint": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster (OEP-0018 keeps OME out of the data path).",
+							Description: "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster.",
 							Ref:         ref("knative.dev/pkg/apis.URL"),
 						},
 					},
@@ -5848,7 +5826,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Candidates are the clusters this ISVC has been fanned out to during the OEP-0018 placement race. Populated by the control plane.",
+							Description: "Candidates are the clusters this ISVC has been fanned out to during the placement race. Populated by the control plane.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -9510,7 +9488,7 @@ func schema_pkg_apis_ome_v1beta1_WorkloadCluster(ref common.ReferenceCallback) c
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "WorkloadCluster registers a workload cluster OME can place workloads onto (OEP-0018) — typically a GPU cluster. Cluster-scoped: it is fleet-level infrastructure, not a namespaced workload.",
+				Description: "WorkloadCluster registers a workload cluster OME can place workloads onto typically a GPU cluster. Cluster-scoped: it is fleet-level infrastructure, not a namespaced workload.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {

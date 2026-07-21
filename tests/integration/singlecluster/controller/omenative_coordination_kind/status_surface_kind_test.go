@@ -72,8 +72,9 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "inst-cond-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			s := cs.Lifecycle.InstanceStatuses[0]
+			insts := instanceStatuses(g, ns.Name, "inst-cond-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			s := insts[0]
 			for _, t := range []string{"AllPodsScheduled", "AllPodsReady", "AllPodsAvailable"} {
 				cond := meta.FindStatusCondition(s.Conditions, t)
 				g.Expect(cond).NotTo(BeNil(), "InstanceStatus[0] missing Condition %q", t)
@@ -94,8 +95,9 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "counter-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(2))
-			for i, s := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "counter-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(2))
+			for i, s := range insts {
 				g.Expect(s.PodCount).To(Equal(int32(1)),
 					"InstanceStatus[%d].PodCount must be 1 (single-pod runner)", i)
 				g.Expect(s.ReadyPodCount).To(Equal(int32(1)),

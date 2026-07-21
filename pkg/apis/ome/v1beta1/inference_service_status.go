@@ -55,7 +55,7 @@ type InferenceServiceStatus struct {
 	// +optional
 	Canary *CanaryStatus `json:"canary,omitempty"`
 
-	// Placement reports OEP-0018 multi-cluster placement of this ISVC, set by
+	// Placement reports multi-cluster placement of this ISVC, set by
 	// the control-plane fan-out controller. Empty on workload clusters and on
 	// single-cluster deployments.
 	// +optional
@@ -420,8 +420,7 @@ func (ss *InferenceServiceStatus) SetCondition(conditionType apis.ConditionType,
 	}
 }
 
-// PlacementPhase is the coarse state of an InferenceService's OEP-0018
-// multi-cluster placement.
+// PlacementPhase is the coarse state of an InferenceService's multi-cluster placement.
 // +kubebuilder:validation:Enum=Pending;Racing;Placed;Failed
 type PlacementPhase string
 
@@ -447,7 +446,7 @@ const (
 	CandidatePhaseAdmitted CandidatePlacementPhase = "Admitted"
 )
 
-// PlacementStatus is the OEP-0018 multi-cluster placement status: which workload
+// PlacementStatus is the multi-cluster placement status: which workload
 // cluster an InferenceService is placed on and a coarse phase.
 type PlacementStatus struct {
 	// Cluster is the WorkloadCluster the ISVC is currently placed on. Empty
@@ -463,12 +462,12 @@ type PlacementStatus struct {
 	// placement, mirrored from the derived InferenceService's status.url once it
 	// is admitted AND addressable. Empty while pending/racing/failed or before
 	// the winner reports a URL. An external global LB/DNS consumes this to route
-	// traffic to the winning cluster (OEP-0018 keeps OME out of the data path).
+	// traffic to the winning cluster.
 	// +optional
 	Endpoint *apis.URL `json:"endpoint,omitempty"`
 
 	// Candidates are the clusters this ISVC has been fanned out to during the
-	// OEP-0018 placement race. Populated by the control plane.
+	// placement race. Populated by the control plane.
 	// +optional
 	// +listType=map
 	// +listMapKey=cluster
@@ -476,7 +475,6 @@ type PlacementStatus struct {
 }
 
 // CandidatePlacement is the per-cluster state of a fan-out candidate in the
-// OEP-0018 placement race.
 type CandidatePlacement struct {
 	// Cluster is the WorkloadCluster name.
 	Cluster string `json:"cluster"`

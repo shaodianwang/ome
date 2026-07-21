@@ -82,8 +82,9 @@ var _ = ginkgo.Describe("Gang SurgeThenDrain capacity floor", ginkgo.Ordered, fu
 			c := freshISVC(g, ns.Name, "gang-floor")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(replicas))
-			for _, is := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "gang-floor", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, is := range insts {
 				g.Expect(is.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -147,10 +148,11 @@ var _ = ginkgo.Describe("Gang SurgeThenDrain capacity floor", ginkgo.Ordered, fu
 			c := freshISVC(g, ns.Name, "gang-floor")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			insts := instanceStatuses(g, ns.Name, "gang-floor", v1beta1.EngineComponent)
 			g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(replicas))
-			for _, is := range cs.Lifecycle.InstanceStatuses {
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, is := range insts {
 				g.Expect(is.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"every engine gang must be Ready on v2")
 			}

@@ -19,14 +19,10 @@ type InferenceServiceSpec struct {
 	// mixed-mode experiments).
 	//
 	// Valid values:
-	//   - "OMENative"     — OEP-0007 native lifecycle-managed pods (also
+	//   - "OMENative"     — Native lifecycle-managed pods (also
 	//     handles multi-node serving when Leader/Worker are present)
 	//   - "RawDeployment" — Kubernetes Deployment/HPA-backed dispatch
 	//
-	// PDDisaggregated is a SHAPE descriptor derived from engine+decoder
-	// pairing; it is not a valid dispatch backend and is rejected by the
-	// CRD enum. A component with Leader/Worker resolves to OMENative.
-	// VirtualDeployment is legacy and not supported here.
 	// +kubebuilder:validation:Enum=OMENative;RawDeployment
 	// +optional
 	DeploymentMode *constants.DeploymentModeType `json:"deploymentMode,omitempty"`

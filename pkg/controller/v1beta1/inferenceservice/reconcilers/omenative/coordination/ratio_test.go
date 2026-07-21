@@ -1,13 +1,83 @@
 package coordination
 
 import (
+	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// testScheme returns the runtime.Scheme for fake client builders in tests.
+func testScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	_ = v1beta1.AddToScheme(scheme)
+	return scheme
+}
+
+// fakeClientForISVC creates a fake client seeded with InferenceReplica objects
+// built from the ISVC's Status.Components. This mirrors what the old gate path
+// read from isvc.Status.Components[c].Lifecycle, now authoritative via
+// ComponentIRStatus reading the IR objects directly.
+func fakeClientForISVC(isvc *v1beta1.InferenceService) client.Client {
+	return fakeClientForISVCWithInstances(isvc, nil)
+}
+
+// fakeClientForISVCWithInstances is fakeClientForISVC plus per-component
+// InstanceStatuses overlaid onto the derived IRs. Instance detail is the IR's
+// source-of-truth and is no longer carried on the ISVC Lifecycle summary.
+func fakeClientForISVCWithInstances(isvc *v1beta1.InferenceService, instancesByComponent map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus) client.Client {
+	if isvc == nil || (isvc.Status.Components == nil && len(instancesByComponent) == 0) {
+		return fake.NewClientBuilder().WithScheme(testScheme()).Build()
+	}
+	var irs []client.Object
+	covered := map[v1beta1.ComponentType]bool{}
+	for c, cs := range isvc.Status.Components {
+		if cs.Lifecycle == nil {
+			continue
+		}
+		ir := &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      isvc.Name + "-" + string(c),
+				Namespace: isvc.Namespace,
+			},
+			Status: v1beta1.InferenceReplicaStatus{
+				Replicas:           cs.Lifecycle.Replicas,
+				UpdatedReplicas:    cs.Lifecycle.UpdatedReplicas,
+				ServingReplicas:    cs.Lifecycle.ServingReplicas,
+				CurrentRevision:    cs.Lifecycle.CurrentRevision,
+				UpdateRevision:     cs.Lifecycle.UpdateRevision,
+				ObservedGeneration: cs.Lifecycle.ObservedGeneration,
+				Conditions:         cs.Lifecycle.Conditions,
+			},
+		}
+		ir.Status.InstanceStatuses = instancesByComponent[c]
+		irs = append(irs, ir)
+		covered[c] = true
+	}
+	// Components with instances but no Lifecycle entry still need an IR so the
+	// gate can read their instance detail. An empty overlay creates no IR —
+	// preserving the "no observation → bypass" first-reconcile semantics.
+	for c, insts := range instancesByComponent {
+		if covered[c] || len(insts) == 0 {
+			continue
+		}
+		irs = append(irs, &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      isvc.Name + "-" + string(c),
+				Namespace: isvc.Namespace,
+			},
+			Status: v1beta1.InferenceReplicaStatus{InstanceStatuses: insts},
+		})
+	}
+	return fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(irs...).Build()
+}
 
 func TestEvaluateSurge_NoSurgeRequested(t *testing.T) {
 	d := EvaluateSurge(v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingRatioBalanced}, RatioState{}, v1beta1.EngineComponent, 0)
@@ -954,17 +1024,15 @@ func TestCheckSurgeGate_OneInFlight_BudgetExhausted(t *testing.T) {
 	// MaxSurge=1, 5 replicas, ONE instance already on Step=Surge → projected=2 > budget=1
 	// → DENIED.
 	isvc := mkSurgeFixture(iosInt(1))
+	insts := []v1beta1.OMENativeInstanceStatus{{
+		Index:     0,
+		Phase:     v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "Surge"},
+	}}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-			Replicas: 5,
-			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-				Index:     0,
-				Phase:     v1beta1.OMENativeInstanceUpdating,
-				Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "Surge"},
-			}},
-		}},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 5}},
 	}
-	allowed, reason := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	allowed, reason := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0, insts...)
 	if allowed {
 		t.Errorf("1 in-flight Surge + budget=1: deny; got allow reason=%s", reason)
 	}
@@ -975,17 +1043,15 @@ func TestCheckSurgeGate_SurgeDrainStepAlsoCounts(t *testing.T) {
 	// still counts as in-flight surge for budget purposes — the extra
 	// pod is alive until old is deleted.
 	isvc := mkSurgeFixture(iosInt(1))
+	insts := []v1beta1.OMENativeInstanceStatus{{
+		Index:     0,
+		Phase:     v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "SurgeDrain"},
+	}}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-			Replicas: 5,
-			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-				Index:     0,
-				Phase:     v1beta1.OMENativeInstanceUpdating,
-				Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "SurgeDrain"},
-			}},
-		}},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 5}},
 	}
-	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0, insts...)
 	if allowed {
 		t.Errorf("SurgeDrain step must count toward in-flight surge budget")
 	}
@@ -993,17 +1059,15 @@ func TestCheckSurgeGate_SurgeDrainStepAlsoCounts(t *testing.T) {
 
 func TestCheckSurgeGate_SurgeDrainSettleStepAlsoCounts(t *testing.T) {
 	isvc := mkSurgeFixture(iosInt(1))
+	insts := []v1beta1.OMENativeInstanceStatus{{
+		Index:     0,
+		Phase:     v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "SurgeDrainSettle"},
+	}}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-			Replicas: 5,
-			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-				Index:     0,
-				Phase:     v1beta1.OMENativeInstanceUpdating,
-				Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "SurgeDrainSettle"},
-			}},
-		}},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 5}},
 	}
-	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0, insts...)
 	if allowed {
 		t.Errorf("SurgeDrainSettle step must count toward in-flight surge budget")
 	}
@@ -1014,17 +1078,15 @@ func TestCheckSurgeGate_OtherStepsDoNotCount(t *testing.T) {
 	// add an extra pod. Gate must not count them.
 	for _, step := range []string{"Drain", "InPlace"} {
 		isvc := mkSurgeFixture(iosInt(1))
+		insts := []v1beta1.OMENativeInstanceStatus{{
+			Index:     0,
+			Phase:     v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: step},
+		}}
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-				Replicas: 5,
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-					Index:     0,
-					Phase:     v1beta1.OMENativeInstanceUpdating,
-					Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: step},
-				}},
-			}},
+			v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 5}},
 		}
-		allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+		allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0, insts...)
 		if !allowed {
 			t.Errorf("step=%s (not surge) must not consume surge budget", step)
 		}
@@ -1114,7 +1176,7 @@ func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 // ratio_drain_tiebreaker_test.go.
 func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
-	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	ctx := ResolveGateContext(context.Background(), fakeClientForISVC(isvc), isvc, v1beta1.EngineComponent)
 
 	if allowed, reason := ctx.CheckRatio(0, +1); !allowed {
 		t.Errorf("surge projection (+1) on symmetric 4:4 tol=25%% must be allowed (5/4=1.25 <= 1.25); got denied: %s", reason)
@@ -1130,8 +1192,9 @@ func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {
 // stack (it was, pre-fix, because CheckRatio projected -1 for it).
 func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
+	client := fakeClientForISVC(isvc)
 
-	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.EngineComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Errorf("SurgeThenDrain RatioBalanced 4:4 must be allowed (no deadlock); got denied: %s", reason)
 	}
@@ -1248,7 +1311,8 @@ func TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			isvc := mkRatioProgressFixture(tc.tol, tc.origE, tc.newE, tc.origD, tc.newD)
-			allowed, reason := EvaluateUpdateGate(isvc, tc.comp, nil,
+			client := fakeClientForISVC(isvc)
+			allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, tc.comp, nil,
 				workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 			if allowed != tc.wantAllowed {
 				t.Errorf("allowed=%v want %v (reason=%q)", allowed, tc.wantAllowed, reason)
@@ -1422,8 +1486,9 @@ func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	mu := intstr.FromInt(3)
 	isvc.Spec.Rollout.Groups[0].RollingUpdate.MaxUnavailable = &mu
+	client := fakeClientForISVC(isvc)
 
-	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.EngineComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil,
 		workloadtypes.UpdateStrategyRecreatePod, 0, 0); !allowed {
 		t.Errorf("RecreatePod on symmetric 4:4 (MaxUnavailable=3) must be allowed via the tiebreaker; got denied: %s", reason)
 	}
@@ -1487,7 +1552,7 @@ func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.
 // ObservedRatio anchor (needed by RatioBalanced; harmless for PerComponent).
 // decoderSurgesInFlight controls how many decoder Instances are already on a
 // surge step (Surge/SurgeDrain) from a prior wake-up.
-func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFlight int) *v1beta1.InferenceService {
+func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFlight int) (*v1beta1.InferenceService, []v1beta1.OMENativeInstanceStatus) {
 	groupSurge := intstr.FromString("25%") // the webhook default when maxSurge is unset
 	group := v1beta1.RolloutGroup{
 		Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -1531,13 +1596,12 @@ func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFl
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4, ServingReplicas: 4}},
 				v1beta1.DecoderComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-					Replicas:         4,
-					ServingReplicas:  4,
-					InstanceStatuses: decoderInstances,
+					Replicas:        4,
+					ServingReplicas: 4,
 				}},
 			},
 		},
-	}
+	}, decoderInstances
 }
 
 // TestDecoderSurgeBudget_P226_RatioBalanced pins the p226 shape: a bumped
@@ -1548,8 +1612,9 @@ func TestDecoderSurgeBudget_P226_RatioBalanced(t *testing.T) {
 	// +1 projects 5:4 = 1.25, in band [0.75,1.25]; CheckSurge 0+0+1 <=
 	// budget 1) must ALLOW. This is the surge that takes the decoder to
 	// peak 5.
-	isvc := mkPDGroupSurge(v1beta1.CoordinationPacingRatioBalanced, 0)
-	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.DecoderComponent, nil,
+	isvc, decInsts := mkPDGroupSurge(v1beta1.CoordinationPacingRatioBalanced, 0)
+	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Fatalf("p226: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
 	}
@@ -1558,8 +1623,9 @@ func TestDecoderSurgeBudget_P226_RatioBalanced(t *testing.T) {
 	// projects 1+0+1 = 2 > budget 1 → must DENY. This is what keeps the
 	// decoder peak at 5 and not 6. (If the decoder were wrongly clamped to
 	// peak 4, the first-surge assertion above would already have failed.)
-	isvc = mkPDGroupSurge(v1beta1.CoordinationPacingRatioBalanced, 1)
-	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.DecoderComponent, nil,
+	isvc, decInsts = mkPDGroupSurge(v1beta1.CoordinationPacingRatioBalanced, 1)
+	client = fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); allowed {
 		t.Fatalf("p226: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
 	}
@@ -1570,14 +1636,16 @@ func TestDecoderSurgeBudget_P226_RatioBalanced(t *testing.T) {
 // surges exactly once to peak 5 — governed solely by the group MaxSurge
 // budget (defaulted "25%" = 1 at N=4).
 func TestDecoderSurgeBudget_P227_PerComponent(t *testing.T) {
-	isvc := mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 0)
-	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.DecoderComponent, nil,
+	isvc, decInsts := mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 0)
+	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Fatalf("p227: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
 	}
 
-	isvc = mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 1)
-	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.DecoderComponent, nil,
+	isvc, decInsts = mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 1)
+	client = fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); allowed {
 		t.Fatalf("p227: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
 	}
@@ -1594,9 +1662,10 @@ func TestDecoderSurgeBudget_InWakeUpDeltaGatesSecondSurge(t *testing.T) {
 		v1beta1.CoordinationPacingRatioBalanced,
 		v1beta1.CoordinationPacingPerComponent,
 	} {
-		isvc := mkPDGroupSurge(pt, 0)
+		isvc, decInsts := mkPDGroupSurge(pt, 0)
+		client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
 		// inFlightSurge=1 → CheckSurge projects 0+1+1 = 2 > budget 1.
-		if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.DecoderComponent, nil,
+		if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 			workloadtypes.UpdateStrategySurgeThenDrain, 1, 0); allowed {
 			t.Errorf("pacing=%s: a second decoder surge in one wake-up (inFlightSurge=1, budget=1) must be denied; got allowed (reason=%s)", pt, reason)
 		}
@@ -1614,7 +1683,23 @@ func TestDecoderSurgeBudget_InWakeUpDeltaGatesSecondSurge(t *testing.T) {
 // surge gang lingers serving alongside the source, so the gate genuinely
 // observes the peak. The gate must treat that peak as the transient surge
 // headroom it is — NOT durable serving capacity a drain may eat into.
-func mkGangSurgeFixture() *v1beta1.InferenceService {
+func mkGangSurgeFixture() (*v1beta1.InferenceService, []v1beta1.OMENativeInstanceStatus) {
+	engineInstances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
+			PodCount: 2, ServingPodCount: 2,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
+				SurgeIndex: int32Ptr(2)}},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 2, ServingPodCount: 2},
+		// Surge-target gang: full pod set, all serving →
+		// counted in ServingReplicas (the N+1 peak).
+		{Index: 2, Phase: v1beta1.OMENativeInstanceCreating,
+			PodCount: 2, ServingPodCount: 2,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationUpdate,
+				Step: workloadtypes.UpdateStepGangSurgeTarget}},
+	}
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
 			Rollout: &v1beta1.RolloutSpec{
@@ -1631,22 +1716,6 @@ func mkGangSurgeFixture() *v1beta1.InferenceService {
 					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        2,
 						ServingReplicas: 3, // N=2 source + 1 surge gang = peak
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
-								PodCount: 2, ServingPodCount: 2,
-								Operation: &v1beta1.InstanceOperation{
-									Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
-									SurgeIndex: int32Ptr(2)}},
-							{Index: 1, Phase: v1beta1.OMENativeInstanceReady,
-								PodCount: 2, ServingPodCount: 2},
-							// Surge-target gang: full pod set, all serving →
-							// counted in ServingReplicas (the N+1 peak).
-							{Index: 2, Phase: v1beta1.OMENativeInstanceCreating,
-								PodCount: 2, ServingPodCount: 2,
-								Operation: &v1beta1.InstanceOperation{
-									Type: v1beta1.InstanceOperationUpdate,
-									Step: workloadtypes.UpdateStepGangSurgeTarget}},
-						},
 					},
 				},
 				v1beta1.DecoderComponent: {
@@ -1669,7 +1738,7 @@ func mkGangSurgeFixture() *v1beta1.InferenceService {
 				}},
 			},
 		},
-	}
+	}, engineInstances
 }
 
 // TestCheckRatioGate_GangSurgePeakDoesNotAuthorizeDrain reproduces the
@@ -1686,8 +1755,8 @@ func mkGangSurgeFixture() *v1beta1.InferenceService {
 // projects 1:2 (out of band) → DENIED. Single-pod is unaffected: it has no
 // GangSurgeTarget Instance, so nothing is netted.
 func TestCheckRatioGate_GangSurgePeakDoesNotAuthorizeDrain(t *testing.T) {
-	isvc := mkGangSurgeFixture()
-	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
+	isvc, engInsts := mkGangSurgeFixture()
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0, engInsts...)
 	if allowed {
 		t.Fatalf("a drain on an engine whose serving is inflated by an in-flight "+
 			"gang surge (peak 3 over steady 2) must be DENIED — once the surge "+
@@ -1720,7 +1789,24 @@ func TestUnavailableInFlight_GangSurgeTargetNotCountedUnavailable(t *testing.T) 
 // still carries its GangSurgeTarget marker — it isn't promoted/removed until a
 // later reconcile. Decoder is at steady N=2. This is the post-drain / pre-
 // promote window where there is NO peak left to net out.
-func mkGangSurgeDrainedFixture() *v1beta1.InferenceService {
+func mkGangSurgeDrainedFixture() (*v1beta1.InferenceService, []v1beta1.OMENativeInstanceStatus) {
+	engineInstances := []v1beta1.OMENativeInstanceStatus{
+		// Source: drained from serving (0/2), delete pending.
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
+			PodCount: 2, ServingPodCount: 0,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
+				SurgeIndex: int32Ptr(2)}},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 2, ServingPodCount: 2},
+		// Surge target still serving + still marked, but its
+		// source has drained → it IS the steady serving slot.
+		{Index: 2, Phase: v1beta1.OMENativeInstanceCreating,
+			PodCount: 2, ServingPodCount: 2,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationUpdate,
+				Step: workloadtypes.UpdateStepGangSurgeTarget}},
+	}
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
 			Rollout: &v1beta1.RolloutSpec{
@@ -1737,23 +1823,6 @@ func mkGangSurgeDrainedFixture() *v1beta1.InferenceService {
 					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        2,
 						ServingReplicas: 2, // source drained → steady N, NOT a peak
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							// Source: drained from serving (0/2), delete pending.
-							{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
-								PodCount: 2, ServingPodCount: 0,
-								Operation: &v1beta1.InstanceOperation{
-									Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
-									SurgeIndex: int32Ptr(2)}},
-							{Index: 1, Phase: v1beta1.OMENativeInstanceReady,
-								PodCount: 2, ServingPodCount: 2},
-							// Surge target still serving + still marked, but its
-							// source has drained → it IS the steady serving slot.
-							{Index: 2, Phase: v1beta1.OMENativeInstanceCreating,
-								PodCount: 2, ServingPodCount: 2,
-								Operation: &v1beta1.InstanceOperation{
-									Type: v1beta1.InstanceOperationUpdate,
-									Step: workloadtypes.UpdateStepGangSurgeTarget}},
-						},
 					},
 				},
 				v1beta1.DecoderComponent: {
@@ -1776,7 +1845,7 @@ func mkGangSurgeDrainedFixture() *v1beta1.InferenceService {
 				}},
 			},
 		},
-	}
+	}, engineInstances
 }
 
 // TestCheckRatioGate_DrainedGangSurgeNotANetTrough is the follow-up to #528.
@@ -1801,12 +1870,15 @@ func mkGangSurgeDrainedFixture() *v1beta1.InferenceService {
 // longer serving, so nothing is netted, engine reads the steady 2, and the
 // decoder drain projects 2:1 (out of band) → DENIED.
 func TestCheckRatioGate_DrainedGangSurgeNotANetTrough(t *testing.T) {
-	isvc := mkGangSurgeDrainedFixture()
-	if got := servingSurgePeakInFlight(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses); got != 0 {
+	isvc, engInsts := mkGangSurgeDrainedFixture()
+	if got := servingSurgePeakInFlight(engInsts); got != 0 {
 		t.Fatalf("once the surge source is drained the target is the steady "+
 			"serving slot, not a peak: want servingSurgePeakInFlight=0, got %d", got)
 	}
-	allowed, reason := CheckRatioGate(isvc, v1beta1.DecoderComponent, 0)
+	// The gang-surge instance detail lives on the engine IR; overlay it there
+	// (not the queried decoder) so the gate nets engine's serving correctly.
+	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.EngineComponent: engInsts})
+	allowed, reason := ResolveGateContext(context.Background(), client, isvc, v1beta1.DecoderComponent).CheckRatio(0, -1)
 	if allowed {
 		t.Fatalf("a decoder drain against an engine at its STEADY N=2 (surge "+
 			"source already drained) projects 2:1 (ratio 2.0 vs 1:1 anchor, "+
@@ -1823,14 +1895,17 @@ func TestCheckRatioGate_DrainedGangSurgeNotANetTrough(t *testing.T) {
 // the GateContext-aware methods via EvaluateUpdateGate); these helpers
 // keep the per-gate band-math coverage by delegating to the same
 // GateContext methods the wrappers did.
-func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (bool, string) {
-	return ResolveGateContext(isvc, component).CheckRatio(inFlightDelta, -1)
+func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32, insts ...v1beta1.OMENativeInstanceStatus) (bool, string) {
+	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{component: insts})
+	return ResolveGateContext(context.Background(), client, isvc, component).CheckRatio(inFlightDelta, -1)
 }
 
-func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (bool, string) {
-	return ResolveGateContext(isvc, component).CheckUnavailability(inFlightDelta)
+func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32, insts ...v1beta1.OMENativeInstanceStatus) (bool, string) {
+	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{component: insts})
+	return ResolveGateContext(context.Background(), client, isvc, component).CheckUnavailability(inFlightDelta)
 }
 
-func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (bool, string) {
-	return ResolveGateContext(isvc, component).CheckSurge(inFlightDelta)
+func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32, insts ...v1beta1.OMENativeInstanceStatus) (bool, string) {
+	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{component: insts})
+	return ResolveGateContext(context.Background(), client, isvc, component).CheckSurge(inFlightDelta)
 }

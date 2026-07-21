@@ -368,24 +368,25 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 			},
 		},
 	}
-	// Seed Components[c].Lifecycle.UpdateRevision so latestRevisionHash
+	// Create IR objects with UpdateRevision so latestRevisionHash
 	// recovers the per-Component hash (matches the steady-state shape
-	// AggregateIRStatus writes after the IR controller commits Status).
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				UpdateRevision: isvc.Name + "-engine-engineHash",
-			},
+	// the IR controller commits to Status).
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-engine", Namespace: isvc.Namespace},
+		Status: v1beta1.InferenceReplicaStatus{
+			UpdateRevision: isvc.Name + "-engine-engineHash",
 		},
-		v1beta1.DecoderComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				UpdateRevision: isvc.Name + "-decoder-decoderHash",
-			},
+	}
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-decoder", Namespace: isvc.Namespace},
+		Status: v1beta1.InferenceReplicaStatus{
+			UpdateRevision: isvc.Name + "-decoder-decoderHash",
 		},
-		v1beta1.RouterComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				UpdateRevision: isvc.Name + "-router-routerHash",
-			},
+	}
+	routerIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-router", Namespace: isvc.Namespace},
+		Status: v1beta1.InferenceReplicaStatus{
+			UpdateRevision: isvc.Name + "-router-routerHash",
 		},
 	}
 	pods := []runtime.Object{
@@ -393,7 +394,7 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 		buildPod(isvc, v1beta1.DecoderComponent, "decoderHash", 0),
 		buildPod(isvc, v1beta1.RouterComponent, "routerHash", 0),
 	}
-	c := testClient(pods...)
+	c := testClient(append(pods, engineIR, decoderIR, routerIR)...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
 	}); err != nil {
@@ -432,10 +433,21 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 // the change as cosmetic and skips the write.
 func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 	isvc := testOMENativeISVC()
-	pods := []runtime.Object{
-		buildPod(isvc, v1beta1.EngineComponent, "engineHash", 0),
+	pod := buildPod(isvc, v1beta1.EngineComponent, "engineHash", 0)
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-engine", Namespace: isvc.Namespace},
+		Status:     v1beta1.InferenceReplicaStatus{
+			// First pass: UpdateRevision empty (IR not yet reconciled).
+		},
 	}
-	c := testClient(pods...)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(pod, engineIR).WithStatusSubresource(&v1beta1.InferenceReplica{}).Build()
 
 	// First reconcile: UpdateRevision empty → LatestRevision=false.
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
@@ -451,12 +463,17 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 		t.Fatalf("first pass: LatestRevision should be false when UpdateRevision is empty: %+v", cs1.Traffic[0])
 	}
 
-	// Mirror AggregateIRStatus committing the IR-observed
-	// UpdateRevision back onto the in-memory ISVC.
-	cs1.Lifecycle = &v1beta1.LifecycleStatus{
-		UpdateRevision: isvc.Name + "-engine-engineHash",
+	// Mirror the IR controller committing UpdateRevision to IR status.
+	ir := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: isvc.Namespace, Name: isvc.Name + "-engine",
+	}, ir); err != nil {
+		t.Fatalf("get IR: %v", err)
 	}
-	isvc.Status.Components[v1beta1.EngineComponent] = cs1
+	ir.Status.UpdateRevision = isvc.Name + "-engine-engineHash"
+	if err := c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("update IR status: %v", err)
+	}
 
 	// Second reconcile: same pod set, but UpdateRevision is now
 	// observed — LatestRevision must flip to true on the next write.
@@ -749,27 +766,11 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 
 // --- buildComponentObservation per-Instance failure rollup ---
 
-// withInstanceStatus builds an ISVC carrying the given InstanceStatus
-// view on Components.<c>.OMENative. Used by the propagation tests.
-func withInstanceStatus(c v1beta1.ComponentType, instances []v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceService {
-	return &v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				c: {Lifecycle: &v1beta1.LifecycleStatus{
-					InstanceStatuses: instances,
-				}},
-			},
-		},
-	}
-}
-
 func TestBuildComponentObservation_NoStatusReturnsZero(t *testing.T) {
-	// No status block populated for the Component — observation must
+	// No IR status available (nil summary) — observation must
 	// report zero values, NOT Failed (otherwise a brand-new ISVC would
 	// flip the group to Failed).
-	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"}}
-	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation("isvc-test", nil, v1beta1.EngineComponent, nil)
 	if obs.Failed {
 		t.Errorf("missing status must not report Failed; got %+v", obs)
 	}
@@ -782,11 +783,13 @@ func TestBuildComponentObservation_NoFailedInstancesIsNotFailed(t *testing.T) {
 	// All Instances Ready/Updating/etc., none Failed — observation
 	// reports Failed=false. Pins that the rollup only fires on the
 	// explicit Failed phase, not on transient states.
-	isvc := withInstanceStatus(v1beta1.EngineComponent, []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
-		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
-	})
-	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	summary := &v1beta1.InferenceReplicaStatus{
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
+		},
+	}
+	obs := buildComponentObservation("isvc-test", summary, v1beta1.EngineComponent, nil)
 	if obs.Failed {
 		t.Errorf("no Failed Instances should not flip Failed; got %+v", obs)
 	}
@@ -796,11 +799,13 @@ func TestBuildComponentObservation_AnyFailedInstanceMarksComponentFailed(t *test
 	// One Instance in Phase=Failed — the rollup must mark the
 	// Component Failed so the BlueGreen / Sequential / RollingUpdate
 	// state machines transition the group to Failed.
-	isvc := withInstanceStatus(v1beta1.EngineComponent, []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
-		{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
-	})
-	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	summary := &v1beta1.InferenceReplicaStatus{
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
+		},
+	}
+	obs := buildComponentObservation("isvc-test", summary, v1beta1.EngineComponent, nil)
 	if !obs.Failed {
 		t.Errorf("any Failed Instance must mark Component Failed; got %+v", obs)
 	}
@@ -814,17 +819,44 @@ func TestBuildComponentObservation_AnyFailedInstanceMarksComponentFailed(t *test
 
 func TestBuildComponentObservation_MultipleFailedInstancesListedInMessage(t *testing.T) {
 	// Two Instances in Phase=Failed — message names both.
-	isvc := withInstanceStatus(v1beta1.EngineComponent, []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
-		{Index: 2, Phase: v1beta1.OMENativeInstanceFailed},
-		{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
-	})
-	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	summary := &v1beta1.InferenceReplicaStatus{
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
+			{Index: 2, Phase: v1beta1.OMENativeInstanceFailed},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
+		},
+	}
+	obs := buildComponentObservation("isvc-test", summary, v1beta1.EngineComponent, nil)
 	if !obs.Failed {
 		t.Errorf("two Failed Instances must mark Component Failed; got %+v", obs)
 	}
 	if !contains(obs.FailureMessage, "0") || !contains(obs.FailureMessage, "2") {
 		t.Errorf("FailureMessage should name both failed indices (0, 2); got %q", obs.FailureMessage)
+	}
+}
+
+func TestBuildComponentObservation_IRSourceMatchesLegacyCopy(t *testing.T) {
+	// TDD: ensure the IR-sourced buildComponentObservation produces
+	// identical ComponentObservation values to the legacy ISVC-copy
+	// path, so swapping data sources is behavior-preserving.
+	irStatus := &v1beta1.InferenceReplicaStatus{
+		Replicas: 4, ReadyReplicas: 3, ServingReplicas: 3,
+		UpdatedReplicas: 2, UpdatedReadyReplicas: 2,
+		CurrentRevision: "svc-engine-aaaa", UpdateRevision: "svc-engine-bbbb",
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
+		},
+	}
+	perRev := map[string]int32{"aaaa": 2, "bbbb": 2}
+	got := buildComponentObservation("svc", irStatus, v1beta1.EngineComponent, perRev)
+	if got.DesiredReplicas != 4 || got.ReadyPods != 3 || got.ServingPods != 3 ||
+		got.NewRevisionPods != 2 || got.NewRevisionReadyPods != 2 ||
+		got.TotalPods != 4 || !got.RolloutInFlight || !got.Failed {
+		t.Fatalf("IR-sourced observation diverged from legacy copy semantics: %+v", got)
+	}
+	if got.CurrentRevisionHash != "aaaa" || got.TargetRevisionHash != "bbbb" {
+		t.Fatalf("revision hashes diverged: %+v", got)
 	}
 }
 
@@ -838,23 +870,26 @@ func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T
 		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 	}
 	isvc := &v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-						{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
-					},
-				}},
-				v1beta1.DecoderComponent: {Lifecycle: &v1beta1.LifecycleStatus{
-					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-						{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
-					},
-				}},
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test", Namespace: "default"},
+	}
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test-engine", Namespace: "default"},
+		Status: v1beta1.InferenceReplicaStatus{
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+				{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
 			},
 		},
 	}
-	obs := buildGroupObservation(isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test-decoder", Namespace: "default"},
+		Status: v1beta1.InferenceReplicaStatus{
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+				{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+			},
+		},
+	}
+	c := testClient(engineIR, decoderIR)
+	obs := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseFailed {
 		t.Errorf("BlueGreen with any Failed Component must report Failed; got %q", tr.Phase)
@@ -910,32 +945,31 @@ func TestBuildRatioState_DefersSnapshotWhenStatusEmpty(t *testing.T) {
 		},
 	}
 
-	// Status not yet populated — DesiredReplicas==0 for both Components.
+	// IR status not yet available — DesiredReplicas==0 for both Components.
 	// buildComponentObservation returns zero-valued observations when
-	// cs.OMENative is missing.
-	isvcEmpty := &v1beta1.InferenceService{}
-	obsEmpty := buildGroupObservation(isvcEmpty, g, map[v1beta1.ComponentType]map[string]int32{})
+	// IR summary is nil.
+	isvcEmpty := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"}}
+	emptyClient := testClient()
+	obsEmpty := buildGroupObservation(context.Background(), emptyClient, isvcEmpty, g, map[v1beta1.ComponentType]map[string]int32{})
 	stateEmpty := buildRatioState(isvcEmpty, g, obsEmpty, map[v1beta1.ComponentType]map[string]int32{})
 
 	if len(stateEmpty.Original) != 0 {
 		t.Fatalf("empty status MUST defer snapshot to avoid the SnapshotOriginal zero-clamp anchoring Original to {1, 1}; got Original=%v", stateEmpty.Original)
 	}
 
-	// Once status carries real Replicas counts, the snapshot should
+	// Once IR status carries real Replicas counts, the snapshot should
 	// reflect the cluster shape verbatim.
-	isvcPopulated := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4},
-				},
-				v1beta1.DecoderComponent: {
-					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 2},
-				},
-			},
-		},
+	isvcPopulated := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"}}
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 4},
 	}
-	obsPopulated := buildGroupObservation(isvcPopulated, g, map[v1beta1.ComponentType]map[string]int32{})
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-decoder", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	popClient := testClient(engineIR, decoderIR)
+	obsPopulated := buildGroupObservation(context.Background(), popClient, isvcPopulated, g, map[v1beta1.ComponentType]map[string]int32{})
 	statePopulated := buildRatioState(isvcPopulated, g, obsPopulated, map[v1beta1.ComponentType]map[string]int32{})
 
 	if statePopulated.Original[v1beta1.EngineComponent] != 4 {
@@ -961,17 +995,14 @@ func TestBuildRatioState_PartiallyPopulatedStatusDefersSnapshot(t *testing.T) {
 			Type: v1beta1.CoordinationPacingRatioBalanced,
 		},
 	}
-	// Engine populated; decoder not yet.
-	isvc := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4},
-				},
-			},
-		},
+	// Engine IR populated; decoder IR not yet.
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"}}
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 4},
 	}
-	obs := buildGroupObservation(isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	c := testClient(engineIR)
+	obs := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
 	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
 	if len(state.Original) != 0 {
 		t.Fatalf("partially populated status MUST defer snapshot; got Original=%v", state.Original)
@@ -992,19 +1023,12 @@ func TestBuildRatioState_PreservesAlreadyRecordedAnchor(t *testing.T) {
 			Type: v1beta1.CoordinationPacingRatioBalanced,
 		},
 	}
-	// Status: scaled DOWN to 2 engine + 1 decoder mid-rollout.
+	// IR status: scaled DOWN to 2 engine + 1 decoder mid-rollout.
 	// ObservedRatio.Original captured at rollout start = 4:2 (the
 	// anchor we want to preserve, NOT the current shape).
 	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"},
 		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 2},
-				},
-				v1beta1.DecoderComponent: {
-					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 1},
-				},
-			},
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
 				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
 					Name: "0",
@@ -1018,7 +1042,16 @@ func TestBuildRatioState_PreservesAlreadyRecordedAnchor(t *testing.T) {
 			},
 		},
 	}
-	obs := buildGroupObservation(isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-decoder", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 1},
+	}
+	c := testClient(engineIR, decoderIR)
+	obs := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
 	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
 	if state.Original[v1beta1.EngineComponent] != 4 {
 		t.Errorf("anchor preservation: engine Original got %d want 4 (the snapshot from rollout start, NOT the current 2)", state.Original[v1beta1.EngineComponent])

@@ -70,8 +70,9 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pf1")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "pf1", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"instance %d must be Ready at baseline", s.Index)
 				initialInc[s.Index] = s.Incarnation
@@ -95,10 +96,11 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pf1")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
+			insts := instanceStatuses(g, ns.Name, "pf1", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
 			byIdx := map[int32]int64{}
 			phases := map[int32]v1beta1.OMENativeInstancePhase{}
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			for _, s := range insts {
 				byIdx[s.Index] = s.Incarnation
 				phases[s.Index] = s.Phase
 			}
@@ -131,9 +133,10 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pf2")
 			cs := c.Status.Components[v1beta1.EngineComponent]
+			insts := instanceStatuses(g, ns.Name, "pf2", v1beta1.EngineComponent)
 			g.Expect(cs.Lifecycle).NotTo(BeNil(), "engine OMENative status must populate before delete")
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				initialInc[s.Index] = s.Incarnation
 			}
@@ -153,8 +156,9 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pf2")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "pf2", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"PF-2: instance %d must converge back to Ready after Restart", s.Index)
 				g.Expect(s.Incarnation).To(BeNumerically(">", initialInc[s.Index]),
@@ -186,8 +190,9 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pf3")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "pf3", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				initialInc[s.Index] = s.Incarnation
 			}
@@ -216,8 +221,9 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pf3")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "pf3", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"PF-3: instance %d must converge back to Ready via Create pass", s.Index)
 				g.Expect(s.Incarnation).To(Equal(initialInc[s.Index]),

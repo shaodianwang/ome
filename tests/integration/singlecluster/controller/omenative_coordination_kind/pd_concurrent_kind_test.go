@@ -46,8 +46,9 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated concurrent ops (KIND)", gink
 			for _, comp := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
 				cs := c.Status.Components[comp]
 				g.Expect(cs.Lifecycle).NotTo(BeNil())
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				insts := instanceStatuses(g, ns.Name, "pda1-isvc", comp)
+				g.Expect(insts).To(HaveLen(1))
+				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
 			engPod, decPod := &corev1.Pod{}, &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -68,12 +69,12 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated concurrent ops (KIND)", gink
 
 		ginkgo.By("both Engine and Decoder converge to a non-zero index (each migrated off its source)")
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pda1-isvc")
+			_ = freshISVC(g, ns.Name, "pda1-isvc")
 			for _, comp := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
-				cs := c.Status.Components[comp]
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Index).NotTo(Equal(int32(0)),
+				insts := instanceStatuses(g, ns.Name, "pda1-isvc", comp)
+				g.Expect(insts).To(HaveLen(1))
+				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(insts[0].Index).NotTo(Equal(int32(0)),
 					"%s must have migrated off index 0", comp)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -116,10 +117,12 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated concurrent ops (KIND)", gink
 			for _, comp := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
 				cs := c.Status.Components[comp]
 				g.Expect(cs.Lifecycle).NotTo(BeNil())
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				insts := instanceStatuses(g, ns.Name, "pda2-isvc", comp)
+				g.Expect(insts).To(HaveLen(1))
+				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
-			initialEngInc = c.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Incarnation
+			engInsts := instanceStatuses(g, ns.Name, "pda2-isvc", v1beta1.EngineComponent)
+			initialEngInc = engInsts[0].Incarnation
 			decPod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "pda2-isvc-decoder-0-default-0",
@@ -137,19 +140,19 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated concurrent ops (KIND)", gink
 
 		ginkgo.By("Decoder migrates (Index 0 → other); Engine restarts in place (Incarnation bumps)")
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pda2-isvc")
-			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(decCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Index).NotTo(Equal(int32(0)),
+			_ = freshISVC(g, ns.Name, "pda2-isvc")
+			decInsts := instanceStatuses(g, ns.Name, "pda2-isvc", v1beta1.DecoderComponent)
+			g.Expect(decInsts).To(HaveLen(1))
+			g.Expect(decInsts[0].Index).NotTo(Equal(int32(0)),
 				"Decoder must have migrated off index 0")
-			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(decInsts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
-			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Index).To(Equal(int32(0)),
+			engInsts := instanceStatuses(g, ns.Name, "pda2-isvc", v1beta1.EngineComponent)
+			g.Expect(engInsts).To(HaveLen(1))
+			g.Expect(engInsts[0].Index).To(Equal(int32(0)),
 				"Engine must stay at index 0 (restart preserves Index)")
-			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Incarnation).To(BeNumerically(">", initialEngInc),
+			g.Expect(engInsts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(engInsts[0].Incarnation).To(BeNumerically(">", initialEngInc),
 				"Engine must have bumped Incarnation through Restart")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

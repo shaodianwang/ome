@@ -72,6 +72,15 @@ func freshInferenceReplica(g gomega.Gomega, namespace, isvcName string, componen
 	return out
 }
 
+// instanceStatuses returns the authoritative per-instance statuses for one
+// ISVC Component, read from its InferenceReplica. Per-instance detail is the
+// IR's source-of-truth and is no longer mirrored onto the ISVC's Lifecycle
+// summary, so specs read it here instead of cs.Lifecycle.InstanceStatuses.
+// Fails g (retryable inside Eventually) when the IR isn't present yet.
+func instanceStatuses(g gomega.Gomega, namespace, isvcName string, component v1beta1.ComponentType) []v1beta1.OMENativeInstanceStatus {
+	return freshInferenceReplica(g, namespace, isvcName, component).Status.InstanceStatuses
+}
+
 // trafficForComponent returns the per-Component Traffic[] from the
 // ISVC's component status, or nil when the entry is missing.
 func trafficForComponent(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []v1beta1.ComponentTrafficTarget {

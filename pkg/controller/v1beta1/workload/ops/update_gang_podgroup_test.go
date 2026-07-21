@@ -61,7 +61,7 @@ func gangSchedClient(t *testing.T, initObjs ...client.Object) client.Client {
 // exists. The fix ensures the PodGroup inline before the create.
 func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := surgeISVCReady("p304", "prod", 1)
+	isvc, _ := surgeISVCReady("p304", "prod", 1)
 	plan := gangSurgePlan()
 	plan.TopologyKey = "network.example.com/fabric-domain"
 
@@ -70,10 +70,10 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 
 	// In-flight gang surge, BEFORE the surge pods are created: the source
 	// (idx=0) carries Op{Surge, SurgeIndex=1}; idx=1 carries the
-	// GangSurgeTarget marker.
-	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
+	// GangSurgeTarget marker (on IR).
+	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
 
-	c := gangSchedClient(t, isvc)
+	c := gangSchedClient(t, isvc, ir)
 	makeCR(t, c, isvc, v2Name)
 	// Source gang still alive at idx=0 (capacity holds during the surge).
 	for _, runner := range []string{"leader", "worker"} {
@@ -147,14 +147,14 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 // passed on 2026-06-08 and broke 2026-06-22).
 func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc := surgeISVCReady("p72", "prod", 1)
+	isvc, _ := surgeISVCReady("p72", "prod", 1)
 	plan := gangSurgePlan()
 
 	v1Name := "p72-engine-rev-v1hash"
 	v2Name := "p72-engine-rev-v2hash"
-	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
+	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
 
-	c := gangSchedClient(t, isvc)
+	c := gangSchedClient(t, isvc, ir)
 	makeCR(t, c, isvc, v1Name)
 	makeCR(t, c, isvc, v2Name)
 	v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)

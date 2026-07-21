@@ -57,9 +57,10 @@ var _ = ginkgo.Describe("behavior — concurrent ISVCs in same namespace", ginkg
 				c := freshISVC(g, ns.Name, isvcName)
 				cs := c.Status.Components[v1beta1.EngineComponent]
 				g.Expect(cs.Lifecycle).NotTo(BeNil(), "ISVC %s missing OMENative status", isvcName)
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
+				insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+				g.Expect(insts).To(HaveLen(1),
 					"ISVC %s must produce exactly one engine Instance", isvcName)
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
+				g.Expect(insts[0].Phase).
 					To(Equal(v1beta1.OMENativeInstanceReady),
 						"ISVC %s engine Instance must reach Ready", isvcName)
 			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

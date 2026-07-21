@@ -83,13 +83,16 @@ func workerWithAdmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch
 	derived.Namespace = "prod"
 	derived.Name = "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	// The reconcile reads admission from the authoritative IR on the worker
+	// cluster, so seed it alongside the derived ISVC.
+	engineIR := irWithInstances(v1beta1.EngineComponent, true)
 	w := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived).Build()
+		WithObjects(derived, engineIR).Build()
 	// Ensure the admitted status is stored (if the builder didn't persist it).
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
-	if !AnyInstanceAdmitted(cur) {
+	if len(cur.Status.Components) == 0 {
 		cur.Status = derived.Status
 		require.NoError(t, w.Status().Update(context.Background(), cur))
 	}
@@ -129,11 +132,12 @@ func workerWithAdmittedURL(t *testing.T, s *runtime.Scheme, host string) client.
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
+	engineIR := irWithInstances(v1beta1.EngineComponent, true)
 	w := fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
-	if cur.Status.URL == nil || !AnyInstanceAdmitted(cur) {
+	if cur.Status.URL == nil {
 		cur.Status = derived.Status
 		require.NoError(t, w.Status().Update(context.Background(), cur))
 	}
@@ -305,9 +309,12 @@ func TestReconcile_WinnerFailedSurfacesFailed(t *testing.T) {
 	derivedFailed.Namespace = "prod"
 	derivedFailed.Name = "svc"
 	derivedFailed.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	// The reconcile reads the Failed phase from the authoritative IR on the
+	// worker cluster; seed it alongside the derived ISVC.
+	failedIR := irWithPhases(v1beta1.EngineComponent, v1beta1.OMENativeInstanceFailed)
 	wb := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derivedFailed).Build()
+		WithObjects(derivedFailed, failedIR).Build()
 	// Ensure the failed status is persisted.
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, wb.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
@@ -581,11 +588,12 @@ func TestReconcile_EndpointPreservedOnFailed(t *testing.T) {
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: "svc.prod.b.example"}
+	failedIR := irWithPhases(v1beta1.EngineComponent, v1beta1.OMENativeInstanceFailed)
 	wb := fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, failedIR).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, wb.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
-	if cur.Status.URL == nil || !IsTerminallyFailed(cur) {
+	if cur.Status.URL == nil {
 		cur.Status = derived.Status
 		require.NoError(t, wb.Status().Update(context.Background(), cur))
 	}

@@ -100,8 +100,9 @@ var _ = ginkgo.Describe("concurrent gang surge — distinct index per gang", gin
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(replicas)))
-			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(replicas))
-			for _, s := range engCS.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"engine instance %d must be Ready at v1", s.Index)
 			}
@@ -175,11 +176,12 @@ var _ = ginkgo.Describe("concurrent gang surge — distinct index per gang", gin
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
-			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(replicas),
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas),
 				"fleet must reconverge to exactly %d gang Instances (not collapse)", replicas)
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(replicas)),
 				"engine must return to %d serving Instances on v2", replicas)
-			for _, s := range engCS.Lifecycle.InstanceStatuses {
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"engine instance %d must be Ready on v2; got %q", s.Index, s.Phase)
 			}

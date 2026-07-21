@@ -42,8 +42,9 @@ var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "int5")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "int5", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Bump an env var 5 times with no delay between writes. Each

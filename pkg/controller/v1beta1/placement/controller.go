@@ -233,7 +233,24 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		case winnerDerivedPresent:
 			// Recovered (or never lost): drop any pending grace marker.
 			r.clearGrace(isvc.UID)
-			if IsTerminallyFailed(derived) {
+			cl, ok := r.Clusters.ClientFor(winner)
+			if !ok {
+				// Winner disconnected between the derived GET and now; hold
+				// rather than judge its state on partial data (consistent with
+				// the winnerDisconnected handling above).
+				r.Log.Info("sticky winner: cluster client unavailable; holding placement", "cluster", winner, "isvc", isvc.Namespace+"/"+isvc.Name)
+				return ctrl.Result{RequeueAfter: r.requeue()}, nil
+			}
+			// Read the authoritative per-component IR status from the winner
+			// cluster (source of truth; the derived ISVC no longer mirrors it).
+			statuses, err := componentIRStatuses(ctx, cl, derived)
+			if err != nil {
+				// A transient IR read error must not be misread as terminal
+				// failure; hold and retry next poll.
+				r.Log.Error(err, "sticky winner: reading IR statuses failed; holding placement", "cluster", winner, "isvc", isvc.Namespace+"/"+isvc.Name)
+				return ctrl.Result{RequeueAfter: r.requeue()}, nil
+			}
+			if IsTerminallyFailed(derived, statuses) {
 				// The placement itself failed; surface it and stop. Do NOT
 				// re-place into a hot fail-loop — needs human/spec action.
 				u := endpointFor(derived)
@@ -248,10 +265,9 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			}
 			// Re-apply on the winner and sweep any stray derived on the other
 			// candidates (origin-guarded, so a same-named user ISVC is safe).
-			if cl, ok := r.Clusters.ClientFor(winner); ok {
-				if err := r.placeOnBounded(ctx, cl, isvc); err != nil {
-					return ctrl.Result{}, err
-				}
+			// cl was resolved above.
+			if err := r.placeOnBounded(ctx, cl, isvc); err != nil {
+				return ctrl.Result{}, err
 			}
 			r.deleteLosers(ctx, isvc, candidates, winner)
 			return r.writePlacement(ctx, isvc, placedResult(winner, derived, isvc))
@@ -402,7 +418,20 @@ func (r *Reconciler) findWinner(ctx context.Context, isvc *v1beta1.InferenceServ
 		if err != nil {
 			return "", err
 		}
-		if ok && AllComponentsAdmitted(derived) {
+		if !ok {
+			continue
+		}
+		cl, ok := r.Clusters.ClientFor(c)
+		if !ok {
+			continue
+		}
+		// Read the authoritative per-component IR status from candidate cluster
+		// c (source of truth; the derived ISVC no longer mirrors it).
+		statuses, err := componentIRStatuses(ctx, cl, derived)
+		if err != nil {
+			return "", err
+		}
+		if AllComponentsAdmitted(derived, statuses) {
 			return c, nil
 		}
 	}

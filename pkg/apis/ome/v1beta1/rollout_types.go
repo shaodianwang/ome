@@ -1,9 +1,6 @@
 // Package v1beta1 — rollout types.
 //
 // spec.rollout is the single home for InferenceService rollout configuration.
-// OEP-0017 (unified rollout v2) reshapes it from two mutually-exclusive engines
-// (coordination + canary) into ONE model: an ordered list of rollout groups,
-// each polymorphic in its progression (canary | blueGreen | rollingUpdate).
 package v1beta1
 
 import (

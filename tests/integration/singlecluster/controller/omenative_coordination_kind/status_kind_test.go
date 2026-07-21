@@ -120,8 +120,9 @@ var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, fun
 			c := freshISVC(g, ns.Name, "rev-promote-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "rev-promote-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(BeEmpty(),
 				"UpdateRevision should be stamped once the target is computed")
 			g.Expect(cs.Lifecycle.CurrentRevision).To(Equal(cs.Lifecycle.UpdateRevision),

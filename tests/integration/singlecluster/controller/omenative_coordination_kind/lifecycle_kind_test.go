@@ -151,8 +151,9 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			c := freshISVC(g, ns.Name, "scaleup-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "scaleup-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -212,9 +213,10 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			c := freshISVC(g, ns.Name, "race-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
+			insts := instanceStatuses(g, ns.Name, "race-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
 			seen := map[int32]bool{}
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"all 3 instances must converge to Ready; got Index=%d Phase=%q", s.Index, s.Phase)
 				seen[s.Index] = true
@@ -242,8 +244,9 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			c := freshISVC(g, ns.Name, "scaledown-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "scaledown-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"InstanceStatus[%d] should be Ready", s.Index)
 			}
@@ -289,7 +292,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			c := freshISVC(g, ns.Name, "scaledown-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
+			g.Expect(instanceStatuses(g, ns.Name, "scaledown-isvc", v1beta1.EngineComponent)).To(HaveLen(1),
 				"InstanceStatuses should converge to exactly one entry after scale-down")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
@@ -325,8 +328,9 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			c := freshISVC(g, ns.Name, "recreate-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "recreate-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(BeEmpty())
 			originalCR = cs.Lifecycle.UpdateRevision
 			originalUID = string(c.UID)
@@ -357,8 +361,9 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			newUID = string(c.UID)
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "recreate-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(BeEmpty())
 			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(Equal(originalCR),
 				"new ISVC must NOT adopt the old CR (foreign UID); EnsureControllerRevision must bump CollisionCount. Old=%s New=%s",

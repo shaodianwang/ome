@@ -1,6 +1,10 @@
 package coordination
 
 import (
+	"context"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
@@ -39,6 +43,15 @@ type GateContext struct {
 	// ShortReason is the operator-facing explanation when ShortCircuit
 	// is true. Empty otherwise.
 	ShortReason string
+
+	// Ctx provides the context for reading authoritative IR status. Nil
+	// when the gate should fall back to reading from ISVC.Status.Components
+	// (pre-IR-migration path or test scenarios).
+	Ctx context.Context
+
+	// Reads is the client.Reader for fetching InferenceReplica objects. Nil
+	// when Ctx is nil.
+	Reads client.Reader
 }
 
 // ResolveGateContext walks the shared prelude every Check*Gate runs:
@@ -52,12 +65,18 @@ type GateContext struct {
 // CheckUnavailability / CheckSequential calls thread through. The
 // dispatcher calls this once per per-Instance tick so the
 // ResolveGroups + MembershipFor work doesn't run 4 times per dispatch.
-func ResolveGateContext(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) GateContext {
+//
+// ctx and reads are optional (may be nil). When provided, the gate methods
+// will read authoritative InferenceReplica status; when nil, they fall back
+// to reading from isvc.Status.Components.
+func ResolveGateContext(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) GateContext {
 	if isvc == nil {
 		return GateContext{
 			Component:    component,
 			ShortCircuit: true,
 			ShortReason:  "nil ISVC",
+			Ctx:          ctx,
+			Reads:        reads,
 		}
 	}
 	groups := ResolveGroups(isvc.Spec.Rollout)
@@ -67,6 +86,8 @@ func ResolveGateContext(isvc *v1beta1.InferenceService, component v1beta1.Compon
 			Component:    component,
 			ShortCircuit: true,
 			ShortReason:  "no coordination groups",
+			Ctx:          ctx,
+			Reads:        reads,
 		}
 	}
 	group, ok := MembershipFor(groups, component)
@@ -76,11 +97,15 @@ func ResolveGateContext(isvc *v1beta1.InferenceService, component v1beta1.Compon
 			Component:    component,
 			ShortCircuit: true,
 			ShortReason:  "component not in any coord group",
+			Ctx:          ctx,
+			Reads:        reads,
 		}
 	}
 	return GateContext{
 		ISVC:      isvc,
 		Component: component,
 		Group:     group,
+		Ctx:       ctx,
+		Reads:     reads,
 	}
 }

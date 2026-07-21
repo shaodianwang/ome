@@ -256,15 +256,9 @@ func IRStatusToComponentStatus(ir *v1beta1.InferenceReplica) *v1beta1.LifecycleS
 		cc := *ir.Status.CollisionCount
 		out.CollisionCount = &cc
 	}
-	// Copy the per-Instance slice into a fresh backing array so
-	// downstream mutators on the ISVC side don't accidentally alias
-	// the IR's slice.
-	if len(ir.Status.InstanceStatuses) > 0 {
-		out.InstanceStatuses = make([]v1beta1.OMENativeInstanceStatus, len(ir.Status.InstanceStatuses))
-		for i, s := range ir.Status.InstanceStatuses {
-			out.InstanceStatuses[i] = *s.DeepCopy()
-		}
-	}
+	// Per-Instance detail is intentionally NOT projected onto the ISVC
+	// summary — the authoritative source is the IR's own status, read
+	// directly by in-cluster consumers via ComponentIRStatus.
 	// Conditions follow the same deep-copy contract.
 	if len(ir.Status.Conditions) > 0 {
 		out.Conditions = make([]metav1.Condition, len(ir.Status.Conditions))

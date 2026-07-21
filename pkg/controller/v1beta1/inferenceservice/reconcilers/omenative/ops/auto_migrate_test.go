@@ -8,7 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -17,30 +16,38 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// stuckInstanceFixture builds an ISVC whose engine Instance is stuck
-// in the given Phase with an Operation.StartedAt of now-stuckDuration.
-// Optionally writes a live pod for the Instance with the given node
-// name so the auto-trigger detector's source-node resolution succeeds.
-func stuckInstanceFixture(t *testing.T, name, ns string, phase v1beta1.OMENativeInstancePhase, stuckDuration time.Duration, withPod bool, podNode string, policy *v1beta1.MigrationPolicy) (*v1beta1.InferenceService, *corev1.Pod) {
+// stuckInstanceFixture builds an ISVC plus its engine InferenceReplica whose
+// Instance is stuck in the given Phase with an Operation.StartedAt of
+// now-stuckDuration. The per-instance detail lives on the IR (the authoritative
+// source the detector reads via ComponentIRStatus); the ISVC carries only an
+// empty aggregate Lifecycle. Optionally writes a live pod for the Instance with
+// the given node name so the auto-trigger detector's source-node resolution
+// succeeds. Callers seed both the ISVC and the returned IR into the fake client.
+func stuckInstanceFixture(t *testing.T, name, ns string, phase v1beta1.OMENativeInstancePhase, stuckDuration time.Duration, withPod bool, podNode string, policy *v1beta1.MigrationPolicy) (*v1beta1.InferenceService, *v1beta1.InferenceReplica, *corev1.Pod) {
 	t.Helper()
 	isvc := minimalISVC(name, ns, 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{MigrationPolicy: policy}
 	stuckSince := time.Now().Add(-stuckDuration)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-					{
-						Index:       0,
-						Incarnation: 1,
-						Phase:       phase,
-						Operation: &v1beta1.InstanceOperation{
-							ID:        "op-0",
-							Type:      v1beta1.InstanceOperationCreate,
-							Step:      "CreatePods",
-							StartedAt: metav1.NewTime(stuckSince),
-							Deadline:  metav1.NewTime(stuckSince.Add(30 * time.Minute)),
-						},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{}},
+	}
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      isvc.Name + "-" + string(v1beta1.EngineComponent),
+		},
+		Status: v1beta1.InferenceReplicaStatus{
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+				{
+					Index:       0,
+					Incarnation: 1,
+					Phase:       phase,
+					Operation: &v1beta1.InstanceOperation{
+						ID:        "op-0",
+						Type:      v1beta1.InstanceOperationCreate,
+						Step:      "CreatePods",
+						StartedAt: metav1.NewTime(stuckSince),
+						Deadline:  metav1.NewTime(stuckSince.Add(30 * time.Minute)),
 					},
 				},
 			},
@@ -69,7 +76,7 @@ func stuckInstanceFixture(t *testing.T, name, ns string, phase v1beta1.OMENative
 			},
 		}
 	}
-	return isvc, pod
+	return isvc, ir, pod
 }
 
 func policyWithDeadline(deadline int32, maxRetries *int32) *v1beta1.MigrationPolicy {
@@ -82,8 +89,8 @@ func policyWithDeadline(deadline int32, maxRetries *int32) *v1beta1.MigrationPol
 
 func TestDetectStuckInstancesForAutoMigration_NilPolicy_NoTrigger(t *testing.T) {
 	resetExpectations(t)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, time.Hour, true, "node-a", nil)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, time.Hour, true, "node-a", nil)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -105,8 +112,8 @@ func TestDetectStuckInstancesForAutoMigration_ModeNever_NoTrigger(t *testing.T) 
 		Mode:                    v1beta1.MigrationPolicyModeNever,
 		ProgressDeadlineSeconds: &deadline,
 	}
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, time.Hour, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, time.Hour, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -121,8 +128,8 @@ func TestDetectStuckInstancesForAutoMigration_ModeNever_NoTrigger(t *testing.T) 
 func TestDetectStuckInstancesForAutoMigration_DeadlineUnset_NoTrigger(t *testing.T) {
 	resetExpectations(t)
 	policy := &v1beta1.MigrationPolicy{Mode: v1beta1.MigrationPolicyModeAuto}
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, time.Hour, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, time.Hour, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -138,8 +145,8 @@ func TestDetectStuckInstancesForAutoMigration_PhaseUpdatingUnderDeadline_NoTrigg
 	resetExpectations(t)
 	policy := policyWithDeadline(60, nil)
 	// 5s stuck, 60s deadline → no trigger yet
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 5*time.Second, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 5*time.Second, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -154,8 +161,8 @@ func TestDetectStuckInstancesForAutoMigration_PhaseUpdatingUnderDeadline_NoTrigg
 func TestDetectStuckInstancesForAutoMigration_PhaseUpdatingOverDeadline_Triggers(t *testing.T) {
 	resetExpectations(t)
 	policy := policyWithDeadline(30, nil)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -189,8 +196,8 @@ func TestDetectStuckInstancesForAutoMigration_PhaseUpdatingOverDeadline_Triggers
 func TestDetectStuckInstancesForAutoMigration_PhaseCreatingOverDeadline_Triggers(t *testing.T) {
 	resetExpectations(t)
 	policy := policyWithDeadline(30, nil)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceCreating, 2*time.Minute, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceCreating, 2*time.Minute, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -205,10 +212,10 @@ func TestDetectStuckInstancesForAutoMigration_PhaseCreatingOverDeadline_Triggers
 func TestDetectStuckInstancesForAutoMigration_PhaseReady_NoTrigger(t *testing.T) {
 	resetExpectations(t)
 	policy := policyWithDeadline(30, nil)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceReady, time.Hour, true, "node-a", policy)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceReady, time.Hour, true, "node-a", policy)
 	// Phase=Ready has no Operation by convention; strip it to mirror prod state.
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation = nil
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	ir.Status.InstanceStatuses[0].Operation = nil
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -224,8 +231,8 @@ func TestDetectStuckInstancesForAutoMigration_NoPod_NoTrigger(t *testing.T) {
 	resetExpectations(t)
 	policy := policyWithDeadline(30, nil)
 	// withPod=false → resolveLiveSourceNode returns ""; trigger skipped.
-	isvc, _ := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, false, "", policy)
-	c := newFakeClientWithDiscovery(t, isvc)
+	isvc, ir, _ := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, false, "", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -240,10 +247,10 @@ func TestDetectStuckInstancesForAutoMigration_NoPod_NoTrigger(t *testing.T) {
 func TestDetectStuckInstancesForAutoMigration_NoOperationAnchor_NoTrigger(t *testing.T) {
 	resetExpectations(t)
 	policy := policyWithDeadline(30, nil)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
 	// Clear Operation so stuckSinceForInstance returns ok=false.
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation = nil
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	ir.Status.InstanceStatuses[0].Operation = nil
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	p := minimalParams(t, isvc, c)
 
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
@@ -259,8 +266,8 @@ func TestDetectStuckInstancesForAutoMigration_RetryCapNotReached_Triggers(t *tes
 	resetExpectations(t)
 	max := int32(3)
 	policy := policyWithDeadline(30, &max)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	// Seed 2 prior auto-migration entries (1 Failed + 1 Completed).
 	prior := &audit.Ledger{Entries: []audit.Entry{
 		{RequestUUID: "u1", Component: "engine", SourceInstance: 0, Phase: audit.PhaseFailed, Reason: AutoMigrateReason, Outcome: "fail"},
@@ -286,12 +293,12 @@ func TestDetectStuckInstancesForAutoMigration_RetryCapNotReached_Triggers(t *tes
 	}
 }
 
-func TestDetectStuckInstancesForAutoMigration_RetryCapReached_NoTriggerAndStampsCondition(t *testing.T) {
+func TestDetectStuckInstancesForAutoMigration_RetryCapReached_NoTrigger(t *testing.T) {
 	resetExpectations(t)
 	max := int32(2)
 	policy := policyWithDeadline(30, &max)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	// Seed 2 prior auto-migration entries — at the cap.
 	prior := &audit.Ledger{Entries: []audit.Entry{
 		{RequestUUID: "u1", Component: "engine", SourceInstance: 0, Phase: audit.PhaseFailed, Reason: AutoMigrateReason, Outcome: "fail"},
@@ -305,48 +312,23 @@ func TestDetectStuckInstancesForAutoMigration_RetryCapReached_NoTriggerAndStamps
 	if err := detectStuckInstancesForAutoMigration(context.Background(), p, v1beta1.EngineComponent); err != nil {
 		t.Fatalf("detect: %v", err)
 	}
+	// At the cap, no new Started entry is filed.
 	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	for _, e := range ledger.Entries {
 		if e.Phase == audit.PhaseStarted && e.Reason == AutoMigrateReason {
 			t.Fatalf("retry cap reached should NOT write a Started entry; got %+v", e)
 		}
 	}
-
-	// Phase must escalate to Failed with ProgressDeadlineExceeded condition.
-	s := findInstanceStatusForISVCTest(isvc, v1beta1.EngineComponent, 0)
-	if s == nil {
-		t.Fatalf("missing engine InstanceStatus")
-	}
-	// Re-read from the apiserver to verify the status was persisted.
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("re-read: %v", err)
-	}
-	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.Lifecycle == nil || len(cs.Lifecycle.InstanceStatuses) != 1 {
-		t.Fatalf("missing engine InstanceStatuses on re-read")
-	}
-	fs := cs.Lifecycle.InstanceStatuses[0]
-	if fs.Phase != v1beta1.OMENativeInstanceFailed {
-		t.Errorf("Phase: got %q want Failed", fs.Phase)
-	}
-	gotCond := false
-	for _, c := range fs.Conditions {
-		if c.Type == ConditionProgressDeadlineExceeded && c.Status == metav1.ConditionTrue {
-			gotCond = true
-			break
-		}
-	}
-	if !gotCond {
-		t.Errorf("ProgressDeadlineExceeded condition not found on InstanceStatus; conditions=%+v", fs.Conditions)
-	}
+	// The cap-reached path no longer stamps Failed/condition onto the ISVC copy
+	// (the IR controller owns escalating the stuck instance to Failed on the
+	// authoritative InferenceReplica; the ISVC surfaces it via aggregation).
 }
 
 func TestDetectStuckInstancesForAutoMigration_InFlightMigrationExists_NoTrigger(t *testing.T) {
 	resetExpectations(t)
 	policy := policyWithDeadline(30, nil)
-	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
-	c := newFakeClientWithDiscovery(t, isvc, pod)
+	isvc, ir, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
+	c := newFakeClientWithDiscovery(t, isvc, ir, pod)
 	// Seed an in-flight (Started, no terminal) migration for the same Instance.
 	prior := &audit.Ledger{Entries: []audit.Entry{
 		{RequestUUID: "in-flight", Component: "engine", SourceInstance: 0, Phase: audit.PhaseStarted, Reason: AutoMigrateReason, StartedAt: time.Now().UTC().Format(time.RFC3339)},

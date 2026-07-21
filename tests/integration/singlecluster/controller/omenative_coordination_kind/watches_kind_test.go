@@ -74,8 +74,9 @@ var _ = ginkgo.Describe("OMENative Loop B watches (extras)", ginkgo.Ordered, fun
 			c := freshISVC(g, ns.Name, "filter-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(BeEmpty())
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, "filter-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).NotTo(BeEmpty())
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture the ISVC UID so the adoption assertion is precise.
@@ -125,9 +126,10 @@ var _ = ginkgo.Describe("OMENative Loop B watches (extras)", ginkgo.Ordered, fun
 				c := freshISVC(g, ns.Name, name)
 				cs := c.Status.Components[v1beta1.EngineComponent]
 				g.Expect(cs.Lifecycle).NotTo(BeNil(), "ISVC %s has no OMENative status", name)
-				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-				g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(int64(1)))
+				insts := instanceStatuses(g, ns.Name, name, v1beta1.EngineComponent)
+				g.Expect(insts).To(HaveLen(1))
+				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(insts[0].Incarnation).To(Equal(int64(1)))
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -144,8 +146,9 @@ var _ = ginkgo.Describe("OMENative Loop B watches (extras)", ginkgo.Ordered, fun
 			c := freshISVC(g, ns.Name, "cross-b-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(BeEmpty())
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).To(BeNumerically(">=", int64(2)),
+			insts := instanceStatuses(g, ns.Name, "cross-b-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).NotTo(BeEmpty())
+			g.Expect(insts[0].Incarnation).To(BeNumerically(">=", int64(2)),
 				"ISVC-B should have bumped Incarnation in response to its own pod delete")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -153,8 +156,9 @@ var _ = ginkgo.Describe("OMENative Loop B watches (extras)", ginkgo.Ordered, fun
 			c := freshISVC(g, ns.Name, "cross-a-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(int64(1)),
+			insts := instanceStatuses(g, ns.Name, "cross-a-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Incarnation).To(Equal(int64(1)),
 				"ISVC-A's Incarnation must stay at 1 — its pod wasn't touched")
 		}, "3s", kindPollInterval).Should(Succeed())
 	})

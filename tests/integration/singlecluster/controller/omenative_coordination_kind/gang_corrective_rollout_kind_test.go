@@ -117,8 +117,9 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 			cur := freshISVC(g, ns.Name, name)
 			status := cur.Status.Components[v1beta1.EngineComponent]
 			g.Expect(status.Lifecycle).NotTo(BeNil())
-			g.Expect(status.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(status.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			insts := instanceStatuses(g, ns.Name, name, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(status.Lifecycle.ServingReplicas).To(Equal(int32(1)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

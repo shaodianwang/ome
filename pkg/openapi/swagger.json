@@ -348,7 +348,7 @@
       }
     },
     "v1beta1.CandidatePlacement": {
-      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate in the OEP-0018 placement race.",
+      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate in the",
       "type": "object",
       "required": [
         "cluster"
@@ -2054,7 +2054,7 @@
           "$ref": "#/definitions/v1beta1.DecoderSpec"
         },
         "deploymentMode": {
-          "description": "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — OEP-0007 native lifecycle-managed pods (also\n    handles multi-node serving when Leader/Worker are present)\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch\n\nPDDisaggregated is a SHAPE descriptor derived from engine+decoder pairing; it is not a valid dispatch backend and is rejected by the CRD enum. A component with Leader/Worker resolves to OMENative. VirtualDeployment is legacy and not supported here.",
+          "description": "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — Native lifecycle-managed pods (also\n    handles multi-node serving when Leader/Worker are present)\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch",
           "type": "string"
         },
         "engine": {
@@ -2165,7 +2165,7 @@
           "type": "string"
         },
         "placement": {
-          "description": "Placement reports OEP-0018 multi-cluster placement of this ISVC, set by the control-plane fan-out controller. Empty on workload clusters and on single-cluster deployments.",
+          "description": "Placement reports multi-cluster placement of this ISVC, set by the control-plane fan-out controller. Empty on workload clusters and on single-cluster deployments.",
           "$ref": "#/definitions/v1beta1.PlacementStatus"
         },
         "rolloutCoordination": {
@@ -2685,18 +2685,6 @@
           "description": "CurrentRevision names the ControllerRevision currently serving traffic.",
           "type": "string"
         },
-        "instanceStatuses": {
-          "description": "InstanceStatuses reports per-Instance state.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1beta1.OMENativeInstanceStatus"
-          },
-          "x-kubernetes-list-map-keys": [
-            "index"
-          ],
-          "x-kubernetes-list-type": "map"
-        },
         "labelSelector": {
           "description": "LabelSelector identifies pods of this Component for HPA-style consumers.",
           "type": "string"
@@ -3178,7 +3166,7 @@
           "format": "int32"
         },
         "admitted": {
-          "description": "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the OEP-0018 control plane to decide the fan-out race winner.",
+          "description": "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the control plane to decide the fan-out race winner.",
           "type": "boolean"
         },
         "availablePodCount": {
@@ -3287,11 +3275,11 @@
       }
     },
     "v1beta1.PlacementStatus": {
-      "description": "PlacementStatus is the OEP-0018 multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
+      "description": "PlacementStatus is the multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
       "type": "object",
       "properties": {
         "candidates": {
-          "description": "Candidates are the clusters this ISVC has been fanned out to during the OEP-0018 placement race. Populated by the control plane.",
+          "description": "Candidates are the clusters this ISVC has been fanned out to during the placement race. Populated by the control plane.",
           "type": "array",
           "items": {
             "default": {},
@@ -3307,7 +3295,7 @@
           "type": "string"
         },
         "endpoint": {
-          "description": "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster (OEP-0018 keeps OME out of the data path).",
+          "description": "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster.",
           "$ref": "#/definitions/knative.URL"
         },
         "phase": {
@@ -5348,7 +5336,7 @@
       }
     },
     "v1beta1.WorkloadCluster": {
-      "description": "WorkloadCluster registers a workload cluster OME can place workloads onto (OEP-0018) — typically a GPU cluster. Cluster-scoped: it is fleet-level infrastructure, not a namespaced workload.",
+      "description": "WorkloadCluster registers a workload cluster OME can place workloads onto typically a GPU cluster. Cluster-scoped: it is fleet-level infrastructure, not a namespaced workload.",
       "type": "object",
       "properties": {
         "apiVersion": {

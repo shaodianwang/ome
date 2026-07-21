@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,9 +46,39 @@ func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(initObjs...).
 		Build()
+}
+
+// irName is the InferenceReplica name the ops_test helpers persist per-instance
+// status on (matches irprojector.InferenceReplicaName: isvcName-component).
+func irName(isvc *v1beta1.InferenceService, component workload.ComponentType) string {
+	return isvc.Name + "-" + string(component)
+}
+
+// instanceIR builds the InferenceReplica carrying the given per-instance
+// statuses for (isvc, component). Per-instance detail is the IR's
+// source-of-truth (no longer mirrored onto the ISVC), so fixtures seed it here
+// and pass the returned IR to newFakeClient alongside the ISVC.
+func instanceIR(isvc *v1beta1.InferenceService, component workload.ComponentType, insts ...v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplica {
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Namespace: isvc.Namespace, Name: irName(isvc, component)},
+		Status:     v1beta1.InferenceReplicaStatus{InstanceStatuses: insts},
+	}
+}
+
+// instanceStatusesOnIR re-reads the InferenceReplica and returns its persisted
+// per-instance statuses, for assertions that previously read
+// isvc.Status.Components[c].Lifecycle.InstanceStatuses. Returns nil when the IR
+// does not exist.
+func instanceStatusesOnIR(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) []v1beta1.OMENativeInstanceStatus {
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: irName(isvc, component)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
+		return nil
+	}
+	return ir.Status.InstanceStatuses
 }
 
 // minimalISVC builds an ISVC with the minimum metadata Create() needs.
@@ -96,20 +127,17 @@ func testPodLabels(isvc string, component workload.ComponentType, instanceIdx in
 // fake client's Status().Update so tests can assert on the persisted
 // ISVC.Status.
 func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component workload.ComponentType) workload.ReconcileInput {
-	v1component := v1beta1.ComponentType(component)
 	var instances []workload.InstanceStatus
-	if cs, ok := isvc.Status.Components[v1component]; ok && cs.Lifecycle != nil {
-		for _, s := range cs.Lifecycle.InstanceStatuses {
-			instances = append(instances, workload.InstanceStatus{
-				Index:           s.Index,
-				Incarnation:     s.Incarnation,
-				Phase:           workload.InstancePhase(s.Phase),
-				RunningRevision: s.RunningRevision,
-				TargetRevision:  s.TargetRevision,
-				ActiveOrdinal:   s.ActiveOrdinal,
-				LastFailure:     fromV1beta1Termination(s.LastFailure),
-			})
-		}
+	for _, s := range instanceStatusesOnIR(c, isvc, component) {
+		instances = append(instances, workload.InstanceStatus{
+			Index:           s.Index,
+			Incarnation:     s.Incarnation,
+			Phase:           workload.InstancePhase(s.Phase),
+			RunningRevision: s.RunningRevision,
+			TargetRevision:  s.TargetRevision,
+			ActiveOrdinal:   s.ActiveOrdinal,
+			LastFailure:     fromV1beta1Termination(s.LastFailure),
+		})
 	}
 	return workload.ReconcileInput{
 		OwnerObject: isvc,
@@ -140,21 +168,19 @@ func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component w
 // ReconcileInput.MutateInstance. Skips retry.RetryOnConflict (fake
 // client has no optimistic-concurrency failures to retry).
 func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-	v1component := v1beta1.ComponentType(component)
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		fresh := &v1beta1.InferenceService{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
-			return fmt.Errorf("get isvc: %w", err)
-		}
-		if fresh.Status.Components == nil {
-			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
-		}
-		cs := fresh.Status.Components[v1component]
-		if cs.Lifecycle == nil {
-			cs.Lifecycle = &v1beta1.LifecycleStatus{}
+		ir := &v1beta1.InferenceReplica{}
+		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irName(isvc, component)}
+		create := false
+		if err := c.Get(ctx, key, ir); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("get IR: %w", err)
+			}
+			ir = &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
+			create = true
 		}
 		pos := -1
-		for i, s := range cs.Lifecycle.InstanceStatuses {
+		for i, s := range ir.Status.InstanceStatuses {
 			if s.Index == idx {
 				pos = i
 				break
@@ -164,7 +190,7 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 		if pos == -1 {
 			w = workload.InstanceStatus{Index: idx}
 		} else {
-			s := cs.Lifecycle.InstanceStatuses[pos]
+			s := ir.Status.InstanceStatuses[pos]
 			w = workload.InstanceStatus{
 				Index:           s.Index,
 				Incarnation:     s.Incarnation,
@@ -190,12 +216,19 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 			LastFailure:     toV1beta1Termination(w.LastFailure),
 		}
 		if pos == -1 {
-			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
+			ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, updated)
 		} else {
-			cs.Lifecycle.InstanceStatuses[pos] = updated
+			ir.Status.InstanceStatuses[pos] = updated
 		}
-		fresh.Status.Components[v1component] = cs
-		return c.Status().Update(ctx, fresh)
+		if create {
+			bare := &v1beta1.InferenceReplica{ObjectMeta: ir.ObjectMeta}
+			if err := c.Create(ctx, bare); err != nil {
+				return fmt.Errorf("create IR: %w", err)
+			}
+			bare.Status = ir.Status
+			ir = bare
+		}
+		return c.Status().Update(ctx, ir)
 	}
 }
 
@@ -289,20 +322,21 @@ func toV1beta1Termination(t *workload.InstanceTermination) *v1beta1.InstanceTerm
 	return out
 }
 
-// findInstanceStatusInISVC is the test-local replacement for the
-// removed query.FindInstanceStatus — looks up the InstanceStatus by
-// (component, idx) on the v1beta1.InferenceService snapshot.
-func findInstanceStatusInISVC(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
+// findInstanceStatusOnIR looks up the InstanceStatus by (component, idx) on the
+// authoritative InferenceReplica (per-instance detail no longer lives on the
+// ISVC). Returns nil when the IR or the instance is absent.
+func findInstanceStatusOnIR(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
 	if isvc == nil {
 		return nil
 	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.Lifecycle == nil {
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: irName(isvc, component)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
 		return nil
 	}
-	for i := range cs.Lifecycle.InstanceStatuses {
-		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
-			return &cs.Lifecycle.InstanceStatuses[i]
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == idx {
+			return &ir.Status.InstanceStatuses[i]
 		}
 	}
 	return nil
@@ -421,18 +455,11 @@ func TestCreate_EmptyClusterCreatesPodsAndRequeues(t *testing.T) {
 	}
 
 	// InstanceStatus for each Instance should be Creating with an Operation.
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("get isvc: %v", err)
+	insts := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+	if len(insts) != 2 {
+		t.Fatalf("InstanceStatuses: got %d want 2", len(insts))
 	}
-	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.Lifecycle == nil {
-		t.Fatal("OMENative status nil")
-	}
-	if len(cs.Lifecycle.InstanceStatuses) != 2 {
-		t.Fatalf("InstanceStatuses: got %d want 2", len(cs.Lifecycle.InstanceStatuses))
-	}
-	for _, s := range cs.Lifecycle.InstanceStatuses {
+	for _, s := range insts {
 		if s.Phase != v1beta1.OMENativeInstanceCreating {
 			t.Errorf("instance %d Phase: got %q want Creating", s.Index, s.Phase)
 		}
@@ -501,13 +528,11 @@ func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	}
 
 	// InstanceStatus should be Ready with Operation=nil.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.Lifecycle == nil || len(cs.Lifecycle.InstanceStatuses) != 1 {
-		t.Fatalf("status missing: %+v", cs.Lifecycle)
+	insts := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+	if len(insts) != 1 {
+		t.Fatalf("status missing: %+v", insts)
 	}
-	is := cs.Lifecycle.InstanceStatuses[0]
+	is := insts[0]
 	if is.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready", is.Phase)
 	}
@@ -588,11 +613,7 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("get isvc: %v", err)
-	}
-	s := findInstanceStatusInISVC(fresh, v1beta1.EngineComponent, 0)
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil {
 		t.Fatal("InstanceStatus[0] must exist after promote")
 	}
@@ -622,24 +643,18 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 	// after an earlier surge promote) with the prior revision recorded
 	// as RunningRevision. The Create promote should NOT clobber this.
 	priorRev := "llama-70b-engine-priorrev"
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-					Index:           0,
-					Incarnation:     1,
-					Phase:           v1beta1.OMENativeInstanceCreating,
-					RunningRevision: priorRev,
-				}},
-			},
-		},
-	}
+	ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     1,
+		Phase:           v1beta1.OMENativeInstanceCreating,
+		RunningRevision: priorRev,
+	})
 	// Pre-seed a runtime-ready, serving pod labeled with the PRIOR
 	// revision's hash (not target's). reconcileInstance will find the
 	// pod, see it's runtime-ready, and reach the promote step.
 	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
 	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRev)
-	c := newFakeClient(t, isvc, pod)
+	c := newFakeClient(t, isvc, ir, pod)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 	target := &appsv1.ControllerRevision{
@@ -650,11 +665,7 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("get isvc: %v", err)
-	}
-	s := findInstanceStatusInISVC(fresh, v1beta1.EngineComponent, 0)
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil {
 		t.Fatal("InstanceStatus[0] must exist after promote")
 	}
@@ -683,11 +694,7 @@ func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("get isvc: %v", err)
-	}
-	s := findInstanceStatusInISVC(fresh, v1beta1.EngineComponent, 0)
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil || s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Fatalf("expected Phase=Ready; got %+v", s)
 	}
@@ -757,18 +764,12 @@ func buildPlanGangEngine(restart workload.RestartPolicy) workload.ComponentPlan 
 
 // seedReadyInstance stamps the ISVC status with one already-Ready engine
 // Instance at the given index/incarnation.
-func seedReadyInstance(isvc *v1beta1.InferenceService, idx int32, incarnation int64) {
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
-					Index:       idx,
-					Incarnation: incarnation,
-					Phase:       v1beta1.OMENativeInstanceReady,
-				}},
-			},
-		},
-	}
+func seedReadyInstance(isvc *v1beta1.InferenceService, idx int32, incarnation int64) *v1beta1.InferenceReplica {
+	return instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:       idx,
+		Incarnation: incarnation,
+		Phase:       v1beta1.OMENativeInstanceReady,
+	})
 }
 
 // An already-Ready gang that loses a pod must NOT be self-healed
@@ -777,10 +778,10 @@ func seedReadyInstance(isvc *v1beta1.InferenceService, idx int32, incarnation in
 func TestCreate_RecreateInstance_DefersPartialGangToRestart(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
-	seedReadyInstance(isvc, 0, 2)
+	ir := seedReadyInstance(isvc, 0, 2)
 	// Established gang lost its worker: leader present, worker gone.
 	leader := gangPod(isvc, 0, "leader", 0, 2, true /* ready */, true /* serving */)
-	c := newFakeClient(t, isvc, leader)
+	c := newFakeClient(t, isvc, ir, leader)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanGangEngine(workload.RestartPolicyRecreateInstance)
 
@@ -797,11 +798,7 @@ func TestCreate_RecreateInstance_DefersPartialGangToRestart(t *testing.T) {
 		t.Fatalf("Create must defer partial-gang recovery to Restart under RecreateInstance: got %d pod(s), want 1 (leader only)", len(pods.Items))
 	}
 	// Phase MUST stay Ready — stamping Creating here is what latches the race.
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("get isvc: %v", err)
-	}
-	s := findInstanceStatusInISVC(fresh, v1beta1.EngineComponent, 0)
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil || s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Fatalf("Phase must remain Ready (Create must not stamp Creating): got %+v", s)
 	}
@@ -812,9 +809,9 @@ func TestCreate_RecreateInstance_DefersPartialGangToRestart(t *testing.T) {
 func TestCreate_NonRecreatePolicy_SelfHealsMissingPod(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
-	seedReadyInstance(isvc, 0, 2)
+	ir := seedReadyInstance(isvc, 0, 2)
 	leader := gangPod(isvc, 0, "leader", 0, 2, true, true)
-	c := newFakeClient(t, isvc, leader)
+	c := newFakeClient(t, isvc, ir, leader)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanGangEngine(workload.RestartPolicyNone)
 
@@ -857,14 +854,8 @@ func TestCreate_RecreateInstance_StillMaterializesFreshInstance(t *testing.T) {
 // seedInstanceStatuses stamps the ISVC status with the given engine
 // InstanceStatuses verbatim — lets a test set per-index Phase to model
 // a mid-rollout snapshot.
-func seedInstanceStatuses(isvc *v1beta1.InferenceService, statuses ...v1beta1.OMENativeInstanceStatus) {
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: append([]v1beta1.OMENativeInstanceStatus(nil), statuses...),
-			},
-		},
-	}
+func seedInstanceStatuses(isvc *v1beta1.InferenceService, statuses ...v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplica {
+	return instanceIR(isvc, workload.ComponentEngine, statuses...)
 }
 
 // CreateFreshIndices must materialize brand-new (surge-free) indices
@@ -875,7 +866,7 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 3)
 	// Index 0 is mid-surge (Phase=Updating); indices 1,2 have no status.
-	seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
+	ir := seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
@@ -884,7 +875,7 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 	// Index 0's existing in-flight pod — present so we can assert it is
 	// neither touched nor duplicated.
 	pod0 := podForInstance(isvc, 0, true /* ready */, true /* serving */)
-	c := newFakeClient(t, isvc, pod0)
+	c := newFakeClient(t, isvc, ir, pod0)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(3)
 	target := &appsv1.ControllerRevision{
@@ -923,7 +914,7 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 
 	// Index 0's status MUST be left untouched at Phase=Updating —
 	// CreateFreshIndices never reconciles it.
-	s := findInstanceStatusInISVC(freshISVCFromClient(t, c, isvc), v1beta1.EngineComponent, 0)
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil || s.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("index 0 Phase must stay Updating (not reconciled by fresh pass); got %+v", s)
 	}
@@ -934,14 +925,14 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 func TestCreateFreshIndices_NoOpWhenOnlyIndexUpdating(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
-	seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
+	ir := seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
 		RunningRevision: "llama-70b-engine-priorrev",
 	})
 	pod0 := podForInstance(isvc, 0, true, true)
-	c := newFakeClient(t, isvc, pod0)
+	c := newFakeClient(t, isvc, ir, pod0)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 	target := &appsv1.ControllerRevision{
@@ -963,14 +954,4 @@ func TestCreateFreshIndices_NoOpWhenOnlyIndexUpdating(t *testing.T) {
 	if len(pods.Items) != 1 {
 		t.Fatalf("CreateFreshIndices must not create/duplicate anything for a pure rollout; got %d pods", len(pods.Items))
 	}
-}
-
-// freshISVCFromClient re-reads the ISVC for post-call status assertions.
-func freshISVCFromClient(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) *v1beta1.InferenceService {
-	t.Helper()
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("get isvc: %v", err)
-	}
-	return fresh
 }

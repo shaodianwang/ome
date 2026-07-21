@@ -15,12 +15,12 @@ import "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 //     validation). These never carry an OMENative Instance failure, so checking
 //     only Instance phases would report them as forever-Pending and re-fan-out
 //     into the same failure on every poll.
-func IsTerminallyFailed(isvc *v1beta1.InferenceService) bool {
-	for _, cs := range isvc.Status.Components {
-		if cs.Lifecycle == nil {
+func IsTerminallyFailed(isvc *v1beta1.InferenceService, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) bool {
+	for _, st := range statuses {
+		if st == nil {
 			continue
 		}
-		for _, inst := range cs.Lifecycle.InstanceStatuses {
+		for _, inst := range st.InstanceStatuses {
 			if inst.Phase == v1beta1.OMENativeInstanceFailed {
 				return true
 			}

@@ -23,8 +23,8 @@ func ObservePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1be
 
 // LatestRevisionHash returns the latest (target) revision hash for a component,
 // exported for reuse by sibling rollout executors.
-func LatestRevisionHash(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) string {
-	return latestRevisionHash(isvc, c)
+func LatestRevisionHash(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) string {
+	return latestRevisionHash(ctx, reads, isvc.Namespace, isvc.Name, c)
 }
 
 // GCOrphanedPerRevisionServices deletes per-revision Service pairs whose revision

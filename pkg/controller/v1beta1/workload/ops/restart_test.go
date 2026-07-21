@@ -21,18 +21,12 @@ import (
 // isvcReadyAtIncarnation builds an ISVC whose InstanceStatus for engine
 // index 0 is Phase=Ready at the given Incarnation — the steady-state from
 // which a restart trigger fires.
-func isvcReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.InferenceService {
+func isvcReadyAtIncarnation(name, ns string, incarnation int64) (*v1beta1.InferenceService, *v1beta1.InferenceReplica) {
 	isvc := minimalISVC(name, ns, 1)
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
-				},
-			},
-		},
-	}
-	return isvc
+	ir := instanceIR(isvc, workload.ComponentEngine,
+		v1beta1.OMENativeInstanceStatus{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
+	)
+	return isvc, ir
 }
 
 // podAtIncarnation extends podForInstance to stamp a specific incarnation
@@ -48,14 +42,12 @@ func podAtIncarnation(isvc *v1beta1.InferenceService, instanceIdx int32, incarna
 // Same shape as buildPlanSinglePodEngine in create_test.go but reads the
 // incarnation from the existing InstanceStatus so subsequent passes drive
 // the post-bump value rather than re-stamping 1.
-func buildPlanSinglePodEngineForRestart(isvc *v1beta1.InferenceService) workload.ComponentPlan {
+func buildPlanSinglePodEngineForRestart(c client.Client, isvc *v1beta1.InferenceService) workload.ComponentPlan {
 	plan := buildPlanSinglePodEngine(1)
-	if cs, ok := isvc.Status.Components[v1beta1.EngineComponent]; ok && cs.Lifecycle != nil {
-		for _, s := range cs.Lifecycle.InstanceStatuses {
-			if s.Index == 0 && s.Incarnation > 0 {
-				plan.Instances[0].Incarnation = s.Incarnation
-				break
-			}
+	for _, s := range instanceStatusesOnIR(c, isvc, workload.ComponentEngine) {
+		if s.Index == 0 && s.Incarnation > 0 {
+			plan.Instances[0].Incarnation = s.Incarnation
+			break
 		}
 	}
 	return plan
@@ -72,11 +64,11 @@ func TestRestart_NilClient(t *testing.T) {
 
 func TestRestart_FirstPassBumpsIncarnationAndPatchesStatus(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
-	c := newFakeClient(t, isvc, pod)
+	c := newFakeClient(t, isvc, ir, pod)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "test trigger")
 	if err != nil {
@@ -87,9 +79,7 @@ func TestRestart_FirstPassBumpsIncarnationAndPatchesStatus(t *testing.T) {
 	}
 
 	// Status should now be Phase=Restarting, Incarnation=2.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.Phase != v1beta1.OMENativeInstanceRestarting {
 		t.Errorf("Phase: got %q want Restarting", s.Phase)
 	}
@@ -112,8 +102,8 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 	// serving=True. Restart should flip serving=False and requeue while
 	// EndpointSlice still publishes the pod as Ready.
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 2,
 		Phase:       v1beta1.OMENativeInstanceRestarting,
@@ -123,9 +113,9 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 	}
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, true /* still Ready */)
-	c := newFakeClient(t, isvc, pod, slice)
+	c := newFakeClient(t, isvc, ir, pod, slice)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
 	if err != nil {
@@ -144,8 +134,8 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 
 func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 2,
 		Phase:       v1beta1.OMENativeInstanceRestarting,
@@ -155,9 +145,9 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	}
 	pod := podAtIncarnation(isvc, 0, 1, true, false /* already drained */)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false /* Ready=false */)
-	c := newFakeClient(t, isvc, pod, slice)
+	c := newFakeClient(t, isvc, ir, pod, slice)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
 	if err != nil {
@@ -183,13 +173,13 @@ func TestRestart_RefusesToDeleteOrphanPod(t *testing.T) {
 	// FoundOrphan and short-circuit rather than deleting it — the operator
 	// re-labels or removes it manually.
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	orphan := podAtIncarnation(isvc, 0, 1, true, false)
 	orphan.Name = "orphan-pod"
 	delete(orphan.Labels, query.LabelInstanceIncarnation)
-	c := newFakeClient(t, isvc, orphan)
+	c := newFakeClient(t, isvc, ir, orphan)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
 	if err != nil {
@@ -213,8 +203,8 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 	// Status is Restarting at Inc=2, no pods (old already deleted, new
 	// not yet created). Restart should create the new pod at Inc=2.
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     2,
 		Phase:           v1beta1.OMENativeInstanceRestarting,
@@ -223,9 +213,9 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 			Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "x",
 		},
 	}
-	c := newFakeClient(t, isvc)
+	c := newFakeClient(t, isvc, ir)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
 	if err != nil {
@@ -250,13 +240,13 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 	// Trigger Restart and run it until done=true; assert the final state
 	// has one new-incarnation pod, serving=True, and Phase=Ready.
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	// Pre-seed RunningRevision so Phase-B recreate has a hash to stamp.
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = "llama-70b-engine-" + testRevisionHash
+	ir.Status.InstanceStatuses[0].RunningRevision = "llama-70b-engine-" + testRevisionHash
 	failed := podAtIncarnation(isvc, 0, 1, true, true)
 	failed.Status.Phase = corev1.PodFailed
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, failed, false /* drained */)
-	c := newFakeClient(t, isvc, failed, slice)
+	c := newFakeClient(t, isvc, ir, failed, slice)
 
 	const maxPasses = 8
 	for pass := 0; pass < maxPasses; pass++ {
@@ -265,7 +255,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 		fresh := &v1beta1.InferenceService{}
 		_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 		input := buildTestInputForDelete(fresh, c, workload.ComponentEngine)
-		plan := buildPlanSinglePodEngineForRestart(fresh)
+		plan := buildPlanSinglePodEngineForRestart(c, fresh)
 
 		// Fast-forward: simulate the fake watch observing every delete the
 		// previous pass issued.
@@ -281,9 +271,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 		}
 		if done {
 			// Verify end state.
-			finalISVC := &v1beta1.InferenceService{}
-			_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), finalISVC)
-			s := finalISVC.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+			s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 			if s.Phase != v1beta1.OMENativeInstanceReady {
 				t.Errorf("final Phase: got %q want Ready", s.Phase)
 			}
@@ -349,24 +337,20 @@ func failedPodOOM(isvc *v1beta1.InferenceService, incarnation int64) *corev1.Pod
 // leaves a durable failure record instead of vanishing.
 func TestRestart_CapturesLastFailureBeforeDrain(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	// Pre-seed RunningRevision so the Restart path has a hash later.
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision =
+	ir.Status.InstanceStatuses[0].RunningRevision =
 		"llama-70b-engine-" + testRevisionHash
 	failed := failedPodOOM(isvc, 1)
-	c := newFakeClient(t, isvc, failed)
+	c := newFakeClient(t, isvc, ir, failed)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod Failed"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("re-read ISVC: %v", err)
-	}
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.LastFailure == nil {
 		t.Fatalf("LastFailure: nil, want OOMKilled diagnostics captured before drain")
 	}
@@ -389,8 +373,8 @@ func TestRestart_CapturesLastFailureBeforeDrain(t *testing.T) {
 // LastFailure — the most recent genuine failure trace is preserved.
 func TestRestart_PodVanished_PreservesPriorLastFailure(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	s0 := &isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	s0 := &ir.Status.InstanceStatuses[0]
 	s0.RunningRevision = "llama-70b-engine-" + testRevisionHash
 	exit := int32(1)
 	s0.LastFailure = &v1beta1.InstanceTermination{
@@ -399,19 +383,15 @@ func TestRestart_PodVanished_PreservesPriorLastFailure(t *testing.T) {
 		ExitCode: &exit,
 	}
 	// No pods exist → "pod count below desired" trigger.
-	c := newFakeClient(t, isvc)
+	c := newFakeClient(t, isvc, ir)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod count 0 below desired 1"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("re-read ISVC: %v", err)
-	}
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if s.LastFailure == nil || s.LastFailure.Reason != "Error" {
 		t.Fatalf("prior LastFailure must be preserved when no pod yields a fresh signal; got %+v", s.LastFailure)
 	}
@@ -422,11 +402,11 @@ func TestRestart_PodVanished_PreservesPriorLastFailure(t *testing.T) {
 // "pod X Failed" — and the Restart event carries it.
 func TestDetectRestartTrigger_RichReasonForFailedPod(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	failed := failedPodOOM(isvc, 1)
-	c := newFakeClient(t, isvc, failed)
+	c := newFakeClient(t, isvc, ir, failed)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	needs, reason, err := ops.DetectRestartTrigger(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0])
 	if err != nil {
@@ -444,13 +424,13 @@ func TestDetectRestartTrigger_RichReasonForFailedPod(t *testing.T) {
 // cause is visible in `kubectl describe` even after the pod is gone.
 func TestRestart_EmitsRichRestartTriggeredEvent(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision =
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].RunningRevision =
 		"llama-70b-engine-" + testRevisionHash
 	failed := failedPodOOM(isvc, 1)
-	c := newFakeClient(t, isvc, failed)
+	c := newFakeClient(t, isvc, ir, failed)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
-	plan := buildPlanSinglePodEngineForRestart(isvc)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	rec := record.NewFakeRecorder(16)
 

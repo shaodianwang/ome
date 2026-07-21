@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -91,9 +92,43 @@ func legacyNewFakeClient(t *testing.T, initObjs ...client.Object) client.Client 
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(initObjs...).
 		Build()
+}
+
+// legacyIRName is the InferenceReplica name the workload helpers persist
+// per-instance status on. Mirrors irprojector.InferenceReplicaName
+// (isvcName-component); reproduced here to avoid the import.
+func legacyIRName(isvc *v1beta1.InferenceService, component workload.ComponentType) string {
+	return isvc.Name + "-" + string(component)
+}
+
+// legacyInstanceIR builds the InferenceReplica that carries the given
+// per-instance statuses for (isvc, component). Instance detail is the IR's
+// source-of-truth (no longer mirrored onto the ISVC), so fixtures seed it
+// here and pass the returned IR to legacyNewFakeClient alongside the ISVC.
+func legacyInstanceIR(isvc *v1beta1.InferenceService, component workload.ComponentType, insts ...v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplica {
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: isvc.Namespace,
+			Name:      legacyIRName(isvc, component),
+		},
+		Status: v1beta1.InferenceReplicaStatus{InstanceStatuses: insts},
+	}
+}
+
+// legacyInstanceStatusesOnIR re-reads the InferenceReplica and returns its
+// persisted per-instance statuses, for assertions that previously read
+// isvc.Status.Components[c].Lifecycle.InstanceStatuses. Returns nil when the
+// IR does not exist.
+func legacyInstanceStatusesOnIR(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) []v1beta1.OMENativeInstanceStatus {
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: legacyIRName(isvc, component)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
+		return nil
+	}
+	return ir.Status.InstanceStatuses
 }
 
 // legacyPodForInstance fabricates a pod matching what Render() would
@@ -165,53 +200,51 @@ func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component 
 			PodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
 		},
 		ObservedState: workload.WorkloadObservedState{
-			InstanceStatuses: legacyInstanceStatuses(isvc, component),
+			InstanceStatuses: legacyInstanceStatuses(c, isvc, component),
 		},
 		MutateInstance: legacyMutateInstance(c, isvc, component),
 	}
 }
 
-// legacyInstanceStatuses pulls + converts the OMENative
-// InstanceStatuses slice into the workload-owned mirror.
-func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component workload.ComponentType) []workload.InstanceStatus {
+// legacyInstanceStatuses reads the authoritative InferenceReplica and
+// converts its per-instance statuses into the workload-owned mirror. The
+// IR is the source of truth (no longer projected onto the ISVC).
+func legacyInstanceStatuses(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) []workload.InstanceStatus {
 	var out []workload.InstanceStatus
-	if cs, ok := isvc.Status.Components[v1beta1.ComponentType(component)]; ok && cs.Lifecycle != nil {
-		for _, s := range cs.Lifecycle.InstanceStatuses {
-			out = append(out, workload.InstanceStatus{
-				Index:           s.Index,
-				Incarnation:     s.Incarnation,
-				Phase:           workload.InstancePhase(s.Phase),
-				RunningRevision: s.RunningRevision,
-				TargetRevision:  s.TargetRevision,
-				ActiveOrdinal:   s.ActiveOrdinal,
-				Operation:       legacyFromV1beta1Op(s.Operation),
-			})
-		}
+	for _, s := range legacyInstanceStatusesOnIR(c, isvc, component) {
+		out = append(out, workload.InstanceStatus{
+			Index:           s.Index,
+			Incarnation:     s.Incarnation,
+			Phase:           workload.InstancePhase(s.Phase),
+			RunningRevision: s.RunningRevision,
+			TargetRevision:  s.TargetRevision,
+			ActiveOrdinal:   s.ActiveOrdinal,
+			Operation:       legacyFromV1beta1Op(s.Operation),
+		})
 	}
 	return out
 }
 
 // legacyMutateInstance is the test-side persistence layer for
-// ReconcileInput.MutateInstance. Skips retry.RetryOnConflict (fake
-// client has no optimistic-concurrency failures to retry). Mirrors
-// the post-commit Operation onto the in-memory ISVC.Status snapshot
-// the test holds a pointer to.
+// ReconcileInput.MutateInstance. It reads-modifies-writes the
+// InferenceReplica status (the source of truth), mirroring production's
+// IR-side write-back. Creates the IR on first write when a fixture didn't
+// pre-seed one (fresh-create tests). Skips retry.RetryOnConflict (fake
+// client has no optimistic-concurrency failures to retry).
 func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-	v1component := v1beta1.ComponentType(component)
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		fresh := &v1beta1.InferenceService{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
-			return fmt.Errorf("get isvc: %w", err)
-		}
-		if fresh.Status.Components == nil {
-			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
-		}
-		cs := fresh.Status.Components[v1component]
-		if cs.Lifecycle == nil {
-			cs.Lifecycle = &v1beta1.LifecycleStatus{}
+		ir := &v1beta1.InferenceReplica{}
+		key := types.NamespacedName{Namespace: isvc.Namespace, Name: legacyIRName(isvc, component)}
+		create := false
+		if err := c.Get(ctx, key, ir); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("get IR: %w", err)
+			}
+			ir = &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
+			create = true
 		}
 		pos := -1
-		for i, s := range cs.Lifecycle.InstanceStatuses {
+		for i, s := range ir.Status.InstanceStatuses {
 			if s.Index == idx {
 				pos = i
 				break
@@ -221,7 +254,7 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 		if pos == -1 {
 			w = workload.InstanceStatus{Index: idx}
 		} else {
-			s := cs.Lifecycle.InstanceStatuses[pos]
+			s := ir.Status.InstanceStatuses[pos]
 			w = workload.InstanceStatus{
 				Index:           s.Index,
 				Incarnation:     s.Incarnation,
@@ -245,19 +278,21 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 			Operation:       legacyToV1beta1Op(w.Operation),
 		}
 		if pos == -1 {
-			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
+			ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, updated)
 		} else {
-			cs.Lifecycle.InstanceStatuses[pos] = updated
+			ir.Status.InstanceStatuses[pos] = updated
 		}
-		fresh.Status.Components[v1component] = cs
-		if err := c.Status().Update(ctx, fresh); err != nil {
+		if create {
+			// Create seeds the object; status subresource is written separately.
+			bare := &v1beta1.InferenceReplica{ObjectMeta: ir.ObjectMeta}
+			if err := c.Create(ctx, bare); err != nil {
+				return fmt.Errorf("create IR: %w", err)
+			}
+			bare.Status = ir.Status
+			ir = bare
+		}
+		if err := c.Status().Update(ctx, ir); err != nil {
 			return err
-		}
-		// Mirror onto the in-memory ISVC the test holds a pointer to.
-		if isvc.Status.Components == nil {
-			isvc.Status.Components = fresh.Status.Components
-		} else {
-			isvc.Status.Components[v1component] = fresh.Status.Components[v1component]
 		}
 		return nil
 	}
@@ -326,21 +361,17 @@ func legacyRunningPodAtRevision(isvc *v1beta1.InferenceService, instIdx int32, i
 	return pod
 }
 
-// legacyISVCReadyAtIncarnation builds an ISVC whose InstanceStatus
-// for engine index 0 is Phase=Ready at the given Incarnation — the
-// steady-state from which an Update trigger fires.
-func legacyISVCReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.InferenceService {
+// legacyISVCReadyAtIncarnation builds an ISVC plus its engine
+// InferenceReplica whose InstanceStatus for index 0 is Phase=Ready at the
+// given Incarnation — the steady-state from which an Update trigger fires.
+// Per-instance detail lives on the returned IR (the source of truth);
+// callers seed both into legacyNewFakeClient.
+func legacyISVCReadyAtIncarnation(name, ns string, incarnation int64) (*v1beta1.InferenceService, *v1beta1.InferenceReplica) {
 	isvc := legacyMinimalISVC(name, ns, 1)
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
-				},
-			},
-		},
-	}
-	return isvc
+	ir := legacyInstanceIR(isvc, workload.ComponentEngine,
+		v1beta1.OMENativeInstanceStatus{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
+	)
+	return isvc, ir
 }
 
 // legacySliceWithEndpoint builds an EndpointSlice with one endpoint
@@ -426,7 +457,6 @@ func legacySeedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.Infe
 // from.
 func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType, idx int32, spec *corev1.PodSpec, meta *metav1.ObjectMeta) {
 	t.Helper()
-	v1component := v1beta1.ComponentType(component)
 	cr, _, err := revision.EnsureControllerRevision(
 		context.Background(), c, c, isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
@@ -436,28 +466,16 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 	if err != nil {
 		t.Fatalf("legacySeedRunningRevisionWithMeta: %v", err)
 	}
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("re-read ISVC: %v", err)
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: legacyIRName(isvc, component)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
+		t.Fatalf("re-read IR: %v", err)
 	}
-	if fresh.Status.Components == nil {
-		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
-	}
-	cs := fresh.Status.Components[v1component]
-	if cs.Lifecycle == nil {
-		cs.Lifecycle = &v1beta1.LifecycleStatus{}
-	}
-	for i := range cs.Lifecycle.InstanceStatuses {
-		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
-			cs.Lifecycle.InstanceStatuses[i].RunningRevision = cr.Name
-			fresh.Status.Components[v1component] = cs
-			if err := c.Status().Update(context.Background(), fresh); err != nil {
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == idx {
+			ir.Status.InstanceStatuses[i].RunningRevision = cr.Name
+			if err := c.Status().Update(context.Background(), ir); err != nil {
 				t.Fatalf("set RunningRevision: %v", err)
-			}
-			if isvc.Status.Components == nil {
-				isvc.Status.Components = fresh.Status.Components
-			} else {
-				isvc.Status.Components[v1component] = fresh.Status.Components[v1component]
 			}
 			return
 		}
@@ -518,3 +536,34 @@ func legacyTestDeps(c client.Client) workload.Deps {
 // Keep the revision import live even when partial test builds don't
 // reference any helper that uses it.
 var _ = revision.Key{}
+
+// legacyRemoveInstance is the test-side persistence layer for
+// ReconcileInput.RemoveInstance. Reads from and writes to the IR.
+func legacyRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(ctx context.Context, idx int32) (bool, error) {
+	return func(ctx context.Context, idx int32) (bool, error) {
+		ir := &v1beta1.InferenceReplica{}
+		key := types.NamespacedName{Namespace: isvc.Namespace, Name: legacyIRName(isvc, component)}
+		if err := c.Get(ctx, key, ir); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("get IR: %w", err)
+		}
+		pos := -1
+		for i, s := range ir.Status.InstanceStatuses {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		if pos == -1 {
+			return false, nil
+		}
+		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses[:pos], ir.Status.InstanceStatuses[pos+1:]...)
+		if err := c.Status().Update(ctx, ir); err != nil {
+			return false, fmt.Errorf("update IR: %w", err)
+		}
+		workload.DefaultExpectations.Forget(isvc.Namespace, isvc.Name, component, idx)
+		return true, nil
+	}
+}

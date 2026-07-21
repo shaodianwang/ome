@@ -10,9 +10,12 @@
 //
 // Bounded by MaxAutoRetries: counts ledger entries for this
 // (component, instance) whose Reason == AutoRecover (any phase). When
-// the cap is reached, the controller refuses to write a new request
-// and stamps the LifecycleConditionProgressDeadlineExceeded condition
-// on the InstanceStatus.
+// the cap is reached, the controller refuses to write a new request and
+// emits a warning event; the IR controller owns escalating the stuck
+// instance to Failed on the authoritative InferenceReplica.
+//
+// Stuck-instance data is read from the authoritative InferenceReplica
+// status via ComponentIRStatus, not the ISVC's mirrored copy.
 package ops
 
 import (
@@ -24,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
@@ -82,8 +86,9 @@ const (
 //   - MigrationPolicy.ProgressDeadlineSeconds != nil
 //   - per-Instance auto-retry count < MaxAutoRetries (default 3)
 //
-// On retry exhaustion: stamps LifecycleConditionProgressDeadlineExceeded
-// on the Instance and does NOT write a new migration request.
+// On retry exhaustion: emits a warning event and does NOT write a new
+// migration request. The IR controller owns escalating the stuck
+// instance to Failed on the authoritative InferenceReplica.
 //
 // Returns nil on success (whether or not any synthetic requests were
 // written); errors are surfaced for ledger persistence / status write
@@ -109,8 +114,13 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 		maxRetries = *policy.MaxAutoRetries
 	}
 
-	cs, ok := p.ISVC.Status.Components[component]
-	if !ok || cs.Lifecycle == nil {
+	// Read stuck-instance data from the authoritative InferenceReplica, not the
+	// ISVC's mirrored copy (which is no longer the source of truth).
+	irStatus, err := irprojector.ComponentIRStatus(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, component)
+	if err != nil {
+		return fmt.Errorf("detectStuckInstancesForAutoMigration: read IR status: %w", err)
+	}
+	if irStatus == nil {
 		return nil
 	}
 
@@ -126,8 +136,8 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 	}
 
 	mutated := false
-	for i := range cs.Lifecycle.InstanceStatuses {
-		s := &cs.Lifecycle.InstanceStatuses[i]
+	for i := range irStatus.InstanceStatuses {
+		s := &irStatus.InstanceStatuses[i]
 		if !isStuckPhase(s.Phase) {
 			continue
 		}
@@ -150,9 +160,9 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 
 		retries := countAutoMigrationRetries(ledger, component, s.Index)
 		if retries >= maxRetries {
-			if err := stampProgressDeadlineExceeded(ctx, p, component, s.Index, retries, deadline); err != nil {
-				return fmt.Errorf("detectStuckInstancesForAutoMigration: stamp condition (instance=%d): %w", s.Index, err)
-			}
+			// Cap reached: warn and stop filing migration requests. The IR
+			// controller owns escalating the stuck instance to Failed on the
+			// authoritative IR; the ISVC surfaces it via status aggregation.
 			status.RecordWarning(p.Recorder, p.ISVC, EventReasonAutoMigrationCapReached,
 				"OMENative auto-migration cap reached: %s phase=%s stuck %.0fs deadline=%.0fs retries=%d/%d",
 				status.InstanceKey(component, s.Index), s.Phase, now.Sub(stuckSince).Seconds(),
@@ -297,31 +307,6 @@ func countAutoMigrationRetries(ledger *audit.Ledger, component v1beta1.Component
 		count++
 	}
 	return count
-}
-
-// stampProgressDeadlineExceeded writes the
-// ConditionProgressDeadlineExceeded Instance-level condition. Uses the
-// status.MutateInstance helper to round-trip through the apiserver
-// under retry.RetryOnConflict.
-func stampProgressDeadlineExceeded(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, retries int32, deadline time.Duration) error {
-	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		// Escalate Phase to Failed so the rest of the controller (and
-		// operators) see the Instance as terminally stuck.
-		if s.Phase != v1beta1.OMENativeInstanceFailed {
-			s.Phase = v1beta1.OMENativeInstanceFailed
-		}
-		message := fmt.Sprintf("auto-migration retry cap %d reached; instance phase=%s stuck past ProgressDeadlineSeconds=%.0fs",
-			retries, s.Phase, deadline.Seconds())
-		cond := metav1.Condition{
-			Type:               ConditionProgressDeadlineExceeded,
-			Status:             metav1.ConditionTrue,
-			Reason:             ReasonProgressDeadlineExceeded,
-			Message:            message,
-			ObservedGeneration: p.ISVC.Generation,
-			LastTransitionTime: metav1.Now(),
-		}
-		return upsertInstanceCondition(s, cond)
-	})
 }
 
 // upsertInstanceCondition merges cond into s.Conditions in-place,

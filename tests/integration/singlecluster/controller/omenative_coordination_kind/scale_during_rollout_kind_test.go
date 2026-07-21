@@ -59,8 +59,9 @@ var _ = ginkgo.Describe("permutation — scale-out new indices during in-flight 
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty())
-			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).
+			insts := instanceStatuses(g, ns.Name, "perm-scale-rollout", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -85,8 +86,9 @@ var _ = ginkgo.Describe("permutation — scale-out new indices during in-flight 
 			c := freshISVC(g, ns.Name, "perm-scale-rollout")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			insts := instanceStatuses(g, ns.Name, "perm-scale-rollout", v1beta1.EngineComponent)
 			seen := map[int32]v1beta1.OMENativeInstancePhase{}
-			for _, s := range engCS.Lifecycle.InstanceStatuses {
+			for _, s := range insts {
 				seen[s.Index] = s.Phase
 			}
 			g.Expect(seen).To(HaveKeyWithValue(int32(1), v1beta1.OMENativeInstanceReady),
@@ -103,8 +105,9 @@ var _ = ginkgo.Describe("permutation — scale-out new indices during in-flight 
 				"engine CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
 				"engine must converge to 3 serving replicas on v2")
-			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(3))
-			for _, s := range engCS.Lifecycle.InstanceStatuses {
+			insts := instanceStatuses(g, ns.Name, "perm-scale-rollout", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(3))
+			for _, s := range insts {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"instance %d must be Ready; got %q", s.Index, s.Phase)
 			}

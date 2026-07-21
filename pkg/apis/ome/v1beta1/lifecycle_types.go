@@ -74,11 +74,11 @@ type LifecycleStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// InstanceStatuses reports per-Instance state.
-	// +optional
-	// +listType=map
-	// +listMapKey=index
-	InstanceStatuses []OMENativeInstanceStatus `json:"instanceStatuses,omitempty"`
+	// NOTE: per-Instance detail (InstanceStatuses) is intentionally NOT
+	// mirrored here. The authoritative source of truth is the owning
+	// InferenceReplica's status; the ISVC carries only this aggregated
+	// summary. In-cluster consumers read the IR directly via
+	// irprojector.ComponentIRStatus.
 }
 
 // OMENativeInstancePhase is the lifecycle phase of an OMENative Instance.
@@ -147,7 +147,7 @@ type OMENativeInstanceStatus struct {
 	// Admitted is true when this Instance's pods have left the Kueue admission
 	// scheduling gate (quota granted): the Instance has pods and none are
 	// admission-gated. False while gated/queued or before pods exist. Used by
-	// the OEP-0018 control plane to decide the fan-out race winner.
+	// the control plane to decide the fan-out race winner.
 	// +optional
 	Admitted bool `json:"admitted,omitempty"`
 

@@ -7,7 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -17,21 +19,15 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// isvcWithStatus builds an ISVC carrying a single InstanceStatus for the
-// engine Component at the given index in Phase. Useful for delete tests
-// that need pre-existing status entries.
-func isvcWithStatus(name, ns string, replicas int, idx int32, phase v1beta1.OMENativeInstancePhase) *v1beta1.InferenceService {
+// isvcWithStatus builds an ISVC plus its engine InferenceReplica carrying a
+// single InstanceStatus at the given index in Phase. Per-instance detail lives
+// on the returned IR (the source of truth); callers seed both into newFakeClient.
+func isvcWithStatus(name, ns string, replicas int, idx int32, phase v1beta1.OMENativeInstancePhase) (*v1beta1.InferenceService, *v1beta1.InferenceReplica) {
 	isvc := minimalISVC(name, ns, replicas)
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{
-				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-					{Index: idx, Phase: phase},
-				},
-			},
-		},
-	}
-	return isvc
+	ir := instanceIR(isvc, workload.ComponentEngine,
+		v1beta1.OMENativeInstanceStatus{Index: idx, Phase: phase},
+	)
+	return isvc, ir
 }
 
 // sliceWithEndpoint constructs an EndpointSlice for serviceName carrying
@@ -71,20 +67,16 @@ func sliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod
 // so a later index reuse doesn't inherit stale counters — matches the
 // production helper.
 func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(ctx context.Context, idx int32) (bool, error) {
-	v1component := v1beta1.ComponentType(component)
 	return func(ctx context.Context, idx int32) (bool, error) {
-		fresh := &v1beta1.InferenceService{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
-			return false, fmt.Errorf("get isvc: %w", err)
+		ir := &v1beta1.InferenceReplica{}
+		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irName(isvc, component)}
+		if err := c.Get(ctx, key, ir); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("get IR: %w", err)
 		}
-		if fresh.Status.Components == nil {
-			return false, nil
-		}
-		cs, ok := fresh.Status.Components[v1component]
-		if !ok || cs.Lifecycle == nil {
-			return false, nil
-		}
-		insts := cs.Lifecycle.InstanceStatuses
+		insts := ir.Status.InstanceStatuses
 		pos := -1
 		for i, s := range insts {
 			if s.Index == idx {
@@ -95,9 +87,8 @@ func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 		if pos == -1 {
 			return false, nil
 		}
-		cs.Lifecycle.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
-		fresh.Status.Components[v1component] = cs
-		if err := c.Status().Update(ctx, fresh); err != nil {
+		ir.Status.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+		if err := c.Status().Update(ctx, ir); err != nil {
 			return false, fmt.Errorf("status update: %w", err)
 		}
 		workload.DefaultExpectations.Forget(isvc.Namespace, isvc.Name, component, idx)
@@ -141,8 +132,8 @@ func TestDelete_NoPodsNoStatus_ReturnsDone(t *testing.T) {
 
 func TestDelete_PodsGone_RemovesInstanceStatus(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
-	c := newFakeClient(t, isvc)
+	isvc, ir := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
+	c := newFakeClient(t, isvc, ir)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
@@ -154,21 +145,19 @@ func TestDelete_PodsGone_RemovesInstanceStatus(t *testing.T) {
 		t.Fatalf("expected done=true after status clear")
 	}
 
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.Lifecycle != nil && len(cs.Lifecycle.InstanceStatuses) != 0 {
-		t.Errorf("InstanceStatuses: got %d want 0", len(cs.Lifecycle.InstanceStatuses))
+	insts := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+	if len(insts) != 0 {
+		t.Errorf("InstanceStatuses: got %d want 0", len(insts))
 	}
 }
 
 func TestDelete_FlipsServingFalseAndRequeuesWhileDraining(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
+	isvc, ir := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
 	// EndpointSlice still publishes the pod with Ready=true — drain not converged.
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, true)
-	c := newFakeClient(t, isvc, pod, slice)
+	c := newFakeClient(t, isvc, ir, pod, slice)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
@@ -190,9 +179,7 @@ func TestDelete_FlipsServingFalseAndRequeuesWhileDraining(t *testing.T) {
 	}
 
 	// Status should be Deleting with Operation Delete.
-	fresh := &v1beta1.InferenceService{}
-	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	is := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
+	is := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if is.Phase != v1beta1.OMENativeInstanceDeleting {
 		t.Errorf("Phase: got %q want Deleting", is.Phase)
 	}
@@ -203,11 +190,11 @@ func TestDelete_FlipsServingFalseAndRequeuesWhileDraining(t *testing.T) {
 
 func TestDelete_DrainedPodIsDeleted(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
+	isvc, ir := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	// Pod already not serving; EndpointSlice publishes it with Ready=false → drained.
 	pod := podForInstance(isvc, 0, true, false)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
-	c := newFakeClient(t, isvc, pod, slice)
+	c := newFakeClient(t, isvc, ir, pod, slice)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
@@ -238,10 +225,10 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 	// external nudges (other than the fake client observing the deletes
 	// immediately, which simulates a fast watch).
 	resetExpectations(t)
-	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
+	isvc, ir := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	pod := podForInstance(isvc, 0, true, false)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
-	c := newFakeClient(t, isvc, pod, slice)
+	c := newFakeClient(t, isvc, ir, pod, slice)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
@@ -258,11 +245,9 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 			if len(pods.Items) != 0 {
 				t.Errorf("pods left: %d", len(pods.Items))
 			}
-			fresh := &v1beta1.InferenceService{}
-			_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
-			if cs.Lifecycle != nil && len(cs.Lifecycle.InstanceStatuses) != 0 {
-				t.Errorf("status entries left: %d", len(cs.Lifecycle.InstanceStatuses))
+			insts := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+			if len(insts) != 0 {
+				t.Errorf("status entries left: %d", len(insts))
 			}
 			// Allow the cache to "observe" the delete: clear the
 			// expectations entry that ExpectDeletes left behind.
@@ -277,7 +262,7 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 
 func TestDelete_PodAlreadyTerminatingIsSkipped(t *testing.T) {
 	resetExpectations(t)
-	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceDeleting)
+	isvc, ir := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceDeleting)
 	pod := podForInstance(isvc, 0, false, false)
 	// Mark as already terminating (deletionTimestamp).
 	now := metav1.Now()
@@ -286,7 +271,7 @@ func TestDelete_PodAlreadyTerminatingIsSkipped(t *testing.T) {
 	// otherwise it rejects the object.
 	pod.Finalizers = []string{"omenative.test/keep-around"}
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
-	c := newFakeClient(t, isvc, pod, slice)
+	c := newFakeClient(t, isvc, ir, pod, slice)
 	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
