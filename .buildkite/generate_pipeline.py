@@ -444,6 +444,14 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
             key: "mirror-{label}"
 {_gh_status(f"mirror-{label}")}
             depends_on: "build-{label}"
+            # ECR credentials on TW: the agent resolves these Buildkite
+            # cluster secrets into the job env, propagate-environment
+            # carries them into the container, and _ecr_login.sh consumes
+            # them (tier 2). The MKS-era aws-CLI fallback doesn't exist in
+            # TW workload containers.
+            secrets:
+              - "ECR_AUTH_TOKEN"
+              - "PROD_ECR_AUTH_TOKEN"
             agents:
               queue: "{BUILD_QUEUE}"
             command: |
@@ -466,6 +474,11 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
             key: "chart-{chart}"
 {_gh_status(f"chart-{chart}")}
             {depends_block}
+            # Same Buildkite cluster-secret ECR auth as the mirror steps;
+            # push_chart.sh logs in to both the dev and prod registries.
+            secrets:
+              - "ECR_AUTH_TOKEN"
+              - "PROD_ECR_AUTH_TOKEN"
             command: |
               sh .buildkite/push_chart.sh {chart}
             agents:

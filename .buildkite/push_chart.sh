@@ -83,5 +83,11 @@ if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then
   helm push "${CHART}-${CHART_VERSION}.tgz" "$PROD_CHART_REPO"
   echo "pushed ${CHART}-${CHART_VERSION}.tgz to ${PROD_CHART_REPO}"
 else
-  echo "branch=${BUILDKITE_BRANCH:-?} is not main; skipping push"
+  # Exercise both registry logins on PR branches too — pushes are
+  # main-only, but a broken credential path must fail the PR that
+  # breaks it, not the next main build. (The TW migration kept every
+  # PR green while main's chart/mirror steps all failed on login.)
+  ecr_login_for dev helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
+  ecr_login_for prod helm registry login --username AWS --password-stdin "$PROD_ECR_REGISTRY"
+  echo "branch=${BUILDKITE_BRANCH:-?} is not main; logins OK, skipping push"
 fi
