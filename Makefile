@@ -769,7 +769,7 @@ mc-realkueue: envtest dep-crds ## 🧪 Run the OEP-0018 real-Kueue multi-cluster
 	@# + scheduler + pod webhook). Gated behind OME_MC_REALKUEUE so the default
 	@# `make integration-test` run leaves members bare (the sim path in
 	@# placement_test.go / gc_test.go). No kubelet: admission = Kueue gate removal.
-	@# CI runs this soft-fail, like test-kind. Narrow with GINKGO_FOCUS='S1|S3'.
+	@# CI runs this soft-fail. Narrow with GINKGO_FOCUS='S1|S3'.
 	@OME_MC_REALKUEUE=1 $(TEST_ENV) \
 		go test ./tests/integration/multicluster/... -run TestMultiCluster -timeout 20m \
 		$(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') $(if $(GINKGO_VERBOSE),-v -ginkgo.v)

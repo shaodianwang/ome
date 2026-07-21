@@ -98,15 +98,28 @@ def _gh_status(key: str, indent: int = 12) -> str:
     )
 
 
-def _tw_docker_plugin(image: str, indent: int = 6) -> str:
+def _tw_docker_plugin(
+    image: str,
+    indent: int = 6,
+    extra_volumes: tuple[str, ...] = (),
+) -> str:
     """Emit the TW docker plugin block for a command step.
 
     TW agents run the Buildkite job on the host and use this plugin to launch the
     command in the requested workload image. The identity/cert mounts mirror the
     shared MSL TW helper so cloud_oss, curl, Go, Helm, and crane can authenticate
     from the TW host identity and cert mounts.
+
+    extra_volumes appends host mounts beyond the identity/cert set (e.g. the
+    Docker daemon socket for the KIND step). Never set the plugin's network
+    option here: the TW agent's docker CLI wrapper
+    (fbsource msl_infra/buildkite buildkite-docker-wrapper.sh) already injects
+    --network host into every workload container it launches and hard-fails
+    `docker network create`, so the plugin's create-if-missing network path
+    must stay unused.
     """
     pad = " " * indent
+    extra_volume_lines = "".join(f"{pad}      - {v}\n" for v in extra_volumes)
     return (
         f'{pad}- "{DOCKER_PLUGIN_REF}":\n'
         f'{pad}    image: "{image}"\n'
@@ -126,6 +139,7 @@ def _tw_docker_plugin(image: str, indent: int = 6) -> str:
         f"{pad}      - /var/facebook/x509_identities:/var/facebook/x509_identities:ro\n"
         f"{pad}      - /var/facebook/tupperware/tls:/var/facebook/tupperware/tls:ro\n"
         f"{pad}      - /data/buildkite/cloud.cli:/opt/cloud.cli:ro\n"
+        f"{extra_volume_lines}"
     )
 
 
@@ -171,6 +185,21 @@ def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str 
 
 
 def ci_steps() -> str:
+    # The KIND step drives the TW agent's dind daemon (kind nodes run as
+    # sibling containers, not nested ones). Mounting the daemon's
+    # /var/run/docker.sock is sufficient: the in-container docker CLI
+    # reaches it at the default path. Do NOT add a second mount of the
+    # supervisor-side socket path (/data/buildkite/dind/run/docker.sock)
+    # — a step configured with it died at container start. Network mode
+    # is deliberately NOT set: the TW docker wrapper injects
+    # --network host into this container anyway, which is also what
+    # makes the apiserver port kind publishes on the dind's loopback
+    # reachable from the test process.
+    kind_plugin = _tw_docker_plugin(
+        CI_IMAGE,
+        indent=14,
+        extra_volumes=("/var/run/docker.sock:/var/run/docker.sock",),
+    )
     base = textwrap.dedent(
         f"""\
         steps:
@@ -230,22 +259,29 @@ def ci_steps() -> str:
             # scale). ~5 min wall-clock, 24 specs.
             #
             # Independent from integration-test — they run in parallel.
-            # Requires Docker on the agent host; run_kind_tests.sh bails
-            # out with a clear error if `docker info` fails.
             #
-            # soft_fail: containerized Buildkite jobs don't expose a
-            # Docker daemon by default, so this can bail out at the
-            # `docker info` check. Keeping it non-blocking so the signal
-            # is visible (and turns green once we either move this step
-            # to a DinD/sysbox-capable queue or stand up a Docker-on-pod
-            # sidecar). Flip back to a hard fail once infra supports it.
+            # soft_fail: the TW dind cannot run kind node containers
+            # today. Its /proc/sys is read-only, which breaks bridge
+            # networking three independent ways (measured on builds
+            # 2268/2271/2272): kind's dual-stack `docker network create
+            # --ipv6` cannot write net.ipv6.conf.default.forwarding;
+            # veth attach to even an IPv4-only bridge cannot write the
+            # interface's disable_ipv6 sysctl; and net.ipv4.ip_forward
+            # is 0 and cannot be enabled. run_kind_tests.sh reproduces
+            # this in its first-minute preflight and exits with a FATAL
+            # naming the gap, so the parked step stays cheap and the
+            # signal stays visible. Flip to a hard fail once the
+            # Buildkite dind task (msl_infra/buildkite) gives dockerd a
+            # writable /proc/sys/net and ip_forward=1 — everything else
+            # (socket mount, docker CLI, IPv4 kind network pre-create,
+            # node-image pre-pull, BuildKit build) already works.
             soft_fail: true
             command: |
               sh .buildkite/run_kind_tests.sh
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
-{_tw_docker_plugin(CI_IMAGE, indent=14)}
+{kind_plugin}
 
           - label: ":racing_car: Perf Tests"
             key: "perf-test"

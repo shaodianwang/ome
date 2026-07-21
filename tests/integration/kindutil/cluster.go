@@ -25,6 +25,14 @@ const envKeepCluster = "KIND_KEEP_CLUSTER"
 // change that requires a fresh apiserver.
 const envRecreateCluster = "KIND_RECREATE"
 
+// envNodeImage, when non-empty, is passed to `kind create cluster
+// --image` so the node image can be pre-pulled by CI (keeping the
+// pre-pull and the booted cluster in lockstep) or redirected to a
+// registry mirror when Docker Hub isn't reachable from the runner.
+// Unset means kind's bundled default node image for the installed
+// kind release.
+const envNodeImage = "KIND_NODE_IMAGE"
+
 // envEnabled reports whether the named env var is set to a truthy
 // value. Accepts "1", "true", "yes", "on" (case-insensitive) so the
 // flag behaves the same whether it's set by `make test-kind`
@@ -146,6 +154,9 @@ func clusterExists(ctx context.Context, name string) (bool, error) {
 // spinup.
 func createCluster(ctx context.Context, name string, workers int) error {
 	args := []string{"create", "cluster", "--name", name, "--wait", "60s"}
+	if img := strings.TrimSpace(os.Getenv(envNodeImage)); img != "" {
+		args = append(args, "--image", img)
+	}
 	if workers > 0 {
 		cfg, cleanup, err := writeMultiNodeConfig(workers)
 		if err != nil {

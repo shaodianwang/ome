@@ -146,10 +146,13 @@ func buildArgsCacheKey(args map[string]string) string {
 }
 
 // dockerBuild runs `docker build -t <tag> [--build-arg KEY=VAL ...] <contextDir>`.
-// Forces DOCKER_BUILDKIT=0 so we use the legacy builder — fake-serving's
+// Defaults to DOCKER_BUILDKIT=0 (the legacy builder) — fake-serving's
 // Dockerfile is plain multi-stage with no BuildKit-only syntax, and forcing
 // buildx would require users to install the buildx component, which not
 // every Docker install ships with (notably colima + docker.io upstream).
+// A caller-set DOCKER_BUILDKIT wins: daemons running the containerd image
+// store (e.g. the TW CI dind) reject the legacy builder, so CI exports
+// DOCKER_BUILDKIT=1.
 func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[string]string) error {
 	args := []string{"build", "-t", tag}
 	keys := make([]string, 0, len(buildArgs))
@@ -162,7 +165,10 @@ func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[stri
 	}
 	args = append(args, contextDir)
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=0")
+	cmd.Env = os.Environ()
+	if os.Getenv("DOCKER_BUILDKIT") == "" {
+		cmd.Env = append(cmd.Env, "DOCKER_BUILDKIT=0")
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
