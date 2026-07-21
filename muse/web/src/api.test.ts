@@ -92,6 +92,9 @@ describe("resource identity requests", () => {
     const clusterScoped = new URL(fetch.mock.calls[1][0], "http://muse.test");
     expect(namespaced.pathname).toBe("/v1/servingruntimes/vllm");
     expect(clusterScoped.pathname).toBe("/v1/clusterservingruntimes/vllm");
+    // A legacy bookmark has no namespace to scope the probe with, so the
+    // ServingRuntime lookup is knowingly unscoped (first name match wins).
+    expect(namespaced.searchParams.has("namespace")).toBe(false);
   });
 
   it("does not change resource scope after an operational failure", async () => {

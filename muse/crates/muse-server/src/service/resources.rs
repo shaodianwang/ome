@@ -10,7 +10,7 @@
 //! Both endpoints fan out across the selected clusters, tagging each row with its
 //! owning cluster; an unknown kind is a 404.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -192,10 +192,14 @@ fn isvc_detail(c: &ClusterState, name: &str, namespace: Option<&str>, raw: bool)
 }
 
 /// The runtime name an InferenceService uses, with where it came from: the spec
-/// when declared there (`"spec"`), else the runtime label on any of the service's
-/// cached pods (`"pods"`, when a pod lister is supplied).
+/// when declared there (`"spec"`), else the runtime label on the service's
+/// cached pods (`"pods"`, when a pod lister is supplied). Disagreeing pod labels
+/// are settled by [`pick_pod_runtime_name`], with the runtime caches saying
+/// which labels still name a real runtime.
 fn runtime_name(
     isvc: &InferenceService,
+    runtimes: &Lister<ServingRuntime>,
+    cluster_runtimes: &Lister<ClusterServingRuntime>,
     pods: Option<&Lister<Pod>>,
 ) -> Option<(String, &'static str)> {
     let declared = isvc
@@ -209,7 +213,7 @@ fn runtime_name(
     }
     let namespace = isvc.meta().namespace.as_deref()?;
     let isvc_name = isvc.meta().name.as_deref()?;
-    pods?
+    let labels: Vec<String> = pods?
         .list_namespaced(namespace)
         .iter()
         .filter(|p| {
@@ -220,7 +224,7 @@ fn runtime_name(
                 .map(String::as_str)
                 == Some(isvc_name)
         })
-        .find_map(|p| {
+        .filter_map(|p| {
             p.meta()
                 .labels
                 .as_ref()?
@@ -228,7 +232,36 @@ fn runtime_name(
                 .cloned()
                 .filter(|n| !n.is_empty())
         })
-        .map(|name| (name, "pods"))
+        .collect();
+    pick_pod_runtime_name(labels, |name| {
+        runtimes.get_namespaced(namespace, name).is_some() || cluster_runtimes.get(name).is_some()
+    })
+    .map(|name| (name, "pods"))
+}
+
+/// Pick one runtime name from the runtime labels on an InferenceService's pods.
+///
+/// Mid-rollout the service's old and new pods carry different runtime labels,
+/// and the pod cache iterates in no particular order — so the pick must depend
+/// only on the label values themselves, never on iteration order, or the
+/// reported runtime would flip between refreshes. A label that resolves in a
+/// runtime cache beats one that does not (a stale label often names a runtime
+/// that no longer exists); after that the label on the most pods wins, and an
+/// exact tie goes to the lexicographically smallest label.
+fn pick_pod_runtime_name(labels: Vec<String>, resolves: impl Fn(&str) -> bool) -> Option<String> {
+    let mut count_by_name: BTreeMap<String, usize> = BTreeMap::new();
+    for label in labels {
+        *count_by_name.entry(label).or_insert(0) += 1;
+    }
+    count_by_name
+        .into_iter()
+        .max_by(|(a, a_count), (b, b_count)| {
+            (resolves(a), a_count)
+                .cmp(&(resolves(b), b_count))
+                // Reversed so that under `max` the smaller name wins a tie.
+                .then_with(|| b.cmp(a))
+        })
+        .map(|(name, _)| name)
 }
 
 /// Resolve which runtime object an InferenceService's runtime name denotes, the
@@ -243,7 +276,7 @@ fn resolved_runtime_ref(
     cluster_runtimes: &Lister<ClusterServingRuntime>,
     pods: Option<&Lister<Pod>>,
 ) -> Option<ResolvedRuntimeRefView> {
-    let (name, source) = runtime_name(isvc, pods)?;
+    let (name, source) = runtime_name(isvc, runtimes, cluster_runtimes, pods)?;
     if let Some(ns) = isvc.meta().namespace.as_deref() {
         if runtimes.get_namespaced(ns, &name).is_some() {
             return Some(ResolvedRuntimeRefView {
@@ -503,6 +536,62 @@ mod tests {
             .expect("pod-labelled runtime should resolve");
         assert_eq!(resolved.kind, "ClusterServingRuntime");
         assert_eq!(resolved.name, "vllm");
+        assert_eq!(resolved.source, "pods");
+    }
+
+    #[test]
+    fn disagreeing_pod_runtime_labels_pick_deterministically() {
+        let cached = |name: &str| name == "new-rt" || name == "old-rt";
+
+        // A label that resolves in a runtime cache beats a stale one that does
+        // not, regardless of how many pods still carry the stale label.
+        assert_eq!(
+            pick_pod_runtime_name(
+                vec!["gone-rt".into(), "gone-rt".into(), "new-rt".into()],
+                cached
+            ),
+            Some("new-rt".into())
+        );
+
+        // Among labels that both resolve, the one on the most pods wins.
+        assert_eq!(
+            pick_pod_runtime_name(
+                vec!["old-rt".into(), "new-rt".into(), "new-rt".into()],
+                cached
+            ),
+            Some("new-rt".into())
+        );
+
+        // An exact tie falls back to the lexicographically smallest label, no
+        // matter the order the labels were collected in.
+        assert_eq!(
+            pick_pod_runtime_name(vec!["old-rt".into(), "new-rt".into()], cached),
+            Some("new-rt".into())
+        );
+        assert_eq!(
+            pick_pod_runtime_name(vec!["new-rt".into(), "old-rt".into()], cached),
+            Some("new-rt".into())
+        );
+
+        assert_eq!(pick_pod_runtime_name(vec![], cached), None);
+    }
+
+    #[test]
+    fn mid_rollout_pod_disagreement_resolves_to_the_cached_runtime() {
+        let runtimes = lister_of::<ServingRuntime>(vec![]);
+        let cluster_runtimes = lister_of(vec![cluster_serving_runtime("vllm-next")]);
+        // Two old pods still carry the label of a runtime that no longer
+        // exists; one new pod names the cached one. The cached name must win.
+        let pods = lister_of(vec![
+            serving_pod("team-a", "svc-0", "svc", "vllm-old"),
+            serving_pod("team-a", "svc-1", "svc", "vllm-old"),
+            serving_pod("team-a", "svc-2", "svc", "vllm-next"),
+        ]);
+        let isvc = isvc_with_runtime("team-a", "svc", None);
+
+        let resolved = resolved_runtime_ref(&isvc, &runtimes, &cluster_runtimes, Some(&pods))
+            .expect("the cached runtime should resolve");
+        assert_eq!(resolved.name, "vllm-next");
         assert_eq!(resolved.source, "pods");
     }
 

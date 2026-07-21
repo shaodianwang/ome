@@ -566,7 +566,11 @@ export const api = {
       () => getJSON<ModelDetail>(resourcePath({ cluster, name, kind: "BaseModel" })),
     ),
   runtime: (ref: Selected) => getJSON<RuntimeDetail>(resourcePath(ref)),
-  // Namespaced first, matching how the operator resolves a runtime name.
+  // Namespaced first, matching how the operator resolves a runtime name. Legacy
+  // bookmark URLs carry only cluster + name, so the ServingRuntime probe is
+  // unscoped and returns the first name match across namespaces — ambiguous when
+  // unrelated namespaces reuse a runtime name. Callers that know the full
+  // identity should use `runtime` instead.
   legacyRuntime: (cluster: string, name: string) =>
     fallbackOnNotFound(
       getJSON<RuntimeDetail>(resourcePath({ cluster, name, kind: "ServingRuntime" })),
