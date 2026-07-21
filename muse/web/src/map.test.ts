@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import {
+  componentTone,
+  conditionRank,
   loadSummary,
   modelUsage,
   replicaRollup,
   runtimeReference,
   runtimeUsage,
+  sortConditions,
   toFeed,
   toRollouts,
   toWorkloadRows,
@@ -86,6 +89,36 @@ describe("replicaRollup", () => {
   it("returns an em dash when there are no components or no counts", () => {
     expect(replicaRollup(undefined)).toEqual({ label: "—", tone: "slate" });
     expect(replicaRollup([])).toEqual({ label: "—", tone: "slate" });
+  });
+});
+
+describe("condition and component tiles", () => {
+  it("orders condition tiles failing first, disabled-by-spec last", () => {
+    const conds = [
+      { type: "IngressReady", status: "False", reason: "IngressDisabled" },
+      { type: "PredictorReady", status: "True" },
+      { type: "Ready", status: "False", reason: "EngineNotReady" },
+    ];
+    expect(sortConditions(conds).map((c) => c.type)).toEqual([
+      "Ready",
+      "PredictorReady",
+      "IngressReady",
+    ]);
+    expect(conditionRank(conds[0])).toBe("disabled");
+    expect(conditionRank(conds[1])).toBe("normal");
+    expect(conditionRank(conds[2])).toBe("bad");
+  });
+
+  it("tones a component by how far live replicas are from the target", () => {
+    expect(componentTone({ name: "e", ready: true, currentReplicas: 2, desiredReplicas: 2 })).toBe(
+      "ok",
+    );
+    expect(componentTone({ name: "e", ready: false, currentReplicas: 1, desiredReplicas: 2 })).toBe(
+      "warn",
+    );
+    expect(componentTone({ name: "e", ready: false, currentReplicas: 0, desiredReplicas: 2 })).toBe(
+      "bad",
+    );
   });
 });
 

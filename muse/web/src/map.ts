@@ -3,7 +3,7 @@
 // Sections with no backing endpoint (Workloads PD/canary detail, Models onboarding
 // pipeline) are left empty and the panels render a placeholder.
 
-import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
+import type { ComponentItem, ConditionItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import { resourceKey, selectResource } from "./resource";
 import type { ResourceRef, Selected } from "./resource";
 import type { FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
@@ -87,6 +87,37 @@ export function replicaRollup(components?: ComponentItem[]): { label: string; to
   const tone: Tone =
     current >= desired && desired > 0 ? "green" : current < desired ? "amber" : "slate";
   return { label: `${current}/${desired}`, tone };
+}
+
+// ---- Deployment overview tiles ---------------------------------------------
+
+export type ConditionRank = "bad" | "normal" | "disabled";
+
+/** Tile rank for one condition. A `…Disabled` reason marks a capability turned
+ *  off by spec (e.g. ingress) — an expected state rendered dimmed, never a
+ *  failure; any other False condition is failing. */
+export function conditionRank(c: ConditionItem): ConditionRank {
+  if (c.reason?.endsWith("Disabled")) return "disabled";
+  return c.status === "False" ? "bad" : "normal";
+}
+
+const RANK_ORDER: Record<ConditionRank, number> = { bad: 0, normal: 1, disabled: 2 };
+
+/** Condition tiles in reading order: failing first, disabled-by-spec last;
+ *  stable within a rank. */
+export function sortConditions(conditions: ConditionItem[]): ConditionItem[] {
+  return [...conditions].sort(
+    (a, b) => RANK_ORDER[conditionRank(a)] - RANK_ORDER[conditionRank(b)],
+  );
+}
+
+/** Tile tone for one component: red when nothing is live against a nonzero
+ *  target, amber when short of target or reported not ready. */
+export function componentTone(c: ComponentItem): "ok" | "warn" | "bad" {
+  const cur = c.currentReplicas ?? 0;
+  const des = c.desiredReplicas ?? 0;
+  if (des > 0 && cur === 0) return "bad";
+  return c.ready === false || cur < des ? "warn" : "ok";
 }
 
 /** A short model-load summary: loaded/failed copies, else a non-steady state. */

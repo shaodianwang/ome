@@ -593,12 +593,6 @@ h2.sec {
   color: var(--fg-3);
   font-size: var(--t-sm);
 }
-.detail-endpoint {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  margin-bottom: var(--s4);
-}
 .detail-grid2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1203,6 +1197,121 @@ th.right .sort-arrow {
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
+/* ---- deployment overview: main column + About sidebar ---- */
+.overview-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: var(--s4);
+  align-items: start;
+}
+.overview-main,
+.overview-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+}
+@media (max-width: 1000px) {
+  .overview-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- component tiles: one box per component instead of flat rows ---- */
+.comp-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--s3);
+}
+.comp-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-2);
+  border-radius: var(--radius);
+  padding: var(--s3);
+}
+.comp-tile.ok {
+  border-left-color: var(--green);
+}
+.comp-tile.warn {
+  border-left-color: var(--amber);
+}
+.comp-tile.bad {
+  border-left-color: var(--red);
+  background: var(--red-dim);
+}
+.ct-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.ct-name {
+  font-weight: 600;
+  font-size: var(--t-md);
+}
+.ct-replicas {
+  margin-left: auto;
+  font-size: var(--t-md);
+}
+.ct-rev {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ct-foot {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+
+/* ---- condition tiles: a status grid, failing red / disabled dimmed ---- */
+.cond-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: var(--s2);
+}
+.cond-tile {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px var(--s3);
+  font-size: var(--t-sm);
+}
+.cond-tile .ct-type {
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cond-tile .ct-reason {
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cond-tile.bad {
+  background: var(--red-dim);
+  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+}
+.cond-tile.bad .ct-reason {
+  color: var(--red);
+}
+.cond-tile.off {
+  color: var(--fg-3);
+}
+
 /* ---- deployment monitoring dashboard ---- */
 .grid.g4 {
   grid-template-columns: repeat(4, 1fr);
@@ -1280,8 +1389,7 @@ th.right .sort-arrow {
   h2.sec {
     margin-top: var(--s4);
   }
-  .panel-alert,
-  .detail-endpoint {
+  .panel-alert {
     align-items: flex-start;
   }
   .detail-head {
@@ -1294,9 +1402,6 @@ th.right .sort-arrow {
   .detail-meta {
     flex: 1 1 100%;
     padding-left: var(--s2);
-  }
-  .detail-endpoint {
-    flex-wrap: wrap;
   }
   .dtabs {
     flex-wrap: nowrap;

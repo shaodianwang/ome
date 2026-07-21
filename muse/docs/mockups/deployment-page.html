@@ -1,12 +1,13 @@
 <!doctype html>
-<!-- MOCKUP ONLY — design draft for the deployment-page runtime card + logs tab.
+<!-- MOCKUP ONLY — design draft for the deployment page: consolidated overview
+     (boxed components/conditions + About sidebar), runtime card, logs tab.
      Class names and tokens mirror muse/web/src/styles/* so implementation maps 1:1.
      Not part of the build; safe to delete. -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MUSE mockup — deployment page: runtime card + logs tab</title>
+<title>MUSE mockup — deployment page: consolidated overview + logs tab</title>
 <style>
 /* ==== tokens copied from muse/web/src/styles/base.css ==== */
 :root {
@@ -89,6 +90,8 @@ body {
 .pill.violet .pdot { background: var(--violet); }
 .pill.slate { background: var(--bg-2); color: var(--fg-2); border-color: var(--border-2); }
 .pill.slate .pdot { background: var(--fg-3); }
+.pill.amber { background: var(--amber-dim); color: var(--amber); border-color: color-mix(in srgb, var(--amber) 30%, transparent); }
+.pill.amber .pdot { background: var(--amber); }
 .tag { font-size: var(--t-xs); font-family: var(--mono); color: var(--fg-2); background: var(--bg-2); border: 1px solid var(--border); padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
 
 .copyable { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
@@ -110,7 +113,7 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 .cond-row:last-child { border-bottom: 0; }
 .cond-rs { margin-left: auto; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
-.dot.green { background: var(--green); } .dot.amber { background: var(--amber); } .dot.slate { background: var(--fg-3); }
+.dot.green { background: var(--green); } .dot.amber { background: var(--amber); } .dot.slate { background: var(--fg-3); } .dot.red { background: var(--red); }
 
 .urow { display: grid; grid-template-columns: 1fr 120px 60px; align-items: center; gap: var(--s3); padding: 6px 0; font-size: var(--t-sm); }
 .urow .track { height: 6px; background: var(--bg-2); border-radius: var(--radius-pill); overflow: hidden; }
@@ -127,6 +130,31 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 .data-notice { display: flex; gap: var(--s2); align-items: baseline; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--s2) var(--s3); font-size: var(--t-sm); color: var(--fg-2); background: var(--bg-2); }
 .data-notice.warning { border-color: color-mix(in srgb, var(--amber) 35%, transparent); background: var(--amber-dim); }
 .data-notice.warning strong { color: var(--amber); font-weight: 600; }
+
+/* ==== consolidated overview: About sidebar + boxed tiles (mirrors viz.css) ==== */
+.overview-cols { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: var(--s4); align-items: start; }
+.overview-main, .overview-side { display: flex; flex-direction: column; gap: var(--s4); min-width: 0; }
+@media (max-width: 1000px) { .overview-cols { grid-template-columns: 1fr; } }
+.comp-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--s3); }
+.comp-tile { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; background: var(--bg-2); border: 1px solid var(--border); border-left: 3px solid var(--border-2); border-radius: var(--radius); padding: var(--s3); }
+.comp-tile.ok { border-left-color: var(--green); }
+.comp-tile.warn { border-left-color: var(--amber); }
+.comp-tile.bad { border-left-color: var(--red); background: var(--red-dim); }
+.ct-head { display: flex; align-items: baseline; gap: var(--s2); }
+.ct-name { font-weight: 600; font-size: var(--t-md); }
+.ct-replicas { margin-left: auto; font-size: var(--t-md); font-variant-numeric: tabular-nums; }
+.ct-rev { font-family: var(--mono); font-size: var(--t-xs); color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ct-foot { font-size: var(--t-xs); color: var(--fg-3); }
+.comp-tile .track { height: 6px; background: var(--panel-2); border-radius: var(--radius-pill); overflow: hidden; }
+.comp-tile .track i { display: block; height: 100%; background: var(--green); }
+.comp-tile.warn .track i { background: var(--amber); }
+.cond-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--s2); }
+.cond-tile { display: flex; align-items: center; gap: var(--s2); min-width: 0; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px var(--s3); font-size: var(--t-sm); }
+.cond-tile .ct-type { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cond-tile .ct-reason { margin-left: auto; color: var(--fg-3); font-size: var(--t-xs); white-space: nowrap; }
+.cond-tile.bad { background: var(--red-dim); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
+.cond-tile.bad .ct-reason { color: var(--red); }
+.cond-tile.off { color: var(--fg-3); }
 
 /* ==== NEW classes proposed by this design (would live in styles/logs.css) ==== */
 .rt-role { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--border); font-size: var(--t-xs); font-weight: 600; color: var(--fg-3); letter-spacing: 0.02em; text-transform: uppercase; }
@@ -155,15 +183,17 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 <body>
 
 <div class="mock-banner">
-  <b>Mockup</b> — deployment page additions: inline <b>Runtime card</b> (Overview tab, with command/args + env)
-  and the new <b>Logs tab</b> (stern-like aggregated streaming). Click the tabs. Static data; classes and
-  tokens mirror the real stylesheets.
+  <b>Mockup</b> — deployment page: the consolidated <b>Overview</b> (components and conditions as boxed
+  tiles — failing first, disabled-by-spec dimmed last — with every identity fact in one <b>About</b>
+  sidebar and a Ready/Degraded header pill), the inline <b>Runtime card</b> (command/args + env) and the
+  <b>Logs tab</b> (stern-like aggregated streaming). Click the tabs. Static data; classes and tokens
+  mirror the real stylesheets.
 </div>
 
 <div class="detail-head">
   <button class="backlink">← Deployments</button>
   <h1 class="detail-title mono">avocado-t5-ome-inferq-513</h1>
-  <span class="pill green"><span class="pdot"></span>Ready</span>
+  <span class="pill amber" title="Ready per the operator, but a component is short of its replica target"><span class="pdot"></span>Degraded</span>
   <span class="detail-meta">InferenceService · sdg-prod · msl-cw-use2-1</span>
 </div>
 
@@ -177,7 +207,7 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 <!-- ============================ OVERVIEW TAB ============================ -->
 <section id="tab-overview">
   <div class="statstrip">
-    <div class="s2"><span class="lbl">Replicas</span><span class="val">203/203</span></div>
+    <div class="s2"><span class="lbl">Replicas</span><span class="val">204/205</span></div>
     <div class="s2"><span class="lbl">QPS</span><span class="val">1.2k</span></div>
     <div class="s2"><span class="lbl">p99</span><span class="val">840 ms</span></div>
     <div class="s2"><span class="lbl">Error</span><span class="val">0.02%</span></div>
@@ -185,22 +215,45 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
     <button class="linkbtn strip-link">Monitoring →</button>
   </div>
 
-  <div class="detail-grid2">
+  <div class="overview-cols">
+  <div class="overview-main">
+
+    <!-- ============ Components as boxed tiles ============ -->
     <div class="card">
-      <div class="card-head"><h3>Details</h3></div>
+      <div class="card-head"><h3>Components</h3><span class="sub">204/205 ready</span></div>
       <div class="card-body">
-        <dl class="facts">
-          <div class="fact"><dt>Model</dt><dd><button class="linkbtn mono">avocado-v7p2-ckpt312</button></dd></div>
-          <div class="fact"><dt>Mode</dt><dd>OMENative</dd></div>
-          <div class="fact"><dt>Namespace</dt><dd>sdg-prod</dd></div>
-          <div class="fact"><dt>Cluster</dt><dd>msl-cw-use2-1</dd></div>
-          <div class="fact"><dt>Age</dt><dd>14d</dd></div>
-        </dl>
-        <!-- NOTE: the old "Runtime" facts row moves to the card on the right -->
+        <div class="comp-tiles">
+          <div class="comp-tile ok">
+            <div class="ct-head"><span class="dot green"></span><span class="ct-name">engine</span><span class="ct-replicas">128/128</span></div>
+            <div class="ct-rev">rev-7c2f1</div><div class="track"><i style="width:100%"></i></div><div class="ct-foot">Stable · 100%</div>
+          </div>
+          <div class="comp-tile ok">
+            <div class="ct-head"><span class="dot green"></span><span class="ct-name">decoder</span><span class="ct-replicas">75/75</span></div>
+            <div class="ct-rev">rev-7c2f1</div><div class="track"><i style="width:100%"></i></div><div class="ct-foot">Stable · 100%</div>
+          </div>
+          <div class="comp-tile warn">
+            <div class="ct-head"><span class="dot amber"></span><span class="ct-name">router</span><span class="ct-replicas">1/2</span></div>
+            <div class="ct-rev">rev-7c2f1</div><div class="track"><i style="width:50%"></i></div><div class="ct-foot">Progressing · 50%</div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- ============ NEW: Runtime overview card ============ -->
+    <!-- ============ Conditions as boxed tiles: failing first, disabled dimmed last ============ -->
+    <div class="card">
+      <div class="card-head"><h3>Conditions</h3></div>
+      <div class="card-body">
+        <div class="cond-tiles">
+          <div class="cond-tile bad" title="router replicas below target"><span class="dot red"></span><span class="ct-type">RouterReady</span><span class="ct-reason">RouterNotReady</span></div>
+          <div class="cond-tile"><span class="dot green"></span><span class="ct-type">Ready</span><span class="ct-reason">True</span></div>
+          <div class="cond-tile"><span class="dot green"></span><span class="ct-type">EngineReady</span><span class="ct-reason">True</span></div>
+          <div class="cond-tile"><span class="dot green"></span><span class="ct-type">DecoderReady</span><span class="ct-reason">True</span></div>
+          <div class="cond-tile off" title="turned off by spec — expected, not a failure"><span class="dot slate"></span><span class="ct-type">IngressReady</span><span class="ct-reason">IngressDisabled</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Runtime overview card ============ -->
     <div class="card">
       <div class="card-head">
         <h3>Runtime</h3>
@@ -260,25 +313,6 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
         </details>
       </div>
     </div>
-  </div>
-
-  <div class="detail-grid2">
-    <div class="card">
-      <div class="card-head"><h3>Components</h3><span class="sub">203/203 ready</span></div>
-      <div class="card-body">
-        <div class="urow"><span>engine <span class="muted">· rev 7c2f1 · Stable</span></span><span class="track"><span class="fill" style="width:100%"></span></span><span class="v">128/128</span></div>
-        <div class="urow"><span>decoder <span class="muted">· rev 7c2f1 · Stable</span></span><span class="track"><span class="fill" style="width:100%"></span></span><span class="v">75/75</span></div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-head"><h3>Conditions</h3></div>
-      <div class="card-body">
-        <div class="cond-row"><span class="dot green"></span><span class="mono">Ready</span><span class="cond-rs">True</span></div>
-        <div class="cond-row"><span class="dot green"></span><span class="mono">EngineReady</span><span class="cond-rs">True</span></div>
-        <div class="cond-row"><span class="dot green"></span><span class="mono">DecoderReady</span><span class="cond-rs">True</span></div>
-      </div>
-    </div>
-  </div>
 
   <!-- degraded states of the runtime card, for design review -->
   <div class="detail-grid2">
@@ -294,6 +328,25 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
         <div class="data-notice warning"><strong>Runtime not found</strong><span>srt-avocado-v7p1 is referenced but no longer exists on msl-cw-use2-1.</span></div>
       </div>
     </div>
+  </div>
+  </div>
+
+  <!-- ============ About sidebar: every identity fact in one place ============ -->
+  <aside class="overview-side">
+    <div class="card">
+      <div class="card-head"><h3>About</h3></div>
+      <div class="card-body">
+        <dl class="facts">
+          <div class="fact"><dt>Model</dt><dd><button class="linkbtn mono">avocado-v7p2-ckpt312</button></dd></div>
+          <div class="fact"><dt>Mode</dt><dd>OMENative</dd></div>
+          <div class="fact"><dt>Namespace</dt><dd>sdg-prod</dd></div>
+          <div class="fact"><dt>Cluster</dt><dd>msl-cw-use2-1</dd></div>
+          <div class="fact"><dt>Age</dt><dd>14d</dd></div>
+          <div class="fact"><dt>Endpoint</dt><dd><span class="copyable"><span class="mono">http://avocado-t5-ome-inferq-513.sdg-prod.svc.cluster.local</span><button class="copybtn" title="Copy endpoint">⧉</button></span></dd></div>
+        </dl>
+      </div>
+    </div>
+  </aside>
   </div>
 </section>
 

@@ -8,7 +8,7 @@ import { metricsHealth } from "../dataState";
 import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import type { StreamConnectionState } from "../live";
-import { replicaRollup, runtimeRefOf } from "../map";
+import { componentTone, conditionRank, replicaRollup, runtimeRefOf, sortConditions } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
 import { replicaDiagnostics } from "../replicaMetrics";
@@ -16,16 +16,17 @@ import { resourceKey, selectResource } from "../resource";
 import type { ResourceRef, Selected } from "../resource";
 import { imageShort, isDisaggregated, servesTags, topologySummary } from "../runtime";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate, num as n } from "../util";
-import { Card, Dot, Gauge, UtilRow } from "../viz";
+import { Card, Dot, Gauge, Track } from "../viz";
 import { ChatBox } from "./ChatBox";
 import { Monitoring } from "./DeploymentMonitoring";
 import { LogsPane } from "./LogsPane";
 
 /** Console-style detail for one deployment, modelled on a cloud console (EC2 /
  *  OCI): a persistent identity header over a few substantial tabs.
- *  Overview holds config *and* current state (components, conditions, rollout,
- *  placement) — deliberately not split into thin per-facet tabs. Monitoring owns
- *  the time-series; Logs streams pod logs (rendered only when the server enables
+ *  Overview leads with current state boxed per item — component tiles, then
+ *  condition tiles (failing first, disabled-by-spec dimmed last) — with every
+ *  identity fact consolidated into one About sidebar. Monitoring owns the
+ *  time-series; Logs streams pod logs (rendered only when the server enables
  *  log streaming for this deployment's cluster); Activity is the change log. */
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -93,13 +94,18 @@ export function DeploymentDetail({
       e.namespace === (d?.namespace ?? sel.namespace),
   );
 
+  // Header health pill: the flat ready flag, sharpened by per-component
+  // readiness — a deployment reporting Ready while a component is short of its
+  // replica target reads Degraded, not Ready.
   const status = !d
     ? null
-    : d.ready === true
-      ? { label: "Ready", tone: "green" as const }
-      : d.ready === false
-        ? { label: "Not ready", tone: "red" as const }
-        : { label: "Unknown", tone: "slate" as const };
+    : d.ready === false
+      ? { label: "Not ready", tone: "red" as const }
+      : (d.components ?? []).some((c) => componentTone(c) !== "ok")
+        ? { label: "Degraded", tone: "amber" as const }
+        : d.ready === true
+          ? { label: "Ready", tone: "green" as const }
+          : { label: "Unknown", tone: "slate" as const };
 
   const meta = [sel.cluster, d?.namespace, d?.deploymentMode, d?.age].filter(Boolean).join(" · ");
 
@@ -113,13 +119,6 @@ export function DeploymentDetail({
         {status ? <Pill tone={status.tone} label={status.label} /> : null}
         <span className="detail-meta">{meta}</span>
       </div>
-
-      {d?.url ? (
-        <div className="detail-endpoint">
-          <span className="eyebrow">Endpoint</span>
-          <Copyable text={d.url} />
-        </div>
-      ) : null}
 
       {d && d.ready === false && (d.reason || d.message) ? (
         <div className="notice bad">
@@ -239,9 +238,9 @@ function StripStat({ label, value }: { label: string; value: ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
-// Overview — config, identity, and current state (components, conditions,
-// rollout, placement). All the static/state facts in one place; the headline
-// strip links out to Monitoring for the charts.
+// Overview — current state first (component tiles, condition tiles, rollout,
+// runtime, placement) beside an About sidebar that consolidates every identity
+// fact; the headline strip links out to Monitoring for the charts.
 // ---------------------------------------------------------------------------
 function OverviewPane({
   d,
@@ -304,136 +303,153 @@ function OverviewPane({
         ) : null}
       </div>
 
-      <div className="detail-grid2">
-        <Card title="Details">
-          <Facts
-            items={[
-              [
-                "Model",
-                modelRef ? (
-                  <button
-                    className="linkbtn mono"
-                    onClick={() => openModel(selectResource(sel.cluster, modelRef))}
-                  >
-                    {modelRef.name}
-                  </button>
-                ) : null,
-              ],
-              ["Mode", d.deploymentMode],
-              ["Namespace", d.namespace],
-              ["Cluster", sel.cluster],
-              ["Age", d.age],
-            ]}
-          />
-        </Card>
-
-        {runtimeSel ? (
-          <RuntimeOverviewCard
-            key={resourceKey(runtimeSel)}
-            sel={runtimeSel}
-            source={d.resolvedRuntimeRef?.source}
-            openRuntime={openRuntime}
-          />
-        ) : (
-          <Card title="Runtime">
-            <p className="muted">Runtime auto-selected — resolves when replicas are running.</p>
-          </Card>
-        )}
-      </div>
-
-      <div className="detail-grid2 section-gap">
-        <Card title="Components" sub={`${ready} ready`}>
-          {components.length ? (
-            <div className="urows">
-              {components.map((c) => {
-                const cur = c.currentReplicas ?? 0;
-                const des = c.desiredReplicas ?? 0;
-                const pct = des > 0 ? Math.round((cur / des) * 100) : cur > 0 ? 100 : 0;
-                const tone = c.ready ? "green" : cur < des ? "amber" : "";
-                const extra = [c.revision, c.rolloutPhase].filter(Boolean).join(" · ");
-                return (
-                  <UtilRow
-                    key={c.name}
-                    name={
-                      <>
-                        {c.name}
-                        {extra ? <span className="muted"> · {extra}</span> : null}
-                      </>
-                    }
-                    pct={pct}
-                    tone={tone}
-                    value={`${cur}/${des}`}
-                  />
-                );
-              })}
-            </div>
-          ) : (
-            <div className="muted">No component detail.</div>
-          )}
-          {d.loadedCopies != null || d.failedCopies ? (
-            <div className="detail-load">
-              <Dot tone={d.failedCopies ? "amber" : "green"} />
-              model {n(d.loadedCopies ?? 0)} loaded
-              {d.failedCopies ? ` · ${n(d.failedCopies)} failed` : ""}
-            </div>
-          ) : null}
-        </Card>
-
-        <Card title="Invoke & test" sub="OpenAI-compatible">
-          <ChatBox
-            resource={sel}
-            endpoint={d.url}
-            defaultModel={d.model ?? ""}
-            enabled={chat}
-            timeoutSecs={chatTimeoutSecs}
-            clientGraceSecs={chatClientGraceSecs}
-          />
-        </Card>
-      </div>
-
-      <div className="detail-grid2 section-gap">
-        <Card title="Conditions">
-          {d.conditions && d.conditions.length ? (
-            d.conditions.map((c, i) => (
-              <div className="cond-row" key={i}>
-                <Dot
-                  tone={c.status === "True" ? "green" : c.status === "False" ? "red" : "slate"}
-                />
-                <span className="mono">{c.type}</span>
-                <span className="cond-rs">{c.reason || c.status}</span>
+      <div className="overview-cols">
+        <div className="overview-main">
+          <Card title="Components" sub={`${ready} ready`}>
+            {components.length ? (
+              <div className="comp-tiles">
+                {components.map((c) => {
+                  const cur = c.currentReplicas ?? 0;
+                  const des = c.desiredReplicas ?? 0;
+                  const pct = des > 0 ? Math.round((cur / des) * 100) : cur > 0 ? 100 : 0;
+                  const tone = componentTone(c);
+                  const barTone = tone === "ok" ? "green" : tone === "warn" ? "amber" : "red";
+                  return (
+                    <div key={c.name} className={`comp-tile ${tone}`}>
+                      <div className="ct-head">
+                        <Dot tone={barTone} />
+                        <span className="ct-name">{c.name}</span>
+                        <span className="ct-replicas tnum">
+                          {cur}/{des}
+                        </span>
+                      </div>
+                      {c.revision ? (
+                        <div className="ct-rev" title={c.revision}>
+                          {c.revision}
+                        </div>
+                      ) : null}
+                      <Track pct={pct} tone={barTone} />
+                      <div className="ct-foot">
+                        {[c.rolloutPhase, `${pct}%`].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))
-          ) : (
-            <div className="muted">No conditions reported.</div>
-          )}
-        </Card>
-
-        {d.placement?.cluster || standby.length ? (
-          <Card title="Placement" sub="where it runs">
-            {d.placement?.cluster ? (
-              <div className="place-row">
-                <Dot tone="green" />
-                <span className="mono">{d.placement.cluster}</span>
-                <span className="muted">active</span>
+            ) : (
+              <div className="muted">No component detail.</div>
+            )}
+            {d.loadedCopies != null || d.failedCopies ? (
+              <div className="detail-load">
+                <Dot tone={d.failedCopies ? "amber" : "green"} />
+                model {n(d.loadedCopies ?? 0)} loaded
+                {d.failedCopies ? ` · ${n(d.failedCopies)} failed` : ""}
               </div>
             ) : null}
-            {standby.map((c, i) => (
-              <div className="place-row" key={i}>
-                <Dot tone="slate" />
-                <span className="mono">{c.cluster}</span>
-                <span className="muted">standby</span>
-              </div>
-            ))}
           </Card>
-        ) : null}
-      </div>
 
-      {d.canary ? (
-        <Card title="Rollout" sub={`canary · step ${d.canary.currentStep}`} className="section-gap">
-          <Gauge pct={d.canary.trafficWeight} />
-          <p className="panel-note">{d.canary.trafficWeight}% of traffic on the new revision.</p>
-        </Card>
-      ) : null}
+          <Card title="Conditions">
+            {d.conditions && d.conditions.length ? (
+              <div className="cond-tiles">
+                {sortConditions(d.conditions).map((c, i) => {
+                  const rank = conditionRank(c);
+                  const cls = rank === "bad" ? " bad" : rank === "disabled" ? " off" : "";
+                  return (
+                    <div key={`${c.type}-${i}`} className={`cond-tile${cls}`} title={c.message}>
+                      <Dot
+                        tone={rank === "bad" ? "red" : c.status === "True" ? "green" : "slate"}
+                      />
+                      <span className="ct-type">{c.type}</span>
+                      <span className="ct-reason">{c.reason || c.status}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="muted">No conditions reported.</div>
+            )}
+          </Card>
+
+          {d.canary ? (
+            <Card title="Rollout" sub={`canary · step ${d.canary.currentStep}`}>
+              <Gauge pct={d.canary.trafficWeight} />
+              <p className="panel-note">
+                {d.canary.trafficWeight}% of traffic on the new revision.
+              </p>
+            </Card>
+          ) : null}
+
+          {runtimeSel ? (
+            <RuntimeOverviewCard
+              key={resourceKey(runtimeSel)}
+              sel={runtimeSel}
+              source={d.resolvedRuntimeRef?.source}
+              openRuntime={openRuntime}
+            />
+          ) : (
+            <Card title="Runtime">
+              <p className="muted">Runtime auto-selected — resolves when replicas are running.</p>
+            </Card>
+          )}
+
+          <div className="detail-grid2">
+            <Card title="Invoke & test" sub="OpenAI-compatible">
+              <ChatBox
+                resource={sel}
+                endpoint={d.url}
+                defaultModel={d.model ?? ""}
+                enabled={chat}
+                timeoutSecs={chatTimeoutSecs}
+                clientGraceSecs={chatClientGraceSecs}
+              />
+            </Card>
+
+            {d.placement?.cluster || standby.length ? (
+              <Card title="Placement" sub="where it runs">
+                {d.placement?.cluster ? (
+                  <div className="place-row">
+                    <Dot tone="green" />
+                    <span className="mono">{d.placement.cluster}</span>
+                    <span className="muted">active</span>
+                  </div>
+                ) : null}
+                {standby.map((c, i) => (
+                  <div className="place-row" key={i}>
+                    <Dot tone="slate" />
+                    <span className="mono">{c.cluster}</span>
+                    <span className="muted">standby</span>
+                  </div>
+                ))}
+              </Card>
+            ) : null}
+          </div>
+        </div>
+
+        <aside className="overview-side">
+          <Card title="About">
+            <Facts
+              items={[
+                [
+                  "Model",
+                  modelRef ? (
+                    <button
+                      className="linkbtn mono"
+                      onClick={() => openModel(selectResource(sel.cluster, modelRef))}
+                    >
+                      {modelRef.name}
+                    </button>
+                  ) : null,
+                ],
+                ["Mode", d.deploymentMode],
+                ["Namespace", d.namespace],
+                ["Cluster", sel.cluster],
+                ["Age", d.age],
+                ["Endpoint", d.url ? <Copyable text={d.url} /> : null],
+              ]}
+            />
+          </Card>
+        </aside>
+      </div>
     </>
   );
 }
