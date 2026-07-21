@@ -138,9 +138,21 @@ spec:
             # a logged reason) if one is missing or the buffer budget is exceeded.
             - name: MUSE_LOGS_ENABLED
               value: {{ .Values.config.logs.enabled | quote }}
+            {{- if .Values.config.logs.allClusters }}
+            {{- $names := list }}
+            {{- range .Values.clusters }}
+            {{- $names = append $names .name }}
+            {{- end }}
+            {{- if not $names }}
+            {{- $names = list .Values.config.localClusterName }}
+            {{- end }}
+            - name: MUSE_LOGS_CLUSTERS
+              value: {{ join "," $names | quote }}
+            {{- else }}
             {{- with .Values.config.logs.clusters }}
             - name: MUSE_LOGS_CLUSTERS
               value: {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.config.logs.maxSessions }}
             - name: MUSE_LOGS_MAX_SESSIONS
