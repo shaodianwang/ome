@@ -769,13 +769,22 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	// We directly set URL and inference service status to Ready in VirtualDeployment mode
 
+	// Honor the configured urlScheme (OEP-0023 Part 4) rather than hardcoding http.
+	ingressConfig, err := controllerconfig.NewIngressConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
 	// Set URL across all Status components
 	host := network.GetServiceHostname(isvc.Name, isvc.Namespace)
-	openAIURL := knapis.HTTP(host)
+	openAIURL := &knapis.URL{
+		Host:   host,
+		Scheme: ingressConfig.UrlScheme,
+	}
 	addressURL := &duckv1.Addressable{
 		URL: &knapis.URL{
 			Host:   host,
-			Scheme: "http",
+			Scheme: ingressConfig.UrlScheme,
 		},
 	}
 	isvc.Status.URL = openAIURL
@@ -1227,14 +1236,15 @@ func (r *InferenceServiceReconciler) setExternalServiceURL(ctx context.Context, 
 	host := network.GetServiceHostname(externalService.Name, externalService.Namespace)
 	hostWithPort := fmt.Sprintf("%s:%d", host, port)
 
+	// Honor the configured urlScheme (OEP-0023 Part 4) rather than hardcoding http.
 	isvc.Status.URL = &knapis.URL{
 		Host:   hostWithPort,
-		Scheme: "http",
+		Scheme: ingressConfig.UrlScheme,
 	}
 	isvc.Status.Address = &duckv1.Addressable{
 		URL: &knapis.URL{
 			Host:   hostWithPort,
-			Scheme: "http",
+			Scheme: ingressConfig.UrlScheme,
 		},
 	}
 
