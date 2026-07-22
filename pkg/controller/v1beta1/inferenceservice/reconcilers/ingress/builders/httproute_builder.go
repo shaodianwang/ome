@@ -147,44 +147,67 @@ func (b *HTTPRouteBuilder) gatewayHostnameForDomain(isvc *v1beta1.InferenceServi
 	return gatewayapiv1.Hostname(domain), nil
 }
 
-// gatewaysForRoute returns the parentRefs and hostnames a route attaches to: the
-// primary gateway (OmeIngressGateway + IngressDomain) plus every
-// AdditionalIngressGateways entry, each with a hostname rendered from its own
-// domain. This lets one route serve, e.g., both an internal and an external
-// gateway. The hostnames and parentRefs are index-aligned per gateway.
-func (b *HTTPRouteBuilder) gatewaysForRoute(isvc *v1beta1.InferenceService) ([]gatewayapiv1.ParentReference, []gatewayapiv1.Hostname, error) {
+// resolvedGateway pairs a resolved gateway spec with its endpoint class and
+// whether it is the config-designated primary gateway. It is the single source
+// both gatewaysForRoute (routing) and Endpoints (status) iterate, so the two
+// cannot drift (OEP-0023 Part 1).
+type resolvedGateway struct {
+	spec    controllerconfig.IngressGatewaySpec
+	class   string
+	primary bool
+}
+
+// resolvedGateways returns the gateways a route attaches to, in host/parentRef
+// order: the primary gateway (OmeIngressGateway + IngressDomain, class
+// OmeIngressGatewayClass) first, then every AdditionalIngressGateways entry with
+// its own class. A per-namespace override (NamespaceIngressGateways) replaces the
+// primary and/or additional gateways for ISVCs in that namespace, carrying that
+// override's own class. A per-ISVC gateway annotation, already applied to
+// b.ingressConfig by ResolveIngressConfig, wins over the namespace default, so
+// the corresponding override is skipped when set.
+func (b *HTTPRouteBuilder) resolvedGateways(isvc *v1beta1.InferenceService) []resolvedGateway {
 	primary := controllerconfig.IngressGatewaySpec{
 		OmeIngressGateway: b.ingressConfig.OmeIngressGateway,
 		IngressDomain:     b.ingressConfig.IngressDomain,
 	}
+	primaryClass := b.ingressConfig.OmeIngressGatewayClass
 	additional := b.ingressConfig.AdditionalIngressGateways
 
-	// Per-namespace gateway override: attach this ISVC's routes to its namespace's
-	// gateway(s) (e.g. "prod-int-gw-https" for the "prod" namespace) instead of the
-	// cluster default, so per-namespace Gateways with their own TLS cert/DNS serve
-	// the namespace-scoped host the DomainTemplate already produces. A per-ISVC
-	// gateway annotation, already applied to b.ingressConfig by ResolveIngressConfig,
-	// wins over this namespace default, so skip the corresponding override when set.
 	if nsGW, ok := b.ingressConfig.NamespaceIngressGateways[isvc.Namespace]; ok {
 		if _, annotated := isvc.Annotations[constants.IngressGatewayOverride]; !annotated && nsGW.Primary.OmeIngressGateway != "" {
 			primary = nsGW.Primary
+			primaryClass = nsGW.Primary.Class
 		}
 		if _, annotated := isvc.Annotations[constants.IngressAdditionalGateways]; !annotated && nsGW.Additional != nil {
 			additional = nsGW.Additional
 		}
 	}
 
-	gateways := append([]controllerconfig.IngressGatewaySpec{primary}, additional...)
+	gateways := make([]resolvedGateway, 0, 1+len(additional))
+	gateways = append(gateways, resolvedGateway{spec: primary, class: primaryClass, primary: true})
+	for _, gw := range additional {
+		gateways = append(gateways, resolvedGateway{spec: gw, class: gw.Class})
+	}
+	return gateways
+}
+
+// gatewaysForRoute returns the parentRefs and hostnames a route attaches to: the
+// primary gateway plus every additional gateway (see resolvedGateways), each with
+// a hostname rendered from its own domain. This lets one route serve, e.g., both
+// an internal and an external gateway. The hostnames and parentRefs are
+// index-aligned per gateway.
+func (b *HTTPRouteBuilder) gatewaysForRoute(isvc *v1beta1.InferenceService) ([]gatewayapiv1.ParentReference, []gatewayapiv1.Hostname, error) {
+	gateways := b.resolvedGateways(isvc)
 
 	parentRefs := make([]gatewayapiv1.ParentReference, 0, len(gateways))
 	hosts := make([]gatewayapiv1.Hostname, 0, len(gateways))
 	for _, gw := range gateways {
-		host, err := b.gatewayHostnameForDomain(isvc, gw.IngressDomain)
+		host, err := b.gatewayHostnameForDomain(isvc, gw.spec.IngressDomain)
 		if err != nil {
 			return nil, nil, err
 		}
 		hosts = append(hosts, host)
-		slice := strings.Split(gw.OmeIngressGateway, "/")
+		slice := strings.Split(gw.spec.OmeIngressGateway, "/")
 		ns := slice[0]
 		name := slice[len(slice)-1]
 		parentRefs = append(parentRefs, gatewayapiv1.ParentReference{

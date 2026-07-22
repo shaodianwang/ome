@@ -347,6 +347,10 @@ func (typedNilHTTPRouteBuilder) BuildHTTPRoute(_ context.Context, _ *v1beta1.Inf
 	return (*gatewayapiv1.HTTPRoute)(nil), nil
 }
 
+func (typedNilHTTPRouteBuilder) Endpoints(_ *v1beta1.InferenceService, _ string) ([]interfaces.Endpoint, error) {
+	return nil, nil
+}
+
 // TestGatewayAPIStrategy_ReconcileComponentHTTPRoute_TypedNilBuilderDoesNotPanic
 // pins the layer-2 defense for the typed-nil-through-interface panic.
 //
