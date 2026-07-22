@@ -174,6 +174,11 @@ ome:
         gatewayService: istio-ingressgateway.istio-system.svc.cluster.local
         className: istio
       omeIngressGateway: ""
+      # Class label for the primary gateway's endpoints in InferenceService
+      # status ("internal", "external", ...). Free-form; the OME binary has NO
+      # built-in default. Must be an RFC-1123 label (invalid values are rejected
+      # at config-load). Empty => the primary endpoint carries no class.
+      omeIngressGatewayClass: ""
       additionalIngressDomains: null
       pathTemplate: ""
       disableIngressCreation: true

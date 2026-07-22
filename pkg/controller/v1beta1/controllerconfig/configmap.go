@@ -11,6 +11,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
 	"golang.org/x/sync/singleflight"
@@ -114,9 +115,17 @@ type RelabelConfig struct {
 
 // +kubebuilder:object:generate=false
 type IngressConfig struct {
-	IngressGateway           string    `json:"ingressGateway,omitempty"`
-	IngressServiceName       string    `json:"ingressService,omitempty"`
-	OmeIngressGateway        string    `json:"omeIngressGateway,omitempty"`
+	IngressGateway     string `json:"ingressGateway,omitempty"`
+	IngressServiceName string `json:"ingressService,omitempty"`
+	OmeIngressGateway  string `json:"omeIngressGateway,omitempty"`
+	// OmeIngressGatewayClass labels the primary (OmeIngressGateway) gateway's
+	// endpoints in status ("internal", "external", ...) — the analogue of
+	// IngressGatewaySpec.Class for the cluster-default primary gateway. Free-form;
+	// NO in-code default (config-driven per the no-hardcoded-magic-values
+	// constraint). Must match the RFC-1123 label form so it is safe as a
+	// selector / metrics / path token; invalid values are rejected at config-load.
+	// Empty ⇒ the primary endpoint carries no class. (OEP-0023 Part 5.)
+	OmeIngressGatewayClass   string    `json:"omeIngressGatewayClass,omitempty"`
 	IngressDomain            string    `json:"ingressDomain,omitempty"`
 	IngressClassName         *string   `json:"ingressClassName,omitempty"`
 	AdditionalIngressDomains *[]string `json:"additionalIngressDomains,omitempty"`
@@ -174,6 +183,13 @@ type IngressGatewaySpec struct {
 	// IngressDomain is the domain used to render this gateway's route hostname
 	// (same scheme as the primary: per-ISVC subdomain or shared-host prefix).
 	IngressDomain string `json:"ingressDomain"`
+	// Class labels this gateway's endpoints in status ("internal", "external",
+	// "exp", ...). Free-form; NO in-code default (config-driven per the
+	// no-hardcoded-magic-values constraint). Must match the RFC-1123 label form
+	// [a-z0-9]([-a-z0-9]*[a-z0-9])? so it is safe as a selector / metrics / path
+	// token; invalid values are rejected at config-load. Empty ⇒ the endpoint
+	// carries no class. (OEP-0023 Part 5.)
+	Class string `json:"class,omitempty"`
 }
 
 // NamespaceIngressGateway is the per-namespace gateway override applied to every
@@ -474,6 +490,13 @@ func parseIngressConfig(configMap *v1.ConfigMap) (*IngressConfig, error) {
 				return nil, fmt.Errorf("invalid ingress config - ingressDomain is required if pathTemplate is given")
 			}
 		}
+
+		// OEP-0023 Part 5: an endpoint class is copied verbatim into status and
+		// used as a selector / metrics / path token, so reject a malformed one at
+		// config-load rather than emit an invalid status value later.
+		if err := validateIngressGatewayClasses(ingressConfig); err != nil {
+			return nil, err
+		}
 	}
 
 	if ingressConfig.DomainTemplate == "" {
@@ -493,6 +516,47 @@ func parseIngressConfig(configMap *v1.ConfigMap) (*IngressConfig, error) {
 	}
 
 	return ingressConfig, nil
+}
+
+// validateIngressGatewayClasses rejects any endpoint class that is not a valid
+// RFC-1123 DNS label. The class is copied verbatim onto status endpoints and is
+// meant to be safe as a selector key / metrics dimension / path segment
+// (OEP-0023 Part 5), so a malformed value is a config error, not something to
+// sanitize silently. Empty classes are allowed (endpoint carries no class).
+func validateIngressGatewayClasses(cfg *IngressConfig) error {
+	if err := validateIngressClass("omeIngressGatewayClass", cfg.OmeIngressGatewayClass); err != nil {
+		return err
+	}
+	for i := range cfg.AdditionalIngressGateways {
+		field := fmt.Sprintf("additionalIngressGateways[%d].class", i)
+		if err := validateIngressClass(field, cfg.AdditionalIngressGateways[i].Class); err != nil {
+			return err
+		}
+	}
+	for ns, ng := range cfg.NamespaceIngressGateways {
+		field := fmt.Sprintf("namespaceIngressGateways[%q].primary.class", ns)
+		if err := validateIngressClass(field, ng.Primary.Class); err != nil {
+			return err
+		}
+		for i := range ng.Additional {
+			field := fmt.Sprintf("namespaceIngressGateways[%q].additional[%d].class", ns, i)
+			if err := validateIngressClass(field, ng.Additional[i].Class); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateIngressClass(field, class string) error {
+	if class == "" {
+		return nil
+	}
+	if errs := validation.IsDNS1123Label(class); len(errs) > 0 {
+		return fmt.Errorf("invalid ingress config - %s %q must be an RFC-1123 label: %s",
+			field, class, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func getComponentConfig(key string, configMap *v1.ConfigMap, componentConfig interface{}) error {

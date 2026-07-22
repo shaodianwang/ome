@@ -9,6 +9,7 @@ data:
         "ingressGateway" : "{{ .Values.ome.controller.ingressGateway.ingressGateway.gateway }}",
         "ingressService" : "{{ .Values.ome.controller.ingressGateway.ingressGateway.gatewayService }}",
         "omeIngressGateway" : "{{ .Values.ome.controller.ingressGateway.omeIngressGateway | default "" }}",
+        "omeIngressGatewayClass" : "{{ .Values.ome.controller.ingressGateway.omeIngressGatewayClass | default "" }}",
         "ingressDomain"  : "{{ .Values.ome.controller.ingressGateway.domain }}",
         "ingressClassName" : "{{ .Values.ome.controller.ingressGateway.ingressGateway.className }}",
         "additionalIngressDomains" : {{ .Values.ome.controller.ingressGateway.additionalIngressDomains | default "null" }},

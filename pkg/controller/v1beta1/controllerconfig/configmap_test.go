@@ -202,8 +202,9 @@ func TestNewIngressConfig(t *testing.T) {
 					"pathTemplate": "/{{ .Namespace }}/{{ .Name }}",
 					"perISVCSubdomain": true,
 					"sharedHostPrefix": "serving",
+					"omeIngressGatewayClass": "internal",
 					"additionalIngressGateways": [
-						{"omeIngressGateway": "envoy-gateway-system/ext-gw", "ingressDomain": "ext.example.com"}
+						{"omeIngressGateway": "envoy-gateway-system/ext-gw", "ingressDomain": "ext.example.com", "class": "external"}
 					]
 				}`,
 			},
@@ -216,10 +217,51 @@ func TestNewIngressConfig(t *testing.T) {
 				assert.Equal(t, "https", cfg.UrlScheme)
 				assert.True(t, cfg.PerISVCSubdomain)
 				assert.Equal(t, "serving", cfg.SharedHostPrefix)
+				assert.Equal(t, "internal", cfg.OmeIngressGatewayClass)
 				require.Len(t, cfg.AdditionalIngressGateways, 1)
 				assert.Equal(t, "envoy-gateway-system/ext-gw", cfg.AdditionalIngressGateways[0].OmeIngressGateway)
 				assert.Equal(t, "ext.example.com", cfg.AdditionalIngressGateways[0].IngressDomain)
+				assert.Equal(t, "external", cfg.AdditionalIngressGateways[0].Class)
 			},
+		},
+		{
+			name: "invalid primary gateway class rejected",
+			configMapData: map[string]string{
+				IngressConfigKeyName: `{
+					"ingressGateway": "istio-ingress",
+					"ingressService": "istio-ingress",
+					"omeIngressGatewayClass": "Internal"
+				}`,
+			},
+			expectedError: true,
+		},
+		{
+			name: "invalid additional gateway class rejected",
+			configMapData: map[string]string{
+				IngressConfigKeyName: `{
+					"ingressGateway": "istio-ingress",
+					"ingressService": "istio-ingress",
+					"additionalIngressGateways": [
+						{"omeIngressGateway": "envoy-gateway-system/ext-gw", "ingressDomain": "ext.example.com", "class": "ext_gw"}
+					]
+				}`,
+			},
+			expectedError: true,
+		},
+		{
+			name: "invalid per-namespace gateway class rejected",
+			configMapData: map[string]string{
+				IngressConfigKeyName: `{
+					"ingressGateway": "istio-ingress",
+					"ingressService": "istio-ingress",
+					"namespaceIngressGateways": {
+						"prod": {
+							"primary": {"omeIngressGateway": "istio-system/prod-int-gw", "ingressDomain": "int.example.com", "class": "prod internal"}
+						}
+					}
+				}`,
+			},
+			expectedError: true,
 		},
 		{
 			name: "missing required fields",
