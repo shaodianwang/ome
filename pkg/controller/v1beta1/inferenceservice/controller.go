@@ -112,8 +112,8 @@ type InferenceServiceReconciler struct {
 	client.Client
 	ClientConfig *rest.Config
 	Clientset    kubernetes.Interface
-	// APIReader is the live (uncached) reader, populated from
-	// mgr.GetAPIReader() in SetupWithManager. Threaded through the
+	// APIReader is the AuthoritativeReader role (see type docs).
+	// Populated from mgr.GetAPIReader() in SetupWithManager. Threaded through the
 	// component builder to OMENative for reads where cache lag would
 	// be a correctness problem (revision bookkeeping, audit ledger,
 	// EndpointSlice drain checks).
@@ -165,6 +165,10 @@ type InferenceServiceReconciler struct {
 	// chart value); a non-positive value disables caching (always reads the
 	// apiserver).
 	ConfigCacheTTL time.Duration
+	// componentDeps is the process-lifetime ComponentDeps prototype,
+	// built once in SetupWithManager. buildComponentDeps attaches the
+	// per-reconcile config; every other field is immutable after setup.
+	componentDeps *components.ComponentDeps
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -275,11 +279,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return result, err
 	}
 
-	// Initialize ComponentBuilderFactory
-	// Note: isvcConfig is created a few lines above inside the Reconcile function
-	// for NewInferenceServicesConfig. We will use that existing isvcConfig.
-	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Expectations, r.Recorder, r.Scheme, isvcConfig).
-		WithGangSchedulingAvailable(r.GangSchedulingAvailable)
+	cdeps := r.buildComponentDeps(isvcConfig)
 
 	// Determine which components to reconcile based on the spec
 	var reconcilers []components.Component
@@ -363,11 +363,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				// never enumerates. Downgrade a pure compatibility mismatch
 				// (format / architecture / framework) to an advisory event and
 				// proceed — the deliberate choice wins over the declaration.
-				//
-				// This mirrors the admission webhook (#460, "explicit-runtime
-				// compat is advisory"), which was only applied there. Without the
-				// same downgrade here, the webhook admits the ISVC but this
-				// reconcile hard-fails, so it never gets pods.
 				//
 				// Everything else stays a hard error: a not-found / disabled
 				// runtime or a malformed model genuinely cannot run, and a sharded
@@ -463,16 +458,15 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.V(1).Info("Creating engine reconciler",
 			"deploymentMode", engineDeploymentMode)
 
-		engineReconciler := componentBuilderFactory.CreateEngineComponent(
-			engineDeploymentMode,
-			baseModel,
-			baseModelMeta,
-			mergedEngine,
-			rt,
-			rtName,
-			engineSupportedModelFormats,
-			resolvedOverlays,
-		)
+		engineReconciler := components.NewEngine(cdeps, components.ComponentInputs{
+			DeploymentMode: engineDeploymentMode,
+			BaseModel:      baseModel,
+			BaseModelMeta:  baseModelMeta,
+			Runtime:        rt,
+			RuntimeName:    rtName,
+			ModelFormat:    engineSupportedModelFormats,
+			Overlays:       resolvedOverlays,
+		}, mergedEngine)
 		reconcilers = append(reconcilers, engineReconciler)
 	}
 
@@ -481,16 +475,15 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.V(1).Info("Creating decoder reconciler",
 			"deploymentMode", decoderDeploymentMode)
 
-		decoderReconciler := componentBuilderFactory.CreateDecoderComponent(
-			decoderDeploymentMode,
-			baseModel,
-			baseModelMeta,
-			mergedDecoder,
-			rt,
-			rtName,
-			decoderSupportedModelFormats,
-			resolvedOverlays,
-		)
+		decoderReconciler := components.NewDecoder(cdeps, components.ComponentInputs{
+			DeploymentMode: decoderDeploymentMode,
+			BaseModel:      baseModel,
+			BaseModelMeta:  baseModelMeta,
+			Runtime:        rt,
+			RuntimeName:    rtName,
+			ModelFormat:    decoderSupportedModelFormats,
+			Overlays:       resolvedOverlays,
+		}, mergedDecoder)
 		reconcilers = append(reconcilers, decoderReconciler)
 	}
 
@@ -499,15 +492,15 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.V(1).Info("Creating router reconciler",
 			"deploymentMode", routerDeploymentMode)
 
-		routerReconciler := componentBuilderFactory.CreateRouterComponent(
-			routerDeploymentMode, // Using the determined router deployment mode
-			baseModel,
-			baseModelMeta,
-			mergedRouter, // Using the merged router spec instead of isvc.Spec.Router
-			rt,
-			rtName,
-			resolvedOverlays,
-		)
+		// Router has no supported-model-format input — ModelFormat stays nil.
+		routerReconciler := components.NewRouter(cdeps, components.ComponentInputs{
+			DeploymentMode: routerDeploymentMode,
+			BaseModel:      baseModel,
+			BaseModelMeta:  baseModelMeta,
+			Runtime:        rt,
+			RuntimeName:    rtName,
+			Overlays:       resolvedOverlays,
+		}, mergedRouter) // merged router spec, not isvc.Spec.Router
 		reconcilers = append(reconcilers, routerReconciler)
 	}
 
@@ -973,8 +966,30 @@ func (r *InferenceServiceReconciler) ensureIngressDisableAnnotation(isvc *v1beta
 func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.ClientConfig = mgr.GetConfig()
 	r.APIReader = mgr.GetAPIReader()
+	if err := r.validateWiring(); err != nil {
+		return err
+	}
 	if r.Expectations == nil {
 		r.Expectations = omenative.NewExpectations()
+	}
+	// scheduler-plugins PodGroup detection. Optional CRD; absence is a
+	// degradation surface, not a hard fail. OMENative's reconciler reads
+	// the cached flag via ReconcileParams.GangSchedulingAvailable and
+	// stamps a `GangSchedulingUnavailable=True` Component Condition when
+	// a multi-pod Component is requested without the CRD.
+	podGroupFound, err := utils.IsCrdAvailable(r.ClientConfig, schedulingv1alpha1.SchemeGroupVersion.String(), constants.PodGroupKind)
+	if err != nil {
+		return err
+	}
+	r.GangSchedulingAvailable = podGroupFound
+	r.componentDeps = &components.ComponentDeps{
+		Client:                  r.Client,
+		Clientset:               r.Clientset,
+		APIReader:               r.APIReader,
+		Expectations:            r.Expectations,
+		Recorder:                r.Recorder,
+		Scheme:                  r.Scheme,
+		GangSchedulingAvailable: r.GangSchedulingAvailable,
 	}
 	// Short-TTL cache for the inferenceservice-config ConfigMap so a reconcile
 	// pass shares one apiserver GET across the per-pass config loads. TTL is
@@ -1006,17 +1021,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
-
-	// scheduler-plugins PodGroup detection. Optional CRD; absence is a
-	// degradation surface, not a hard fail. OMENative's reconciler reads
-	// the cached flag via ReconcileParams.GangSchedulingAvailable and
-	// stamps a `GangSchedulingUnavailable=True` Component Condition when
-	// a multi-pod Component is requested without the CRD.
-	podGroupFound, err := utils.IsCrdAvailable(r.ClientConfig, schedulingv1alpha1.SchemeGroupVersion.String(), constants.PodGroupKind)
-	if err != nil {
-		return err
-	}
-	r.GangSchedulingAvailable = podGroupFound
 
 	// Build the canary analysis sampler once. Its concurrency cap and cache TTL are
 	// fixed for the controller's lifetime (the per-sample source + query timeout are
@@ -1273,4 +1277,36 @@ func setOverlaysReadyCondition(isvc *v1beta1.InferenceService, overlays []isvcut
 		cond.Message = strings.Join(skipped, "; ")
 	}
 	isvc.Status.SetConditions(knapis.Conditions{cond})
+}
+
+// buildComponentDeps returns the component dependencies for one
+// reconcile pass: the process-lifetime prototype plus the per-reconcile
+// isvc config (the only non-static field).
+func (r *InferenceServiceReconciler) buildComponentDeps(cfg *controllerconfig.InferenceServicesConfig) *components.ComponentDeps {
+	// nil prototype: Reconcile invoked without SetupWithManager (tests).
+	if r.componentDeps == nil {
+		return &components.ComponentDeps{
+			Client:                  r.Client,
+			Clientset:               r.Clientset,
+			APIReader:               r.APIReader,
+			Expectations:            r.Expectations,
+			Recorder:                r.Recorder,
+			Scheme:                  r.Scheme,
+			GangSchedulingAvailable: r.GangSchedulingAvailable,
+			Config:                  cfg,
+		}
+	}
+	d := *r.componentDeps
+	d.Config = cfg
+	return &d
+}
+
+// validateWiring rejects a mis-wired reconciler at setup. The
+// authoritative (live) reader is a correctness dependency — see
+// workload/types AuthoritativeReader.
+func (r *InferenceServiceReconciler) validateWiring() error {
+	if r.APIReader == nil {
+		return fmt.Errorf("inferenceservice: APIReader (AuthoritativeReader) must be wired")
+	}
+	return nil
 }

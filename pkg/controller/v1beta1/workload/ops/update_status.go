@@ -65,7 +65,7 @@ func isSurgeUpdateStep(step string) bool {
 // Update operation in Step=InPlace at targetRev. Skip-write requires
 // Step==InPlace so a previous recreate-step write doesn't short-circuit.
 func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
@@ -112,7 +112,7 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 		observedIncarnation = s.Incarnation
 		s.Phase = workload.InstancePhaseUpdating
 		s.TargetRevision = targetRev
-		now := metav1.NewTime(time.Now())
+		now := metav1.NewTime(input.Now())
 		s.Operation = &workload.InstanceOperation{
 			ID:             fmt.Sprintf("update-%d-%d", idx, now.Unix()),
 			Type:           workload.InstanceOperationUpdate,
@@ -145,7 +145,7 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 // same target doesn't short-circuit (those writes use the same
 // TargetRevision but a different Step namespace).
 func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		// Already surging toward this target — no-op. The Phase check
 		// admits BOTH an in-flight Updating instance AND one the stuck-pod
@@ -186,7 +186,7 @@ func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.Rec
 // the stuck-operation timeout machinery. Idempotent — no-op if
 // already on SurgeDrain.
 func patchInstanceStatusSurgeStepDrain(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Operation == nil ||
 			s.Operation.Type != workload.InstanceOperationUpdate {
@@ -205,7 +205,7 @@ func patchInstanceStatusSurgeStepDrain(ctx context.Context, input workload.Recon
 // convergence was first observed. LastProgressAt is the durable start of the
 // connection-settle interval, so controller restarts do not shorten the wait.
 func patchInstanceStatusSurgeStepSettle(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Operation == nil || s.Operation.Type != workload.InstanceOperationUpdate {
 			return false
@@ -250,7 +250,7 @@ func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input wo
 // against MaxSurge; the SurgeIndex pointer distinguishes a gang surge
 // (new index) from a single-pod surge (ActiveOrdinal toggle). Idempotent.
 func patchInstanceStatusGangSurging(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, targetRev string, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating && s.Operation != nil &&
 			s.Operation.Type == workload.InstanceOperationUpdate &&
@@ -281,7 +281,7 @@ func patchInstanceStatusGangSurging(ctx context.Context, input workload.Reconcil
 // its PodGroup and scale-down won't delete it. Creates the InstanceStatus
 // if absent. Idempotent.
 func patchInstanceStatusGangSurgeTarget(ctx context.Context, input workload.ReconcileInput, surgeIdx int32, targetRev string, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, surgeIdx, func(s *workload.InstanceStatus) bool {
 		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 			s.Operation.Step == workload.UpdateStepGangSurgeTarget {

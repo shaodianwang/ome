@@ -50,6 +50,7 @@ type ReconcileInputs struct {
 
 	// Now is the wall-clock used for LastTransitionTime; callers may
 	// override for tests. Zero defaults to time.Now().
+	// Already an injected-time seam; kept as time.Time (single snapshot per pass).
 	Now time.Time
 
 	// TrafficWeightDeadbandPercent is the per-revision hysteresis band

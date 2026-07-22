@@ -432,7 +432,7 @@ func revisionHashFromTarget(target *appsv1.ControllerRevision) string {
 // written on first-touch; existing nonzero values are preserved so a
 // post-restart reconcile doesn't downgrade the lifecycle token.
 func patchInstanceStatusCreating(ctx context.Context, input workload.ReconcileInput, idx int32, incarnation int64, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseCreating &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate &&

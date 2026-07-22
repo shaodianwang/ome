@@ -82,7 +82,7 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 			// cause (OOMKilled exit 137, CrashLoopBackOff, ...) instead of
 			// the bare "pod X Failed". Falls back to the pod name when no
 			// per-container detail is available.
-			if t := workload.PodTermination(pod, metav1.Now()); t != nil {
+			if t := workload.PodTermination(pod, metav1.NewTime(input.Now())); t != nil {
 				return true, t.ShortString()
 			}
 			return true, fmt.Sprintf("pod %s Failed", pod.Name)
@@ -309,7 +309,7 @@ func patchInstanceStatusRestarting(ctx context.Context, input workload.Reconcile
 		s.Incarnation++
 		observedIncarnation = s.Incarnation
 		s.Phase = workload.InstancePhaseRestarting
-		now := metav1.NewTime(time.Now())
+		now := metav1.NewTime(input.Now())
 		s.Operation = &workload.InstanceOperation{
 			ID:             fmt.Sprintf("restart-%d-%d", idx, now.Unix()),
 			Type:           workload.InstanceOperationRestart,

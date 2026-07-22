@@ -60,8 +60,9 @@ func TestEngineReconcileDeployment_ProjectsMergedTopologyKey(t *testing.T) {
 		TopologyKey:            &topologyKey,
 	}
 	engine := NewEngine(
-		c, fake.NewClientset(), c, nil, nil, scheme, &controllerconfig.InferenceServicesConfig{},
-		constants.OMENative, nil, nil, engineSpec, nil, "", nil, nil,
+		&ComponentDeps{Client: c, Clientset: fake.NewClientset(), APIReader: c, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+		ComponentInputs{DeploymentMode: constants.OMENative},
+		engineSpec,
 	).(*Engine)
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "topology", Namespace: "default", UID: types.UID("topology-uid")},
@@ -436,21 +437,14 @@ func TestEngineReconcile(t *testing.T) {
 
 			// Create engine using the constructor
 			engine := NewEngine(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				tt.deploymentMode,
-				tt.baseModel,
-				tt.baseModelMeta,
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{
+					DeploymentMode: tt.deploymentMode,
+					BaseModel:      tt.baseModel,
+					BaseModelMeta:  tt.baseModelMeta,
+					RuntimeName:    tt.runtimeName,
+				},
 				tt.engineSpec,
-				nil, // runtime
-				tt.runtimeName,
-				nil, // supportedModelFormat
-				nil, // overlays
 			).(*Engine)
 
 			// Set fine-tuned fields if needed
@@ -619,21 +613,14 @@ func TestEngineReconcileObjectMeta(t *testing.T) {
 
 			// Create engine using the constructor
 			engine := NewEngine(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.RawDeployment,
-				tt.baseModel,
-				tt.baseModelMeta,
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{
+					DeploymentMode: constants.RawDeployment,
+					BaseModel:      tt.baseModel,
+					BaseModelMeta:  tt.baseModelMeta,
+					RuntimeName:    tt.runtimeName,
+				},
 				tt.engineSpec,
-				nil, // runtime
-				tt.runtimeName,
-				nil, // supportedModelFormat
-				nil, // overlays
 			).(*Engine)
 
 			// Set fine-tuned fields if needed
@@ -760,21 +747,9 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 
 			// Create engine using the constructor
 			engine := NewEngine(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.RawDeployment,
-				nil, // baseModel
-				nil, // baseModelMeta
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{DeploymentMode: constants.RawDeployment},
 				tt.engineSpec,
-				nil, // runtime
-				"",  // runtimeName
-				nil, // supportedModelFormat
-				nil, // overlays
 			).(*Engine)
 
 			podSpec, err := engine.reconcileWorkerPodSpec(isvc, objectMeta)
@@ -906,14 +881,9 @@ func TestEngineReconcilePodSpec_OMENativeWithLeader(t *testing.T) {
 	// Construct with DeploymentMode=OMENative wired in at construction;
 	// template selection keys on Leader != nil regardless of dispatch mode.
 	engine := NewEngine(
-		c, clientset,
-		nil, nil, nil, // apiReader, expectations, recorder
-		scheme,
-		&controllerconfig.InferenceServicesConfig{},
-		constants.OMENative,
-		nil, nil, // baseModel, baseModelMeta
+		&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+		ComponentInputs{DeploymentMode: constants.OMENative},
 		engineSpec,
-		nil, "", nil, nil, // runtime, runtimeName, supportedModelFormat, overlays
 	).(*Engine)
 
 	podSpec, err := engine.reconcilePodSpec(isvc, objectMeta)
@@ -947,14 +917,9 @@ func TestEngineDetermineEngineName_CtxCancellation(t *testing.T) {
 	clientset := fake.NewClientset()
 
 	engine := NewEngine(
-		c, clientset,
-		nil, nil, nil,
-		scheme,
-		&controllerconfig.InferenceServicesConfig{},
-		constants.RawDeployment,
-		nil, nil,
+		&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+		ComponentInputs{DeploymentMode: constants.RawDeployment},
 		&v1beta1.EngineSpec{},
-		nil, "", nil, nil,
 	).(*Engine)
 
 	isvc := &v1beta1.InferenceService{
@@ -1062,14 +1027,9 @@ func TestEngineReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 			c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 			clientset := fake.NewClientset()
 			engine := NewEngine(
-				c, clientset,
-				nil, nil, nil,
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.OMENative,
-				nil, nil,
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{DeploymentMode: constants.OMENative},
 				engineSpec,
-				nil, "", nil, nil,
 			).(*Engine)
 
 			err := engine.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
@@ -1167,14 +1127,9 @@ func TestEngineReconcileOMENativeSubresources_ExtraEndpoints(t *testing.T) {
 	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 	clientset := fake.NewClientset()
 	engine := NewEngine(
-		c, clientset,
-		nil, nil, nil,
-		scheme,
-		&controllerconfig.InferenceServicesConfig{},
-		constants.OMENative,
-		nil, nil,
+		&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+		ComponentInputs{DeploymentMode: constants.OMENative},
 		engineSpec,
-		nil, "", nil, nil,
 	).(*Engine)
 
 	err := engine.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
@@ -1254,14 +1209,9 @@ func TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig(t *testing.T) 
 	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 	clientset := fake.NewClientset()
 	engine := NewEngine(
-		c, clientset,
-		nil, nil, nil,
-		scheme,
-		cfg,
-		constants.OMENative,
-		nil, nil,
+		&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: cfg},
+		ComponentInputs{DeploymentMode: constants.OMENative},
 		engineSpec,
-		nil, "", nil, nil,
 	).(*Engine)
 
 	err := engine.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
@@ -1360,14 +1310,9 @@ func TestDecoderReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 			c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 			clientset := fake.NewClientset()
 			decoder := NewDecoder(
-				c, clientset,
-				nil, nil, nil,
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.OMENative,
-				nil, nil,
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{DeploymentMode: constants.OMENative},
 				decoderSpec,
-				nil, "", nil, nil,
 			).(*Decoder)
 
 			err := decoder.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)

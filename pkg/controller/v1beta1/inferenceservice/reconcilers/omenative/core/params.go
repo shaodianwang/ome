@@ -14,9 +14,12 @@
 package core
 
 import (
+	"time"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -103,7 +106,7 @@ type ReconcileParams struct {
 	// from BaseComponentFields.Client.
 	Client client.Client
 
-	// APIReader is an optional live API reader, typically mgr.GetAPIReader().
+	// APIReader is the AuthoritativeReader role (see type docs).
 	// When set it is used for the correctness-critical reads in revision
 	// bookkeeping where stale cache contents could cause spurious
 	// collisions or duplicate Revision numbers. When nil the cached Client
@@ -126,6 +129,10 @@ type ReconcileParams struct {
 	// set). nil-safe: when unset, recordEventf is a no-op so tests
 	// don't need to plumb a recorder.
 	Recorder record.EventRecorder
+
+	// Clock supplies wall-clock time to omenative lifecycle helpers.
+	// nil falls back to the real clock; tests inject a fake.
+	Clock clock.Clock
 }
 
 // Reader returns the live API reader when APIReader is set; otherwise the
@@ -136,6 +143,15 @@ func (p *ReconcileParams) Reader() client.Reader {
 		return p.APIReader
 	}
 	return p.Client
+}
+
+// Now returns the injected clock's time, or time.Now() when unset.
+// Mirrors workload.Deps.Now — see that doc for the rule.
+func (p *ReconcileParams) Now() time.Time {
+	if p.Clock != nil {
+		return p.Clock.Now()
+	}
+	return time.Now()
 }
 
 // ExpectationsCache returns the Expectations cache to use this reconcile —

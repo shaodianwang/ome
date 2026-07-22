@@ -409,7 +409,7 @@ func waitForSurgeDrainSettle(ctx context.Context, input workload.ReconcileInput,
 	if status.Operation.LastProgressAt.IsZero() {
 		return false, nil
 	}
-	return !time.Now().Before(status.Operation.LastProgressAt.Add(grace)), nil
+	return !input.Now().Before(status.Operation.LastProgressAt.Add(grace)), nil
 }
 
 // partitionPodsBySurgeOrdinal buckets pods by the LabelPodOrdinal label

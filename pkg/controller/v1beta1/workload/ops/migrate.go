@@ -164,7 +164,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 
 		// Cluster-wide capacity / rate-limit gate (in-flight + last-hour
 		// counts across the audit ledger).
-		if ok, reason := audit.ValidateCapacity(ledger, time.Now()); !ok {
+		if ok, reason := audit.ValidateCapacity(ledger, deps.Now()); !ok {
 			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonRateLimited,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
@@ -521,7 +521,7 @@ func validateFromNode(ctx context.Context, deps workload.Deps, input workload.Re
 // describe`. Clears the trigger annotation (via input.ClearMigrationRequest)
 // so the requester does not re-deliver against the same UUID indefinitely.
 func failMigration(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, ledger *audit.Ledger, req *audit.MigrationRequest, uuid, reason string) (bool, error) {
-	now := metav1.Now().UTC().Format(time.RFC3339)
+	now := metav1.NewTime(deps.Now()).UTC().Format(time.RFC3339)
 	entry := audit.Entry{
 		RequestUUID: uuid,
 		Phase:       audit.PhaseFailed,
@@ -607,7 +607,7 @@ const (
 // stampMigrationStatus writes one side of the migration pair. Idempotent
 // on (Phase, Operation.Type, RequestUUID).
 func stampMigrationStatus(ctx context.Context, input workload.ReconcileInput, idx, siblingIdx int32, role migrationRole, uuid string, req *audit.MigrationRequest, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	siblingPtr := siblingIdx
 	wantPhase := workload.InstancePhaseMigrating
 	idSuffix := ""

@@ -512,7 +512,7 @@ type EscalationParams struct {
 // status.MutateInstance / status.RecordWarning; the IR adapter will
 // wire its own equivalents.
 func EscalateStuckPodFailures(ctx context.Context, input ReconcileInput, p EscalationParams) error {
-	now := time.Now()
+	now := input.Now()
 	for _, s := range p.Instances {
 		pods := podsForStuckCheck(s, p.PodsByIndex)
 		if !ShouldCheckForStuckPods(&s, pods, p.CurrentRevisionHash, p.RevisionHashLabel) {

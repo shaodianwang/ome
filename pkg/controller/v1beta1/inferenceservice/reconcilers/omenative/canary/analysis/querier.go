@@ -7,11 +7,11 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"time"
 
 	promapi "github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
+	"k8s.io/utils/clock"
 )
 
 // ErrNoData is returned when a query produces no usable value — an empty result
@@ -42,16 +42,19 @@ func NewQuerier(serverAddress, bearerToken string, headers map[string]string) (Q
 	if err != nil {
 		return nil, fmt.Errorf("build prometheus client for %q: %w", serverAddress, err)
 	}
-	return &promQuerier{api: promv1.NewAPI(client)}, nil
+	return &promQuerier{api: promv1.NewAPI(client), clock: clock.RealClock{}}, nil
 }
 
-type promQuerier struct{ api promv1.API }
+type promQuerier struct {
+	api   promv1.API
+	clock clock.Clock
+}
 
 // Query runs an instant query at the current time and reduces the result. A
 // transport error is returned verbatim (the caller maps it to INCONCLUSIVE);
 // query warnings are ignored.
 func (p *promQuerier) Query(ctx context.Context, promQL string) (float64, error) {
-	val, _, err := p.api.Query(ctx, promQL, time.Now())
+	val, _, err := p.api.Query(ctx, promQL, p.clock.Now())
 	if err != nil {
 		return 0, err
 	}

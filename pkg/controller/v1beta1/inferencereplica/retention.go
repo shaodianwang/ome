@@ -37,10 +37,7 @@ const defaultRevisionRetention = 10
 // just-committed CurrentRevision / UpdateRevision (the deferred status
 // writer mirrors those onto ir.Status before this runs).
 func (r *Reconciler) sweepRevisions(ctx context.Context, ir *v1beta1.InferenceReplica) {
-	reader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
+	reader := r.reader()
 
 	// liveNames union protects in-flight migrations: an Instance whose
 	// RunningRevision points at an older CR must keep that CR, or the

@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -107,6 +108,10 @@ type Reconciler struct {
 	// the IR UID folded into the entry so a delete-and-recreate of the same
 	// name misses the stale entry.
 	revisionHashCache map[types.NamespacedName]revisionHashEntry
+
+	// Clock supplies wall-clock time to the workload lifecycle layer.
+	// SetupWithManager defaults it to the real clock; tests may inject a fake.
+	Clock clock.Clock
 }
 
 // revisionHashEntry is one memoized revision hash plus the inputs that
@@ -302,6 +307,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		APIReader:    r.APIReader,
 		Recorder:     r.Recorder,
 		Expectations: r.Expectations,
+		Clock:        r.Clock,
 		// Wire OEP-0007.1 peer-env injection on the IR-managed (live) path.
 		// ISVCRenderHook overlays OME_<PEER>_ENDPOINT / _REVISION_ENDPOINT
 		// onto each rendered pod so PD components (engine <-> decoder) can
@@ -346,7 +352,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if !plan.Paused && parent != nil {
 		if merr := omenativeops.DetectStuckInstancesForISVC(ctx, parent,
 			&v1beta1.ComponentExtensionSpec{Lifecycle: ir.Spec.Lifecycle},
-			r.APIReader, r.Client, r.Recorder, ir.Spec.Component); merr != nil {
+			r.APIReader, r.Client, r.Recorder, r.Clock, ir.Spec.Component); merr != nil {
 			return ctrl.Result{}, fmt.Errorf(
 				"InferenceReplica reconciler: detect stuck instances for auto-migration (component=%s): %w",
 				ir.Spec.Component, merr)
@@ -382,8 +388,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	return result, err
 }
 
-// reader returns the live API reader when configured and preserves the
-// fake-client/test fallback used by controller helpers.
+// reader returns the authoritative live reader when wired, else the
+// cached client. Single home for the consistency-class fallback.
 func (r *Reconciler) reader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -510,10 +516,7 @@ func irRevisionKey(ir *v1beta1.InferenceReplica) revision.Key {
 func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v1beta1.InferenceReplica, input workload.ReconcileInput) (*appsv1.ControllerRevision, error) {
 	revKey := irRevisionKey(ir)
 
-	reader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
+	reader := r.reader()
 
 	// scopeUID = parent ISVC's UID so the IR-managed path partitions the
 	// revision history by the same identity the direct OMENative path uses

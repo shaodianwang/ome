@@ -3,6 +3,8 @@ package types
 import (
 	"sync"
 	"time"
+
+	"k8s.io/utils/clock"
 )
 
 // expectationsTTL is how long an Instance's expectation stays in the
@@ -24,6 +26,7 @@ const expectationsTTL = 2 * time.Minute
 type Expectations struct {
 	mu      sync.Mutex
 	entries map[expectationKey]*expectationEntry
+	clock   clock.Clock
 }
 
 // expectationKey is the per-Instance cache key. OwnerName mirrors
@@ -45,7 +48,20 @@ type expectationEntry struct {
 
 // NewExpectations builds an empty cache.
 func NewExpectations() *Expectations {
-	return &Expectations{entries: make(map[expectationKey]*expectationEntry)}
+	return &Expectations{
+		entries: make(map[expectationKey]*expectationEntry),
+		clock:   clock.RealClock{},
+	}
+}
+
+// NewExpectationsWithClock is NewExpectations with an injected clock,
+// for TTL-boundary tests.
+func NewExpectationsWithClock(c clock.Clock) *Expectations {
+	e := NewExpectations()
+	if c != nil {
+		e.clock = c
+	}
+	return e
 }
 
 // DefaultExpectations is the in-process singleton used by the workload
@@ -68,7 +84,7 @@ func (e *Expectations) ExpectCreates(namespace, ownerName string, component Comp
 		e.entries[k] = ent
 	}
 	ent.Adds += n
-	ent.Deadline = time.Now().Add(expectationsTTL)
+	ent.Deadline = e.clock.Now().Add(expectationsTTL)
 }
 
 // ExpectDeletes records that n pod deletes are in flight.
@@ -85,7 +101,7 @@ func (e *Expectations) ExpectDeletes(namespace, ownerName string, component Comp
 		e.entries[k] = ent
 	}
 	ent.Deletes += n
-	ent.Deadline = time.Now().Add(expectationsTTL)
+	ent.Deadline = e.clock.Now().Add(expectationsTTL)
 }
 
 // ObservedCreate decrements the create counter, called when a pod
@@ -131,7 +147,7 @@ func (e *Expectations) Satisfied(namespace, ownerName string, component Componen
 	if !ok {
 		return true
 	}
-	if time.Now().After(ent.Deadline) {
+	if e.clock.Now().After(ent.Deadline) {
 		delete(e.entries, k)
 		return true
 	}

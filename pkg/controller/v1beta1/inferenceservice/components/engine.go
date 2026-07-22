@@ -8,21 +8,14 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
@@ -37,56 +30,21 @@ type Engine struct {
 	podSpecReconciler    *common.PodSpecReconciler
 }
 
-// NewEngine creates a new Engine component instance. apiReader is the
-// live (uncached) reader threaded through to OMENative dispatch;
-// expectations is the per-controller Expectations cache shared with
-// the SetupWithManager-registered Pod watch; recorder emits
-// ISVC-scoped lifecycle events. Any may be nil — the OMENative
-// backend falls back to the cached client, the DefaultExpectations
-// singleton, and a no-op event recorder respectively.
-func NewEngine(
-	client client.Client,
-	clientset kubernetes.Interface,
-	apiReader client.Reader,
-	expectations *omenative.Expectations,
-	recorder record.EventRecorder,
-	scheme *runtime.Scheme,
-	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
-	deploymentMode constants.DeploymentModeType,
-	baseModel *v1beta1.BaseModelSpec,
-	baseModelMeta *metav1.ObjectMeta,
-	engineSpec *v1beta1.EngineSpec,
-	runtime *v1beta1.ServingRuntimeSpec,
-	runtimeName string,
-	supportedModelFormat *v1beta1.SupportedModelFormat,
-	overlays []isvcutils.ResolvedOverlay,
-) Component {
-	base := BaseComponentFields{
-		Client:                 client,
-		Clientset:              clientset,
-		APIReader:              apiReader,
-		Expectations:           expectations,
-		Recorder:               recorder,
-		Scheme:                 scheme,
-		InferenceServiceConfig: inferenceServiceConfig,
-		DeploymentMode:         deploymentMode,
-		BaseModel:              baseModel,
-		BaseModelMeta:          baseModelMeta,
-		Runtime:                runtime,
-		RuntimeName:            runtimeName,
-		StatusManager:          status.NewStatusReconciler(),
-		Log:                    ctrl.Log.WithName("EngineReconciler"),
-		SupportedModelFormat:   supportedModelFormat,
-		Overlays:               overlays,
-	}
+// NewEngine creates a new Engine component instance. deps carries the
+// process-lifetime wiring (client, live APIReader, Expectations cache,
+// recorder — any may be nil; the OMENative backend falls back to the
+// cached client, the DefaultExpectations singleton, and a no-op event
+// recorder respectively); in carries the per-reconcile pipeline output.
+func NewEngine(deps *ComponentDeps, in ComponentInputs, engineSpec *v1beta1.EngineSpec) Component {
+	base := newBaseComponentFields(deps, in, "EngineReconciler")
 
 	return &Engine{
 		BaseComponentFields: base,
 		engineSpec:          engineSpec,
 		deploymentReconciler: &common.DeploymentReconciler{
-			Client:        client,
-			Clientset:     clientset,
-			Scheme:        scheme,
+			Client:        deps.Client,
+			Clientset:     deps.Clientset,
+			Scheme:        deps.Scheme,
 			StatusManager: base.StatusManager,
 			Log:           base.Log,
 		},

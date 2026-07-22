@@ -2,11 +2,23 @@ package types
 
 import (
 	"context"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// ObservationReader is a watch-backed (cached) reader; it may lag the
+// API server. Safe wherever a later live read or optimistic-concurrency
+// write re-validates the observation.
+type ObservationReader = client.Reader
+
+// AuthoritativeReader reads live from the API server. Required where
+// cache lag is a correctness bug: revision bookkeeping, audit ledger,
+// EndpointSlice drain checks, gang topology proofs.
+type AuthoritativeReader = client.Reader
 
 // Deps is the manager-scoped wiring the workload reconciler needs.
 // Shared across every workload the same controller manages (unlike
@@ -16,7 +28,7 @@ type Deps struct {
 	// vast majority of read/write operations.
 	Client client.Client
 
-	// APIReader is an optional live API reader (mgr.GetAPIReader()).
+	// APIReader is the AuthoritativeReader role (see type docs).
 	// Used for revision bookkeeping and immutable topology observations where
 	// stale cache contents could cause a collision or split a live gang. When
 	// nil the cached Client is used.
@@ -56,6 +68,11 @@ type Deps struct {
 	// package wires it; nil callback / single-pod Instance / absent CRD
 	// all no-op. Idempotent.
 	EnsureGangPodGroup EnsureGangPodGroupFn
+
+	// Clock supplies wall-clock time for deadlines and status
+	// timestamps. nil falls back to the real clock — inject a fake
+	// (k8s.io/utils/clock/testing) for deterministic boundary tests.
+	Clock clock.Clock
 }
 
 // RenderHook is the optional adapter-specific render-time mutator.
@@ -85,4 +102,15 @@ func (d *Deps) ExpectationsCache() *Expectations {
 		return d.Expectations
 	}
 	return DefaultExpectations
+}
+
+// Now returns the injected clock's time, or time.Now() when no clock
+// is wired. Lifecycle code holding a Deps or ReconcileInput should read
+// time through Now, not time.Now(); subpackages without a seam
+// (audit, podreadiness, gang) still read real time.
+func (d *Deps) Now() time.Time {
+	if d.Clock != nil {
+		return d.Clock.Now()
+	}
+	return time.Now()
 }

@@ -29,7 +29,10 @@ type DispatchDeps struct {
 	Reader   client.Reader
 	Recorder record.EventRecorder
 	ISVC     *v1beta1.InferenceService
-	Now      time.Time
+	// Now is the wall-clock used for LastTransitionTime; callers may
+	// override for tests. Zero defaults to time.Now().
+	// Already an injected-time seam; kept as time.Time (single snapshot per pass).
+	Now time.Time
 	// Sampler is the controller's shared async analysis sampler (built once at
 	// startup). nil disables metric-gated steps (they hold), which keeps a
 	// controller without a configured sampler from advancing analysis steps ungated.

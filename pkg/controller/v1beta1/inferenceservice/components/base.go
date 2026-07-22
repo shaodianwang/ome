@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -80,6 +81,34 @@ type BaseComponentFields struct {
 	// none declared. Consumed by UpdateVolumeMounts / UpdateEnvVariables
 	// / UpdatePodSpecVolumes.
 	Overlays []isvcutils.ResolvedOverlay
+}
+
+// newBaseComponentFields is the ONE place BaseComponentFields is
+// assembled from deps + inputs. Constructors pass their component's
+// logger name; nothing else differs per component. The fine-tuned
+// serving fields (FineTunedServing / FineTunedServingWithMergedWeights /
+// FineTunedWeights) are populated at reconcile time by
+// ReconcileFineTunedWeights, never at construction.
+func newBaseComponentFields(deps *ComponentDeps, in ComponentInputs, loggerName string) BaseComponentFields {
+	return BaseComponentFields{
+		Client:                  deps.Client,
+		Clientset:               deps.Clientset,
+		APIReader:               deps.APIReader,
+		Expectations:            deps.Expectations,
+		Recorder:                deps.Recorder,
+		GangSchedulingAvailable: deps.GangSchedulingAvailable,
+		Scheme:                  deps.Scheme,
+		InferenceServiceConfig:  deps.Config,
+		DeploymentMode:          in.DeploymentMode,
+		BaseModel:               in.BaseModel,
+		BaseModelMeta:           in.BaseModelMeta,
+		Runtime:                 in.Runtime,
+		RuntimeName:             in.RuntimeName,
+		StatusManager:           status.NewStatusReconciler(),
+		Log:                     ctrl.Log.WithName(loggerName),
+		SupportedModelFormat:    in.ModelFormat,
+		Overlays:                in.Overlays,
+	}
 }
 
 // Common methods as functions that operate on BaseComponentFields

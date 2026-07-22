@@ -132,7 +132,7 @@ func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 // patchInstanceStatusDeleting idempotently stamps Phase=Deleting + the
 // Delete operation in Step=Drain.
 func patchInstanceStatusDeleting(ctx context.Context, input workload.ReconcileInput, idx int32, timeout time.Duration) error {
-	now := metav1.NewTime(time.Now())
+	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseDeleting &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationDelete {

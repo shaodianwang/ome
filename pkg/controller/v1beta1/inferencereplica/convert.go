@@ -119,6 +119,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		MutateInstance:          buildMutateInstance(r.Client, ir),
 		RemoveInstance:          buildRemoveInstance(r.Client, ir, r.Expectations),
 		WriteAggregateCondition: buildWriteAggregateCondition(r.Client, ir),
+		Clock:                   r.Clock,
 		// IR doesn't drive ISVC migrations; no source-of-truth annotation
 		// to clear. Wire a no-op stub so the workload.ReconcileInput
 		// panic-on-nil contract is satisfied.
@@ -162,10 +163,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	if parent != nil {
 		// Prefer APIReader for gate freshness (cross-Component coordination
 		// needs live peer status), fall back to Client when unavailable.
-		reads := client.Reader(r.Client)
-		if r.APIReader != nil {
-			reads = r.APIReader
-		}
+		reads := r.reader()
 		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
 			return coordination.EvaluateUpdateGate(ctx, reads, parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
 		}

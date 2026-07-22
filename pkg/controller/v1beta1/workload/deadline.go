@@ -47,7 +47,7 @@ const DeadlineExceededReason = "DeadlineExceeded"
 // Phase=Failed via input.MutateInstance, emits the operator-facing event
 // via input.WarnInstanceFailed.
 func ExpireOperationsIfDeadlinePassed(ctx context.Context, input ReconcileInput, instances []InstanceStatus) error {
-	now := time.Now()
+	now := input.Now()
 	for _, s := range instances {
 		if !operationDeadlinePassed(&s, now) {
 			continue
@@ -125,7 +125,7 @@ func PodAdmissionGated(pod *corev1.Pod) bool {
 // (restart) transitions — a workload queued for hours does not churn its
 // status. `gated` maps Instance index -> "any of its pods is gated".
 func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instances []InstanceStatus, gated map[int32]bool, timeout time.Duration) error {
-	now := time.Now()
+	now := input.Now()
 	for i := range instances {
 		s := &instances[i]
 		if s.Operation == nil || !isTransientPhase(s.Phase) {

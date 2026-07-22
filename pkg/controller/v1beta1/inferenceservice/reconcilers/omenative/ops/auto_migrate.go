@@ -124,7 +124,7 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 		return nil
 	}
 
-	now := time.Now()
+	now := p.Now()
 
 	// Load the ledger once and reuse across all Instances. Reduces
 	// apiserver round-trips when multiple Instances of one Component

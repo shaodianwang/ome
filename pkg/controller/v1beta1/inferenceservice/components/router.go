@@ -7,23 +7,15 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
-	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
 var _ Component = &Router{}
@@ -38,48 +30,20 @@ type Router struct {
 	rbacReconciler       *rbac.RBACReconciler
 }
 
-// NewRouter creates a new Router component instance
-func NewRouter(
-	client client.Client,
-	clientset kubernetes.Interface,
-	apiReader client.Reader,
-	expectations *omenative.Expectations,
-	recorder record.EventRecorder,
-	scheme *runtime.Scheme,
-	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
-	deploymentMode constants.DeploymentModeType,
-	baseModel *v1beta1.BaseModelSpec,
-	baseModelMeta *metav1.ObjectMeta,
-	routerSpec *v1beta1.RouterSpec,
-	runtime *v1beta1.ServingRuntimeSpec,
-	runtimeName string,
-	overlays []isvcutils.ResolvedOverlay,
-) Component {
-	base := BaseComponentFields{
-		Client:                 client,
-		Clientset:              clientset,
-		APIReader:              apiReader,
-		Expectations:           expectations,
-		Recorder:               recorder,
-		Scheme:                 scheme,
-		InferenceServiceConfig: inferenceServiceConfig,
-		DeploymentMode:         deploymentMode,
-		BaseModel:              baseModel,
-		BaseModelMeta:          baseModelMeta,
-		Runtime:                runtime,
-		RuntimeName:            runtimeName,
-		StatusManager:          status.NewStatusReconciler(),
-		Log:                    ctrl.Log.WithName("RouterReconciler"),
-		Overlays:               overlays,
-	}
+// NewRouter creates a new Router component instance. deps carries the
+// process-lifetime wiring; in carries the per-reconcile pipeline
+// output. Router has no supported-model-format input — callers leave
+// in.ModelFormat unset (nil).
+func NewRouter(deps *ComponentDeps, in ComponentInputs, routerSpec *v1beta1.RouterSpec) Component {
+	base := newBaseComponentFields(deps, in, "RouterReconciler")
 
 	return &Router{
 		BaseComponentFields: base,
 		routerSpec:          routerSpec,
 		deploymentReconciler: &common.DeploymentReconciler{
-			Client:        client,
-			Clientset:     clientset,
-			Scheme:        scheme,
+			Client:        deps.Client,
+			Clientset:     deps.Clientset,
+			Scheme:        deps.Scheme,
 			StatusManager: base.StatusManager,
 			Log:           base.Log,
 		},

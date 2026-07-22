@@ -2,9 +2,11 @@ package types
 
 import (
 	"context"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -128,4 +130,19 @@ type ReconcileInput struct {
 	//
 	// Nil is treated as always-allowed.
 	UpdateGate func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (allowed bool, denyReason string)
+
+	// Clock mirrors Deps.Clock for helpers that receive only the input.
+	// See Deps.Now for the rule.
+	Clock clock.Clock
+}
+
+// Now returns the injected clock's time, or time.Now() when no clock
+// is wired. Lifecycle code holding a Deps or ReconcileInput should read
+// time through Now, not time.Now(); subpackages without a seam
+// (audit, podreadiness, gang) still read real time.
+func (r *ReconcileInput) Now() time.Time {
+	if r.Clock != nil {
+		return r.Clock.Now()
+	}
+	return time.Now()
 }

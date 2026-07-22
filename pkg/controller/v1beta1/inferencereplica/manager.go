@@ -1,11 +1,14 @@
 package inferencereplica
 
 import (
+	"fmt"
+
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -61,6 +64,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Expectations == nil {
 		r.Expectations = workload.NewExpectations()
 	}
+	if r.Clock == nil {
+		r.Clock = clock.RealClock{}
+	}
 	// Discover the scheduler-plugins PodGroup CRD once at setup (mirrors the
 	// ISVC controller). Gates per-Instance PodGroup creation for multi-pod
 	// Instances; absence is a degradation surface, not a hard fail (the
@@ -70,6 +76,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	r.GangSchedulingAvailable = podGroupFound
+	if err := r.validateWiring(); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		// MaxConcurrentReconciles parallelizes reconciles for distinct IRs;
 		// zero (unset) falls back to controller-runtime's single-worker default.
@@ -94,4 +103,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(EndpointSliceToIR),
 		).
 		Complete(r)
+}
+
+// validateWiring rejects a mis-wired reconciler at setup. The
+// authoritative (live) reader is a correctness dependency — see
+// workload/types AuthoritativeReader.
+func (r *Reconciler) validateWiring() error {
+	if r.APIReader == nil {
+		return fmt.Errorf("inferencereplica: APIReader (AuthoritativeReader) must be wired")
+	}
+	return nil
 }

@@ -243,21 +243,15 @@ func TestDecoderReconcile(t *testing.T) {
 
 			// Create decoder component
 			decoder := NewDecoder(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				isvcConfig,
-				tt.deploymentMode,
-				tt.baseModel,
-				tt.baseModelMeta,
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: isvcConfig},
+				ComponentInputs{
+					DeploymentMode: tt.deploymentMode,
+					BaseModel:      tt.baseModel,
+					BaseModelMeta:  tt.baseModelMeta,
+					Runtime:        tt.runtime,
+					RuntimeName:    tt.runtimeName,
+				},
 				tt.decoderSpec,
-				tt.runtime,
-				tt.runtimeName,
-				nil, // supportedModelFormat
-				nil, // overlays
 			)
 
 			// Reconcile
@@ -370,21 +364,14 @@ func TestDecoderReconcileObjectMeta(t *testing.T) {
 
 			// Create decoder using the constructor
 			decoder := NewDecoder(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.RawDeployment,
-				tt.baseModel,
-				tt.baseModelMeta,
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{
+					DeploymentMode: constants.RawDeployment,
+					BaseModel:      tt.baseModel,
+					BaseModelMeta:  tt.baseModelMeta,
+					RuntimeName:    tt.runtimeName,
+				},
 				tt.decoderSpec,
-				nil, // runtime
-				tt.runtimeName,
-				nil, // supportedModelFormat
-				nil, // overlays
 			).(*Decoder)
 
 			// Test reconcileObjectMeta
@@ -482,21 +469,9 @@ func TestDecoderWorkerPodSpec(t *testing.T) {
 
 			// Create decoder using the constructor
 			decoder := NewDecoder(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.RawDeployment,
-				nil, // baseModel
-				nil, // baseModelMeta
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{DeploymentMode: constants.RawDeployment},
 				tt.decoderSpec,
-				nil, // runtime
-				"",  // runtimeName
-				nil, // supportedModelFormat
-				nil, // overlays
 			).(*Decoder)
 
 			podSpec, err := decoder.reconcileWorkerPodSpec(isvc, objectMeta)
@@ -562,21 +537,12 @@ func TestDecoderComponentConfig(t *testing.T) {
 
 			// Create decoder using the constructor
 			decoder := NewDecoder(
-				c,
-				clientset,
-				nil, // apiReader
-				nil, // expectations
-				nil, // recorder
-				scheme,
-				&controllerconfig.InferenceServicesConfig{},
-				constants.RawDeployment,
-				nil, // baseModel
-				nil, // baseModelMeta
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{
+					DeploymentMode: constants.RawDeployment,
+					RuntimeName:    "test-runtime",
+				},
 				tt.decoderSpec,
-				nil, // runtime
-				"test-runtime",
-				nil, // supportedModelFormat
-				nil, // overlays
 			).(*Decoder)
 
 			// Test GetComponentType

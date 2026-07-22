@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -65,6 +66,7 @@ func DetectStuckInstancesForISVC(
 	reader client.Reader,
 	c client.Client,
 	recorder record.EventRecorder,
+	clk clock.Clock,
 	component v1beta1.ComponentType,
 ) error {
 	p := core.ReconcileParams{
@@ -73,6 +75,7 @@ func DetectStuckInstancesForISVC(
 		Client:       c,
 		APIReader:    reader,
 		Recorder:     recorder,
+		Clock:        clk,
 		Component:    component,
 	}
 	return detectStuckInstancesForAutoMigration(ctx, p, component)

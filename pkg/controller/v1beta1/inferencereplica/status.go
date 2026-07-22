@@ -434,6 +434,7 @@ func (r *Reconciler) buildEscalationInput(ir *v1beta1.InferenceReplica, parent c
 		OwnerObject:             ir,
 		OwnerGVK:                irGVK,
 		EventTarget:             eventTarget,
+		Clock:                   r.Clock,
 		MutateInstance:          buildMutateInstance(r.Client, ir),
 		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
 		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
