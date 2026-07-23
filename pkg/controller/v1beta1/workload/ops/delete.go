@@ -8,6 +8,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -70,6 +71,24 @@ func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 		return false, fmt.Errorf("patch status Deleting (instance=%d): %w", idx, err)
 	}
 
+	// Stuck-Terminating escalation MUST precede the expectations gate: a
+	// pod wedged Terminating on a dead node never emits the watch DELETE
+	// that satisfies its delete expectation, so gating the escalation
+	// behind Satisfied would defer it to the expectations TTL — a
+	// cache-hygiene bound, not an escalation schedule. Escalation latency
+	// is governed only by the ForceDelete policy thresholds. The helper
+	// force-deletes only on provable node-death evidence; escalation
+	// trouble never fails the pass — the wedge is no worse than before.
+	for _, pod := range pods {
+		if pod.DeletionTimestamp == nil {
+			continue
+		}
+		if escErr := escalateStuckTerminating(ctx, deps, input, pod, idx); escErr != nil {
+			logf.FromContext(ctx).V(1).Info("stuck-Terminating escalation deferred",
+				"pod", pod.Name, "error", escErr.Error())
+		}
+	}
+
 	// Only the Delete RPC batch is expectations-gated; the drain reads
 	// below are idempotent on repeat.
 	expectationsSatisfied := deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, idx)
@@ -115,6 +134,9 @@ func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	// ObservedDelete on error — a failed RPC fires no event to decrement.
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
+			// A Terminating pod normally just needs time; the stuck-
+			// teardown escalation already ran above, before the
+			// expectations gate — exactly once per pod per pass.
 			continue
 		}
 		deps.ExpectationsCache().ExpectDeletes(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, idx, 1)

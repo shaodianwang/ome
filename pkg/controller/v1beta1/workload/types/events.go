@@ -61,6 +61,21 @@ const (
 	// through ReconcileInput.WarnRetryHeld.
 	EventReasonRetryHeld EventReason = "RetryHeld"
 
+	// EventReasonPodForceDeleted fires when the Delete op's escalation
+	// force-deletes (grace 0, UID-preconditioned) a Terminating pod
+	// overdue past its own deletion deadline on a node that provably
+	// cannot acknowledge the termination (gone, or unreachable-tainted /
+	// NotReady beyond the configured threshold). Names the pod, node,
+	// evidence branch, and overdue duration.
+	EventReasonPodForceDeleted EventReason = "PodForceDeleted"
+
+	// EventReasonPodDeleteBlockedByFinalizer fires (once per pod UID)
+	// when a Terminating pod is overdue past its deletion deadline but
+	// pinned by foreign finalizers. Report-only: OME never strips
+	// another controller's finalizer, so the teardown stays blocked
+	// until the finalizer owner resolves it.
+	EventReasonPodDeleteBlockedByFinalizer EventReason = "PodDeleteBlockedByFinalizer"
+
 	// Migration (workload/ops/migrate.go).
 	EventReasonMigrationRequestAccepted      EventReason = "MigrationRequestAccepted"
 	EventReasonMigrationRequestRejected      EventReason = "MigrationRequestRejected"

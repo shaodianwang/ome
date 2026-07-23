@@ -61,6 +61,13 @@ func nextInFlightFromLedger(ledger *audit.Ledger, component v1beta1.ComponentTyp
 		if e.Reason == audit.ReasonAutoRecover {
 			continue
 		}
+		// Force-delete records are terminal audit rows, never work
+		// orders. They are always written Phase=Completed, so this
+		// guard is defensive — it keeps any future Started ForceDelete
+		// row from resuming as a phantom migration.
+		if e.Reason == audit.ReasonForceDelete {
+			continue
+		}
 		if e.Component != string(component) {
 			continue
 		}

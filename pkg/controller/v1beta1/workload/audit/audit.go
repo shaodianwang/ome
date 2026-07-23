@@ -168,12 +168,17 @@ func LoadLedgerForOwner(ctx context.Context, reads client.Reader, owner metav1.O
 }
 
 // HasCompletedOrFailedRequest reports whether the ledger already
-// terminally records this UUID. Both Completed and Failed are terminal
-// — a re-delivered request with the same UUID is a no-op regardless
-// of outcome.
+// terminally records this UUID as a MIGRATION. Both Completed and
+// Failed are terminal — a re-delivered request with the same UUID is a
+// no-op regardless of outcome. ForceDelete rows share the RequestUUID
+// keyspace (they key on the pod UID) but are not migrations, so they
+// are excluded: a migration request reusing a force-deleted pod's UID
+// must not be swallowed as already-terminal. Exclusion (rather than a
+// positive reason match) because migration rows carry the requester's
+// free-form Reason, often empty.
 func (l *Ledger) HasCompletedOrFailedRequest(uuid string) bool {
 	for _, e := range l.Entries {
-		if e.RequestUUID != uuid {
+		if e.RequestUUID != uuid || e.Reason == ReasonForceDelete {
 			continue
 		}
 		if e.Phase == PhaseCompleted || e.Phase == PhaseFailed {
@@ -410,6 +415,11 @@ func ValidateCapacity(ledger *Ledger, now time.Time) (ok bool, reason string) {
 	hourAgo := now.Add(-time.Hour)
 
 	for _, entry := range ledger.Entries {
+		// Force-delete records are not migrations: a dead node's pod
+		// sweep must not consume the migration admission window.
+		if entry.Reason == ReasonForceDelete {
+			continue
+		}
 		if entry.Phase == PhaseStarted {
 			inFlight++
 		}

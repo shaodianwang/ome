@@ -239,7 +239,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// expiries dispose terminal.
 	autoMigrateBudget := r.resolveAutoMigrateBudget(log)
 
-	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy)
+	// Resolve the stuck-Terminating force-delete policy from the operator
+	// lifecycle config. nil (absent/invalid config) fails safe: the
+	// escalation is disabled and wedged teardowns are left alone.
+	forceDeletePolicy := r.resolveForceDeletePolicy(log)
+
+	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy)
 
 	// Relocation-directive memory: prune AutoRecover ledger records for
 	// instances observed Ready (the success-prune mirror of the
@@ -493,6 +498,33 @@ func (r *Reconciler) resolveAutoMigrateBudget(log logr.Logger) int32 {
 		return 0
 	}
 	return cfg.AutoMigrate.MaxAttempts
+}
+
+// resolveForceDeletePolicy loads lifecycle.forceDelete from the operator
+// ConfigMap (through the shared short-TTL ConfigCache). Absent, invalid,
+// or unloadable config resolves to nil — the stuck-Terminating
+// force-delete escalation is disabled this pass — with one V(1) log
+// naming the cause; there is never a silent in-code fallback policy.
+func (r *Reconciler) resolveForceDeletePolicy(log logr.Logger) *workload.ForceDeletePolicy {
+	if r.Clientset == nil {
+		log.V(1).Info("force-delete policy unresolved: no clientset wired; escalation disabled this pass")
+		return nil
+	}
+	cfg, err := controllerconfig.NewLifecycleConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		log.V(1).Info("force-delete policy unresolved: lifecycle config load failed; escalation disabled this pass", "error", err.Error())
+		return nil
+	}
+	if cfg == nil || cfg.ForceDelete == nil {
+		log.V(1).Info("force-delete policy unconfigured (no lifecycle.forceDelete in inferenceservice-config); escalation disabled")
+		return nil
+	}
+	policy, err := cfg.ForceDelete.ToPolicy()
+	if err != nil {
+		log.V(1).Info("force-delete policy invalid; escalation disabled this pass", "error", err.Error())
+		return nil
+	}
+	return policy
 }
 
 // reconcileRelocationDirectives owns the per-reconcile relocation-

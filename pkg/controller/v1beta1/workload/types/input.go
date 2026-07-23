@@ -148,9 +148,34 @@ type ReconcileInput struct {
 	// nil = unconfigured → fail-safe: first failure Holds.
 	UpdateRetryPolicy *RetryPolicy
 
+	// ForceDelete gates the stuck-Terminating force-delete escalation.
+	// nil = unconfigured → the escalation is disabled entirely (does not
+	// exist); when non-nil both durations are > 0 — config validation
+	// guarantees it, consumers never re-check.
+	ForceDelete *ForceDeletePolicy
+
 	// Clock mirrors Deps.Clock for helpers that receive only the input.
 	// See Deps.Now for the rule.
 	Clock clock.Clock
+}
+
+// ForceDeletePolicy configures the stuck-Terminating force-delete
+// escalation: a Terminating pod overdue past its own deletion deadline
+// by OverdueSlack, on a node whose unreachable evidence is at least
+// NodeUnreachableThreshold old, may be force-deleted. Config-driven
+// (chart values → inferenceservice-config); nil means unconfigured and
+// the escalation is disabled entirely. Both durations are always > 0
+// when the policy is non-nil (config validation rejects anything else).
+type ForceDeletePolicy struct {
+	// OverdueSlack is how long past the pod's own DeletionTimestamp
+	// (which already includes the pod's own grace period) a Terminating
+	// pod must be before it counts as wedged.
+	OverdueSlack time.Duration
+	// NodeUnreachableThreshold is the minimum age of the node's
+	// unreachable evidence (taint TimeAdded / NotReady
+	// LastTransitionTime, or the Node object gone) before the
+	// escalation may act.
+	NodeUnreachableThreshold time.Duration
 }
 
 // Now returns the injected clock's time, or time.Now() when no clock

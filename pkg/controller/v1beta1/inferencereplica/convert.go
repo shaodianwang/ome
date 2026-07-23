@@ -95,7 +95,11 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // ONCE per reconcile by the caller (from the operator lifecycle config);
 // nil means unconfigured and the workload layer fails safe (first
 // same-target failure Holds).
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy) workload.ReconcileInput {
+//
+// forceDeletePolicy is the stuck-Terminating force-delete policy,
+// likewise resolved ONCE per reconcile by the caller; nil means
+// unconfigured and the escalation is disabled entirely.
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -129,7 +133,10 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// alone decides Backoff vs fail-safe Held.
 		MutateRetryBlock:  buildMutateRetryBlock(r.Client, ir),
 		UpdateRetryPolicy: updateRetryPolicy,
-		Clock:             r.Clock,
+		// Stuck-Terminating force-delete gate. nil disables the
+		// escalation; non-nil durations are validated > 0 upstream.
+		ForceDelete: forceDeletePolicy,
+		Clock:       r.Clock,
 		// IR doesn't drive ISVC migrations; no source-of-truth annotation
 		// to clear. Wire a no-op stub so the workload.ReconcileInput
 		// panic-on-nil contract is satisfied.

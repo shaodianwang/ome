@@ -55,6 +55,9 @@ data:
   {{- with .autoMigrate }}
   {{- $fields = append $fields (dict "autoMigrate" (dict "maxAttempts" .maxAttempts)) }}
   {{- end }}
+  {{- with .forceDelete }}
+  {{- $fields = append $fields (dict "forceDelete" (dict "overdueSlack" .overdueSlack "nodeUnreachableThreshold" .nodeUnreachableThreshold)) }}
+  {{- end }}
   {{- if $fields }}
   lifecycle: |-
     {{- $merged := dict }}

@@ -280,6 +280,10 @@ type LifecycleConfig struct {
 	// AutoMigrate configures the deadline-disposition relocation budget.
 	// Absence disables the relocation branch.
 	AutoMigrate *AutoMigrateConfig `json:"autoMigrate,omitempty"`
+	// ForceDelete configures the stuck-Terminating force-delete
+	// escalation. Absence means the escalation does not exist — there
+	// are intentionally NO in-code defaults.
+	ForceDelete *ForceDeleteConfig `json:"forceDelete,omitempty"`
 }
 
 // UpdateRetryConfig is the same-target update retry policy: a failed rollout
@@ -302,6 +306,53 @@ type AutoMigrateConfig struct {
 	// MaxAttempts bounds the number of relocation attempts for one expired
 	// Instance before the disposition falls through to terminal failure.
 	MaxAttempts int32 `json:"maxAttempts"`
+}
+
+// ForceDeleteConfig configures the stuck-Terminating force-delete
+// escalation. Both fields are duration strings ("2m", "5m") and are
+// REQUIRED when the block is present — there are no in-code defaults.
+//
+// +kubebuilder:object:generate=false
+type ForceDeleteConfig struct {
+	// OverdueSlack is how long past a Terminating pod's own
+	// deletionTimestamp (request time + the pod's own grace period) the
+	// pod must be before it counts as wedged.
+	OverdueSlack string `json:"overdueSlack"`
+	// NodeUnreachableThreshold is the minimum age of the node's
+	// unreachable evidence (taint TimeAdded / NotReady
+	// LastTransitionTime, or the Node object gone) before the
+	// escalation may act.
+	NodeUnreachableThreshold string `json:"nodeUnreachableThreshold"`
+}
+
+// ToPolicy validates the config and converts it to the workload-side
+// ForceDeletePolicy. A nil receiver (absent block) yields (nil, nil) —
+// unconfigured, the escalation is disabled. Any violation — either
+// field missing, unparseable, or non-positive — is an error; callers
+// treat an invalid policy as unconfigured (escalation OFF), never patch
+// it up with fallback numbers.
+func (c *ForceDeleteConfig) ToPolicy() (*workloadtypes.ForceDeletePolicy, error) {
+	if c == nil {
+		return nil, nil
+	}
+	overdue, err := time.ParseDuration(c.OverdueSlack)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.forceDelete: overdueSlack %q: %w", c.OverdueSlack, err)
+	}
+	if overdue <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.forceDelete: overdueSlack must be > 0, got %s", overdue)
+	}
+	threshold, err := time.ParseDuration(c.NodeUnreachableThreshold)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.forceDelete: nodeUnreachableThreshold %q: %w", c.NodeUnreachableThreshold, err)
+	}
+	if threshold <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.forceDelete: nodeUnreachableThreshold must be > 0, got %s", threshold)
+	}
+	return &workloadtypes.ForceDeletePolicy{
+		OverdueSlack:             overdue,
+		NodeUnreachableThreshold: threshold,
+	}, nil
 }
 
 // ToPolicy validates the config and converts it to the workload-side

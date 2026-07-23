@@ -54,6 +54,7 @@ type (
 	RetryBlockState         = types.RetryBlockState
 	RetryBlockDisposition   = types.RetryBlockDisposition
 	RetryPolicy             = types.RetryPolicy
+	ForceDeletePolicy       = types.ForceDeletePolicy
 )
 
 const (
@@ -108,6 +109,8 @@ const (
 	EventReasonAutoMigrationCapReached       = types.EventReasonAutoMigrationCapReached
 	EventReasonInstanceFailed                = types.EventReasonInstanceFailed
 	EventReasonRetryHeld                     = types.EventReasonRetryHeld
+	EventReasonPodForceDeleted               = types.EventReasonPodForceDeleted
+	EventReasonPodDeleteBlockedByFinalizer   = types.EventReasonPodDeleteBlockedByFinalizer
 	EventReasonMigrationRequestAccepted      = types.EventReasonMigrationRequestAccepted
 	EventReasonMigrationRequestRejected      = types.EventReasonMigrationRequestRejected
 	EventReasonMigrationCompleted            = types.EventReasonMigrationCompleted

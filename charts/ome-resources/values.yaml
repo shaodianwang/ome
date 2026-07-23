@@ -188,6 +188,16 @@ ome:
       # Removing this block disables the relocation branch.
       autoMigrate:
         maxAttempts: 3
+      # forceDelete enables automated force-deletion (grace 0) of pods stuck
+      # Terminating on unreachable/gone nodes — opt-in; leave commented out
+      # (the default) to disable the escalation entirely. Both fields are
+      # required when the block is present: overdueSlack is how long past a
+      # pod's own deletionTimestamp before it counts as wedged;
+      # nodeUnreachableThreshold is the minimum age of the node's
+      # unreachable evidence before acting.
+      # forceDelete:
+      #   overdueSlack: 2m
+      #   nodeUnreachableThreshold: 5m
     ingressGateway:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"

@@ -238,6 +238,97 @@ func TestNewLifecycleConfig_StuckPodGracePeriod(t *testing.T) {
 	})
 }
 
+// TestForceDeleteConfig_ToPolicy pins the validation contract: a nil
+// receiver (absent block) is unconfigured — nil policy, no error — the
+// chart example converts 1:1, and every violation (either field missing,
+// unparseable, or non-positive) is an error the caller treats as
+// unconfigured (escalation OFF), never patched with fallback numbers.
+func TestForceDeleteConfig_ToPolicy(t *testing.T) {
+	t.Run("nil receiver yields nil policy, no error", func(t *testing.T) {
+		var cfg *ForceDeleteConfig
+		policy, err := cfg.ToPolicy()
+		require.NoError(t, err)
+		assert.Nil(t, policy)
+	})
+
+	t.Run("happy path matches chart example", func(t *testing.T) {
+		cfg := &ForceDeleteConfig{OverdueSlack: "2m", NodeUnreachableThreshold: "5m"}
+		policy, err := cfg.ToPolicy()
+		require.NoError(t, err)
+		require.NotNil(t, policy)
+		assert.Equal(t, 2*time.Minute, policy.OverdueSlack)
+		assert.Equal(t, 5*time.Minute, policy.NodeUnreachableThreshold)
+	})
+
+	invalid := []struct {
+		name string
+		cfg  ForceDeleteConfig
+	}{
+		{"missing overdueSlack", ForceDeleteConfig{OverdueSlack: "", NodeUnreachableThreshold: "5m"}},
+		{"missing nodeUnreachableThreshold", ForceDeleteConfig{OverdueSlack: "2m", NodeUnreachableThreshold: ""}},
+		{"invalid overdueSlack duration", ForceDeleteConfig{OverdueSlack: "not-a-duration", NodeUnreachableThreshold: "5m"}},
+		{"invalid nodeUnreachableThreshold duration", ForceDeleteConfig{OverdueSlack: "2m", NodeUnreachableThreshold: "5 minutes"}},
+		{"zero overdueSlack", ForceDeleteConfig{OverdueSlack: "0s", NodeUnreachableThreshold: "5m"}},
+		{"zero nodeUnreachableThreshold", ForceDeleteConfig{OverdueSlack: "2m", NodeUnreachableThreshold: "0s"}},
+		{"negative overdueSlack", ForceDeleteConfig{OverdueSlack: "-2m", NodeUnreachableThreshold: "5m"}},
+		{"negative nodeUnreachableThreshold", ForceDeleteConfig{OverdueSlack: "2m", NodeUnreachableThreshold: "-5m"}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, err := tt.cfg.ToPolicy()
+			assert.Error(t, err)
+			assert.Nil(t, policy)
+		})
+	}
+}
+
+// TestNewLifecycleConfig_ForceDelete pins the load contract for the
+// forceDelete key: present + valid parses, absent leaves the field nil
+// (unconfigured — the escalation does not exist).
+func TestNewLifecycleConfig_ForceDelete(t *testing.T) {
+	t.Run("valid forceDelete block", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset()
+		configMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{
+				LifecycleConfigName: `{"forceDelete":{"overdueSlack":"2m","nodeUnreachableThreshold":"5m"}}`,
+			},
+		}
+		_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		cfg, err := NewLifecycleConfig(clientset)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ForceDelete)
+		assert.Equal(t, "2m", cfg.ForceDelete.OverdueSlack)
+		assert.Equal(t, "5m", cfg.ForceDelete.NodeUnreachableThreshold)
+	})
+
+	t.Run("lifecycle key without forceDelete yields config with nil ForceDelete", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset()
+		configMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{
+				LifecycleConfigName: `{}`,
+			},
+		}
+		_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		cfg, err := NewLifecycleConfig(clientset)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.ForceDelete)
+	})
+}
+
 // TestNewLifecycleConfig_AutoMigrate pins the load contract for the
 // autoMigrate key: present + valid parses, absent leaves the field nil.
 func TestNewLifecycleConfig_AutoMigrate(t *testing.T) {
