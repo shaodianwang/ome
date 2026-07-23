@@ -523,6 +523,13 @@ func (in *ComponentExtensionSpec) DeepCopyInto(out *ComponentExtensionSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.ServicePortAppProtocols != nil {
+		in, out := &in.ServicePortAppProtocols, &out.ServicePortAppProtocols
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.MinAvailable != nil {
 		in, out := &in.MinAvailable, &out.MinAvailable
 		*out = new(intstr.IntOrString)

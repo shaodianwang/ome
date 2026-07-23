@@ -9463,6 +9463,10 @@ spec:
                       type: string
                     serviceAccountName:
                       type: string
+                    servicePortAppProtocols:
+                      additionalProperties:
+                        type: string
+                      type: object
                     setHostnameAsFQDN:
                       type: boolean
                     shareProcessNamespace:
@@ -22898,6 +22902,10 @@ spec:
                       type: string
                     serviceAccountName:
                       type: string
+                    servicePortAppProtocols:
+                      additionalProperties:
+                        type: string
+                      type: object
                     setHostnameAsFQDN:
                       type: boolean
                     shareProcessNamespace:
@@ -32095,6 +32103,10 @@ spec:
                       type: string
                     serviceAccountName:
                       type: string
+                    servicePortAppProtocols:
+                      additionalProperties:
+                        type: string
+                      type: object
                     setHostnameAsFQDN:
                       type: boolean
                     shareProcessNamespace:

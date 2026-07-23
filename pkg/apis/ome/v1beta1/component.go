@@ -24,6 +24,10 @@ type ComponentExtensionSpec struct {
 	// More info: http://kubernetes.io/docs/user-guide/annotations
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+	// ServicePortAppProtocols maps generated Service port names to their
+	// Kubernetes appProtocol values. Declared ports use their container port name.
+	// +optional
+	ServicePortAppProtocols map[string]string `json:"servicePortAppProtocols,omitempty"`
 	// MinAvailable specifies how many component pods must still be available after the eviction
 	// +optional
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`

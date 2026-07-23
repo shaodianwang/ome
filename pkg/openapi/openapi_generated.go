@@ -1145,6 +1145,22 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 							},
 						},
 					},
+					"servicePortAppProtocols": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServicePortAppProtocols maps generated Service port names to their Kubernetes appProtocol values. Declared ports use their container port name.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"minAvailable": {
 						SchemaProps: spec.SchemaProps{
 							Description: "MinAvailable specifies how many component pods must still be available after the eviction",
@@ -1946,6 +1962,22 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							},
 						},
 					},
+					"servicePortAppProtocols": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServicePortAppProtocols maps generated Service port names to their Kubernetes appProtocol values. Declared ports use their container port name.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"minAvailable": {
 						SchemaProps: spec.SchemaProps{
 							Description: "MinAvailable specifies how many component pods must still be available after the eviction",
@@ -2666,6 +2698,22 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					"annotations": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Annotations that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/annotations",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"servicePortAppProtocols": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServicePortAppProtocols maps generated Service port names to their Kubernetes appProtocol values. Declared ports use their container port name.",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -7585,6 +7633,22 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					"annotations": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Annotations that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/annotations",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"servicePortAppProtocols": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServicePortAppProtocols maps generated Service port names to their Kubernetes appProtocol values. Declared ports use their container port name.",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
