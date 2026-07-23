@@ -106,23 +106,6 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         }
     };
 
-    // Log streaming is optional and fails closed the same way: incomplete or
-    // over-budget knob config disables only this feature, with the reason
-    // logged; the read plane remains available.
-    let logs = config.logs_config().unwrap_or_else(|err| {
-        tracing::error!(error = %err, "log streaming configuration invalid; feature disabled");
-        None
-    });
-    // Enabled with an empty allowlist is the deliberate ships-dark posture,
-    // but say so: an operator expecting a live Logs tab should find the
-    // reason here, not in a silent UI.
-    if logs.as_ref().is_some_and(|logs| logs.clusters.is_empty()) {
-        tracing::warn!(
-            "log streaming is enabled with an empty cluster allowlist; no cluster serves logs \
-             until one is added"
-        );
-    }
-
     let metrics = telemetry::init_metrics(
         &config.http_latency_buckets,
         Duration::from_secs(config.metrics_upkeep_secs),
@@ -234,7 +217,6 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             },
             dashboard_policy,
             metrics_time_ranges,
-            logs,
         },
     );
     server::serve(&config, state).await

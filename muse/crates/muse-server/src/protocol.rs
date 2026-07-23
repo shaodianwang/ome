@@ -1698,39 +1698,6 @@ pub struct ConfigResp {
     /// console shows the full cached query range without a selector.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics_time_ranges: Option<MetricsTimeRanges>,
-    /// Whether pod log streaming (`GET /v1/logs/stream`) is available; the
-    /// console hides its logs tab when false.
-    pub logs: bool,
-    /// Clusters allowlisted for log streaming: the console renders the Logs
-    /// tab only for deployments on these clusters, so a cluster whose log
-    /// permissions haven't landed shows no tab rather than a failing one.
-    /// Omitted when disabled.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logs_clusters: Option<Vec<String>>,
-    /// The log-stream caps the UI must reflect (input clamping, truncation
-    /// hints). Omitted when disabled.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logs_caps: Option<LogsCaps>,
-    /// Optional since selector for the log viewer — the same shape as
-    /// `metrics_time_ranges`. Omitted means no selector.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logs_since_options: Option<MetricsTimeRanges>,
-    /// Scrollback lines the console should retain, supplied by deployment
-    /// config rather than baked into the console. Omitted when disabled.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logs_client_buffer_lines: Option<usize>,
-}
-
-/// The log-stream limits the console reflects in its viewer controls.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogsCaps {
-    /// Pods one log stream tails at most; excess pods are announced, not tailed.
-    pub max_pods_per_session: usize,
-    /// Upper bound the server clamps `?tail=` to; the console caps its input.
-    pub tail_lines_max: i64,
-    /// Per-session egress rate; lines above it are dropped and counted.
-    pub max_lines_per_sec: usize,
 }
 
 /// Serialize any value to JSON, or `Null` on failure.
@@ -1786,55 +1753,8 @@ mod tests {
             metrics_refresh_secs: 15,
             dashboard_policy: None,
             metrics_time_ranges: None,
-            logs: false,
-            logs_clusters: None,
-            logs_caps: None,
-            logs_since_options: None,
-            logs_client_buffer_lines: None,
         };
         let value = serde_json::to_value(response).expect("config response serializes");
         assert_eq!(value.get("metricsRefreshSecs"), Some(&Value::from(15)));
-        // Disabled logs surface only the boolean; the allowlist and sizing
-        // fields are omitted.
-        assert_eq!(value.get("logs"), Some(&Value::from(false)));
-        assert_eq!(value.get("logsClusters"), None);
-        assert_eq!(value.get("logsCaps"), None);
-    }
-
-    #[test]
-    fn console_config_exposes_log_stream_limits_when_enabled() {
-        let response = ConfigResp {
-            chat: false,
-            chat_timeout_secs: None,
-            chat_client_grace_secs: None,
-            metrics: false,
-            metrics_refresh_secs: 15,
-            dashboard_policy: None,
-            metrics_time_ranges: None,
-            logs: true,
-            logs_clusters: Some(vec!["cw".to_owned(), "gcp".to_owned()]),
-            logs_caps: Some(LogsCaps {
-                max_pods_per_session: 48,
-                tail_lines_max: 5000,
-                max_lines_per_sec: 2000,
-            }),
-            logs_since_options: Some(MetricsTimeRanges {
-                default: "15m".to_owned(),
-                options: vec![MetricsTimeRangeOption {
-                    id: "15m".to_owned(),
-                    label: "15m".to_owned(),
-                    seconds: 900,
-                }],
-            }),
-            logs_client_buffer_lines: Some(5000),
-        };
-        let value = serde_json::to_value(response).expect("config response serializes");
-        assert_eq!(value["logsClusters"], serde_json::json!(["cw", "gcp"]));
-        assert_eq!(value["logsCaps"]["maxPodsPerSession"], 48);
-        assert_eq!(value["logsCaps"]["tailLinesMax"], 5000);
-        assert_eq!(value["logsCaps"]["maxLinesPerSec"], 2000);
-        assert_eq!(value.get("logsClientBufferLines"), Some(&Value::from(5000)));
-        assert_eq!(value["logsSinceOptions"]["default"], "15m");
-        assert_eq!(value["logsSinceOptions"]["options"][0]["seconds"], 900);
     }
 }

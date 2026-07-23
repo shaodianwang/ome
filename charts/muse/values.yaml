@@ -145,67 +145,6 @@ config:
     # instant only). Override per environment with a list of
     # { id, kind: instant|range, promql, window, step }.
     queries: []
-  # Pod log streaming: GET /v1/logs/stream fans in the follow-mode logs of every
-  # pod behind one InferenceService on one cluster as a single SSE response.
-  # Enabled for every configured cluster by default (operator decision: the
-  # console is single-tenant and log visibility beats a quiet default). A
-  # cluster whose read credential lacks `get pods/log` shows retrying
-  # permission notices until the grant lands in that cluster's own GitOps
-  # (granted below for the in-cluster case). Set `allClusters: false` and use
-  # the explicit `clusters` list for a gradual per-cluster rollout instead.
-  logs:
-    enabled: true
-    # Allowlist every configured cluster (derived from `clusters` above, or
-    # `localClusterName` when running single-cluster/ambient). Takes precedence
-    # over the explicit list below; new clusters are covered automatically.
-    # Expect 403 tail notices on clusters whose `get pods/log` grant has not
-    # landed yet.
-    allClusters: true
-    # Per-cluster allowlist. Every name must match a configured cluster name
-    # (validated at startup; a typo fails the deploy rather than shipping a
-    # silently dark cluster). Empty ⇒ no cluster serves logs even when enabled.
-    clusters: []
-    maxSessions: 16          # concurrent log sessions per replica; 503 beyond
-    maxPodsPerSession: 48    # pods tailed per session (component→name order; excess announced)
-    maxTailsPerCluster: 256  # concurrent pod log streams per cluster, across sessions
-    bufferLines: 512         # per-session in-flight line buffer; full ⇒ tails block
-    lineBytesMax: 8192       # single-line byte cap; longer lines truncated + flagged
-    maxLinesPerSec: 2000     # per-session egress rate; excess dropped + counted
-    tailLinesMax: 5000       # upper bound for ?tail= (clamped, not rejected)
-    catchupLines: 10         # history for pods joining mid-session / stream retries
-    podRefreshSecs: 5        # roster resync cadence (rollouts, scale churn)
-    sessionMaxSecs: 3600     # hard session lifetime; the console reconnects
-    startStaggerMs: 25       # delay between tail starts (spreads the connect burst)
-    noticeIntervalSecs: 5    # minimum interval between dropped-line notices
-    tailRetryBackoffSecs: 10 # wait before reopening an ended/errored pod stream
-    flushIntervalMs: 200     # egress batch tick
-    batchMaxLines: 500       # max lines per SSE frame
-    clientBufferLines: 5000  # console scrollback advice (served via /v1/config)
-    # Budget for the worst case where every session's line buffer is full of
-    # maximum-length lines at once:
-    #   maxSessions × bufferLines × lineBytesMax = 16 × 512 × 8192 = 64 MiB,
-    # about 1% of the 6Gi memory limit below. The budget (128 MiB, ~2%) leaves
-    # room to raise one knob without redoing the math; an over-budget knob
-    # combination disables the feature with a logged reason instead of risking
-    # the pod's memory limit. Revisit alongside resources.limits.memory.
-    maxBufferBytes: 134217728
-    # Since selector offered by the log viewer; the explicit default is
-    # required to match one option id (same shape as metrics.timeRanges).
-    sinceOptions:
-      default: 15m
-      options:
-        - id: 5m
-          label: 5m
-          seconds: 300
-        - id: 15m
-          label: 15m
-          seconds: 900
-        - id: 1h
-          label: 1h
-          seconds: 3600
-        - id: 6h
-          label: 6h
-          seconds: 21600
   # jemalloc tuning (MALLOC_CONF). A background thread purges freed pages back to
   # the OS after a short decay, so RSS drops after the initial-list allocation
   # burst instead of lingering. Empty ⇒ jemalloc defaults (no background purge).
@@ -247,7 +186,6 @@ route:
     paths:
       - /v1/stream
       - /v1/metrics/stream
-      - /v1/logs/stream
   # Needed only if the backend Service is in a different namespace than the route
   # (it isn't here — both are in the release namespace).
   referenceGrant: false

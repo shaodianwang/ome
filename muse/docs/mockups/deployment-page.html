@@ -1,13 +1,13 @@
 <!doctype html>
 <!-- MOCKUP ONLY — design draft for the deployment page: consolidated overview
-     (boxed components/conditions + About sidebar), runtime card, logs tab.
+     (boxed components/conditions + About sidebar) and runtime card.
      Class names and tokens mirror muse/web/src/styles/* so implementation maps 1:1.
      Not part of the build; safe to delete. -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MUSE mockup — deployment page: consolidated overview + logs tab</title>
+<title>MUSE mockup — deployment page: consolidated overview</title>
 <style>
 /* ==== tokens copied from muse/web/src/styles/base.css ==== */
 :root {
@@ -156,28 +156,9 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 .cond-tile.bad .ct-reason { color: var(--red); }
 .cond-tile.off { color: var(--fg-3); }
 
-/* ==== NEW classes proposed by this design (would live in styles/logs.css) ==== */
+/* ==== Runtime card classes ==== */
 .rt-role { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--border); font-size: var(--t-xs); font-weight: 600; color: var(--fg-3); letter-spacing: 0.02em; text-transform: uppercase; }
 .rt-serves { display: flex; flex-wrap: wrap; gap: 6px; }
-
-.logbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; padding: var(--s2) var(--s3); }
-.logbar .grow { flex: 1; }
-.logstat { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--fg-3); font-variant-numeric: tabular-nums; }
-.logpane { position: relative; background: var(--code-bg); border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); height: 480px; overflow-y: auto; padding: var(--s2) 0; font-family: var(--mono); font-size: var(--t-xs); line-height: 1.7; }
-.logline { display: flex; gap: var(--s3); padding: 0 var(--s3); white-space: pre; }
-.logline:hover { background: var(--hover); }
-.log-ts { color: var(--fg-faint); flex: none; }
-.log-pfx { flex: none; width: 172px; overflow: hidden; text-overflow: ellipsis; cursor: pointer; text-align: right; }
-.log-pfx:hover { text-decoration: underline; }
-.log-msg { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; }
-/* pod-prefix hues: fixed palette from base.css series/state tokens, hash(pod) -> class */
-.loghue-0 { color: var(--cyan); } .loghue-1 { color: var(--violet); }
-.loghue-2 { color: var(--green); } .loghue-3 { color: var(--amber); }
-.loghue-4 { color: color-mix(in srgb, var(--cyan) 55%, var(--green)); }
-.loghue-5 { color: color-mix(in srgb, var(--violet) 55%, var(--red)); }
-.log-noticerow { display: flex; gap: var(--s2); padding: 2px var(--s3); color: var(--amber); background: var(--amber-dim); font-family: var(--sans); font-size: var(--t-sm); }
-.log-resume { position: sticky; bottom: var(--s2); margin: 0 auto; display: block; width: max-content; background: var(--accent-dim); color: var(--accent-fg); border: 1px solid var(--border-2); border-radius: var(--radius-pill); padding: 3px 12px; font: inherit; font-size: var(--t-sm); cursor: pointer; }
-.log-footnotice { margin-top: var(--s3); }
 </style>
 </head>
 <body>
@@ -185,9 +166,8 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 <div class="mock-banner">
   <b>Mockup</b> — deployment page: the consolidated <b>Overview</b> (components and conditions as boxed
   tiles — failing first, disabled-by-spec dimmed last — with every identity fact in one <b>About</b>
-  sidebar and a Ready/Degraded header pill), the inline <b>Runtime card</b> (command/args + env) and the
-  <b>Logs tab</b> (stern-like aggregated streaming). Click the tabs. Static data; classes and tokens
-  mirror the real stylesheets.
+  sidebar and a Ready/Degraded header pill) and the inline <b>Runtime card</b> (command/args + env).
+  Click the tabs. Static data; classes and tokens mirror the real stylesheets.
 </div>
 
 <div class="detail-head">
@@ -200,7 +180,6 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
 <div class="dtabs" role="tablist">
   <button class="dtab active" data-tab="overview">Overview</button>
   <button class="dtab" data-tab="monitoring">Monitoring</button>
-  <button class="dtab" data-tab="logs">Logs</button>
   <button class="dtab" data-tab="activity">Activity</button>
 </div>
 
@@ -350,51 +329,6 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
   </div>
 </section>
 
-<!-- ============================ LOGS TAB ============================ -->
-<section id="tab-logs" hidden>
-  <div class="logbar">
-    <label class="fv"><span>Component</span>
-      <select><option>All</option><option selected>engine</option><option>decoder</option></select></label>
-    <label class="fv"><span>Pod</span>
-      <select><option selected>All (48 of 203)</option><option>engine-0-leader-0</option><option>engine-1-leader-0</option><option>…</option></select></label>
-    <label class="fv"><span>Container</span>
-      <select><option selected>All</option><option>ome-container</option><option>serving-agent</option></select></label>
-    <label class="fv"><span>Since</span>
-      <select><option>5m</option><option selected>15m</option><option>1h</option><option>6h</option></select></label>
-    <label class="fv"><input type="text" placeholder="grep (client-side, / for regex)" /></label>
-    <label class="fv"><span>highlight</span><select><option selected>highlight</option><option>filter</option></select></label>
-    <span class="grow"></span>
-    <span class="logstat"><span class="dot green"></span>Live · 48 pods · 4.1k lines</span>
-    <button class="btn" aria-pressed="true">Follow</button>
-    <button class="btn">Pause</button>
-    <button class="btn">Wrap</button>
-    <button class="btn">Clear</button>
-  </div>
-
-  <div class="logpane">
-    <div class="log-noticerow">⚠ streaming 48 of 203 pods (server cap) — narrow by component or pod to change the set</div>
-    <div class="logline"><span class="log-ts">15:04:01.113</span><span class="log-pfx loghue-0" title="avocado-t5-ome-inferq-513-engine-0-leader-0 — click to filter">engine-0-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 12, #new-token: 8192, #cached-token: 51203, token usage: 0.61, #queue-req: 3</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.201</span><span class="log-pfx loghue-1">engine-1-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 8, #new-token: 6144, #cached-token: 40161, token usage: 0.58, #queue-req: 1</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.244</span><span class="log-pfx loghue-2">decoder-0-leader-0</span><span class="log-msg">Decode batch. #running-req: 231, #token: 104857, token usage: 0.72, gen throughput (token/s): 5123.4</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.309</span><span class="log-pfx loghue-3">decoder-4-leader-0</span><span class="log-msg">Decode batch. #running-req: 198, #token: 98301, token usage: 0.69, gen throughput (token/s): 4877.0</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.377</span><span class="log-pfx loghue-0">engine-0-leader-0</span><span class="log-msg">KV transfer to decoder-4 done: 12 seqs, 8.2 GB, 412 ms</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.402</span><span class="log-pfx loghue-4">engine-7-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 15, #new-token: 10240, #cached-token: 61150, token usage: 0.64, #queue-req: 6</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.463</span><span class="log-pfx loghue-5">engine-12-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 4, #new-token: 3072, #cached-token: 18716, token usage: 0.55, #queue-req: 0</span></div>
-    <div class="log-noticerow">engine-9-leader-0: tail error 403 (pods/log not granted on msl-cw-use2-1) — retrying in 10s</div>
-    <div class="logline"><span class="log-ts">15:04:01.518</span><span class="log-pfx loghue-2">decoder-0-leader-0</span><span class="log-msg">Decode batch. #running-req: 235, #token: 106114, token usage: 0.73, gen throughput (token/s): 5210.9</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.598</span><span class="log-pfx loghue-1">engine-1-leader-0</span><span class="log-msg">[serving-agent] heartbeat ok, model copies: 1 loaded</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.633</span><span class="log-pfx loghue-3">decoder-4-leader-0</span><span class="log-msg">Decode batch. #running-req: 201, #token: 99870, token usage: 0.70, gen throughput (token/s): 4901.2</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.702</span><span class="log-pfx loghue-4">engine-7-leader-0</span><span class="log-msg">KV transfer to decoder-0 done: 15 seqs, 10.1 GB, 388 ms</span></div>
-    <div class="logline"><span class="log-ts">15:04:01.771</span><span class="log-pfx loghue-0">engine-0-leader-0</span><span class="log-msg">Prefill batch. #new-seq: 9, #new-token: 7168, #cached-token: 44520, token usage: 0.62, #queue-req: 2</span></div>
-    <button class="log-resume">↓ 214 new lines — resume follow</button>
-  </div>
-
-  <div class="data-notice log-footnotice">
-    <strong>Session</strong>
-    <span>hard limit 60m (server config) — the stream reconnects automatically with <span class="mono">sinceSecs</span> resume; caps, since-options and buffer size all come from <span class="mono">/v1/config</span>.</span>
-  </div>
-</section>
-
 <!-- ============================ STUB TABS ============================ -->
 <section id="tab-monitoring" hidden><p class="muted">Not part of this mockup — unchanged Monitoring tab.</p></section>
 <section id="tab-activity" hidden><p class="muted">Not part of this mockup — unchanged Activity tab.</p></section>
@@ -405,7 +339,7 @@ pre.argbox { background: var(--code-bg); border: 1px solid var(--border); border
   tabs.forEach((t) =>
     t.addEventListener("click", () => {
       tabs.forEach((x) => x.classList.toggle("active", x === t));
-      ["overview", "monitoring", "logs", "activity"].forEach((id) => {
+      ["overview", "monitoring", "activity"].forEach((id) => {
         document.getElementById("tab-" + id).hidden = id !== t.dataset.tab;
       });
     })

@@ -20,7 +20,6 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod health;
-pub mod logs;
 pub mod metrics;
 pub mod resources;
 pub mod rollouts;
@@ -43,7 +42,6 @@ pub fn routes() -> Router<AppState> {
         // (matchit prefers the static match), mirroring the `.../chat` route.
         .route("/v1/metrics", get(metrics::snapshot))
         .route("/v1/metrics/stream", get(metrics::stream))
-        .route("/v1/logs/stream", get(logs::stream))
         .route("/v1/inferenceservices/{name}/chat", post(chat::proxy))
         .route("/v1/{kind}", get(resources::list_kind))
         .route("/v1/{kind}/{name}", get(resources::get_kind))

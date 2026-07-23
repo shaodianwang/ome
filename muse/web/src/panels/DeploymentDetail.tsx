@@ -19,19 +19,16 @@ import { ago, fmtErrPct, fmtInt, fmtLatency, fmtRate, num as n } from "../util";
 import { Card, Dot, Gauge, Track } from "../viz";
 import { ChatBox } from "./ChatBox";
 import { Monitoring } from "./DeploymentMonitoring";
-import { LogsPane } from "./LogsPane";
 
 /** Console-style detail for one deployment, modelled on a cloud console (EC2 /
  *  OCI): a persistent identity header over a few substantial tabs.
  *  Overview leads with current state boxed per item — component tiles, then
  *  condition tiles (failing first, disabled-by-spec dimmed last) — with every
  *  identity fact consolidated into one About sidebar. Monitoring owns the
- *  time-series; Logs streams pod logs (rendered only when the server enables
- *  log streaming for this deployment's cluster); Activity is the change log. */
+ *  time-series; Activity is the change log. */
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "monitoring", label: "Monitoring" },
-  { id: "logs", label: "Logs" },
   { id: "activity", label: "Activity" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -58,11 +55,6 @@ export function DeploymentDetail({
   const cfg = useLive(api.config, { kinds: [] });
   const feed = useEventFeed(200);
   const d = detail.data;
-
-  // Per-cluster gate: the Logs tab exists only when log streaming is enabled
-  // AND this deployment's cluster is allowlisted for it — a cluster whose log
-  // permissions haven't landed gets no tab rather than a failing one.
-  const logsOn = cfg.data?.logs === true && (cfg.data.logsClusters ?? []).includes(sel.cluster);
 
   // This deployment's serving metrics (from the live snapshot; SSE-pushed).
   const metricsOn = !!cfg.data?.metrics;
@@ -155,7 +147,7 @@ export function DeploymentDetail({
       ) : (
         <>
           <div className="dtabs">
-            {TABS.filter((t) => t.id !== "logs" || logsOn).map((t) => (
+            {TABS.map((t) => (
               <button
                 key={t.id}
                 className={`dtab${tab === t.id ? " active" : ""}`}
@@ -204,14 +196,6 @@ export function DeploymentDetail({
                 source={metricsSource}
               />
             )
-          ) : null}
-          {tab === "logs" && logsOn ? (
-            <LogsPane
-              sel={sel}
-              namespace={d.namespace ?? sel.namespace}
-              sinceOptions={cfg.data?.logsSinceOptions}
-              bufferLines={cfg.data?.logsClientBufferLines}
-            />
           ) : null}
           {tab === "activity" ? (
             <ActivityPane
