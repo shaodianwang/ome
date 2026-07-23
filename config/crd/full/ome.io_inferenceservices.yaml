@@ -30028,6 +30028,20 @@ spec:
                     url:
                       type: string
                   type: object
+                addresses:
+                  items:
+                    properties:
+                      CACerts:
+                        type: string
+                      audience:
+                        type: string
+                      name:
+                        type: string
+                      url:
+                        type: string
+                    type: object
+                  type: array
+                  x-kubernetes-list-type: atomic
                 annotations:
                   additionalProperties:
                     type: string

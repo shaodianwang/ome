@@ -23,6 +23,16 @@ type InferenceServiceStatus struct {
 	// It generally has the form http[s]://{route-name}.{route-namespace}.{cluster-level-suffix}
 	// +optional
 	URL *apis.URL `json:"url,omitempty"`
+	// Addresses lists every reachable endpoint for this service — one per gateway
+	// its route attaches to, plus the cluster-local address. Each entry's Name
+	// carries the operator-declared class (see IngressGatewaySpec.Class):
+	// "internal", "external", "cluster-local", or any config-defined value.
+	// Derived from the same builder that produces the HTTPRoutes, so it never
+	// drifts from the actual routing. status.url is the primary gateway entry and
+	// status.address is the "cluster-local" entry — both projections of this list.
+	// +optional
+	// +listType=atomic
+	Addresses []duckv1.Addressable `json:"addresses,omitempty"`
 	// Statuses for the components of the InferenceService
 	Components map[ComponentType]ComponentStatusSpec `json:"components,omitempty"`
 	// Model related statuses

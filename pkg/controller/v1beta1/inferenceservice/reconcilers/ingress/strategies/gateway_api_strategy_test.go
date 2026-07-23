@@ -536,37 +536,92 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated(t *testin
 	assert.Equal(t, "ComponentNotReady", condition.Reason)
 }
 
-func TestGatewayAPIStrategy_CreateRawURL(t *testing.T) {
-	tests := []struct {
-		name        string
-		isvc        *v1beta1.InferenceService
-		config      *controllerconfig.IngressConfig
-		expectedURL string
-	}{
-		{
-			name: "simple domain generation",
-			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
-			config: &controllerconfig.IngressConfig{
-				UrlScheme:      "https",
-				IngressDomain:  "example.com",
-				DomainTemplate: "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
-			},
-			expectedURL: "https://test-isvc.default.example.com",
-		},
+// gatewayStrategyWithConfig builds a GatewayAPIStrategy over an explicit
+// IngressConfig so each status case pins the exact routing knobs.
+func gatewayStrategyWithConfig(t *testing.T, cfg *controllerconfig.IngressConfig) *GatewayAPIStrategy {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, gatewayapiv1.Install(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	fakeClient := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	opts := interfaces.ReconcilerOptions{
+		Client:        fakeClient,
+		Scheme:        scheme,
+		IngressConfig: cfg,
+		IsvcConfig:    &controllerconfig.InferenceServicesConfig{},
+	}
+	return NewGatewayAPIStrategy(opts, services.NewDomainService(), services.NewPathService()).(*GatewayAPIStrategy)
+}
+
+func addressName(a duckv1.Addressable) string {
+	if a.Name == nil {
+		return ""
+	}
+	return *a.Name
+}
+
+// TestGatewayAPIStrategy_setStatusEndpoints is the OEP-0023 status contract:
+// status.addresses carries one entry per gateway (tagged with the declared
+// class) plus the cluster-local address, status.url projects the primary gateway
+// endpoint, and status.address projects the cluster-local one — all derived from
+// the same builder as the HTTPRoutes.
+func TestGatewayAPIStrategy_setStatusEndpoints(t *testing.T) {
+	base := func() *controllerconfig.IngressConfig {
+		return &controllerconfig.IngressConfig{
+			EnableGatewayAPI:  true,
+			IngressDomain:     "int-gw-https.cluster.example",
+			DomainTemplate:    "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
+			OmeIngressGateway: "istio-system/int-gw",
+			UrlScheme:         "https",
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			strategy := &GatewayAPIStrategy{
-				ingressConfig: tt.config,
-				domainService: services.NewDomainService(),
-			}
+	t.Run("subdomain primary+external is discoverable and url is primary", func(t *testing.T) {
+		cfg := base()
+		cfg.PerISVCSubdomain = true
+		cfg.OmeIngressGatewayClass = "internal"
+		cfg.AdditionalIngressGateways = []controllerconfig.IngressGatewaySpec{{
+			OmeIngressGateway: "istio-system/ext-gw",
+			IngressDomain:     "ext-gw-https.cluster.example",
+			Class:             "external",
+		}}
+		strategy := gatewayStrategyWithConfig(t, cfg)
+		isvc := createTestInferenceServiceGateway("svc", "ns")
 
-			url, err := strategy.createRawURL(tt.isvc)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedURL, url.String())
-		})
-	}
+		require.NoError(t, strategy.setStatusEndpoints(isvc))
+
+		require.Len(t, isvc.Status.Addresses, 3)
+		assert.Equal(t, "internal", addressName(isvc.Status.Addresses[0]))
+		assert.Equal(t, "https://svc.ns.int-gw-https.cluster.example/", isvc.Status.Addresses[0].URL.String())
+		assert.Equal(t, "external", addressName(isvc.Status.Addresses[1]))
+		assert.Equal(t, "https://svc.ns.ext-gw-https.cluster.example/", isvc.Status.Addresses[1].URL.String())
+		assert.Equal(t, interfaces.ClusterLocalEndpointClass, addressName(isvc.Status.Addresses[2]))
+		assert.Equal(t, "https://svc-engine.ns.svc.cluster.local", isvc.Status.Addresses[2].URL.String())
+
+		// status.url projects the primary gateway; status.address the cluster-local.
+		assert.Equal(t, "https://svc.ns.int-gw-https.cluster.example/", isvc.Status.URL.String())
+		require.NotNil(t, isvc.Status.Address)
+		assert.Equal(t, "https://svc-engine.ns.svc.cluster.local", isvc.Status.Address.URL.String())
+	})
+
+	t.Run("shared-host url carries the load-bearing path prefix", func(t *testing.T) {
+		cfg := base()
+		cfg.PerISVCSubdomain = false
+		cfg.SharedHostPrefix = "llm"
+		strategy := gatewayStrategyWithConfig(t, cfg)
+		isvc := createTestInferenceServiceGateway("svc", "ns")
+
+		require.NoError(t, strategy.setStatusEndpoints(isvc))
+
+		require.Len(t, isvc.Status.Addresses, 2)
+		assert.Equal(t, "", addressName(isvc.Status.Addresses[0]))
+		assert.Equal(t, "https://llm.int-gw-https.cluster.example/ns/svc/", isvc.Status.Addresses[0].URL.String())
+		assert.Equal(t, interfaces.ClusterLocalEndpointClass, addressName(isvc.Status.Addresses[1]))
+
+		// The corrected status.url — the shared host WITH the /ns/svc/ prefix,
+		// not the old non-routable per-ISVC subdomain.
+		assert.Equal(t, "https://llm.int-gw-https.cluster.example/ns/svc/", isvc.Status.URL.String())
+	})
 }
 
 func TestGatewayAPIStrategy_GetRawServiceHost(t *testing.T) {

@@ -66,8 +66,6 @@ func (g *GatewayAPIStrategy) GetName() string {
 }
 
 func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) error {
-	var err error
-
 	if !g.ingressConfig.DisableIngressCreation {
 		// Reconcile component HTTPRoutes
 		if err := g.reconcileComponentHTTPRoute(ctx, isvc, builders.EngineComponent); err != nil {
@@ -123,17 +121,53 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 		})
 	}
 
-	// Set status URL and Address
-	isvc.Status.URL, err = g.createRawURL(isvc)
+	// Set status URL, Address, and Addresses — all derived from the same builder
+	// that produces the HTTPRoutes (OEP-0023), so they cannot drift from routing.
+	return g.setStatusEndpoints(isvc)
+}
+
+// setStatusEndpoints derives status.addresses (one entry per gateway the route
+// attaches to, tagged with the operator-declared class, plus the cluster-local
+// address) from the shared endpoint builder, and projects the two
+// backward-compatible fields from it: status.url = the primary gateway endpoint,
+// status.address = the cluster-local endpoint. Because all three come from one
+// renderer, they cannot disagree with the HTTPRoutes.
+func (g *GatewayAPIStrategy) setStatusEndpoints(isvc *v1beta1.InferenceService) error {
+	endpoints, err := g.httpRouteBuilder.Endpoints(isvc, isvc.Name)
 	if err != nil {
 		return err
 	}
-	isvc.Status.Address = &duckv1.Addressable{
+
+	addresses := make([]duckv1.Addressable, 0, len(endpoints)+1)
+	var primary *knapis.URL
+	for _, ep := range endpoints {
+		addr := duckv1.Addressable{
+			URL: &knapis.URL{Scheme: ep.Scheme, Host: ep.Host, Path: ep.Path},
+		}
+		if ep.Class != "" {
+			addr.Name = ptr.To(ep.Class)
+		}
+		addresses = append(addresses, addr)
+		if ep.Primary {
+			primary = addr.URL
+		}
+	}
+
+	// Cluster-local endpoint (unchanged semantics) — projected to status.address
+	// and also listed in status.addresses, tagged "cluster-local".
+	clusterLocal := duckv1.Addressable{
+		Name: ptr.To(interfaces.ClusterLocalEndpointClass),
 		URL: &knapis.URL{
-			Host:   g.getRawServiceHost(isvc),
 			Scheme: g.ingressConfig.UrlScheme,
-			Path:   "",
+			Host:   g.getRawServiceHost(isvc),
 		},
+	}
+	addresses = append(addresses, clusterLocal)
+
+	isvc.Status.Addresses = addresses
+	isvc.Status.Address = &duckv1.Addressable{URL: clusterLocal.URL}
+	if primary != nil {
+		isvc.Status.URL = primary
 	}
 	return nil
 }
@@ -321,17 +355,6 @@ func (g *GatewayAPIStrategy) checkBackendTrafficPolicyStatus(ctx context.Context
 		}
 	}
 	return nil
-}
-
-func (g *GatewayAPIStrategy) createRawURL(isvc *v1beta1.InferenceService) (*knapis.URL, error) {
-	var err error
-	url := &knapis.URL{}
-	url.Scheme = g.ingressConfig.UrlScheme
-	url.Host, err = g.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, g.ingressConfig)
-	if err != nil {
-		return nil, err
-	}
-	return url, nil
 }
 
 func (g *GatewayAPIStrategy) getRawServiceHost(isvc *v1beta1.InferenceService) string {

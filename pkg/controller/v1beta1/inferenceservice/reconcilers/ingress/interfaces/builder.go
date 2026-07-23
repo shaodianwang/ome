@@ -14,6 +14,12 @@ type ResourceBuilder interface {
 	GetResourceType() string
 }
 
+// ClusterLocalEndpointClass is the conventional class tagged on the in-cluster
+// (<svc>.<ns>.svc.cluster.local) endpoint that status.address projects. It is a
+// status taxonomy label (like a condition-type string), not a config-driven
+// behavioral value.
+const ClusterLocalEndpointClass = "cluster-local"
+
 // Endpoint is one reachable endpoint for an InferenceService route: the tuple
 // (class, host, path, scheme) the status writer publishes, derived from the same
 // logic that builds the HTTPRoute hosts + paths so status and routing cannot

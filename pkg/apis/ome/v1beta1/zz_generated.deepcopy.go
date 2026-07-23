@@ -1417,6 +1417,13 @@ func (in *InferenceServiceStatus) DeepCopyInto(out *InferenceServiceStatus) {
 		*out = new(apis.URL)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Addresses != nil {
+		in, out := &in.Addresses, &out.Addresses
+		*out = make([]duckv1.Addressable, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.Components != nil {
 		in, out := &in.Components, &out.Components
 		*out = make(map[ComponentType]ComponentStatusSpec, len(*in))

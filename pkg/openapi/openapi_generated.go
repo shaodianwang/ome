@@ -3805,6 +3805,25 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 							Ref:         ref("knative.dev/pkg/apis.URL"),
 						},
 					},
+					"addresses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Addresses lists every reachable endpoint for this service — one per gateway its route attaches to, plus the cluster-local address. Each entry's Name carries the operator-declared class (see IngressGatewaySpec.Class): \"internal\", \"external\", \"cluster-local\", or any config-defined value. Derived from the same builder that produces the HTTPRoutes, so it never drifts from the actual routing. status.url is the primary gateway entry and status.address is the \"cluster-local\" entry — both projections of this list.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("knative.dev/pkg/apis/duck/v1.Addressable"),
+									},
+								},
+							},
+						},
+					},
 					"components": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Statuses for the components of the InferenceService",
