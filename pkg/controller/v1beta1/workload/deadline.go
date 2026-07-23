@@ -29,7 +29,7 @@ const DeadlineExceededReason = "DeadlineExceeded"
 //
 //   - EscalateStuckPodFailures is the FAST path: a pod stuck in a
 //     terminal kubelet waiting state (CrashLoopBackOff, ImagePullBackOff,
-//     ...) fails the Instance after StuckPodFailureGracePeriod (60s).
+//     ...) fails the Instance after the configured grace period.
 //   - ExpireOperationsIfDeadlinePassed is the BROAD path: any operation
 //     that never converges — a perpetually-Pending gang, a run-then-crash
 //     loop the kubelet never parks in a terminal waiting reason — fails
@@ -43,12 +43,22 @@ const DeadlineExceededReason = "DeadlineExceeded"
 // (Ready / Failed / Deleting) and the zero Deadline (unset → "never
 // expires") are skipped.
 //
+// Instances with a disposable in-flight attempt (single-pod-updateable
+// Create/Update Operations — see disposableAttempt) route through
+// DisposeExpiredAttempt instead of the bare stamp; gang Update attempts
+// keep the Failed-preserving-Operation stamp (the gang abandon path
+// consumes the continuation), and Restart / Migrate expiries are
+// unchanged. Reads p.PodsByIndex (via podsForStuckCheck, so a gang
+// surge's replacement pods attribute to the source) and
+// p.DesiredPodsByIndex for the routing; p.StuckPodGrace is not
+// consulted here.
+//
 // Adapter-agnostic, mirroring EscalateStuckPodFailures: writes
 // Phase=Failed via input.MutateInstance, emits the operator-facing event
 // via input.WarnInstanceFailed.
-func ExpireOperationsIfDeadlinePassed(ctx context.Context, input ReconcileInput, instances []InstanceStatus) error {
+func ExpireOperationsIfDeadlinePassed(ctx context.Context, deps Deps, input ReconcileInput, p EscalationParams) error {
 	now := input.Now()
-	for _, s := range instances {
+	for _, s := range p.Instances {
 		if !operationDeadlinePassed(&s, now) {
 			continue
 		}
@@ -58,6 +68,14 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, input ReconcileInput,
 			continue
 		}
 		op := s.Operation
+		desired := DesiredFor(p.DesiredPodsByIndex, s.Index, s.PodCount)
+		if disposableAttempt(&s, desired) {
+			pods := podsForStuckCheck(s, p.PodsByIndex)
+			if _, err := DisposeExpiredAttempt(ctx, deps, input, p.Disposition, s, pods, deadlineFailureMessage(op)); err != nil {
+				return fmt.Errorf("dispose expired attempt (instance=%d): %w", s.Index, err)
+			}
+			continue
+		}
 		if err := stampInstanceFailedForDeadline(ctx, input, s.Index, now, op); err != nil {
 			return fmt.Errorf("stamp Phase=Failed after deadline (instance=%d): %w", s.Index, err)
 		}

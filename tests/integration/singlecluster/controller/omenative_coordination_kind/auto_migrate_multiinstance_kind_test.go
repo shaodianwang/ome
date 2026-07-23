@@ -1,42 +1,37 @@
 package omenative_coordination_kind
 
 import (
-	"sync"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Multi-in-flight auto-migration within one Component's index space.
+// Relocation isolation within one Component's index space.
 //
-// A single engine Component pinned to minReplicas=maxReplicas=3 with a
-// bad image leaves all three source Instances stuck in Phase=Creating
-// simultaneously. Under MigrationPolicy.Mode=Auto with a short
-// ProgressDeadlineSeconds, the controller self-triggers a migration for
-// each stuck source in the same window.
+// Two engine Instances land on the same node; only Instance 0 is broken
+// there (fake-serving FAIL_ON_NODE narrowed by FAIL_ON_POD to Instance
+// 0's pod — a node-scoped fault with no kubelet waiting reason), so
+// Instance 1 converges Ready as the healthy sibling. The deadline
+// disposition must scope its relocation directive to the stuck Instance
+// alone:
 //
-// This is the fleet-wipe class: if surge allocation collapsed colliding
-// gangs into a single index bucket, three sources would fight over one
-// surge index and the Component could implode to a single alive Instance.
-// The spec pins three invariants the fleet-wipe SEV violated:
-//
-//   - distinct-surge-index: the ledger reaches three Started entries with
-//     three DISTINCT SurgeInstance indices (no shared surge index).
-//   - capacity-floor / no mass fan-out: total alive engine pods stays
-//     <= replicas + per-source surge headroom throughout (100ms sampler).
-//   - source->surge bijection: each source index maps to exactly one
-//     surge index and vice-versa.
-//
-// As with auto_migrate_kind_test.go, InstanceReadyTimeout is deliberately
-// left unset: the timeouts escalator would otherwise stamp Phase=Failed
-// (for which isStuckPhase() is false), suppressing auto-migration before
-// the Started entries land.
-var _ = ginkgo.Describe("OMENative auto-migration multi-Instance surge fan-out (KIND)", ginkgo.Ordered, func() {
+//   - directive isolation: exactly one AutoRecover ledger entry, for
+//     SourceInstance=0 — the healthy sibling never accrues one;
+//   - rebuild isolation: only Instance 0's pod is recreated (with the
+//     required hostname NotIn exclusion, landing off the suspect node);
+//     the sibling's pod keeps its UID for the whole window — no
+//     fleet-wide churn from one stuck Instance;
+//   - budget/exclusion reset: the directive is pruned once Instance 0
+//     proves its new placement Ready.
+var _ = ginkgo.Describe("OMENative auto-relocation multi-Instance isolation (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
@@ -47,142 +42,144 @@ var _ = ginkgo.Describe("OMENative auto-migration multi-Instance surge fan-out (
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("three stuck Instances each get a DISTINCT surge index (no fleet-wipe collapse)", func() {
+	ginkgo.It("relocates only the stuck Instance; the healthy sibling's pod keeps its UID", func() {
 		const (
 			isvcName = "auto-mig-mi1"
-			replicas = 3
+			replicas = 2
+			stuckPod = isvcName + "-engine-0-default-0"
 		)
-		// replicas + one concurrent surge per source. Sources never drain
-		// because the bad image never promotes a surge to Ready, so all
-		// three surges coexist with all three sources — 2x replicas is the
-		// hard alive ceiling. Anything above it is a mass fan-out.
-		ceiling := int32(replicas * 2)
 
-		// 30s is the webhook-enforced ProgressDeadlineSeconds minimum;
-		// MaxAutoRetries=1 keeps the ledger to one auto-recover attempt per
-		// source so the distinct-index assertion reads a clean 3-entry set
-		// (a higher cap would append retry rows for the same source).
-		deadline := int32(30)
-		maxRetries := int32(1)
+		workers := schedulableWorkerNodes(Default)
+		Expect(len(workers)).To(BeNumerically(">=", 2),
+			"relocation needs a second schedulable worker; got %v", workers)
+		failNode, spareNode := workers[0], workers[1]
+
+		configureFastDisposition()
+
+		// Cordon the spare so BOTH pods deterministically land on the
+		// failing node (only Instance 0's pod breaks there).
+		cordonNode(spareNode)
 
 		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
 			WithoutDecoder(),
 			WithEngineReplicas(replicas),
-			WithEngineImage("ghcr.io/ome-projects/this-image-does-not-exist:v0"))
+			WithEngineUpdateStrategy(v1beta1.UpdateStrategyRecreatePod),
+			WithEngineImage("fake-serving:v1"))
 		// Pin maxReplicas=minReplicas so no autoscaler drift changes the
-		// index space mid-test, and attach the Auto migration policy.
+		// index space mid-test.
 		fix.ISVC.Spec.Engine.MaxReplicas = replicas
-		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
-			MigrationPolicy: &v1beta1.MigrationPolicy{
-				Mode:                    v1beta1.MigrationPolicyModeAuto,
-				ProgressDeadlineSeconds: &deadline,
-				MaxAutoRetries:          &maxRetries,
-			},
+		withNodeScopedFailure(&fix.ISVC.Spec.Engine.PodSpec.Containers[0], failNode, stuckPod)
+		fix.ISVC.Spec.Engine.Lifecycle.MigrationPolicy = &v1beta1.MigrationPolicy{
+			Mode: v1beta1.MigrationPolicyModeAuto,
 		}
+		fix.ISVC.Spec.Engine.Lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 45 * time.Second}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		ginkgo.By("waiting for all three source Instances to land and stick in Phase=Creating")
+		ginkgo.By("waiting for Instance 0 to park stuck and Instance 1 to converge Ready, both on the failing node")
+		var stuckUID types.UID
+		var siblingName string
+		var siblingUID types.UID
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, isvcName)
-			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.Lifecycle).NotTo(BeNil())
 			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
-			creating := map[int32]struct{}{}
+			g.Expect(insts).To(HaveLen(replicas))
+			byIdx := map[int32]v1beta1.OMENativeInstanceStatus{}
 			for _, s := range insts {
-				if s.Phase == v1beta1.OMENativeInstanceCreating {
-					creating[s.Index] = struct{}{}
-				}
+				byIdx[s.Index] = s
 			}
-			g.Expect(creating).To(HaveLen(replicas),
-				"expected %d source Instances stuck in Phase=Creating; got %+v",
-				replicas, insts)
-		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+			g.Expect(byIdx[0].Phase).To(Equal(v1beta1.OMENativeInstanceCreating),
+				"Instance 0 must be stuck Creating; got %+v", insts)
+			g.Expect(byIdx[1].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				"Instance 1 must converge Ready on the same node; got %+v", insts)
 
-		// 100ms sampler pins the capacity-floor invariant for the whole
-		// fan-out window: alive engine pods must never exceed the ceiling.
-		// A shared-surge-index collapse or a mass fan-out both trip this.
-		// Track the max observed so a passing run still proves the surge
-		// path fired (max > replicas) rather than trivially passing because
-		// no surge ever surfaced.
-		var maxAlive int32
-		var maxAliveMu sync.Mutex
-		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: stuckPod}, pod)).To(Succeed())
+			g.Expect(pod.Spec.NodeName).To(Equal(failNode))
+			stuckUID = pod.UID
+
 			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, isvcName)
 			g.Expect(err).NotTo(HaveOccurred())
-			alive := int32(snap.Alive(v1beta1.EngineComponent))
-			maxAliveMu.Lock()
-			if alive > maxAlive {
-				maxAlive = alive
+			for _, p := range snap.ByComponent[v1beta1.EngineComponent] {
+				if p.Name == stuckPod {
+					continue
+				}
+				g.Expect(p.Spec.NodeName).To(Equal(failNode),
+					"sibling pod must share the failing node (spare is cordoned)")
+				siblingName, siblingUID = p.Name, p.UID
 			}
-			maxAliveMu.Unlock()
-			g.Expect(alive).To(BeNumerically("<=", ceiling),
-				"engine alive pods must stay <= replicas(%d)+surge-headroom=%d throughout the fan-out; got alive=%d",
-				replicas, ceiling, alive)
-		})
-		defer stop()
+			g.Expect(siblingName).NotTo(BeEmpty(), "expected a healthy sibling pod")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("waiting for three Started AutoRecover ledger entries with three DISTINCT surge indices")
+		// Give the rebuild somewhere off-suspect to land BEFORE the
+		// deadline disposition fires.
+		setNodeUnschedulable(spareNode, false)
+
+		// Standing isolation invariant, threaded through every poll
+		// below: the healthy sibling is never torn down or recreated
+		// while its neighbor relocates.
+		observeSibling := func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: siblingName}, pod)).To(Succeed(),
+				"healthy sibling pod %s must survive its neighbor's relocation", siblingName)
+			g.Expect(pod.UID).To(Equal(siblingUID),
+				"healthy sibling pod %s must keep its UID (a new UID means it was recreated)", siblingName)
+			g.Expect(pod.DeletionTimestamp).To(BeNil(),
+				"healthy sibling pod %s must not be terminating", siblingName)
+		}
+
+		ginkgo.By("waiting for exactly one AutoRecover directive, scoped to Instance 0")
 		Eventually(func(g Gomega) {
-			ledger := loadLedger(g, ns.Name, isvcName)
-			// Collect the surge index of each distinct Started AutoRecover
-			// migration, keyed by source index so we can assert the
-			// source->surge bijection.
-			surgeBySource := map[int32]int32{}
-			for _, e := range ledger.Entries {
-				if e.Component != "engine" || e.Phase != "Started" || e.Reason != "AutoRecover" {
-					continue
-				}
-				// The surge index is stamped once Migrate dispatches the
-				// synthetic request (auto_migrate seeds the source-side
-				// Started; migrate.go rewrites it with SurgeInstance). Only
-				// count entries that have advanced to a real surge index.
-				if e.SurgeInstance == 0 {
-					continue
-				}
-				surgeBySource[e.SourceInstance] = e.SurgeInstance
-			}
-			g.Expect(surgeBySource).To(HaveLen(replicas),
-				"expected %d sources with a dispatched surge; got %+v (ledger=%+v)",
-				replicas, surgeBySource, ledger.Entries)
+			observeSibling(g)
+			entries := autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine")
+			g.Expect(entries).To(HaveLen(1),
+				"exactly one directive (the stuck Instance); got %+v", entries)
+			e := entries[0]
+			g.Expect(e.SourceInstance).To(Equal(int32(0)),
+				"the directive must target the stuck Instance, never the healthy sibling")
+			g.Expect(e.Phase).To(Equal("Completed"))
+			g.Expect(e.Outcome).To(Equal("relocate-recreate"))
+			g.Expect(e.FromNode).To(Equal(failNode))
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-			// (a) distinct-surge-index: the surge indices must be pairwise
-			// distinct — the fleet-wipe class is multiple sources sharing
-			// one surge index.
-			surgeSet := map[int32]struct{}{}
-			for _, surge := range surgeBySource {
-				surgeSet[surge] = struct{}{}
-			}
-			g.Expect(surgeSet).To(HaveLen(replicas),
-				"surge indices must be pairwise DISTINCT (no shared surge index); source->surge=%+v",
-				surgeBySource)
+		ginkgo.By("waiting for Instance 0's pod to be recreated off the suspect node with the NotIn exclusion")
+		Eventually(func(g Gomega) {
+			observeSibling(g)
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: stuckPod}, pod)).To(Succeed())
+			g.Expect(pod.UID).NotTo(Equal(stuckUID), "relocation must recreate the stuck pod (new UID)")
+			g.Expect(podExcludesHostname(pod, failNode)).To(BeTrue(),
+				"recreated pod must carry a required kubernetes.io/hostname NotIn[%s] term; affinity=%+v",
+				failNode, pod.Spec.Affinity)
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty(), "recreated pod must schedule")
+			g.Expect(pod.Spec.NodeName).NotTo(Equal(failNode),
+				"recreated pod must land off the suspect node")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-			// (c) source->surge bijection: no surge index may collide with
-			// a source index (that would re-target a live source), and the
-			// map is already a function source->surge with distinct images
-			// (checked above), so distinct + disjoint domains == bijection
-			// onto the surge index space.
-			for source, surge := range surgeBySource {
-				g.Expect(surge).NotTo(Equal(source),
-					"surge index %d must differ from its source index %d", surge, source)
-				_, sourceIsAlsoSurge := surgeSet[source]
-				g.Expect(sourceIsAlsoSurge).To(BeFalse(),
-					"source index %d must not also be a surge target (index-space overlap)", source)
+		ginkgo.By("waiting for both Instances Ready")
+		Eventually(func(g Gomega) {
+			observeSibling(g)
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, s := range insts {
+				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+					"instance %d must be Ready; got %+v", s.Index, insts)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		stop()
+		ginkgo.By("holding the isolation invariant: sibling untouched, no directive ever lands for it")
+		Consistently(func(g Gomega) {
+			observeSibling(g)
+			for _, e := range autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine") {
+				g.Expect(e.SourceInstance).To(Equal(int32(0)),
+					"no AutoRecover directive may ever target the healthy sibling; got %+v", e)
+			}
+		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		// (b) sanity floor: the surge path must have actually fired. With
-		// three sources stuck and three surges created, max alive must
-		// exceed replicas; if it stayed at replicas no surge ever landed
-		// and the distinct-index assertion above would have passed for the
-		// wrong reason.
-		maxAliveMu.Lock()
-		observed := maxAlive
-		maxAliveMu.Unlock()
-		Expect(observed).To(BeNumerically(">", int32(replicas)),
-			"surge path must fire (max alive engine pods > replicas=%d); got max=%d — "+
-				"auto-migration never surged", replicas, observed)
+		ginkgo.By("expecting the directive pruned once Instance 0 is Ready")
+		Eventually(func(g Gomega) {
+			entries := autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine")
+			g.Expect(entries).To(BeEmpty(),
+				"Ready proves the placement; exclusion memory and budget must reset; got %+v", entries)
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

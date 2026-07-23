@@ -41,9 +41,9 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	omenativecore "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	workloadpodgroup "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -228,7 +228,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// safe: the workload layer Holds on the first same-target failure.
 	retryPolicy := r.resolveUpdateRetryPolicy(log)
 
+	// Resolve the stuck-pod grace period from the operator lifecycle config.
+	// Zero (absent/invalid config) fails safe: the escalator skips fast
+	// escalation this pass and only the InstanceReadyTimeout backstop fires.
+	stuckPodGrace := r.resolveStuckPodGrace(log)
+
+	// Resolve the auto-migrate relocation budget from the operator lifecycle
+	// config. Zero (absent/invalid config) fails safe: the deadline
+	// disposition's relocation branch is disabled and non-workload-caused
+	// expiries dispose terminal.
+	autoMigrateBudget := r.resolveAutoMigrateBudget(log)
+
 	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy)
+
+	// Relocation-directive memory: prune AutoRecover ledger records for
+	// instances observed Ready (the success-prune mirror of the
+	// RetryBlock prune), then project the per-instance node-exclusion
+	// lists the renderer materializes as NotIn overlays. Fail-open on
+	// ledger errors — a missing overlay only risks one rebuild landing
+	// back on the suspect node for a pass.
+	input.ObservedState.ExcludedNodesByInstance = r.reconcileRelocationDirectives(ctx, log, ir, parent, autoMigrateBudget)
 
 	// Park every in-flight deadline before revision creation, rollback payload
 	// reads, or plan construction can fail. The deferred aggregate path below
@@ -301,7 +320,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// workload is paused. A live-read or PodGroup error must not bypass that
 	// circuit-breaker bookkeeping.
 	defer func() {
-		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget); serr != nil {
+		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget, stuckPodGrace, retryPolicy, autoMigrateBudget); serr != nil {
 			if err == nil {
 				if apierrors.IsConflict(serr) {
 					result, err = ctrl.Result{Requeue: true}, nil
@@ -364,27 +383,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	plan.InstanceTopologyKeys = effectiveTopology
 
-	// Self-trigger auto-migration for Instances stuck past
-	// MigrationPolicy.ProgressDeadlineSeconds (node failure / wedged
-	// scheduler / stuck image pull). Mirrors the direct OMENative
-	// dispatcher: it writes synthetic AutoRecover ledger entries that
-	// DetectMigrationRequest (wired in buildReconcileInput) picks up
-	// inside workload.Reconcile below. Reads the parent ISVC's ledger +
-	// aggregated InstanceStatuses; no-op when the parent is unresolved or
-	// ProgressDeadlineSeconds is unset. Paused workloads skip detection so the
-	// circuit breaker cannot queue a migration that fires immediately on
-	// unpause. Runs BEFORE the dispatch so an allowed request is visible this
-	// pass.
-	if !plan.Paused && parent != nil {
-		if merr := omenativeops.DetectStuckInstancesForISVC(ctx, parent,
-			&v1beta1.ComponentExtensionSpec{Lifecycle: ir.Spec.Lifecycle},
-			r.APIReader, r.Client, r.Recorder, r.Clock, ir.Spec.Component); merr != nil {
-			return ctrl.Result{}, fmt.Errorf(
-				"InferenceReplica reconciler: detect stuck instances for auto-migration (component=%s): %w",
-				ir.Spec.Component, merr)
-		}
-	}
-
 	result, err = workload.Reconcile(ctx, deps, input, plan, rollTarget)
 
 	// Reconcile the per-Component headless Service. The Service gives every
@@ -439,6 +437,136 @@ func (r *Reconciler) resolveUpdateRetryPolicy(log logr.Logger) *workload.RetryPo
 		return nil
 	}
 	return policy
+}
+
+// resolveStuckPodGrace loads lifecycle.stuckPodGracePeriod from the
+// operator ConfigMap. Parse failure or absent config resolves to 0 —
+// the escalator skips fast escalation this pass (the
+// InstanceReadyTimeout backstop still fires) — with one V(1) log.
+func (r *Reconciler) resolveStuckPodGrace(log logr.Logger) time.Duration {
+	if r.Clientset == nil {
+		log.V(1).Info("stuck-pod grace unresolved: no clientset wired; skipping fast escalation this pass")
+		return 0
+	}
+	cfg, err := controllerconfig.NewLifecycleConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		log.V(1).Info("stuck-pod grace unresolved: lifecycle config load failed; skipping fast escalation this pass", "error", err.Error())
+		return 0
+	}
+	if cfg == nil {
+		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle block in inferenceservice-config); skipping fast escalation this pass")
+		return 0
+	}
+	grace, err := cfg.ToGracePeriod()
+	if err != nil {
+		log.V(1).Info("stuck-pod grace invalid; skipping fast escalation this pass", "error", err.Error())
+		return 0
+	}
+	if grace == 0 {
+		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle.stuckPodGracePeriod); skipping fast escalation this pass")
+		return 0
+	}
+	return grace
+}
+
+// resolveAutoMigrateBudget loads lifecycle.autoMigrate.maxAttempts from
+// the operator ConfigMap. Absent, invalid, or unloadable config resolves
+// to 0 — the deadline disposition's relocation branch is disabled (no
+// migration without an operator budget) — with one V(1) log naming the
+// cause; there is never a silent in-code fallback budget.
+func (r *Reconciler) resolveAutoMigrateBudget(log logr.Logger) int32 {
+	if r.Clientset == nil {
+		log.V(1).Info("auto-migrate budget unresolved: no clientset wired; relocation branch disabled this pass")
+		return 0
+	}
+	cfg, err := controllerconfig.NewLifecycleConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		log.V(1).Info("auto-migrate budget unresolved: lifecycle config load failed; relocation branch disabled this pass", "error", err.Error())
+		return 0
+	}
+	if cfg == nil || cfg.AutoMigrate == nil {
+		log.V(1).Info("auto-migrate budget unconfigured (no lifecycle.autoMigrate in inferenceservice-config); relocation branch disabled this pass")
+		return 0
+	}
+	if err := cfg.AutoMigrate.Validate(); err != nil {
+		log.V(1).Info("auto-migrate budget invalid; relocation branch disabled this pass", "error", err.Error())
+		return 0
+	}
+	return cfg.AutoMigrate.MaxAttempts
+}
+
+// reconcileRelocationDirectives owns the per-reconcile relocation-
+// directive bookkeeping against the audit ledger (parent-ISVC-owned
+// when resolvable, else IR-owned — same rule as buildReconcileInput's
+// LedgerOwner):
+//
+//  1. Success-prune: AutoRecover records for any instance observed
+//     Phase=Ready with no in-flight Operation are removed — the
+//     instance proved its placement, so its exclusion memory and
+//     relocation budget reset (mirror of the RetryBlock promote-prune;
+//     done here, adapter-side, because the workload promote stampers
+//     have no client handle, and gated on the ledger actually holding
+//     entries so the steady-state hot path pays one cached GET at most).
+//  2. Projection: build the Instance-index → excluded-nodes map from
+//     the remaining AutoRecover entries, each list bounded to the most
+//     recent autoMigrateBudget entries.
+//
+// All errors fail open with a V(1) log: the overlay is a placement
+// steer, not a correctness gate, and the next pass re-derives it.
+func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, autoMigrateBudget int32) map[int32][]string {
+	if r.Client == nil || ir == nil {
+		return nil
+	}
+	owner := client.Object(ir)
+	gvk := irGVK
+	if parent != nil {
+		owner = parent
+		gvk = isvcGVK
+	}
+	ledger, err := audit.LoadLedgerForOwner(ctx, r.Client, owner)
+	if err != nil {
+		log.V(1).Info("relocation directives unavailable: ledger load failed; rendering without node exclusions this pass", "error", err.Error())
+		return nil
+	}
+	if len(ledger.Entries) == 0 {
+		return nil
+	}
+	component := string(ir.Spec.Component)
+
+	pruned := false
+	for i := range ir.Status.InstanceStatuses {
+		s := &ir.Status.InstanceStatuses[i]
+		if s.Phase != v1beta1.OMENativeInstanceReady || s.Operation != nil {
+			continue
+		}
+		if audit.RemoveAutoRecoverEntries(ledger, component, s.Index) {
+			pruned = true
+		}
+	}
+	if pruned {
+		if err := audit.PersistLedgerForOwner(ctx, r.Client, owner, gvk, ledger); err != nil {
+			// Projection below still uses the pruned in-memory view; the
+			// persisted prune retries next pass.
+			log.V(1).Info("relocation-directive prune persist failed; will retry next pass", "error", err.Error())
+		}
+	}
+
+	if autoMigrateBudget <= 0 {
+		return nil
+	}
+	var out map[int32][]string
+	for i := range ir.Status.InstanceStatuses {
+		idx := ir.Status.InstanceStatuses[i].Index
+		nodes := audit.RecentAutoRecoverFromNodes(ledger, component, idx, autoMigrateBudget)
+		if len(nodes) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[int32][]string{}
+		}
+		out[idx] = nodes
+	}
+	return out
 }
 
 // reader returns the authoritative live reader when wired, else the

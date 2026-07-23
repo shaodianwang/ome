@@ -6728,21 +6728,12 @@ spec:
                           type: string
                         migrationPolicy:
                           properties:
-                            maxAutoRetries:
-                              format: int32
-                              maximum: 10
-                              minimum: 0
-                              type: integer
                             mode:
                               enum:
                                 - Auto
                                 - Surge
                                 - Never
                               type: string
-                            progressDeadlineSeconds:
-                              format: int32
-                              minimum: 30
-                              type: integer
                           type: object
                         readyPolicy:
                           enum:
@@ -19468,21 +19459,12 @@ spec:
                           type: string
                         migrationPolicy:
                           properties:
-                            maxAutoRetries:
-                              format: int32
-                              maximum: 10
-                              minimum: 0
-                              type: integer
                             mode:
                               enum:
                                 - Auto
                                 - Surge
                                 - Never
                               type: string
-                            progressDeadlineSeconds:
-                              format: int32
-                              minimum: 30
-                              type: integer
                           type: object
                         readyPolicy:
                           enum:
@@ -28127,21 +28109,12 @@ spec:
                           type: string
                         migrationPolicy:
                           properties:
-                            maxAutoRetries:
-                              format: int32
-                              maximum: 10
-                              minimum: 0
-                              type: integer
                             mode:
                               enum:
                                 - Auto
                                 - Surge
                                 - Never
                               type: string
-                            progressDeadlineSeconds:
-                              format: int32
-                              minimum: 30
-                              type: integer
                           type: object
                         readyPolicy:
                           enum:

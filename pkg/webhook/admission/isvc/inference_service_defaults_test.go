@@ -510,51 +510,6 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		require.NotNil(t, ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable)
 		assert.Equal(t, intstr.FromString("25%"), *ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable)
 	})
-
-	t.Run("OMENative + ProgressDeadlineSeconds set — MaxAutoRetries defaults to 3", func(t *testing.T) {
-		deadline := int32(60)
-		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: omenativeMode,
-			Lifecycle: &v1beta1.LifecycleSpec{
-				MigrationPolicy: &v1beta1.MigrationPolicy{
-					ProgressDeadlineSeconds: &deadline,
-				},
-			},
-		}
-		defaultOMENativeComponent(ext, false, nil)
-		require.NotNil(t, ext.Lifecycle.MigrationPolicy.MaxAutoRetries)
-		assert.Equal(t, int32(3), *ext.Lifecycle.MigrationPolicy.MaxAutoRetries)
-		// ProgressDeadlineSeconds preserved.
-		require.NotNil(t, ext.Lifecycle.MigrationPolicy.ProgressDeadlineSeconds)
-		assert.Equal(t, int32(60), *ext.Lifecycle.MigrationPolicy.ProgressDeadlineSeconds)
-	})
-
-	t.Run("OMENative + ProgressDeadlineSeconds nil — MaxAutoRetries stays nil", func(t *testing.T) {
-		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: omenativeMode,
-		}
-		defaultOMENativeComponent(ext, false, nil)
-		require.NotNil(t, ext.Lifecycle.MigrationPolicy)
-		assert.Nil(t, ext.Lifecycle.MigrationPolicy.ProgressDeadlineSeconds, "no auto-migration opt-in → no deadline")
-		assert.Nil(t, ext.Lifecycle.MigrationPolicy.MaxAutoRetries, "no auto-migration opt-in → no cap (cap is meaningless without trigger)")
-	})
-
-	t.Run("OMENative + ProgressDeadlineSeconds set + MaxAutoRetries set — both preserved", func(t *testing.T) {
-		deadline := int32(60)
-		custom := int32(7)
-		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: omenativeMode,
-			Lifecycle: &v1beta1.LifecycleSpec{
-				MigrationPolicy: &v1beta1.MigrationPolicy{
-					ProgressDeadlineSeconds: &deadline,
-					MaxAutoRetries:          &custom,
-				},
-			},
-		}
-		defaultOMENativeComponent(ext, false, nil)
-		require.NotNil(t, ext.Lifecycle.MigrationPolicy.MaxAutoRetries)
-		assert.Equal(t, int32(7), *ext.Lifecycle.MigrationPolicy.MaxAutoRetries, "explicit MaxAutoRetries must be preserved")
-	})
 }
 
 func TestEngineIsMultiPod(t *testing.T) {

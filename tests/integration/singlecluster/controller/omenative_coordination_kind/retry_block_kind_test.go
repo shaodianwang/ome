@@ -22,11 +22,11 @@ import (
 // the IR so the loop is bounded: <= maxAttempts authorized waves, then
 // Held until a NEW revision is published.
 //
-// Coverage is GANG surges only (leader+worker): the RetryBlock writers are
-// wired on the abandonFailedGangSurge path, the only failure path that
-// clears the failed attempt's Operation in the same transition (the
-// writer-ordering invariant). Single-pod same-target failures do not
-// record blocks yet (follow-up sub-PR A2).
+// Coverage here is GANG surges (leader+worker): the RetryBlock writers are
+// wired on the abandonFailedGangSurge path, which clears the failed
+// attempt's Operation in the same transition (the writer-ordering
+// invariant). Single-pod same-target failures record blocks through the
+// deadline disposition — pinned by disposition_kind_test.go.
 //
 // One Ordered container, one fixture: the three Its walk the same rollout
 // through Backoff -> Held -> release-by-new-revision, which is both the

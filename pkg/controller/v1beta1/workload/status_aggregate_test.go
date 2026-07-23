@@ -373,9 +373,7 @@ func TestShouldCheckForStuckPods(t *testing.T) {
 // pod past grace flips the InstanceStatus Phase to Failed via
 // MutateInstance and fires WarnInstanceFailed exactly once.
 func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+	grace := 1 * time.Millisecond
 
 	now := time.Now()
 	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
@@ -416,11 +414,12 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 		},
 	}
 
-	err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
 		Instances:           insts,
 		PodsByIndex:         map[int32][]*corev1.Pod{0: {stuck}},
 		CurrentRevisionHash: "rev-old",
 		RevisionHashLabel:   "ome.io/revision-hash",
+		StuckPodGrace:       grace,
 	})
 	if err != nil {
 		t.Fatalf("EscalateStuckPodFailures: %v", err)
@@ -447,9 +446,7 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 // index's stuck pods to the source, a bad-revision gang surge hangs the
 // rollout at Phase=Updating forever.
 func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+	grace := 1 * time.Millisecond
 
 	now := time.Now()
 	healthy := &corev1.Pod{
@@ -507,11 +504,12 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 		},
 	}
 
-	err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
 		Instances:           insts,
 		PodsByIndex:         map[int32][]*corev1.Pod{0: {healthy}, 2: {surgeStuck}},
 		CurrentRevisionHash: "rev-old",
 		RevisionHashLabel:   "ome.io/revision-hash",
+		StuckPodGrace:       grace,
 	})
 	if err != nil {
 		t.Fatalf("EscalateStuckPodFailures: %v", err)
@@ -532,9 +530,7 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 // on the old source must not be attributed to that surge. Otherwise the gang
 // recovery path abandons each new replacement before it can start.
 func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+	grace := 1 * time.Millisecond
 
 	now := time.Now()
 	oldStuck := &corev1.Pod{
@@ -602,7 +598,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 				WarnInstanceFailed: func(_ int32, podName, _ string) { eventPod = podName },
 			}
 
-			err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+			err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
 				Instances: insts,
 				PodsByIndex: map[int32][]*corev1.Pod{
 					0: {oldStuck},
@@ -610,6 +606,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 				},
 				CurrentRevisionHash: "rev-new",
 				RevisionHashLabel:   "ome.io/revision-hash",
+				StuckPodGrace:       grace,
 			})
 			if err != nil {
 				t.Fatalf("EscalateStuckPodFailures: %v", err)
@@ -628,9 +625,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 // the escalator must not re-fire on an already-Failed Instance even
 // though the wedged pod is still in front of it.
 func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+	grace := 1 * time.Millisecond
 
 	now := time.Now()
 	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
@@ -655,11 +650,12 @@ func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
 		WarnInstanceFailed: func(_ int32, _, _ string) { eventFired++ },
 	}
 
-	err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
 		Instances:           insts,
 		PodsByIndex:         map[int32][]*corev1.Pod{0: {stuck}},
 		CurrentRevisionHash: "rev-old",
 		RevisionHashLabel:   "ome.io/revision-hash",
+		StuckPodGrace:       grace,
 	})
 	if err != nil {
 		t.Fatalf("EscalateStuckPodFailures: %v", err)
@@ -674,10 +670,6 @@ func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
 // (workload-side unit tests, adapters with no event surface) set an
 // explicit no-op closure and the Phase=Failed mutation still lands.
 func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
-
 	now := time.Now()
 	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
 	stuck := &corev1.Pod{
@@ -703,9 +695,10 @@ func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
 		// shape (see workload.ReconcileInput docs).
 		WarnInstanceFailed: func(_ int32, _, _ string) {},
 	}
-	if err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
-		Instances:   insts,
-		PodsByIndex: map[int32][]*corev1.Pod{0: {stuck}},
+	if err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
+		Instances:     insts,
+		PodsByIndex:   map[int32][]*corev1.Pod{0: {stuck}},
+		StuckPodGrace: 1 * time.Millisecond,
 	}); err != nil {
 		t.Fatalf("EscalateStuckPodFailures with no-op WarnInstanceFailed: %v", err)
 	}
@@ -767,9 +760,7 @@ func TestReconcileInput_Compiles(t *testing.T) {
 // the escalation is followed by a recreate / teardown that deletes the
 // wedged pod, so this is the surviving trace operators read.
 func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+	grace := 1 * time.Millisecond
 
 	now := time.Now()
 	stuck := &corev1.Pod{
@@ -800,11 +791,12 @@ func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
 		WarnInstanceFailed: func(_ int32, _, _ string) {},
 	}
 
-	if err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
+	if err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
 		Instances:           insts,
 		PodsByIndex:         map[int32][]*corev1.Pod{0: {stuck}},
 		CurrentRevisionHash: "rev-old",
 		RevisionHashLabel:   "ome.io/revision-hash",
+		StuckPodGrace:       grace,
 	}); err != nil {
 		t.Fatalf("EscalateStuckPodFailures: %v", err)
 	}

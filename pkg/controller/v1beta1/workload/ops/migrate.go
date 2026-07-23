@@ -258,10 +258,20 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// The surge mirrors the source's Runner layout: a single "default"
 	// pod, or leader + workers for a gang.
 	surgeRunners := []workload.RunnerPlan{{Name: "default", Size: 1}}
+	var sourceExcludedNodes []string
 	if gang {
 		for i := range plan.Instances {
 			if plan.Instances[i].Index == sourceIdx {
 				surgeRunners = append([]workload.RunnerPlan(nil), plan.Instances[i].Runners...)
+				sourceExcludedNodes = plan.Instances[i].ExcludedNodes
+				break
+			}
+		}
+	} else {
+		// Single-pod: ExcludedNodes from the source instance plan.
+		for i := range plan.Instances {
+			if plan.Instances[i].Index == sourceIdx {
+				sourceExcludedNodes = plan.Instances[i].ExcludedNodes
 				break
 			}
 		}
@@ -269,9 +279,10 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 
 	// Migration overlay tells Render to stamp anti-affinity vs FromNode.
 	surgeInst := workload.InstancePlan{
-		Index:       surgeIdx,
-		Incarnation: 1,
-		Runners:     surgeRunners,
+		Index:         surgeIdx,
+		Incarnation:   1,
+		Runners:       surgeRunners,
+		ExcludedNodes: sourceExcludedNodes, // Exclusion memory follows the instance through surge replacement.
 		MigrationOverlay: &workload.MigrationOverlay{
 			FromNode:        req.FromNode,
 			HintTargetNodes: req.HintTargetNodes,

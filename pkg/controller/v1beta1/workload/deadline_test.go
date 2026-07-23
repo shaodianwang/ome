@@ -45,24 +45,30 @@ func expireFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *[
 	return input, &store, &event
 }
 
-// TestExpireOperations_ExpiredDeadlineFailsInstance pins the core
-// contract: a transient-phase Instance whose Operation.Deadline is in
-// the past flips to Phase=Failed via MutateInstance, fires
-// WarnInstanceFailed once, and records a DeadlineExceeded LastFailure.
+// TestExpireOperations_ExpiredDeadlineFailsInstance pins the gang-path
+// contract: a gang-surge Instance (Update Operation with a SurgeIndex)
+// whose Operation.Deadline is in the past flips to Phase=Failed via
+// MutateInstance with the Operation PRESERVED (the Failed-with-Operation
+// continuation is what routes the dispatcher into the gang abandon
+// path), fires WarnInstanceFailed once, and records a DeadlineExceeded
+// LastFailure. Single-pod Update / Create expiries take the deadline
+// disposition instead — see the disposition tests.
 func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 	now := time.Now()
+	surgeIdx := int32(2)
 	insts := []workload.InstanceStatus{{
 		Index: 0,
 		Phase: workload.InstancePhaseUpdating,
 		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationUpdate,
-			Step:     "Surge",
-			Deadline: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Type:       workload.InstanceOperationUpdate,
+			Step:       "Surge",
+			SurgeIndex: &surgeIdx,
+			Deadline:   metav1.NewTime(now.Add(-1 * time.Minute)),
 		},
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, insts); err != nil {
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
 		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
 	}
 
@@ -73,9 +79,10 @@ func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 	if got.LastFailure == nil || got.LastFailure.Reason != workload.DeadlineExceededReason {
 		t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, workload.DeadlineExceededReason)
 	}
-	// Operation preserved so operators see what was in flight.
+	// Operation preserved so operators see what was in flight AND the
+	// gang abandon path can consume the continuation.
 	if got.Operation == nil {
-		t.Errorf("Operation should be preserved on the failed Instance")
+		t.Errorf("Operation should be preserved on the failed gang Instance")
 	}
 	if event.count != 1 {
 		t.Errorf("event count: got %d want 1", event.count)
@@ -98,7 +105,7 @@ func TestExpireOperations_NotYetExpiredUntouched(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, insts); err != nil {
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
 		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
 	}
 
@@ -125,7 +132,7 @@ func TestExpireOperations_ZeroDeadlineNeverExpires(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, insts); err != nil {
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
 		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
 	}
 
@@ -161,7 +168,7 @@ func TestExpireOperations_AlreadyFailedNoOp(t *testing.T) {
 		},
 	}
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, insts); err != nil {
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
 		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
 	}
 	if mutated {
@@ -182,7 +189,7 @@ func TestExpireOperations_TerminalPhaseUntouched(t *testing.T) {
 			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationDelete, Deadline: expired},
 		}}
 		input, store, event := expireFixture(insts)
-		if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, insts); err != nil {
+		if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
 			t.Fatalf("ExpireOperationsIfDeadlinePassed(%s): %v", phase, err)
 		}
 		if (*store)[0].Phase != phase {
@@ -199,7 +206,7 @@ func TestExpireOperations_TerminalPhaseUntouched(t *testing.T) {
 func TestExpireOperations_NoOperationUntouched(t *testing.T) {
 	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseUpdating}}
 	input, store, event := expireFixture(insts)
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, insts); err != nil {
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
 		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
 	}
 	if (*store)[0].Phase != workload.InstancePhaseUpdating {

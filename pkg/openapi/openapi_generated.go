@@ -5059,28 +5059,14 @@ func schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref common.ReferenceCallback) c
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
+				Description: "MigrationPolicy controls whether and how OMENative honors migration requests (both automatic deadline-disposition relocation and explicit annotation-triggered migration).",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Mode selects the migration disposition. Defaults to auto.",
+							Description: "Mode gates migration: Auto enables both deadline-disposition relocation and explicit migration requests; Never disables both. Defaults to Auto.",
 							Type:        []string{"string"},
 							Format:      "",
-						},
-					},
-					"progressDeadlineSeconds": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ProgressDeadlineSeconds is the maximum time an Instance may remain in Phase=Updating or Phase=Creating before the controller self-triggers a migration to recover from a stuck pod (e.g. node failure, scheduler wedged, image-pull stuck). Optional; when unset, auto-migration is disabled and only explicit migration requests are honored. Has no effect when Mode is \"Never\".",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"maxAutoRetries": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MaxAutoRetries caps how many times the controller will self-trigger a migration for the same Instance before escalating to Phase=Failed with a ProgressDeadlineExceeded condition. Defaults to 3.",
-							Type:        []string{"integer"},
-							Format:      "int32",
 						},
 					},
 				},

@@ -51,6 +51,16 @@ func nextInFlightFromLedger(ledger *audit.Ledger, component v1beta1.ComponentTyp
 		if e.Phase != audit.PhaseStarted {
 			continue
 		}
+		// Relocation directives (Reason=AutoRecover) are records, not
+		// work orders: the deadline disposition writes them terminal
+		// and relocation happens through the render-time node-exclusion
+		// overlay, never through the Migrate copier. This guard also
+		// keeps legacy Started AutoRecover entries (written by the old
+		// PDS-keyed detector) from resuming as phantom migrations
+		// against a broken source.
+		if e.Reason == audit.ReasonAutoRecover {
+			continue
+		}
 		if e.Component != string(component) {
 			continue
 		}

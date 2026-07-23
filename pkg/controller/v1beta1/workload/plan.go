@@ -42,6 +42,11 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 			Index:       idx,
 			Incarnation: incarnationForIndex(observed.InstanceStatuses, idx),
 			Runners:     append([]RunnerPlan(nil), runners...),
+			// Relocation-directive memory: the adapter projects the
+			// per-instance node-exclusion list from the audit ledger;
+			// Render turns it into a required NotIn hostname term so
+			// the rebuild lands off the recorded suspect node(s).
+			ExcludedNodes: append([]string(nil), observed.ExcludedNodesByInstance[idx]...),
 		}
 	}
 

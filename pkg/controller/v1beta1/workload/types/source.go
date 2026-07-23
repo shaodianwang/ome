@@ -113,6 +113,15 @@ type WorkloadObservedState struct {
 	// authority. Read-only from workload code; writes go through
 	// ReconcileInput.MutateRetryBlock.
 	RetryBlocks []RetryBlock
+
+	// ExcludedNodesByInstance maps Instance index → nodes its rebuild
+	// must avoid, projected per reconcile by the adapter from the
+	// audit ledger's AutoRecover relocation directives (bounded to the
+	// operator's autoMigrate.maxAttempts most recent entries). BuildPlan
+	// copies it onto InstancePlan.ExcludedNodes; Render materializes it
+	// as a required NodeAffinity NotIn overlay. Nil / missing index =
+	// no exclusion (zero change for normal instances).
+	ExcludedNodesByInstance map[int32][]string
 }
 
 // WorkloadAggregateStatus is the per-reconcile flush of counters,

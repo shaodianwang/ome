@@ -4,56 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// recordUpdateFailureInRetryBlock upserts the RetryBlock for targetRev
-// after a terminal same-target update failure. Wave counting: an
-// existing Backoff block means this wave already recorded — refresh
-// evidence only. Policy nil (unconfigured) or exhausted → Held; else
-// Backoff with persisted NextRetryAt. No-op when the adapter did not
-// wire MutateRetryBlock. Callers hold the writer-ordering invariant:
-// the failed attempt's Operation is cleared in the same transition.
+// recordUpdateFailureInRetryBlock delegates to the shared writer in the
+// types package (workload.RecordUpdateFailureInRetryBlock) — one
+// implementation for the gang abandon here and the workload-root
+// deadline disposition. Kept as a package-local name so the ops-side
+// call sites and invariant tests read unchanged.
 func recordUpdateFailureInRetryBlock(ctx context.Context, input workload.ReconcileInput, targetRev, reason string) error {
-	if input.MutateRetryBlock == nil || targetRev == "" {
-		return nil
-	}
-	now := metav1.NewTime(input.Now())
-	// heldAttempts captures the Held transition inside the mutate; the
-	// warning is emitted only after the write COMMITS so RMW conflict
-	// retries cannot duplicate the event.
-	var heldAttempts int32
-	err := input.MutateRetryBlock(ctx, targetRev, func(b *workload.RetryBlock) workload.RetryBlockDisposition {
-		heldAttempts = 0
-		if b.FirstFailureAt == nil {
-			b.FirstFailureAt = &now
-		}
-		b.LastFailureAt = &now
-		b.Reason = reason
-		switch b.State {
-		case workload.RetryBlockBackoff, workload.RetryBlockHeld:
-			// This wave already recorded (Backoff) or the subject is
-			// terminally held — evidence refresh only.
-			return workload.RetryBlockPersist
-		}
-		b.AttemptsStarted++
-		if input.UpdateRetryPolicy.Exhausted(b.AttemptsStarted) {
-			b.State = workload.RetryBlockHeld
-			b.NextRetryAt = nil
-			heldAttempts = b.AttemptsStarted
-		} else {
-			b.State = workload.RetryBlockBackoff
-			next := metav1.NewTime(now.Add(input.UpdateRetryPolicy.NextRetryDelay(b.AttemptsStarted)))
-			b.NextRetryAt = &next
-		}
-		return workload.RetryBlockPersist
-	})
-	if err == nil && heldAttempts > 0 && input.WarnRetryHeld != nil {
-		input.WarnRetryHeld(targetRev, heldAttempts, reason)
-	}
-	return err
+	return workload.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason)
 }
 
 // pruneRetryBlockOnPromote removes the RetryBlock for rev once the

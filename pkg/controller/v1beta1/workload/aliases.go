@@ -6,6 +6,8 @@
 package workload
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -102,6 +104,10 @@ const (
 	EventReasonRestartTriggered              = types.EventReasonRestartTriggered
 	EventReasonRestartCompleted              = types.EventReasonRestartCompleted
 	EventReasonFoundOrphan                   = types.EventReasonFoundOrphan
+	EventReasonAutoMigrationTriggered        = types.EventReasonAutoMigrationTriggered
+	EventReasonAutoMigrationCapReached       = types.EventReasonAutoMigrationCapReached
+	EventReasonInstanceFailed                = types.EventReasonInstanceFailed
+	EventReasonRetryHeld                     = types.EventReasonRetryHeld
 	EventReasonMigrationRequestAccepted      = types.EventReasonMigrationRequestAccepted
 	EventReasonMigrationRequestRejected      = types.EventReasonMigrationRequestRejected
 	EventReasonMigrationCompleted            = types.EventReasonMigrationCompleted
@@ -149,6 +155,14 @@ func PodTermination(pod *corev1.Pod, now metav1.Time) *InstanceTermination {
 // escalator, which has already classified the wedge reason.
 func PodTerminationWithReason(pod *corev1.Pod, reason string, now metav1.Time) *InstanceTermination {
 	return types.PodTerminationWithReason(pod, reason, now)
+}
+
+// RecordUpdateFailureInRetryBlock re-exports the shared RetryBlock
+// failure writer (types.RecordUpdateFailureInRetryBlock) — one
+// implementation used by the ops gang abandon and the workload-root
+// deadline disposition.
+func RecordUpdateFailureInRetryBlock(ctx context.Context, input ReconcileInput, targetRev, reason string) error {
+	return types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason)
 }
 
 // DefaultExpectations re-exports the package-level cache the

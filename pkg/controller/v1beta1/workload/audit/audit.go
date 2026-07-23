@@ -96,6 +96,12 @@ type Entry struct {
 	Outcome        string `json:"outcome,omitempty"`
 }
 
+// CompletedAtTime parses the entry's RFC3339 CompletedAt timestamp.
+// ok=false when the field is unset or malformed.
+func (e Entry) CompletedAtTime() (time.Time, bool) {
+	return parseTime(e.CompletedAt)
+}
+
 // Ledger is the in-memory shape of the audit ConfigMap's history.json
 // payload.
 type Ledger struct {

@@ -179,6 +179,15 @@ ome:
         initialDelay: 1m
         maxDelay: 30m
         multiplier: 2.0
+      # stuckPodGracePeriod is the wait window after pod creation before a
+      # terminal kubelet waiting state escalates to Phase=Failed. Removing
+      # this field disables fast escalation (the InstanceReadyTimeout backstop
+      # still fires).
+      stuckPodGracePeriod: 60s
+      # autoMigrate configures the deadline-disposition relocation budget.
+      # Removing this block disables the relocation branch.
+      autoMigrate:
+        maxAttempts: 3
     ingressGateway:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"

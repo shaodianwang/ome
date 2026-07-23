@@ -141,43 +141,11 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// from the IR's aggregateAndWriteStatus tail (see
 		// status.go::escalateStuckPodFailures) so the contract surface
 		// here matches the omenative direct path byte-for-byte.
-		//
-		// Also mirror the escalation onto the controller log so
-		// log-aggregated views (loki/es/journal) see it without going
-		// through the events stream — the event is user-facing while
-		// the log is operator-facing.
-		WarnInstanceFailed: func(idx int32, podName, reason string) {
-			r.Log.Info("Instance escalated to Phase=Failed",
-				"inferencereplica", client.ObjectKeyFromObject(ir),
-				"component", ir.Spec.Component,
-				"instance", idx,
-				"pod", podName,
-				"reason", reason)
-			if r.Recorder == nil {
-				return
-			}
-			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "InstanceFailed",
-				"InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
-				ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
-		},
+		WarnInstanceFailed: r.warnInstanceFailedFunc(ir, eventTarget, instanceFailedStuckPodMsg),
 		// WarnRetryHeld surfaces the terminal same-target retry exhaustion
 		// (RetryBlock → Held) to the operator. Emitted by the workload
-		// writer exactly once, at the transition into Held. Mirrored onto
-		// the controller log like WarnInstanceFailed.
-		WarnRetryHeld: func(targetRevision string, attempts int32, reason string) {
-			r.Log.Info("Same-target update retries exhausted; revision Held",
-				"inferencereplica", client.ObjectKeyFromObject(ir),
-				"component", ir.Spec.Component,
-				"targetRevision", targetRevision,
-				"attempts", attempts,
-				"reason", reason)
-			if r.Recorder == nil {
-				return
-			}
-			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "RetryHeld",
-				"InferenceReplica %s/%s component=%s update to revision %s held after %d failed attempt(s) (last failure: %s); publish a corrected revision or raise lifecycle.updateRetry limits",
-				ir.Namespace, ir.Name, ir.Spec.Component, targetRevision, attempts, reason)
-		},
+		// writer exactly once, at the transition into Held.
+		WarnRetryHeld: r.warnRetryHeldFunc(ir, eventTarget),
 	}
 
 	// Wire the coordination UpdateGate onto the shared decision site so the
@@ -213,6 +181,59 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	}
 
 	return input
+}
+
+// The two InstanceFailed message shapes. Same argument tuple
+// (namespace, name, component, instance, pod, reason); the dispatch
+// input always names the stuck pod while the escalation input covers
+// the deadline backstop's empty podName.
+const (
+	instanceFailedStuckPodMsg   = "InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)"
+	instanceFailedEscalationMsg = "InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed (pod=%q): %s"
+)
+
+// warnInstanceFailedFunc returns the WarnInstanceFailed closure shared
+// by buildReconcileInput and buildEscalationInput: mirror the
+// escalation onto the controller log (operator-facing; log-aggregated
+// views see it without the events stream), then emit the
+// InstanceFailed Warning against eventTarget (user-facing). messageFmt
+// formats (namespace, name, component, instance, pod, reason).
+func (r *Reconciler) warnInstanceFailedFunc(ir *v1beta1.InferenceReplica, eventTarget client.Object, messageFmt string) func(idx int32, podName, reason string) {
+	return func(idx int32, podName, reason string) {
+		r.Log.Info("Instance escalated to Phase=Failed",
+			"inferencereplica", client.ObjectKeyFromObject(ir),
+			"component", ir.Spec.Component,
+			"instance", idx,
+			"pod", podName,
+			"reason", reason)
+		if r.Recorder == nil {
+			return
+		}
+		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workload.EventReasonInstanceFailed),
+			messageFmt, ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
+	}
+}
+
+// warnRetryHeldFunc returns the WarnRetryHeld closure shared by
+// buildReconcileInput and buildEscalationInput: surface the terminal
+// same-target retry exhaustion (RetryBlock → Held) on the controller
+// log and as a RetryHeld Warning against eventTarget. The workload
+// writer invokes it exactly once, at the transition into Held.
+func (r *Reconciler) warnRetryHeldFunc(ir *v1beta1.InferenceReplica, eventTarget client.Object) func(targetRevision string, attempts int32, reason string) {
+	return func(targetRevision string, attempts int32, reason string) {
+		r.Log.Info("Same-target update retries exhausted; revision Held",
+			"inferencereplica", client.ObjectKeyFromObject(ir),
+			"component", ir.Spec.Component,
+			"targetRevision", targetRevision,
+			"attempts", attempts,
+			"reason", reason)
+		if r.Recorder == nil {
+			return
+		}
+		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workload.EventReasonRetryHeld),
+			"InferenceReplica %s/%s component=%s update to revision %s held after %d failed attempt(s) (last failure: %s); publish a corrected revision or raise lifecycle.updateRetry limits",
+			ir.Namespace, ir.Name, ir.Spec.Component, targetRevision, attempts, reason)
+	}
 }
 
 // buildHeadlessServiceSpec adapts an InferenceReplica into the typed

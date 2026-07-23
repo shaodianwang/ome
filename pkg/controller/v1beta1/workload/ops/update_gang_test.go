@@ -7,9 +7,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	clocktesting "k8s.io/utils/clock/testing"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -250,5 +253,132 @@ func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	}
 	if prune := (*blockCalls)[1]; prune.rev != "p414-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
 		t.Errorf("prune call: got (rev=%q, disposition=%v) want (p414-engine-goodrev, Remove)", prune.rev, prune.disposition)
+	}
+}
+
+// TestGangSurge_InheritsExcludedNodes pins the exclusion-memory contract
+// through the REAL surge-synthesis path: gangSurgeUpdate's replacement-gang
+// creation pass must render the surge pods with the source instance's
+// ExcludedNodes as required hostname NotIn terms — the exclusion overlay
+// follows the instance through the surge-replace cycle.
+func TestGangSurge_InheritsExcludedNodes(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc, ir)
+	tcr := legacyEnsureTargetCR(t, c, isvc, legacyTargetSpecImage("llama:v2"))
+
+	// Mid-surge shape: the surge was stamped on a prior pass (SurgeIndex
+	// allocated, target pinned) but the replacement gang's pods don't
+	// exist yet — the next gangSurgeUpdate pass creates them.
+	surgeIdx := int32(2)
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
+	ir.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+		ID:             "update-0-1",
+		Type:           v1beta1.InstanceOperationType(workload.InstanceOperationUpdate),
+		Step:           updateStepSurge,
+		SurgeIndex:     &surgeIdx,
+		TargetRevision: tcr.Name,
+	}
+	if err := c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	plan.Instances[0].ExcludedNodes = []string{"node-bad-1", "node-bad-2"}
+
+	done, err := gangSurgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate: %v", err)
+	}
+	if done {
+		t.Errorf("done: got true want false (create pass requeues)")
+	}
+
+	surgePods, err := query.LiveListPodsForInstance(context.Background(), c, isvc.Namespace, isvc.Name, workload.ComponentEngine, surgeIdx)
+	if err != nil {
+		t.Fatalf("list surge pods: %v", err)
+	}
+	if len(surgePods) != 2 {
+		t.Fatalf("surge gang pods: got %d want 2 (leader + worker)", len(surgePods))
+	}
+	for _, pod := range surgePods {
+		got := hostnameNotInValues(pod)
+		want := map[string]bool{"node-bad-1": false, "node-bad-2": false}
+		for _, v := range got {
+			if _, ok := want[v]; ok {
+				want[v] = true
+			}
+		}
+		for node, seen := range want {
+			if !seen {
+				t.Errorf("surge pod %s: excluded node %s missing from required NotIn terms (inheritance lost): got %v", pod.Name, node, got)
+			}
+		}
+	}
+}
+
+// TestMigrateSurge_InheritsExcludedNodes pins the same contract through
+// Migrate's surge synthesis: the in-flight migration's surge pod must
+// render with the source instance plan's ExcludedNodes (plus the
+// overlay's FromNode) as required hostname NotIn terms.
+func TestMigrateSurge_InheritsExcludedNodes(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc, ir)
+	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
+
+	// In-flight migration shape: source already stamped with the Migrate
+	// Operation + SurgeIndex; the next Migrate pass creates the surge pod.
+	surgeIdx := int32(2)
+	irKey := types.NamespacedName{Namespace: isvc.Namespace, Name: legacyIRName(isvc, workload.ComponentEngine)}
+	if err := c.Get(context.Background(), irKey, ir); err != nil {
+		t.Fatalf("re-read IR: %v", err)
+	}
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceMigrating
+	ir.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+		ID:         "migrate-0-1",
+		Type:       v1beta1.InstanceOperationType(workload.InstanceOperationMigrate),
+		SurgeIndex: &surgeIdx,
+	}
+	if err := c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+	plan.Instances[0].ExcludedNodes = []string{"node-bad-1", "node-bad-2"}
+	req := &audit.MigrationRequest{
+		Component: string(workload.ComponentEngine),
+		Instance:  0,
+		FromNode:  "node-from",
+	}
+
+	done, accepted, err := Migrate(context.Background(), legacyTestDeps(c), input, plan, 0, "uuid-mig-1", req)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if done || !accepted {
+		t.Errorf("(done, accepted): got (%v, %v) want (false, true) — surge create pass requeues", done, accepted)
+	}
+
+	surgePods, err := query.LiveListPodsForInstance(context.Background(), c, isvc.Namespace, isvc.Name, workload.ComponentEngine, surgeIdx)
+	if err != nil {
+		t.Fatalf("list surge pods: %v", err)
+	}
+	if len(surgePods) != 1 {
+		t.Fatalf("surge pods: got %d want 1", len(surgePods))
+	}
+	got := hostnameNotInValues(surgePods[0])
+	want := map[string]bool{"node-bad-1": false, "node-bad-2": false, "node-from": false}
+	for _, v := range got {
+		if _, ok := want[v]; ok {
+			want[v] = true
+		}
+	}
+	for node, seen := range want {
+		if !seen {
+			t.Errorf("surge pod: node %s missing from required NotIn terms (inheritance/overlay lost): got %v", node, got)
+		}
 	}
 }

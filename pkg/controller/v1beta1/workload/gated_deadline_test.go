@@ -147,7 +147,7 @@ func TestGatedInstance_NotFailedByDeadlineBackstop(t *testing.T) {
 	// Rebuild the snapshot from the parked store, mirroring how the IR
 	// adapter re-reads ir.Status before the expiry backstop runs.
 	snapshot := append([]workload.InstanceStatus(nil), (*store)...)
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), input, snapshot); err != nil {
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: snapshot}); err != nil {
 		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
 	}
 

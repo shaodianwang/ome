@@ -162,6 +162,12 @@ func RenderWithRevision(
 	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvcName)
 	injectGangDomainAffinity(pod, plan, inst, runner, isvcName)
 	applyMigrationOverlay(pod, inst.MigrationOverlay)
+	// Relocation-directive exclusions: same required NotIn machinery
+	// as the migration overlay's FromNode, one term per recorded node.
+	// Empty list is a no-op for normal Instances.
+	for _, node := range inst.ExcludedNodes {
+		applyRequiredNodeExclusion(pod, node)
+	}
 
 	// Adapter-supplied hook: peer-env injection for the ISVC adapter,
 	// nil for the IR adapter (peer-env stays on the parent ISVC
@@ -212,29 +218,7 @@ func applyMigrationOverlay(pod *corev1.Pod, overlay *workload.MigrationOverlay) 
 	na := pod.Spec.Affinity.NodeAffinity
 
 	if overlay.FromNode != "" {
-		// RequiredDuringSchedulingIgnoredDuringExecution: the surge
-		// pod MUST schedule somewhere other than FromNode. NodeSelector
-		// terms are OR'd; each term's MatchExpressions are AND'd. We
-		// append to each existing term and add a default term when
-		// none exist so the require-not-FromNode condition combines
-		// with any caller-supplied required selectors.
-		req := corev1.NodeSelectorRequirement{
-			Key:      "kubernetes.io/hostname",
-			Operator: corev1.NodeSelectorOpNotIn,
-			Values:   []string{overlay.FromNode},
-		}
-		if na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
-			na.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
-				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{req}}},
-			}
-		} else {
-			for i := range na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
-				term := &na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i]
-				if !hasHostnameNotIn(term.MatchExpressions, overlay.FromNode) {
-					term.MatchExpressions = append(term.MatchExpressions, req)
-				}
-			}
-		}
+		applyRequiredNodeExclusion(pod, overlay.FromNode)
 	}
 
 	if len(overlay.HintTargetNodes) > 0 && !hasPreferredHintTerm(na.PreferredDuringSchedulingIgnoredDuringExecution, overlay.HintTargetNodes) {
@@ -262,47 +246,112 @@ func applyMigrationOverlay(pod *corev1.Pod, overlay *workload.MigrationOverlay) 
 // than competes against — operator-supplied preferences.
 const overlayPreferredHintWeight int32 = 50
 
+// applyRequiredNodeExclusion appends a required NotIn[node] hostname
+// term to the pod's NodeAffinity — the pod MUST schedule somewhere
+// other than node. NodeSelector terms are OR'd; each term's
+// MatchExpressions are AND'd, so the requirement is appended to every
+// existing term (and a default term is created when none exist) to
+// combine with any caller-supplied required selectors. Idempotent per
+// node. Shared by the migration overlay (FromNode) and the
+// relocation-directive exclusion list (InstancePlan.ExcludedNodes).
+func applyRequiredNodeExclusion(pod *corev1.Pod, node string) {
+	if node == "" {
+		return
+	}
+	if pod.Spec.Affinity == nil {
+		pod.Spec.Affinity = &corev1.Affinity{}
+	}
+	if pod.Spec.Affinity.NodeAffinity == nil {
+		pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	na := pod.Spec.Affinity.NodeAffinity
+	req := corev1.NodeSelectorRequirement{
+		Key:      "kubernetes.io/hostname",
+		Operator: corev1.NodeSelectorOpNotIn,
+		Values:   []string{node},
+	}
+	if na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		na.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{req}}},
+		}
+		return
+	}
+	for i := range na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+		term := &na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i]
+		if !hasHostnameNotIn(term.MatchExpressions, node) {
+			term.MatchExpressions = append(term.MatchExpressions, req)
+		}
+	}
+}
+
 // WouldOverlayConflictWithNodeAffinity reports whether the migration
 // overlay's NotIn[FromNode] would make the source PodSpec unschedulable.
-// Conflict means every existing required NodeSelectorTerm pins
-// kubernetes.io/hostname to exactly FromNode — there's no other host
-// the surge could land on. A single term that permits other hosts (or
-// doesn't pin hostname at all) is enough to defuse the conflict.
+// Thin single-node wrapper over WouldExclusionsConflictWithNodeAffinity.
 //
 // Called from migrate.go's up-front validation: a true result means
 // reject the migration with a Failed audit row rather than create a
 // permanently-pending surge pod.
 func WouldOverlayConflictWithNodeAffinity(spec *corev1.PodSpec, overlay *workload.MigrationOverlay) bool {
-	if overlay == nil || overlay.FromNode == "" || spec == nil {
+	if overlay == nil || overlay.FromNode == "" {
 		return false
 	}
-	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
+	return WouldExclusionsConflictWithNodeAffinity(spec, []string{overlay.FromNode})
+}
+
+// WouldExclusionsConflictWithNodeAffinity reports whether excluding
+// every node in excluded (required NotIn hostname terms) would make the
+// PodSpec unschedulable. Conflict means every existing required
+// NodeSelectorTerm pins kubernetes.io/hostname entirely inside the
+// excluded set — there's no other host the pod could land on. A term
+// that permits an un-excluded host (or doesn't pin hostname at all)
+// defuses the conflict.
+//
+// Shared by the migration up-front validation (via the overlay wrapper)
+// and the deadline disposition's relocation-directive guard, which
+// checks the suspect node plus the instance's recorded exclusions.
+func WouldExclusionsConflictWithNodeAffinity(spec *corev1.PodSpec, excluded []string) bool {
+	if spec == nil || spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
 		return false
 	}
 	req := spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 	if req == nil || len(req.NodeSelectorTerms) == 0 {
 		return false
 	}
+	set := make(map[string]struct{}, len(excluded))
+	for _, n := range excluded {
+		if n != "" {
+			set[n] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return false
+	}
 	for _, term := range req.NodeSelectorTerms {
-		if !termPinsHostnameTo(term, overlay.FromNode) {
+		if !termPinsHostnameWithin(term, set) {
 			return false
 		}
 	}
 	return true
 }
 
-// termPinsHostnameTo returns true when term's hostname In-requirement
-// permits ONLY hostname. A term without any hostname In-requirement
-// returns false — it doesn't pin hostname at all.
-func termPinsHostnameTo(term corev1.NodeSelectorTerm, hostname string) bool {
+// termPinsHostnameWithin returns true when term's hostname
+// In-requirement permits ONLY hosts inside excluded. A term without any
+// hostname In-requirement returns false — it doesn't pin hostname at
+// all.
+func termPinsHostnameWithin(term corev1.NodeSelectorTerm, excluded map[string]struct{}) bool {
 	for _, expr := range term.MatchExpressions {
 		if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpIn {
 			continue
 		}
-		if len(expr.Values) == 1 && expr.Values[0] == hostname {
-			return true
+		if len(expr.Values) == 0 {
+			return false
 		}
-		return false
+		for _, v := range expr.Values {
+			if _, ok := excluded[v]; !ok {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

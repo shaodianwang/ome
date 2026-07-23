@@ -96,6 +96,14 @@ type InstancePlan struct {
 	// paths.
 	MigrationOverlay *MigrationOverlay
 
+	// ExcludedNodes lists nodes this Instance's pods must not land on —
+	// the relocation-directive memory (AutoRecover ledger entries)
+	// projected through WorkloadObservedState.ExcludedNodesByInstance.
+	// Render materializes each entry as the same required NotIn
+	// hostname term the migration overlay uses. Empty for normal
+	// Instances.
+	ExcludedNodes []string
+
 	// PeerHostnames is an optional render-time cache of the Instance's
 	// ordered peer-DNS host list (one entry per pod, flat gang-rank
 	// order). The list is identical for every pod in the gang, so the

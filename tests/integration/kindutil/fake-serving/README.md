@@ -13,6 +13,8 @@ no auth.
 | `FAIL_AT=startup` | exit 1 immediately (CrashLoopBackOff) |
 | `FAIL_AT=ready` | bind `:8080` but return `503` to `/healthz` |
 | `FAIL_AT=after-Nm` | run normally for N minutes, then exit 1 |
+| `FAIL_ON_NODE=<node>` | return `503` to `/healthz` only while running on `<node>` (node-scoped fault; pod spec supplies `NODE_NAME` via fieldRef) |
+| `FAIL_ON_POD=<pod>` | narrow `FAIL_ON_NODE` to one pod name (pod spec supplies `POD_NAME` via fieldRef) |
 | `STARTUP_DELAY_SEC=N` | sleep N seconds before binding |
 
 OMENative's serving-gate (`ome.io/serving=True`) is set by the

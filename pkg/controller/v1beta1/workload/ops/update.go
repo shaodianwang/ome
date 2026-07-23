@@ -343,31 +343,11 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	failedContinuation := s.Phase == workload.InstancePhaseFailed &&
 		s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate
 	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); b != nil && !failedContinuation {
-		switch b.State {
-		case workload.RetryBlockHeld:
-			return false, 0, nil
-		case workload.RetryBlockRetryInProgress:
-			// Self-heal a leaked authorization: RetryInProgress with no
-			// in-flight Update attempt at this revision (superseded
-			// surge, scale-down, crash) would otherwise deny forever
-			// with no operator surface. Treat as due — the attempt
-			// stamp re-confirms the state.
-			if anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) {
-				return false, 0, nil
-			}
-		case workload.RetryBlockBackoff:
-			// Nil NextRetryAt is immediately due.
-			now := input.Now()
-			if b.NextRetryAt != nil && now.Before(b.NextRetryAt.Time) {
-				return false, b.NextRetryAt.Time.Sub(now), nil
-			}
-			// Due: allow without flipping state. The RetryInProgress
-			// flip happens at attempt-stamp time, after the dispatcher's
-			// budget/coordination gates admit the start — flipping here
-			// would strand RetryInProgress when a budget denies the pass.
+		denied, retryAfter := evaluateRetryBlockGate(b, input.Now(),
+			anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name))
+		if denied {
+			return false, retryAfter, nil
 		}
-		// Unrecognized states fall through un-gated (fail-open
-		// forward-compat).
 	}
 
 	// RunningRevision is the cheap fast-path comparison.
@@ -392,6 +372,17 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 		if !podMatchesTarget(pod, targetSpec) {
 			return true, 0, nil
 		}
+	}
+	// Spec-match alone proves nothing about health: a wedged pod (e.g.
+	// ImagePullBackOff) spec-matches the very revision that broke it, and
+	// the Ready stamp below prunes that revision's RetryBlock — Ready is
+	// only stamped on proof. Require the same runtime-readiness the
+	// canonical Ready promotions gate on before adopting; unproven pods
+	// are simply left alone (a corrective target re-triggers via the
+	// per-pod diff above, and pods that later become ready are adopted
+	// on a subsequent pass).
+	if !query.AllPodsRuntimeReady(pods) {
+		return false, 0, nil
 	}
 	// Backfill so future reconciles take the fast-path.
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {

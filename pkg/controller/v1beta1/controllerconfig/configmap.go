@@ -272,6 +272,14 @@ type LifecycleConfig struct {
 	// means unconfigured: the workload layer fails safe (the first same-target
 	// failure Holds), never a silent fallback to baked-in numbers.
 	UpdateRetry *UpdateRetryConfig `json:"updateRetry,omitempty"`
+	// StuckPodGracePeriod is the wait window after pod creation before a
+	// terminal kubelet waiting state escalates to Phase=Failed. A duration
+	// string ("60s"); absence or parse failure disables fast escalation
+	// this pass (the InstanceReadyTimeout backstop remains).
+	StuckPodGracePeriod string `json:"stuckPodGracePeriod,omitempty"`
+	// AutoMigrate configures the deadline-disposition relocation budget.
+	// Absence disables the relocation branch.
+	AutoMigrate *AutoMigrateConfig `json:"autoMigrate,omitempty"`
 }
 
 // UpdateRetryConfig is the same-target update retry policy: a failed rollout
@@ -285,6 +293,15 @@ type UpdateRetryConfig struct {
 	InitialDelay string  `json:"initialDelay"`
 	MaxDelay     string  `json:"maxDelay"`
 	Multiplier   float64 `json:"multiplier"`
+}
+
+// AutoMigrateConfig configures the deadline-disposition relocation budget.
+//
+// +kubebuilder:object:generate=false
+type AutoMigrateConfig struct {
+	// MaxAttempts bounds the number of relocation attempts for one expired
+	// Instance before the disposition falls through to terminal failure.
+	MaxAttempts int32 `json:"maxAttempts"`
 }
 
 // ToPolicy validates the config and converts it to the workload-side
@@ -320,6 +337,32 @@ func (c *UpdateRetryConfig) ToPolicy() (*workloadtypes.RetryPolicy, error) {
 		MaxDelay:     maxDelay,
 		Multiplier:   c.Multiplier,
 	}, nil
+}
+
+// ToGracePeriod validates and parses StuckPodGracePeriod. Returns an
+// error when the value is malformed or non-positive; absence (empty
+// string) is NOT an error (the caller distinguishes unconfigured from
+// invalid via the returned zero value).
+func (c *LifecycleConfig) ToGracePeriod() (time.Duration, error) {
+	if c.StuckPodGracePeriod == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.StuckPodGracePeriod)
+	if err != nil {
+		return 0, fmt.Errorf("invalid lifecycle.stuckPodGracePeriod %q: %w", c.StuckPodGracePeriod, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid lifecycle.stuckPodGracePeriod: must be > 0, got %s", d)
+	}
+	return d, nil
+}
+
+// Validate checks AutoMigrateConfig constraints.
+func (c *AutoMigrateConfig) Validate() error {
+	if c.MaxAttempts <= 0 {
+		return fmt.Errorf("invalid lifecycle.autoMigrate: maxAttempts must be > 0, got %d", c.MaxAttempts)
+	}
+	return nil
 }
 
 // NewLifecycleConfig loads the lifecycle block from the inferenceservice

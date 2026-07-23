@@ -571,7 +571,7 @@ func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
 
 	// First pass: status changes (per-Instance counters, conditions,
 	// LabelSelector, ObservedGeneration all get stamped) → a write lands.
-	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil)).To(gomega.Succeed())
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil, 60*time.Second, nil, 0)).To(gomega.Succeed())
 	afterFirst := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, afterFirst)).To(gomega.Succeed())
 	rvAfterFirst := afterFirst.ResourceVersion
@@ -579,7 +579,7 @@ func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
 	// Second pass over the now-converged IR: recomputed status equals
 	// live status → the DeepEqual guard must skip Status().Update, so the
 	// ResourceVersion is unchanged.
-	g.Expect(r.aggregateAndWriteStatus(context.Background(), afterFirst.DeepCopy(), nil, plan, nil)).To(gomega.Succeed())
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), afterFirst.DeepCopy(), nil, plan, nil, 60*time.Second, nil, 0)).To(gomega.Succeed())
 	afterSecond := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, afterSecond)).To(gomega.Succeed())
 	g.Expect(afterSecond.ResourceVersion).To(gomega.Equal(rvAfterFirst),
@@ -626,27 +626,31 @@ func TestAggregateAndWriteStatus_ConflictSurfacesAsConflict(t *testing.T) {
 		},
 	}
 
-	err := r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil)
+	err := r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil, 60*time.Second, nil, 0)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(apierrors.IsConflict(err)).To(gomega.BeTrue(),
 		"a terminal status conflict must remain recognizable so the caller can requeue instead of logging ERROR")
 }
 
-// withIRStuckPodGracePeriod swaps in a short grace window for the
-// workload-side stuck-pod escalator so unit tests don't have to wait
-// the production 60s. Restored on cleanup so parallel tests don't see
-// each other's overrides.
+// withIRStuckPodGracePeriod is a helper for tests that called the old
+// shared package-level stuck-pod grace period. Now that the grace is
+// supplied per-reconcile via config, tests that call Reconcile() will
+// get whatever the test environment's config resolves to (absent config
+// → grace=0 → fast escalation disabled). This no-op helper exists to
+// preserve test names/structure while the grace is config-driven.
+// Direct aggregateAndWriteStatus callers supply the grace explicitly.
 func withIRStuckPodGracePeriod(t *testing.T, d time.Duration) {
 	t.Helper()
-	prev := workload.StuckPodFailureGracePeriod
-	workload.StuckPodFailureGracePeriod = d
-	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+	// No-op: tests that call Reconcile() observe the grace the reconciler
+	// resolves from the config cache. Tests that call aggregateAndWriteStatus
+	// directly supply the grace as a parameter.
 }
 
 // TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed reproduces
 // the IR-managed-path failure where a SurgeThenDrain surge pod stuck in
-// ImagePullBackOff past StuckPodFailureGracePeriod must escalate the
-// Instance Phase to Failed, the same way the omenative direct path does.
+// ImagePullBackOff past the config-driven stuck-pod grace
+// (lifecycle stuckPodGracePeriod) must escalate the Instance Phase to
+// Failed, the same way the omenative direct path does.
 // Without this fix, the production cluster observes the Instance stuck at
 // Phase=Updating for the full 30-minute InstanceReadyTimeout before the
 // (now-wired) deadline backstop ExpireOperationsIfDeadlinePassed catches
@@ -710,7 +714,7 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 		},
 	}
 
-	r, c := newReconciler(t, ir, oldPod, surgePod)
+	r, c := newReconcilerWithGrace(t, 1*time.Millisecond, ir, oldPod, surgePod)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})
@@ -725,16 +729,28 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 	g.Expect(got.Status.InstanceStatuses[0].Phase).
 		To(gomega.Equal(v1beta1.OMENativeInstanceFailed),
 			"IR aggregator must run the workload stuck-pod escalator: surge pod stuck in ImagePullBackOff past grace must flip Instance Phase to Failed")
-	// Operation is preserved as the breadcrumb operators read to find
-	// which step wedged.
-	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil(),
-		"Operation must be preserved on stuck-pod escalation so operators see what was in flight")
-	g.Expect(got.Status.InstanceStatuses[0].Operation.Step).To(gomega.Equal("Surge"))
+	// The deadline disposition owns single-pod update escalations:
+	// ImagePullBackOff is a workload-caused failure, so the Operation is
+	// CLEARED in the same transition (Failed-with-no-Operation is a fresh
+	// start; the old Failed-with-Operation continuation re-armed the
+	// stampers every pass — the churn loop) and the target revision is
+	// recorded in a RetryBlock (Held here: no updateRetry policy is
+	// configured, fail-safe).
+	g.Expect(got.Status.InstanceStatuses[0].Operation).To(gomega.BeNil(),
+		"disposition must clear the failed attempt's Operation in the same transition")
+	g.Expect(got.Status.RetryBlocks).To(gomega.HaveLen(1),
+		"workload-caused failure must record a RetryBlock for the attempt's target revision")
+	g.Expect(got.Status.RetryBlocks[0].State).To(gomega.Equal(v1beta1.RetryBlockHeld),
+		"nil retry policy fails safe: first failure Holds")
+	g.Expect(got.Status.RetryBlocks[0].Reason).To(gomega.Equal("ImagePullBackOff"))
+	g.Expect(got.Status.InstanceStatuses[0].LastFailure).NotTo(gomega.BeNil())
+	g.Expect(got.Status.InstanceStatuses[0].LastFailure.Reason).To(gomega.Equal("ImagePullBackOff"))
 }
 
 // TestAggregateStatus_StuckPodWithinGrace_NoEscalation pins the
-// IR-path debounce: a stuck pod still inside StuckPodFailureGracePeriod
-// must NOT escalate. Without this guard, a brief transient pull failure
+// IR-path debounce: a stuck pod still inside the config-driven
+// stuck-pod grace (lifecycle stuckPodGracePeriod) must NOT escalate.
+// Without this guard, a brief transient pull failure
 // on a flaky registry would mis-classify a pod that's about to recover.
 // Mirrors the equivalent omenative-direct-path test
 // TestSurgeUpdate_ImagePullBackOff_WithinGrace_NoEscalation.
@@ -842,8 +858,14 @@ func TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed(t *testing.T)
 	g.Expect(got.Status.InstanceStatuses[0].Phase).
 		To(gomega.Equal(v1beta1.OMENativeInstanceFailed),
 			"IR aggregator must run the deadline backstop: an Operation.Deadline in the past must flip the Instance Phase to Failed")
-	// Operation preserved as the breadcrumb operators read.
-	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
+	// The deadline disposition owns Create-attempt expiries: no
+	// workload-caused pod evidence and no relocation budget configured →
+	// terminal branch clears the Operation (fresh start next pass) and
+	// records no RetryBlock (failure not proven revision-scoped).
+	g.Expect(got.Status.InstanceStatuses[0].Operation).To(gomega.BeNil(),
+		"disposition must clear the expired attempt's Operation")
+	g.Expect(got.Status.RetryBlocks).To(gomega.BeEmpty(),
+		"terminal disposition must not record a RetryBlock")
 	// LastFailure records the DeadlineExceeded cause.
 	g.Expect(got.Status.InstanceStatuses[0].LastFailure).NotTo(gomega.BeNil(),
 		"deadline escalation must record a LastFailure diagnostic")
@@ -932,7 +954,7 @@ func TestAggregateStatus_PausedInstance_DeadlineParkedAndRearmed(t *testing.T) {
 		}},
 	}}
 
-	r, c := newReconciler(t, ir, stuckPod)
+	r, c := newReconcilerWithGrace(t, time.Millisecond, ir, stuckPod)
 	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
 	g.Expect(err).NotTo(gomega.HaveOccurred())

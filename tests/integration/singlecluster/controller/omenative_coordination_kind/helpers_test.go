@@ -2,12 +2,14 @@ package omenative_coordination_kind
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -112,16 +114,23 @@ const (
 
 const fastUpdateRetryLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0}}`
 
-// configureFastUpdateRetry patches the suite-level inferenceservice-config
-// ConfigMap's lifecycle key with the fast retry policy and registers a
-// DeferCleanup that restores the prior state (removing the key when it
-// was absent, which is the fail-safe Held-on-first-failure default every
-// other spec runs under). The KIND manager wires the IR reconciler with
-// ConfigCacheTTL=0 (never caches — see kindfix.StandardOMESetup), so the
-// edit applies on the very next reconcile. The suite runs specs serially,
-// so a per-spec ConfigMap patch cannot bleed into a concurrently running
-// spec.
-func configureFastUpdateRetry() {
+// Fast deadline-disposition tuning: the fast updateRetry policy above
+// plus a short stuck-pod grace (terminal kubelet waiting states escalate
+// in seconds, not the production minutes) and a small relocation budget
+// (lifecycle.autoMigrate.maxAttempts=2) so the disposition's relocation
+// branch is enabled.
+const fastDispositionLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},"stuckPodGracePeriod":"10s","autoMigrate":{"maxAttempts":2}}`
+
+// configureLifecycleConfig patches the suite-level inferenceservice-config
+// ConfigMap's lifecycle key with value and registers a DeferCleanup that
+// restores the prior state (removing the key when it was absent, which is
+// the fail-safe default every other spec runs under: Held on first
+// same-target failure, no fast escalation, no relocation budget). The
+// KIND manager wires the IR reconciler with ConfigCacheTTL=0 (never
+// caches — see kindfix.StandardOMESetup), so the edit applies on the very
+// next reconcile. The suite runs specs serially, so a per-spec ConfigMap
+// patch cannot bleed into a concurrently running spec.
+func configureLifecycleConfig(value string) {
 	key := client.ObjectKey{Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName}
 	cm := &corev1.ConfigMap{}
 	gomega.Expect(k8sClient.Get(suiteCtx, key, cm)).To(gomega.Succeed(), "read inferenceservice-config")
@@ -144,10 +153,22 @@ func configureFastUpdateRetry() {
 			"patch inferenceservice-config lifecycle key")
 	}
 
-	setLifecycleKey(fastUpdateRetryLifecycleJSON, false)
+	setLifecycleKey(value, false)
 	ginkgo.DeferCleanup(func() {
 		setLifecycleKey(prev, !hadPrev)
 	})
+}
+
+// configureFastUpdateRetry seeds the seconds-scale updateRetry policy.
+func configureFastUpdateRetry() {
+	configureLifecycleConfig(fastUpdateRetryLifecycleJSON)
+}
+
+// configureFastDisposition seeds the seconds-scale updateRetry policy
+// plus the short stuck-pod grace and the relocation budget the deadline
+// disposition consumes.
+func configureFastDisposition() {
+	configureLifecycleConfig(fastDispositionLifecycleJSON)
 }
 
 // retryBlocks reads the per-target-revision RetryBlocks for one ISVC
@@ -165,6 +186,124 @@ func findRetryBlock(blocks []v1beta1.RetryBlock, targetRevision string) *v1beta1
 		}
 	}
 	return nil
+}
+
+// =========================================================================
+// Node scheduling helpers (deadline-disposition relocation specs)
+// =========================================================================
+
+// schedulableWorkerNodes returns the sorted names of every worker node
+// (the control-plane node carries the default NoSchedule taint and is
+// excluded by its role label). The suite cluster runs 2 workers, which
+// relocation specs rely on: one to fail on, one to relocate to.
+func schedulableWorkerNodes(g gomega.Gomega) []string {
+	nodes := &corev1.NodeList{}
+	g.ExpectWithOffset(1, k8sClient.List(suiteCtx, nodes)).To(gomega.Succeed())
+	var out []string
+	for i := range nodes.Items {
+		if _, cp := nodes.Items[i].Labels["node-role.kubernetes.io/control-plane"]; cp {
+			continue
+		}
+		out = append(out, nodes.Items[i].Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setNodeUnschedulable flips node.Spec.Unschedulable (kubectl cordon /
+// uncordon). Cordoning only affects future scheduling; running pods
+// stay put — relocation specs use it to force initial placement onto a
+// chosen node, then uncordon so the rebuild has somewhere else to land.
+func setNodeUnschedulable(name string, unschedulable bool) {
+	gomega.Eventually(func(g gomega.Gomega) {
+		node := &corev1.Node{}
+		g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Name: name}, node)).To(gomega.Succeed())
+		if node.Spec.Unschedulable == unschedulable {
+			return
+		}
+		node.Spec.Unschedulable = unschedulable
+		g.Expect(k8sClient.Update(suiteCtx, node)).To(gomega.Succeed())
+	}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(gomega.Succeed(),
+		"set node %s unschedulable=%v", name, unschedulable)
+}
+
+// cordonNode cordons name and registers an uncordon cleanup so a
+// failing spec can never leave the shared cluster unschedulable.
+func cordonNode(name string) {
+	setNodeUnschedulable(name, true)
+	ginkgo.DeferCleanup(func() { setNodeUnschedulable(name, false) })
+}
+
+// podExcludesHostname reports whether every required NodeAffinity term
+// on pod carries a kubernetes.io/hostname NotIn[node] requirement — the
+// relocation-directive overlay the renderer materializes from the
+// AutoRecover ledger entries.
+func podExcludesHostname(pod *corev1.Pod, node string) bool {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil ||
+		pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return false
+	}
+	terms := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) == 0 {
+		return false
+	}
+	for _, term := range terms {
+		matched := false
+		for _, expr := range term.MatchExpressions {
+			if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpNotIn {
+				continue
+			}
+			for _, v := range expr.Values {
+				if v == node {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// withNodeScopedFailure fixtures c to fail readiness only on failNode
+// (optionally only in pod failPod): fake-serving's FAIL_ON_NODE mode
+// plus the NODE_NAME / POD_NAME fieldRefs it reads, plus the readiness
+// probe that surfaces the 503 as ContainersReady=false. The pod then
+// parks Running-but-unready on the failing node — no kubelet waiting
+// reason, so the deadline disposition classifies it relocatable — and
+// the identical revision converges Ready anywhere else.
+func withNodeScopedFailure(c *corev1.Container, failNode, failPod string) {
+	c.Env = append(c.Env,
+		corev1.EnvVar{Name: "NODE_NAME", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}},
+		corev1.EnvVar{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		corev1.EnvVar{Name: "FAIL_ON_NODE", Value: failNode},
+	)
+	if failPod != "" {
+		c.Env = append(c.Env, corev1.EnvVar{Name: "FAIL_ON_POD", Value: failPod})
+	}
+	c.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+			Path: "/healthz", Port: intstr.FromInt(8080),
+		}},
+		PeriodSeconds:    1,
+		FailureThreshold: 2,
+	}
+}
+
+// autoRecoverEntries filters the audit ledger to the AutoRecover
+// relocation directives for one component.
+func autoRecoverEntries(ledger auditLedgerShape, component string) []auditEntryShape {
+	var out []auditEntryShape
+	for _, e := range ledger.Entries {
+		if e.Reason == "AutoRecover" && e.Component == component {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // =========================================================================

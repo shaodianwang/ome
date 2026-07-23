@@ -1407,6 +1407,53 @@ func TestWouldOverlayConflictWithNodeAffinity_NilOverlayOrEmptyFromNode(t *testi
 	}
 }
 
+// TestWouldExclusionsConflictWithNodeAffinity_MultiNode pins the
+// exclusion-set generalization the deadline disposition uses: a
+// hostname In-pin conflicts only once EVERY permitted host is excluded.
+func TestWouldExclusionsConflictWithNodeAffinity_MultiNode(t *testing.T) {
+	pinned := func(hosts ...string) *corev1.PodSpec {
+		return &corev1.PodSpec{
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+							MatchExpressions: []corev1.NodeSelectorRequirement{{
+								Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: hosts,
+							}},
+						}},
+					},
+				},
+			},
+		}
+	}
+	if WouldExclusionsConflictWithNodeAffinity(pinned("node-a", "node-b"), []string{"node-a"}) {
+		t.Errorf("In[a,b] minus {a} still permits b — no conflict")
+	}
+	if !WouldExclusionsConflictWithNodeAffinity(pinned("node-a", "node-b"), []string{"node-a", "node-b"}) {
+		t.Errorf("In[a,b] minus {a,b} permits nothing — conflict expected")
+	}
+	if WouldExclusionsConflictWithNodeAffinity(pinned("node-a"), nil) {
+		t.Errorf("empty exclusion set must not conflict")
+	}
+	// A term that doesn't pin hostname at all defuses the conflict.
+	unpinned := &corev1.PodSpec{
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key: "gpu-type", Operator: corev1.NodeSelectorOpIn, Values: []string{"h100"},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	if WouldExclusionsConflictWithNodeAffinity(unpinned, []string{"node-a"}) {
+		t.Errorf("term without hostname pin must not conflict")
+	}
+}
+
 // TestRender_ContainerName_FallbackPrecedence pins the precedence walk
 // for rendered container names when the upstream merge layer hasn't
 // stamped a name. Render is the apply-time chokepoint that talks to the

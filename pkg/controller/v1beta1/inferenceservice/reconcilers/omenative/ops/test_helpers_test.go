@@ -14,14 +14,13 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
 // Shared test fixtures used by the surviving *_test.go in the
-// omenative/ops package (migrate_test.go, auto_migrate_test.go). The
-// per-Instance state-machine helpers that the deleted dispatch / restart
-// / timeouts / update tests relied on were removed alongside those tests
-// when the legacy OMENative direct path was retired.
+// omenative/ops package (migrate_test.go). The per-Instance
+// state-machine helpers that the deleted dispatch / restart / timeouts
+// / update tests relied on were removed alongside those tests when the
+// legacy OMENative direct path was retired.
 
 // minimalISVC builds an ISVC with the minimum metadata the detectors need.
 func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
@@ -54,26 +53,12 @@ func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client
 	}
 }
 
-// resetExpectations clears the process-level expectations singletons so
-// per-test create attempts aren't blocked by entries from a previous
-// test. Reseats BOTH core.DefaultExpectations and the workload
-// singleton because the dispatch shim's `deps.ExpectationsCache()`
-// fallback path reads workload's copy when params.Expectations is nil
-// (every test fixture in this package leaves it nil). The workload
-// singleton lives in workload/types; SetDefaultExpectations keeps the
-// workload alias mirror and the types-side var in lock-step.
-func resetExpectations(t *testing.T) {
-	t.Helper()
-	core.DefaultExpectations = core.NewExpectations()
-	workload.SetDefaultExpectations(workload.NewExpectations())
-}
-
 // newFakeClientWithDiscovery builds a controller-runtime fake client with
 // the schemes the omenative/ops tests touch (corev1 + v1beta1 +
 // discoveryv1 + appsv1). The status subresource is registered so
 // Status().Update mirrors API-server behavior. Detectors read per-instance
 // state from the authoritative InferenceReplica, so fixtures seed the IR
-// directly (see stuckInstanceFixture) — pass it alongside the ISVC.
+// directly — pass it alongside the ISVC.
 func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()

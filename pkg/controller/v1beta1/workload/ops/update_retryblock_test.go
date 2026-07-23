@@ -6,6 +6,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -649,6 +650,109 @@ func TestPatchReadyOnRevision_PrunesBlock(t *testing.T) {
 	}
 	if c := (*calls)[0]; c.rev != tcr.Name || c.disposition != workload.RetryBlockRemove {
 		t.Errorf("prune: got (rev=%q, disposition=%v) want (%q, Remove)", c.rev, c.disposition, tcr.Name)
+	}
+}
+
+// disposedBackfillFixture builds the deadline-disposed shape the
+// empty-RunningRevision backfill can encounter: Instance 0 is
+// Phase=Failed with NO Operation and NO RunningRevision, a Backoff
+// RetryBlock for the target revision is already due, and the wedged
+// attempt's pods are still present and spec-match the target. podReady
+// controls whether those pods carry ContainersReady. Returns the pod
+// separately so the caller threads it through instancePods.
+func disposedBackfillFixture(t *testing.T, t0 time.Time, podReady bool) (*workload.ReconcileInput, workload.ComponentPlan, *appsv1.ControllerRevision, *[]retryBlockCall, client.Client, *v1beta1.InferenceService, *corev1.Pod) {
+	t.Helper()
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	// Deadline disposition left: Failed, Operation cleared, no
+	// RunningRevision ever stamped (initial create never converged).
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceFailed
+	c := legacyNewFakeClient(t, isvc, ir)
+	tcr := legacyEnsureTargetCR(t, c, isvc, legacyTargetSpecImage("llama:v2"))
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	input.Clock = clocktesting.NewFakeClock(t0)
+	due := metav1.NewTime(t0.Add(-1 * time.Second))
+	calls := recordRetryBlockCalls(&input, []workload.RetryBlock{
+		{TargetRevision: tcr.Name, State: workload.RetryBlockBackoff, AttemptsStarted: 1, NextRetryAt: &due},
+	})
+	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+
+	// The wedged attempt's pod: spec-matches the target revision (a bad
+	// image ref always spec-matches its own bad revision).
+	pod := legacyPodForInstance(isvc, 0, podReady, false)
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "llama:v2"}}
+	if !podReady {
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "main",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+		}}
+	}
+	return &input, plan, tcr, calls, c, isvc, pod
+}
+
+// TestDetectUpdate_BackfillRefusesWedgedPods: the empty-RunningRevision
+// backfill must NOT stamp Ready / prune the target's RetryBlock off a
+// spec-match alone. A deadline-disposed create (Failed, no Operation,
+// pods present in ImagePullBackOff) spec-matches the very revision that
+// wedged it; stamping Ready here would prune the block and defuse the
+// retry machinery while nothing is actually serving.
+func TestDetectUpdate_BackfillRefusesWedgedPods(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, calls, c, isvc, pod := disposedBackfillFixture(t, t0, false /* podReady */)
+
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), []*corev1.Pod{pod})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("spec-matching pods must not trigger a fresh update")
+	}
+	if retryAfter != 0 {
+		t.Errorf("retryAfter: got %v want 0", retryAfter)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("MutateRetryBlock calls: got %d want 0 (block must survive — pods are not runtime-ready)", len(*calls))
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("phase: got %q want still Failed (no Ready stamp without proof)", s.Phase)
+	}
+	if s.RunningRevision != "" {
+		t.Errorf("RunningRevision: got %q want empty (no backfill without proof)", s.RunningRevision)
+	}
+}
+
+// TestDetectUpdate_BackfillAdoptsRuntimeReadyPods: the backfill's
+// legitimate purpose survives the guard — pods genuinely running the
+// target (runtime-ready) with a lost/never-written status record are
+// adopted: Ready stamped, RunningRevision backfilled, and the target's
+// block pruned (success at rev is real proof here).
+func TestDetectUpdate_BackfillAdoptsRuntimeReadyPods(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, calls, c, isvc, pod := disposedBackfillFixture(t, t0, true /* podReady */)
+
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), []*corev1.Pod{pod})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("runtime-ready spec-matching pods must not trigger an update")
+	}
+	if retryAfter != 0 {
+		t.Errorf("retryAfter: got %v want 0", retryAfter)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("MutateRetryBlock calls: got %d want 1 (success-prune)", len(*calls))
+	}
+	if call := (*calls)[0]; call.rev != tcr.Name || call.disposition != workload.RetryBlockRemove {
+		t.Errorf("prune: got (rev=%q, disposition=%v) want (%q, Remove)", call.rev, call.disposition, tcr.Name)
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("phase: got %q want Ready (legitimate adoption)", s.Phase)
+	}
+	if s.RunningRevision != tcr.Name {
+		t.Errorf("RunningRevision: got %q want %q (backfilled)", s.RunningRevision, tcr.Name)
 	}
 }
 

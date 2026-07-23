@@ -45,16 +45,23 @@ data:
     }
 
   {{- with .Values.ome.controller.lifecycle }}
+  {{- $fields := list }}
   {{- with .updateRetry }}
+  {{- $fields = append $fields (dict "updateRetry" (dict "maxAttempts" .maxAttempts "initialDelay" .initialDelay "maxDelay" .maxDelay "multiplier" .multiplier)) }}
+  {{- end }}
+  {{- with .stuckPodGracePeriod }}
+  {{- $fields = append $fields (dict "stuckPodGracePeriod" .) }}
+  {{- end }}
+  {{- with .autoMigrate }}
+  {{- $fields = append $fields (dict "autoMigrate" (dict "maxAttempts" .maxAttempts)) }}
+  {{- end }}
+  {{- if $fields }}
   lifecycle: |-
-    {
-      "updateRetry": {
-        "maxAttempts": {{ .maxAttempts }},
-        "initialDelay": "{{ .initialDelay }}",
-        "maxDelay": "{{ .maxDelay }}",
-        "multiplier": {{ .multiplier }}
-      }
-    }
+    {{- $merged := dict }}
+    {{- range $fields }}
+    {{- $merged = merge $merged . }}
+    {{- end }}
+    {{ $merged | toJson | nindent 4 }}
   {{- end }}
   {{- end }}
 

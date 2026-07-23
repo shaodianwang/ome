@@ -44,7 +44,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 		},
 	}
 
-	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), input, instances); err != nil {
+	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), wl.Deps{}, input, wl.EscalationParams{Instances: instances}); err != nil {
 		t.Fatalf("expire (before deadline): %v", err)
 	}
 	if len(mutated) != 0 {
@@ -53,7 +53,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 
 	// AT the deadline: now.After(deadline) is false — still no expiry.
 	fc.SetTime(deadline)
-	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), input, instances); err != nil {
+	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), wl.Deps{}, input, wl.EscalationParams{Instances: instances}); err != nil {
 		t.Fatalf("expire (at deadline): %v", err)
 	}
 	if len(mutated) != 0 {
@@ -61,7 +61,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 	}
 
 	fc.SetTime(deadline.Add(time.Second)) // 1s AFTER
-	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), input, instances); err != nil {
+	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), wl.Deps{}, input, wl.EscalationParams{Instances: instances}); err != nil {
 		t.Fatalf("expire (after deadline): %v", err)
 	}
 	if len(mutated) != 1 || mutated[0] != 0 {

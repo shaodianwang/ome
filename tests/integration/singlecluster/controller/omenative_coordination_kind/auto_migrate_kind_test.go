@@ -7,33 +7,35 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Auto-migration on stuck Instance — when a pod is stuck in
-// Phase=Creating / Updating longer than
-// MigrationPolicy.ProgressDeadlineSeconds, the controller self-triggers
-// a migration to recover. After MaxAutoRetries failed attempts the
-// Instance retry cap is reached and the ProgressDeadlineExceeded
-// condition is stamped; the Instance eventually reaches Phase=Failed.
+// Auto-relocation of a stuck Instance — the deadline disposition's
+// relocatable branch.
 //
-// The fixture uses a non-existent image so the pod never becomes
-// Ready. ProgressDeadlineSeconds=30s is the webhook-enforced minimum
-// (ValidateMigrationPolicy in pkg/webhook/admission/isvc). With
-// MaxAutoRetries=2, AutoMigrationTriggered fires at T+30s, and the
-// detector watches subsequent passes for cap exhaustion.
+// A single-pod engine parks Running-but-unready on one node (fake-serving
+// FAIL_ON_NODE: readiness fails only there — a node-scoped fault with NO
+// workload-caused kubelet waiting reason). When the Create attempt
+// exceeds InstanceReadyTimeout, the disposition records a TERMINAL
+// AutoRecover ledger entry (Phase=Completed, Outcome=relocate-recreate,
+// FromNode=<suspect node>) — a relocation directive, not a migration
+// work order (the migration detector ignores AutoRecover entries; no
+// surge machinery runs) — then clears the Operation and stamps
+// Phase=Failed. The normal rebuild recreates the pod with a required
+// NodeAffinity hostname NotIn exclusion for the recorded node, it lands
+// on a different node, converges Ready, and the directive entries are
+// pruned (placement proved; exclusion memory and budget reset).
 //
-// Deliberately do NOT set InstanceReadyTimeout on the fixture: the
-// timeouts escalator would otherwise fire Phase=Failed independently
-// of auto-migration, and isStuckPhase() returns false for Failed —
-// auto-migration would never trigger and ProgressDeadlineExceeded
-// would never be stamped. Controller behaviour is correct as
-// designed: once Failed, an operator investigates; we do NOT
-// auto-spin migrations.
-var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", ginkgo.Ordered, func() {
+// Initial placement is forced onto the failing node by cordoning the
+// other worker; it is uncordoned once the pod is parked so the rebuild
+// has an off-suspect home. The relocation budget comes from operator
+// config (lifecycle.autoMigrate.maxAttempts); MigrationPolicy.Mode=Auto
+// gates the branch.
+var _ = ginkgo.Describe("OMENative auto-relocation on stuck Instance (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
@@ -44,110 +46,101 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("stuck Instance triggers auto-migration; retry cap escalates to Phase=Failed", func() {
-		// Build the fixture with a bad image so the first pod NEVER
-		// becomes Ready. ProgressDeadlineSeconds=30s is the
-		// webhook-enforced minimum; MaxAutoRetries=2 keeps the budget
-		// short enough to fit in the suite wall-clock.
-		deadline := int32(30)
-		maxRetries := int32(2)
+	ginkgo.It("stuck Instance is relocated off the suspect node via a terminal AutoRecover directive", func() {
+		const (
+			isvcName = "auto-mig-am1"
+			podName  = isvcName + "-engine-0-default-0"
+		)
 
-		fix := newCoordFixture(ns.Name, WithISVCName("auto-mig-am1"),
+		workers := schedulableWorkerNodes(Default)
+		Expect(len(workers)).To(BeNumerically(">=", 2),
+			"relocation needs a second schedulable worker; got %v", workers)
+		failNode, spareNode := workers[0], workers[1]
+
+		configureFastDisposition()
+
+		// Cordon the spare so the first pod deterministically lands on
+		// the failing node. cordonNode's cleanup uncordons on any exit.
+		cordonNode(spareNode)
+
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
 			WithoutDecoder(),
-			WithEngineImage("ghcr.io/ome-projects/this-image-does-not-exist:v0"))
-		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
-			MigrationPolicy: &v1beta1.MigrationPolicy{
-				Mode:                    v1beta1.MigrationPolicyModeAuto,
-				ProgressDeadlineSeconds: &deadline,
-				MaxAutoRetries:          &maxRetries,
-			},
+			WithEngineUpdateStrategy(v1beta1.UpdateStrategyRecreatePod),
+			WithEngineImage("fake-serving:v1"))
+		withNodeScopedFailure(&fix.ISVC.Spec.Engine.PodSpec.Containers[0], failNode, "")
+		fix.ISVC.Spec.Engine.Lifecycle.MigrationPolicy = &v1beta1.MigrationPolicy{
+			Mode: v1beta1.MigrationPolicyModeAuto,
 		}
+		fix.ISVC.Spec.Engine.Lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 45 * time.Second}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		ginkgo.By("waiting for the first pod to land and enter Phase=Creating (it will NEVER become Ready)")
+		ginkgo.By("waiting for the pod to park Running-but-unready on the failing node")
+		var stuckUID types.UID
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "auto-mig-am1")
-			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			insts := instanceStatuses(g, ns.Name, "auto-mig-am1", v1beta1.EngineComponent)
-			g.Expect(insts).NotTo(BeEmpty())
-			// Phase will be Creating; pod will be ImagePullBackOff.
-			g.Expect(insts[0].Phase).
-				To(Equal(v1beta1.OMENativeInstanceCreating))
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: podName}, pod)).To(Succeed())
+			g.Expect(pod.Spec.NodeName).To(Equal(failNode),
+				"initial placement must hit the failing node (spare is cordoned)")
+			g.Expect(pod.Status.Phase).To(Equal(corev1.PodRunning),
+				"the node-scoped fault must leave the container Running (no kubelet waiting reason)")
+			stuckUID = pod.UID
+
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceCreating))
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("waiting for the controller to write the first synthetic AutoRecover audit ledger entry past the deadline")
-		Eventually(func(g Gomega) {
-			ledger := loadLedger(g, ns.Name, "auto-mig-am1")
-			autoRecoverCount := 0
-			for _, e := range ledger.Entries {
-				if e.Reason == "AutoRecover" && e.Component == "engine" {
-					autoRecoverCount++
-				}
-			}
-			g.Expect(autoRecoverCount).To(BeNumerically(">=", 1),
-				"expected at least one AutoRecover audit ledger entry past ProgressDeadlineSeconds=30s; got %+v", ledger.Entries)
-		}).WithTimeout(2 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
+		// Give the rebuild somewhere off-suspect to land BEFORE the
+		// deadline disposition fires.
+		setNodeUnschedulable(spareNode, false)
 
-		ginkgo.By("waiting for the AutoMigrationTriggered event on the ISVC")
+		ginkgo.By("waiting for the terminal AutoRecover relocation directive in the audit ledger")
 		Eventually(func(g Gomega) {
-			events := &corev1.EventList{}
-			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
-			gotEvent := false
-			for _, e := range events.Items {
-				if e.InvolvedObject.Name == "auto-mig-am1" && e.Reason == "AutoMigrationTriggered" {
-					gotEvent = true
-					break
-				}
-			}
-			g.Expect(gotEvent).To(BeTrue(), "expected AutoMigrationTriggered event")
+			entries := autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine")
+			g.Expect(entries).NotTo(BeEmpty(),
+				"expected an AutoRecover directive after InstanceReadyTimeout")
+			e := entries[0]
+			g.Expect(e.Phase).To(Equal("Completed"), "directives are recorded TERMINAL")
+			g.Expect(e.Outcome).To(Equal("relocate-recreate"))
+			g.Expect(e.FromNode).To(Equal(failNode))
+			g.Expect(e.SourceInstance).To(Equal(int32(0)))
+			g.Expect(e.SurgeInstance).To(Equal(int32(0)),
+				"a directive is not a migration work order; no surge index is ever allocated")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("waiting for the retry cap to be reached and Phase=Failed + ProgressDeadlineExceeded condition stamped")
-		// Worst-case budget: 2 retries × ProgressDeadlineSeconds=30s +
-		// surge create + drain + ledger write headroom ≈ 3-5 minutes.
-		// 8 minutes is a comfortable ceiling.
+		ginkgo.By("expecting the AutoMigrationTriggered event on the ISVC")
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "auto-mig-am1")
-			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			insts := instanceStatuses(g, ns.Name, "auto-mig-am1", v1beta1.EngineComponent)
-			g.Expect(insts).NotTo(BeEmpty())
-			// Find the original source InstanceStatus — it's the one
-			// stuck at the auto-migration trigger point. Surge indices
-			// are different.
-			foundFailedWithCondition := false
-			for _, s := range insts {
-				if s.Phase != v1beta1.OMENativeInstanceFailed {
-					continue
-				}
-				for _, c := range s.Conditions {
-					if c.Type == "ProgressDeadlineExceeded" && c.Status == metav1.ConditionTrue {
-						foundFailedWithCondition = true
-						break
-					}
-				}
-				if foundFailedWithCondition {
-					break
-				}
-			}
-			g.Expect(foundFailedWithCondition).To(BeTrue(),
-				"expected at least one InstanceStatus with Phase=Failed + ProgressDeadlineExceeded condition; got %+v", insts)
-		}).WithTimeout(8 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
+			eventHasReasonInvolving(g, ns.Name, "AutoMigrationTriggered", "InferenceService", isvcName)
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("expecting an AutoMigrationCapReached warning event")
+		ginkgo.By("waiting for the rebuild to recreate the pod off the recorded node with the NotIn exclusion")
 		Eventually(func(g Gomega) {
-			events := &corev1.EventList{}
-			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
-			gotCap := false
-			for _, e := range events.Items {
-				if e.InvolvedObject.Name == "auto-mig-am1" && e.Reason == "AutoMigrationCapReached" {
-					gotCap = true
-					break
-				}
-			}
-			g.Expect(gotCap).To(BeTrue(), "expected AutoMigrationCapReached event after retry budget exhausted")
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: podName}, pod)).To(Succeed())
+			g.Expect(pod.UID).NotTo(Equal(stuckUID), "relocation must recreate the pod (new UID)")
+			g.Expect(podExcludesHostname(pod, failNode)).To(BeTrue(),
+				"recreated pod must carry a required kubernetes.io/hostname NotIn[%s] term; affinity=%+v",
+				failNode, pod.Spec.Affinity)
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty(), "recreated pod must schedule")
+			g.Expect(pod.Spec.NodeName).NotTo(Equal(failNode),
+				"recreated pod must land off the suspect node")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("waiting for the Instance to converge Ready off the suspect node")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Index).To(Equal(int32(0)),
+				"relocation rebuilds the SAME instance index; no surge index appears")
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the directive entries to be pruned once the Instance is Ready")
+		Eventually(func(g Gomega) {
+			entries := autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine")
+			g.Expect(entries).To(BeEmpty(),
+				"Ready proves the placement; exclusion memory and budget must reset; got %+v", entries)
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

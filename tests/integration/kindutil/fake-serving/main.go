@@ -11,6 +11,13 @@
 //	                       (kubelet sees liveness/readiness fail)
 //	FAIL_AT=after-Nm       run normally for N minutes, then exit 1
 //	                       (delayed crash, soak-test the recovery path)
+//	FAIL_ON_NODE=<node>    return 503 to /healthz only while running on
+//	                       <node> — a node-scoped fault: the identical
+//	                       workload is healthy on any other node. The
+//	                       pod spec supplies NODE_NAME via a fieldRef.
+//	FAIL_ON_POD=<pod>      narrows FAIL_ON_NODE to one pod name (the
+//	                       pod spec supplies POD_NAME via a fieldRef);
+//	                       other pods on the failing node stay healthy.
 //	STARTUP_DELAY_SEC=N    sleep N seconds before binding (slow start)
 //	(unset)                normal pod
 //
@@ -52,9 +59,15 @@ func main() {
 		}()
 	}
 
+	nodeFault := nodeScopedFault()
+
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if failAt == "ready" {
 			http.Error(w, "FAIL_AT=ready", http.StatusServiceUnavailable)
+			return
+		}
+		if nodeFault {
+			http.Error(w, "FAIL_ON_NODE="+os.Getenv("FAIL_ON_NODE"), http.StatusServiceUnavailable)
 			return
 		}
 		fmt.Fprintln(w, "ok")
@@ -65,6 +78,19 @@ func main() {
 		fmt.Printf("listen error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// nodeScopedFault reports whether this process should fail readiness
+// because it landed on the FAIL_ON_NODE node (optionally narrowed to
+// the FAIL_ON_POD pod). NODE_NAME / POD_NAME come from pod-spec
+// fieldRefs; unset FAIL_ON_NODE means no node-scoped fault.
+func nodeScopedFault() bool {
+	failNode := os.Getenv("FAIL_ON_NODE")
+	if failNode == "" || failNode != os.Getenv("NODE_NAME") {
+		return false
+	}
+	failPod := os.Getenv("FAIL_ON_POD")
+	return failPod == "" || failPod == os.Getenv("POD_NAME")
 }
 
 // parseAfterMinutes extracts N from a "after-Nm" FAIL_AT value.

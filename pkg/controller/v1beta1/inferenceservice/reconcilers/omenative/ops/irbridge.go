@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -50,33 +49,4 @@ func DetectMigrationRequestForISVC(
 		Component: component,
 	}
 	return detectMigrationRequest(ctx, p, component)
-}
-
-// DetectStuckInstancesForISVC self-triggers auto-migration for Instances
-// of `component` stuck past MigrationPolicy.ProgressDeadlineSeconds, by
-// writing synthetic AutoRecover ledger entries the next
-// DetectMigrationRequest pass picks up. Wraps
-// detectStuckInstancesForAutoMigration for the IR controller. componentExt
-// carries the Component's Lifecycle (→ MigrationPolicy); the IR builds it
-// from ir.Spec.Lifecycle. No-op when ProgressDeadlineSeconds is unset.
-func DetectStuckInstancesForISVC(
-	ctx context.Context,
-	isvc *v1beta1.InferenceService,
-	componentExt *v1beta1.ComponentExtensionSpec,
-	reader client.Reader,
-	c client.Client,
-	recorder record.EventRecorder,
-	clk clock.Clock,
-	component v1beta1.ComponentType,
-) error {
-	p := core.ReconcileParams{
-		ISVC:         isvc,
-		ComponentExt: componentExt,
-		Client:       c,
-		APIReader:    reader,
-		Recorder:     recorder,
-		Clock:        clk,
-		Component:    component,
-	}
-	return detectStuckInstancesForAutoMigration(ctx, p, component)
 }

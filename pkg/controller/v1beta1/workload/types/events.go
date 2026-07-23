@@ -33,6 +33,34 @@ const (
 	// manually.
 	EventReasonFoundOrphan EventReason = "FoundOrphan"
 
+	// EventReasonAutoMigrationTriggered fires when the deadline
+	// disposition records a relocation directive (terminal AutoRecover
+	// ledger entry) for a stuck Instance — its rebuild will be steered
+	// off the recorded node. Value matches the legacy omenative
+	// detector's reason string.
+	EventReasonAutoMigrationTriggered EventReason = "AutoMigrationTriggered"
+
+	// EventReasonAutoMigrationCapReached fires exactly once per budget
+	// fill — when the disposition records the relocation directive that
+	// exhausts the (component, instance) AutoRecover budget
+	// (lifecycle.autoMigrate.maxAttempts). Subsequent over-budget
+	// dispositions dispose terminal silently. Operator intervention (or
+	// an instance reaching Ready, which prunes its records) is required
+	// before relocation resumes.
+	EventReasonAutoMigrationCapReached EventReason = "AutoMigrationCapReached"
+
+	// EventReasonInstanceFailed fires when an escalation backstop (the
+	// stuck-pod fast path or the deadline disposition) stamps an
+	// Instance Phase=Failed. Emitted by adapters through
+	// ReconcileInput.WarnInstanceFailed.
+	EventReasonInstanceFailed EventReason = "InstanceFailed"
+
+	// EventReasonRetryHeld fires once, at the RetryBlock transition into
+	// State=Held — same-target update retries exhausted; a corrected
+	// revision (or raised retry limits) is required. Emitted by adapters
+	// through ReconcileInput.WarnRetryHeld.
+	EventReasonRetryHeld EventReason = "RetryHeld"
+
 	// Migration (workload/ops/migrate.go).
 	EventReasonMigrationRequestAccepted      EventReason = "MigrationRequestAccepted"
 	EventReasonMigrationRequestRejected      EventReason = "MigrationRequestRejected"

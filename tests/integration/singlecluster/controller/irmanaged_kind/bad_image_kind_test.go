@@ -32,7 +32,8 @@ import (
 //
 //  1. The engine bump produces a surge pod stuck in ImagePullBackOff
 //     (the original v1 pod stays serving — capacity preserved).
-//  2. Within ~StuckPodFailureGracePeriod (60s) of the surge pod
+//  2. Within ~the config-driven stuck-pod grace (lifecycle
+//     stuckPodGracePeriod, 60s in this suite) of the surge pod
 //     reaching the terminal kubelet state, the IR controller's
 //     aggregator escalates the per-Instance Phase to Failed.
 //  3. The IR's Ready condition flips to False/InstanceFailed.
@@ -71,7 +72,7 @@ var _ = ginkgo.Describe("IR-managed OMENative bad-image failure", ginkgo.Ordered
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting the IR aggregator to escalate the Instance to Phase=Failed within the stuck-pod grace + kubelet pull-retry budget")
-		// Budget = StuckPodFailureGracePeriod (60s) + kubelet pull-retry
+		// Budget = stuckPodGracePeriod (60s) + kubelet pull-retry
 		// backoff (~60s worst case) + reconcile/status-flush headroom.
 		// 3 minutes is comfortable. Asserts on IR.Status.InstanceStatuses
 		// directly: that's the surface the omenative status_aggregate

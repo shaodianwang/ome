@@ -97,29 +97,45 @@ func createFiltered(ctx context.Context, deps workload.Deps, input workload.Reco
 	byInstance := query.BucketPodsByInstanceIdx(existing)
 
 	allReady := true
+	// retryBlockWait is the earliest not-yet-due Backoff RetryBlock
+	// wake-up reported by a gated instance; folded into the pass result
+	// below so the gate is re-evaluated exactly on time (never a busy
+	// poll, never a missed wake-up).
+	var retryBlockWait time.Duration
 	for _, inst := range plan.Instances {
 		if !keep(inst.Index) {
 			continue
 		}
-		ready, err := reconcileInstance(ctx, deps, input, plan, inst, byInstance[inst.Index], target)
+		ready, retryAfter, err := reconcileInstance(ctx, deps, input, plan, inst, byInstance[inst.Index], target)
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
+			retryBlockWait = retryAfter
 		}
 		if !ready {
 			allReady = false
 		}
 	}
 
+	res := ctrl.Result{}
 	if !allReady {
-		return ctrl.Result{RequeueAfter: CreateRequeueInterval}, nil
+		res.RequeueAfter = CreateRequeueInterval
 	}
-	return ctrl.Result{}, nil
+	// Additive fold, mirroring the dispatcher's foldRetryAfter: take the
+	// earlier wake-up, never remove one.
+	if retryBlockWait > 0 && (res.RequeueAfter == 0 || retryBlockWait < res.RequeueAfter) {
+		res.RequeueAfter = retryBlockWait
+	}
+	return res, nil
 }
 
 // reconcileInstance drives one Instance toward Ready. Returns ready=true
 // only when every pod is runtime-ready and ome.io/serving=True. target has
-// the same nil-OK semantics as Create.
-func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (bool, error) {
+// the same nil-OK semantics as Create. retryAfter > 0 means the instance
+// was skipped by a not-yet-due Backoff RetryBlock for the target
+// revision; re-evaluate then.
+func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (ready bool, retryAfter time.Duration, err error) {
 	desired := expectedPodNamesForInstance(input, plan, inst)
 	existingByName := query.IndexPodsByName(existing)
 
@@ -133,6 +149,30 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 	// Only patch Creating when there's something to create — otherwise the
 	// next pass would oscillate status back to Creating after Ready.
 	if len(missing) > 0 {
+		// Disposed fresh-start gate. A deadline-disposed create leaves the
+		// instance Failed-with-no-Operation — a fresh start — so without
+		// this gate the pass would re-materialize pods at the same bad
+		// revision every reconcile, bypassing the RetryBlock the
+		// disposition recorded. Gate on the block for the revision these
+		// pods would stamp (target). An absent status slot gates too: a
+		// scale-up onto a blocked revision materializes the same wedged
+		// pods. Instances with no block for the target — genuinely-new
+		// scale-ups — pass untouched. Denial is a skip, not un-readiness:
+		// Held has no wake-up (a corrected revision re-triggers via watch)
+		// and Backoff surfaces its NextRetryAt to the caller.
+		if target != nil {
+			s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+			freshStart := s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
+			if freshStart {
+				if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); b != nil {
+					attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) ||
+						anyInFlightCreateAttempt(input.ObservedState.InstanceStatuses)
+					if denied, wait := evaluateRetryBlockGate(b, input.Now(), attemptInFlight); denied {
+						return true, wait, nil
+					}
+				}
+			}
+		}
 		// RecreateInstance owns partial-Instance recovery. When an Instance
 		// that already reached Ready loses a pod (some present, some missing),
 		// recreating only the missing pod here races the Restart pass — which
@@ -147,14 +187,14 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		// Create's responsibility.
 		if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
 			if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil && s.Phase == workload.InstancePhaseReady {
-				return false, nil
+				return false, 0, nil
 			}
 		}
 		// Capture before patch — findInstanceStatus reads ObservedState,
 		// so the patch below doesn't backfill this view.
 		isFirstCreate := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index) == nil
-		if err := patchInstanceStatusCreating(ctx, input, inst.Index, inst.Incarnation, plan.InstanceReadyTimeout); err != nil {
-			return false, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
+		if err := patchInstanceStatusCreating(ctx, input, inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, revisionNameFromTarget(target)); err != nil {
+			return false, 0, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
 		}
 		if isFirstCreate {
 			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceCreated,
@@ -163,18 +203,18 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		}
 
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
-			return false, nil
+			return false, 0, nil
 		}
 
 		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, missing, revisionHashFromTarget(target)); err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, nil
+		return false, 0, nil
 	}
 
 	// All desired pods exist. Are they runtime-Ready?
 	if !query.AllPodsRuntimeReady(existing) {
-		return false, nil
+		return false, 0, nil
 	}
 
 	// Flip ome.io/serving=True. For freshly-created pods the condition
@@ -184,7 +224,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 			continue
 		}
 		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
-			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			return false, 0, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}
 
@@ -215,7 +255,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		promoteErr = patchInstanceStatusReady(ctx, input, inst.Index)
 	}
 	if promoteErr != nil {
-		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, promoteErr)
+		return false, 0, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, promoteErr)
 	}
 	if !wasReady {
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceReady,
@@ -230,7 +270,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 			obsmetrics.RecordPodCreateToReady(string(input.Key.Component), time.Since(earliest).Seconds())
 		}
 	}
-	return true, nil
+	return true, 0, nil
 }
 
 // earliestPodCreation returns the oldest CreationTimestamp across the
@@ -427,13 +467,27 @@ func revisionHashFromTarget(target *appsv1.ControllerRevision) string {
 	return query.RevisionHashFromControllerRevisionName(target.Name)
 }
 
+// revisionNameFromTarget returns target.Name, or "" for a nil target.
+func revisionNameFromTarget(target *appsv1.ControllerRevision) string {
+	if target == nil {
+		return ""
+	}
+	return target.Name
+}
+
 // patchInstanceStatusCreating idempotently stamps Phase=Creating with the
 // Create operation and a Deadline of StartedAt+timeout. incarnation is
 // written on first-touch; existing nonzero values are preserved so a
 // post-restart reconcile doesn't downgrade the lifecycle token.
-func patchInstanceStatusCreating(ctx context.Context, input workload.ReconcileInput, idx int32, incarnation int64, timeout time.Duration) error {
+//
+// targetRev is the revision the created pods will carry. Like the
+// Update stampers, the attempt stamp — not the gate — flips a due
+// Backoff RetryBlock to RetryInProgress: the flip must be
+// co-transactional with the attempt actually starting, so wave counting
+// can't double-count a pass that gated-allowed but never stamped.
+func patchInstanceStatusCreating(ctx context.Context, input workload.ReconcileInput, idx int32, incarnation int64, timeout time.Duration, targetRev string) error {
 	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseCreating &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate &&
 			s.Incarnation > 0 {
@@ -453,6 +507,13 @@ func patchInstanceStatusCreating(ctx context.Context, input workload.ReconcileIn
 		}
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	if targetRev == "" {
+		return nil
+	}
+	return flipRetryBlockOnAttemptStart(ctx, input, targetRev)
 }
 
 // patchInstanceStatusReady idempotently moves to Phase=Ready, clears Operation.

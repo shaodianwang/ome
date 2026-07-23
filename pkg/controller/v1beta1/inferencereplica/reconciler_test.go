@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -776,4 +779,29 @@ func intToLabel(n int64) string {
 		b[pos] = '-'
 	}
 	return string(b[pos:])
+}
+
+// newReconcilerWithGrace returns a reconciler with a fake clientset that
+// supplies the given stuck-pod grace period, so fast-escalation tests work
+// without wiring a real config cache.
+func newReconcilerWithGrace(t *testing.T, grace time.Duration, objs ...client.Object) (*Reconciler, client.Client) {
+	t.Helper()
+	r, c := newReconciler(t, objs...)
+
+	// Wire a fake clientset + config cache that resolves the grace.
+	lifecycleCfg := fmt.Sprintf(`{"stuckPodGracePeriod":"%s"}`, grace.String())
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "inferenceservice-config",
+			Namespace: "ome",
+		},
+		Data: map[string]string{
+			"lifecycle": lifecycleCfg,
+		},
+	}
+	fakeCS := kubefake.NewSimpleClientset(cm)
+	r.Clientset = fakeCS
+	r.ConfigCache = controllerconfig.NewConfigCache(0) // zero TTL = always refetch
+
+	return r, c
 }

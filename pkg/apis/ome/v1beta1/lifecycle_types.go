@@ -545,46 +545,26 @@ const (
 	InstanceReadyPolicyNone InstanceReadyPolicy = "None"
 )
 
-// MigrationPolicy controls whether and how OMENative honors a
-// migration request annotation for this Component.
+// MigrationPolicy controls whether and how OMENative honors migration requests
+// (both automatic deadline-disposition relocation and explicit annotation-triggered migration).
 type MigrationPolicy struct {
-	// Mode selects the migration disposition. Defaults to auto.
+	// Mode gates migration: Auto enables both deadline-disposition relocation and
+	// explicit migration requests; Never disables both. Defaults to Auto.
 	// +optional
 	Mode MigrationPolicyMode `json:"mode,omitempty"`
-
-	// ProgressDeadlineSeconds is the maximum time an Instance may remain
-	// in Phase=Updating or Phase=Creating before the controller
-	// self-triggers a migration to recover from a stuck pod
-	// (e.g. node failure, scheduler wedged, image-pull stuck).
-	// Optional; when unset, auto-migration is disabled and only
-	// explicit migration requests are honored.
-	// Has no effect when Mode is "Never".
-	// +optional
-	// +kubebuilder:validation:Minimum=30
-	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
-
-	// MaxAutoRetries caps how many times the controller will self-trigger
-	// a migration for the same Instance before escalating to
-	// Phase=Failed with a ProgressDeadlineExceeded condition. Defaults to 3.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=10
-	MaxAutoRetries *int32 `json:"maxAutoRetries,omitempty"`
 }
 
-// MigrationPolicyMode is the requested migration disposition.
-// In v1, `Auto` resolves to `Surge` or rejection — there is no rolling
-// per-pod migration path.
+// MigrationPolicyMode gates migration mechanisms for a Component.
 // +kubebuilder:validation:Enum=Auto;Surge;Never
 type MigrationPolicyMode string
 
 const (
-	// MigrationPolicyModeAuto lets OMENative pick the mechanism.
-	// In v1 this resolves to Surge when capacity is available, or rejection.
+	// MigrationPolicyModeAuto enables automatic relocation on deadline expiry
+	// and honors explicit migration requests.
 	MigrationPolicyModeAuto MigrationPolicyMode = "Auto"
-	// MigrationPolicyModeSurge forces surge migration.
+	// MigrationPolicyModeSurge forces surge migration when capacity is available.
 	MigrationPolicyModeSurge MigrationPolicyMode = "Surge"
-	// MigrationPolicyModeNever opts the Component out of migration
-	// entirely. Migration requests are rejected with reason MigrationDisabled.
+	// MigrationPolicyModeNever disables all migration. Migration requests
+	// are rejected with reason MigrationDisabled.
 	MigrationPolicyModeNever MigrationPolicyMode = "Never"
 )

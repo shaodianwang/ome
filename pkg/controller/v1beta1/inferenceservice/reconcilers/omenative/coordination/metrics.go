@@ -64,7 +64,7 @@ var (
 	autoMigrationsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ome_omenative_auto_migrations_total",
-			Help: "Count of auto-triggered migrations the controller initiated to recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds, per (namespace, isvc, component, reason).",
+			Help: "Count of relocation directives the deadline disposition recorded to recover an Instance whose attempt expired (config-driven stuckPodGracePeriod / instanceReadyTimeout), per (namespace, isvc, component, reason).",
 		},
 		[]string{"namespace", "isvc", "component", "reason"},
 	)
@@ -92,8 +92,10 @@ func init() {
 }
 
 // RecordAutoMigrationTriggered increments the auto-migration counter
-// when the controller writes a synthetic migration ledger entry to
-// recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds.
+// when the deadline disposition records a relocation directive
+// (terminal AutoRecover ledger entry) for an Instance whose attempt
+// expired via the config-driven stuckPodGracePeriod fast path or the
+// instanceReadyTimeout backstop.
 func RecordAutoMigrationTriggered(namespace, isvc, component, reason string) {
 	if isvc == "" || component == "" || reason == "" {
 		return

@@ -160,9 +160,10 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	// 2. Create the replacement gang at k on the target revision (leader
 	// + workers; createMissingPods picks the per-runner spec).
 	surgeInst := workload.InstancePlan{
-		Index:       surgeIdx,
-		Incarnation: 1,
-		Runners:     append([]workload.RunnerPlan(nil), inst.Runners...),
+		Index:         surgeIdx,
+		Incarnation:   1,
+		Runners:       append([]workload.RunnerPlan(nil), inst.Runners...),
+		ExcludedNodes: inst.ExcludedNodes, // Exclusion memory follows the instance through surge replacement.
 	}
 	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
 	if err != nil {
