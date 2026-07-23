@@ -48,6 +48,10 @@ type (
 	InstanceReadyPolicy     = types.InstanceReadyPolicy
 	MigrationPolicy         = types.MigrationPolicy
 	ComponentTrafficTarget  = types.ComponentTrafficTarget
+	RetryBlock              = types.RetryBlock
+	RetryBlockState         = types.RetryBlockState
+	RetryBlockDisposition   = types.RetryBlockDisposition
+	RetryPolicy             = types.RetryPolicy
 )
 
 const (
@@ -106,6 +110,14 @@ const (
 	EventReasonMigrationNodeAffinityConflict = types.EventReasonMigrationNodeAffinityConflict
 	EventReasonMaybeNoGangScheduler          = types.EventReasonMaybeNoGangScheduler
 	EventReasonGangSplitRisk                 = types.EventReasonGangSplitRisk
+
+	RetryBlockBackoff         = types.RetryBlockBackoff
+	RetryBlockHeld            = types.RetryBlockHeld
+	RetryBlockRetryInProgress = types.RetryBlockRetryInProgress
+
+	RetryBlockUnchanged = types.RetryBlockUnchanged
+	RetryBlockPersist   = types.RetryBlockPersist
+	RetryBlockRemove    = types.RetryBlockRemove
 
 	ConditionGangSchedulingUnavailable = types.ConditionGangSchedulingUnavailable
 

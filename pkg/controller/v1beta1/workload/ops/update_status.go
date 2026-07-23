@@ -61,12 +61,34 @@ func isSurgeUpdateStep(step string) bool {
 		step == updateStepSurgeDrainSettle
 }
 
+// flipRetryBlockOnAttemptStart marks an existing due-Backoff RetryBlock
+// RetryInProgress once a fresh Update attempt actually starts — i.e.
+// after every dispatcher budget/coordination gate admitted it (flipping
+// at detect time would strand RetryInProgress when a budget denies the
+// start). No block, or any non-Backoff state, records nothing: a fresh
+// start with no prior failure needs no block. Idempotent across passes.
+func flipRetryBlockOnAttemptStart(ctx context.Context, input workload.ReconcileInput, targetRev string) error {
+	if input.MutateRetryBlock == nil {
+		return nil
+	}
+	if err := input.MutateRetryBlock(ctx, targetRev, func(rb *workload.RetryBlock) workload.RetryBlockDisposition {
+		if rb.State != workload.RetryBlockBackoff {
+			return workload.RetryBlockUnchanged
+		}
+		rb.State = workload.RetryBlockRetryInProgress
+		return workload.RetryBlockPersist
+	}); err != nil {
+		return fmt.Errorf("mark retry in progress (rev=%s): %w", targetRev, err)
+	}
+	return nil
+}
+
 // patchInstanceStatusUpdating idempotently stamps Phase=Updating with the
 // Update operation in Step=InPlace at targetRev. Skip-write requires
 // Step==InPlace so a previous recreate-step write doesn't short-circuit.
 func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 			s.Operation.Step == updateStepInPlace &&
@@ -86,6 +108,10 @@ func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileIn
 		}
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	return flipRetryBlockOnAttemptStart(ctx, input, targetRev)
 }
 
 // patchInstanceStatusRecreatingForUpdate is the recreate entry point.
@@ -125,7 +151,10 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 		}
 		return true
 	})
-	return observedIncarnation, err
+	if err != nil {
+		return observedIncarnation, err
+	}
+	return observedIncarnation, flipRetryBlockOnAttemptStart(ctx, input, targetRev)
 }
 
 // (patchInstanceStatusReadyOnRevision lives in create.go — the in-place,
@@ -146,7 +175,7 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 // TargetRevision but a different Step namespace).
 func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		// Already surging toward this target — no-op. The Phase check
 		// admits BOTH an in-flight Updating instance AND one the stuck-pod
 		// escalator has since flipped to Failed. Resurrecting a Failed
@@ -176,6 +205,10 @@ func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.Rec
 		}
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	return flipRetryBlockOnAttemptStart(ctx, input, targetRev)
 }
 
 // patchInstanceStatusSurgeStepDrain transitions the surge operation
@@ -225,9 +258,9 @@ func patchInstanceStatusSurgeStepSettle(ctx context.Context, input workload.Reco
 // patchInstanceStatusReadyOnRevision because surge needs to ALSO bump
 // ActiveOrdinal — the old pod is gone, the surge pod is the new
 // canonical pod, and future restart / scale-up paths must address that
-// slot.
+// slot. Success at rev also prunes rev's RetryBlock.
 func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input workload.ReconcileInput, idx int32, rev string, newOrdinal int32) error {
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseReady &&
 			s.Operation == nil &&
 			s.RunningRevision == rev &&
@@ -242,6 +275,10 @@ func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input wo
 		s.ActiveOrdinal = newOrdinal
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	return pruneRetryBlockOnPromote(ctx, input, rev)
 }
 
 // patchInstanceStatusGangSurging stamps the SOURCE Instance of a gang
@@ -251,7 +288,7 @@ func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input wo
 // (new index) from a single-pod surge (ActiveOrdinal toggle). Idempotent.
 func patchInstanceStatusGangSurging(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating && s.Operation != nil &&
 			s.Operation.Type == workload.InstanceOperationUpdate &&
 			s.Operation.Step == updateStepSurge && s.Operation.SurgeIndex != nil &&
@@ -273,10 +310,16 @@ func patchInstanceStatusGangSurging(ctx context.Context, input workload.Reconcil
 		}
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	return flipRetryBlockOnAttemptStart(ctx, input, targetRev)
 }
 
 // patchInstanceStatusGangSurgeTarget stamps the TARGET (surge) index of a
-// gang surge: Phase=Creating, Op{Update, Step=GangSurgeTarget}. The
+// gang surge: Phase=Creating, Op{Update, Step=GangSurgeTarget}. Same
+// attempt patchInstanceStatusGangSurging already flipped the RetryBlock
+// for — no flip here (once per attempt, source side). The
 // marker pins the index in instancePlanIndices so EnsurePodGroups creates
 // its PodGroup and scale-down won't delete it. Creates the InstanceStatus
 // if absent. Idempotent.

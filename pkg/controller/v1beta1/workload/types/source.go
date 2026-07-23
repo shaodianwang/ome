@@ -108,6 +108,11 @@ type WorkloadObservedState struct {
 
 	// Conditions reports component-level conditions.
 	Conditions []metav1.Condition
+
+	// RetryBlocks mirrors the owner's persisted per-revision retry
+	// authority. Read-only from workload code; writes go through
+	// ReconcileInput.MutateRetryBlock.
+	RetryBlocks []RetryBlock
 }
 
 // WorkloadAggregateStatus is the per-reconcile flush of counters,

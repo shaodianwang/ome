@@ -109,6 +109,11 @@ type ReconcileInput struct {
 	// No-op adapters wire `func(_ int32, _, _ string) {}`.
 	WarnInstanceFailed func(idx int32, podName, reason string)
 
+	// WarnRetryHeld emits the operator-facing Warning when a revision's
+	// retry budget exhausts (spec: emitted at the Held transition, once).
+	// Nil-safe: unset means no event.
+	WarnRetryHeld func(targetRevision string, attempts int32, reason string)
+
 	// DetectMigrationRequest, when non-nil, returns the next migration
 	// to drive. Source-of-truth carriers are adapter-specific
 	// (ISVC annotations + audit ledger; IR equivalent).
@@ -130,6 +135,18 @@ type ReconcileInput struct {
 	//
 	// Nil is treated as always-allowed.
 	UpdateGate func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (allowed bool, denyReason string)
+
+	// MutateRetryBlock reads-modifies-writes the owner's persisted
+	// RetryBlock for targetRevision. mutate receives the existing block
+	// (or a zero block with TargetRevision set) and returns whether to
+	// persist, remove, or leave it. Nil closure disables retry-block
+	// WRITES only; the update-trigger gate still honors blocks present
+	// in ObservedState.RetryBlocks.
+	MutateRetryBlock func(ctx context.Context, targetRevision string, mutate func(*RetryBlock) RetryBlockDisposition) error
+
+	// UpdateRetryPolicy bounds automatic same-target update retries.
+	// nil = unconfigured → fail-safe: first failure Holds.
+	UpdateRetryPolicy *RetryPolicy
 
 	// Clock mirrors Deps.Clock for helpers that receive only the input.
 	// See Deps.Now for the rule.

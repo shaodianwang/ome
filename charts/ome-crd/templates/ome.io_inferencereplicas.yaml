@@ -3853,6 +3853,40 @@ spec:
                 replicas:
                   format: int32
                   type: integer
+                retryBlocks:
+                  items:
+                    properties:
+                      attemptsStarted:
+                        format: int32
+                        type: integer
+                      firstFailureAt:
+                        format: date-time
+                        type: string
+                      lastFailureAt:
+                        format: date-time
+                        type: string
+                      nextRetryAt:
+                        format: date-time
+                        type: string
+                      reason:
+                        type: string
+                      state:
+                        enum:
+                          - Backoff
+                          - Held
+                          - RetryInProgress
+                        type: string
+                      targetRevision:
+                        type: string
+                    required:
+                      - attemptsStarted
+                      - state
+                      - targetRevision
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - targetRevision
+                  x-kubernetes-list-type: map
                 servingReplicas:
                   format: int32
                   type: integer

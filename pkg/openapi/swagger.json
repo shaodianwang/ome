@@ -1958,6 +1958,18 @@
           "type": "integer",
           "format": "int32"
         },
+        "retryBlocks": {
+          "description": "RetryBlocks records per-target-revision retry authority for update attempts. Revision-scoped: one block per failed target revision, shared by every Instance attempting it — allocating a new Instance cannot evade the block.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RetryBlock"
+          },
+          "x-kubernetes-list-map-keys": [
+            "targetRevision"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
         "servingReplicas": {
           "description": "ServingReplicas is the number of Instances whose every pod is both ContainersReady AND has serving=True on the controller-managed readiness gate (i.e., actually in the load balancer rotation). MaxUnavailable budgets are computed against this count, not ReadyReplicas, so \"missing from traffic\" reflects reality during in-place updates.",
           "type": "integer",
@@ -3605,6 +3617,46 @@
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
           }
+        }
+      }
+    },
+    "v1beta1.RetryBlock": {
+      "description": "RetryBlock is the persisted per-revision retry authority. The subject is the owning IR plus TargetRevision.",
+      "type": "object",
+      "required": [
+        "targetRevision",
+        "state",
+        "attemptsStarted"
+      ],
+      "properties": {
+        "attemptsStarted": {
+          "description": "AttemptsStarted counts lifecycle attempts at this revision. Kubelet container restarts are diagnostic and not counted here.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "firstFailureAt": {
+          "$ref": "#/definitions/v1.Time"
+        },
+        "lastFailureAt": {
+          "$ref": "#/definitions/v1.Time"
+        },
+        "nextRetryAt": {
+          "description": "NextRetryAt is the persisted resume time while State=Backoff. Never recomputed from process-local history (restart-safe).",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "reason": {
+          "description": "Reason is the operator-facing last-failure summary.",
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "default": ""
+        },
+        "targetRevision": {
+          "description": "TargetRevision is the ControllerRevision name this block scopes.",
+          "type": "string",
+          "default": ""
         }
       }
     },

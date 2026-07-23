@@ -18,6 +18,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 const (
@@ -28,6 +29,7 @@ const (
 	CanaryAnalysisConfigName = "canaryAnalysis"
 	CoordinationConfigName   = "coordination"
 	PodMonitorConfigName     = "podMonitor"
+	LifecycleConfigName      = "lifecycle"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -257,6 +259,100 @@ type CoordinationConfig struct {
 	// write-on-any-diff behavior, so eventual correctness is never traded away
 	// silently.
 	TrafficWeightDeadbandPercent int32 `json:"trafficWeightDeadbandPercent,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// LifecycleConfig holds operator-level tuning for the OMENative per-Instance
+// lifecycle state machine, loaded from the "lifecycle" key of the
+// inferenceservice-config ConfigMap.
+type LifecycleConfig struct {
+	// UpdateRetry bounds automatic same-target update retries (RetryBlock).
+	// There are intentionally NO in-code defaults — the values are supplied
+	// via the inferenceservice-config ConfigMap (Helm chart / GitOps). Absent
+	// means unconfigured: the workload layer fails safe (the first same-target
+	// failure Holds), never a silent fallback to baked-in numbers.
+	UpdateRetry *UpdateRetryConfig `json:"updateRetry,omitempty"`
+}
+
+// UpdateRetryConfig is the same-target update retry policy: a failed rollout
+// toward an unchanged target revision backs off exponentially
+// (initialDelay * multiplier^(attempt-1), capped at maxDelay) and Holds after
+// maxAttempts. Delays are duration strings ("1m", "30m").
+//
+// +kubebuilder:object:generate=false
+type UpdateRetryConfig struct {
+	MaxAttempts  int32   `json:"maxAttempts"`
+	InitialDelay string  `json:"initialDelay"`
+	MaxDelay     string  `json:"maxDelay"`
+	Multiplier   float64 `json:"multiplier"`
+}
+
+// ToPolicy validates the config and converts it to the workload-side
+// RetryPolicy. Any violation is an error — callers treat an invalid policy
+// as unconfigured (fail-safe Held), never patch it up with fallback numbers.
+func (c *UpdateRetryConfig) ToPolicy() (*workloadtypes.RetryPolicy, error) {
+	if c.MaxAttempts <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: maxAttempts must be > 0, got %d", c.MaxAttempts)
+	}
+	if c.Multiplier < 1 {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: multiplier must be >= 1, got %v", c.Multiplier)
+	}
+	initial, err := time.ParseDuration(c.InitialDelay)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: initialDelay %q: %w", c.InitialDelay, err)
+	}
+	maxDelay, err := time.ParseDuration(c.MaxDelay)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: maxDelay %q: %w", c.MaxDelay, err)
+	}
+	if initial <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: initialDelay must be > 0, got %s", initial)
+	}
+	if maxDelay <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: maxDelay must be > 0, got %s", maxDelay)
+	}
+	if maxDelay < initial {
+		return nil, fmt.Errorf("invalid lifecycle.updateRetry: maxDelay %s must be >= initialDelay %s", maxDelay, initial)
+	}
+	return &workloadtypes.RetryPolicy{
+		MaxAttempts:  c.MaxAttempts,
+		InitialDelay: initial,
+		MaxDelay:     maxDelay,
+		Multiplier:   c.Multiplier,
+	}, nil
+}
+
+// NewLifecycleConfig loads the lifecycle block from the inferenceservice
+// ConfigMap. An absent "lifecycle" key yields (nil, nil) — unconfigured, the
+// caller fails safe.
+func NewLifecycleConfig(clientset kubernetes.Interface) (*LifecycleConfig, error) {
+	configMap, err := getInferenceServiceConfigMap(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseLifecycleConfig(configMap)
+}
+
+// NewLifecycleConfigCached is the ConfigCache-backed variant of
+// NewLifecycleConfig used on the reconcile hot path.
+func NewLifecycleConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*LifecycleConfig, error) {
+	configMap, err := cache.get(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseLifecycleConfig(configMap)
+}
+
+func parseLifecycleConfig(configMap *v1.ConfigMap) (*LifecycleConfig, error) {
+	data, ok := configMap.Data[LifecycleConfigName]
+	if !ok || strings.TrimSpace(data) == "" {
+		return nil, nil
+	}
+	cfg := &LifecycleConfig{}
+	if err := json.Unmarshal([]byte(data), cfg); err != nil {
+		return nil, fmt.Errorf("unable to parse lifecycle config json: %w", err)
+	}
+	return cfg, nil
 }
 
 // +kubebuilder:object:generate=false

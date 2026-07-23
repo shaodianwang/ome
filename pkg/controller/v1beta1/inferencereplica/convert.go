@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -90,7 +91,11 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // wrapping a nil pointer, so the `parent != nil` guards below (event
 // target + gate wiring) would both misfire. The typed parameter makes
 // the nil check correct.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) workload.ReconcileInput {
+// updateRetryPolicy is the same-target update retry policy resolved
+// ONCE per reconcile by the caller (from the operator lifecycle config);
+// nil means unconfigured and the workload layer fails safe (first
+// same-target failure Holds).
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -119,7 +124,12 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		MutateInstance:          buildMutateInstance(r.Client, ir),
 		RemoveInstance:          buildRemoveInstance(r.Client, ir, r.Expectations),
 		WriteAggregateCondition: buildWriteAggregateCondition(r.Client, ir),
-		Clock:                   r.Clock,
+		// Same-target RetryBlock persistence + policy. The
+		// closure is always wired on the IR-managed path — the policy
+		// alone decides Backoff vs fail-safe Held.
+		MutateRetryBlock:  buildMutateRetryBlock(r.Client, ir),
+		UpdateRetryPolicy: updateRetryPolicy,
+		Clock:             r.Clock,
 		// IR doesn't drive ISVC migrations; no source-of-truth annotation
 		// to clear. Wire a no-op stub so the workload.ReconcileInput
 		// panic-on-nil contract is satisfied.
@@ -149,6 +159,24 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "InstanceFailed",
 				"InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
 				ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
+		},
+		// WarnRetryHeld surfaces the terminal same-target retry exhaustion
+		// (RetryBlock → Held) to the operator. Emitted by the workload
+		// writer exactly once, at the transition into Held. Mirrored onto
+		// the controller log like WarnInstanceFailed.
+		WarnRetryHeld: func(targetRevision string, attempts int32, reason string) {
+			r.Log.Info("Same-target update retries exhausted; revision Held",
+				"inferencereplica", client.ObjectKeyFromObject(ir),
+				"component", ir.Spec.Component,
+				"targetRevision", targetRevision,
+				"attempts", attempts,
+				"reason", reason)
+			if r.Recorder == nil {
+				return
+			}
+			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "RetryHeld",
+				"InferenceReplica %s/%s component=%s update to revision %s held after %d failed attempt(s) (last failure: %s); publish a corrected revision or raise lifecycle.updateRetry limits",
+				ir.Namespace, ir.Name, ir.Spec.Component, targetRevision, attempts, reason)
 		},
 	}
 
@@ -318,6 +346,49 @@ func observedFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadObservedState
 		CurrentRevision:    ir.Status.CurrentRevision,
 		UpdateRevision:     ir.Status.UpdateRevision,
 		InstanceStatuses:   v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
+		RetryBlocks:        retryBlocksFromIR(ir),
+	}
+}
+
+// retryBlocksFromIR mirrors IR.Status.RetryBlocks onto the workload-side
+// RetryBlock shape. Field-for-field; timestamps are deep-copied so the
+// workload mirror never aliases the IR's status slice.
+func retryBlocksFromIR(ir *v1beta1.InferenceReplica) []workload.RetryBlock {
+	if len(ir.Status.RetryBlocks) == 0 {
+		return nil
+	}
+	out := make([]workload.RetryBlock, len(ir.Status.RetryBlocks))
+	for i := range ir.Status.RetryBlocks {
+		out[i] = retryBlockToWorkload(ir.Status.RetryBlocks[i])
+	}
+	return out
+}
+
+// retryBlockToWorkload converts one v1beta1.RetryBlock to the workload
+// mirror. Timestamps copy pointer-safely (DeepCopy) like the
+// instance-status conversion does for its pointer fields.
+func retryBlockToWorkload(v v1beta1.RetryBlock) workload.RetryBlock {
+	return workload.RetryBlock{
+		TargetRevision:  v.TargetRevision,
+		State:           workload.RetryBlockState(v.State),
+		AttemptsStarted: v.AttemptsStarted,
+		NextRetryAt:     v.NextRetryAt.DeepCopy(),
+		FirstFailureAt:  v.FirstFailureAt.DeepCopy(),
+		LastFailureAt:   v.LastFailureAt.DeepCopy(),
+		Reason:          v.Reason,
+	}
+}
+
+// retryBlockFromWorkload is the inverse of retryBlockToWorkload.
+func retryBlockFromWorkload(w workload.RetryBlock) v1beta1.RetryBlock {
+	return v1beta1.RetryBlock{
+		TargetRevision:  w.TargetRevision,
+		State:           v1beta1.RetryBlockState(w.State),
+		AttemptsStarted: w.AttemptsStarted,
+		NextRetryAt:     w.NextRetryAt.DeepCopy(),
+		FirstFailureAt:  w.FirstFailureAt.DeepCopy(),
+		LastFailureAt:   w.LastFailureAt.DeepCopy(),
+		Reason:          w.Reason,
 	}
 }
 
@@ -433,6 +504,149 @@ func mirrorInstanceStatus(ir *v1beta1.InferenceReplica, src v1beta1.OMENativeIns
 		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, src)
 	} else {
 		ir.Status.InstanceStatuses[pos] = src
+	}
+}
+
+// maxHistoricalRetryBlocks caps how many RetryBlocks for superseded
+// revisions are retained as historical evidence. A config-free constant
+// is acceptable here because it is a bookkeeping bound, not behavior
+// (spec: pruned oldest-first; the block for the CURRENT UpdateRevision
+// is never pruned).
+const maxHistoricalRetryBlocks = 3
+
+// buildMutateRetryBlock wraps the workload-typed RetryBlock mutate
+// callback with an IR-typed apiserver round-trip — the
+// ReconcileInput.MutateRetryBlock capability. Same shape as
+// buildMutateInstance: re-read under retry.RetryOnConflict, locate the
+// block for targetRevision (or hand the callback a zero block with
+// TargetRevision set), convert to the workload mirror, apply the
+// callback's disposition (Persist upserts, Remove deletes, Unchanged
+// writes nothing), apply the retention prune, persist via
+// Status().Update, and mirror the committed slice back onto the
+// caller's in-memory IR so later ops in the same pass observe the
+// post-write state.
+//
+// NotFound on Get or Update is a successful no-op: the IR was deleted
+// under us and the block is gone with it.
+func buildMutateRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	key := client.ObjectKeyFromObject(ir)
+	return func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		var committed []v1beta1.RetryBlock
+		wrote := false
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			wrote = false
+			fresh := &v1beta1.InferenceReplica{}
+			if err := c.Get(ctx, key, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("re-read IR: %w", err)
+			}
+			blocks := fresh.Status.RetryBlocks
+			pos := -1
+			for i := range blocks {
+				if blocks[i].TargetRevision == targetRevision {
+					pos = i
+					break
+				}
+			}
+			w := workload.RetryBlock{TargetRevision: targetRevision}
+			if pos != -1 {
+				w = retryBlockToWorkload(blocks[pos])
+			}
+			switch mutate(&w) {
+			case workload.RetryBlockPersist:
+				nb := retryBlockFromWorkload(w)
+				// The subject key is fixed: a callback cannot re-scope the
+				// block to a different revision.
+				nb.TargetRevision = targetRevision
+				if pos == -1 {
+					blocks = append(blocks, nb)
+				} else {
+					blocks[pos] = nb
+				}
+			case workload.RetryBlockRemove:
+				if pos == -1 {
+					// Nothing to remove — no write.
+					return nil
+				}
+				blocks = append(blocks[:pos], blocks[pos+1:]...)
+			default: // RetryBlockUnchanged
+				return nil
+			}
+			fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
+			if err := c.Status().Update(ctx, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("update IR status: %w", err)
+			}
+			wrote = true
+			committed = make([]v1beta1.RetryBlock, len(fresh.Status.RetryBlocks))
+			for i := range fresh.Status.RetryBlocks {
+				committed[i] = *fresh.Status.RetryBlocks[i].DeepCopy()
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if wrote {
+			// Mirror the committed slice onto the caller's in-memory IR —
+			// same pattern as buildMutateInstance's mirrorInstanceStatus,
+			// wholesale because pruning can touch entries beyond the
+			// mutated one.
+			ir.Status.RetryBlocks = committed
+		}
+		return nil
+	}
+}
+
+// pruneRetryBlocks applies the RetryBlock retention rule: the block
+// whose TargetRevision == updateRevision (the current rollout target)
+// is NEVER pruned; the remaining historical blocks are capped at
+// maxHistoricalRetryBlocks, oldest-pruned by LastFailureAt with a nil
+// LastFailureAt sorting oldest. Survivors keep their original relative
+// order so the listType=map patch surface stays minimal.
+func pruneRetryBlocks(blocks []v1beta1.RetryBlock, updateRevision string) []v1beta1.RetryBlock {
+	var otherIdx []int
+	for i := range blocks {
+		if updateRevision == "" || blocks[i].TargetRevision != updateRevision {
+			otherIdx = append(otherIdx, i)
+		}
+	}
+	excess := len(otherIdx) - maxHistoricalRetryBlocks
+	if excess <= 0 {
+		return blocks
+	}
+	sort.SliceStable(otherIdx, func(a, b int) bool {
+		return retryBlockOlder(blocks[otherIdx[a]], blocks[otherIdx[b]])
+	})
+	drop := make(map[int]bool, excess)
+	for _, i := range otherIdx[:excess] {
+		drop[i] = true
+	}
+	out := make([]v1beta1.RetryBlock, 0, len(blocks)-excess)
+	for i := range blocks {
+		if !drop[i] {
+			out = append(out, blocks[i])
+		}
+	}
+	return out
+}
+
+// retryBlockOlder orders blocks for pruning: nil LastFailureAt is
+// oldest; otherwise earlier LastFailureAt is older.
+func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
+	switch {
+	case a.LastFailureAt == nil && b.LastFailureAt == nil:
+		return false // tie — stable sort keeps original order
+	case a.LastFailureAt == nil:
+		return true
+	case b.LastFailureAt == nil:
+		return false
+	default:
+		return a.LastFailureAt.Before(b.LastFailureAt)
 	}
 }
 

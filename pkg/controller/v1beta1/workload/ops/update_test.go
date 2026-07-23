@@ -861,7 +861,7 @@ func TestDetectUpdateTrigger_PhaseUpdatingAlwaysTrue(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v1")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -883,7 +883,7 @@ func TestDetectUpdateTrigger_PhaseMigratingSuppressed(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -909,7 +909,7 @@ func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -934,7 +934,7 @@ func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -962,7 +962,7 @@ func TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -984,7 +984,7 @@ func TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision(t *testing
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1035,7 +1035,7 @@ func TestDetectUpdateTrigger_PhaseCreatingNotInterruptible(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}

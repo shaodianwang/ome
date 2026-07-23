@@ -14,6 +14,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
@@ -160,8 +161,20 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		}
 
 		if opts.WireInferenceReplica {
+			// Clientset gives the IR reconciler live access to the
+			// inferenceservice-config ConfigMap for the operator lifecycle
+			// config (same-target update RetryBlock policy) — mirrors the
+			// cmd/manager wiring. ConfigCacheTTL stays zero: a non-positive
+			// TTL disables the config cache, so a spec that patches the
+			// ConfigMap's lifecycle key sees the change on the very next
+			// reconcile with no staleness window to reason about.
+			clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+			if err != nil {
+				return err
+			}
 			return (&inferencereplica.Reconciler{
 				Client:    mgr.GetClient(),
+				Clientset: clientset,
 				Log:       ctrl.Log.WithName("InferenceReplica"),
 				APIReader: mgr.GetAPIReader(),
 				Recorder:  mgr.GetEventRecorderFor("InferenceReplica"),

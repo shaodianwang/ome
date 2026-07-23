@@ -2,7 +2,9 @@ package omenative_coordination_kind
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
@@ -92,6 +95,76 @@ func trafficForComponent(isvc *v1beta1.InferenceService, component v1beta1.Compo
 		return nil
 	}
 	return cs.Traffic
+}
+
+// =========================================================================
+// RetryBlock helpers
+// =========================================================================
+
+// Fast same-target update retry policy for KIND specs. The production
+// chart ships minutes-scale windows; specs need seconds-scale ones so an
+// exhaust-into-Held cycle fits the suite budget. The numeric consts
+// mirror fastUpdateRetryLifecycleJSON — specs assert against them.
+const (
+	fastRetryMaxAttempts  = int32(2)
+	fastRetryInitialDelay = 5 * time.Second
+)
+
+const fastUpdateRetryLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0}}`
+
+// configureFastUpdateRetry patches the suite-level inferenceservice-config
+// ConfigMap's lifecycle key with the fast retry policy and registers a
+// DeferCleanup that restores the prior state (removing the key when it
+// was absent, which is the fail-safe Held-on-first-failure default every
+// other spec runs under). The KIND manager wires the IR reconciler with
+// ConfigCacheTTL=0 (never caches — see kindfix.StandardOMESetup), so the
+// edit applies on the very next reconcile. The suite runs specs serially,
+// so a per-spec ConfigMap patch cannot bleed into a concurrently running
+// spec.
+func configureFastUpdateRetry() {
+	key := client.ObjectKey{Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName}
+	cm := &corev1.ConfigMap{}
+	gomega.Expect(k8sClient.Get(suiteCtx, key, cm)).To(gomega.Succeed(), "read inferenceservice-config")
+	prev, hadPrev := cm.Data[controllerconfig.LifecycleConfigName]
+
+	setLifecycleKey := func(value string, remove bool) {
+		gomega.Eventually(func(g gomega.Gomega) {
+			fresh := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(suiteCtx, key, fresh)).To(gomega.Succeed())
+			if fresh.Data == nil {
+				fresh.Data = map[string]string{}
+			}
+			if remove {
+				delete(fresh.Data, controllerconfig.LifecycleConfigName)
+			} else {
+				fresh.Data[controllerconfig.LifecycleConfigName] = value
+			}
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(gomega.Succeed())
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(gomega.Succeed(),
+			"patch inferenceservice-config lifecycle key")
+	}
+
+	setLifecycleKey(fastUpdateRetryLifecycleJSON, false)
+	ginkgo.DeferCleanup(func() {
+		setLifecycleKey(prev, !hadPrev)
+	})
+}
+
+// retryBlocks reads the per-target-revision RetryBlocks for one ISVC
+// Component from its InferenceReplica (the sole status authority).
+// Fails g (retryable inside Eventually) when the IR isn't present yet.
+func retryBlocks(g gomega.Gomega, namespace, isvcName string, component v1beta1.ComponentType) []v1beta1.RetryBlock {
+	return freshInferenceReplica(g, namespace, isvcName, component).Status.RetryBlocks
+}
+
+// findRetryBlock returns the block scoped to targetRevision, or nil.
+func findRetryBlock(blocks []v1beta1.RetryBlock, targetRevision string) *v1beta1.RetryBlock {
+	for i := range blocks {
+		if blocks[i].TargetRevision == targetRevision {
+			return &blocks[i]
+		}
+	}
+	return nil
 }
 
 // =========================================================================

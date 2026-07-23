@@ -72,7 +72,12 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	// rollout is wedged forever — the multi-pod analogue of surgeUpdate's
 	// single-pod Failed-recovery path.
 	if surging && src.Phase == workload.InstancePhaseFailed {
-		return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision)
+		// Terminal same-target failure: the abandon's reset pass records the
+		// RetryBlock for the surge's committed target (Op.TargetRevision, the
+		// rev pinned when the surge was stamped) with the escalators' failure
+		// evidence — see the writer-ordering note on abandonFailedGangSurge.
+		return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision,
+			src.Operation.TargetRevision, instanceFailureReason(src, "gang surge abandoned before the target became Ready"))
 	}
 
 	// Superseded-surge redirect: the in-flight gang surge is committed to a rev
@@ -90,7 +95,10 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 			return false, fmt.Errorf("list surge gang pods for supersede check (instance=%d): %w", *src.Operation.SurgeIndex, err)
 		}
 		if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
-			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision)
+			// Superseded, not failed — the target moved on. No RetryBlock:
+			// abandonment by spec change is not a terminal failure of the
+			// old target (empty failedTargetRev skips the record).
+			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision, "", "")
 		}
 	}
 
@@ -308,11 +316,22 @@ func cloneInstanceTopologyKeys(in map[int32]string) map[int32]string {
 // Steps (one advanced per reconcile; the loop requeues between them):
 //  1. Delete the wedged replacement gang's pods at surgeIdx.
 //  2. Drop the surge index's marker InstanceStatus (if any).
-//  3. Reset the source: Phase=Ready, RunningRevision unchanged, Operation
+//  3. Record the terminal failure on failedTargetRev's RetryBlock, then
+//     reset the source: Phase=Ready, RunningRevision unchanged, Operation
 //     cleared. The source's own gang never left its running revision, so
 //     this is an accurate state — and RunningRevision != target then
-//     re-fires a clean surge on the next pass.
-func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx, surgeIdx int32, sourceRunningRev string) (bool, error) {
+//     re-fires a clean surge on the next pass, through the RetryBlock gate.
+//
+// Writer-ordering invariant: the RetryBlock upsert lands in
+// the same pass as — immediately before — the reset that clears the
+// failed attempt's Operation. Upsert-first is crash-safe: a re-entered
+// abandon (upsert landed, reset didn't) re-routes here via the Failed
+// branch, where the writer's wave dedup refreshes without recounting; no
+// attempt-stamp helper runs while the Failed branch owns dispatch, so the
+// fresh Backoff cannot be prematurely flipped to RetryInProgress. An
+// empty failedTargetRev means the abandon is a supersede, not a failure —
+// nothing is recorded.
+func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx, surgeIdx int32, sourceRunningRev, failedTargetRev, failureReason string) (bool, error) {
 	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
 
 	// 1. Delete the wedged surge gang's pods.
@@ -345,8 +364,13 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 		return false, fmt.Errorf("remove failed surge marker (instance=%d): %w", surgeIdx, err)
 	}
 
-	// 3. Reset the source to Ready on its running revision, clearing the
-	// failed surge Operation.
+	// 3. Record the failure, then reset the source to Ready on its running
+	// revision, clearing the failed surge Operation. The reset's own prune
+	// targets sourceRunningRev — a different revision than failedTargetRev
+	// (an update never re-targets the running rev), so the block survives.
+	if err := recordUpdateFailureInRetryBlock(ctx, input, failedTargetRev, failureReason); err != nil {
+		return false, fmt.Errorf("record retry block for failed gang surge (rev=%s): %w", failedTargetRev, err)
+	}
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, sourceIdx, sourceRunningRev); err != nil {
 		return false, fmt.Errorf("reset failed gang surge source (instance=%d): %w", sourceIdx, err)
 	}

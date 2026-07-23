@@ -298,7 +298,11 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 // dispatcher's per-reconcile update pass calls DetectUpdateTriggerWithPods
 // with the Instance's pods from a single per-Component cached List +
 // bucket, so the rare per-pod fallback doesn't cost one List per Instance.
-func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
+//
+// retryAfter > 0 means the trigger was denied by a not-yet-due Backoff
+// RetryBlock for the current target; re-evaluate then. 0 otherwise
+// (including Held, which has no time bound).
+func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (trigger bool, retryAfter time.Duration, err error) {
 	return DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, targetSpec, nil)
 }
 
@@ -308,16 +312,16 @@ func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload
 // "not pre-listed"; the function then self-lists on the fallback path,
 // preserving the standalone DetectUpdateTrigger contract. Semantics are
 // otherwise identical.
-func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) (bool, error) {
+func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) (trigger bool, retryAfter time.Duration, err error) {
 	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
 	if s == nil {
-		return false, nil
+		return false, 0, nil
 	}
 	if isMigrateOwnedStatus(s) {
-		return false, nil
+		return false, 0, nil
 	}
 	if s.Phase == workload.InstancePhaseUpdating {
-		return true, nil
+		return true, 0, nil
 	}
 	// A Failed Instance must still re-trigger toward a NEW target. Once a
 	// rollout escalates an Instance to Phase=Failed (e.g. a bad image →
@@ -327,15 +331,51 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	// changed target re-drives it (the reconciler's budget path lets a
 	// mid-operation Failed Instance continue rather than start fresh).
 	if s.Phase != workload.InstancePhaseReady && s.Phase != workload.InstancePhaseFailed {
-		return false, nil
+		return false, 0, nil
+	}
+
+	// Same-target retry gate: a persisted RetryBlock for the
+	// CURRENT target denies FRESH re-triggering. A different target
+	// revision is a different RetrySubject and passes (the Failed-wedge
+	// fix stands). Phase=Failed with an in-flight Update Operation is a
+	// CONTINUATION (teardown/abandon of the failed candidate) and is
+	// exempt — mirrors the dispatcher's startingFresh carve-out.
+	failedContinuation := s.Phase == workload.InstancePhaseFailed &&
+		s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate
+	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); b != nil && !failedContinuation {
+		switch b.State {
+		case workload.RetryBlockHeld:
+			return false, 0, nil
+		case workload.RetryBlockRetryInProgress:
+			// Self-heal a leaked authorization: RetryInProgress with no
+			// in-flight Update attempt at this revision (superseded
+			// surge, scale-down, crash) would otherwise deny forever
+			// with no operator surface. Treat as due — the attempt
+			// stamp re-confirms the state.
+			if anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) {
+				return false, 0, nil
+			}
+		case workload.RetryBlockBackoff:
+			// Nil NextRetryAt is immediately due.
+			now := input.Now()
+			if b.NextRetryAt != nil && now.Before(b.NextRetryAt.Time) {
+				return false, b.NextRetryAt.Time.Sub(now), nil
+			}
+			// Due: allow without flipping state. The RetryInProgress
+			// flip happens at attempt-stamp time, after the dispatcher's
+			// budget/coordination gates admit the start — flipping here
+			// would strand RetryInProgress when a budget denies the pass.
+		}
+		// Unrecognized states fall through un-gated (fail-open
+		// forward-compat).
 	}
 
 	// RunningRevision is the cheap fast-path comparison.
 	if s.RunningRevision != "" && s.RunningRevision != target.Name {
-		return true, nil
+		return true, 0, nil
 	}
 	if s.RunningRevision == target.Name {
-		return false, nil
+		return false, 0, nil
 	}
 	// Empty RunningRevision — fall back to per-pod diff and backfill. Use
 	// the caller-supplied pods when present; otherwise self-list (the
@@ -344,20 +384,20 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	if pods == nil {
 		all, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, true)
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
 		pods = filterPodsByInstance(all, inst.Index)
 	}
 	for _, pod := range pods {
 		if !podMatchesTarget(pod, targetSpec) {
-			return true, nil
+			return true, 0, nil
 		}
 	}
 	// Backfill so future reconciles take the fast-path.
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {
-		return false, fmt.Errorf("backfill RunningRevision (instance=%d): %w", inst.Index, err)
+		return false, 0, fmt.Errorf("backfill RunningRevision (instance=%d): %w", inst.Index, err)
 	}
-	return false, nil
+	return false, 0, nil
 }
 
 // isMigrateOwnedStatus reports whether the InstanceStatus carries an
@@ -398,4 +438,18 @@ func podMatchesTarget(pod *corev1.Pod, target *corev1.PodSpec) bool {
 		return false
 	}
 	return podImagesMatch(pod, target)
+}
+
+// anyInFlightUpdateAt reports whether any Instance carries an in-flight
+// Update Operation targeting rev. Used by the retry gate to distinguish
+// a live RetryInProgress authorization from one leaked by a superseded
+// or interrupted attempt.
+func anyInFlightUpdateAt(statuses []workload.InstanceStatus, rev string) bool {
+	for i := range statuses {
+		op := statuses[i].Operation
+		if op != nil && op.Type == workload.InstanceOperationUpdate && op.TargetRevision == rev {
+			return true
+		}
+	}
+	return false
 }

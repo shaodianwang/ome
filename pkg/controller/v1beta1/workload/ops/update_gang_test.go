@@ -3,9 +3,11 @@ package ops
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -73,9 +75,10 @@ func TestAbandonFailedGangSurge_DeletesStalePodsFirst(t *testing.T) {
 	}
 	var removed []int32
 	input := gangAbandonInput(isvc, ns, src, &removed)
+	blockCalls := recordRetryBlockCalls(&input, nil)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
-	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 2, src.RunningRevision)
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 2, src.RunningRevision, "p414-engine-badrev", "pod stuck")
 	if err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
@@ -97,6 +100,31 @@ func TestAbandonFailedGangSurge_DeletesStalePodsFirst(t *testing.T) {
 	if src.Phase != workload.InstancePhaseFailed {
 		t.Errorf("source Phase: got %q want still Failed (reset happens after pods gone)", src.Phase)
 	}
+	// Writer-ordering invariant: no RetryBlock write while the failed
+	// attempt's Operation is still in flight (reset pass records it).
+	if len(*blockCalls) != 0 {
+		t.Errorf("MutateRetryBlock calls: got %d want 0 before the reset pass", len(*blockCalls))
+	}
+}
+
+// recordRetryBlockCalls wires a recording MutateRetryBlock closure (same
+// pattern as retryGateFixture's) onto input, reading existing blocks from
+// input.ObservedState.RetryBlocks.
+func recordRetryBlockCalls(input *workload.ReconcileInput, existing []workload.RetryBlock) *[]retryBlockCall {
+	input.ObservedState.RetryBlocks = existing
+	calls := &[]retryBlockCall{}
+	input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		var b workload.RetryBlock
+		if found := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev); found != nil {
+			b = *found
+		} else {
+			b = workload.RetryBlock{TargetRevision: rev}
+		}
+		d := mutate(&b)
+		*calls = append(*calls, retryBlockCall{rev: rev, disposition: d, block: b})
+		return nil
+	}
+	return calls
 }
 
 // TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone pins the second
@@ -122,9 +150,10 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	}
 	var removed []int32
 	input := gangAbandonInput(isvc, ns, src, &removed)
+	blockCalls := recordRetryBlockCalls(&input, nil)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
-	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx, src.RunningRevision)
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx, src.RunningRevision, src.TargetRevision, "pod stuck")
 	if err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
@@ -145,5 +174,81 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	}
 	if src.TargetRevision != "" {
 		t.Errorf("source TargetRevision: got %q want cleared", src.TargetRevision)
+	}
+	// The reset pass records the failed target's block (writer-ordering:
+	// same pass as the Operation-clearing reset) and the reset's own prune
+	// targets only the OLD running revision — the fresh block survives.
+	if len(*blockCalls) != 2 {
+		t.Fatalf("MutateRetryBlock calls: got %d want 2 (record failed target, prune old rev)", len(*blockCalls))
+	}
+	if rec := (*blockCalls)[0]; rec.rev != "p414-engine-badrev" || rec.disposition != workload.RetryBlockPersist {
+		t.Errorf("record call: got (rev=%q, disposition=%v) want (p414-engine-badrev, Persist)", rec.rev, rec.disposition)
+	}
+	if prune := (*blockCalls)[1]; prune.rev != "p414-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
+		t.Errorf("prune call: got (rev=%q, disposition=%v) want (p414-engine-goodrev, Remove)", prune.rev, prune.disposition)
+	}
+}
+
+// TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy drives the reset
+// pass with a configured RetryPolicy and asserts the recorded block is a
+// counted Backoff wave: AttemptsStarted=1, NextRetryAt = now + initial
+// delay off the fake clock, evidence stamped — all landed in the SAME
+// pass that cleared the failed attempt's Operation.
+func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
+	legacyResetExpectations(t)
+	const isvc, ns = "p414", "omenative-eval"
+	c := legacyNewFakeClient(t) // surge pods already deleted
+
+	t0 := time.Now()
+	surgeIdx := int32(2)
+	src := &workload.InstanceStatus{
+		Index:           0,
+		Phase:           workload.InstancePhaseFailed,
+		RunningRevision: "p414-engine-goodrev",
+		TargetRevision:  "p414-engine-badrev",
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			Step:           updateStepSurge,
+			SurgeIndex:     &surgeIdx,
+			TargetRevision: "p414-engine-badrev",
+		},
+		LastFailure: &workload.InstanceTermination{PodName: "p414-engine-2-leader-0", Reason: "ImagePullBackOff"},
+	}
+	var removed []int32
+	input := gangAbandonInput(isvc, ns, src, &removed)
+	input.Clock = clocktesting.NewFakeClock(t0)
+	input.UpdateRetryPolicy = retryTestPolicy()
+	blockCalls := recordRetryBlockCalls(&input, nil)
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx,
+		src.RunningRevision, src.Operation.TargetRevision, instanceFailureReason(src, "gang surge abandoned"))
+	if err != nil {
+		t.Fatalf("abandonFailedGangSurge: %v", err)
+	}
+	if done {
+		t.Errorf("done: got true want false")
+	}
+	if src.Operation != nil || src.Phase != workload.InstancePhaseReady {
+		t.Errorf("source: got (phase=%q, op=%+v) want (Ready, nil) — Operation cleared in the same pass", src.Phase, src.Operation)
+	}
+	if len(*blockCalls) != 2 {
+		t.Fatalf("MutateRetryBlock calls: got %d want 2", len(*blockCalls))
+	}
+	rec := (*blockCalls)[0]
+	if rec.rev != "p414-engine-badrev" || rec.disposition != workload.RetryBlockPersist {
+		t.Fatalf("record call: got (rev=%q, disposition=%v) want (p414-engine-badrev, Persist)", rec.rev, rec.disposition)
+	}
+	if rec.block.State != workload.RetryBlockBackoff || rec.block.AttemptsStarted != 1 {
+		t.Errorf("block: got (state=%q, attempts=%d) want (Backoff, 1)", rec.block.State, rec.block.AttemptsStarted)
+	}
+	if rec.block.NextRetryAt == nil || !rec.block.NextRetryAt.Time.Equal(t0.Add(time.Minute)) {
+		t.Errorf("NextRetryAt: got %v want %v", rec.block.NextRetryAt, t0.Add(time.Minute))
+	}
+	if rec.block.Reason != "pod p414-engine-2-leader-0 stuck (ImagePullBackOff)" {
+		t.Errorf("Reason: got %q want the LastFailure evidence", rec.block.Reason)
+	}
+	if prune := (*blockCalls)[1]; prune.rev != "p414-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
+		t.Errorf("prune call: got (rev=%q, disposition=%v) want (p414-engine-goodrev, Remove)", prune.rev, prune.disposition)
 	}
 }

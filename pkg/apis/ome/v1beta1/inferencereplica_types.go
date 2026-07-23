@@ -294,6 +294,15 @@ type InferenceReplicaStatus struct {
 	// +listMapKey=index
 	InstanceStatuses []OMENativeInstanceStatus `json:"instanceStatuses,omitempty"`
 
+	// RetryBlocks records per-target-revision retry authority for update
+	// attempts. Revision-scoped: one block per failed target revision,
+	// shared by every Instance attempting it — allocating a new Instance
+	// cannot evade the block.
+	// +optional
+	// +listType=map
+	// +listMapKey=targetRevision
+	RetryBlocks []RetryBlock `json:"retryBlocks,omitempty"`
+
 	// Conditions reports InferenceReplica-level conditions. Defined
 	// types include Available, Progressing, FailedScale,
 	// FailedUpdate, GangSchedulingUnavailable, OperationStuck.
@@ -318,6 +327,49 @@ type InferenceReplicaStatus struct {
 	// child without parsing the ISVC spec.
 	// +optional
 	CoordinationGroupRef string `json:"coordinationGroupRef,omitempty"`
+}
+
+// RetryBlockState is the retry authority state for one target revision.
+// +kubebuilder:validation:Enum=Backoff;Held;RetryInProgress
+type RetryBlockState string
+
+const (
+	// RetryBlockBackoff: attempts remain; the next one is authorized at
+	// NextRetryAt.
+	RetryBlockBackoff RetryBlockState = "Backoff"
+	// RetryBlockHeld: attempts exhausted (or retry unconfigured). Only a
+	// new target revision releases the hold.
+	RetryBlockHeld RetryBlockState = "Held"
+	// RetryBlockRetryInProgress: exactly one retry attempt is authorized
+	// and running.
+	RetryBlockRetryInProgress RetryBlockState = "RetryInProgress"
+)
+
+// RetryBlock is the persisted per-revision retry authority. The
+// subject is the owning IR plus TargetRevision.
+type RetryBlock struct {
+	// TargetRevision is the ControllerRevision name this block scopes.
+	TargetRevision string `json:"targetRevision"`
+
+	State RetryBlockState `json:"state"`
+
+	// AttemptsStarted counts lifecycle attempts at this revision.
+	// Kubelet container restarts are diagnostic and not counted here.
+	AttemptsStarted int32 `json:"attemptsStarted"`
+
+	// NextRetryAt is the persisted resume time while State=Backoff.
+	// Never recomputed from process-local history (restart-safe).
+	// +optional
+	NextRetryAt *metav1.Time `json:"nextRetryAt,omitempty"`
+
+	// +optional
+	FirstFailureAt *metav1.Time `json:"firstFailureAt,omitempty"`
+	// +optional
+	LastFailureAt *metav1.Time `json:"lastFailureAt,omitempty"`
+
+	// Reason is the operator-facing last-failure summary.
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 func init() {

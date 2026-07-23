@@ -165,6 +165,20 @@ ome:
       # continuous churn at large pod counts; a sustained ratio change still
       # exceeds the band and converges.
       trafficWeightDeadbandPercent: 0
+    # lifecycle tunes the OMENative per-Instance lifecycle state machine.
+    lifecycle:
+      # updateRetry bounds automatic same-target update retries (RetryBlock).
+      # A rollout that fails toward an UNCHANGED target revision backs off
+      # exponentially (initialDelay * multiplier^(attempt-1), capped at
+      # maxDelay) and Holds after maxAttempts; only a new target revision
+      # releases the hold. The OME binary has NO built-in defaults: removing
+      # this block fails safe (the first same-target failure Holds
+      # immediately with a RetryHeld warning event).
+      updateRetry:
+        maxAttempts: 3
+        initialDelay: 1m
+        maxDelay: 30m
+        multiplier: 2.0
     ingressGateway:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/utils"
 )
@@ -66,6 +67,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.Clock == nil {
 		r.Clock = clock.RealClock{}
+	}
+	// Config cache for the operator lifecycle config (update retry
+	// policy). Same shape as the ISVC controller's SetupWithManager
+	// init: reuses the shared controllerconfig.ConfigCache type; the
+	// flag-driven TTL keeps ConfigMap edits applying without a restart.
+	if r.ConfigCache == nil {
+		r.ConfigCache = controllerconfig.NewConfigCache(r.ConfigCacheTTL)
 	}
 	// Discover the scheduler-plugins PodGroup CRD once at setup (mirrors the
 	// ISVC controller). Gates per-Instance PodGroup creation for multi-pod

@@ -507,10 +507,12 @@ func main() {
 		setupLog.Info("Setting up InferenceReplica controller")
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
 			Client:                  mgr.GetClient(),
+			Clientset:               clientSet,
 			Log:                     ctrl.Log.WithName("InferenceReplica"),
 			APIReader:               mgr.GetAPIReader(),
 			Recorder:                eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 			MaxConcurrentReconciles: options.irMaxConcurrentReconciles,
+			ConfigCacheTTL:          options.configCacheTTL,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)

@@ -470,9 +470,11 @@ func patchInstanceStatusReady(ctx context.Context, input workload.ReconcileInput
 // patchInstanceStatusReadyOnRevision idempotently moves to Phase=Ready
 // with RunningRevision=rev; clears Operation + TargetRevision. The
 // post-promote anchor that lets detectUpdateTrigger's fast-path
-// short-circuit on revision-equality before per-pod diffs.
+// short-circuit on revision-equality before per-pod diffs. Success at
+// rev also prunes rev's RetryBlock — a converged subject leaves no
+// active block.
 func patchInstanceStatusReadyOnRevision(ctx context.Context, input workload.ReconcileInput, idx int32, rev string) error {
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseReady &&
 			s.Operation == nil &&
 			s.RunningRevision == rev &&
@@ -485,4 +487,8 @@ func patchInstanceStatusReadyOnRevision(ctx context.Context, input workload.Reco
 		s.Operation = nil
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	return pruneRetryBlockOnPromote(ctx, input, rev)
 }

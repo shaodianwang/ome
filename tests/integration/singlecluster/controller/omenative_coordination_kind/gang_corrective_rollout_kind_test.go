@@ -18,12 +18,21 @@ import (
 // failure detection for the replacement; attributing the old source failure
 // to that operation makes OMENative create and delete a fresh gang every
 // reconcile without ever letting the corrected image start.
+//
+// Held-boundary extension: the same spec then rolls the (healthy) corrective
+// gang toward a second unpullable revision under the fast retry policy and
+// crosses the attempts boundary into Held — asserting the serving gang's
+// pod UIDs stay stable through every failed wave AND across the
+// Backoff->Held transition (no delete/recreate at exhaustion).
 var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
 		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "gang-corrective-")
 		Expect(err).NotTo(HaveOccurred())
+		// Seconds-scale same-target retry policy for the Held extension;
+		// inert for the corrective half (its update attempt never fails).
+		configureFastUpdateRetry()
 	})
 	ginkgo.AfterEach(func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
@@ -122,5 +131,62 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(status.Lifecycle.ServingReplicas).To(Equal(int32(1)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// ---- Held-boundary extension: cross the attempts boundary into Held.
+		//
+		// The corrective gang is now the serving source. Roll it toward a
+		// SECOND unpullable revision: each authorized wave surges a
+		// candidate gang, fails, and is abandoned; the fast policy
+		// (maxAttempts=2) exhausts into Held. Throughout — and specifically
+		// across the Backoff->Held transition — the serving gang's pods
+		// must keep the exact UIDs captured above: exhaustion is a
+		// bookkeeping transition on the IR, never a teardown of the
+		// healthy source.
+		const badImage2 = "ghcr.io/ome-projects/this-image-does-not-exist:p0a-held"
+
+		goodRev := freshInferenceReplica(Default, ns.Name, name, v1beta1.EngineComponent).Status.CurrentRevision
+		Expect(goodRev).NotTo(BeEmpty())
+
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, name)
+			cur.Spec.Engine.Leader.PodSpec.Containers[0].Image = badImage2
+			cur.Spec.Engine.Worker.PodSpec.Containers[0].Image = badImage2
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		var heldRev string
+		Eventually(func(g Gomega) {
+			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			g.Expect(cur.Status.UpdateRevision).NotTo(BeEmpty())
+			g.Expect(cur.Status.UpdateRevision).NotTo(Equal(goodRev))
+			heldRev = cur.Status.UpdateRevision
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Attempts exhaust into Held while every poll re-proves the serving
+		// gang's UID set — a churned pod can never regain its old UID, so a
+		// single delete/recreate anywhere in the cycle fails this wait.
+		Eventually(func(g Gomega) {
+			pods := enginePodsForImage(g, goodImage)
+			g.Expect(pods).To(HaveLen(2))
+			for _, pod := range pods {
+				g.Expect(replacementUIDs).To(HaveKeyWithValue(pod.Name, pod.UID),
+					"serving gang pod must keep its UID through the failed retry waves")
+			}
+			b := findRetryBlock(retryBlocks(g, ns.Name, name, v1beta1.EngineComponent), heldRev)
+			g.Expect(b).NotTo(BeNil(), "a RetryBlock must be recorded for the failed revision %s", heldRev)
+			g.Expect(b.State).To(Equal(v1beta1.RetryBlockHeld))
+			g.Expect(b.AttemptsStarted).To(Equal(fastRetryMaxAttempts))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// No delete/recreate at the Held transition: the UID set is still
+		// stable for a window after exhaustion.
+		Consistently(func(g Gomega) {
+			pods := enginePodsForImage(g, goodImage)
+			g.Expect(pods).To(HaveLen(2))
+			for _, pod := range pods {
+				g.Expect(replacementUIDs).To(HaveKeyWithValue(pod.Name, pod.UID),
+					"serving gang pod must keep its UID across the Backoff->Held boundary")
+			}
+		}).WithTimeout(15 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

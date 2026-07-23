@@ -44,6 +44,20 @@ data:
       "trafficWeightDeadbandPercent": {{ .Values.ome.controller.coordination.trafficWeightDeadbandPercent | default 0 }}
     }
 
+  {{- with .Values.ome.controller.lifecycle }}
+  {{- with .updateRetry }}
+  lifecycle: |-
+    {
+      "updateRetry": {
+        "maxAttempts": {{ .maxAttempts }},
+        "initialDelay": "{{ .initialDelay }}",
+        "maxDelay": "{{ .maxDelay }}",
+        "multiplier": {{ .multiplier }}
+      }
+    }
+  {{- end }}
+  {{- end }}
+
   multicluster: |-
     {
       "workloadCluster": {

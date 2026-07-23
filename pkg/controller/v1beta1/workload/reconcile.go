@@ -180,6 +180,11 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	}
 
 	// 4. Per-Instance update pass.
+	// retryBlockWait is the earliest not-yet-due Backoff RetryBlock
+	// wake-up reported by the detect pass; folded into this pass's
+	// result so the gate is re-evaluated on time. Only ever ADDS a
+	// wake-up — never delays one an op already scheduled.
+	var retryBlockWait time.Duration
 	if target != nil {
 		anyUpdating := false
 		anyGated := false
@@ -261,11 +266,16 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 				findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
 				continue
 			}
-			needs, derr := workloadops.DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
+			needs, retryAfter, derr := workloadops.DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
 			if derr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect update trigger (instance=%d): %w", inst.Index, derr)
 			}
 			if !needs {
+				// Denied by a not-yet-due Backoff RetryBlock — keep the
+				// earliest re-evaluation time across Instances.
+				if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
+					retryBlockWait = retryAfter
+				}
 				continue
 			}
 			s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
@@ -344,22 +354,44 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 			}
 		}
 		if anyUpdating {
-			return ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, nil
+			return foldRetryAfter(ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, retryBlockWait), nil
 		}
 		if anyGated {
-			return ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, nil
+			return foldRetryAfter(ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, retryBlockWait), nil
 		}
 		// All Updates that ran returned done=true (steady-state for those
 		// instances). Requeue without running Create so the next pass
 		// sees fresh ObservedState — see anyUpdateRan comment above for
 		// the X-2 (bump-during-bump) corruption modes this guards against.
+		// Immediate requeue is already sooner than any retryBlockWait.
 		if anyUpdateRan {
 			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 
 	// 5. Create pass.
-	return workloadops.Create(ctx, deps, input, plan, target)
+	res, cerr := workloadops.Create(ctx, deps, input, plan, target)
+	if cerr != nil {
+		return res, cerr
+	}
+	return foldRetryAfter(res, retryBlockWait), nil
+}
+
+// foldRetryAfter folds a RetryBlock re-evaluation wake-up into res.
+// Additive only: an immediate requeue or an already-earlier
+// RequeueAfter wins; otherwise take the min. Never removes a wake-up.
+func foldRetryAfter(res ctrl.Result, retryAfter time.Duration) ctrl.Result {
+	if retryAfter <= 0 {
+		return res
+	}
+	if res.Requeue && res.RequeueAfter == 0 {
+		// Immediate requeue is sooner than any positive retryAfter.
+		return res
+	}
+	if res.RequeueAfter == 0 || retryAfter < res.RequeueAfter {
+		res.RequeueAfter = retryAfter
+	}
+	return res
 }
 
 // liveBucketPods does ONE live List of the Component's pods and buckets

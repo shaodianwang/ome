@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -29,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/clock"
@@ -37,6 +39,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	omenativecore "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -65,6 +68,24 @@ type Reconciler struct {
 	client.Client
 	Log      logr.Logger
 	Recorder record.EventRecorder
+
+	// Clientset reads the inferenceservice-config ConfigMap for the
+	// operator lifecycle config (same-target update retry policy).
+	// Optional: when nil the policy resolves to nil and retry-blocking
+	// fails safe (Held on the first same-target failure).
+	Clientset kubernetes.Interface
+
+	// ConfigCache memoizes the inferenceservice-config ConfigMap for a
+	// short, flag-driven TTL so per-reconcile config loads share one
+	// apiserver GET — the same controllerconfig.ConfigCache the ISVC
+	// controller uses (its own instance; the cache type is the shared
+	// implementation). Initialized in SetupWithManager.
+	ConfigCache *controllerconfig.ConfigCache
+	// ConfigCacheTTL is the TTL applied to ConfigCache. Flag-driven (no
+	// in-code behavioral default — supplied by the manager's
+	// --config-cache-ttl flag / chart value); a non-positive value
+	// disables caching (always reads the apiserver).
+	ConfigCacheTTL time.Duration
 
 	// APIReader is the live (uncached) API reader. Used for the
 	// correctness-critical reads in revision bookkeeping and immutable topology
@@ -202,7 +223,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// failing the reconcile.
 	parent := r.resolveParent(ctx, ir)
 
-	input := r.buildReconcileInput(ctx, ir, parent)
+	// Resolve the same-target update retry policy ONCE per reconcile from
+	// the operator lifecycle config. nil (absent/invalid config) fails
+	// safe: the workload layer Holds on the first same-target failure.
+	retryPolicy := r.resolveUpdateRetryPolicy(log)
+
+	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy)
 
 	// Park every in-flight deadline before revision creation, rollback payload
 	// reads, or plan construction can fail. The deferred aggregate path below
@@ -386,6 +412,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 	}
 	return result, err
+}
+
+// resolveUpdateRetryPolicy loads lifecycle.updateRetry from the operator
+// ConfigMap (through the shared short-TTL ConfigCache). Absent, invalid,
+// or unloadable config resolves to nil — the workload layer fails safe
+// (the first same-target failure Holds) — with one V(1) log naming the
+// cause; there is never a silent in-code fallback policy.
+func (r *Reconciler) resolveUpdateRetryPolicy(log logr.Logger) *workload.RetryPolicy {
+	if r.Clientset == nil {
+		log.V(1).Info("update retry policy unresolved: no clientset wired; failing safe (Held on first same-target failure)")
+		return nil
+	}
+	cfg, err := controllerconfig.NewLifecycleConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		log.V(1).Info("update retry policy unresolved: lifecycle config load failed; failing safe (Held on first same-target failure)", "error", err.Error())
+		return nil
+	}
+	if cfg == nil || cfg.UpdateRetry == nil {
+		log.V(1).Info("update retry policy unconfigured (no lifecycle.updateRetry in inferenceservice-config); failing safe (Held on first same-target failure)")
+		return nil
+	}
+	policy, err := cfg.UpdateRetry.ToPolicy()
+	if err != nil {
+		log.V(1).Info("update retry policy invalid; failing safe (Held on first same-target failure)", "error", err.Error())
+		return nil
+	}
+	return policy
 }
 
 // reader returns the authoritative live reader when wired, else the
