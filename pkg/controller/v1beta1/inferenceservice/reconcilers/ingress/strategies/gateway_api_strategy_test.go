@@ -238,7 +238,12 @@ func TestGatewayAPIStrategy_Reconcile_GateOnOEPIntent(t *testing.T) {
 			}, policy)
 
 			if tt.expectBTPCreated {
-				assert.NoError(t, err, "expected default BTP to be created")
+				require.NoError(t, err, "expected default BTP to be created")
+				// The created route BTP must merge into the Gateway-level parent
+				// so it inherits its settings (e.g. circuitBreaker, timeout).
+				spec, ok := policy.Object["spec"].(map[string]interface{})
+				require.True(t, ok)
+				assert.Equal(t, "StrategicMerge", spec["mergeType"])
 			} else {
 				assert.True(t, apierr.IsNotFound(err),
 					"expected default BTP NOT to be created (traffic.Reconciler owns it); got err=%v", err)

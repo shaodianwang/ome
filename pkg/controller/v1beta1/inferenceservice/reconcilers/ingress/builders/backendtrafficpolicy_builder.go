@@ -44,6 +44,9 @@ func (b *BackendTrafficPolicyBuilder) Build(isvc *v1beta1.InferenceService) *uns
 		"app.kubernetes.io/managed-by": "ome-controller",
 	})
 	policy.Object["spec"] = map[string]interface{}{
+		// Merge into the Gateway-level parent BTP so this route inherits its
+		// settings (e.g. circuitBreaker, timeout) instead of shadowing them.
+		"mergeType": "StrategicMerge",
 		"targetRefs": []interface{}{
 			map[string]interface{}{
 				"group": "gateway.networking.k8s.io",

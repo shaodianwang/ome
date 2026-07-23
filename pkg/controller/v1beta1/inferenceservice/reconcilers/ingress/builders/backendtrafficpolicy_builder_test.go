@@ -73,6 +73,10 @@ func TestBackendTrafficPolicyBuilder_Build(t *testing.T) {
 			spec, ok := policy.Object["spec"].(map[string]interface{})
 			require.True(t, ok)
 
+			// Route BTP must opt into merging so it inherits the Gateway-level
+			// parent's settings (e.g. circuitBreaker, timeout) instead of shadowing them.
+			assert.Equal(t, "StrategicMerge", spec["mergeType"])
+
 			targetRefs, ok := spec["targetRefs"].([]interface{})
 			require.True(t, ok)
 			require.Len(t, targetRefs, 1)
