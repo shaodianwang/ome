@@ -9,6 +9,7 @@ import {
   replicaRollup,
   runtimeReference,
   runtimeUsage,
+  shortRevision,
   sortConditions,
   toFeed,
   toRollouts,
@@ -301,6 +302,14 @@ describe("toFeed", () => {
     expect(deleted.icon).toBe("warning");
     expect(deleted.tone).toBe("amber");
     expect(deleted.when).toBe("30s ago");
+  });
+});
+
+describe("shortRevision", () => {
+  it("keeps the distinguishing rev suffix and falls back to the full name", () => {
+    expect(shortRevision("avocado-v7p2-ckpt312-engine-rev-b54cd954")).toBe("rev-b54cd954");
+    expect(shortRevision("rev-b54cd954")).toBe("rev-b54cd954");
+    expect(shortRevision("no-suffix-here")).toBe("no-suffix-here");
   });
 });
 

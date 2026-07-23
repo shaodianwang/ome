@@ -8,7 +8,14 @@ import { metricsHealth } from "../dataState";
 import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import type { StreamConnectionState } from "../live";
-import { componentTone, conditionRank, replicaRollup, runtimeRefOf, sortConditions } from "../map";
+import {
+  componentTone,
+  conditionRank,
+  replicaRollup,
+  runtimeRefOf,
+  shortRevision,
+  sortConditions,
+} from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
 import { replicaDiagnostics } from "../replicaMetrics";
@@ -22,10 +29,9 @@ import { Monitoring } from "./DeploymentMonitoring";
 
 /** Console-style detail for one deployment, modelled on a cloud console (EC2 /
  *  OCI): a persistent identity header over a few substantial tabs.
- *  Overview leads with current state boxed per item — component tiles, then
- *  condition tiles (failing first, disabled-by-spec dimmed last) — with every
- *  identity fact consolidated into one About sidebar. Monitoring owns the
- *  time-series; Activity is the change log. */
+ *  Overview balances current health with invocation, followed by the full
+ *  runtime configuration. Monitoring owns the time-series; Activity is the
+ *  change log. */
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "monitoring", label: "Monitoring" },
@@ -222,9 +228,8 @@ function StripStat({ label, value }: { label: string; value: ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
-// Overview — current state first (component tiles, condition tiles, rollout,
-// runtime, placement) beside an About sidebar that consolidates every identity
-// fact; the headline strip links out to Monitoring for the charts.
+// Overview — health and deployment details beside invocation, followed by the
+// full runtime configuration. The headline strip links out to Monitoring.
 // ---------------------------------------------------------------------------
 function OverviewPane({
   d,
@@ -287,8 +292,8 @@ function OverviewPane({
         ) : null}
       </div>
 
-      <div className="overview-cols">
-        <div className="overview-main">
+      <div className="deployment-workspace">
+        <div className="deployment-health">
           <Card title="Components" sub={`${ready} ready`}>
             {components.length ? (
               <div className="comp-tiles">
@@ -309,7 +314,7 @@ function OverviewPane({
                       </div>
                       {c.revision ? (
                         <div className="ct-rev" title={c.revision}>
-                          {c.revision}
+                          {shortRevision(c.revision)}
                         </div>
                       ) : null}
                       <Track pct={pct} tone={barTone} />
@@ -362,53 +367,10 @@ function OverviewPane({
               </p>
             </Card>
           ) : null}
-
-          {runtimeSel ? (
-            <RuntimeOverviewCard
-              key={resourceKey(runtimeSel)}
-              sel={runtimeSel}
-              source={d.resolvedRuntimeRef?.source}
-              openRuntime={openRuntime}
-            />
-          ) : (
-            <Card title="Runtime">
-              <p className="muted">Runtime auto-selected — resolves when replicas are running.</p>
-            </Card>
-          )}
-
-          <Card title="Invoke & test" sub="OpenAI-compatible">
-            <ChatBox
-              resource={sel}
-              endpoint={d.url}
-              defaultModel={d.model ?? ""}
-              enabled={chat}
-              timeoutSecs={chatTimeoutSecs}
-              clientGraceSecs={chatClientGraceSecs}
-            />
-          </Card>
-
-          {d.placement?.cluster || standby.length ? (
-            <Card title="Placement" sub="where it runs">
-              {d.placement?.cluster ? (
-                <div className="place-row">
-                  <Dot tone="green" />
-                  <span className="mono">{d.placement.cluster}</span>
-                  <span className="muted">active</span>
-                </div>
-              ) : null}
-              {standby.map((c, i) => (
-                <div className="place-row" key={i}>
-                  <Dot tone="slate" />
-                  <span className="mono">{c.cluster}</span>
-                  <span className="muted">standby</span>
-                </div>
-              ))}
-            </Card>
-          ) : null}
         </div>
 
-        <aside className="overview-side">
-          <Card title="About">
+        <aside className="deployment-details">
+          <Card title="Deployment details">
             <Facts
               items={[
                 [
@@ -426,11 +388,63 @@ function OverviewPane({
                 ["Namespace", d.namespace],
                 ["Cluster", sel.cluster],
                 ["Age", d.age],
-                ["Endpoint", d.url ? <Copyable text={d.url} /> : null],
+                [
+                  "Placement",
+                  d.placement?.cluster || standby.length ? (
+                    <div className="deployment-placement">
+                      {d.placement?.cluster ? (
+                        <div className="place-row">
+                          <Dot tone="green" />
+                          <span className="mono">{d.placement.cluster}</span>
+                          <span className="muted">active</span>
+                        </div>
+                      ) : null}
+                      {standby.map((c, i) => (
+                        <div className="place-row" key={`${c.cluster}-${i}`}>
+                          <Dot tone="slate" />
+                          <span className="mono">{c.cluster}</span>
+                          <span className="muted">standby</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null,
+                ],
               ]}
             />
+            {d.url ? (
+              <div className="about-endpoint">
+                <span className="lbl">Endpoint</span>
+                <Copyable text={d.url} />
+              </div>
+            ) : null}
           </Card>
         </aside>
+
+        <Card title="Invoke & test" sub="OpenAI-compatible" className="deployment-invoke">
+          <ChatBox
+            resource={sel}
+            endpoint={d.url}
+            defaultModel={d.model ?? ""}
+            enabled={chat}
+            timeoutSecs={chatTimeoutSecs}
+            clientGraceSecs={chatClientGraceSecs}
+          />
+        </Card>
+      </div>
+
+      <div className="deployment-runtime">
+        {runtimeSel ? (
+          <RuntimeOverviewCard
+            key={resourceKey(runtimeSel)}
+            sel={runtimeSel}
+            source={d.resolvedRuntimeRef?.source}
+            openRuntime={openRuntime}
+          />
+        ) : (
+          <Card title="Runtime">
+            <p className="muted">Runtime auto-selected — resolves when replicas are running.</p>
+          </Card>
+        )}
       </div>
     </>
   );

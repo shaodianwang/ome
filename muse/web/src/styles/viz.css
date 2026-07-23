@@ -1197,7 +1197,7 @@ th.right .sort-arrow {
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
-/* ---- deployment overview: main column + About sidebar ---- */
+/* ---- deployment overview workspace ---- */
 /* The detail view reads as a page, not a full-bleed sheet: cap and center it
    so ultra-wide viewports don't stretch cards into mostly-empty panels. */
 .detail-page {
@@ -1205,40 +1205,89 @@ th.right .sort-arrow {
   max-width: 1320px;
   margin-inline: auto;
 }
-/* Long copyable values (endpoint URLs, image refs) wrap inside their card
-   instead of forcing a horizontal scrollbar on the card body. */
-.overview-main .copyable .mono,
-.overview-side .copyable .mono {
+/* Long image references wrap inside the full-width runtime card. */
+.deployment-runtime .copyable .mono {
   width: fit-content;
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
-.overview-cols {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  gap: var(--s4);
-  align-items: start;
+/* Endpoint URLs need the full card width. Inside the narrow facts value column,
+   wrap-anywhere degenerates into a one-character tower. */
+.about-endpoint {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  margin-top: var(--s3);
+  font-size: var(--t-sm);
 }
-.overview-main,
-.overview-side {
+.about-endpoint .lbl {
+  color: var(--fg-3);
+}
+.about-endpoint .copyable .mono {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.deployment-workspace {
+  display: grid;
+  grid-template:
+    "health invoke" auto
+    "details invoke" 1fr /
+    minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: stretch;
+}
+.deployment-health {
+  grid-area: health;
   display: flex;
   flex-direction: column;
   gap: var(--s4);
   min-width: 0;
 }
+.deployment-details {
+  grid-area: details;
+  min-width: 0;
+}
+.deployment-details > .card {
+  height: 100%;
+}
+.deployment-details .facts {
+  grid-template-columns: 100px minmax(0, 1fr);
+}
+.deployment-placement {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.deployment-invoke {
+  grid-area: invoke;
+  display: flex;
+  flex-direction: column;
+}
+.deployment-invoke > .card-body {
+  flex: 1;
+}
+.deployment-runtime {
+  margin-top: var(--s4);
+}
 @media (max-width: 1000px) {
-  .overview-cols {
-    grid-template-columns: 1fr;
+  .deployment-workspace {
+    grid-template:
+      "health"
+      "details"
+      "invoke" /
+      minmax(0, 1fr);
   }
 }
 
 /* ---- component tiles: one box per component instead of flat rows ---- */
 .comp-tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 280px));
   gap: var(--s3);
+  justify-content: start;
 }
 .comp-tile {
   display: flex;
@@ -1290,18 +1339,16 @@ th.right .sort-arrow {
 /* ---- condition tiles: a status grid, failing red / disabled dimmed ---- */
 .cond-tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: var(--s2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--s4);
 }
 .cond-tile {
   display: flex;
   align-items: center;
   gap: var(--s2);
   min-width: 0;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 7px var(--s3);
+  border-bottom: 1px solid var(--border);
+  padding: 7px 0;
   font-size: var(--t-sm);
 }
 .cond-tile .ct-type {
@@ -1320,13 +1367,22 @@ th.right .sort-arrow {
 }
 .cond-tile.bad {
   background: var(--red-dim);
-  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
 }
 .cond-tile.bad .ct-reason {
   color: var(--red);
 }
 .cond-tile.off {
   color: var(--fg-3);
+}
+@media (max-width: 700px) {
+  .comp-tiles,
+  .cond-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .deployment-details .facts {
+    grid-template-columns: 90px minmax(0, 1fr);
+  }
 }
 
 /* ---- deployment monitoring dashboard ---- */

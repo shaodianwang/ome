@@ -242,6 +242,15 @@ export function deploymentHealth(isvcs: IsvcItem[]): FleetHealth {
   return { ready, notReady, unknown, total: isvcs.length, attention };
 }
 
+/** Revision names embed the deployment and component (`<isvc>-<comp>-rev-<hash>`);
+ * only the trailing `rev-<hash>` distinguishes revisions, so display that and
+ * keep the full name for the tooltip. End-truncation would hide exactly the
+ * part that differs. */
+export function shortRevision(revision: string): string {
+  const i = revision.lastIndexOf("rev-");
+  return i > 0 ? revision.slice(i) : revision;
+}
+
 // ---- Models ---------------------------------------------------------------
 
 /** Lifecycle state → tone: Ready=green, Failed=red, in-progress=amber, else slate. */
