@@ -284,6 +284,11 @@ type LifecycleConfig struct {
 	// escalation. Absence means the escalation does not exist — there
 	// are intentionally NO in-code defaults.
 	ForceDelete *ForceDeleteConfig `json:"forceDelete,omitempty"`
+	// Teardown configures the finalizer-gated IR teardown deadline.
+	// Absence means the finalizer holds strictly until clean (NO
+	// deadline, the fully supported default). When present, Deadline is
+	// REQUIRED and bounds how long the finalizer holds.
+	Teardown *TeardownConfig `json:"teardown,omitempty"`
 }
 
 // UpdateRetryConfig is the same-target update retry policy: a failed rollout
@@ -323,6 +328,42 @@ type ForceDeleteConfig struct {
 	// LastTransitionTime, or the Node object gone) before the
 	// escalation may act.
 	NodeUnreachableThreshold string `json:"nodeUnreachableThreshold"`
+}
+
+// TeardownConfig configures the finalizer-gated IR teardown deadline.
+// The Deadline field is a duration string ("30m") and is REQUIRED when
+// the block is present — there is no in-code default.
+//
+// +kubebuilder:object:generate=false
+type TeardownConfig struct {
+	// Deadline bounds how long a deleting InferenceReplica may hold its
+	// finalizer while draining pods. Past it, the finalizer warns and
+	// lifts (degrading to plain GC). Absence (of the entire block) is
+	// the fully supported default: the finalizer holds strictly until
+	// clean, NO deadline.
+	Deadline string `json:"deadline"`
+}
+
+// ToDeadline validates the config and converts Deadline to a
+// *time.Duration. A nil receiver (absent block) yields (nil, nil) —
+// unconfigured, no deadline, the finalizer holds strictly until clean
+// (fully supported). Empty, unparseable, or non-positive Deadline is an
+// error; callers treat invalid config as unconfigured (no deadline).
+func (c *TeardownConfig) ToDeadline() (*time.Duration, error) {
+	if c == nil {
+		return nil, nil
+	}
+	if c.Deadline == "" {
+		return nil, fmt.Errorf("invalid lifecycle.teardown: deadline is required when the block is present")
+	}
+	d, err := time.ParseDuration(c.Deadline)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.teardown: deadline %q: %w", c.Deadline, err)
+	}
+	if d <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.teardown: deadline must be > 0, got %s", d)
+	}
+	return &d, nil
 }
 
 // ToPolicy validates the config and converts it to the workload-side

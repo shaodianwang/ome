@@ -68,6 +68,8 @@ func denyDirectWrite(op admissionv1.Operation, namespace, name string) admission
 //   - Create / Update without ome.io/controller-write=true ⇒ Denied.
 //   - Update changing spec.parentRef or spec.component (even from the
 //     controller) ⇒ Denied; recreating the IR is required.
+//   - Update touching nothing but metadata.finalizers ⇒ Allowed
+//     unconditionally (see isFinalizerOnlyUpdate).
 //   - Delete is not registered in the kubebuilder verbs list and
 //     therefore not reached here; operators may delete to recover.
 func (v *Validator) Handle(_ context.Context, req admission.Request) admission.Response {
@@ -103,6 +105,17 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 				"namespace", req.Namespace, "name", req.Name)
 			return admission.Errored(http.StatusBadRequest, err)
 		}
+
+		// Finalizer-only updates are admitted before every gate below.
+		// Such a patch cannot violate any invariant this webhook protects
+		// (spec immutability, controller-write provenance) — but denying
+		// it can manufacture a teardown wedge: this webhook is fail-
+		// closed, so a refused finalizer-removal update leaves a
+		// Terminating IR stuck behind our own admission gate.
+		if isFinalizerOnlyUpdate(oldObj, newObj) {
+			return admission.Allowed("finalizer-only update")
+		}
+
 		if !reflect.DeepEqual(oldObj.Spec.ParentRef, newObj.Spec.ParentRef) {
 			return admission.Denied(fmt.Sprintf(
 				"InferenceReplica %s/%s: spec.parentRef is immutable",
@@ -166,6 +179,50 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	}
 
 	return admission.Allowed("")
+}
+
+// isFinalizerOnlyUpdate reports whether the update changes nothing
+// beyond metadata.finalizers. A finalizer-only patch cannot violate any
+// invariant this webhook protects — spec immutability and controller-
+// write provenance both concern content the patch leaves untouched —
+// while refusing it can only manufacture teardown wedges: the webhook
+// is fail-closed, and finalizer add/remove is exactly the write a
+// controller must be able to make for deletion to complete.
+//
+// "Finalizer-only" is judged strictly:
+//   - Spec must be deep-equal.
+//   - Status must be deep-equal. With the status subresource enabled
+//     the apiserver already resets status before validating admission
+//     runs on main-resource updates (and /status updates never reach
+//     this webhook, whose rule covers only the main resource), so this
+//     check is inert today; it keeps the exemption airtight if the
+//     subresource wiring ever changes.
+//   - ObjectMeta must be deep-equal after overwriting, on a copy of the
+//     old metadata, only Finalizers (the field under test) plus the
+//     fields the apiserver itself rewrites on every update and clients
+//     cannot use to smuggle state: ResourceVersion (storage-assigned,
+//     optimistic concurrency enforced by the apiserver), ManagedFields
+//     (server-side field tracking, rewritten on every write), and
+//     Generation (apiserver-stamped; inert here given spec equality).
+//
+// Any other metadata delta — labels, annotations (including stripping
+// the controller-write annotation), ownerReferences, deletion fields —
+// disqualifies the update, which then falls through to the normal
+// gates. Combining a finalizer change with any such edit is therefore
+// not a bypass.
+func isFinalizerOnlyUpdate(oldObj, newObj *v1beta1.InferenceReplica) bool {
+	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) {
+		return false
+	}
+	if !reflect.DeepEqual(oldObj.Status, newObj.Status) {
+		return false
+	}
+	meta := oldObj.ObjectMeta.DeepCopy()
+	meta.Finalizers = newObj.Finalizers
+	meta.ResourceVersion = newObj.ResourceVersion
+	meta.ManagedFields = newObj.ManagedFields
+	meta.Generation = newObj.Generation
+	return reflect.DeepEqual(*meta, newObj.ObjectMeta)
 }
 
 // validateIRAutoscaler runs the shared Autoscaler shape check against

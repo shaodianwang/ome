@@ -354,18 +354,20 @@ func TestReconcile_ParentPauseParksDeadlineBeforeRevisionError(t *testing.T) {
 	}
 }
 
-// TestReconcile_DeletionTimestamp_NoOp pins that an IR with a
-// DeletionTimestamp short-circuits before the workload dispatcher runs.
-// Foreground cascade-delete is owned by the apiserver via
-// blockOwnerDeletion; the controller has no finalizer.
+// TestReconcile_DeletionTimestamp_NoOp pins the pre-upgrade /
+// hand-stripped shape: an IR Terminating WITHOUT the teardown finalizer
+// is a clean no-op — background GC owns the children via their owner
+// references and the controller must not interfere. This is the
+// upgrade story for IRs already Terminating before the finalizer
+// existed. Deeper assertions (pods untouched) live in teardown_test.go.
 func TestReconcile_DeletionTimestamp_NoOp(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
 	now := metav1.Now()
 	ir.DeletionTimestamp = &now
 	// A DeletionTimestamp without a finalizer makes the fake client
-	// drop the object immediately. Stamp a dummy finalizer so the IR
-	// remains observable for the test.
+	// drop the object immediately. Stamp a dummy (non-teardown)
+	// finalizer so the IR remains observable for the test.
 	ir.Finalizers = []string{"keep-for-test"}
 	r, _ := newReconciler(t, ir)
 	result, err := r.Reconcile(context.Background(), ctrl.Request{

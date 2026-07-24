@@ -329,6 +329,90 @@ func TestNewLifecycleConfig_ForceDelete(t *testing.T) {
 	})
 }
 
+// TestTeardownConfig_ToDeadline pins the validation contract: a nil
+// receiver (absent block) is unconfigured — nil deadline, no error —
+// the chart default converts 1:1, and every violation (missing
+// deadline, unparseable, or non-positive) is an error the caller
+// treats as unconfigured (no deadline), never patched with fallback.
+func TestTeardownConfig_ToDeadline(t *testing.T) {
+	t.Run("nil receiver yields nil deadline, no error", func(t *testing.T) {
+		var cfg *TeardownConfig
+		deadline, err := cfg.ToDeadline()
+		require.NoError(t, err)
+		assert.Nil(t, deadline)
+	})
+
+	t.Run("happy path matches chart default", func(t *testing.T) {
+		cfg := &TeardownConfig{Deadline: "30m"}
+		deadline, err := cfg.ToDeadline()
+		require.NoError(t, err)
+		require.NotNil(t, deadline)
+		assert.Equal(t, 30*time.Minute, *deadline)
+	})
+
+	invalid := []struct {
+		name string
+		cfg  TeardownConfig
+	}{
+		{"missing deadline", TeardownConfig{Deadline: ""}},
+		{"invalid deadline duration", TeardownConfig{Deadline: "not-a-duration"}},
+		{"zero deadline", TeardownConfig{Deadline: "0s"}},
+		{"negative deadline", TeardownConfig{Deadline: "-30m"}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			deadline, err := tt.cfg.ToDeadline()
+			assert.Error(t, err)
+			assert.Nil(t, deadline)
+		})
+	}
+}
+
+// TestNewLifecycleConfig_Teardown pins the load contract for the
+// teardown key: present + valid parses, absent leaves the field nil.
+func TestNewLifecycleConfig_Teardown(t *testing.T) {
+	t.Run("valid teardown block", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset()
+		configMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{
+				LifecycleConfigName: `{"teardown":{"deadline":"30m"}}`,
+			},
+		}
+		_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		cfg, err := NewLifecycleConfig(clientset)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.Teardown)
+		assert.Equal(t, "30m", cfg.Teardown.Deadline)
+	})
+
+	t.Run("lifecycle key without teardown yields config with nil Teardown", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset()
+		configMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{
+				LifecycleConfigName: `{}`,
+			},
+		}
+		_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		cfg, err := NewLifecycleConfig(clientset)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.Teardown)
+	})
+}
+
 // TestNewLifecycleConfig_AutoMigrate pins the load contract for the
 // autoMigrate key: present + valid parses, absent leaves the field nil.
 func TestNewLifecycleConfig_AutoMigrate(t *testing.T) {

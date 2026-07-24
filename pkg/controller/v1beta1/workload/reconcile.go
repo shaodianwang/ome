@@ -75,17 +75,36 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{}, fmt.Errorf("workload.Reconcile: nil client (component=%s)", plan.Component)
 	}
 
+	// Teardown mode: the owner is being deleted. The planned index set is
+	// treated as empty so every observed Instance is a scale-down extra
+	// and runs the ordinary Delete pipeline; nothing else runs — not the
+	// Paused gate, not Restart / Migrate / Update / Create. The caller
+	// owns completion detection and finalizer decisions.
+	//
+	// includeMigrating=true: a mid-migration source and its surge are
+	// deleted like everything else. The normal-path exclusion protects an
+	// in-flight Migrate from the scale-down pass, but under teardown there
+	// is no Migrate to protect — excluding the pair would leave its pods
+	// with no Delete op and wedge the teardown forever.
+	if input.Teardown {
+		emptied := plan
+		emptied.Instances = nil
+		extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, emptied, true)
+		allDeleted, err := deleteExtraInstances(ctx, deps, input, plan, extras)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !allDeleted {
+			return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// 1. Scale-down.
-	extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan)
-	allDeleted := true
-	for _, idx := range extras {
-		done, derr := workloadops.Delete(ctx, deps, input, plan, idx)
-		if derr != nil {
-			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: delete instance %d: %w", idx, derr)
-		}
-		if !done {
-			allDeleted = false
-		}
+	extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false)
+	allDeleted, err := deleteExtraInstances(ctx, deps, input, plan, extras)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	if !allDeleted {
 		return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
@@ -377,6 +396,24 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	return foldRetryAfter(res, retryBlockWait), nil
 }
 
+// deleteExtraInstances dispatches workloadops.Delete for every index in
+// extras. Shared verbatim by the scale-down step and the teardown branch
+// so Delete-of-extras semantics cannot drift between them. Returns
+// allDeleted=false while any Delete is still in flight.
+func deleteExtraInstances(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, extras []int32) (bool, error) {
+	allDeleted := true
+	for _, idx := range extras {
+		done, derr := workloadops.Delete(ctx, deps, input, plan, idx)
+		if derr != nil {
+			return false, fmt.Errorf("workload.Reconcile: delete instance %d: %w", idx, derr)
+		}
+		if !done {
+			allDeleted = false
+		}
+	}
+	return allDeleted, nil
+}
+
 // foldRetryAfter folds a RetryBlock re-evaluation wake-up into res.
 // Additive only: an immediate requeue or an already-earlier
 // RequeueAfter wins; otherwise take the min. Never removes a wake-up.
@@ -426,10 +463,16 @@ func cachedBucketPods(ctx context.Context, deps Deps, input ReconcileInput, comp
 // ExtraInstanceIndices returns InstanceStatus indices the plan no
 // longer covers — scale-down targets. Set-difference framing handles
 // sparse indices from surge migration (index 7 is extra only when no
-// InstancePlan covers it, regardless of replica count). Mid-migration
-// Instances are excluded so the surge pair isn't scale-down-deleted
-// out from under Migrate.
-func ExtraInstanceIndices(observed []InstanceStatus, plan ComponentPlan) []int32 {
+// InstancePlan covers it, regardless of replica count).
+//
+// includeMigrating=false (the normal scale-down pass) excludes
+// mid-migration Instances — Phase=Migrating sources and
+// Operation.Type=Migrate surges — so the pair isn't scale-down-deleted
+// out from under Migrate. Teardown passes includeMigrating=true:
+// everything must die, and since source and surge each carry their own
+// InstanceStatus entry, both run the full Delete pipeline
+// (patchInstanceStatusDeleting stamps Deleting over any phase).
+func ExtraInstanceIndices(observed []InstanceStatus, plan ComponentPlan, includeMigrating bool) []int32 {
 	planned := make(map[int32]struct{}, len(plan.Instances))
 	for _, inst := range plan.Instances {
 		planned[inst.Index] = struct{}{}
@@ -439,11 +482,13 @@ func ExtraInstanceIndices(observed []InstanceStatus, plan ComponentPlan) []int32
 		if _, inPlan := planned[s.Index]; inPlan {
 			continue
 		}
-		if s.Phase == InstancePhaseMigrating {
-			continue
-		}
-		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
-			continue
+		if !includeMigrating {
+			if s.Phase == InstancePhaseMigrating {
+				continue
+			}
+			if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
+				continue
+			}
 		}
 		extras = append(extras, s.Index)
 	}

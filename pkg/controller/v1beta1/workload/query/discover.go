@@ -190,6 +190,20 @@ func LiveListPodsForInstance(ctx context.Context, reader client.Reader, namespac
 	return out, nil
 }
 
+// LiveListPodsForComponent returns every pod the OMENative selector
+// matches for (namespace, isvcName, component) via the supplied live
+// reader — the per-Instance lister's selector minus the index filter.
+// This is the teardown completion check: teardown is complete only when
+// NO component pod remains, so a live pod whose InstanceStatus entry
+// was lost (a statusless orphan) must still block completion — an
+// InstanceStatus-driven check would miss exactly that pod.
+//
+// Same primitive-arg shape and live-reader rule as
+// LiveListPodsForInstance (see comments there).
+func LiveListPodsForComponent(ctx context.Context, reader client.Reader, namespace, isvcName string, component workload.ComponentType) ([]*corev1.Pod, error) {
+	return ListOMENativePodsByName(ctx, reader, namespace, isvcName, component, false)
+}
+
 // BucketPodsByInstanceIdx groups pods by their ome.io/instance-index
 // label. Pods missing the label are dropped — they were never created
 // by OMENative.

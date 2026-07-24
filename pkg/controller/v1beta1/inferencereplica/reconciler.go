@@ -36,6 +36,7 @@ import (
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -58,7 +59,7 @@ import (
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
 
@@ -154,9 +155,14 @@ type revisionHashEntry struct {
 //
 // Loop (mirrors the omenative.ReconcileComponent shape):
 //
-//  1. Get IR. NotFound → no-op (owner-ref cascade GC handles children).
-//  2. DeletionTimestamp set → no-op (foreground GC is owned by the
-//     apiserver via blockOwnerDeletion on each child).
+//  1. Get IR. NotFound → no-op (background owner-ref GC handles
+//     children).
+//  2. DeletionTimestamp set → finalizer-driven teardown (teardown.go):
+//     dispatch the ordinary Delete pipeline against every observed
+//     Instance until no component pod remains, then lift the teardown
+//     finalizer. Without the finalizer, cleanup is plain BACKGROUND
+//     kube-GC via the children's owner references (nothing sets a
+//     foreground propagation policy).
 //  3. Resolve parent ISVC so user-facing events stay on the ISVC
 //     stream. Parent fetch failure is NON-fatal — fall back to the
 //     IR itself as the event target.
@@ -203,19 +209,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		"replicas", ir.Status.Replicas,
 		"readyReplicas", ir.Status.ReadyReplicas)
 
+	if ir.DeletionTimestamp != nil {
+		// Finalizer-driven teardown: reconcile the deletion as "desired
+		// instances = zero" so pods drain and escalate through the same
+		// Delete pipeline as scale-down; any remainder after the
+		// finalizer lifts is BACKGROUND kube-GC via the children's owner
+		// references (nothing sets a foreground propagation policy).
+		return r.reconcileTeardown(ctx, log, ir)
+	}
+
+	// Ensure the teardown finalizer before any other work so a later
+	// delete routes through the reconciled teardown path. The IR
+	// validating webhook admits finalizer-only updates, so this write
+	// clears admission even without the controller-write annotation.
+	if !controllerutil.ContainsFinalizer(ir, TeardownFinalizer) {
+		controllerutil.AddFinalizer(ir, TeardownFinalizer)
+		if err := r.Update(ctx, ir); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Deleted between Get and Update; nothing to protect.
+				return ctrl.Result{}, nil
+			}
+			if apierrors.IsConflict(err) {
+				// Lost a write race; requeue and re-add on the fresh object.
+				return ctrl.Result{Requeue: true}, nil
+			}
+			// Deletion race: a stale cache showed no DeletionTimestamp but
+			// the apiserver copy is already Terminating, so the add is
+			// rejected ("no new finalizers can be added if the object is
+			// being deleted"). Re-read live rather than matching the error
+			// shape: Terminating means this is the self-healing race, not a
+			// real failure — requeue onto the teardown path without
+			// surfacing an error (and its backoff noise).
+			fresh := &v1beta1.InferenceReplica{}
+			switch gerr := r.reader().Get(ctx, req.NamespacedName, fresh); {
+			case gerr == nil && fresh.DeletionTimestamp != nil:
+				log.V(1).Info("Finalizer add rejected: IR already Terminating; requeueing onto the teardown path")
+				return ctrl.Result{Requeue: true}, nil
+			case gerr != nil && apierrors.IsNotFound(gerr):
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Snapshot revision pointers + failure-state BEFORE workload.Reconcile
 	// so the deferred status-write can log on real transitions
 	// (CurrentRevision promotion, first Phase=Failed escalation).
 	priorCurrentRevision := ir.Status.CurrentRevision
 	priorAnyFailed := hasFailedInstance(ir.Status.InstanceStatuses)
-
-	if ir.DeletionTimestamp != nil {
-		// Foreground cascade-delete is owned by the apiserver via
-		// blockOwnerDeletion on each child owner ref. The IR controller
-		// has no finalizer — its work is observation-only at delete time.
-		log.V(1).Info("DeletionTimestamp set; no-op")
-		return ctrl.Result{}, nil
-	}
 
 	// Resolve the parent ISVC for the event stream. Best-effort: an
 	// IR can outlive its parent for a brief window during foreground
@@ -527,6 +568,36 @@ func (r *Reconciler) resolveForceDeletePolicy(log logr.Logger) *workload.ForceDe
 	return policy
 }
 
+// resolveTeardownDeadline loads lifecycle.teardown.deadline from the
+// operator ConfigMap. Returns (deadline, invalidReason): absent or
+// unloadable config yields (nil, "") — strict hold, genuinely
+// unconfigured — while config that is PRESENT but invalid yields
+// (nil, <parse error>) so the strict-hold diagnostics can say why the
+// deadline didn't apply instead of claiming none was configured. The
+// invalid case logs at Info (not V(1)), once per resolve: an operator
+// who wrote a bad duration must see it without raising verbosity.
+func (r *Reconciler) resolveTeardownDeadline(log logr.Logger) (*time.Duration, string) {
+	if r.Clientset == nil {
+		log.V(1).Info("teardown deadline unresolved: no clientset wired; no deadline this pass")
+		return nil, ""
+	}
+	cfg, err := controllerconfig.NewLifecycleConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		log.V(1).Info("teardown deadline unresolved: lifecycle config load failed; no deadline this pass", "error", err.Error())
+		return nil, ""
+	}
+	if cfg == nil || cfg.Teardown == nil {
+		log.V(1).Info("teardown deadline unconfigured (no lifecycle.teardown in inferenceservice-config); no deadline")
+		return nil, ""
+	}
+	deadline, err := cfg.Teardown.ToDeadline()
+	if err != nil {
+		log.Info("teardown deadline configured but invalid; strict hold applies", "error", err.Error())
+		return nil, err.Error()
+	}
+	return deadline, ""
+}
+
 // reconcileRelocationDirectives owns the per-reconcile relocation-
 // directive bookkeeping against the audit ledger (parent-ISVC-owned
 // when resolvable, else IR-owned — same rule as buildReconcileInput's
@@ -676,12 +747,21 @@ func (r *Reconciler) applyRollbackPayload(ctx context.Context, ir *v1beta1.Infer
 // the parent is a soft degradation, not a reason to fail the whole
 // reconcile.
 func (r *Reconciler) resolveParent(ctx context.Context, ir *v1beta1.InferenceReplica) *v1beta1.InferenceService {
+	return r.resolveParentFrom(ctx, r.Client, ir)
+}
+
+// resolveParentFrom is resolveParent against an explicit reader. The
+// teardown path passes the live reader: a stale cached NotFound on a
+// still-live parent would re-target the dangling-ledger close at the
+// empty IR-owned ledger and leave the parent-owned Started entry to
+// resume as a phantom migration.
+func (r *Reconciler) resolveParentFrom(ctx context.Context, reads client.Reader, ir *v1beta1.InferenceReplica) *v1beta1.InferenceService {
 	if ir.Spec.ParentRef.Name == "" {
 		return nil
 	}
 	parent := &v1beta1.InferenceService{}
 	key := types.NamespacedName{Namespace: ir.Namespace, Name: ir.Spec.ParentRef.Name}
-	if err := r.Get(ctx, key, parent); err != nil {
+	if err := reads.Get(ctx, key, parent); err != nil {
 		if !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
 			r.Log.V(1).Info("Failed to fetch parent ISVC for IR event stream; falling back to IR target",
 				"ir", client.ObjectKeyFromObject(ir), "parent", key, "err", err)

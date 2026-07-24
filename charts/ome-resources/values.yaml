@@ -198,6 +198,13 @@ ome:
       # forceDelete:
       #   overdueSlack: 2m
       #   nodeUnreachableThreshold: 5m
+      # teardown bounds how long a deleting InferenceReplica may hold its
+      # finalizer while draining pods. Past the deadline, the controller
+      # warns and lifts the finalizer (degrading to plain GC). Absence (of
+      # the entire block) is the fully supported default: the finalizer
+      # holds strictly until clean, NO deadline.
+      teardown:
+        deadline: 30m
     ingressGateway:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"

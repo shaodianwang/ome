@@ -208,6 +208,35 @@ func TestLiveListPodsForInstance_FiltersByIndex(t *testing.T) {
 	}
 }
 
+// TestLiveListPodsForComponent_AllIndicesAndUnlabeled pins the teardown
+// completion read: every component pod counts regardless of its
+// instance-index label — including a pod whose index label is missing
+// entirely (the statusless-orphan shape) — while pods of another
+// component stay invisible.
+func TestLiveListPodsForComponent_AllIndicesAndUnlabeled(t *testing.T) {
+	pod0 := newDiscoverPod("p-0", 0, 1, false)
+	pod1 := newDiscoverPod("p-1", 1, 1, false)
+	orphan := newDiscoverPod("p-orphan", 9, 1, false)
+	delete(orphan.Labels, LabelInstanceIdx)
+	foreign := newDiscoverPod("p-foreign", 0, 1, false)
+	foreign.Labels[constants.OMEComponentLabel] = string(workload.ComponentDecoder)
+	c := newDiscoverTestClient(t, pod0, pod1, orphan, foreign)
+
+	got, err := LiveListPodsForComponent(context.Background(), c, "ns", "isvc", workload.ComponentEngine)
+	if err != nil {
+		t.Fatalf("LiveListPodsForComponent: %v", err)
+	}
+	want := map[string]bool{"p-0": true, "p-1": true, "p-orphan": true}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d pods, got %v", len(want), podNames(got))
+	}
+	for _, p := range got {
+		if !want[p.Name] {
+			t.Errorf("unexpected pod %s in component list", p.Name)
+		}
+	}
+}
+
 func TestLiveOldPodsClearedForRecreate_NoPods(t *testing.T) {
 	c := newDiscoverTestClient(t)
 	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0, 2)

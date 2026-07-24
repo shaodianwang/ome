@@ -154,6 +154,16 @@ type ReconcileInput struct {
 	// guarantees it, consumers never re-check.
 	ForceDelete *ForceDeletePolicy
 
+	// Teardown marks this reconcile as owner-deletion teardown. When
+	// set, the dispatcher treats the planned index set as empty — every
+	// observed Instance is a scale-down extra and runs the ordinary
+	// Delete pipeline (drain gate, graceful delete, stuck-Terminating
+	// force-delete escalation, audit) — and runs NOTHING else: no
+	// Paused gate, no Restart / Migrate / Update / Create. The caller
+	// owns completion detection (live component pod list) and all
+	// finalizer decisions.
+	Teardown bool
+
 	// Clock mirrors Deps.Clock for helpers that receive only the input.
 	// See Deps.Now for the rule.
 	Clock clock.Clock

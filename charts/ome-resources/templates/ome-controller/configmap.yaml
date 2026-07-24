@@ -58,6 +58,9 @@ data:
   {{- with .forceDelete }}
   {{- $fields = append $fields (dict "forceDelete" (dict "overdueSlack" .overdueSlack "nodeUnreachableThreshold" .nodeUnreachableThreshold)) }}
   {{- end }}
+  {{- with .teardown }}
+  {{- $fields = append $fields (dict "teardown" (dict "deadline" .deadline)) }}
+  {{- end }}
   {{- if $fields }}
   lifecycle: |-
     {{- $merged := dict }}

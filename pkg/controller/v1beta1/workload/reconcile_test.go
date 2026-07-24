@@ -294,7 +294,7 @@ func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 	}
 	plan := minimalPlan() // covers only index 0
 
-	if extras := workload.ExtraInstanceIndices(in.ObservedState.InstanceStatuses, plan); len(extras) != 1 || extras[0] != 1 {
+	if extras := workload.ExtraInstanceIndices(in.ObservedState.InstanceStatuses, plan, false); len(extras) != 1 || extras[0] != 1 {
 		t.Fatalf("ExtraInstanceIndices: got %v, want [1]", extras)
 	}
 	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
@@ -314,7 +314,7 @@ func TestReconcile_MigrationInFlight_NotScaleDown(t *testing.T) {
 	}
 	plan := minimalPlan() // covers only index 0
 
-	extras := workload.ExtraInstanceIndices(observed, plan)
+	extras := workload.ExtraInstanceIndices(observed, plan, false)
 	for _, idx := range extras {
 		if idx == 7 {
 			t.Errorf("index 7 (Phase=Migrating) must not be in scale-down extras, got %v", extras)
@@ -338,7 +338,7 @@ func TestReconcile_MigrationOperationOwned_NotScaleDown(t *testing.T) {
 	}
 	plan := minimalPlan() // covers only index 0
 
-	extras := workload.ExtraInstanceIndices(observed, plan)
+	extras := workload.ExtraInstanceIndices(observed, plan, false)
 	for _, idx := range extras {
 		if idx == 3 {
 			t.Errorf("index 3 (Operation.Migrate) must not be in scale-down extras, got %v", extras)

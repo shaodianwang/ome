@@ -124,6 +124,35 @@ func withParent(ir *v1beta1.InferenceReplica, name string) *v1beta1.InferenceRep
 	return out
 }
 
+// withFinalizers returns a clone with metadata.finalizers replaced.
+func withFinalizers(ir *v1beta1.InferenceReplica, finalizers ...string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Finalizers = finalizers
+	return out
+}
+
+// withLabel returns a clone with one label added.
+func withLabel(ir *v1beta1.InferenceReplica, k, v string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	if out.Labels == nil {
+		out.Labels = map[string]string{}
+	}
+	out.Labels[k] = v
+	return out
+}
+
+// withOwnerRef returns a clone with one ownerReference added.
+func withOwnerRef(ir *v1beta1.InferenceReplica, name string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.OwnerReferences = append(out.OwnerReferences, metav1.OwnerReference{
+		APIVersion: "ome.io/v1beta1",
+		Kind:       "InferenceService",
+		Name:       name,
+		UID:        "1234",
+	})
+	return out
+}
+
 // withPacingPartition returns a clone with spec.pacing.partition set
 // (creating the Pacing block if nil).
 func withPacingPartition(ir *v1beta1.InferenceReplica, partition int32) *v1beta1.InferenceReplica {
@@ -652,6 +681,105 @@ func TestHandle(t *testing.T) {
 				`runner "worker"`,
 				`volumeMount "dshm" has no matching volume`,
 			},
+		},
+		// Finalizer-only-update exemption: a patch that changes nothing
+		// but metadata.finalizers is admitted before the immutability and
+		// controller-write gates — denying it would wedge teardown behind
+		// this fail-closed webhook. Combining a finalizer change with ANY
+		// other edit falls through to the normal gates.
+		{
+			name: "finalizer add without annotation → allowed (exemption)",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				return updateReq(t, old, withFinalizers(old, "ome.io/ir-teardown"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "finalizer remove without annotation → allowed (exemption)",
+			req: func(t *testing.T) admission.Request {
+				old := withFinalizers(baselineIR(nil), "ome.io/ir-teardown")
+				return updateReq(t, old, withFinalizers(old))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "finalizer remove on terminating IR without annotation → allowed",
+			req: func(t *testing.T) admission.Request {
+				old := withFinalizers(baselineIR(nil), "ome.io/ir-teardown")
+				old.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+				old.DeletionGracePeriodSeconds = ptr.To[int64](0)
+				return updateReq(t, old, withFinalizers(old))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "finalizer change + apiserver-mutated fields (rv/generation/managedFields) → allowed",
+			req: func(t *testing.T) admission.Request {
+				old := withFinalizers(baselineIR(nil), "ome.io/ir-teardown")
+				old.ResourceVersion = "100"
+				old.Generation = 3
+				newObj := withFinalizers(old)
+				newObj.ResourceVersion = "101"
+				newObj.Generation = 4
+				newObj.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "ome-manager"}}
+				return updateReq(t, old, newObj)
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "finalizer change + spec change → denied (not exempt)",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				return updateReq(t, old,
+					withReplicas(withFinalizers(old, "ome.io/ir-teardown"), 7))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"controller-only resource"},
+		},
+		{
+			name: "finalizer change + parentRef change → denied (immutability fires)",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				return updateReq(t, old,
+					withParent(withFinalizers(old, "ome.io/ir-teardown"), "different-isvc"))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.parentRef is immutable"},
+		},
+		{
+			name: "finalizer change + label change → denied (not exempt)",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				return updateReq(t, old,
+					withLabel(withFinalizers(old, "ome.io/ir-teardown"), "app", "rogue"))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"controller-only resource"},
+		},
+		{
+			name: "finalizer change + annotation change → denied (not exempt)",
+			req: func(t *testing.T) admission.Request {
+				// Stripping the controller-write annotation alongside a
+				// finalizer edit must not ride the exemption: annotations
+				// differ, so the write falls through to the normal gate and
+				// is denied for the missing annotation.
+				old := withFinalizers(baselineIR(wcw), "ome.io/ir-teardown")
+				newObj := withFinalizers(baselineIR(nil), "ome.io/ir-teardown", "extra")
+				return updateReq(t, old, newObj)
+			},
+			wantAllowed:  false,
+			wantContains: []string{"controller-only resource"},
+		},
+		{
+			name: "finalizer change + ownerRef change → denied (not exempt)",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				return updateReq(t, old,
+					withOwnerRef(withFinalizers(old, "ome.io/ir-teardown"), "other-parent"))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"controller-only resource"},
 		},
 		{
 			name: "create with leader/worker runners, both declare dshm → allowed",
