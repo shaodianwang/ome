@@ -56,7 +56,7 @@ import (
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas/finalizers,verbs=update
-// +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -294,6 +294,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// ledger errors — a missing overlay only risks one rebuild landing
 	// back on the suspect node for a pass.
 	input.ObservedState.ExcludedNodesByInstance = r.reconcileRelocationDirectives(ctx, log, ir, parent, autoMigrateBudget)
+
+	// Migration-entry bookkeeping, then the mailbox. syncMigrationEntries
+	// first: it imports pre-upgrade in-flight ledger Started rows into
+	// status.migrations (so they resume through the entry path) and
+	// prunes aged-out terminal entries. Then the mailbox consume:
+	// validated annotations become ir.Status.Migrations entries (+ ledger
+	// Started row), invalid ones become terminal Failed ledger rows;
+	// either way the annotation is deleted so the mailbox is empty at
+	// rest. The Deadline stamps the same per-Component effective
+	// InstanceReadyTimeout the per-op writers read from ComponentPlan;
+	// the mode is the same effective MigrationMode the dispatcher reads
+	// from ComponentPlan (Never rejects at accept instead of parking).
+	migrationTimeout := workload.InstanceReadyTimeoutOrDefault(input.DesiredSpec.Lifecycle.InstanceReadyTimeout)
+	migrationMode := workload.MigrationModeOrDefault(input.DesiredSpec.Lifecycle.MigrationPolicy)
+	if serr := r.syncMigrationEntries(ctx, log, ir, parent, migrationTimeout); serr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: sync migration entries: %w", serr)
+	}
+	if requeue, merr := r.consumeMigrationRequests(ctx, log, ir, parent, migrationMode, migrationTimeout); merr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: consume migration requests: %w", merr)
+	} else if requeue {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	// Refresh the observed migration mirror: buildReconcileInput snapshot
+	// predates the import/accept writes above, and the dispatcher selects
+	// work from this slice — without the refresh a just-accepted request
+	// would wait a full requeue before dispatch.
+	input.ObservedState.Migrations = migrationsFromIR(ir)
 
 	// Park every in-flight deadline before revision creation, rollback payload
 	// reads, or plan construction can fail. The deferred aggregate path below
@@ -620,6 +647,14 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 	if r.Client == nil || ir == nil {
 		return nil
 	}
+	// Success touch for the Auto visibility mirror: a Ready-no-op
+	// instance confirms its newest un-Succeeded Auto record. The ledger
+	// rows below are PRUNED on Ready while the status record persists
+	// until the trim window — deliberate asymmetry: the ledger is
+	// working memory for exclusions, the record is visible history. Runs
+	// before (and independent of) the ledger so a crash between the
+	// prune persist and this stamp still heals next pass.
+	r.stampAutoRelocationSuccess(ctx, log, ir)
 	owner := client.Object(ir)
 	gvk := irGVK
 	if parent != nil {
@@ -670,6 +705,104 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 		out[idx] = nodes
 	}
 	return out
+}
+
+// stampAutoRelocationSuccess stamps Succeeded=true + CompletedAt on the
+// newest un-Succeeded Auto migration record of every instance observed
+// Phase=Ready with no in-flight Operation (the same predicate as the
+// ledger success-prune). Only the newest record per instance is
+// touched — older un-Succeeded records stay as history of relocations
+// that never confirmed. Best-effort: failures V(1)-log and retry next
+// pass; the record is a visibility mirror, never a work input.
+func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica) {
+	readyIdx := map[int32]bool{}
+	for i := range ir.Status.InstanceStatuses {
+		s := &ir.Status.InstanceStatuses[i]
+		if s.Phase == v1beta1.OMENativeInstanceReady && s.Operation == nil {
+			readyIdx[s.Index] = true
+		}
+	}
+	// Steady-state fast path: no candidate record → no apiserver write.
+	stampable := false
+	for idx := range readyIdx {
+		if newestUnsucceededAutoMigration(ir.Status.Migrations, idx) >= 0 {
+			stampable = true
+			break
+		}
+	}
+	if !stampable {
+		return
+	}
+
+	now := metav1.NewTime(r.now())
+	key := client.ObjectKeyFromObject(ir)
+	var committed []v1beta1.MigrationStatus
+	wrote := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		wrote = false
+		fresh := &v1beta1.InferenceReplica{}
+		if err := r.Client.Get(ctx, key, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("re-read IR: %w", err)
+		}
+		changed := false
+		for idx := range readyIdx {
+			pos := newestUnsucceededAutoMigration(fresh.Status.Migrations, idx)
+			if pos < 0 {
+				continue
+			}
+			succeeded := true
+			completed := now
+			fresh.Status.Migrations[pos].Succeeded = &succeeded
+			fresh.Status.Migrations[pos].CompletedAt = &completed
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("update IR status: %w", err)
+		}
+		wrote = true
+		committed = fresh.Status.Migrations
+		return nil
+	})
+	if err != nil {
+		log.V(1).Info("auto-relocation success stamp failed; will retry next pass", "error", err.Error())
+		return
+	}
+	if wrote {
+		out := make([]v1beta1.MigrationStatus, len(committed))
+		for i := range committed {
+			out[i] = *committed[i].DeepCopy()
+		}
+		ir.Status.Migrations = out
+	}
+}
+
+// newestUnsucceededAutoMigration returns the slice position of the
+// newest (StartedAt; later slice position wins ties) Auto record whose
+// SourceInstance is idx and whose Succeeded is not yet true, or -1.
+func newestUnsucceededAutoMigration(migrations []v1beta1.MigrationStatus, idx int32) int {
+	pos := -1
+	for i := range migrations {
+		e := &migrations[i]
+		if e.Trigger != v1beta1.MigrationTriggerAuto || e.SourceInstance != idx {
+			continue
+		}
+		if e.Succeeded != nil && *e.Succeeded {
+			continue
+		}
+		if pos == -1 || !e.StartedAt.Time.Before(migrations[pos].StartedAt.Time) {
+			pos = i
+		}
+	}
+	return pos
 }
 
 // reader returns the authoritative live reader when wired, else the

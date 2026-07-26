@@ -116,9 +116,8 @@ func restartDrainKey(idx int32, incarnation int64) string {
 // Operation=nil; done=false means the caller should requeue and resume.
 //
 // Source-agnostic: callers construct workload.ReconcileInput from their
-// own source-of-truth types. The ISVC-OMENative dispatcher delegates
-// via internalsource.BuildReconcileInput; the IR controller will call
-// the same entry point with its own ReconcileInput.
+// own source-of-truth types — today the InferenceReplica adapter
+// (inferencereplica.buildReconcileInput) wires this entry point.
 func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, reason string) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Restart: nil client")

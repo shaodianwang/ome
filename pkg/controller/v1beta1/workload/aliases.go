@@ -26,7 +26,9 @@ type (
 	InstanceTermination     = types.InstanceTermination
 	Key                     = types.Key
 	ReconcileInput          = types.ReconcileInput
-	MigrationRequestSummary = types.MigrationRequestSummary
+	MigrationRecord         = types.MigrationRecord
+	MigrationTrigger        = types.MigrationTrigger
+	MigrationPhase          = types.MigrationPhase
 	WorkloadDesiredSpec     = types.WorkloadDesiredSpec
 	WorkloadObservedState   = types.WorkloadObservedState
 	WorkloadAggregateStatus = types.WorkloadAggregateStatus
@@ -84,6 +86,17 @@ const (
 	MigrationModeSurge = types.MigrationModeSurge
 	MigrationModeNever = types.MigrationModeNever
 
+	MigrationTriggerManual = types.MigrationTriggerManual
+	MigrationTriggerAuto   = types.MigrationTriggerAuto
+
+	MigrationPhaseAccepted     = types.MigrationPhaseAccepted
+	MigrationPhaseSurgePending = types.MigrationPhaseSurgePending
+	MigrationPhaseSurgeReady   = types.MigrationPhaseSurgeReady
+	MigrationPhaseDraining     = types.MigrationPhaseDraining
+	MigrationPhaseCompleted    = types.MigrationPhaseCompleted
+	MigrationPhaseFailed       = types.MigrationPhaseFailed
+	MigrationPhaseRelocated    = types.MigrationPhaseRelocated
+
 	InstanceReadyPolicyAllPodReady = types.InstanceReadyPolicyAllPodReady
 	InstanceReadyPolicyNone        = types.InstanceReadyPolicyNone
 
@@ -113,6 +126,7 @@ const (
 	EventReasonPodDeleteBlockedByFinalizer   = types.EventReasonPodDeleteBlockedByFinalizer
 	EventReasonMigrationRequestAccepted      = types.EventReasonMigrationRequestAccepted
 	EventReasonMigrationRequestRejected      = types.EventReasonMigrationRequestRejected
+	EventReasonUnsupportedSchemaVersion      = types.EventReasonUnsupportedSchemaVersion
 	EventReasonMigrationCompleted            = types.EventReasonMigrationCompleted
 	EventReasonRateLimited                   = types.EventReasonRateLimited
 	EventReasonMigrationFromNodeMismatch     = types.EventReasonMigrationFromNodeMismatch
@@ -144,6 +158,19 @@ func NewExpectations() *Expectations {
 // surge pod.
 func AllocateSurgeIndex(instances []InstanceStatus) int32 {
 	return types.AllocateSurgeIndex(instances)
+}
+
+// FindMigrationRecord re-exports types.FindMigrationRecord: the record
+// for requestUUID (aliasing the slice element), or nil.
+func FindMigrationRecord(records []MigrationRecord, requestUUID string) *MigrationRecord {
+	return types.FindMigrationRecord(records, requestUUID)
+}
+
+// NextManualMigration re-exports types.NextManualMigration: the
+// oldest-StartedAt non-terminal Manual record, or nil when no migration
+// work exists.
+func NextManualMigration(records []MigrationRecord) *MigrationRecord {
+	return types.NextManualMigration(records)
 }
 
 // PodTermination re-exports types.PodTermination: extracts the most

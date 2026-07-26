@@ -21,8 +21,16 @@ const DeadlineExceededReason = "DeadlineExceeded"
 // any whose in-flight Operation.Deadline has elapsed. It is the broad
 // backstop for InstanceReadyTimeout: the per-op writers stamp
 // Operation.Deadline = StartedAt + InstanceReadyTimeout when they begin
-// a Create / Update / Restart / Migrate, and this consumer reads it back
-// and escalates the Instance to Phase=Failed once the deadline passes.
+// a Create / Update / Restart, and this consumer reads it back and
+// escalates the Instance to Phase=Failed once the deadline passes.
+//
+// Migrate Operations are NOT expired here — neither the source
+// (Phase=Migrating) nor the surge (Phase=Creating + Migrate op). A
+// migration's timeout authority is the owner's status.migrations
+// record: the dispatcher's migration-expiry pass consumes the record's
+// Deadline, tears the surge down, and restores the source phase from
+// observation. Stamping either side Failed here would mark a healthy
+// serving source Failed while the record keeps driving the pair.
 //
 // Relationship to EscalateStuckPodFailures: both backstops converge on
 // Phase=Failed, but they cover different wedges.
@@ -47,8 +55,8 @@ const DeadlineExceededReason = "DeadlineExceeded"
 // Create/Update Operations — see disposableAttempt) route through
 // DisposeExpiredAttempt instead of the bare stamp; gang Update attempts
 // keep the Failed-preserving-Operation stamp (the gang abandon path
-// consumes the continuation), and Restart / Migrate expiries are
-// unchanged. Reads p.PodsByIndex (via podsForStuckCheck, so a gang
+// consumes the continuation), and Restart expiries are unchanged.
+// Reads p.PodsByIndex (via podsForStuckCheck, so a gang
 // surge's replacement pods attribute to the source) and
 // p.DesiredPodsByIndex for the routing; p.StuckPodGrace is not
 // consulted here.
@@ -59,6 +67,12 @@ const DeadlineExceededReason = "DeadlineExceeded"
 func ExpireOperationsIfDeadlinePassed(ctx context.Context, deps Deps, input ReconcileInput, p EscalationParams) error {
 	now := input.Now()
 	for _, s := range p.Instances {
+		// Migrate pairs are owned by the status.migrations record —
+		// the migration-expiry pass consumes their deadline, never this
+		// backstop.
+		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
+			continue
+		}
 		if !operationDeadlinePassed(&s, now) {
 			continue
 		}
@@ -88,7 +102,7 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, deps Deps, input Reco
 // an in-flight Operation whose Deadline lies in the past. A zero
 // Deadline (the metav1.Time zero value) is treated as "never expires" so
 // an unset field can't trip the timeout — see plan.go's
-// instanceReadyTimeoutOrDefault for where the deadline window comes from.
+// InstanceReadyTimeoutOrDefault for where the deadline window comes from.
 func operationDeadlinePassed(s *InstanceStatus, now time.Time) bool {
 	if s == nil || s.Operation == nil {
 		return false

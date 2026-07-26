@@ -22,7 +22,7 @@
 // Callers populate a workload.ReconcileInput (input.go) — identity,
 // projected DesiredSpec / ObservedState, and callback closures
 // (MutateInstance, RemoveInstance, WriteAggregateCondition,
-// ClearMigrationRequest, WarnInstanceFailed) — and hand it to the
+// WarnInstanceFailed) — and hand it to the
 // entry point. Workload code reads ReconcileInput and never reaches
 // back into the caller's types.
 //

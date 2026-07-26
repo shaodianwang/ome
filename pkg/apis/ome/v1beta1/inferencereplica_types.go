@@ -303,6 +303,22 @@ type InferenceReplicaStatus struct {
 	// +listMapKey=targetRevision
 	RetryBlocks []RetryBlock `json:"retryBlocks,omitempty"`
 
+	// Migrations is the authoritative set of migration records for
+	// this InferenceReplica — one entry per request UUID. Manual
+	// entries are resumable processes born Accepted; Auto entries are
+	// born-terminal Relocated records. Executors select on
+	// non-terminal phase only — terminal entries are records, never
+	// work. Non-terminal entries are never trimmed; terminal entries
+	// are pruned once older than the migration-capacity rate window,
+	// so the list stays bounded. Full history remains in the audit
+	// ledger and events.
+	// +optional
+	// +listType=map
+	// +listMapKey=requestUUID
+	// +patchStrategy=merge
+	// +patchMergeKey=requestUUID
+	Migrations []MigrationStatus `json:"migrations,omitempty" patchStrategy:"merge" patchMergeKey:"requestUUID"`
+
 	// Conditions reports InferenceReplica-level conditions. Defined
 	// types include Available, Progressing, FailedScale,
 	// FailedUpdate, GangSchedulingUnavailable, OperationStuck.
@@ -370,6 +386,159 @@ type RetryBlock struct {
 	// Reason is the operator-facing last-failure summary.
 	// +optional
 	Reason string `json:"reason,omitempty"`
+}
+
+// MigrationTrigger identifies who initiated a migration entry.
+// +kubebuilder:validation:Enum=Manual;Auto
+type MigrationTrigger string
+
+const (
+	// MigrationTriggerManual marks an operator-requested migration.
+	// Manual entries are resumable processes: born Accepted, they
+	// walk the phase chain to a terminal phase.
+	MigrationTriggerManual MigrationTrigger = "Manual"
+	// MigrationTriggerAuto marks a controller-initiated relocation.
+	// Auto entries are born-terminal Relocated records — visibility
+	// mirrors of a relocation directive, never resumable work.
+	MigrationTriggerAuto MigrationTrigger = "Auto"
+)
+
+// MigrationPhase is the lifecycle phase of a migration.
+//
+// Manual migrations walk Accepted -> SurgePending -> SurgeReady ->
+// Draining -> Completed | Failed. Auto relocations are born terminal
+// (Relocated). Terminal phases are Completed, Failed, and Relocated —
+// executors select work on non-terminal phase only; terminal entries
+// are records, never work.
+//
+// Pending and InProgress are legacy values used only by the ISVC
+// status migrationHistory window.
+// +kubebuilder:validation:Enum=Accepted;SurgePending;SurgeReady;Draining;Completed;Failed;Relocated;Pending;InProgress
+type MigrationPhase string
+
+const (
+	// MigrationPhaseAccepted: the request was validated and admitted;
+	// no surge Instance is allocated yet.
+	MigrationPhaseAccepted MigrationPhase = "Accepted"
+	// MigrationPhaseSurgePending: the surge Instance is allocated and
+	// waiting to become Ready.
+	MigrationPhaseSurgePending MigrationPhase = "SurgePending"
+	// MigrationPhaseSurgeReady: the surge Instance is Ready; the
+	// source may begin draining.
+	MigrationPhaseSurgeReady MigrationPhase = "SurgeReady"
+	// MigrationPhaseDraining: the source Instance is draining out of
+	// rotation.
+	MigrationPhaseDraining MigrationPhase = "Draining"
+	// MigrationPhaseCompleted: terminal — the migration succeeded.
+	MigrationPhaseCompleted MigrationPhase = "Completed"
+	// MigrationPhaseFailed: terminal — the migration did not complete.
+	MigrationPhaseFailed MigrationPhase = "Failed"
+	// MigrationPhaseRelocated: terminal — a born-terminal Auto
+	// relocation record.
+	MigrationPhaseRelocated MigrationPhase = "Relocated"
+
+	// MigrationPhasePending is a legacy migrationHistory-only value.
+	MigrationPhasePending MigrationPhase = "Pending"
+	// MigrationPhaseInProgress is a legacy migrationHistory-only value.
+	MigrationPhaseInProgress MigrationPhase = "InProgress"
+)
+
+// Terminal reports whether p is a terminal phase (Completed, Failed,
+// or Relocated). Executors select migrations on non-terminal phase
+// only — terminal entries are records, never work.
+func (p MigrationPhase) Terminal() bool {
+	switch p {
+	case MigrationPhaseCompleted, MigrationPhaseFailed, MigrationPhaseRelocated:
+		return true
+	}
+	return false
+}
+
+// MigrationStatus is one migration request's authoritative record on
+// the InferenceReplica. status.migrations is the single source of
+// truth for migration work: executors resume from non-terminal
+// entries; the audit ledger and events are history, not work.
+//
+// Lifecycle contract:
+//   - Manual entries (Trigger=Manual) are resumable processes: born
+//     Accepted, they walk Accepted -> SurgePending -> SurgeReady ->
+//     Draining -> Completed | Failed.
+//   - Auto entries (Trigger=Auto) are born-terminal Relocated records
+//     mirroring a relocation directive; Succeeded is stamped post-hoc
+//     when the relocated Instance next reaches Ready.
+//   - Executors select on non-terminal phase only — terminal entries
+//     are records, never work.
+type MigrationStatus struct {
+	// RequestUUID uniquely identifies the migration request. Manual:
+	// supplied by the requester. Auto: generated by the controller.
+	RequestUUID string `json:"requestUUID"`
+
+	// Trigger records who initiated the migration.
+	Trigger MigrationTrigger `json:"trigger"`
+
+	// SourceInstance is the Instance index being migrated away from.
+	SourceInstance int32 `json:"sourceInstance"`
+
+	// SurgeInstance is the Instance index allocated for the surge
+	// replacement. Manual only; nil until allocated. Distinct from
+	// index 0, which is a valid surge index.
+	// +optional
+	SurgeInstance *int32 `json:"surgeInstance,omitempty"`
+
+	// AllocatedAt is when the surge Instance index was allocated —
+	// the start of execution. Nil while the entry is queued (Accepted
+	// but not yet picked up by the executor). The capacity gate counts
+	// execution from this stamp, never queued intent.
+	// +optional
+	AllocatedAt *metav1.Time `json:"allocatedAt,omitempty"`
+
+	// FromNode is the node the source is being moved off.
+	// Auto: the excluded node.
+	// +optional
+	FromNode string `json:"fromNode,omitempty"`
+
+	// HintTargetNodes are requester-supplied preferred placement
+	// targets for the surge replacement. Rendered as preferred (soft)
+	// node affinity; the scheduler may pick other nodes.
+	// +optional
+	// +listType=atomic
+	HintTargetNodes []string `json:"hintTargetNodes,omitempty"`
+
+	// Phase is the migration lifecycle phase. See MigrationPhase for
+	// the Manual chain, the Auto born-terminal rule, and the terminal
+	// set.
+	Phase MigrationPhase `json:"phase"`
+
+	// Attempt is the relocation attempt ordinal.
+	// Auto: N of autoMigrate.maxAttempts.
+	// +optional
+	Attempt int32 `json:"attempt,omitempty"`
+
+	// Reason is the requester-supplied reason (Manual) or the
+	// disposition branch that produced the entry (Auto).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// Message describes the current blocker (non-terminal) or the
+	// terminal outcome.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// StartedAt is when the entry was created.
+	StartedAt metav1.Time `json:"startedAt"`
+
+	// Deadline is when a non-terminal entry expires.
+	// Manual: accept time plus InstanceReadyTimeout.
+	Deadline metav1.Time `json:"deadline"`
+
+	// CompletedAt is when the entry reached a terminal phase.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// Succeeded reports the post-hoc outcome. Auto: stamped true when
+	// the relocated Instance next reaches Ready.
+	// +optional
+	Succeeded *bool `json:"succeeded,omitempty"`
 }
 
 func init() {

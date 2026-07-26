@@ -86,6 +86,34 @@ func instanceStatuses(g gomega.Gomega, namespace, isvcName string, component v1b
 	return freshInferenceReplica(g, namespace, isvcName, component).Status.InstanceStatuses
 }
 
+// migrationEntries reads status.migrations for one ISVC Component from
+// its InferenceReplica — the authoritative per-request migration
+// records (the audit ConfigMap and events are history, not authority).
+// Fails g (retryable inside Eventually) when the IR isn't present yet.
+func migrationEntries(g gomega.Gomega, namespace, isvcName string, component v1beta1.ComponentType) []v1beta1.MigrationStatus {
+	return freshInferenceReplica(g, namespace, isvcName, component).Status.Migrations
+}
+
+// findMigrationEntry returns the entry with requestUUID, or nil.
+func findMigrationEntry(entries []v1beta1.MigrationStatus, requestUUID string) *v1beta1.MigrationStatus {
+	for i := range entries {
+		if entries[i].RequestUUID == requestUUID {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// podIsReady reports the pod's Ready condition.
+func podIsReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // trafficForComponent returns the per-Component Traffic[] from the
 // ISVC's component status, or nil when the entry is missing.
 func trafficForComponent(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []v1beta1.ComponentTrafficTarget {

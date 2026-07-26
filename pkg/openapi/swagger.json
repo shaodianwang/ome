@@ -1967,6 +1967,20 @@
           "description": "LabelSelector identifies pods of this InferenceReplica for the HPA scale subresource. Must match the legacy componentLabelSelectorString formula so existing HPAs continue to resolve unchanged.",
           "type": "string"
         },
+        "migrations": {
+          "description": "Migrations is the authoritative set of migration records for this InferenceReplica — one entry per request UUID. Manual entries are resumable processes born Accepted; Auto entries are born-terminal Relocated records. Executors select on non-terminal phase only — terminal entries are records, never work. Non-terminal entries are never trimmed; terminal entries are pruned once older than the migration-capacity rate window, so the list stays bounded. Full history remains in the audit ledger and events.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.MigrationStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "requestUUID"
+          ],
+          "x-kubernetes-list-type": "map",
+          "x-kubernetes-patch-merge-key": "requestUUID",
+          "x-kubernetes-patch-strategy": "merge"
+        },
         "observedGeneration": {
           "description": "ObservedGeneration is the InferenceReplica.metadata.generation the most recent status flush reflects.",
           "type": "integer",
@@ -2889,6 +2903,92 @@
         "mode": {
           "description": "Mode gates migration: Auto enables both deadline-disposition relocation and explicit migration requests; Never disables both. Defaults to Auto.",
           "type": "string"
+        }
+      }
+    },
+    "v1beta1.MigrationStatus": {
+      "description": "MigrationStatus is one migration request's authoritative record on the InferenceReplica. status.migrations is the single source of truth for migration work: executors resume from non-terminal entries; the audit ledger and events are history, not work.\n\nLifecycle contract:\n  - Manual entries (Trigger=Manual) are resumable processes: born\n    Accepted, they walk Accepted -\u003e SurgePending -\u003e SurgeReady -\u003e\n    Draining -\u003e Completed | Failed.\n  - Auto entries (Trigger=Auto) are born-terminal Relocated records\n    mirroring a relocation directive; Succeeded is stamped post-hoc\n    when the relocated Instance next reaches Ready.\n  - Executors select on non-terminal phase only — terminal entries\n    are records, never work.",
+      "type": "object",
+      "required": [
+        "requestUUID",
+        "trigger",
+        "sourceInstance",
+        "phase",
+        "startedAt",
+        "deadline"
+      ],
+      "properties": {
+        "allocatedAt": {
+          "description": "AllocatedAt is when the surge Instance index was allocated — the start of execution. Nil while the entry is queued (Accepted but not yet picked up by the executor). The capacity gate counts execution from this stamp, never queued intent.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "attempt": {
+          "description": "Attempt is the relocation attempt ordinal. Auto: N of autoMigrate.maxAttempts.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "completedAt": {
+          "description": "CompletedAt is when the entry reached a terminal phase.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "deadline": {
+          "description": "Deadline is when a non-terminal entry expires. Manual: accept time plus InstanceReadyTimeout.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "fromNode": {
+          "description": "FromNode is the node the source is being moved off. Auto: the excluded node.",
+          "type": "string"
+        },
+        "hintTargetNodes": {
+          "description": "HintTargetNodes are requester-supplied preferred placement targets for the surge replacement. Rendered as preferred (soft) node affinity; the scheduler may pick other nodes.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "message": {
+          "description": "Message describes the current blocker (non-terminal) or the terminal outcome.",
+          "type": "string"
+        },
+        "phase": {
+          "description": "Phase is the migration lifecycle phase. See MigrationPhase for the Manual chain, the Auto born-terminal rule, and the terminal set.",
+          "type": "string",
+          "default": ""
+        },
+        "reason": {
+          "description": "Reason is the requester-supplied reason (Manual) or the disposition branch that produced the entry (Auto).",
+          "type": "string"
+        },
+        "requestUUID": {
+          "description": "RequestUUID uniquely identifies the migration request. Manual: supplied by the requester. Auto: generated by the controller.",
+          "type": "string",
+          "default": ""
+        },
+        "sourceInstance": {
+          "description": "SourceInstance is the Instance index being migrated away from.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "startedAt": {
+          "description": "StartedAt is when the entry was created.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "succeeded": {
+          "description": "Succeeded reports the post-hoc outcome. Auto: stamped true when the relocated Instance next reaches Ready.",
+          "type": "boolean"
+        },
+        "surgeInstance": {
+          "description": "SurgeInstance is the Instance index allocated for the surge replacement. Manual only; nil until allocated. Distinct from index 0, which is a valid surge index.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "trigger": {
+          "description": "Trigger records who initiated the migration.",
+          "type": "string",
+          "default": ""
         }
       }
     },

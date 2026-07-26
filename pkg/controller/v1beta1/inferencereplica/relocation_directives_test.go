@@ -7,6 +7,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -106,6 +107,125 @@ func TestReconcileRelocationDirectives_PrunesOnReady(t *testing.T) {
 	}
 	if audit.CountAutoRecoverAttempts(after, "engine", 1) != 1 {
 		t.Errorf("instance 1 directives must survive: %+v", after.Entries)
+	}
+}
+
+// autoRecord builds one born-terminal Auto migration status record.
+func autoRecord(uuid string, idx int32, node string, startedAt time.Time) v1beta1.MigrationStatus {
+	started := metav1.NewTime(startedAt)
+	completed := started
+	return v1beta1.MigrationStatus{
+		RequestUUID:    uuid,
+		Trigger:        v1beta1.MigrationTriggerAuto,
+		SourceInstance: idx,
+		FromNode:       node,
+		Phase:          v1beta1.MigrationPhaseRelocated,
+		Attempt:        1,
+		Reason:         audit.ReasonAutoRecover,
+		StartedAt:      started,
+		Deadline:       started,
+		CompletedAt:    &completed,
+	}
+}
+
+// The success touch: an instance observed Ready with no in-flight
+// Operation stamps Succeeded=true + CompletedAt on its NEWEST
+// un-Succeeded Auto record only — older un-Succeeded records and other
+// instances' records stay untouched — while the same pass prunes the
+// instance's ledger rows. The asymmetry is deliberate: ledger =
+// working memory for exclusions (pruned on Ready), record = visible
+// history (persists until the trim window).
+func TestReconcileRelocationDirectives_SuccessTouchStampsNewestAutoRecord(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	ir := baselineIR("llama-engine", "prod", 2)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate}},
+	}
+	ir.Status.Migrations = []v1beta1.MigrationStatus{
+		autoRecord("u-old", 0, "n1", t0.Add(-10*time.Minute)),
+		autoRecord("u-new", 0, "n2", t0.Add(-5*time.Minute)),
+		autoRecord("u-other", 1, "n3", t0.Add(-5*time.Minute)),
+	}
+	r, c := newReconciler(t, ir)
+
+	ledger := &audit.Ledger{}
+	ledger.UpsertEntry(directiveEntry("u-old", "engine", 0, "n1"))
+	ledger.UpsertEntry(directiveEntry("u-new", "engine", 0, "n2"))
+	ledger.UpsertEntry(directiveEntry("u-other", "engine", 1, "n3"))
+	if err := audit.PersistLedgerForOwner(context.Background(), c, ir, irGVK, ledger); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n3" {
+		t.Fatalf("exclusion map: got %v want only instance 1 → [n3]", got)
+	}
+
+	fresh := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh); err != nil {
+		t.Fatalf("re-read IR: %v", err)
+	}
+	byUUID := map[string]v1beta1.MigrationStatus{}
+	for _, e := range fresh.Status.Migrations {
+		byUUID[e.RequestUUID] = e
+	}
+	newest := byUUID["u-new"]
+	if newest.Succeeded == nil || !*newest.Succeeded {
+		t.Errorf("u-new Succeeded: got %v want true (newest record for the Ready instance)", newest.Succeeded)
+	}
+	if newest.CompletedAt == nil || !newest.CompletedAt.Time.After(t0.Add(-5*time.Minute)) {
+		t.Errorf("u-new CompletedAt: got %v want restamped at success time", newest.CompletedAt)
+	}
+	if older := byUUID["u-old"]; older.Succeeded != nil {
+		t.Errorf("u-old Succeeded: got %v want nil (only the newest record is stamped)", *older.Succeeded)
+	}
+	if other := byUUID["u-other"]; other.Succeeded != nil {
+		t.Errorf("u-other Succeeded: got %v want nil (instance 1 is not Ready)", *other.Succeeded)
+	}
+	if len(ir.Status.Migrations) != 3 || ir.Status.Migrations[1].Succeeded == nil {
+		t.Errorf("in-memory mirror: got %+v want the committed stamp mirrored back", ir.Status.Migrations)
+	}
+
+	// The ledger rows for instance 0 pruned in the same pass; the
+	// status records persist — the asymmetry under test.
+	after, err := audit.LoadLedgerForOwner(context.Background(), c, ir)
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 0) != 0 {
+		t.Errorf("instance 0 ledger rows must prune on Ready: %+v", after.Entries)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 1) != 1 {
+		t.Errorf("instance 1 ledger rows must survive: %+v", after.Entries)
+	}
+}
+
+// Crash-window heal: the ledger rows were already pruned (prior pass
+// crashed between the prune persist and the stamp) — the success touch
+// still fires because it is keyed on the status records, not the
+// ledger.
+func TestReconcileRelocationDirectives_SuccessTouchIndependentOfLedger(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+	}
+	ir.Status.Migrations = []v1beta1.MigrationStatus{autoRecord("u-orphan", 0, "n1", t0)}
+	r, c := newReconciler(t, ir)
+
+	// No ledger seeded at all.
+	if got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3); got != nil {
+		t.Fatalf("exclusion map: got %v want nil (empty ledger)", got)
+	}
+
+	fresh := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh); err != nil {
+		t.Fatalf("re-read IR: %v", err)
+	}
+	if len(fresh.Status.Migrations) != 1 || fresh.Status.Migrations[0].Succeeded == nil || !*fresh.Status.Migrations[0].Succeeded {
+		t.Errorf("record: got %+v want u-orphan stamped Succeeded=true without any ledger rows", fresh.Status.Migrations)
 	}
 }
 

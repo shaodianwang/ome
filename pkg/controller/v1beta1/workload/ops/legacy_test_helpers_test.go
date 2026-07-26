@@ -311,6 +311,7 @@ func legacyFromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperat
 		Deadline:       op.Deadline,
 		TargetRevision: op.TargetRevision,
 		Reason:         op.Reason,
+		RequestUUID:    op.RequestUUID,
 		// SurgeIndex round-trips so gang-surge fixtures (Op.Step=Surge with
 		// a SurgeIndex pointer) survive the projection. Without it the
 		// gangSurgeUpdate "surging" detection sees SurgeIndex==nil and
@@ -333,6 +334,7 @@ func legacyToV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperatio
 		Deadline:       op.Deadline,
 		TargetRevision: op.TargetRevision,
 		Reason:         op.Reason,
+		RequestUUID:    op.RequestUUID,
 		SurgeIndex:     op.SurgeIndex,
 	}
 }

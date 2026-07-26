@@ -2,7 +2,6 @@ package audit
 
 import (
 	"testing"
-	"time"
 )
 
 // forceDeleteEntry builds a terminal ForceDelete record shaped exactly
@@ -73,35 +72,9 @@ func TestHasCompletedOrFailedRequest_IgnoresForceDeleteRows(t *testing.T) {
 	}
 }
 
-// A dead node's pod sweep writes one ForceDelete row per pod; none of
-// them may consume the migration admission window (in-flight cap or
-// trailing-hour cap).
-func TestValidateCapacity_IgnoresForceDeleteEntries(t *testing.T) {
-	now, err := time.Parse(time.RFC3339, "2026-07-23T12:00:00Z")
-	if err != nil {
-		t.Fatalf("parse now: %v", err)
-	}
-	recent := now.Add(-time.Minute).UTC().Format(time.RFC3339)
-
-	ledger := &Ledger{}
-	// Well past DefaultPerHourCap, all inside the trailing hour.
-	for i := 0; i < DefaultPerHourCap+5; i++ {
-		ledger.UpsertEntry(forceDeleteEntry(
-			// Distinct UUIDs so UpsertEntry appends.
-			"pod-uid-"+string(rune('a'+i)), "engine", int32(i), "node-x", recent))
-	}
-	if ok, reason := ValidateCapacity(ledger, now); !ok {
-		t.Fatalf("force-delete rows tripped migration capacity: %s", reason)
-	}
-
-	// A genuine migration burst still trips the trailing-hour cap.
-	for i := 0; i < DefaultPerHourCap; i++ {
-		ledger.UpsertEntry(Entry{
-			RequestUUID: "mig-" + string(rune('a'+i)), Component: "engine",
-			Phase: PhaseCompleted, StartedAt: recent, CompletedAt: recent,
-		})
-	}
-	if ok, _ := ValidateCapacity(ledger, now); ok {
-		t.Fatalf("real migrations must still count toward the per-hour cap")
-	}
-}
+// Capacity note: ValidateCapacity now reads status.migrations records,
+// which force-delete ledger rows can never enter (the accept pass never
+// creates one and the upgrade import filters Reason=ForceDelete), so
+// the old ledger-level ValidateCapacity force-delete exclusion test is
+// structurally obsolete. The HasCompletedOrFailedRequest exclusion
+// above still matters — the ledger remains the dedup history.

@@ -463,8 +463,8 @@ func (r *Reconciler) reconcileHeldDeadlines(ctx context.Context, ir *v1beta1.Inf
 // the identity Key (ledger entries are keyed on Component), the observed
 // state (UpdateRevision fallback for Create-op dispositions), and the
 // ledger owner (parent ISVC when resolvable, else the IR — matching
-// buildReconcileInput). The RemoveInstance / WriteAggregateCondition /
-// ClearMigrationRequest stubs satisfy the panic-on-nil contract. Reuses
+// buildReconcileInput). The RemoveInstance / WriteAggregateCondition
+// stubs satisfy the panic-on-nil contract. Reuses
 // buildMutateInstance so the escalation observes the same retry +
 // in-memory-mirror semantics dispatch-time writes get.
 //
@@ -490,7 +490,6 @@ func (r *Reconciler) buildEscalationInput(ir *v1beta1.InferenceReplica, parent *
 		UpdateRetryPolicy:       retryPolicy,
 		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
 		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
-		ClearMigrationRequest:   func(_ context.Context, _ string) error { return nil },
 		WarnRetryHeld:           r.warnRetryHeldFunc(ir, eventTarget),
 		// podName is empty for the deadline backstop (no single pod to
 		// blame); reason carries the cause either way (kubelet

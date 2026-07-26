@@ -1,11 +1,8 @@
 // Internal-package tests for workload.Migrate's private helpers
 // (validateFromNode, etc.) that aren't reachable from outside the
-// workload/ops package. The public-API end-to-end TestMigrate_* tests
-// live in the omenative adapter package (omenative/ops/migrate_test.go)
-// because they depend on the omenative-side test harness (audit ledger
-// seeding via real ISVC ConfigMap round-trips, multi-pass status
-// counter refresh, per-revision EndpointSlice synthesis) coupled to
-// pkg/apis/ome/v1beta1 fixtures.
+// workload/ops package. The end-to-end TestMigrate_* lifecycle tests
+// (status.migrations-driven, single-pod + gang) live in
+// migrate_entry_lifecycle_test.go alongside this file.
 package ops
 
 import (

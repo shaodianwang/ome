@@ -76,10 +76,21 @@ const (
 	// until the finalizer owner resolves it.
 	EventReasonPodDeleteBlockedByFinalizer EventReason = "PodDeleteBlockedByFinalizer"
 
-	// Migration (workload/ops/migrate.go).
-	EventReasonMigrationRequestAccepted      EventReason = "MigrationRequestAccepted"
-	EventReasonMigrationRequestRejected      EventReason = "MigrationRequestRejected"
-	EventReasonMigrationCompleted            EventReason = "MigrationCompleted"
+	// Migration (workload/ops/migrate.go + the IR accept pass).
+	EventReasonMigrationRequestAccepted EventReason = "MigrationRequestAccepted"
+	EventReasonMigrationRequestRejected EventReason = "MigrationRequestRejected"
+	// EventReasonUnsupportedSchemaVersion fires when a migration-request
+	// annotation carries a schemaVersion the controller doesn't
+	// understand. Kept distinct from MigrationRequestRejected so
+	// dashboards can alert on requester/controller version skew.
+	EventReasonUnsupportedSchemaVersion EventReason = "UnsupportedSchemaVersion"
+	EventReasonMigrationCompleted       EventReason = "MigrationCompleted"
+	// EventReasonMigrationExpired fires when a non-terminal Manual
+	// migration record passes its Deadline: the record is closed
+	// Failed, the pair's Migrate ops are cleared, the surge is torn
+	// down by the ordinary scale-down Delete pipeline, and the source
+	// phase is restored from observation.
+	EventReasonMigrationExpired              EventReason = "MigrationExpired"
 	EventReasonRateLimited                   EventReason = "RateLimited"
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
 	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"

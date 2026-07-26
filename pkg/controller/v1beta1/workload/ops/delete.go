@@ -42,9 +42,8 @@ func deleteDrainKey(idx int32) string {
 // Returns done=true once step 6 completes; done=false means requeue.
 //
 // Source-agnostic: callers construct workload.ReconcileInput from their
-// own source-of-truth types. The ISVC-OMENative dispatcher delegates
-// via internalsource.BuildReconcileInput; the IR controller will call
-// the same entry point with its own ReconcileInput.
+// own source-of-truth types — today the InferenceReplica adapter
+// (inferencereplica.buildReconcileInput) wires this entry point.
 func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, idx int32) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Delete: nil client")

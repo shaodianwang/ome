@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -70,11 +71,13 @@ func stubInputCallbacks(input *workload.ReconcileInput) {
 	if input.WriteAggregateCondition == nil {
 		input.WriteAggregateCondition = func(_ context.Context, _ metav1.Condition) error { return nil }
 	}
-	if input.ClearMigrationRequest == nil {
-		input.ClearMigrationRequest = func(_ context.Context, _ string) error { return nil }
-	}
 	if input.WarnInstanceFailed == nil {
 		input.WarnInstanceFailed = func(_ int32, _, _ string) {}
+	}
+	if input.MutateMigration == nil {
+		input.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+			return nil
+		}
 	}
 }
 
@@ -348,17 +351,21 @@ func TestReconcile_MigrationOperationOwned_NotScaleDown(t *testing.T) {
 
 // TestReconcile_SkipsMigrateWhenModeNever asserts the dispatcher
 // short-circuits the migration pass when plan.MigrationMode==never,
-// even if a DetectMigrationRequest callback is wired.
+// even with a dispatchable non-terminal Manual record present.
 func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	deps := workload.Deps{Client: c}
 
 	in := minimalInput(t)
-	detectorCalled := false
-	in.DetectMigrationRequest = func(_ context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
-		detectorCalled = true
-		return "", nil, 0, false, nil
+	in.ObservedState.Migrations = []workload.MigrationRecord{{
+		RequestUUID: "u-never", Trigger: workload.MigrationTriggerManual,
+		Phase: workload.MigrationPhaseAccepted, SourceInstance: 0,
+	}}
+	migrationMutated := false
+	in.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+		migrationMutated = true
+		return nil
 	}
 	plan := minimalPlan()
 	plan.MigrationMode = workload.MigrationModeNever
@@ -367,28 +374,74 @@ func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if detectorCalled {
-		t.Errorf("DetectMigrationRequest must NOT fire when MigrationMode=never")
+	if migrationMutated {
+		t.Errorf("migration pass must NOT fire when MigrationMode=never")
 	}
 }
 
-// TestReconcile_SkipsMigrateWhenDetectorNil asserts the dispatcher
-// is safe when an adapter (e.g., a future IR adapter) leaves
-// DetectMigrationRequest=nil — no panic, no migration work.
-func TestReconcile_SkipsMigrateWhenDetectorNil(t *testing.T) {
+// TestReconcile_MigrationWorkSelection is the structural work-loop
+// contract: the dispatcher selects ONLY non-terminal Manual records.
+// Terminal records (any trigger) and Auto records (born terminal —
+// Relocated) are records, never work; they must never be picked even
+// when they are the only records present. This replaces the retired
+// reason-string filter stack (nextInFlightFromLedger's AutoRecover /
+// ForceDelete guards) with a structural exclusion.
+func TestReconcile_MigrationWorkSelection(t *testing.T) {
 	scheme := makeScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
 
+	terminalAndAuto := []workload.MigrationRecord{
+		// Terminal Manual — finished work, never re-picked.
+		{RequestUUID: "u-done", Trigger: workload.MigrationTriggerManual,
+			Phase: workload.MigrationPhaseCompleted, SourceInstance: 0},
+		// Terminal Manual failure — same.
+		{RequestUUID: "u-failed", Trigger: workload.MigrationTriggerManual,
+			Phase: workload.MigrationPhaseFailed, SourceInstance: 0},
+		// Auto relocation record — born terminal, structurally excluded.
+		{RequestUUID: "u-auto", Trigger: workload.MigrationTriggerAuto,
+			Phase: workload.MigrationPhaseRelocated, SourceInstance: 0},
+	}
+	if rec := workload.NextManualMigration(terminalAndAuto); rec != nil {
+		t.Fatalf("terminal/Auto records must never be selected as work; picked %q", rec.RequestUUID)
+	}
+
+	// Dispatcher-level proof: with only terminal/Auto records the
+	// migration pass performs zero record mutations.
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	in := minimalInput(t)
-	in.DetectMigrationRequest = nil
+	in.ObservedState.Migrations = terminalAndAuto
+	migrationMutated := false
+	in.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+		migrationMutated = true
+		return nil
+	}
 	plan := minimalPlan()
 	plan.MigrationMode = workload.MigrationModeAuto
-
-	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
-	if err != nil {
+	if _, err := workload.Reconcile(context.Background(), workload.Deps{Client: c}, in, plan, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
+	if migrationMutated {
+		t.Errorf("terminal/Auto records must not reach the executor")
+	}
+
+	// Positive control: a non-terminal Manual record IS selected — and
+	// the oldest StartedAt wins when several are in flight.
+	older := metav1.NewTime(fixedMigrationTime())
+	newer := metav1.NewTime(fixedMigrationTime().Add(time.Minute))
+	work := append(append([]workload.MigrationRecord(nil), terminalAndAuto...),
+		workload.MigrationRecord{RequestUUID: "u-newer", Trigger: workload.MigrationTriggerManual,
+			Phase: workload.MigrationPhaseAccepted, SourceInstance: 0, StartedAt: newer},
+		workload.MigrationRecord{RequestUUID: "u-older", Trigger: workload.MigrationTriggerManual,
+			Phase: workload.MigrationPhaseSurgePending, SourceInstance: 0, StartedAt: older},
+	)
+	rec := workload.NextManualMigration(work)
+	if rec == nil || rec.RequestUUID != "u-older" {
+		t.Fatalf("expected oldest non-terminal Manual record u-older, got %+v", rec)
+	}
+}
+
+// fixedMigrationTime anchors the work-selection ordering assertions.
+func fixedMigrationTime() time.Time {
+	return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 }
 
 // TestReconcile_UpdateGateNil_AllowsAll asserts the dispatcher treats
@@ -412,25 +465,25 @@ func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 }
 
 // TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate pins
-// the affinity-trigger-not-detected bugfix: when DetectMigrationRequest
-// returns found=true for a fresh request UUID (no in-flight ledger
-// entry, no stamped Operation) but the source InstanceStatus is NOT in
-// a state where Migrate can accept it (Phase=Updating, Creating,
-// Restarting, or any Operation != Migrate in flight), Migrate defers
-// without taking ownership. The dispatcher MUST then fall through to
-// the Update / Create passes so the in-flight op can converge —
-// otherwise the dispatcher loops indefinitely in the Migrate-defer
-// branch, the in-flight Update never completes, and the source never
-// reaches Ready so the migration can never proceed (silent deadlock).
+// the affinity-trigger-not-detected bugfix: when a fresh Accepted
+// migration record exists (no surge allocated, no stamped Operation)
+// but the source InstanceStatus is NOT in a state where Migrate can
+// accept it (Phase=Updating, Creating, Restarting, or any Operation !=
+// Migrate in flight), Migrate defers without taking ownership. The
+// dispatcher MUST then fall through to the Update / Create passes so
+// the in-flight op can converge — otherwise the dispatcher loops
+// indefinitely in the Migrate-defer branch, the in-flight Update never
+// completes, and the source never reaches Ready so the migration can
+// never proceed (silent deadlock).
 //
 // Reproduction shape: user adds NodeAffinity to ISVC.Spec.Engine
 // PodSpec while the source pod is Running on the to-be-pinned node.
-// The controller fires Update (Phase=Updating). A migration request
-// annotation lands before the Update converges. detectMigrationRequest
-// returns found=true; Migrate sees Phase=Updating, returns done=false
-// without stamping. Without this fix the dispatcher requeues at
-// MigrateRequeueInterval indefinitely; Update never runs; the test's
-// Eventually for the audit ledger times out at 300s.
+// The controller fires Update (Phase=Updating). A migration request is
+// accepted into status.migrations before the Update converges. The
+// dispatcher picks the record; Migrate sees Phase=Updating, returns
+// done=false without stamping. Without this fix the dispatcher
+// requeues at MigrateRequeueInterval indefinitely and Update never
+// runs.
 //
 // Test shape: instrument MutateInstance to count calls. Without the
 // fix: zero mutations (Migrate's defer doesn't mutate; Update never
@@ -452,18 +505,16 @@ func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.
 	plan.UpdateStrategy = workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain}
 	plan.MigrationMode = workload.MigrationModeAuto
 
-	// DetectMigrationRequest returns a fresh annotation-detected request.
-	// Note the dispatcher does NOT pre-check source state — that's
-	// Migrate's job. The point of the test is the post-Migrate fall-
-	// through.
-	in.DetectMigrationRequest = func(_ context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
-		return "fresh-uuid-during-update", &workload.MigrationRequestSummary{
-			SchemaVersion: "v1",
-			Component:     "engine",
-			Instance:      0,
-			FromNode:      "node5",
-		}, 0, true, nil
-	}
+	// A fresh Accepted record — the dispatcher does NOT pre-check source
+	// state; that's Migrate's job. The point of the test is the
+	// post-Migrate fall-through.
+	in.ObservedState.Migrations = []workload.MigrationRecord{{
+		RequestUUID:    "fresh-uuid-during-update",
+		Trigger:        workload.MigrationTriggerManual,
+		Phase:          workload.MigrationPhaseAccepted,
+		SourceInstance: 0,
+		FromNode:       "node5",
+	}}
 
 	// Count MutateInstance calls to detect Update firing. Migrate's
 	// defer path doesn't mutate; Update's stamp does. Without the

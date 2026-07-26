@@ -3835,6 +3835,74 @@ spec:
                   x-kubernetes-list-type: map
                 labelSelector:
                   type: string
+                migrations:
+                  items:
+                    properties:
+                      allocatedAt:
+                        format: date-time
+                        type: string
+                      attempt:
+                        format: int32
+                        type: integer
+                      completedAt:
+                        format: date-time
+                        type: string
+                      deadline:
+                        format: date-time
+                        type: string
+                      fromNode:
+                        type: string
+                      hintTargetNodes:
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      message:
+                        type: string
+                      phase:
+                        enum:
+                          - Accepted
+                          - SurgePending
+                          - SurgeReady
+                          - Draining
+                          - Completed
+                          - Failed
+                          - Relocated
+                          - Pending
+                          - InProgress
+                        type: string
+                      reason:
+                        type: string
+                      requestUUID:
+                        type: string
+                      sourceInstance:
+                        format: int32
+                        type: integer
+                      startedAt:
+                        format: date-time
+                        type: string
+                      succeeded:
+                        type: boolean
+                      surgeInstance:
+                        format: int32
+                        type: integer
+                      trigger:
+                        enum:
+                          - Manual
+                          - Auto
+                        type: string
+                    required:
+                      - deadline
+                      - phase
+                      - requestUUID
+                      - sourceInstance
+                      - startedAt
+                      - trigger
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - requestUUID
+                  x-kubernetes-list-type: map
                 observedGeneration:
                   format: int64
                   type: integer

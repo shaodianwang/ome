@@ -16,7 +16,6 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -65,12 +64,12 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // — EventTarget falls back to the IR itself so events still land
 // somewhere observable.
 //
-// DetectMigrationRequest is left nil: the IR controller doesn't yet
-// handle ISVC-orchestrated migrations (that stays on the ISVC controller
-//
-//	the workload dispatcher treats a nil
-//
-// DetectMigrationRequest as "no migration in flight".
+// Migration work flows from IR.Status.Migrations (mirrored onto
+// ObservedState.Migrations): the workload dispatcher selects the oldest
+// non-terminal Manual record and MutateMigration is the write-back seam
+// for phase advancement. The migration-request annotation is consumed
+// into status.migrations by consumeMigrationRequests before dispatch;
+// no detection callback exists anymore.
 //
 // UpdateGate IS wired (when the parent ISVC is resolvable) onto the
 // shared coordination.EvaluateUpdateGate decision site — the identical
@@ -133,14 +132,18 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// alone decides Backoff vs fail-safe Held.
 		MutateRetryBlock:  buildMutateRetryBlock(r.Client, ir),
 		UpdateRetryPolicy: updateRetryPolicy,
+		// Migration-record persistence: the executor advances
+		// status.migrations phases through this seam (same RMW +
+		// in-memory-mirror discipline as MutateRetryBlock).
+		MutateMigration: buildMutateMigration(r.Client, ir),
+		// Record creation (born-terminal Auto mirrors from the
+		// disposition). Separate from MutateMigration so mutate-on-
+		// missing stays a structural no-op.
+		AppendMigration: buildAppendMigration(r.Client, ir),
 		// Stuck-Terminating force-delete gate. nil disables the
 		// escalation; non-nil durations are validated > 0 upstream.
 		ForceDelete: forceDeletePolicy,
 		Clock:       r.Clock,
-		// IR doesn't drive ISVC migrations; no source-of-truth annotation
-		// to clear. Wire a no-op stub so the workload.ReconcileInput
-		// panic-on-nil contract is satisfied.
-		ClearMigrationRequest: func(_ context.Context, _ string) error { return nil },
 		// WarnInstanceFailed bridges the workload-side escalator to the
 		// reconciler's event recorder so the operator sees the
 		// per-Instance Failed escalation against the EventTarget (parent
@@ -171,20 +174,14 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 			return coordination.EvaluateUpdateGate(ctx, reads, parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
 		}
 	}
-	// Wire migration detection onto the IR-managed path. The operator's
-	// migration-request annotation + the audit ledger live on the
-	// user-facing parent ISVC, and AggregateIRStatus mirrors the IR's
-	// per-Instance statuses back onto it — so detection reads the parent,
-	// while Migrate drives the IR's own pods. LedgerOwner=parent keeps the
-	// ledger Migrate reads/writes the same ISVC-owned ledger detection
-	// uses. Nil parent (brief foreground-GC window) → migration simply
-	// doesn't fire this pass.
+	// The migration audit ledger (history) lives on the user-facing
+	// parent ISVC when resolvable; Migrate drives the IR's own pods and
+	// resumes from IR.Status.Migrations. Nil parent (brief foreground-GC
+	// window) → the ledger falls back to the IR via the workload-side
+	// owner resolution.
 	if parent != nil {
 		input.LedgerOwner = parent
 		input.LedgerOwnerGVK = isvcGVK
-		input.DetectMigrationRequest = func(ctx context.Context) (string, *workloadtypes.MigrationRequestSummary, int32, bool, error) {
-			return omenativeops.DetectMigrationRequestForISVC(ctx, parent, r.APIReader, r.Client, r.Recorder, ir.Spec.Component)
-		}
 	}
 
 	return input
@@ -375,6 +372,7 @@ func observedFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadObservedState
 		UpdateRevision:     ir.Status.UpdateRevision,
 		InstanceStatuses:   v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
 		RetryBlocks:        retryBlocksFromIR(ir),
+		Migrations:         migrationsFromIR(ir),
 	}
 }
 

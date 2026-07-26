@@ -35,6 +35,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -59,13 +60,20 @@ const ratioGateRequeueInterval = 3 * time.Second
 //  2. Restart — per-Instance pod-loss / pod-Failed triggers; dispatched
 //     when the Component's restart policy allows it. One pass per
 //     reconcile.
-//  3. Migration — input.DetectMigrationRequest then Migrate. Returns
+//  3. Migration expiry — Manual records past their Deadline are
+//     consumed (ops.ExpireMigrations): record closed, pair unpinned,
+//     source restored from observation. Runs BEFORE the drive pass so
+//     an expired record can never be driven (re-stamped) again, and
+//     regardless of MigrationMode so a mode flip to Never cannot
+//     strand a non-terminal record.
+//  4. Migration — the oldest non-terminal Manual record from
+//     ObservedState.Migrations drives Migrate, one per pass. Returns
 //     Requeue=true after completion so the next reconcile rebuilds
 //     plan from the post-migration status.
-//  4. Update — DetectUpdateTrigger then Update. Tracks within-pass
+//  5. Update — DetectUpdateTrigger then Update. Tracks within-pass
 //     in-flight counters and consults input.UpdateGate so
 //     cross-Component coordination can throttle the rollout.
-//  5. Create — materialize any missing Instances.
+//  6. Create — materialize any missing Instances.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -148,30 +156,55 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}, nil
 	}
 
-	// 3. Per-Component migration pass. Skip when mode is Never or the
-	// adapter didn't wire a detector.
+	// 3. Migration expiry pass — the deadline consumer. Runs BEFORE the
+	// drive pass so an expired record is consumed before it can be
+	// driven (re-stamped) again, and regardless of MigrationMode so a
+	// mode flip to Never can never strand a non-terminal record. When
+	// anything expired, requeue immediately: ObservedState and plan are
+	// now stale (record terminal, pair ops cleared), and the next
+	// pass's rebuilt plan drops the unpinned surge index so the
+	// ordinary step-1 Delete pipeline tears it down.
+	if expiredCount, eerr := workloadops.ExpireMigrations(ctx, deps, input, plan); eerr != nil {
+		return ctrl.Result{}, fmt.Errorf("workload.Reconcile: expire migrations: %w", eerr)
+	} else if expiredCount > 0 {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 4. Per-Component migration pass. Work comes from the owner's
+	// status.migrations records (ObservedState.Migrations): the oldest
+	// non-terminal Manual record is driven, one per pass (dispatch
+	// pacing unchanged). Terminal records and Auto records (born
+	// terminal) are excluded structurally — records, never work. Skip
+	// when mode is Never.
 	//
 	// Migrate's third return (accepted) distinguishes two done=false
 	// modes:
-	//   - accepted=true: migration is mid-flight (status stamped, ledger
-	//     Started, or fresh request that just stamped). Requeue at the
-	//     Migrate interval; do NOT fall through (DetectUpdateTrigger
-	//     already suppresses Migrate-owned status, so falling through
-	//     would be a no-op anyway, but the explicit requeue is cleaner).
+	//   - accepted=true: migration is mid-flight (record carries the
+	//     surge index, statuses stamped). Requeue at the Migrate
+	//     interval; do NOT fall through (DetectUpdateTrigger already
+	//     suppresses Migrate-owned status, so falling through would be
+	//     a no-op anyway, but the explicit requeue is cleaner).
 	//   - accepted=false: migration deferred without taking ownership
-	//     (fresh request, source not yet steady-Ready because of an
+	//     (fresh record, source not yet steady-Ready because of an
 	//     in-flight Update/Restart/Create). Fall through to Update/Create
 	//     so the in-flight op converges. Without fall-through the
 	//     dispatcher loops indefinitely at the MigrateRequeueInterval and
 	//     the in-flight op never runs — the affinity-trigger-not-detected
 	//     deadlock.
-	if plan.MigrationMode != MigrationModeNever && input.DetectMigrationRequest != nil {
-		uuid, req, sourceIdx, found, mderr := input.DetectMigrationRequest(ctx)
-		if mderr != nil {
-			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect migration request (component=%s): %w", plan.Component, mderr)
-		}
-		if found {
-			done, accepted, merr := workloadops.Migrate(ctx, deps, input, plan, sourceIdx, uuid, req)
+	if plan.MigrationMode != MigrationModeNever {
+		if rec := NextManualMigration(input.ObservedState.Migrations); rec != nil {
+			// Reconstruct the executor's request view from the record —
+			// the annotation was consumed at accept time.
+			req := &audit.MigrationRequest{
+				SchemaVersion:   audit.SchemaV1,
+				Component:       string(plan.Component),
+				Instance:        rec.SourceInstance,
+				FromNode:        rec.FromNode,
+				HintTargetNodes: append([]string(nil), rec.HintTargetNodes...),
+				Reason:          rec.Reason,
+			}
+			sourceIdx := rec.SourceInstance
+			done, accepted, merr := workloadops.Migrate(ctx, deps, input, plan, sourceIdx, rec.RequestUUID, req)
 			if merr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, merr)
 			}
@@ -190,15 +223,15 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 				// migration status.
 				return ctrl.Result{Requeue: true}, nil
 			}
-			// !done && !accepted: fresh-request defer (e.g., source
+			// !done && !accepted: fresh-record defer (e.g., source
 			// Phase=Updating from an in-flight spec edit). Fall through
 			// to Update/Create so the in-flight op converges; the next
-			// reconcile re-detects the same annotation against a steady-
-			// Ready source.
+			// reconcile re-picks the same record against a steady-Ready
+			// source.
 		}
 	}
 
-	// 4. Per-Instance update pass.
+	// 5. Per-Instance update pass.
 	// retryBlockWait is the earliest not-yet-due Backoff RetryBlock
 	// wake-up reported by the detect pass; folded into this pass's
 	// result so the gate is re-evaluated on time. Only ever ADDS a
@@ -388,7 +421,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		}
 	}
 
-	// 5. Create pass.
+	// 6. Create pass.
 	res, cerr := workloadops.Create(ctx, deps, input, plan, target)
 	if cerr != nil {
 		return res, cerr

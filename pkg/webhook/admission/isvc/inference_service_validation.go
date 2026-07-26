@@ -3,6 +3,7 @@ package isvc
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/runtimerevision"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils/storage"
@@ -61,6 +63,11 @@ func (v *InferenceServiceValidator) ValidateCreate(ctx context.Context, obj runt
 	if err := validateLegacyAutoscalerFieldsFromCtx(ctx); err != nil {
 		return nil, err
 	}
+	// old=nil: every migration-request annotation present at CREATE is
+	// an add and gets validated (parity with the update path).
+	if err := validateAddedMigrationRequests(nil, isvc); err != nil {
+		return nil, err
+	}
 	return v.validateInferenceService(ctx, isvc)
 }
 
@@ -81,7 +88,67 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 	if err := validation.ValidateCoordinationUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
 		return nil, err
 	}
+	if err := validateAddedMigrationRequests(oldIsvc, isvc); err != nil {
+		return nil, err
+	}
 	return v.validateInferenceService(ctx, isvc)
+}
+
+// validateAddedMigrationRequests validates every migration-request
+// annotation (ome.io/migration-request-v1-<uuid>) this write ADDS —
+// present in the new object with a value absent or different in the
+// old. A nil oldIsvc (CREATE) treats every present annotation as an
+// add. Pre-existing unchanged annotations are never re-validated, and
+// deletions are always admitted: the controller consumes the mailbox
+// by deleting keys, so a delete must never be blocked.
+func validateAddedMigrationRequests(oldIsvc, isvc *v1beta1.InferenceService) error {
+	var oldAnnotations map[string]string
+	if oldIsvc != nil {
+		oldAnnotations = oldIsvc.Annotations
+	}
+	for key, raw := range isvc.Annotations {
+		if !strings.HasPrefix(key, audit.MigrationRequestAnnotationPrefix) {
+			continue
+		}
+		if oldRaw, existed := oldAnnotations[key]; existed && oldRaw == raw {
+			continue
+		}
+		uuid := audit.ExtractRequestUUID(key)
+		if uuid == "" {
+			return fmt.Errorf("migration request %s: annotation key carries no request UUID", key)
+		}
+		req, err := audit.ParseMigrationRequest(raw)
+		if err != nil {
+			return fmt.Errorf("migration request %s: %v", uuid, err)
+		}
+		if err := validateMigrationRequestComponent(isvc, req.Component); err != nil {
+			return fmt.Errorf("migration request %s: %v", uuid, err)
+		}
+		if req.Instance < 0 {
+			return fmt.Errorf("migration request %s: instance must be >= 0, got %d", uuid, req.Instance)
+		}
+	}
+	return nil
+}
+
+// validateMigrationRequestComponent checks a migration request's
+// component against the components this ISVC declares: engine always;
+// decoder / router only when their spec blocks are present (same
+// enumeration rule as isvcAutoscalerChecks).
+func validateMigrationRequestComponent(isvc *v1beta1.InferenceService, component string) error {
+	switch component {
+	case string(v1beta1.EngineComponent):
+		return nil
+	case string(v1beta1.DecoderComponent):
+		if isvc.Spec.Decoder != nil {
+			return nil
+		}
+	case string(v1beta1.RouterComponent):
+		if isvc.Spec.Router != nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("component %q does not exist on this InferenceService", component)
 }
 
 // validateLegacyAutoscalerFieldsFromCtx pulls the raw admission request

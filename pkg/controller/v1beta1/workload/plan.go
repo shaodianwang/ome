@@ -59,8 +59,8 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 		RestartPolicy:        restartPolicyOrDefault(lifecycle.RestartPolicy, desired.MultiPod),
 		UpdateStrategy:       updateStrategyWithDefaults(lifecycle.UpdateStrategy),
 		ReadyPolicy:          readyPolicyOrDefault(lifecycle.ReadyPolicy, desired.MultiPod),
-		InstanceReadyTimeout: instanceReadyTimeoutOrDefault(lifecycle.InstanceReadyTimeout),
-		MigrationMode:        migrationModeOrDefault(lifecycle.MigrationPolicy),
+		InstanceReadyTimeout: InstanceReadyTimeoutOrDefault(lifecycle.InstanceReadyTimeout),
+		MigrationMode:        MigrationModeOrDefault(lifecycle.MigrationPolicy),
 		Paused:               desired.Paused,
 		TopologyKey:          desired.TopologyKey,
 	}, nil
@@ -139,14 +139,24 @@ func updateStrategyWithDefaults(s *UpdateStrategy) UpdateStrategy {
 	return out
 }
 
-func instanceReadyTimeoutOrDefault(d *metav1.Duration) time.Duration {
+// InstanceReadyTimeoutOrDefault resolves the effective per-Component
+// InstanceReadyTimeout: the configured lifecycle value, or the 30m
+// default when unset. Exported so adapters stamping deadlines outside
+// BuildPlan (e.g. migration accept) resolve the identical value the
+// per-op writers read from ComponentPlan.InstanceReadyTimeout.
+func InstanceReadyTimeoutOrDefault(d *metav1.Duration) time.Duration {
 	if d == nil {
 		return 30 * time.Minute
 	}
 	return d.Duration
 }
 
-func migrationModeOrDefault(p *MigrationPolicy) MigrationMode {
+// MigrationModeOrDefault resolves the effective per-Component
+// migration mode: the configured MigrationPolicy.Mode, or Auto when
+// unset. Exported so adapters gating outside BuildPlan (e.g. migration
+// accept rejecting under Never) resolve the identical value the
+// dispatcher reads from ComponentPlan.MigrationMode.
+func MigrationModeOrDefault(p *MigrationPolicy) MigrationMode {
 	if p == nil || p.Mode == "" {
 		return MigrationModeAuto
 	}

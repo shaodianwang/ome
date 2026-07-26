@@ -8,14 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
-
-// MigrationRequestSummary is the type DetectMigrationRequest returns
-// to the dispatcher. Direct alias of audit.MigrationRequest, the type
-// the workload Migrate state machine consumes.
-type MigrationRequestSummary = audit.MigrationRequest
 
 // ReconcileInput carries everything a workload reconcile needs as
 // plain data. Callers populate this struct from their source-of-truth
@@ -93,15 +86,6 @@ type ReconcileInput struct {
 	// `func(_ context.Context, _ metav1.Condition) error { return nil }`.
 	WriteAggregateCondition func(ctx context.Context, cond metav1.Condition) error
 
-	// ClearMigrationRequest removes the source-of-truth annotation
-	// for the migration request identified by uuid. Without removal,
-	// the requester re-delivers the same UUID indefinitely.
-	//
-	// MUST be set on every constructed ReconcileInput — nil panics.
-	// No-op adapters wire an explicit
-	// `func(_ context.Context, _ string) error { return nil }`.
-	ClearMigrationRequest func(ctx context.Context, uuid string) error
-
 	// WarnInstanceFailed emits a Warning event against EventTarget
 	// reporting that the (idx) Instance escalated to Phase=Failed.
 	//
@@ -114,13 +98,26 @@ type ReconcileInput struct {
 	// Nil-safe: unset means no event.
 	WarnRetryHeld func(targetRevision string, attempts int32, reason string)
 
-	// DetectMigrationRequest, when non-nil, returns the next migration
-	// to drive. Source-of-truth carriers are adapter-specific
-	// (ISVC annotations + audit ledger; IR equivalent).
+	// MutateMigration reads-modifies-writes the owner's persisted
+	// MigrationRecord for requestUUID (status.migrations). mutate
+	// receives the existing record and returns true when a real change
+	// was made; false short-circuits the status write. A missing record
+	// (trimmed, or the owner was recreated) is a clean no-op — the
+	// callback is not invoked.
 	//
-	// found=false means no migration in flight; the dispatcher skips
-	// the Migrate pass. Nil callback is treated as found=false.
-	DetectMigrationRequest func(ctx context.Context) (uuid string, req *MigrationRequestSummary, sourceIdx int32, found bool, err error)
+	// MUST be set when ObservedState.Migrations carries any records —
+	// the Migrate executor errors on a nil callback rather than
+	// silently dropping phase advancement.
+	MutateMigration func(ctx context.Context, requestUUID string, mutate func(*MigrationRecord) bool) error
+
+	// AppendMigration appends a NEW MigrationRecord to the owner's
+	// persisted status.migrations. Idempotent: a record with the same
+	// RequestUUID already present writes nothing. Deliberately separate
+	// from MutateMigration — mutate-on-missing stays a no-op (a stamper
+	// must never resurrect a trimmed record as a phantom), so record
+	// CREATION gets its own seam. Optional: nil disables workload-side
+	// record creation; callers treat the write as a best-effort mirror.
+	AppendMigration func(ctx context.Context, rec MigrationRecord) error
 
 	// UpdateGate, when non-nil, is called per Instance in the Update
 	// pass before starting a fresh Update operation. Lets the adapter

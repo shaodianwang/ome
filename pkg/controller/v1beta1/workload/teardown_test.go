@@ -51,10 +51,16 @@ func TestReconcile_Teardown_DeletesEveryObservedInstance(t *testing.T) {
 		phaseByIdx[idx] = s.Phase
 		return nil
 	}
-	detectorCalled := false
-	in.DetectMigrationRequest = func(_ context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
-		detectorCalled = true
-		return "", nil, 0, false, nil
+	// A non-terminal Manual record that would be dispatched on a normal
+	// reconcile; teardown must never reach the migration pass.
+	in.ObservedState.Migrations = []workload.MigrationRecord{{
+		RequestUUID: "teardown-mig", Trigger: workload.MigrationTriggerManual,
+		Phase: workload.MigrationPhaseAccepted, SourceInstance: 0,
+	}}
+	migrationMutated := false
+	in.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+		migrationMutated = true
+		return nil
 	}
 
 	plan := minimalPlan() // covers only index 0
@@ -77,7 +83,7 @@ func TestReconcile_Teardown_DeletesEveryObservedInstance(t *testing.T) {
 			t.Errorf("instance %d: phase = %q, want Deleting (every observed index is an extra under teardown)", idx, phaseByIdx[idx])
 		}
 	}
-	if detectorCalled {
+	if migrationMutated {
 		t.Errorf("teardown must not run the migration pass")
 	}
 	// Every pod deleted, none created (Create pass must not run even

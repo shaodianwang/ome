@@ -30358,10 +30358,15 @@ spec:
                         type: string
                       phase:
                         enum:
-                          - Pending
-                          - InProgress
+                          - Accepted
+                          - SurgePending
+                          - SurgeReady
+                          - Draining
                           - Completed
                           - Failed
+                          - Relocated
+                          - Pending
+                          - InProgress
                         type: string
                       reason:
                         type: string

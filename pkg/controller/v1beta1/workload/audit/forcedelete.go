@@ -8,14 +8,15 @@ package audit
 // ForceDelete entries are RECORDS, never work orders, and every ledger
 // reader must treat them as inert:
 //   - written terminal (Phase=Completed), so the in-flight readers
-//     (nextInFlightFromLedger, HasInFlightMigrationForInstance,
-//     InFlightEntry) never resume them as migrations;
+//     (HasInFlightMigrationForInstance, InFlightEntry) never resume
+//     them as migrations, and the adapter's upgrade import (which
+//     additionally filters Reason=ForceDelete) never synthesizes a
+//     status.migrations entry from one — so they can never reach the
+//     migration capacity gate, which counts status entries;
 //   - not AutoRecover, so the relocation budget / node-exclusion
 //     helpers (CountAutoRecoverAttempts, RecentAutoRecoverFromNodes,
 //     NewestAutoRecoverEntry, RemoveAutoRecoverEntries) never count
-//     them;
-//   - excluded from migration capacity (ValidateCapacity) — a dead
-//     node's pod sweep must not consume the migration admission window.
+//     them.
 //
 // RequestUUID carries the force-deleted pod's UID (a valid UUID), so
 // one pod object yields at most one row across passes and restarts.

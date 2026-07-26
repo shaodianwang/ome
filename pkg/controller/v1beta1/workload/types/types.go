@@ -7,11 +7,11 @@
 //
 // The workload package owns its own status / operation / component /
 // phase / key types and does NOT depend on the OME CRD API package.
-// Every type here mirrors the corresponding OMENative-on-ISVC status
-// type field-for-field; the v1beta1convert helpers next door
-// (`workload/v1beta1convert`) perform the conversion, and adapter
-// packages (omenative/internalsource, inferencereplica) wire those
-// converters into their reconcile loops.
+// Every type here mirrors the corresponding v1beta1 status type
+// field-for-field; the v1beta1convert helpers
+// (`controller/v1beta1/v1beta1convert`) perform the conversion, and
+// the InferenceReplica adapter (inferencereplica) wires those
+// converters into its reconcile loop.
 //
 // External callers reference these types as `workload.X` — the parent
 // `workload` package re-exports them as Go aliases.
@@ -147,11 +147,18 @@ type InstanceOperation struct {
 
 	Reason string
 
-	// Migrate-only fields:
-	SurgeIndex      *int32
+	// Migrate-only fields. The Operation is a pin: SurgeIndex correlates
+	// the source/surge pair and RequestUUID keys the authoritative
+	// status.migrations record.
+	SurgeIndex  *int32
+	RequestUUID string
+
+	// FromNode / HintTargetNodes are no longer stamped (migration facts
+	// live on the owner's status.migrations record) and have no readers;
+	// retained only so the CRD InstanceOperation mirror round-trips
+	// pre-existing stamped values unchanged. Do not add new writers.
 	FromNode        string
 	HintTargetNodes []string
-	RequestUUID     string
 }
 
 // InstanceStatus is the per-Instance status. Mirrors the CRD

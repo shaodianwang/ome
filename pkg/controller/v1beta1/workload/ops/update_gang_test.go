@@ -346,6 +346,17 @@ func TestMigrateSurge_InheritsExcludedNodes(t *testing.T) {
 	}
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	// In-flight record: the executor resumes from status.migrations
+	// (SurgeInstance allocated on a prior pass).
+	input.ObservedState.Migrations = []workload.MigrationRecord{{
+		RequestUUID: "uuid-mig-1", Trigger: workload.MigrationTriggerManual,
+		Phase: workload.MigrationPhaseSurgePending, SourceInstance: 0,
+		SurgeInstance: &surgeIdx, FromNode: "node-from",
+	}}
+	input.MutateMigration = func(_ context.Context, uuid string, mutate func(*workload.MigrationRecord) bool) error {
+		mutate(&input.ObservedState.Migrations[0])
+		return nil
+	}
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 	plan.Instances[0].ExcludedNodes = []string{"node-bad-1", "node-bad-2"}
 	req := &audit.MigrationRequest{

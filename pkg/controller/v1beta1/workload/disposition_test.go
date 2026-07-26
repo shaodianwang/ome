@@ -19,6 +19,7 @@ package workload_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -386,6 +387,125 @@ func TestDispose_RelocationDirective_GPUCase(t *testing.T) {
 	}
 }
 
+// TestDispose_RelocationDirective_MirrorsStatusRecord: branch 2 writes
+// the born-terminal Auto visibility mirror through AppendMigration
+// AFTER the ledger persist — one record per directive, uuid matching
+// the ledger row, Attempt matching the ledger's attempt count, and the
+// born-terminal shape: Phase=Relocated, StartedAt=CompletedAt=now,
+// Deadline stamped = now (required field, no deadline semantics),
+// Succeeded unset at birth.
+func TestDispose_RelocationDirective_MirrorsStatusRecord(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	c := fakeLedgerClient(t)
+	owner := ledgerOwnerCM()
+	deps := workload.Deps{Client: c, Clock: fc}
+	dd := workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto}
+	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+
+	var appended []workload.MigrationRecord
+	dispose := func() workload.DispositionOutcome {
+		insts := []workload.InstanceStatus{{
+			Index:     0,
+			Phase:     workload.InstancePhaseUpdating,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+		}}
+		input, _ := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
+		input.AppendMigration = func(_ context.Context, rec workload.MigrationRecord) error {
+			appended = append(appended, rec)
+			return nil
+		}
+		outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+		if err != nil {
+			t.Fatalf("DisposeExpiredAttempt: %v", err)
+		}
+		return outcome
+	}
+
+	if outcome := dispose(); outcome != workload.DispositionRelocationDirective {
+		t.Fatalf("outcome: got %v want DispositionRelocationDirective", outcome)
+	}
+	if len(appended) != 1 {
+		t.Fatalf("AppendMigration calls: got %d want 1", len(appended))
+	}
+	rec := appended[0]
+	ledger := loadLedger(t, c)
+	if len(ledger.Entries) != 1 || rec.RequestUUID != ledger.Entries[0].RequestUUID {
+		t.Errorf("record uuid: got %q want the ledger directive's %q", rec.RequestUUID, ledger.Entries[0].RequestUUID)
+	}
+	if rec.Trigger != workload.MigrationTriggerAuto || rec.Phase != workload.MigrationPhaseRelocated {
+		t.Errorf("record: got trigger=%q phase=%q want Auto/Relocated (born terminal)", rec.Trigger, rec.Phase)
+	}
+	if rec.SourceInstance != 0 || rec.FromNode != "node-a" {
+		t.Errorf("record identity: got instance=%d fromNode=%q want 0/node-a", rec.SourceInstance, rec.FromNode)
+	}
+	if rec.Attempt != 1 {
+		t.Errorf("Attempt: got %d want 1 (CountAutoRecoverAttempts before the write + 1)", rec.Attempt)
+	}
+	if rec.Reason != audit.ReasonAutoRecover {
+		t.Errorf("Reason: got %q want %q", rec.Reason, audit.ReasonAutoRecover)
+	}
+	if !rec.StartedAt.Time.Equal(t0) || rec.CompletedAt == nil || !rec.CompletedAt.Time.Equal(t0) {
+		t.Errorf("timestamps: got started=%v completed=%v want both %v", rec.StartedAt, rec.CompletedAt, t0)
+	}
+	if !rec.Deadline.Time.Equal(t0) {
+		t.Errorf("Deadline: got %v want %v (stamped = now; no deadline semantics on a born-terminal record)", rec.Deadline, t0)
+	}
+	if rec.Succeeded != nil {
+		t.Errorf("Succeeded: got %v want nil at birth (stamped post-hoc on Ready)", *rec.Succeeded)
+	}
+	if rec.SurgeInstance != nil || rec.AllocatedAt != nil {
+		t.Errorf("record: got surge=%v allocatedAt=%v want both nil (Auto never allocates — capacity stays blind)", rec.SurgeInstance, rec.AllocatedAt)
+	}
+
+	// Second attempt: Attempt tracks the ledger count.
+	fc.SetTime(t0.Add(5 * time.Minute))
+	if outcome := dispose(); outcome != workload.DispositionRelocationDirective {
+		t.Fatalf("attempt 2 outcome: got %v want DispositionRelocationDirective", outcome)
+	}
+	if len(appended) != 2 || appended[1].Attempt != 2 {
+		t.Fatalf("attempt 2 record: got %+v want a second record with Attempt=2", appended)
+	}
+}
+
+// TestDispose_RelocationDirective_RecordMirrorFailureTolerated: the
+// status record is a mirror — a failed AppendMigration must NOT fail
+// the disposition. The ledger directive (the exclusion-memory
+// authority) persists, the outcome stays RelocationDirective, and the
+// terminal backstop completes.
+func TestDispose_RelocationDirective_RecordMirrorFailureTolerated(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	c := fakeLedgerClient(t)
+	insts := []workload.InstanceStatus{{
+		Index:     0,
+		Phase:     workload.InstancePhaseUpdating,
+		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
+	input.AppendMigration = func(_ context.Context, _ workload.MigrationRecord) error {
+		return fmt.Errorf("apiserver unavailable")
+	}
+	dd := workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto}
+	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{Client: c, Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v (a mirror failure must not fail the disposition)", err)
+	}
+	if outcome != workload.DispositionRelocationDirective {
+		t.Fatalf("outcome: got %v want DispositionRelocationDirective", outcome)
+	}
+	// The ledger row landed — the exclusion overlay is unaffected.
+	ledger := loadLedger(t, c)
+	if len(ledger.Entries) != 1 || ledger.Entries[0].Reason != audit.ReasonAutoRecover || ledger.Entries[0].FromNode != "node-a" {
+		t.Fatalf("ledger: got %+v want the directive row despite the mirror failure", ledger.Entries)
+	}
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+		t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
+	}
+}
+
 // drainEvents empties the FakeRecorder channel into a slice.
 func drainEvents(recorder *record.FakeRecorder) []string {
 	var out []string
@@ -525,6 +645,11 @@ func TestDispose_RelocationDirective_ReplayDedup(t *testing.T) {
 		},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
+	appendCalls := 0
+	input.AppendMigration = func(_ context.Context, _ workload.MigrationRecord) error {
+		appendCalls++
+		return nil
+	}
 	recorder := record.NewFakeRecorder(8)
 	var directives []string
 	dd := workload.DispositionDeps{
@@ -557,6 +682,9 @@ func TestDispose_RelocationDirective_ReplayDedup(t *testing.T) {
 	}
 	if len(directives) != 0 {
 		t.Errorf("OnRelocationDirective: got %v want none on replay", directives)
+	}
+	if appendCalls != 0 {
+		t.Errorf("AppendMigration calls: got %d want 0 (a replay writes no second status record)", appendCalls)
 	}
 }
 

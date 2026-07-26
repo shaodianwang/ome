@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
@@ -97,7 +98,7 @@ type DispositionDeps struct {
 	// entry count. <= 0 (unconfigured) disables relocation entirely.
 	AutoMigrateMaxAttempts int32
 	// MigrationMode is the effective migration disposition from the
-	// plan (migrationModeOrDefault). Only Auto (and its Surge spelling
+	// plan (MigrationModeOrDefault). Only Auto (and its Surge spelling
 	// alias) enables relocation; the zero value fails safe to the
 	// terminal branch.
 	MigrationMode MigrationMode
@@ -308,9 +309,10 @@ func singleLiveNode(pods []*corev1.Pod) string {
 // AutoRecover ledger entry (Phase=Completed, Outcome=relocate-recreate,
 // FromNode = the suspect node). It is a record — budget accounting,
 // node-exclusion memory, audit evidence — NOT a migration work order:
-// the migration-request detector skips AutoRecover entries, so the
-// Ready-source copier machinery is never fed a broken source. The
-// rebuild relocates through the render-time NotIn overlay instead.
+// Auto records are born terminal and the work loop selects only
+// non-terminal Manual entries, so the Ready-source copier machinery is
+// never fed a broken source. The rebuild relocates through the
+// render-time NotIn overlay instead.
 //
 // Three guards run BEFORE recording, in order:
 //
@@ -332,11 +334,16 @@ func singleLiveNode(pods []*corev1.Pod) string {
 //     when the directive that fills the final budget slot is recorded
 //     below — so post-cap dispose cycles don't re-warn indefinitely.
 //
-// Note: terminal entries never count toward the migration capacity
-// in-flight cap (audit.ValidateCapacity counts Phase=Started only), but
-// they DO count toward its trailing-hour rate window — acceptable:
-// bounded by maxAttempts per instance, and directive bursts are exactly
-// the churn that window exists to damp.
+// After the ledger persist succeeds (and only then — the ledger stays
+// the exclusion-memory authority), a born-terminal Auto status record
+// (Phase=Relocated) is mirrored through input.AppendMigration. The
+// record is visibility, not work: it counts toward neither capacity
+// cap (terminal → not in-flight; never allocates a surge → no
+// AllocatedAt for the per-hour window — Auto churn is bounded
+// separately by maxAttempts per instance) and the executor's work loop
+// never selects it. Best-effort: a nil closure or a failed write is
+// V(1)-logged and never fails the disposition — the relocation itself
+// is ledger-driven.
 func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileInput, dd DispositionDeps, inst InstanceStatus, fromNode string) (recorded bool, err error) {
 	owner := dispositionLedgerOwner(input)
 	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), owner)
@@ -372,7 +379,8 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 		return false, nil
 	}
 
-	now := metav1.NewTime(input.Now()).UTC().Format(time.RFC3339)
+	nowT := metav1.NewTime(input.Now())
+	now := nowT.UTC().Format(time.RFC3339)
 	reqUUID := uuid.NewString()
 	ledger.UpsertEntry(audit.Entry{
 		RequestUUID:    reqUUID,
@@ -387,6 +395,28 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 	})
 	if err := audit.PersistLedgerForOwner(ctx, deps.Client, owner, dispositionLedgerOwnerGVK(input), ledger); err != nil {
 		return false, fmt.Errorf("persist audit ledger (instance=%d): %w", inst.Index, err)
+	}
+	// Visibility mirror, only after the ledger persist: a born-terminal
+	// Auto record. Deadline is required in the schema but carries no
+	// semantics on a born-terminal record — stamped = now.
+	if input.AppendMigration != nil {
+		completedAt := nowT
+		if aerr := input.AppendMigration(ctx, MigrationRecord{
+			RequestUUID:    reqUUID,
+			Trigger:        MigrationTriggerAuto,
+			SourceInstance: inst.Index,
+			FromNode:       fromNode,
+			Phase:          MigrationPhaseRelocated,
+			Attempt:        attempts + 1,
+			Reason:         audit.ReasonAutoRecover,
+			Message:        fmt.Sprintf("relocation directive recorded; rebuild steered off node %s", fromNode),
+			StartedAt:      nowT,
+			Deadline:       nowT,
+			CompletedAt:    &completedAt,
+		}); aerr != nil {
+			logf.FromContext(ctx).V(1).Info("relocation status-record mirror failed; ledger remains authoritative",
+				"uuid", reqUUID, "instance", inst.Index, "error", aerr.Error())
+		}
 	}
 	if deps.Recorder != nil {
 		if target := dispositionEventTarget(input); target != nil {

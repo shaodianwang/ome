@@ -25,7 +25,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -313,15 +312,11 @@ func TestTeardown_InFlightMigration_CompletesAndClosesLedger(t *testing.T) {
 		t.Errorf("Started entry must be closed (Phase=Failed, Outcome=%s, CompletedAt set); got %+v", audit.OutcomeOwnerTornDown, e)
 	}
 
-	// Fresh-IR-resume regression: the detector a recreated IR would run
-	// against the surviving parent must find nothing in flight.
-	uuid, _, _, found, derr := omenativeops.DetectMigrationRequestForISVC(
-		context.Background(), parent, c, c, record.NewFakeRecorder(8), v1beta1.EngineComponent)
-	if derr != nil {
-		t.Fatalf("DetectMigrationRequestForISVC: %v", derr)
-	}
-	if found {
-		t.Errorf("closed entry must not resume on a fresh IR; detector returned uuid=%q", uuid)
+	// Fresh-IR-resume regression: the upgrade import a projector-
+	// recreated IR runs against the surviving parent's ledger must NOT
+	// synthesize work from the closed row.
+	if imports := importableLedgerMigrations(ledger, string(v1beta1.EngineComponent), metav1.Now(), time.Minute); len(imports) != 0 {
+		t.Errorf("closed entry must not import as migration work on a fresh IR; got %+v", imports)
 	}
 }
 

@@ -316,16 +316,8 @@ const (
 	MigrationModeSurge MigrationMode = "Surge"
 )
 
-// MigrationPhase is the lifecycle phase of a migration request.
-// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed
-type MigrationPhase string
-
-const (
-	MigrationPhasePending    MigrationPhase = "Pending"
-	MigrationPhaseInProgress MigrationPhase = "InProgress"
-	MigrationPhaseCompleted  MigrationPhase = "Completed"
-	MigrationPhaseFailed     MigrationPhase = "Failed"
-)
+// MigrationPhase is declared in inferencereplica_types.go beside the
+// authoritative status.migrations types.
 
 // MigrationEvent is one observation logged during a migration.
 type MigrationEvent struct {

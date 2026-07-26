@@ -129,33 +129,41 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
 
-// TestBuildReconcileInput_WiresMigrationWhenParentSet pins Layer 2: with
-// a resolvable parent, the IR-managed path wires DetectMigrationRequest
-// (so explicit migration requests fire on the production-default path)
-// and points the migration audit ledger at the
-// parent ISVC via LedgerOwner — so the ledger Migrate reads/writes is the
-// same ISVC-owned ledger detection uses, while the IR still owns the pods.
-// Nil parent leaves both nil (migration dormant), matching the gate/
-// EventTarget fallback.
+// TestBuildReconcileInput_WiresMigrationWhenParentSet pins Layer 2: the
+// IR-managed path always wires MutateMigration (the executor's
+// status.migrations write-back seam) and mirrors the persisted records
+// onto ObservedState.Migrations (the dispatcher's work source); with a
+// resolvable parent it points the migration audit ledger at the parent
+// ISVC via LedgerOwner, while the IR still owns the pods.
 func TestBuildReconcileInput_WiresMigrationWhenParentSet(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, _ := newReconciler(t)
 	engineIR := baselineIR("llama-engine", "default", 1)
+	engineIR.Status.Migrations = []v1beta1.MigrationStatus{{
+		RequestUUID: "u-1", Trigger: v1beta1.MigrationTriggerManual,
+		Phase: v1beta1.MigrationPhaseAccepted, SourceInstance: 0,
+	}}
 
 	parent := mkSequentialParent() // any non-nil ISVC named "llama"
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil)
 
-	g.Expect(input.DetectMigrationRequest).NotTo(gomega.BeNil(),
-		"DetectMigrationRequest must be wired on the IR path when the parent is resolvable")
+	g.Expect(input.MutateMigration).NotTo(gomega.BeNil(),
+		"MutateMigration must be wired on the IR path")
+	g.Expect(input.AppendMigration).NotTo(gomega.BeNil(),
+		"AppendMigration must be wired on the IR path (the disposition's Auto mirror)")
+	g.Expect(input.ObservedState.Migrations).To(gomega.HaveLen(1),
+		"status.migrations must mirror onto ObservedState.Migrations")
+	g.Expect(input.ObservedState.Migrations[0].RequestUUID).To(gomega.Equal("u-1"))
 	g.Expect(input.LedgerOwner).NotTo(gomega.BeNil(),
 		"the migration ledger must be owned by the parent ISVC, not the IR")
 	g.Expect(input.LedgerOwner.GetName()).To(gomega.Equal(parent.Name))
 	g.Expect(input.LedgerOwnerGVK).To(gomega.Equal(isvcGVK))
 
-	// Nil parent ⇒ migration dormant.
+	// Nil parent ⇒ ledger falls back to the IR (workload-side owner
+	// resolution); the migration seam stays wired.
 	nilInput := r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil)
-	g.Expect(nilInput.DetectMigrationRequest).To(gomega.BeNil(),
-		"no parent ⇒ migration has no ISVC to read ⇒ DetectMigrationRequest stays nil")
+	g.Expect(nilInput.MutateMigration).NotTo(gomega.BeNil())
+	g.Expect(nilInput.AppendMigration).NotTo(gomega.BeNil())
 	g.Expect(nilInput.LedgerOwner).To(gomega.BeNil())
 }
 

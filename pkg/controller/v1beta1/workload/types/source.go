@@ -114,6 +114,12 @@ type WorkloadObservedState struct {
 	// ReconcileInput.MutateRetryBlock.
 	RetryBlocks []RetryBlock
 
+	// Migrations mirrors the owner's persisted migration records
+	// (status.migrations) — the single source of truth for migration
+	// work. Read-only from workload code; writes go through
+	// ReconcileInput.MutateMigration.
+	Migrations []MigrationRecord
+
 	// ExcludedNodesByInstance maps Instance index → nodes its rebuild
 	// must avoid, projected per reconcile by the adapter from the
 	// audit ledger's AutoRecover relocation directives (bounded to the

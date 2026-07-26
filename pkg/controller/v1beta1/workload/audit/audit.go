@@ -3,13 +3,14 @@
 // dedup, in-flight resume, and capacity gating survive controller
 // restarts and Alfred retries.
 //
-// Boundary: this package is a leaf. It depends only on Kubernetes API
-// machinery and is owner-agnostic — callers pass the owner metav1.Object
-// and its GroupVersionKind explicitly, so this package does not import
-// the project's v1beta1 type set. The "ome.io/managed-by=OMENative"
-// label it stamps on the ConfigMap matches the value other workload
-// subpackages use; the owner-specific GVK is passed through from the
-// adapter rather than recomputed here.
+// Boundary: this package depends only on Kubernetes API machinery plus
+// the workload/types value types (for the MigrationRecord shape
+// ValidateCapacity reads) and is owner-agnostic — callers pass the
+// owner metav1.Object and its GroupVersionKind explicitly, so this
+// package does not import the project's v1beta1 type set. The
+// "ome.io/managed-by=OMENative" label it stamps on the ConfigMap
+// matches the value other workload subpackages use; the owner-specific
+// GVK is passed through from the adapter rather than recomputed here.
 package audit
 
 import (
@@ -24,6 +25,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 const (
@@ -91,9 +94,13 @@ type Entry struct {
 	Phase          string `json:"phase"`
 	Reason         string `json:"reason,omitempty"`
 	FromNode       string `json:"fromNode,omitempty"`
-	StartedAt      string `json:"startedAt"`
-	CompletedAt    string `json:"completedAt,omitempty"`
-	Outcome        string `json:"outcome,omitempty"`
+	// HintTargetNodes carries the request's preferred placement targets
+	// so a Started row imported after an upgrade resumes with the
+	// requester's hints intact (unknown to older builds — additive).
+	HintTargetNodes []string `json:"hintTargetNodes,omitempty"`
+	StartedAt       string   `json:"startedAt"`
+	CompletedAt     string   `json:"completedAt,omitempty"`
+	Outcome         string   `json:"outcome,omitempty"`
 }
 
 // CompletedAtTime parses the entry's RFC3339 CompletedAt timestamp.
@@ -358,14 +365,15 @@ func NewStartedEntry(req *MigrationRequest, uuid string, surgeIdx int32) Entry {
 		startedAt = metav1.Now().UTC().Format(time.RFC3339)
 	}
 	return Entry{
-		RequestUUID:    uuid,
-		Component:      req.Component,
-		SourceInstance: req.Instance,
-		SurgeInstance:  surgeIdx,
-		Phase:          PhaseStarted,
-		Reason:         req.Reason,
-		FromNode:       req.FromNode,
-		StartedAt:      startedAt,
+		RequestUUID:     uuid,
+		Component:       req.Component,
+		SourceInstance:  req.Instance,
+		SurgeInstance:   surgeIdx,
+		Phase:           PhaseStarted,
+		Reason:          req.Reason,
+		FromNode:        req.FromNode,
+		HintTargetNodes: append([]string(nil), req.HintTargetNodes...),
+		StartedAt:       startedAt,
 	}
 }
 
@@ -381,58 +389,75 @@ func NewTerminalEntry(prev Entry, phase, outcome string) Entry {
 
 // Migration capacity defaults. Cluster-wide caps that gate Alfred or
 // any other automated migration caller from flooding the controller's
-// destructive-action pipeline with too many concurrent or hourly requests.
+// destructive-action pipeline with too much concurrent or hourly
+// EXECUTION churn — queued intent is never counted (the dispatcher
+// executes serially; a queued record holds no resources).
 const (
-	// DefaultInFlightCap is the maximum number of Started (not yet
-	// terminal) migration UUIDs in the audit ledger before new requests
-	// are RateLimited. Default of 3.
+	// DefaultInFlightCap is the maximum number of EXECUTING migration
+	// records on the owner — non-terminal with an allocated surge —
+	// before new requests are RateLimited. Default of 3.
 	DefaultInFlightCap = 3
 
-	// DefaultPerHourCap is the maximum number of NEWLY Started migration
-	// UUIDs in the trailing hour. Older ledger entries (Started or
-	// terminal) are still counted by their StartedAt timestamp. Default
-	// of 10.
+	// DefaultPerHourCap is the maximum number of migration records (any
+	// phase) whose AllocatedAt falls in the trailing CapacityRateWindow.
+	// Default of 10.
 	DefaultPerHourCap = 10
+
+	// CapacityRateWindow is the trailing window the per-hour cap counts
+	// over. The status-entry trim rule shares it: terminal records older
+	// than the window are pruned, so the record list stays bounded by
+	// construction (in-flight cap x window).
+	CapacityRateWindow = time.Hour
 )
 
-// ValidateCapacity reports whether a new migration request is admissible
-// against the current ledger. Returns ok=true when admission is allowed;
-// ok=false with a short reason string when the request must be rejected.
+// ValidateCapacity reports whether the migration request identified by
+// requestUUID is admissible against the owner's status.migrations
+// records — the single source of truth for migration work. Returns
+// ok=true when admission is allowed; ok=false with a short reason
+// string when the request must be rejected.
+//
+// The request's OWN record (already born Accepted by the accept pass)
+// is excluded from both counts — capacity gates the request against
+// the other work in flight, not against itself.
+//
+// Both caps bound EXECUTION, not queued intent — a queued-Accepted
+// record holds no resources (the dispatcher executes serially), so a
+// batch submission must never trip the caps for the records behind it:
+//
+//   - in-flight = non-terminal records whose surge is ALLOCATED
+//     (SurgeInstance set). Terminal records (Completed / Failed /
+//     Relocated) free their slot structurally — the wedged-Started-row
+//     capacity leak cannot exist.
+//   - per-hour = records of ANY phase with AllocatedAt inside the
+//     trailing CapacityRateWindow. A nil AllocatedAt (queued, or an
+//     Auto record that never allocates a surge) never counts.
 //
 // The two caps are independent — either tripping rejects the request.
-// The cluster-wide in-flight cap bounds peak destructive work; the
-// per-hour cap bounds sustained churn against the same owner.
-//
 // `now` is injected so tests can pin a deterministic time and walk the
-// trailing-hour window past the relevant entries.
-func ValidateCapacity(ledger *Ledger, now time.Time) (ok bool, reason string) {
-	if ledger == nil {
-		return true, ""
-	}
-
+// trailing window past the relevant records.
+func ValidateCapacity(records []types.MigrationRecord, requestUUID string, now time.Time) (ok bool, reason string) {
 	inFlight := 0
-	startedInLastHour := 0
-	hourAgo := now.Add(-time.Hour)
+	allocatedInWindow := 0
+	windowStart := now.Add(-CapacityRateWindow)
 
-	for _, entry := range ledger.Entries {
-		// Force-delete records are not migrations: a dead node's pod
-		// sweep must not consume the migration admission window.
-		if entry.Reason == ReasonForceDelete {
+	for i := range records {
+		r := &records[i]
+		if r.RequestUUID == requestUUID {
 			continue
 		}
-		if entry.Phase == PhaseStarted {
+		if !r.Phase.Terminal() && r.SurgeInstance != nil && *r.SurgeInstance >= 0 {
 			inFlight++
 		}
-		if startedAt, ok := parseTime(entry.StartedAt); ok && startedAt.After(hourAgo) {
-			startedInLastHour++
+		if r.AllocatedAt != nil && r.AllocatedAt.Time.After(windowStart) {
+			allocatedInWindow++
 		}
 	}
 
 	if inFlight >= DefaultInFlightCap {
 		return false, fmt.Sprintf("in-flight migration cap reached (%d/%d)", inFlight, DefaultInFlightCap)
 	}
-	if startedInLastHour >= DefaultPerHourCap {
-		return false, fmt.Sprintf("per-hour migration cap reached (%d/%d in last hour)", startedInLastHour, DefaultPerHourCap)
+	if allocatedInWindow >= DefaultPerHourCap {
+		return false, fmt.Sprintf("per-hour migration cap reached (%d/%d in last hour)", allocatedInWindow, DefaultPerHourCap)
 	}
 	return true, ""
 }

@@ -109,6 +109,35 @@ var _ = ginkgo.Describe("OMENative auto-relocation on stuck Instance (KIND)", gi
 				"a directive is not a migration work order; no surge index is ever allocated")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
+		ginkgo.By("expecting a born-terminal Auto record in status.migrations")
+		// The relocation directive is mirrored as a visibility record on
+		// the IR: Trigger=Auto, born terminal (Phase=Relocated), never
+		// selected by the migration executor (no surge index is ever
+		// allocated). Succeeded stays unset until the relocated Instance
+		// next reaches Ready.
+		var autoUUID string
+		Eventually(func(g Gomega) {
+			entries := migrationEntries(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			var auto *v1beta1.MigrationStatus
+			for i := range entries {
+				if entries[i].Trigger == v1beta1.MigrationTriggerAuto {
+					auto = &entries[i]
+					break
+				}
+			}
+			g.Expect(auto).NotTo(BeNil(),
+				"the relocation directive must mirror as a status.migrations record")
+			g.Expect(auto.Phase).To(Equal(v1beta1.MigrationPhaseRelocated), "Auto records are born terminal")
+			g.Expect(auto.FromNode).To(Equal(failNode))
+			g.Expect(auto.SourceInstance).To(Equal(int32(0)))
+			g.Expect(auto.Attempt).To(Equal(int32(1)),
+				"first relocation attempt of the configured budget")
+			g.Expect(auto.SurgeInstance).To(BeNil(),
+				"a directive is not a migration work order; no surge index is ever allocated")
+			g.Expect(auto.CompletedAt).NotTo(BeNil(), "born-terminal records carry CompletedAt")
+			autoUUID = auto.RequestUUID
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
 		ginkgo.By("expecting the AutoMigrationTriggered event on the ISVC")
 		Eventually(func(g Gomega) {
 			eventHasReasonInvolving(g, ns.Name, "AutoMigrationTriggered", "InferenceService", isvcName)
@@ -141,6 +170,20 @@ var _ = ginkgo.Describe("OMENative auto-relocation on stuck Instance (KIND)", gi
 			entries := autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine")
 			g.Expect(entries).To(BeEmpty(),
 				"Ready proves the placement; exclusion memory and budget must reset; got %+v", entries)
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the Auto record to persist with Succeeded=true")
+		// Ledger pruning resets exclusion memory, but the status record
+		// stays as history — with the post-hoc outcome stamped once the
+		// relocated Instance reached Ready.
+		Eventually(func(g Gomega) {
+			auto := findMigrationEntry(migrationEntries(g, ns.Name, isvcName, v1beta1.EngineComponent), autoUUID)
+			g.Expect(auto).NotTo(BeNil(),
+				"the Auto record must survive the ledger prune as visible history")
+			g.Expect(auto.Phase).To(Equal(v1beta1.MigrationPhaseRelocated))
+			g.Expect(auto.Succeeded).NotTo(BeNil(),
+				"Succeeded must be stamped once the relocated Instance is Ready")
+			g.Expect(*auto.Succeeded).To(BeTrue())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

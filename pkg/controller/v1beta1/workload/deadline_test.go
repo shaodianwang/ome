@@ -201,6 +201,60 @@ func TestExpireOperations_TerminalPhaseUntouched(t *testing.T) {
 	}
 }
 
+// TestExpireOperations_MigratePairSkipped pins the migration-authority
+// contract: instances carrying a Migrate Operation — the source
+// (Phase=Migrating) AND the surge (Phase=Creating) — are skipped
+// entirely even with an expired Operation.Deadline. Their fate belongs
+// to the owner's status.migrations record, consumed by the dispatcher's
+// migration-expiry pass; stamping the pair Failed here would mark a
+// healthy serving source Failed while the record keeps driving the
+// migration.
+func TestExpireOperations_MigratePairSkipped(t *testing.T) {
+	now := time.Now()
+	expired := metav1.NewTime(now.Add(-1 * time.Minute))
+	surgeIdx := int32(1)
+	sourceIdx := int32(0)
+	insts := []workload.InstanceStatus{
+		{
+			Index: 0,
+			Phase: workload.InstancePhaseMigrating,
+			Operation: &workload.InstanceOperation{
+				Type:        workload.InstanceOperationMigrate,
+				Step:        "CreateSurge",
+				RequestUUID: "mig-1",
+				SurgeIndex:  &surgeIdx,
+				Deadline:    expired,
+			},
+		},
+		{
+			Index: 1,
+			Phase: workload.InstancePhaseCreating,
+			Operation: &workload.InstanceOperation{
+				Type:        workload.InstanceOperationMigrate,
+				Step:        "CreateSurge",
+				RequestUUID: "mig-1",
+				SurgeIndex:  &sourceIdx,
+				Deadline:    expired,
+			},
+		},
+	}
+	input, store, event := expireFixture(insts)
+
+	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
+		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	}
+
+	if got := (*store)[0]; got.Phase != workload.InstancePhaseMigrating || got.Operation == nil {
+		t.Errorf("migration source must be untouched; got phase=%q op=%+v", got.Phase, got.Operation)
+	}
+	if got := (*store)[1]; got.Phase != workload.InstancePhaseCreating || got.Operation == nil {
+		t.Errorf("migration surge must be untouched; got phase=%q op=%+v", got.Phase, got.Operation)
+	}
+	if event.count != 0 {
+		t.Errorf("event count: got %d want 0 (Migrate pairs are entry-owned)", event.count)
+	}
+}
+
 // TestExpireOperations_NoOperationUntouched pins that an Instance with no
 // in-flight Operation is skipped (nothing to time out).
 func TestExpireOperations_NoOperationUntouched(t *testing.T) {
