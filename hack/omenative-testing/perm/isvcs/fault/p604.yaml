@@ -1,0 +1,14 @@
+# p604: gang surge rollout blocked mid-gang (quota admits 1 of 2 surge pods) — parks without churn, settled gangs keep serving  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=quota:1 blocked=1 co=none topo=engine-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p604 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

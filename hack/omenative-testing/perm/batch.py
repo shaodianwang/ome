@@ -14,6 +14,7 @@ Examples:
 """
 import concurrent.futures as cf
 import glob
+import json
 import os
 import re
 import subprocess
@@ -48,6 +49,21 @@ def case_category(case_id):
             topo = tok[len("topo="):]
             break
     return (feature, topo)
+
+
+def case_header_fields(case_id):
+    """Line-1 k=v header fields of a case (parsed like run.py.parse_header,
+    values kept as strings — enough to classify fault= kinds)."""
+    matches = sorted((HERE / "isvcs").glob(f"**/{case_id}.yaml"))
+    if not matches:
+        return {}
+    first = matches[0].read_text().splitlines()[0].lstrip("#").strip()
+    fields = {}
+    for tok in first.split():
+        if "=" in tok and not tok.startswith("("):
+            k, _, v = tok.partition("=")
+            fields[k] = v
+    return fields
 
 
 def run_one(case_id):
@@ -106,8 +122,11 @@ def summarize(cases):
             pass
         emit("{:<5} {:<13} {:>6} {:>6} {:>8} {:<12} {}".format(case, verdict, pe, pd, conv, pol, note[:60]))
     npass = sum(1 for r in rows if r[1] == "PASS")
+    # INFRA-FAIL = the fault apparatus broke (quota/cordon/manager-pod plumbing),
+    # not the product — counted apart from FAIL so it reads as a rerun, not a bug.
+    ninfra = sum(1 for r in rows if r[1] == "INFRA-FAIL")
     emit("-" * 90)
-    emit(f"PASS {npass}/{len(rows)}")
+    emit(f"PASS {npass}/{len(rows)}" + (f"   INFRA-FAIL {ninfra} (fault apparatus, not product)" if ninfra else ""))
     fails = [r for r in rows if r[1] != "PASS"]
     if fails:
         emit("\nNON-PASS:")
@@ -122,16 +141,25 @@ def summarize(cases):
 def expand_cases(tokens):
     """Normalize case tokens. Handles ranges ('p01-p50', '26-50') and a single
     space-joined argument (zsh does not word-split unquoted $VAR, so a caller's
-    `$CASES` can arrive as one string) — split it back out."""
-    out = []
+    `$CASES` can arrive as one string) — split it back out. Range ids with no
+    case file are SKIPPED (with a note) instead of fanning out as NO_RESULT
+    noise; an explicitly-named case is kept so run.py errors loudly on it."""
+    out, skipped = [], []
     for tok in tokens:
         for part in str(tok).split():
             m = re.fullmatch(r"p?(\d+)-p?(\d+)", part)
             if m:
                 a, b = int(m.group(1)), int(m.group(2))
-                out.extend(f"p{n:02d}" for n in range(a, b + 1))
+                for n in range(a, b + 1):
+                    cid = f"p{n:02d}"
+                    if list((HERE / "isvcs").glob(f"**/{cid}.yaml")):
+                        out.append(cid)
+                    else:
+                        skipped.append(cid)
             elif part:
                 out.append(part if part.startswith("p") else f"p{int(part):02d}")
+    if skipped:
+        print(f"    (range expansion skipped {len(skipped)} id(s) with no case file: {', '.join(skipped)})")
     return out
 
 
@@ -149,8 +177,20 @@ def main():
     if not cases:
         cases = [f"p{n:02d}" for n in range(1, 26)]   # p01..p25
 
+    # Quota isolation: a fault=quota case creates a NAMESPACE-wide ResourceQuota
+    # sized from a live usage snapshot — run concurrently it both blocks other
+    # cases' pod admissions and mis-sizes its own headroom against their churn.
+    # Partition: everything else keeps the concurrent pool; quota cases run
+    # SERIALLY after the pool drains (quiet namespace → deterministic sizing).
+    quota_cases = [c for c in cases
+                   if str(case_header_fields(c).get("fault", "")).startswith("quota")]
+    conc_cases = [c for c in cases if c not in quota_cases]
+
     print(f"=== batch: {len(cases)} cases @ concurrency {conc} ===")
     print(f"    cases: {cases[0]}..{cases[-1]}  ({', '.join(cases)})")
+    if quota_cases:
+        print(f"    partition: {len(conc_cases)} concurrent, then {len(quota_cases)} fault=quota case(s) "
+              f"SERIAL after the pool drains ({', '.join(quota_cases)}) — namespace-wide ResourceQuota isolation")
     # Apply runtime once up front so the N subprocesses don't race on it.
     print("=== applying runtime (once) ===")
     subprocess.run(["kubectl", "apply", "-f", str(HERE / "runtime")], env=ENV)
@@ -158,22 +198,29 @@ def main():
 
     t0 = time.time()
     results = {}
-    with cf.ThreadPoolExecutor(max_workers=conc) as ex:
-        futs = {ex.submit(run_one, c): c for c in cases}
-        done = 0
-        for fut in cf.as_completed(futs):
-            case_id, rc, secs = fut.result()
-            done += 1
-            v = latest_tsv(case_id)
-            verdict = "?"
-            if v:
-                with open(v) as fh:
-                    ls = fh.read().splitlines()
-                if len(ls) >= 2:
-                    cols = ls[1].split("\t")
-                    verdict = cols[16] if len(cols) > 16 else "?"
-            print(f"  [{done}/{len(cases)}] {case_id} done in {secs:.0f}s  rc={rc}  verdict={verdict}")
-            results[case_id] = verdict
+    done = 0
+
+    def record(case_id, rc, secs):
+        nonlocal done
+        done += 1
+        v = latest_tsv(case_id)
+        verdict = "?"
+        if v:
+            with open(v) as fh:
+                ls = fh.read().splitlines()
+            if len(ls) >= 2:
+                cols = ls[1].split("\t")
+                verdict = cols[16] if len(cols) > 16 else "?"
+        print(f"  [{done}/{len(cases)}] {case_id} done in {secs:.0f}s  rc={rc}  verdict={verdict}")
+        results[case_id] = verdict
+
+    if conc_cases:
+        with cf.ThreadPoolExecutor(max_workers=conc) as ex:
+            futs = {ex.submit(run_one, c): c for c in conc_cases}
+            for fut in cf.as_completed(futs):
+                record(*fut.result())
+    for c in quota_cases:   # serial tail — see the partition note above
+        record(*run_one(c))
 
     print(f"\n=== all {len(cases)} cases finished in {time.time() - t0:.0f}s ===")
     summarize(cases)
@@ -189,6 +236,29 @@ def main():
     if leftover:
         print(f"\n=== sweeping {len(leftover)} leftover ISVCs: {leftover} ===")
         subprocess.run(["kubectl", "-n", NS, "delete", "isvc", *leftover, "--wait=false"], env=ENV)
+
+    # Fault-apparatus safety sweep: a SIGKILLed run.py never ran its in-process
+    # cleanup, so its ResourceQuota / cordon can leak. Both carry harness-only
+    # markers (quota: label perm.test/fault; cordon: run.py stamps node label
+    # perm.test/cordoned=<case> at cordon time), so this sweep can never touch
+    # an operator's quota or cordon.
+    subprocess.run(["kubectl", "-n", NS, "delete", "resourcequota",
+                    "-l", "perm.test/fault", "--ignore-not-found"], env=ENV)
+    r = subprocess.run(["kubectl", "get", "nodes", "-l", "perm.test/cordoned", "-o", "json"],
+                       env=ENV, capture_output=True, text=True)
+    if r.returncode == 0:
+        try:
+            marked = json.loads(r.stdout).get("items", [])
+        except Exception:
+            marked = []
+        for it in marked:
+            node = (it.get("metadata") or {}).get("name", "")
+            if not node:
+                continue
+            if (it.get("spec") or {}).get("unschedulable"):
+                print(f"=== sweeping leftover harness cordon: uncordon {node} ===")
+                subprocess.run(["kubectl", "uncordon", node], env=ENV)
+            subprocess.run(["kubectl", "label", "node", node, "perm.test/cordoned-"], env=ENV)
 
 
 if __name__ == "__main__":

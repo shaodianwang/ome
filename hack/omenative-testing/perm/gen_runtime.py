@@ -17,7 +17,8 @@ atomicity, not just single-pod engine.
 
 Run:  python3 gen_runtime.py    (writes isvcs/runtime-rev/*.yaml)
 """
-import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -27,6 +28,9 @@ CSR_SP = (HERE / "runtime" / "csr.yaml").read_text()           # single-pod base
 CSR_MN = (HERE / "runtime" / "csr-multinode.yaml").read_text() # gang base
 
 TOPOS = ["engine", "pd", "engine-mn", "pd-mn"]
+# Hand-written cases parked in the generated folder (p416 = the break=stuck
+# surge-budget-deadlock guard, #719): the regen sweep must preserve them.
+HAND_WRITTEN = {"p416"}
 BEHAVIORS = [  # (tag, autoSync, expect, edit)
     ("roll",   "true",  "roll",   "material"),
     ("noop",   "true",  "noroll", "noop"),
@@ -66,8 +70,10 @@ def isvc(cid, topo, autosync, rt):
 
 def main():
     if OUT.exists():
-        shutil.rmtree(OUT)
-    OUT.mkdir(parents=True)
+        for f in OUT.glob("*.yaml"):
+            if f.stem not in HAND_WRITTEN:   # regen everything generated; keep hand-written
+                f.unlink()
+    OUT.mkdir(parents=True, exist_ok=True)
     n = 400
     for topo in TOPOS:
         mn = topo.endswith("-mn")
@@ -77,6 +83,8 @@ def main():
         ce, cd = Ne + 1, (Nd + 1 if pd else 0)  # SurgeThenDrain maxSurge=1
         for tag, autosync, expect, edit in BEHAVIORS:
             cid = f"p{n}"; n += 1
+            if cid in HAND_WRITTEN:
+                sys.exit(f"generated {cid} collides with a hand-written case — renumber")
             rt = f"ome-coordtest-rt-{cid}"
             desc = (f"{cid}: runtime-rev {topo} {tag} (autoSync={autosync}, {edit} edit) "
                     f"mode=runtimerev rt={rt} expect={expect} edit={edit} "
@@ -95,6 +103,8 @@ def main():
         Ne, Nd = N, (N if pd else 0)
         ce, cd = Ne + 1, (Nd + 1 if pd else 0)
         cid = f"p{n}"; n += 1
+        if cid in HAND_WRITTEN:
+            sys.exit(f"generated {cid} collides with a hand-written case — renumber")
         rt = f"ome-coordtest-rt-{cid}"
         desc = (f"{cid}: runtime-rev {topo} recover-after-failed-rollout (KNOWN BUG: wedges today) "
                 f"mode=runtimerev rt={rt} expect=recover "
@@ -102,6 +112,12 @@ def main():
         body = f"# {desc}\n" + dedicated_csr(topo, rt) + "\n---\n" + isvc(cid, topo, "true", rt)
         (OUT / f"{cid}.yaml").write_text(body)
         print(f"  {cid}: {topo:10s} recover")
+
+    # A regen must never reintroduce a duplicate/shadowed case id or a malformed
+    # header — fail the generation, not the next harness run.
+    rc = subprocess.run([sys.executable, str(HERE / "run.py"), "--validate-only"]).returncode
+    if rc:
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

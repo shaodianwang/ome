@@ -1,0 +1,12 @@
+# p736: migration batch of 5 queued against the surge budget — every request completes, no tail entry spuriously terminal Failed on capacity  mode=migrate mig=Auto inst=0,1,2,3,4 Ne=8 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p736 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

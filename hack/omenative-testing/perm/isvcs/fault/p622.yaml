@@ -1,0 +1,14 @@
+# p622: manager restarted at gang-drain start (scale 2 to 1) — drain resumes, whole-gang teardown, survivor untouched (env-gated: skips unless OME_TEST_ALLOW_CTRL_RESTART=1; the ISVC-delete phase has no fault hook, so teardown-under-restart is exercised via a scale-down drain)  mode=scaledown Ne=2 Nd=0 Nr=0 to_e=1 ceil_e=2 ceil_d=0 ceil_r=0 fault=ctrlrestart:settling co=none topo=engine-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p622 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

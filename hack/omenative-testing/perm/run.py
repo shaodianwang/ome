@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""run.py <case_id>
+"""run.py <case_id> | run.py --validate-only [isvcs_dir]
 
 Watcher-driven test runner for the OMENative rollout playground.
+--validate-only checks the whole case tree (id uniqueness + line-1 header
+schema) with zero cluster interaction and exits nonzero on any problem.
 
 Architecture:
   1. Apply the ISVC; read its (post-defaulting) spec: per-Component update
@@ -21,6 +23,16 @@ Architecture:
        CONVERGED → stop watcher, emit verdict.
   4. Throughout: track peak alive per Component, and per-Component first-change /
      fully-rotated timestamps (for Sequential ordering + soak verification).
+  5. Throughout (every mode, whole case duration): continuous invariants —
+     (A) status-truth: no IR Instance claims Failed while all its pods serve, or
+     Ready with no pods; (B) endpoints-membership: every serving pod is a Ready
+     endpoint of its per-revision routed Service and no endpoint references a
+     deleted pod. Sustained violations FAIL the verdict (see INV_* constants).
+  6. Optional fault injection (header fault=<kind>:<param>): quota:<n> (derived
+     ResourceQuota admitting exactly +n case-shaped pods), podkill:<phase>,
+     ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source.
+     Apparatus errors record the distinct INFRA-FAIL verdict — harness
+     infrastructure broke, not the product.
 
 Why bump ALL group members (the 2026-06-01 fix):
   OMENative coordination is a status-only layer + *restrictive* gates. It never
@@ -42,6 +54,7 @@ Update detection per strategy:
 """
 import json
 import os
+import re
 import select
 import subprocess
 import sys
@@ -75,6 +88,44 @@ RATIO_SUSTAIN_S = 5.0  # assert the worst ratio deviation that PERSISTED this lo
                        # on separate dispatchers, peer status lags a reconcile), so when both move
                        # opposite directions a bounded ~1-2s cross-dispatcher overshoot is by-design
                        # and self-corrects. Only an off-band deviation held >= this window is real.
+FLOOR_SUSTAIN_S = 5.0  # capacity-floor debounce (mirrors RATIO_SUSTAIN_S): the hard floor check
+                       # fails only on a below-floor dip that PERSISTED this long — a single-sample
+                       # readiness flap at 1Hz must not red a case. floor_hard=1 skips the debounce.
+MIGRATE_SETTLE_S = 90.0  # post-Completed grace: the source drain + request-annotation clear finish
+                         # asynchronously after the ledger flips Completed; poll this long before
+                         # either still-present state FAILs the verdict
+TEARDOWN_BASE_S, TEARDOWN_PER_POD_S = 120, 5   # post-delete teardown-convergence budget
+TEARDOWN_POLL_S = 5.0
+
+# ── Continuous invariants (status-truth + endpoints-membership) ──────────────
+# Polled for the WHOLE duration of every case, in every mode. API-load bound
+# (shared cluster): the poller adds at most 3 label-selected namespaced GETs
+# per tick per running case — one InferenceReplica list (invariant A), one
+# Service list + one EndpointSlice list (invariant B). Pod state is reused
+# from the watcher (no extra pod reads). At INV_TICK_S=5 that is 0.6 req/s
+# per case, ~5 req/s at batch conc-8 — the same order as the existing status
+# polls (canary 0.5/s, migrate ledger 0.2/s).
+INV_TICK_S = 5.0
+# Sustain counts, in CONSECUTIVE tick observations — the transient carve-out:
+#   A (status-truth): 2 observations = the condition spanned >= 1 full tick
+#     interval (>= 5s; fires 5-10s after onset depending on tick phase), so a
+#     just-transitioned phase — read while the controller is mid-flip — can
+#     never fire off a single stale sample.
+#   B missing-endpoint: 3 observations = the gap spanned >= 2 tick intervals
+#     (>= (3-1)*5 = 10s; fires 10-15s after onset). Endpoint controllers lag
+#     pod readiness legitimately (slice mirror + kube-proxy churn, normally
+#     1-2s); any propagation lag < 10s cannot span 3 consecutive ticks.
+#   B stale-endpoint (deleted pod UID still referenced): 2 observations
+#     (5-10s), same arithmetic as A — slice purge is near-immediate.
+INV_SUSTAIN_A = 2
+INV_SUSTAIN_B_MISSING = 3
+INV_SUSTAIN_B_STALE = 2
+# IR Instance phases exempt from ALL status-truth checks: transitional by
+# definition. A Migrating source keeps serving while its replacement surges;
+# Updating/Restarting/Creating/Deleting all legitimately hold pods in states
+# that would read as a lie if sampled mid-transition.
+INV_TRANSIENT_PHASES = {"Pending", "Creating", "Updating", "Restarting", "Migrating", "Deleting"}
+SERVING_COND = "ome.io/serving"   # controller-managed pod readiness gate (query.ServingConditionType)
 
 # Dynamic timeouts: real kubelet + a 15s artificial startup sleep per pod, and
 # surge=1 rolls serialize. Static 240s was too tight for N=8 and for two-member
@@ -137,6 +188,24 @@ def parse_duration(v):
         return 0
 
 
+def resolve_max_unavailable(mu, n):
+    """maxUnavailable → absolute Instance count against n. Ints pass through;
+    k8s-style percent strings round DOWN (Deployment maxUnavailable semantics),
+    so '100%' of 8 = 8 (floor 0) and '25%' of 8 = 2. Anything unparsable = 0."""
+    if isinstance(mu, int):
+        return mu
+    s = str(mu).strip()
+    if s.endswith("%"):
+        try:
+            return (n * int(float(s[:-1]))) // 100
+        except ValueError:
+            return 0
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return 0
+
+
 def get_spec_info(case_id):
     """Read spec.rollout.groups + per-Component update strategy from the live ISVC.
 
@@ -165,11 +234,12 @@ def get_spec_info(case_id):
             w = cs.get("worker")
             if isinstance(w, dict) and w.get("size"):
                 info["workers"][c] = int(w["size"])
-            # Per-Component maxUnavailable → the capacity floor (Check 10). Int
-            # cases only (the matrix uses ints); a percent string defaults to 0.
+            # Per-Component maxUnavailable → the capacity floor (Check 10).
+            # Stored RAW (int or percent string); every consumer resolves it
+            # against N via resolve_max_unavailable so "100%"/"25%" cases get
+            # their real floor instead of silently reading as 0.
             ru = cs.get("lifecycle", {}).get("updateStrategy", {}).get("rollingUpdate", {})
-            mu = ru.get("maxUnavailable", 0)
-            info["max_unavail"][c] = mu if isinstance(mu, int) else 0
+            info["max_unavail"][c] = ru.get("maxUnavailable", 0)
             pt = ru.get("partition", 0)
             info["partition"][c] = pt if isinstance(pt, int) else 0
     # OEP-0017 (v2): coordination + canary unified under spec.rollout.groups[].
@@ -369,27 +439,25 @@ def index_collision_checks(ctx, comps, verdict, notes, checks):
 
 def _track_gang_and_floor(ctx, comps):
     """Mid-loop bookkeeping shared by the _read_one handlers: (1) per-Instance
-    mixed-revision span (gang atomicity) and partial-teardown span (orphan
-    worker), and (2) per-Component min ready Instances (capacity floor). Mirrors
+    mixed-revision span (gang atomicity), and (2) per-Component min ready
+    Instances + below-floor dip span (capacity floor with debounce). Mirrors
     the inline tracking in run_case so _partition/_migrate/_canary get the same
-    coverage. Stashes results in ctx: gang_worst, teardown_worst, min_ready."""
+    coverage. Stashes results in ctx: gang_worst, min_ready, floor_sust."""
     now = time.time()
     ppi = ctx["pods_per_inst"]
     modes = ctx["modes"]
     agg = ctx.get("agg") or {}
     gang_mixed_since = ctx.setdefault("gang_mixed_since", {})
     gang_worst = ctx.setdefault("gang_worst", {})
-    teardown_since = ctx.setdefault("teardown_since", {})
-    teardown_worst = ctx.setdefault("teardown_worst", {})
     min_ready = ctx.setdefault("min_ready", {})
+    floor_since = ctx.setdefault("floor_since", {})
+    floor_sust = ctx.setdefault("floor_sust", {})
     by_comp = defaultdict(lambda: defaultdict(list))
     for q in ctx["pod_state"].values():
         if q and q["alive"]:
             by_comp[q["comp"]][q.get("inst", "0")].append(q)
     for c in comps:
-        p = ppi.get(c, 1)
-        if p > 1:
-            live_idx = set(by_comp[c].keys())
+        if ppi.get(c, 1) > 1:
             for inst_idx, ipods in by_comp[c].items():
                 if modes.get(c) == "inplace":
                     sigs = {bool(q.get("newanno")) for q in ipods}
@@ -403,21 +471,21 @@ def _track_gang_and_floor(ctx, comps):
                         gang_worst[key] = span
                 else:
                     gang_mixed_since.pop(key, None)
-                # Partial-teardown: an index with 0<live<ppi (an orphan worker /
-                # leader) held sustained is a broken gang teardown.
-                nlive = len(ipods)
-                if 0 < nlive < p:
-                    teardown_since.setdefault(key, now)
-                    span = now - teardown_since[key]
-                    if span > teardown_worst.get(key, 0):
-                        teardown_worst[key] = span
-                else:
-                    teardown_since.pop(key, None)
-            for key in [k for k in list(teardown_since) if k[0] == c and k[1] not in live_idx]:
-                teardown_since.pop(key, None)
         rd = agg.get(c, (0, 0, 0))[1]
         if c not in min_ready or rd < min_ready[c]:
             min_ready[c] = rd
+        # Below-floor dip span → min_ready_checks' FLOOR_SUSTAIN_S debounce
+        # (mirrors run_case's Check 10 tracking).
+        n = ctx["N"].get(c, 0)
+        if n:
+            fl = n - resolve_max_unavailable(ctx["info"].get("max_unavail", {}).get(c, 0), n)
+            if rd < fl:
+                floor_since.setdefault(c, now)
+                span = now - floor_since[c]
+                if span > floor_sust.get(c, 0.0):
+                    floor_sust[c] = span
+            else:
+                floor_since.pop(c, None)
 
 
 def gang_atomicity_checks(ctx, comps, verdict, notes, checks):
@@ -443,9 +511,11 @@ def surge_before_drain_checks(ctx, comps, verdict, notes, checks):
     """Surge-before-drain ordering for the _read_one handlers: a source pod must
     not begin draining before its Ready surge replacement (drained-old must not
     lead ready-new by more than maxUnavailable). Consumes the running worst breach
-    accumulated in _apply_event (ctx['order_viol']). Surge components only."""
+    accumulated in _apply_event (ctx['order_viol']). SurgeThenDrain components
+    only — RecreatePod also aggregates as mode "surge" but drains first by design,
+    and _apply_event only tracks SurgeThenDrain."""
     ov = ctx.get("order_viol") or {}
-    surge = [c for c in comps if ctx["modes"].get(c) == "surge"]
+    surge = [c for c in comps if ctx["info"].get("strat", {}).get(c) == "SurgeThenDrain"]
     if not surge:
         return verdict
     viol = {c: ov.get(c, 0) for c in surge if ov.get(c, 0) > 0}
@@ -461,20 +531,29 @@ def surge_before_drain_checks(ctx, comps, verdict, notes, checks):
 
 def min_ready_checks(ctx, comps, verdict, notes, checks, label="capacity floor"):
     """Capacity-floor: each Component's min ready Instances mid-roll stays >=
-    N - maxUnavailable. Requires _track_gang_and_floor to have run over `comps`."""
+    N - maxUnavailable. Debounced like run_case's Check 10: only a dip that
+    PERSISTED >= FLOOR_SUSTAIN_S fails; shorter dips are reported ⚠ as
+    readiness flaps. floor_hard=1 keeps the instantaneous semantics. Requires
+    _track_gang_and_floor to have run over `comps`."""
     min_ready = ctx.get("min_ready") or {}
+    floor_sust = ctx.get("floor_sust") or {}
+    floor_hard = bool((ctx.get("hdr") or {}).get("floor_hard"))
     mu = ctx["info"].get("max_unavail", {})
     for c in comps:
         if ctx["N"].get(c, 0) == 0:
             continue
-        floor = ctx["N"][c] - mu.get(c, 0)
+        floor = ctx["N"][c] - resolve_max_unavailable(mu.get(c, 0), ctx["N"][c])
         mr = min_ready.get(c, ctx["N"][c])
-        if mr < floor:
-            verdict = "FAIL"
-            notes.append(f"{c} {label} breached: min ready {mr} < N-maxUnavailable={floor}")
-            checks.append(f"  ✗ {c} {label} breached: min ready {mr} < N-maxUnavailable={floor} — did NOT preserve capacity")
-        else:
+        sust = floor_sust.get(c, 0.0)
+        if mr >= floor:
             checks.append(f"  ✓ {c} {label} held: min ready {mr} ≥ N-maxUnavailable={floor}")
+        elif floor_hard or sust >= FLOOR_SUSTAIN_S:
+            verdict = "FAIL"
+            held = "" if floor_hard else f", dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s"
+            notes.append(f"{c} {label} breached: min ready {mr} < N-maxUnavailable={floor}")
+            checks.append(f"  ✗ {c} {label} breached: min ready {mr} < N-maxUnavailable={floor}{held} — did NOT preserve capacity")
+        else:
+            checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< N-maxUnavailable={floor}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap (not failed)")
     return verdict
 
 
@@ -497,6 +576,621 @@ def fetch_rev_services(case_id):
         return [i["metadata"]["name"] for i in json.loads(r.stdout).get("items", [])]
     except Exception:
         return []
+
+
+def _teardown_survivors(case_id):
+    """Live leftovers for a case after its delete: [(kind, name, node)] across
+    component pods, InferenceReplicas, Services (incl. per-revision), and the
+    ISVC object itself. Empty = teardown converged. A missing CRD or NotFound
+    reads as gone (version-tolerant: pre-IR builds have no inferencereplicas)."""
+    sel = f"ome.io/inferenceservice={case_id}"
+    left = []
+    for kind, res in (("pod", "pod"), ("inferencereplica", "inferencereplicas"), ("svc", "svc")):
+        r = kubectl("-n", NS, "get", res, "-l", sel, "-o", "json")
+        if r.returncode != 0:
+            continue
+        try:
+            items = json.loads(r.stdout).get("items", [])
+        except Exception:
+            continue
+        for it in items:
+            node = (it.get("spec") or {}).get("nodeName", "") if kind == "pod" else ""
+            left.append((kind, (it.get("metadata") or {}).get("name", "?"), node))
+    if kubectl("-n", NS, "get", "isvc", case_id, "-o", "name").returncode == 0:
+        left.append(("isvc", case_id, ""))
+    return left
+
+
+def teardown_check(case_id, total_pods, verdict, notes, checks):
+    """Universal end-of-case teardown gate: after the case's delete, poll
+    (bounded) until zero component pods, no InferenceReplicas, no Services and
+    no ISVC remain. Anything surviving the budget FAILs the verdict, naming
+    each survivor (kind/name/node) — a cleanup that doesn't converge is a
+    controller bug (wedged finalizer / orphaned pods), not a mop-up detail."""
+    budget = min(MAX_BUDGET_S, TEARDOWN_BASE_S + TEARDOWN_PER_POD_S * max(0, total_pods))
+    deadline = time.time() + budget
+    left = _teardown_survivors(case_id)
+    while left and time.time() < deadline:
+        time.sleep(TEARDOWN_POLL_S)
+        left = _teardown_survivors(case_id)
+    if left:
+        named = ", ".join(f"{k}/{n}" + (f"@{node}" if node else "") for k, n, node in left[:8])
+        more = f" (+{len(left) - 8} more)" if len(left) > 8 else ""
+        verdict = "FAIL"
+        notes.append(f"teardown did not converge in {budget}s: {named}{more}")
+        checks.append(f"  ✗ teardown did not converge within {budget}s — survivors: {named}{more}")
+    else:
+        checks.append("  ✓ teardown converged: pods, InferenceReplicas, Services, ISVC all gone")
+    return verdict
+
+
+# ── Continuous invariants ────────────────────────────────────────────────────
+# Two invariants the pod-observed verdicts are blind to, polled every
+# INV_TICK_S for the whole case:
+#   A status-truth      — an IR Instance must not claim Phase=Failed while its
+#                         full pod set is Ready+serving, nor Phase=Ready with
+#                         zero pods for its index.
+#   B endpoints-membership — every Ready+serving pod that revision-matches a
+#                         per-revision routed Service must be a Ready endpoint
+#                         of it, and no endpoint may reference a deleted pod.
+# A violation must hold for its sustain count of CONSECUTIVE ticks to fire
+# (see the INV_* constants for the carve-out arithmetic); fired violations
+# dedup per (invariant, kind, subject) with first/last timestamps and an
+# occurrence count, and FAIL the verdict via invariant_checks.
+
+
+def _pod_serving(obj):
+    """True when the pod's ome.io/serving readiness-gate condition is True."""
+    for c in (obj.get("status", {}).get("conditions") or []):
+        if c.get("type") == SERVING_COND:
+            return c.get("status") == "True"
+    return False
+
+
+def _inv_new(case_id, hdr):
+    """Fresh invariant-poller state. Header `inv_off=A|B|all` (which requires an
+    adjacent '# reason:' comment — enforced by validate-only) disables checks."""
+    off = str(hdr.get("inv_off", "") or "")
+    return {
+        "case_id": case_id,
+        "off": off,
+        "a_on": off not in ("A", "all"),
+        "b_on": off not in ("B", "all"),
+        "last": 0.0,        # last tick timestamp (self-rate-limited)
+        "streaks": {},      # streak_key → consecutive-tick observation count
+        "viol": {},         # viol_key → {first, last, n, detail}
+        "ir_seen": False,   # instanceStatuses observed at least once (version tolerance)
+        "b_seen": False,    # invariant B evaluated ≥1 Ready+serving pod against a routed Service
+        "dead_uids": set(), # pod UIDs whose DELETED watch event was observed
+    }
+
+
+def _inv_hit(inv, hits, streak_key, viol_key, sustain, now, detail):
+    """One tick's observation of a violating condition. Fires (records a
+    violation) only once the streak reaches `sustain` consecutive ticks."""
+    hits.add(streak_key)
+    n = inv["streaks"].get(streak_key, 0) + 1
+    inv["streaks"][streak_key] = n
+    if n < sustain:
+        return
+    v = inv["viol"].get(viol_key)
+    if v is None:
+        inv["viol"][viol_key] = {"first": now, "last": now, "n": 1, "detail": detail}
+        print(f"    ✗ INVARIANT {viol_key[0]} ({viol_key[1]}): {detail}")
+    else:
+        v["last"] = now
+        v["n"] += 1
+        v["detail"] = detail
+
+
+def _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now):
+    """Invariant A, one tick: compare each IR Instance's claimed phase against
+    the watcher's live pods for its index. Version-tolerant: a build without
+    the IR CRD / instanceStatuses field leaves ir_seen False and the verdict
+    prints one ⓘ note instead of asserting."""
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l",
+                f"ome.io/inferenceservice={inv['case_id']}", "-o", "json")
+    if r.returncode != 0:
+        return
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return
+    existing = defaultdict(list)   # (comp, inst-index) → pod records still existing
+    for p in pod_state.values():
+        if p:
+            existing[(p["comp"], p.get("inst", "0"))].append(p)
+    for it in items:
+        comp = (it.get("spec") or {}).get("component", "?")
+        insts = (it.get("status") or {}).get("instanceStatuses")
+        if insts is None:
+            continue   # pre-IR-status build — field absent
+        inv["ir_seen"] = True
+        ppi = max(1, pods_per_inst.get(comp, 1))
+        for ist in insts:
+            phase = ist.get("phase")
+            idx = str(ist.get("index", "?"))
+            if phase in INV_TRANSIENT_PHASES:
+                continue   # transitional phases are exempt from all A-checks
+            pods = existing.get((comp, idx), [])
+            if phase == "Failed":
+                # Failed-while-serving: the Instance claims Failed while its
+                # FULL pod set is alive, Ready and in the serving rotation.
+                alive = [p for p in pods if p["alive"]]
+                if len(alive) >= ppi and all(p["ready"] and p.get("serving") for p in alive):
+                    key = ("A", "failed-while-serving", comp, idx)
+                    _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
+                             f"{comp}/{idx} Phase=Failed while all {len(alive)} live pod(s) are Ready+serving")
+            elif phase == "Ready":
+                # Ready-without-pods: pods still terminating count as existing
+                # (the lie is Ready with NOTHING behind the index, not a
+                # graceful-termination window).
+                if not pods:
+                    key = ("A", "ready-without-pods", comp, idx)
+                    _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
+                             f"{comp}/{idx} Phase=Ready with zero pods for its index")
+
+
+# Selector keys the watcher can evaluate against its pod records. Keys every
+# OMENative-managed pod carries by construction (the watcher's own selector /
+# the managed-by stamp) are treated as always-matching.
+_INV_SEL_KEYS = ("component", REV_LABEL, "ome.io/runner", "ome.io/pod-ordinal")
+_INV_SEL_UNIVERSAL = {"ome.io/inferenceservice", "ome.io/managed-by"}
+
+
+def _inv_check_endpoints(inv, pod_state, hits, now):
+    """Invariant B, one tick: for each per-revision ROUTED Service (selector
+    carries the revision-hash label; headless peer-DNS Services excluded —
+    they publish not-ready addresses by design), every alive+Ready+serving pod
+    matching the selector must appear as a Ready endpoint, and no endpoint may
+    reference a pod UID whose DELETED event the watcher has seen."""
+    sel = f"ome.io/inferenceservice={inv['case_id']}"
+    rs = kubectl("-n", NS, "get", "svc", "-l", sel, "-o", "json")
+    re_ = kubectl("-n", NS, "get", "endpointslices", "-l", sel, "-o", "json")
+    if rs.returncode != 0 or re_.returncode != 0:
+        return
+    try:
+        svcs = json.loads(rs.stdout).get("items", [])
+        slices = json.loads(re_.stdout).get("items", [])
+    except Exception:
+        return
+    eps = defaultdict(list)   # service name → endpoints (slices merged; labels are service-mirrored)
+    for sl in slices:
+        svc_name = ((sl.get("metadata") or {}).get("labels") or {}).get("kubernetes.io/service-name")
+        if svc_name:
+            eps[svc_name].extend(sl.get("endpoints") or [])
+    for s in svcs:
+        spec = s.get("spec") or {}
+        selector = spec.get("selector") or {}
+        name = ((s.get("metadata") or {}).get("name")) or "?"
+        if spec.get("clusterIP") == "None" or REV_LABEL not in selector:
+            continue   # headless (peer DNS) or not a per-revision routed Service
+        if set(selector) - set(_INV_SEL_KEYS) - _INV_SEL_UNIVERSAL:
+            continue   # selector uses a label the watcher doesn't track — can't evaluate
+        ready_uids, all_uids = set(), set()
+        for ep in eps.get(name, []):
+            u = (ep.get("targetRef") or {}).get("uid")
+            if not u:
+                continue
+            all_uids.add(u)
+            # EndpointConditions contract: nil ready reads as ready.
+            if (ep.get("conditions") or {}).get("ready") is not False:
+                ready_uids.add(u)
+        for pname, p in pod_state.items():
+            if not p or not p["alive"] or not p["ready"] or not p.get("serving") or not p.get("uid"):
+                continue
+            view = {"component": p["comp"], REV_LABEL: p.get("hash", ""),
+                    "ome.io/runner": p.get("runner", "default"),
+                    "ome.io/pod-ordinal": p.get("ord", "0")}
+            if any(k in selector and view[k] != selector[k] for k in _INV_SEL_KEYS):
+                continue   # pod is not a member of this Service
+            inv["b_seen"] = True   # membership actually evaluated (non-vacuous)
+            if p["uid"] not in ready_uids:
+                _inv_hit(inv, hits, ("B", "missing-endpoint", name, pname), ("B", "missing-endpoint", name),
+                         INV_SUSTAIN_B_MISSING, now,
+                         f"svc {name}: pod {pname} is Ready+serving on its revision but absent from the Ready endpoints")
+        for u in all_uids & inv["dead_uids"]:
+            _inv_hit(inv, hits, ("B", "stale-endpoint", name, u), ("B", "stale-endpoint", name),
+                     INV_SUSTAIN_B_STALE, now,
+                     f"svc {name}: endpoint still references deleted pod UID {u[:13]}…")
+
+
+def _inv_tick(inv, pod_state, pods_per_inst):
+    """One invariant observation, self-rate-limited to INV_TICK_S. Called from
+    every watch loop each iteration; a no-op between ticks and when both
+    invariants are opted out. Streaks reset for keys not observed this tick
+    (the CONSECUTIVE-tick sustain rule)."""
+    if not inv or (not inv["a_on"] and not inv["b_on"]):
+        return
+    now = time.time()
+    if now - inv["last"] < INV_TICK_S:
+        return
+    inv["last"] = now
+    hits = set()
+    if inv["a_on"]:
+        _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now)
+    if inv["b_on"]:
+        _inv_check_endpoints(inv, pod_state, hits, now)
+    for k in [k for k in inv["streaks"] if k not in hits]:
+        del inv["streaks"][k]
+
+
+def invariant_checks(inv, verdict, notes, checks):
+    """Verdict gate for the continuous invariants: every violation that fired
+    (sustained past its carve-out) FAILs the case, with first/last-seen
+    timestamps and the tick occurrence count."""
+    if not inv:
+        return verdict
+    if inv["off"]:
+        checks.append(f"  ⓘ continuous invariant(s) disabled by header inv_off={inv['off']} (reason in the case file)")
+    if inv["a_on"] and not inv["ir_seen"]:
+        checks.append("  ⓘ invariant A (status-truth) skipped — IR instanceStatuses unavailable on this build")
+    if inv["b_on"] and not inv["b_seen"]:
+        checks.append("  ⓘ invariant B (endpoints-membership) evaluated zero Ready+serving pods against a routed Service — vacuous (no assertion made)")
+    if not inv["viol"]:
+        active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]), ("B", inv["b_on"] and inv["b_seen"])) if on]
+        if active:
+            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership violation")
+        return verdict
+    for key, v in sorted(inv["viol"].items()):
+        verdict = "FAIL"
+        first = time.strftime("%H:%M:%S", time.localtime(v["first"]))
+        last = time.strftime("%H:%M:%S", time.localtime(v["last"]))
+        notes.append(f"invariant {key[0]} {key[1]}: {v['detail']}")
+        checks.append(f"  ✗ invariant {key[0]} violated ({key[1]}): {v['detail']} "
+                      f"[first {first}, last {last}, {v['n']} tick(s)]")
+    return verdict
+
+
+# ── Fault injection (header fault=<kind>:<param>) ───────────────────────────
+# Runner plumbing for controlled faults. Kinds:
+#   quota:<n>          — pre-trigger: create a namespace ResourceQuota sized from
+#                        the case's OWN pod requests (never hardcoded) to admit
+#                        exactly current-usage + n more pods of the case's shape.
+#   podkill:<phase>    — at the phase hook, delete one deterministic pod.
+#   ctrlrestart:<phase>— at the phase hook, delete the OME manager pod. ALWAYS
+#                        gated on OME_TEST_ALLOW_CTRL_RESTART=1 (shared-cluster
+#                        safety); otherwise skipped with an ⓘ note.
+#   cordon:source      — pre-trigger: cordon the node hosting the source pod;
+#                        ALWAYS uncordoned in cleanup (failure-path safe).
+# Phase enum: settling (immediately after the trigger), rotating (first surge/
+# updated pod observed post-trigger), migrating (migration accept observed).
+# One firing per case (latched). Any fault-APPARATUS error → the distinct
+# INFRA-FAIL verdict: the harness broke, not the product — never a FAIL/PASS.
+FAULT_PHASES = {"rotating", "migrating", "settling"}
+FAULT_TARGETS = {"source"}
+# Marker label stamped on a node the harness cordons, so batch.py's end-of-run
+# sweep can find (and uncordon) ONLY harness cordons — never an operator's.
+CORDON_LABEL = "perm.test/cordoned"
+# Manager pod location for ctrlrestart. Label from the chart's Deployment
+# selector (charts/ome-resources/templates/ome-controller/deployment.yaml).
+CTRL_NS = os.environ.get("OME_TEST_CTRL_NS", "ome")
+CTRL_SELECTOR = os.environ.get("OME_TEST_CTRL_SELECTOR", "control-plane=ome-controller-manager")
+
+# Cleanup registry, flushed in __main__'s finally — runs on PASS, FAIL,
+# INFRA-FAIL and crash alike. Entries: ("quota", case_id) | ("uncordon", node).
+_FAULT_CLEANUPS = []
+
+
+def _run_fault_cleanups():
+    """Idempotent failure-path-safe fault teardown (quota delete + uncordon)."""
+    while _FAULT_CLEANUPS:
+        kind, arg = _FAULT_CLEANUPS.pop()
+        if kind == "quota":
+            _lift_quota(arg)
+        elif kind == "uncordon":
+            kubectl("uncordon", arg)
+            kubectl("label", "node", arg, f"{CORDON_LABEL}-")   # drop the harness marker
+
+
+def _lift_quota(case_id):
+    """Remove the case's fault ResourceQuota. Idempotent — callable mid-case
+    (a case that lifts the quota to let a blocked surge proceed) and again
+    from the end-of-case cleanup."""
+    kubectl("-n", NS, "delete", "resourcequota", f"perm-{case_id}-quota",
+            "--ignore-not-found=true")
+
+
+CHURN_SETTLE_S = 20.0   # blocked=1 probe: two pod snapshots this far apart must match
+
+
+def _churn_stopped(case_id):
+    """blocked=1 probe (run after the expected non-convergence): the case's pod
+    set — (UID, deleting?) pairs — must be IDENTICAL across two snapshots
+    CHURN_SETTLE_S apart. A parked fault-blocked state holds still; a
+    create/delete retry loop shows up as a differing set. Quota-REJECTED create
+    attempts never materialize as pods, so controller-side retries that the
+    apiserver refuses correctly read as 'stopped'."""
+    def snap():
+        r = kubectl("-n", NS, "get", "pod", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+        if r.returncode != 0:
+            return None
+        try:
+            return {((it.get("metadata") or {}).get("uid", ""),
+                     bool((it.get("metadata") or {}).get("deletionTimestamp")))
+                    for it in json.loads(r.stdout).get("items", [])}
+        except Exception:
+            return None
+    a = snap()
+    time.sleep(CHURN_SETTLE_S)
+    b = snap()
+    if a is None or b is None:
+        return False, "churn probe could not read the case pods"
+    if a == b:
+        return True, f"pod set held still across {CHURN_SETTLE_S:.0f}s ({len(b)} pod(s))"
+    return False, (f"pod set still churning across {CHURN_SETTLE_S:.0f}s "
+                   f"({len(a)}→{len(b)} pod(s), {len(a ^ b)} differing)")
+
+
+def _fault_ok(v):
+    """Header validator for fault=<kind>:<param> (also the validate-only schema)."""
+    kind, _, param = str(v).partition(":")
+    if kind == "quota":
+        try:
+            # n=0 = zero headroom: every further pod admission is rejected
+            # (the only way to bound a single-pod surge).
+            return int(param) >= 0
+        except ValueError:
+            return False
+    if kind in ("podkill", "ctrlrestart"):
+        return param in FAULT_PHASES
+    if kind == "cordon":
+        return param in FAULT_TARGETS
+    return False
+
+
+def _fault_new(case_id, hdr):
+    """Parsed fault header state (or None). fired latches the one-shot phase
+    faults; infra_fail routes apparatus errors to the INFRA-FAIL verdict."""
+    v = str(hdr.get("fault", "") or "")
+    if not v:
+        return None
+    kind, _, param = v.partition(":")
+    return {"case_id": case_id, "kind": kind, "param": param,
+            "fired": False, "infra_fail": None, "notes": []}
+
+
+_QTY_BIN = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6}
+_QTY_DEC = {"k": 1000, "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4, "P": 1000**5, "E": 1000**6}
+
+
+def _qty(res, v):
+    """k8s resource quantity → int (cpu in millicores, memory in bytes,
+    extended resources — GPUs — in plain counts)."""
+    s = str(v).strip()
+    if res == "cpu":
+        return int(float(s[:-1])) if s.endswith("m") else int(float(s) * 1000)
+    for suf, mult in _QTY_BIN.items():
+        if s.endswith(suf):
+            return int(float(s[: -len(suf)]) * mult)
+    for suf, mult in _QTY_DEC.items():
+        if s.endswith(suf):
+            return int(float(s[:-1]) * mult)
+    return int(float(s))
+
+
+def _pod_requests(obj):
+    """Summed container resource REQUESTS of one pod — REGULAR containers only.
+    The k8s effective-request rule (max of each init container vs the regular
+    sum) is not modeled; a pod whose init containers dominate is undercounted."""
+    tot = defaultdict(int)
+    for ctn in (obj.get("spec", {}).get("containers") or []):
+        for k, v in ((ctn.get("resources") or {}).get("requests") or {}).items():
+            tot[k] += _qty(k, v)
+    return tot
+
+
+def _qty_str(res, n):
+    return f"{n}m" if res == "cpu" else str(n)
+
+
+def _fault_quota_create(f, case_id):
+    """QUOTA: read the case's engine/decoder pod requests live, take the
+    per-resource max as the per-pod shape, sum the namespace's current usage
+    (non-terminal pods — what ResourceQuota counts), and create a quota
+    admitting exactly usage + n more pods of that shape. All quantities are
+    DERIVED from the read values — nothing hardcoded."""
+    n = int(f["param"])
+    r = kubectl("-n", NS, "get", "pod", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        f["infra_fail"] = f"quota: cannot read case pods: {r.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    shape = defaultdict(int)
+    try:
+        for it in json.loads(r.stdout).get("items", []):
+            comp = ((it.get("metadata") or {}).get("labels") or {}).get("component")
+            if comp not in ("engine", "decoder"):
+                continue
+            for k, v in _pod_requests(it).items():
+                shape[k] = max(shape[k], v)
+    except Exception as e:
+        f["infra_fail"] = f"quota: cannot parse case pods: {e}"
+        return False, f["infra_fail"]
+    if not shape:
+        f["infra_fail"] = "quota: case pods expose no container resource requests"
+        return False, f["infra_fail"]
+    r2 = kubectl("-n", NS, "get", "pod", "-o", "json")
+    if r2.returncode != 0:
+        f["infra_fail"] = f"quota: cannot read namespace usage: {r2.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    usage = defaultdict(int)
+    for it in json.loads(r2.stdout).get("items", []):
+        if ((it.get("status") or {}).get("phase")) in ("Succeeded", "Failed"):
+            continue
+        for k, v in _pod_requests(it).items():
+            usage[k] += v
+    hard = {f"requests.{k}": _qty_str(k, usage[k] + n * shape[k]) for k in shape}
+    rq = {"apiVersion": "v1", "kind": "ResourceQuota",
+          "metadata": {"name": f"perm-{case_id}-quota", "labels": {"perm.test/fault": case_id}},
+          "spec": {"hard": hard}}
+    rr = kubectl("-n", NS, "apply", "-f", "-", input=json.dumps(rq))
+    if rr.returncode != 0:
+        f["infra_fail"] = f"quota: create failed: {rr.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    _FAULT_CLEANUPS.append(("quota", case_id))
+    f["notes"].append(f"fault armed: quota +{n} pod(s) ({' '.join(f'{k}={v}' for k, v in sorted(hard.items()))})")
+    print(f"    ⚡ {f['notes'][-1]}")
+    return True, ""
+
+
+def _fault_cordon(f, case_id, hdr):
+    """CORDON: resolve target 'source' — the node hosting the pod the case acts
+    on (the engine pod at the header `inst` index when present, else the case's
+    first pod by name) — and cordon it. Uncordon is registered unconditionally
+    before the cordon attempt is judged, so cleanup is failure-path safe."""
+    r = kubectl("-n", NS, "get", "pod", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        f["infra_fail"] = f"cordon: cannot read case pods: {r.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    try:
+        items = sorted(json.loads(r.stdout).get("items", []),
+                       key=lambda it: (it.get("metadata") or {}).get("name", ""))
+    except Exception as e:
+        f["infra_fail"] = f"cordon: cannot parse case pods: {e}"
+        return False, f["infra_fail"]
+    want_inst = str(hdr.get("inst", 0)).split(",")[0].strip()
+    pick = None
+    for it in items:
+        lb = (it.get("metadata") or {}).get("labels") or {}
+        if lb.get("component") == "engine" and lb.get("ome.io/instance-index", "0") == want_inst:
+            pick = it
+            break
+    if pick is None and items:
+        pick = items[0]
+    node = ((pick or {}).get("spec") or {}).get("nodeName", "")
+    if not node:
+        f["infra_fail"] = "cordon: no node to cordon (no scheduled source pod)"
+        return False, f["infra_fail"]
+    _FAULT_CLEANUPS.append(("uncordon", node))   # registered BEFORE judging the cordon
+    f["node"] = node   # handlers assert placement against the cordoned node
+    # Marker label FIRST (so a cordon that lands without the label is impossible);
+    # batch.py's sweep uncordons only nodes carrying it.
+    kubectl("label", "node", node, f"{CORDON_LABEL}={case_id}", "--overwrite")
+    rr = kubectl("cordon", node)
+    if rr.returncode != 0:
+        f["infra_fail"] = f"cordon {node} failed: {rr.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    pname = ((pick.get("metadata") or {}).get("name", "?"))
+    f["notes"].append(f"fault armed: cordon {node} (source pod {pname})")
+    print(f"    ⚡ {f['notes'][-1]}")
+    return True, ""
+
+
+def _fault_setup(f, case_id, hdr):
+    """Pre-trigger fault apparatus (quota / cordon), run once Initial Ready is
+    reached and before the trigger. Returns (ok, msg); not-ok → INFRA-FAIL."""
+    if not f or f["kind"] not in ("quota", "cordon"):
+        return True, ""
+    try:
+        if f["kind"] == "quota":
+            return _fault_quota_create(f, case_id)
+        return _fault_cordon(f, case_id, hdr)
+    except Exception as e:
+        f["infra_fail"] = f"{f['kind']} setup error: {e}"
+        return False, f["infra_fail"]
+
+
+def _fault_pick_pod(pod_state, pods_per_inst, old_hashes):
+    """Deterministic podkill victim: (1) gang topology → the leader pod of the
+    lowest live instance index (heads the whole gang); (2) surge in flight (an
+    alive new-revision pod exists) → the newest surge pod (latest
+    creationTimestamp, name tie-break) — hits the in-flight rollout, not
+    settled capacity; (3) otherwise the first live pod sorted by name."""
+    def _idx(p):
+        try:
+            return int(p.get("inst", "0"))
+        except (TypeError, ValueError):
+            return 0
+    live = [(n, p) for n, p in sorted(pod_state.items()) if p and p["alive"]]
+    if not live:
+        return None
+    if any(v > 1 for v in pods_per_inst.values()):
+        leaders = [(n, p) for n, p in live if p.get("runner") == "leader"]
+        if leaders:
+            return min(leaders, key=lambda x: (_idx(x[1]), x[0]))[0]
+    if old_hashes is not None:
+        surges = [(n, p) for n, p in live if p.get("hash") and p["hash"] not in old_hashes]
+        if surges:
+            return max(surges, key=lambda x: (x[1].get("created", ""), x[0]))[0]
+    return live[0][0]
+
+
+def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
+    """One-shot phase-fault action (latched by the caller's fired check)."""
+    f["fired"] = True
+    if f["kind"] == "podkill":
+        victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes)
+        if not victim:
+            f["infra_fail"] = "podkill: no live pod to delete"
+            return
+        r = kubectl("-n", NS, "delete", "pod", victim, "--wait=false")
+        if r.returncode != 0:
+            f["infra_fail"] = f"podkill: delete {victim} failed: {r.stderr.strip()[:120]}"
+            return
+        f["notes"].append(f"fault fired: podkill {victim} ({f['param']})")
+        print(f"    ⚡ {f['notes'][-1]}")
+        return
+    # ctrlrestart — ALWAYS gated (shared-cluster safety): without the explicit
+    # env opt-in the fault is skipped with a note, never fired.
+    if os.environ.get("OME_TEST_ALLOW_CTRL_RESTART") != "1":
+        f["notes"].append("ⓘ fault ctrlrestart skipped — OME_TEST_ALLOW_CTRL_RESTART=1 not set")
+        print(f"    {f['notes'][-1]}")
+        return
+    r = kubectl("-n", CTRL_NS, "get", "pod", "-l", CTRL_SELECTOR, "-o", "name")
+    pods = [x for x in (r.stdout or "").split() if x]
+    if r.returncode != 0 or not pods:
+        f["infra_fail"] = f"ctrlrestart: no manager pod matches -l {CTRL_SELECTOR} in ns {CTRL_NS}"
+        return
+    rr = kubectl("-n", CTRL_NS, "delete", *pods, "--wait=false")
+    if rr.returncode != 0:
+        f["infra_fail"] = f"ctrlrestart: delete failed: {rr.stderr.strip()[:120]}"
+        return
+    f["notes"].append("fault fired: ctrlrestart " +
+                      " ".join(p.split("/")[-1] for p in pods) + f" ({f['param']})")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _fault_tick(ctx):
+    """Phase-hook dispatcher for the in-flight faults (podkill/ctrlrestart),
+    called every watch iteration; one firing per case (latched):
+      settling  → immediately after the trigger was applied;
+      rotating  → first observation of a surge/updated pod post-trigger;
+      migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
+    f = ctx.get("fault")
+    if not f or f["fired"] or f["kind"] not in ("podkill", "ctrlrestart"):
+        return
+    if ctx.get("trigger_ts") is None:
+        return
+    ph = f["param"]
+    if ph == "settling":
+        due = True
+    elif ph == "rotating":
+        old = ctx.get("old_hashes")
+        due = old is not None and any(
+            p and p["alive"] and ((p.get("hash") and p["hash"] not in old) or p.get("newanno"))
+            for p in ctx["pod_state"].values())
+    else:   # migrating
+        due = bool(ctx.get("fault_migrating"))
+    if due:
+        _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"))
+
+
+def _fault_finalize(f, verdict, notes, checks):
+    """Fold fault bookkeeping into the verdict: surface armed/fired notes, and
+    route any apparatus error to the distinct INFRA-FAIL verdict — the harness
+    broke, not the product (batch.py counts it separately from FAIL)."""
+    if not f:
+        return verdict
+    for x in f["notes"]:
+        notes.append(x)
+        checks.append(f"  ⓘ {x}")
+    if f["kind"] in ("podkill", "ctrlrestart") and not f["fired"]:
+        checks.append(f"  ⓘ fault {f['kind']}:{f['param']} never reached its phase hook (not fired)")
+    if f["infra_fail"]:
+        verdict = "INFRA-FAIL"
+        notes.append(f"INFRA-FAIL: {f['infra_fail']}")
+        checks.append(f"  ✗ INFRA-FAIL (fault apparatus): {f['infra_fail']}")
+    return verdict
 
 
 def write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
@@ -553,8 +1247,206 @@ def case_category(case_id):
 # Other modes share the apply→wait-Ready→watch scaffolding but swap the Phase-2
 # trigger and the verdict. Implemented: scaledown. Planned: migrate, kill,
 # partition, rebump (each becomes a branch here on the same scaffolding).
-MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev"}   # modes with a real impl
+MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev",
+                 "recreate", "compremove"}   # modes with a real impl
 TO_KEYS = {"engine": "to_e", "decoder": "to_d", "router": "to_r"}  # scaledown target replicas
+
+
+# ── Case-tree integrity: duplicate-id guard + --validate-only ────────────────
+# find_isvc resolves isvcs/**/<id>.yaml alphabetically-first, so a duplicate
+# case id silently SHADOWS every other file with that id (scale/p97+p98 and
+# rollout/p100 never ran until renamed to p188/p189/p500). run_case therefore
+# hard-fails on any duplicate before any cluster op, and `run.py
+# --validate-only [dir]` checks the whole tree — id uniqueness + the line-1
+# header schema — with zero cluster interaction (no kubeconfig needed; kubectl
+# is only ever spawned by the run paths, never by validation).
+
+
+def collect_case_files(isvcs_dir=None):
+    """Every case YAML under the case tree, keyed by case id (filename stem)."""
+    root = Path(isvcs_dir) if isvcs_dir else HERE / "isvcs"
+    cases = defaultdict(list)
+    for f in sorted(root.glob("**/*.yaml")):
+        cases[f.stem].append(f)
+    return cases
+
+
+def duplicate_id_errors(cases):
+    return [f"duplicate case id {cid}: " + " AND ".join(str(p) for p in paths)
+            + " — find_isvc() silently runs only the first"
+            for cid, paths in sorted(cases.items()) if len(paths) > 1]
+
+
+def _int_ge0(v):
+    return isinstance(v, int) and v >= 0
+
+
+def _int_list(v):
+    try:
+        return all(int(s) >= 0 for s in str(v).split(","))
+    except ValueError:
+        return False
+
+
+def _numlike(v):
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+# Header schema = exactly what the runner consumes (parse_header + the hdr.get
+# dispatches above). Enums lowered where run.py lowers; exact where it compares
+# exact. Values arrive int-coerced when possible (parse_header semantics).
+HDR_VALIDATORS = {
+    "mode": lambda v: v == "rollout" or v in MODE_HANDLERS,
+    "Ne": _int_ge0, "Nd": _int_ge0, "Nr": _int_ge0,
+    "ceil_e": _int_ge0, "ceil_d": _int_ge0, "ceil_r": _int_ge0,
+    "to_e": _int_ge0, "to_d": _int_ge0, "to_r": _int_ge0,
+    "partition": _int_ge0,
+    "mig": lambda v: v in {"Auto", "Surge", "Never"},
+    "restart": lambda v: v in {"None", "RecreateInstance"},
+    "kill": lambda v: v in {"leader", "worker"},
+    "inst": _int_list,
+    "canary": lambda v: str(v).lower() in {"auto", "manual"},
+    "rollback": lambda v: v in (0, 1),
+    "analysis": lambda v: str(v).lower() in {"pass", "breach", "inconclusive"},
+    "health": lambda v: str(v).lower() in {"pass", "breach", "inconclusive"},
+    "errorrate": _numlike,
+    "oninconclusive": lambda v: str(v).lower() in {"hold", "rollback"},
+    "failurelimit": _int_ge0,
+    "expect": lambda v: v in {"reject", "roll", "noroll", "recover", "fail"},
+    "reason": lambda v: bool(str(v)),
+    "rt": lambda v: bool(str(v)),
+    "edit": lambda v: v in {"material", "noop", "image", "resources"},
+    "img": lambda v: bool(str(v)),
+    "break": lambda v: v == "stuck",
+    # Scenario knobs. during= times a destructive op against an in-flight one:
+    # recreate deletes mid-rollout/mid-migration; migrate files its request
+    # mid-rotate (both must complete; ordering unasserted — the product may
+    # preempt the rollout); runtimerev edits the CSR mid-rotate.
+    "during": lambda v: v in {"rollout", "migrate"},
+    "remove": lambda v: v in {"decoder", "router"},   # compremove: component patched out
+    "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
+    "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
+    "hint": lambda v: v == 1,     # migrate: carry hint_target_nodes (soft placement assert)
+    "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen"},
+    "topo": lambda v: v in {"engine", "pd", "engine-mn", "pd-mn"},
+    "infeasible": lambda v: v == 1,
+    "notimpl": lambda v: v == 1,
+    "floor_hard": lambda v: v == 1,   # assert the instantaneous floor min (no debounce)
+    "floor_soft": lambda v: v == 1,   # opt out of the (default-hard) capacity floor
+    # Opt out of the continuous invariants (A=status-truth, B=endpoints-
+    # membership). REQUIRES an adjacent '# reason: <why>' comment on line 2
+    # of the case file — validate-only rejects an inv_off without one.
+    "inv_off": lambda v: v in {"A", "B", "all"},
+    # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
+    # ctrlrestart:<phase> (phase ∈ FAULT_PHASES), cordon:<target ∈ FAULT_TARGETS>.
+    "fault": _fault_ok,
+    # Fault-case contract knobs. blocked=1 (rollout/scaledown): the fault is
+    # expected to HOLD the operation — assert parked-no-churn + capacity floor
+    # instead of convergence. expect=fail (migrate): the request must end
+    # terminal Failed BOUNDED while the source keeps serving and the request is
+    # consumed. lift=1 (migrate + fault=quota): after the bounded-failure
+    # contract passes, lift the quota and assert a follow-up request completes.
+    "blocked": lambda v: v == 1,
+    "lift": lambda v: v == 1,
+}
+HDR_REQUIRED = ("Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r")
+
+
+def validate_case_file(path):
+    """Line-1 header + identity checks for one case file; returns error strings.
+
+    The k=v field block is recovered by walking the header's tokens BACKWARD
+    from the end: stop at the first token that is not key=value with a KNOWN,
+    not-yet-seen key. The free-text description also contains k=v-looking words
+    (maxSurge=2, N=8, even mode=Auto in a migrate desc) which must not be
+    schema-checked; last-wins matches parse_header's forward overwrite. A typo'd
+    KEY inside the real block stops the walk and surfaces as missing-required-
+    key errors — loud, if indirectly named.
+    """
+    errs = []
+    text = path.read_text()
+    first = (text.splitlines() or [""])[0]
+    cid = path.stem
+    if not first.startswith("#"):
+        return [f"{path}:1: missing '# <id>: <desc> k=v ...' header comment"]
+    if not first.lstrip("#").strip().startswith(f"{cid}:"):
+        errs.append(f"{path}:1: header id does not match filename stem '{cid}'")
+    fields = {}
+    for tok in reversed(first.lstrip("#").strip().split()):
+        if tok.startswith("(") or "=" not in tok:
+            break
+        k, _, v = tok.partition("=")
+        if k not in HDR_VALIDATORS or k in fields:
+            break   # description territory (or a desc token repeating a real key)
+        try:
+            val = int(v)
+        except ValueError:
+            val = v
+        fields[k] = val
+        if not HDR_VALIDATORS[k](val):
+            errs.append(f"{path}:1: malformed header value {k}={v}")
+    for k in HDR_REQUIRED:
+        if k not in fields:
+            errs.append(f"{path}:1: header missing {k}=")
+    if "inv_off" in fields:
+        # An invariant opt-out is an assertion hole — it must name why, on the
+        # line adjacent to the header, so the reason travels with the case.
+        second = text.splitlines()[1] if len(text.splitlines()) > 1 else ""
+        if not re.match(r"^\s*#\s*reason:\s*\S", second):
+            errs.append(f"{path}:2: inv_off={fields['inv_off']} requires an adjacent '# reason: <why>' comment on line 2")
+    mode = fields.get("mode", "rollout")
+    if mode == "scaledown" and not any(k in fields for k in ("to_e", "to_d", "to_r")):
+        errs.append(f"{path}:1: mode=scaledown needs a to_e/to_d/to_r target")
+    if mode == "runtimerev" and "rt" not in fields:
+        errs.append(f"{path}:1: mode=runtimerev needs rt=<dedicated CSR name>")
+    if fields.get("edit") == "image" and "img" not in fields:
+        errs.append(f"{path}:1: edit=image needs img=<image-ref>")
+    if mode == "compremove" and "remove" not in fields:
+        errs.append(f"{path}:1: mode=compremove needs remove=<component>")
+    if "readd" in fields and mode != "compremove":
+        errs.append(f"{path}:1: readd=1 only applies to mode=compremove")
+    if "during" in fields and fields["during"] not in {"recreate": {"rollout", "migrate"},
+                                                       "migrate": {"rollout"},
+                                                       "runtimerev": {"rollout"}}.get(mode, set()):
+        errs.append(f"{path}:1: during={fields['during']} not supported for mode={mode}")
+    if ("dup" in fields or "hint" in fields) and mode != "migrate":
+        errs.append(f"{path}:1: dup=/hint= are migrate-mode knobs")
+    if fields.get("blocked") and "fault" not in fields:
+        errs.append(f"{path}:1: blocked=1 requires a fault= header")
+    if fields.get("expect") == "fail" and (mode != "migrate" or "fault" not in fields):
+        errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
+    if fields.get("lift") and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
+        errs.append(f"{path}:1: lift=1 requires mode=migrate + fault=quota:<n>")
+    if not re.search(rf"\bname:\s*{re.escape(cid)}\b", text):
+        errs.append(f"{path}:1: no document with metadata name '{cid}' (run.py gets the ISVC by case id)")
+    return errs
+
+
+def validate_cases(isvcs_dir=None):
+    """--validate-only: load EVERY case file, check id uniqueness + header
+    schema; nonzero exit on any problem. Pure filesystem — no cluster access."""
+    root = Path(isvcs_dir) if isvcs_dir else HERE / "isvcs"
+    cases = collect_case_files(root)
+    if not cases:
+        print(f"ERROR: no case YAMLs under {root}", file=sys.stderr)
+        return 1
+    errs = duplicate_id_errors(cases)
+    for cid in sorted(cases):
+        for path in cases[cid]:
+            errs.extend(validate_case_file(path))
+    if errs:
+        for e in errs:
+            print(e, file=sys.stderr)
+        nfiles = sum(len(v) for v in cases.values())
+        print(f"\nvalidate-only: FAIL — {len(errs)} problem(s) across {nfiles} case file(s)", file=sys.stderr)
+        return 1
+    nfiles = sum(len(v) for v in cases.values())
+    print(f"validate-only: OK — {nfiles} case files, {len(cases)} unique case ids, headers valid ({root})")
+    return 0
 
 
 WATCH_MAX_RESTARTS = 50  # reconnect kubectl -w on EOF up to this many times before giving up
@@ -592,11 +1484,13 @@ def _apply_event(ctx, ev):
     comp = labels.get("component", "?")
     rev = labels.get(REV_LABEL, "")
     deletion = meta.get("deletionTimestamp")
-    # Surge-before-drain ordering: record (post-trigger, surge mode only) the
+    # Surge-before-drain ordering: record (post-trigger, SurgeThenDrain only —
+    # RecreatePod also reads as mode "surge" but legitimately drains first) the
     # cumulative OLD-rev pods draining and NEW-rev pods Ready per component, so a
     # handler can assert a drain never led its Ready surge replacement. Captured
     # here (not from pod_state) because a DELETED event drops the record + its rev.
-    if ctx.get("trigger_ts") is not None and ctx.get("old_hashes") is not None and ctx["modes"].get(comp) == "surge":
+    if ctx.get("trigger_ts") is not None and ctx.get("old_hashes") is not None \
+            and ctx["info"].get("strat", {}).get(comp) == "SurgeThenDrain":
         is_new = bool(rev and rev not in ctx["old_hashes"])
         nr = ctx.setdefault("new_ready", defaultdict(set))
         od = ctx.setdefault("old_drained", defaultdict(set))
@@ -604,23 +1498,29 @@ def _apply_event(ctx, ev):
             nr[comp].add(name)
         if (not is_new) and rev and (ev.get("type") == "DELETED" or deletion is not None):
             od[comp].add(name)
-        mu_pods = ctx["info"].get("max_unavail", {}).get(comp, 0) * ctx["pods_per_inst"].get(comp, 1)
+        mu_pods = resolve_max_unavailable(ctx["info"].get("max_unavail", {}).get(comp, 0),
+                                          ctx["N"].get(comp, 0)) * ctx["pods_per_inst"].get(comp, 1)
         breach = len(od[comp]) - len(nr[comp]) - mu_pods
         ov = ctx.setdefault("order_viol", {})
         if breach > ov.get(comp, 0):
             ov[comp] = breach
     if ev.get("type") == "DELETED":
+        if meta.get("uid") and ctx.get("inv"):
+            ctx["inv"]["dead_uids"].add(meta["uid"])   # stale-endpoint invariant
         ctx["pod_state"][name] = None
     else:
         ctx["pod_state"][name] = {
             "comp": comp,
             "inst": labels.get("ome.io/instance-index", "0"),
             "runner": labels.get("ome.io/runner", "default"),
+            "ord": labels.get("ome.io/pod-ordinal", "0"),
             "alive": deletion is None,
             "ready": ready, "hash": rev,
+            "serving": _pod_serving(obj),
             "uid": meta.get("uid", ""),
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
             "node": (obj.get("spec") or {}).get("nodeName", ""),
+            "created": meta.get("creationTimestamp", ""),
         }
         if rev:
             ctx.setdefault("seen_hashes", set()).add(rev)   # every revision-hash ever observed
@@ -677,6 +1577,11 @@ def _read_one(ctx, timeout=1.0):
     # configured). Handlers set ctx["track_comps"] before their watch loop.
     if ctx.get("trigger_ts") is not None and time.time() - ctx["trigger_ts"] >= MINREADY_GRACE_S:
         _track_gang_and_floor(ctx, ctx.get("track_comps") or sorted(ctx["configured"]))
+    # Fault phase hooks (podkill/ctrlrestart): one latched firing per case.
+    _fault_tick(ctx)
+    # Continuous invariants: one observation per INV_TICK_S (self-rate-limited),
+    # for the whole case duration — INIT through the handler's last watch read.
+    _inv_tick(ctx.get("inv"), ctx["pod_state"], ctx["pods_per_inst"])
     if ctx.get("trigger_ts") is not None:                       # per-tick progress (post-trigger) for diagnosis
         snap = tuple(agg.get(c, (0, 0, 0)) for c in COMPS)
         if snap != ctx.get("last_snap"):
@@ -721,12 +1626,14 @@ def _setup_and_ready(case_id, yaml_file, hdr):
         return None, ("APPLY_FAIL", msg[:200])
     info = get_spec_info(case_id)
     ctx = {
-        "case_id": case_id, "N": N, "configured": configured, "info": info,
+        "case_id": case_id, "N": N, "configured": configured, "info": info, "hdr": hdr,
         "pods_per_inst": {c: 1 + info["workers"].get(c, 0) for c in COMPS},
         "modes": {c: ("inplace" if info["strat"].get(c) in IN_PLACE_TYPES else "surge") for c in configured},
         "pod_state": {}, "peaks": {"engine": 0, "decoder": 0, "router": 0}, "agg": {},
         "buf": "", "closed": False, "old_hashes": None, "old_uids": {}, "old_nodes": {}, "seen_hashes": set(),
         "trigger_ts": None, "converged_at": None, "watcher": start_watcher(case_id),
+        "inv": _inv_new(case_id, hdr),
+        "fault": _fault_new(case_id, hdr),
     }
     budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
     print(f"\n  Phase 1: waiting for initial Ready (need {Ne}/{Nd}/{Nr}; ≤{budget}s)")
@@ -740,6 +1647,13 @@ def _setup_and_ready(case_id, yaml_file, hdr):
                 ctx["old_uids"][c] = {p["uid"] for p in alive if p["comp"] == c and p.get("uid")}
             ctx["old_nodes"] = {(p["comp"], p["inst"]): p.get("node", "") for p in alive}
             print(f"  ✓ Initial Ready after {int(time.time() - t0)}s; old rev {sorted(ctx['old_hashes']) or '(none)'}")
+            # Pre-trigger fault apparatus (quota / cordon) arms once Ready.
+            ok_f, fmsg = _fault_setup(ctx["fault"], case_id, hdr)
+            if not ok_f:
+                _stop_watcher(ctx)
+                kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
+                print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
+                return None, ("INFRA-FAIL", fmsg)
             return ctx, None
     _stop_watcher(ctx)
     kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")   # don't leak the ISVC
@@ -761,7 +1675,21 @@ def _write_fail(case_id, desc, hdr, state, msg):
     # the apply never landed. Guard on a concrete name so an empty case_id can
     # never issue a broad delete.
     if case_id:
+        # Teardown budget scales with the REAL pod count (N × pods-per-Instance),
+        # so read worker sizes from the live spec BEFORE deleting; when the ISVC
+        # never landed, get_spec_info degrades to workers={} → 1 pod/Instance.
+        winfo = get_spec_info(case_id)
+        total_pods = sum(n * (1 + winfo["workers"].get(c, 0))
+                         for c, n in (("engine", Ne), ("decoder", Nd), ("router", Nr)))
         kubectl("delete", "-n", NS, "isvc", case_id, "--wait=false", check=False)
+        # Even a failed case's cleanup must converge (fault cases included);
+        # survivors are appended to the recorded note.
+        tnotes, tchecks = [], []
+        teardown_check(case_id, total_pods, state, tnotes, tchecks)
+        for line in tchecks:
+            print(line)
+        if tnotes:
+            msg = f"{msg}; {'; '.join(tnotes)}"
     write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, z, d, None, None, state, msg, z)
     return 0
 
@@ -778,15 +1706,27 @@ def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
                else "an unsatisfiable config")
         checks.append(f"  ⓘ marked {'notimpl' if hdr.get('notimpl') else 'infeasible'} — {why} (expected); recorded XFAIL, not a regression")
         verdict = "XFAIL"
+    # Invariants + fault apparatus run AFTER the softening (same rationale as
+    # teardown_check below): a status lie or a broken fault apparatus is never
+    # an expected failure, so they re-harden an XFAIL back to FAIL/INFRA-FAIL.
+    verdict = invariant_checks(ctx.get("inv"), verdict, notes, checks)
+    verdict = _fault_finalize(ctx.get("fault"), verdict, notes, checks)
+    _stop_watcher(ctx)
+    # Teardown gate runs AFTER the infeasible/notimpl softening: a cleanup
+    # that doesn't converge is never an expected failure, so it re-hardens
+    # an XFAIL back to FAIL.
+    if not os.getenv("OME_TEST_KEEP"):
+        kubectl("delete", "-n", NS, "-f", str(find_isvc(case_id)), "--wait=false")
+        total_pods = sum(ctx["N"][c] * ctx["pods_per_inst"].get(c, 1) for c in ctx["configured"])
+        verdict = teardown_check(case_id, total_pods, verdict, notes, checks)
+    else:
+        checks.append("  ⓘ OME_TEST_KEEP set — ISVC kept, teardown check skipped")
     note = "; ".join(notes)
     print(f"\n=== VERDICT: {verdict} ===")
     for c in checks:
         print(c)
     if note:
         print(f"\nFailure reasons: {note}")
-    _stop_watcher(ctx)
-    if not os.getenv("OME_TEST_KEEP"):
-        kubectl("delete", "-n", NS, "-f", str(find_isvc(case_id)), "--wait=false")
     write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, ctx["peaks"], final,
                  ctx.get("converged_at"), ctx["info"].get("policy"), verdict, note, new_final)
     return 0
@@ -967,21 +1907,58 @@ def _runner_env_paths(spec, cfg):
     return paths
 
 
-def _bump_runtime(ctx, csr, comps, material):
+def _csr_bump_cpu(csr, comps):
+    """Bump every runner's requests.cpu (flat + leader/worker) by 5m — a material
+    resource-shape edit. Values are derived from the live CSR, nothing fixed."""
+    r = kubectl("get", "clusterservingruntime", csr, "-o", "json")
+    if r.returncode != 0:
+        return False
+    spec = (json.loads(r.stdout) or {}).get("spec", {})
+    ops = []
+    for c in comps:
+        cfg = f"{c}Config"
+        node = spec.get(cfg) or {}
+        runners = [(f"/spec/{cfg}/runner", node.get("runner"))]
+        runners += [(f"/spec/{cfg}/{s}/runner", (node.get(s) or {}).get("runner"))
+                    for s in ("leader", "worker")]
+        for path, rn in runners:
+            if not isinstance(rn, dict):
+                continue
+            cur = ((rn.get("resources") or {}).get("requests") or {}).get("cpu")
+            if cur is None:
+                continue
+            ops.append({"op": "replace", "path": f"{path}/resources/requests/cpu",
+                        "value": f"{_qty('cpu', cur) + 5}m"})
+    if not ops:
+        return False
+    return kubectl("patch", "clusterservingruntime", csr, "--type=json",
+                   "-p", json.dumps(ops)).returncode == 0
+
+
+def _bump_runtime(ctx, csr, comps, material, kind="env", image=None):
     """Trigger a change on the ISVC's dedicated ClusterServingRuntime.
 
-    material=True: bump the runner's TEST_REV env (index 0) on every runner of each
-    configured component's runtime config — a real pod-spec change that must
-    re-render and roll an autoSync=true ISVC (the runtime-side analogue of
-    _bump_rev's ISVC annotation). Shape-aware so it works for single-pod and gang
-    runtimes. material=False: touch a CSR label only — no pod-spec change, so the
-    revision-hash is unchanged and nothing should roll.
+    material=True: a real pod-spec change that must re-render and roll an
+    autoSync=true ISVC (the runtime-side analogue of _bump_rev's ISVC
+    annotation). kind picks WHICH field changes: "env" bumps the runner's
+    TEST_REV env (index 0), "image" swaps the runner image to `image`,
+    "resources" bumps requests.cpu — all shape-aware for single-pod and gang
+    runtimes. material=False: touch a CSR label only — no pod-spec change, so
+    the revision-hash is unchanged and nothing should roll.
     """
     if not material:
         rr = kubectl("patch", "clusterservingruntime", csr, "--type=merge",
                      "-p", json.dumps({"metadata": {"labels": {"perm.test/touch": TRIGGER_VAL}}}))
         ctx["trigger_ts"] = time.time()
         return rr.returncode == 0
+    if kind == "image":
+        ok = bool(image) and _csr_set_image(csr, comps, image)
+        ctx["trigger_ts"] = time.time()
+        return ok
+    if kind == "resources":
+        ok = _csr_bump_cpu(csr, comps)
+        ctx["trigger_ts"] = time.time()
+        return ok
     r = kubectl("get", "clusterservingruntime", csr, "-o", "json")
     if r.returncode != 0:
         return False
@@ -1244,6 +2221,78 @@ def _runtime_recover(case_id, yaml_file, desc, hdr, csr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _runtimerev_during(case_id, yaml_file, desc, hdr, csr):
+    """Edit the runtime while an ISVC-annotation rollout is mid-rotate: the two
+    triggers must fold into ONE converged outcome — every Instance on the final
+    (post-runtime-edit) revision, ceilings held, nothing stranded on the
+    intermediate revision and no wedge (the runtime-edit analogue of _rebump)."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N, configured = ctx["N"], ctx["configured"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    edit = hdr.get("edit", "material")
+    kind = edit if edit in ("image", "resources") else "env"
+    bumped = _bumped(ctx)
+    print(f"  Phase 2a: ISVC revision bump (v2) on {sorted(bumped)} — runtime edit lands mid-rotate")
+    if not _bump_rev(ctx, bumped, "v2"):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "isvc bump failed")
+    t0 = time.time()
+    while time.time() - t0 < 60 and not ctx["closed"]:
+        _read_one(ctx)
+        if any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+               for p in ctx["pod_state"].values()):
+            break
+    # Final revision = anything appearing only AFTER the CSR edit (rebump-style).
+    pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
+    print(f"  Phase 2b: {edit} runtime edit on CSR {csr} mid-rotate")
+    if not _bump_runtime(ctx, csr, sorted(configured), True, kind=kind, image=hdr.get("img")):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "csr patch failed")
+    budget = min(MAX_BUDGET_S, 2 * (ROTATE_BASE_S + ROTATE_PER_POD_S *
+                                    sum(N[c] * ctx["pods_per_inst"][c] for c in configured)))
+    print(f"  Phase 3: watching convergence onto the post-edit revision (≤{budget:.0f}s)")
+
+    def converged():
+        for c in configured:
+            a, rd, _ = ctx["agg"].get(c, (0, 0, 0))
+            if a != N[c] or rd != N[c]:
+                return False
+        for c in configured:
+            live = [p for p in ctx["pod_state"].values()
+                    if p and p["alive"] and p["comp"] == c and p.get("hash")]
+            if not live or any(p["hash"] in pre_final for p in live):
+                return False
+        return True
+
+    state, stable = "ROTATING", None
+    while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)
+        if converged():
+            if stable is None:
+                stable = time.time()
+            elif time.time() - stable >= STABILITY_S:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                break
+        else:
+            stable = None
+    verdict, notes, checks = "PASS", [], []
+    for c in COMPS:
+        if N[c] and ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"; notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+        elif N[c]:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    if state != "CONVERGED":
+        verdict = "FAIL"
+        notes.append(f"runtime edit mid-rollout did not converge (state={state})")
+        checks.append(f"  ✗ concurrent ISVC rollout + runtime edit never converged onto the post-edit revision (state={state})")
+    else:
+        checks.append("  ✓ concurrent ISVC rollout + runtime edit converged onto the post-edit revision — no wedge, nothing stranded")
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _runtimerev(case_id, yaml_file, desc, hdr):
     """Modify the ISVC's RUNTIME (not the ISVC) and assert the dependent ISVC
     behaves per autoSync — the one rollout trigger the rest of the suite never
@@ -1265,11 +2314,15 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
         if hdr.get("break") == "stuck":
             return _runtime_recover_stuck(case_id, yaml_file, desc, hdr, csr)
         return _runtime_recover(case_id, yaml_file, desc, hdr, csr)
+    if hdr.get("during") == "rollout":
+        return _runtimerev_during(case_id, yaml_file, desc, hdr, csr)
     expect_roll = hdr.get("expect", "roll") == "roll"
     # Whether the runtime edit is material (changes the pod spec) is independent of
     # whether a roll is expected: a material edit on a PINNED (autoSync=false) ISVC
     # must NOT roll. Default: material when a roll is expected, no-op otherwise.
-    material = hdr.get("edit", "material" if expect_roll else "noop") == "material"
+    edit = hdr.get("edit", "material" if expect_roll else "noop")
+    material = edit != "noop"
+    kind = edit if edit in ("image", "resources") else "env"
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -1283,9 +2336,9 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
         return {p["hash"] for p in ctx["pod_state"].values()
                 if p and p["alive"] and p.get("hash") and p["hash"] not in old}
 
-    print(f"  Phase 2: {'material' if material else 'no-op'} runtime edit on CSR {csr} ({configs}); "
+    print(f"  Phase 2: {edit} runtime edit on CSR {csr} ({configs}); "
           f"expect {'ROLL' if expect_roll else 'NO ROLL'}")
-    if not _bump_runtime(ctx, csr, sorted(configured), material):
+    if not _bump_runtime(ctx, csr, sorted(configured), material, kind=kind, image=hdr.get("img")):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "csr patch failed")
 
     verdict, notes, checks = "PASS", [], []
@@ -1357,19 +2410,47 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, "CONVERGED" if verdict == "PASS" else "NOROLL_VIOLATED", verdict, notes, checks)
 
 
-def _migration_ledger_entry(case_id, req_uuid):
-    """The audit-ledger row for a request UUID, from CM <isvc>-ome-migration-audit
-    (data key history.json). None if the CM/entry doesn't exist yet."""
+def _migration_ledger_entries(case_id):
+    """All rows of the audit ledger CM <isvc>-ome-migration-audit (data key
+    history.json). Empty when the CM doesn't exist yet."""
     r = kubectl("-n", NS, "get", "cm", f"{case_id}-ome-migration-audit", "-o", "json")
     if r.returncode != 0:
-        return None
+        return []
     try:
         hist = json.loads(json.loads(r.stdout).get("data", {}).get("history.json", "{}"))
     except Exception:
-        return None
-    for e in hist.get("entries", []):
+        return []
+    return hist.get("entries", []) or []
+
+
+def _migration_ledger_entry(case_id, req_uuid):
+    """The audit-ledger row for a request UUID; None if it doesn't exist yet."""
+    for e in _migration_ledger_entries(case_id):
         if e.get("requestUUID") == req_uuid:
             return e
+    return None
+
+
+def _ir_status_migrations(case_id, comp):
+    """status.migrations of the component's InferenceReplica. Post-#832 builds
+    consume the request annotation at ACCEPT and keep migration state here.
+    Returns the entry list, or None when unavailable — no IR CRD, no IR for the
+    component, or an IR without the field (pre-#832 build) — so callers can
+    stay version-tolerant."""
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l",
+                f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return None
+    for it in items:
+        if (it.get("spec") or {}).get("component") == comp:
+            st = it.get("status") or {}
+            if "migrations" in st:
+                return st.get("migrations") or []
+            return None
     return None
 
 
@@ -1402,6 +2483,15 @@ def _migrate(case_id, yaml_file, desc, hdr):
     inst = req_insts[0]
     orig_insts = {p["inst"] for p in ctx["pod_state"].values()
                   if p and p["alive"] and p["comp"] == mcomp}
+    dup = bool(hdr.get("dup"))
+    defer_rollout = hdr.get("during") == "rollout"
+    hint_node = None
+    if hdr.get("hint"):
+        # Hint target: a node already hosting a DIFFERENT instance of the same
+        # component (schedulable for this workload shape), never the from_node.
+        fn0 = ctx["old_nodes"].get((mcomp, inst), "")
+        hint_node = next((n for (c, i), n in sorted(ctx["old_nodes"].items())
+                          if c == mcomp and i != inst and n and n != fn0), None)
     reqs = {}   # src inst -> (req_uuid, anno_key, from_node)
     annos = {}
     for i in req_insts:
@@ -1409,10 +2499,27 @@ def _migrate(case_id, yaml_file, desc, hdr):
         ak = f"ome.io/migration-request-v1-{ru}"
         fn = ctx["old_nodes"].get((mcomp, i), "")
         reqs[i] = (ru, ak, fn)
-        annos[ak] = json.dumps({"schemaVersion": "v1", "component": mcomp, "instance": int(i),
-                                "from_node": fn, "reason": "perm-test"})
+        body = {"schemaVersion": "v1", "component": mcomp, "instance": int(i),
+                "from_node": fn, "reason": "perm-test"}
+        if hint_node:
+            body["hint_target_nodes"] = [hint_node]
+        annos[ak] = json.dumps(body)
     from_node = reqs[inst][2]
-    print(f"  Phase 2: migration request (mig={mig_mode}) component={mcomp} instances={req_insts}")
+    if defer_rollout:
+        # Mid-rotate migration: start an ISVC rollout and file the migration
+        # request only once the rotation is visibly in flight.
+        bumped = _bumped(ctx)
+        print(f"  Phase 2a: ISVC revision bump (v2) on {sorted(bumped)} — migration request filed mid-rotate")
+        if not _bump_rev(ctx, bumped, "v2"):
+            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "isvc bump failed")
+        t0 = time.time()
+        while time.time() - t0 < 60 and not ctx["closed"]:
+            _read_one(ctx)
+            if any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+                   for p in ctx["pod_state"].values()):
+                break
+    print(f"  Phase 2: migration request (mig={mig_mode}) component={mcomp} instances={req_insts}"
+          + (f" hint={hint_node}" if hint_node else ""))
     rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
                  "-p", json.dumps({"metadata": {"annotations": annos}}))
     if rr.returncode != 0:
@@ -1420,9 +2527,19 @@ def _migrate(case_id, yaml_file, desc, hdr):
     ctx["trigger_ts"] = time.time()
     ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[mcomp] * ctx["pods_per_inst"][mcomp])
+    if defer_rollout:
+        budget = min(MAX_BUDGET_S, 2 * budget)   # two ops (rollout + migration) share the window
     never_grace = 90
     print(f"  Phase 3: watching migration (ledger {case_id}-ome-migration-audit; ≤{budget}s)")
     surge_seen, surge_nodes, last_poll, state = set(), {}, 0.0, "WATCHING"
+    dup_refiled, rollout_conv_ts = False, None
+
+    def _rollout_done():
+        live = [p for p in ctx["pod_state"].values()
+                if p and p["alive"] and p["comp"] in _bumped(ctx) and p.get("hash")]
+        return bool(live and all(p["hash"] not in ctx["old_hashes"] for p in live)
+                    and all(ctx["agg"].get(c, (0, 0, 0))[1] >= N[c] for c in ctx["configured"]))
+
     while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)
         for p in ctx["pod_state"].values():
@@ -1430,16 +2547,39 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 surge_seen.add(p["inst"])
                 surge_nodes[p["inst"]] = p.get("node", "") or surge_nodes.get(p["inst"], "")
         now = time.time()
+        if defer_rollout and rollout_conv_ts is None and _rollout_done():
+            rollout_conv_ts = now
+            print(f"    ↷ in-flight rollout converged at {now - ctx['trigger_ts']:.0f}s")
         if now - last_poll >= 5:
             last_poll = now
             phs = {i: (_migration_ledger_entry(case_id, ru) or {}).get("phase")
                    for i, (ru, _, _) in reqs.items()}
+            if any(phs.values()):
+                ctx["fault_migrating"] = True   # accept observed → migrating fault phase hook
+                if dup and not dup_refiled:
+                    # Duplicate delivery: the SAME request UUID re-filed after
+                    # the first was observed — must dedup to one entry/one surge.
+                    kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                            "-p", json.dumps({"metadata": {"annotations": annos}}))
+                    dup_refiled = True
+                    print("    ↻ duplicate delivery: same migration-request annotation re-filed")
             if mig_mode != "Never" and all(v == "Completed" for v in phs.values()):
                 state = "COMPLETED"; break
             if any(v == "Failed" for v in phs.values()):
                 state = "FAILED"; break
             if mig_mode == "Never" and now - ctx["trigger_ts"] > never_grace:
                 state = "NEVER_GRACE"; break
+    if defer_rollout and rollout_conv_ts is None:
+        # The product may PREEMPT: an accepted migration's requeue skips the
+        # update pass, so the rollout can finish AFTER the migration completed
+        # (the loop above breaks on the ledger phase). Keep watching, within
+        # the same overall budget, for the rollout to converge.
+        while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+            _read_one(ctx)
+            if _rollout_done():
+                rollout_conv_ts = time.time()
+                print(f"    ↷ in-flight rollout converged at {rollout_conv_ts - ctx['trigger_ts']:.0f}s (post-migration)")
+                break
     # Collapse the per-source ledger into the single-inst vars the verdict block
     # below already consumes; ph=="Completed" only when EVERY request completed.
     entries = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
@@ -1451,9 +2591,29 @@ def _migrate(case_id, yaml_file, desc, hdr):
     surge_inst = sorted(surge_seen)[0] if surge_seen else None
     surge_node = surge_nodes.get(surge_inst, "") if surge_inst is not None else None
     surged = bool(surge_seen) or (ledger_surge is not None and ph == "Completed")
-    anno_cleared = all(ak not in _isvc_annotations(case_id) for (_, ak, _) in reqs.values())
-    src_gone = not any(p and p["alive"] and p["comp"] == mcomp and p["inst"] in req_insts
+
+    def _src_gone():
+        return not any(p and p["alive"] and p["comp"] == mcomp and p["inst"] in req_insts
                        for p in ctx["pod_state"].values())
+
+    def _anno_cleared():
+        return all(ak not in _isvc_annotations(case_id) for (_, ak, _) in reqs.values())
+
+    anno_cleared, src_gone = _anno_cleared(), _src_gone()
+    if mig_mode != "Never" and ph == "Completed" and not (anno_cleared and src_gone):
+        # The source drain + annotation clear finish asynchronously after the
+        # ledger flips Completed (post-#832 the annotation is already consumed
+        # at ACCEPT). Settle with a bounded poll before hard-failing on either.
+        settle_deadline = time.time() + MIGRATE_SETTLE_S
+        last_anno = 0.0
+        while time.time() < settle_deadline and not ctx["closed"]:
+            _read_one(ctx)
+            src_gone = _src_gone()
+            if time.time() - last_anno >= 5:
+                last_anno = time.time()
+                anno_cleared = _anno_cleared()
+            if anno_cleared and src_gone:
+                break
 
     verdict, notes, checks = "PASS", [], []
     # Peak/ceiling: a migration surges +1 (ceil = N+1 from the case header; N for
@@ -1474,8 +2634,134 @@ def _migrate(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ mig=Never but a migration happened (surge inst={surge_inst}, ledger phase={ph})")
         else:
             checks.append(f"  ✓ mig=Never: request not actioned (no surge; ledger phase={ph or 'none'})")
+        # Rejection must still CONSUME the request: annotation cleared + a
+        # terminal Failed entry naming the policy. Hard only on builds exposing
+        # IR status.migrations (post-#832); ⓘ-soft on older builds.
+        mig_entries = _ir_status_migrations(case_id, mcomp)
+        if mig_entries is None:
+            checks.append(f"  ⓘ pre-#832 build (no IR status.migrations) — Never-consumption checks soft: "
+                          f"annotation {'cleared' if anno_cleared else 'still present'}, ledger phase={ph or 'none'}")
+        else:
+            if anno_cleared:
+                checks.append("  ✓ mig=Never: request annotation consumed (cleared on rejection)")
+            else:
+                verdict = "FAIL"
+                notes.append("Never-rejected request annotation never consumed")
+                checks.append("  ✗ mig=Never: request annotation still on the ISVC — a rejected request must still be consumed")
+            ir_ent = next((m for m in mig_entries if m.get("requestUUID") == reqs[inst][0]), None)
+            eph = (ir_ent or {}).get("phase") or ph
+            reason = str((ir_ent or entry or {}).get("reason", ""))
+            if eph == "Failed":
+                checks.append(f"  ✓ mig=Never: terminal Failed entry recorded (reason={reason or '(none)'})")
+            else:
+                verdict = "FAIL"
+                notes.append(f"Never rejection entry {'missing' if not (ir_ent or entry) else f'phase={eph}'} (want terminal Failed)")
+                checks.append(f"  ✗ mig=Never: no terminal Failed entry for the rejected request "
+                              f"({'missing' if not (ir_ent or entry) else f'phase={eph}'}) — the policy rejection must be recorded")
+    elif hdr.get("expect") == "fail":
+        # Bounded-failure contract (fault cases): the armed fault holds the
+        # surge, so the request must end terminal Failed WITHIN the budget while
+        # the source keeps serving, the request annotation is consumed, and the
+        # migration slot frees (terminal IR entry). lift=1 then proves the
+        # bound is recoverable: lift the quota → a fresh request completes.
         if ph == "Failed":
-            checks.append("  ✓ ledger recorded a Failed/rejected entry (MigrationDisabled)")
+            checks.append(f"  ✓ ledger terminal Failed within budget (bounded; state={state})")
+        else:
+            verdict = "FAIL"
+            notes.append(f"expected bounded terminal Failed, got phase={ph} (state={state})")
+            checks.append(f"  ✗ expected a bounded terminal Failed entry, got phase={ph} (state={state}) — the fault did not bound the migration")
+        src_ready = all(
+            any(p and p["alive"] and p["ready"] and p["comp"] == mcomp and p["inst"] == i
+                for p in ctx["pod_state"].values())
+            for i in req_insts)
+        if src_ready:
+            checks.append(f"  ✓ source Instance(s) {','.join(req_insts)} still Ready — served throughout the failed migration")
+        else:
+            verdict = "FAIL"
+            notes.append("source lost during failed migration")
+            checks.append(f"  ✗ source Instance(s) {','.join(req_insts)} not Ready after the failed migration — a failed migration must retain its source")
+        # Request consumed (post-#832 the annotation is consumed at ACCEPT):
+        # settle-poll before failing on a still-present annotation.
+        settle_deadline = time.time() + MIGRATE_SETTLE_S
+        last_anno = 0.0
+        while not anno_cleared and time.time() < settle_deadline and not ctx["closed"]:
+            _read_one(ctx)
+            if time.time() - last_anno >= 5:
+                last_anno = time.time()
+                anno_cleared = _anno_cleared()
+        if anno_cleared:
+            checks.append("  ✓ migration-request annotation(s) consumed (cleared)")
+        else:
+            verdict = "FAIL"
+            notes.append("failed migration left its request annotation")
+            checks.append("  ✗ migration-request annotation(s) still on the ISVC after terminal Failed — request never consumed")
+        # Slot freed: the IR entry must be TERMINAL Failed, not a live entry
+        # squatting the migration slot. Version-tolerant like the Completed path.
+        mig_entries = _ir_status_migrations(case_id, mcomp)
+        if mig_entries is None:
+            checks.append("  ⓘ IR status.migrations unavailable (pre-#832 build) — terminal-entry check skipped (CM ledger asserted above)")
+        else:
+            for i, (ru, _, _) in sorted(reqs.items()):
+                ent = next((m for m in mig_entries if m.get("requestUUID") == ru), None)
+                eph = (ent or {}).get("phase")
+                if eph == "Failed":
+                    checks.append(f"  ✓ IR status.migrations[{ru[:8]}] terminal Failed (slot freed)")
+                else:
+                    verdict = "FAIL"
+                    notes.append(f"IR migrations entry {ru[:8]} {'missing' if ent is None else f'phase={eph}'} (want terminal Failed)")
+                    checks.append(f"  ✗ IR status.migrations entry {ru[:8]} {'missing' if ent is None else f'has phase={eph}'} — want terminal Failed (a live entry means the slot never freed)")
+        if hdr.get("lift") and verdict == "PASS":
+            _lift_quota(case_id)
+            print("    ⚡ fault quota lifted — follow-up migration request")
+            checks.append("  ⓘ quota lifted after the bounded failure — follow-up migration")
+            ru2 = str(uuid.uuid4())
+            ak2 = f"ome.io/migration-request-v1-{ru2}"
+            fn2 = next((p.get("node", "") for p in ctx["pod_state"].values()
+                        if p and p["alive"] and p["comp"] == mcomp and p["inst"] == inst), "")
+            body2 = json.dumps({"schemaVersion": "v1", "component": mcomp, "instance": int(inst),
+                                "from_node": fn2, "reason": "perm-test-lift"})
+            rr2 = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                          "-p", json.dumps({"metadata": {"annotations": {ak2: body2}}}))
+            if rr2.returncode != 0:
+                verdict = "FAIL"
+                notes.append("follow-up migration patch failed")
+                checks.append(f"  ✗ follow-up migration request patch failed: {rr2.stderr[:120]}")
+            else:
+                t2, ph2, last2 = time.time(), None, 0.0
+                while time.time() - t2 < budget and not ctx["closed"]:
+                    _read_one(ctx)
+                    if time.time() - last2 >= 5:
+                        last2 = time.time()
+                        ph2 = (_migration_ledger_entry(case_id, ru2) or {}).get("phase")
+                        if ph2 in ("Completed", "Failed"):
+                            break
+                if ph2 == "Completed":
+                    checks.append(f"  ✓ follow-up migration Completed after the quota lift ({time.time() - t2:.0f}s)")
+                    sd = time.time() + MIGRATE_SETTLE_S
+                    gone = _src_gone()
+                    while not gone and time.time() < sd and not ctx["closed"]:
+                        _read_one(ctx)
+                        gone = _src_gone()
+                    if gone:
+                        checks.append(f"  ✓ follow-up drained source Instance {inst}")
+                    else:
+                        verdict = "FAIL"
+                        notes.append("follow-up completed but source never drained")
+                        checks.append(f"  ✗ follow-up Completed but source Instance {inst} never drained")
+                else:
+                    verdict = "FAIL"
+                    notes.append(f"follow-up migration did not complete (phase={ph2})")
+                    checks.append(f"  ✗ follow-up migration never reached Completed after the quota lift (phase={ph2}) — slot/headroom not actually freed")
+            # The follow-up surge happens AFTER the main peak gate ran above —
+            # re-assert the ceiling over the whole case (fan-out would show here).
+            for c in COMPS:
+                if N[c] and ctx["peaks"][c] > mceil[c]:
+                    verdict = "FAIL"
+                    notes.append(f"{c} post-lift peak {ctx['peaks'][c]}>ceil {mceil[c]}")
+                    checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} exceeded ceiling {mceil[c]} during the post-lift follow-up")
+        # Capacity floor: the source must have served throughout the bounded
+        # failure (and the follow-up, when lifted).
+        verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     else:
         if ph == "Completed":
             checks.append(f"  ✓ ledger Completed (surgeInstance={entry.get('surgeInstance')})")
@@ -1489,18 +2775,88 @@ def _migrate(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ surge Instance {surge_inst} on a different node ({surge_node} != {from_node})")
         else:
             checks.append(f"  ⓘ surge happened (watcher inst={surge_inst}, ledger surgeInstance={ledger_surge}); node compare inconclusive")
-        checks.append(f"  {'✓' if src_gone else '⚠'} source Instance(s) {','.join(req_insts)} {'drained' if src_gone else 'still present'}")
-        checks.append(f"  {'✓' if anno_cleared else '⚠'} migration-request annotation(s) {'cleared' if anno_cleared else 'still present'}")
+        # Source-drain + request-consumption hygiene: hard checks (previously
+        # ⚠-only — the exact class the expired-mid-drain and same-name-recreate
+        # bugs lived in). Gated on Completed: a FAILED migration is REQUIRED to
+        # keep its source (bounded-failure contract), so asserting src_gone
+        # there would demand the wrong behavior — and the ledger check above
+        # already reds the case.
+        if ph == "Completed":
+            if src_gone:
+                checks.append(f"  ✓ source Instance(s) {','.join(req_insts)} drained")
+            else:
+                verdict = "FAIL"
+                notes.append(f"source Instance(s) {','.join(req_insts)} still present {int(MIGRATE_SETTLE_S)}s after Completed")
+                checks.append(f"  ✗ source Instance(s) {','.join(req_insts)} still present {int(MIGRATE_SETTLE_S)}s after ledger Completed — source did not drain")
+            if anno_cleared:
+                checks.append("  ✓ migration-request annotation(s) cleared")
+            else:
+                verdict = "FAIL"
+                notes.append("migration-request annotation(s) still on the ISVC")
+                checks.append("  ✗ migration-request annotation(s) still on the ISVC — request never consumed")
+            # Post-#832 the authoritative per-request state is the IR's
+            # status.migrations; assert a terminal Completed entry per request
+            # UUID. Version-tolerant: skipped (with a note) on builds without
+            # the field — the CM-ledger assertion above still gates there.
+            mig_entries = _ir_status_migrations(case_id, mcomp)
+            if mig_entries is None:
+                checks.append("  ⓘ IR status.migrations unavailable (pre-#832 build) — per-request IR entry check skipped (CM ledger asserted above)")
+            else:
+                for i, (ru, _, _) in sorted(reqs.items()):
+                    ent = next((m for m in mig_entries if m.get("requestUUID") == ru), None)
+                    eph = (ent or {}).get("phase")
+                    if eph == "Completed":
+                        checks.append(f"  ✓ IR status.migrations[{ru[:8]}] terminal Completed")
+                    else:
+                        verdict = "FAIL"
+                        notes.append(f"IR status.migrations entry {ru[:8]} {'missing' if ent is None else f'phase={eph}'}")
+                        checks.append(f"  ✗ IR status.migrations entry for request {ru[:8]} {'missing' if ent is None else f'has phase={eph}'} — want terminal Completed")
+        else:
+            checks.append("  ⓘ source-drain / annotation-clear / IR-entry checks skipped — migration did not complete (ledger check above already failed)")
         if len(req_insts) > 1:
-            # Concurrent migration: each source must surge its OWN replacement
-            # index — collapsing N sources onto one surge index is the fleet-wipe
-            # shape. Require at least as many distinct surge indices as sources.
-            if len(surge_seen) >= len(req_insts):
-                checks.append(f"  ✓ concurrent migrate surged {len(surge_seen)} distinct index(es) for {len(req_insts)} sources {sorted(surge_seen)}")
+            # Concurrent/batched migration: each source must surge its OWN
+            # replacement — collapsing N sources onto one surge index is the
+            # fleet-wipe shape. Watcher indices catch the concurrent case; the
+            # ledger's per-request surgeInstance also covers SERIALIZED batches,
+            # where a later request may legitimately reuse an index a finished
+            # one already freed (so watcher-distinct undercounts).
+            ledger_surges = {e.get("surgeInstance") for e in entries.values()
+                             if e.get("phase") == "Completed" and e.get("surgeInstance") is not None}
+            if len(surge_seen) >= len(req_insts) or len(ledger_surges) >= len(req_insts):
+                checks.append(f"  ✓ {len(req_insts)} migrations each surged their own replacement "
+                              f"(watcher indices {sorted(surge_seen)}, ledger surgeInstances {sorted(ledger_surges)})")
             else:
                 verdict = "FAIL"
                 notes.append(f"migration index collision: {len(req_insts)} sources surged only {len(surge_seen)} distinct index(es) {sorted(surge_seen)}")
-                checks.append(f"  ✗ migration index collision: {len(req_insts)} concurrent migrations surged only {len(surge_seen)} distinct index(es) {sorted(surge_seen)} — sources collapsed onto a shared surge index (fleet-wipe shape)")
+                checks.append(f"  ✗ migration index collision: {len(req_insts)} migrations surged only {len(surge_seen)} watcher index(es) {sorted(surge_seen)} / {len(ledger_surges)} ledger surgeInstance(s) {sorted(ledger_surges)} — sources collapsed onto a shared surge index (fleet-wipe shape)")
+        if defer_rollout:
+            # Ordering deliberately UNASSERTED: the product currently PREEMPTS
+            # — an accepted migration's requeue skips the update pass (there is
+            # no defer-then-run queue). Whether preempt or defer is the
+            # contract is an open product-design decision; until it lands this
+            # case only asserts both operations complete without wedging each
+            # other in bounded total time (migration Completed is gated above).
+            if rollout_conv_ts is None:
+                verdict = "FAIL"
+                notes.append("mid-rotate migration: the in-flight rollout never converged (wedge)")
+                checks.append("  ✗ mid-rotate migration: the concurrent rollout never converged onto its new revision within budget — the migration wedged the rollout")
+            else:
+                checks.append(f"  ✓ mid-rotate migration: rollout converged onto its new revision at {rollout_conv_ts - ctx['trigger_ts']:.0f}s (ordering vs the migration deliberately unasserted)")
+        if dup:
+            cnt = sum(1 for e in _migration_ledger_entries(case_id)
+                      if e.get("requestUUID") == reqs[inst][0])
+            if cnt == 1 and len(surge_seen) <= 1:
+                checks.append(f"  ✓ duplicate-UUID re-delivery deduped: exactly one ledger entry, {len(surge_seen)} surge index")
+            else:
+                verdict = "FAIL"
+                notes.append(f"duplicate-UUID re-delivery not deduped (entries={cnt}, surges={sorted(surge_seen)})")
+                checks.append(f"  ✗ duplicate-UUID re-delivery produced {cnt} ledger entr(ies) and surge indices {sorted(surge_seen)} — want exactly one entry / one migration")
+        if hint_node:
+            if surge_node and surge_node == hint_node:
+                checks.append(f"  ✓ hint honored: surge landed on the hinted node {hint_node}")
+            else:
+                checks.append(f"  ⓘ hint {hint_node} not taken (surge on {surge_node or '?'}) — "
+                              f"a hint is a preference; capacity/schedulability may divert (soft)")
         # A migration surges a replacement before draining the source, so capacity
         # must never drop below the floor, gangs must stay whole, and no two gangs
         # may collapse onto one index (the fleet-wipe shape at migration scale).
@@ -1508,6 +2864,178 @@ def _migrate(case_id, yaml_file, desc, hdr):
         verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
         verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     ctx["converged_at"] = (time.time() - ctx["trigger_ts"]) if verdict == "PASS" else None
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _recreate(case_id, yaml_file, desc, hdr):
+    """Delete the case ISVC (optionally mid-rollout / mid-migration), require the
+    universal teardown to converge, then IMMEDIATELY re-apply the same manifest:
+    the same-name recreate must reach Ready on all-fresh pod UIDs — no
+    AlreadyExists wedge, no adopted leftovers. With fault=cordon the recreate
+    must land only on schedulable nodes; with fault=quota:0 the teardown must
+    free the capacity that re-admits the recreate under the same cap."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    verdict, notes, checks = "PASS", [], []
+    during = hdr.get("during")
+    if during == "rollout":
+        print("  Phase 2: ISVC revision bump (v2) — delete lands mid-rotate")
+        if not _bump_rev(ctx, _bumped(ctx), "v2"):
+            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "isvc bump failed")
+        t0 = time.time()
+        while time.time() - t0 < 90 and not ctx["closed"]:
+            _read_one(ctx)
+            if any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+                   for p in ctx["pod_state"].values()):
+                break
+    elif during == "migrate":
+        mcomp = "engine" if "engine" in ctx["configured"] else sorted(ctx["configured"])[0]
+        mi = str(hdr.get("inst", 0)).split(",")[0].strip()
+        ru = str(uuid.uuid4())
+        body = {"schemaVersion": "v1", "component": mcomp, "instance": int(mi),
+                "from_node": ctx["old_nodes"].get((mcomp, mi), ""), "reason": "perm-test-delete-mid-migration"}
+        orig = {p["inst"] for p in ctx["pod_state"].values() if p and p["alive"] and p["comp"] == mcomp}
+        print("  Phase 2: migration request — delete lands mid-migration")
+        rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                     "-p", json.dumps({"metadata": {"annotations":
+                                                    {f"ome.io/migration-request-v1-{ru}": json.dumps(body)}}}))
+        if rr.returncode != 0:
+            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", rr.stderr[:200])
+        t0 = time.time()
+        while time.time() - t0 < 90 and not ctx["closed"]:
+            _read_one(ctx)
+            if any(p and p["alive"] and p["comp"] == mcomp and p["inst"] not in orig
+                   for p in ctx["pod_state"].values()) or _migration_ledger_entry(case_id, ru):
+                break
+    pass1_uids = {p["uid"] for p in ctx["pod_state"].values() if p and p.get("uid")}
+    total_pods = sum(ctx["N"][c] * ctx["pods_per_inst"].get(c, 1) for c in ctx["configured"])
+    _stop_watcher(ctx)
+    print("  Phase 3: delete, teardown convergence, then same-name recreate")
+    kubectl("delete", "-n", NS, "isvc", case_id, "--wait=false")
+    verdict = teardown_check(case_id, total_pods, verdict, notes, checks)
+    hdr2 = dict(hdr)
+    hdr2.pop("fault", None)   # pass-1 apparatus (quota/cordon) stays armed; never re-arm
+    t_re = time.time()
+    ctx2, err2 = _setup_and_ready(case_id, yaml_file, hdr2)
+    if err2:
+        notes.append(f"same-name recreate failed: {err2[0]} {err2[1]}")
+        return _write_fail(case_id, desc, hdr, "RECREATE_FAIL", "; ".join(notes))
+    ctx2["fault"] = ctx.get("fault")   # surface pass-1 fault notes/errors in the verdict
+    ctx2["converged_at"] = time.time() - t_re
+    reused = pass1_uids & {p["uid"] for p in ctx2["pod_state"].values() if p and p.get("uid")}
+    if reused:
+        verdict = "FAIL"
+        notes.append(f"recreate reused {len(reused)} pod UID(s)")
+        checks.append(f"  ✗ recreate reused {len(reused)} pre-delete pod UID(s) — pods survived the teardown")
+    else:
+        checks.append("  ✓ same-name recreate reached Ready on all-fresh pod UIDs (no AlreadyExists wedge, no adopted pods)")
+    f = ctx.get("fault")
+    if f and f["kind"] == "cordon" and f.get("node"):
+        on_bad = sorted({f"{p['comp']}-{p['inst']}" for p in ctx2["pod_state"].values()
+                         if p and p["alive"] and p.get("node") == f["node"]})
+        if on_bad:
+            verdict = "FAIL"
+            notes.append(f"recreate scheduled onto cordoned node {f['node']}")
+            checks.append(f"  ✗ recreate placed {on_bad} on the cordoned node {f['node']}")
+        else:
+            checks.append(f"  ✓ recreate avoided the cordoned node {f['node']}")
+    return _finish(case_id, desc, hdr, ctx2, "RECREATED", verdict, notes, checks)
+
+
+def _component_irs(case_id, comp):
+    """[(name, deleting)] for the component's InferenceReplicas (label-selected);
+    [] when gone or the CRD is absent (version-tolerant)."""
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l",
+                f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return []
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return []
+    return [((it.get("metadata") or {}).get("name", "?"),
+             bool((it.get("metadata") or {}).get("deletionTimestamp")))
+            for it in items if (it.get("spec") or {}).get("component") == comp]
+
+
+def _compremove(case_id, yaml_file, desc, hdr):
+    """Patch a whole component OUT of the ISVC spec: the removed component's IR
+    must be swept (drained teardown — DeletionTimestamp observed, then gone)
+    along with every one of its pods, while the surviving components' pods stay
+    untouched (the removed-component-leak guard). readd=1 then re-applies the
+    original manifest and the component must converge back to Ready."""
+    comp = str(hdr.get("remove", ""))
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N = ctx["N"]
+    if comp not in ctx["configured"]:
+        return _write_fail(case_id, desc, hdr, "CASE_ERROR", f"remove={comp} is not a configured component")
+    keep = sorted(ctx["configured"] - {comp})
+    keep_uids = {c: {p["uid"] for p in ctx["pod_state"].values()
+                     if p and p["alive"] and p["comp"] == c and p.get("uid")} for c in keep}
+    print(f"  Phase 2: removing /spec/{comp} (keep {keep})")
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=json",
+                 "-p", json.dumps([{"op": "remove", "path": f"/spec/{comp}"}]))
+    if rr.returncode != 0:
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", rr.stderr[:200])
+    ctx["trigger_ts"] = time.time()
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[comp] * ctx["pods_per_inst"][comp])
+    saw_deleting, gone_at, last_poll = False, None, 0.0
+    print(f"  Phase 3: watching the removed component sweep (IR + pods; ≤{budget:.0f}s)")
+    while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if now - last_poll >= 2:
+            last_poll = now
+            irs = _component_irs(case_id, comp)
+            saw_deleting = saw_deleting or any(d for _, d in irs)
+            pods_left = any(p and p["alive"] and p["comp"] == comp for p in ctx["pod_state"].values())
+            if not irs and not pods_left:
+                gone_at = now - ctx["trigger_ts"]
+                break
+    verdict, notes, checks = "PASS", [], []
+    state = "REMOVED" if gone_at is not None else "REMOVE_TIMEOUT"
+    if gone_at is None:
+        irs = _component_irs(case_id, comp)
+        pods = sorted({f"{comp}-{p['inst']}" for p in ctx["pod_state"].values()
+                       if p and p["alive"] and p["comp"] == comp})
+        verdict = "FAIL"
+        notes.append(f"removed {comp} not swept in {budget:.0f}s (IRs={len(irs)}, pods={pods})")
+        checks.append(f"  ✗ removed component {comp} still has {len(irs)} IR(s) and pods {pods} "
+                      f"after {budget:.0f}s — the removed-component leak")
+    else:
+        ctx["converged_at"] = gone_at
+        checks.append(f"  ✓ removed component {comp} swept (IR + pods gone) at {gone_at:.0f}s")
+        checks.append("  ✓ IR removal was a drained teardown (DeletionTimestamp observed)" if saw_deleting
+                      else "  ⓘ IR DeletionTimestamp not observed (sweep faster than the 2s poll)")
+    for c in keep:
+        cur = {p["uid"] for p in ctx["pod_state"].values()
+               if p and p["alive"] and p["comp"] == c and p.get("uid")}
+        if cur == keep_uids[c]:
+            checks.append(f"  ✓ {c} untouched during the removal ({len(cur)} pod UID(s) stable)")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{c} pods churned during {comp} removal")
+            checks.append(f"  ✗ {c} pods churned during the {comp} removal "
+                          f"({len(keep_uids[c] - cur)} gone, {len(cur - keep_uids[c])} new)")
+    if hdr.get("readd") and verdict == "PASS":
+        print(f"  Phase 4: re-adding {comp} (re-apply the original manifest)")
+        rr = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
+        rebudget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * N[comp] * ctx["pods_per_inst"][comp])
+        t0, back = time.time(), False
+        while rr.returncode == 0 and time.time() - t0 < rebudget and not ctx["closed"]:
+            _read_one(ctx)
+            if ctx["agg"].get(comp, (0, 0, 0))[1] == N[comp]:
+                back = True
+                break
+        if back:
+            checks.append(f"  ✓ round-trip: {comp} re-added and Ready {N[comp]}/{N[comp]}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"re-added {comp} never came back Ready")
+            checks.append(f"  ✗ round-trip: re-added {comp} did not reach Ready {N[comp]} within {rebudget:.0f}s")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
@@ -1934,6 +3462,10 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _canary(case_id, yaml_file, desc, hdr)
     if mode == "runtimerev":
         return _runtimerev(case_id, yaml_file, desc, hdr)
+    if mode == "recreate":
+        return _recreate(case_id, yaml_file, desc, hdr)
+    if mode == "compremove":
+        return _compremove(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
     # Survivor set: instances with index < min(start,target) must be left UNTOUCHED
@@ -1962,6 +3494,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     info = get_spec_info(case_id)
     pods_per_inst = {c: 1 + info["workers"].get(c, 0) for c in COMPS}
     surge_modes = {c: "surge" for c in configured}
+    inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
+    fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
 
     init_budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
     conv_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in configured))
@@ -1996,6 +3530,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                     break
                 line = line.strip() or None
             now = time.time()
+            _inv_tick(inv, pod_state, pods_per_inst)
             if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
                 state = "CONVERGED"
                 converged_at = stable_since - trigger_ts
@@ -2029,14 +3564,19 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             cstats = obj.get("status", {}).get("containerStatuses") or []
             ready = any(cs.get("name") == "ome-container" and cs.get("ready") for cs in cstats)
             if ev_type == "DELETED":
+                if meta.get("uid"):
+                    inv["dead_uids"].add(meta["uid"])   # stale-endpoint invariant
                 pod_state[name] = None
             else:
                 pod_state[name] = {"comp": labels.get("component", "?"),
                                    "inst": labels.get("ome.io/instance-index", "0"),
                                    "runner": labels.get("ome.io/runner", "default"),
+                                   "ord": labels.get("ome.io/pod-ordinal", "0"),
                                    "alive": meta.get("deletionTimestamp") is None,
                                    "ready": ready, "hash": labels.get(REV_LABEL, ""),
-                                   "uid": meta.get("uid", ""), "newanno": False}
+                                   "uid": meta.get("uid", ""), "newanno": False,
+                                   "serving": _pod_serving(obj),
+                                   "created": meta.get("creationTimestamp", "")}
             agg = aggregate(pod_state, None, surge_modes, pods_per_inst)
             for c in COMPS:
                 if agg.get(c, (0, 0, 0))[0] > peaks[c]:
@@ -2046,6 +3586,11 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                     print(f"  ✓ Initial Ready after {int(now - init_started)}s")
                     survivor_uids = {q["uid"] for q in pod_state.values()
                                      if q and q["alive"] and _is_survivor(q) and q.get("uid")}
+                    ok_f, fmsg = _fault_setup(fault, case_id, hdr)
+                    if not ok_f:
+                        print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
+                        state = "INFRA-FAIL"
+                        break
                     patch = {"spec": {c: {"minReplicas": target[c], "maxReplicas": target[c]}
                                       for c in configured if target[c] != N[c]}}
                     print(f"\n  Phase 2: scaledown patch {json.dumps(patch['spec'])}")
@@ -2059,6 +3604,9 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                     print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
                     state = "DRAINING"
             elif state == "DRAINING":
+                # Fault phase hook (settling fires right after the trigger).
+                _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
+                             "pod_state": pod_state, "pods_per_inst": pods_per_inst})
                 # Check C: capacity floor — every CONFIGURED component (not just the
                 # scaled one) must keep >= its target ready throughout the drain. A
                 # scaled component drains N→target (never below target); a non-scaled
@@ -2107,6 +3655,9 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     verdict = "PASS"
     notes = []
     checks = []
+    # blocked=1: the armed fault is EXPECTED to hold the scale short of target —
+    # the contract inverts to bounded-partial + parked-no-churn (Check B below).
+    blocked = bool(hdr.get("blocked")) and fault is not None
     # Check A: no surge UP while scaling down — peak alive ≤ ceiling (= start N).
     for c in sorted(configured):
         if peaks[c] > ceil[c]:
@@ -2115,8 +3666,39 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             checks.append(f"  ✗ {c} peak {peaks[c]} > ceiling {ceil[c]} — surged UP during scale-down")
         else:
             checks.append(f"  ✓ {c} peak {peaks[c]} ≤ ceiling {ceil[c]}")
-    # Check B: drained to the target Instance count.
-    if state != "CONVERGED":
+    # Check B: drained to the target Instance count. blocked=1 inverts it: the
+    # fault must HOLD the scale at a bounded partial state — for a quota fault
+    # exactly start + n admitted on a scale-up — with pod churn stopped (parked,
+    # not a retry loop). Converging while blocked=1 means the fault never bound.
+    if blocked:
+        if state == "CONVERGED":
+            verdict = "FAIL"
+            notes.append("blocked=1 but the scale converged — fault never bound")
+            checks.append("  ✗ blocked=1: scale reached target despite the armed fault — the fault never bound (apparatus or product overshot the quota)")
+        else:
+            if fault["kind"] == "quota":
+                qn = int(fault["param"])
+                exp = {c: (min(target[c], N[c] + qn) if target[c] > N[c] else target[c])
+                       for c in sorted(configured)}
+                bad = [c for c in sorted(configured) if final[c] != exp[c]]
+                if bad:
+                    al = " ".join(f"{c}={final[c]}/exp {exp[c]}" for c in bad)
+                    verdict = "FAIL"
+                    notes.append(f"blocked partial state wrong: {al}")
+                    checks.append(f"  ✗ blocked=1 (quota +{qn}): held at the wrong partial count ({al}) — want exactly the quota-admitted pods, no more, no fewer")
+                else:
+                    al = " ".join(f"{c} {final[c]} (start {N[c]}, target {target[c]})" for c in sorted(configured))
+                    checks.append(f"  ✓ blocked=1 (quota +{qn}): held bounded at the quota-admitted partial state ({al})")
+            else:
+                checks.append(f"  ⓘ blocked=1: held short of target as expected (state={state}); exact partial count only asserted for quota faults")
+            stable_ok, cdetail = _churn_stopped(case_id)
+            if stable_ok:
+                checks.append(f"  ✓ churn stopped: {cdetail}")
+            else:
+                verdict = "FAIL"
+                notes.append(f"blocked state churning: {cdetail}")
+                checks.append(f"  ✗ blocked state is NOT parked — {cdetail} (retry loop instead of bounded parking)")
+    elif state != "CONVERGED":
         verdict = "FAIL"
         al = " ".join(f"{c}={final[c]}/{target[c]}" for c in sorted(configured))
         notes.append(f"did not drain (state={state}, {al})")
@@ -2163,7 +3745,9 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     # must keep their ORIGINAL pods. A survivor pod with a UID not in the pre-scale
     # survivor set was needlessly RECREATED — the prod avocado-tier5 bug where
     # scaling 20→10 recreated all 10 survivors instead of just deleting the tail.
-    if state == "CONVERGED":
+    # Also asserted for a blocked=1 parked partial state — a fault holding the
+    # tail must not cost the survivors their pods.
+    if state == "CONVERGED" or blocked:
         recreated = defaultdict(int)
         for q in pod_state.values():
             if q and q["alive"] and _is_survivor(q) and q.get("uid") and q["uid"] not in survivor_uids:
@@ -2180,6 +3764,20 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                else "an unsatisfiable config")
         checks.append(f"  ⓘ marked {'notimpl' if hdr.get('notimpl') else 'infeasible'} — {why} (expected); recorded XFAIL, not a regression")
         verdict = "XFAIL"
+    # Check F: continuous invariants + fault apparatus — AFTER the softening
+    # (same rationale as teardown_check): a status lie or a broken apparatus is
+    # never an expected failure, so they re-harden an XFAIL.
+    verdict = invariant_checks(inv, verdict, notes, checks)
+    verdict = _fault_finalize(fault, verdict, notes, checks)
+
+    # Cleanup + universal teardown gate (after the softening — a non-converging
+    # cleanup is never an expected failure).
+    if not os.getenv("OME_TEST_KEEP"):
+        kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
+        verdict = teardown_check(case_id, sum(N[c] * pods_per_inst.get(c, 1) for c in configured),
+                                 verdict, notes, checks)
+    else:
+        checks.append("  ⓘ OME_TEST_KEEP set — ISVC kept, teardown check skipped")
 
     note = "; ".join(notes)
     print(f"\n=== VERDICT: {verdict} ===")
@@ -2188,7 +3786,6 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     if note:
         print(f"\nFailure reasons: {note}")
 
-    kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
     write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
                  converged_at, info.get("policy"), verdict, note, zero)
     return 0
@@ -2214,6 +3811,13 @@ def run_reject_case(case_id, yaml_file, desc, hdr):
         kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")  # don't leak the wrongly-accepted ISVC
         verdict, note = "FAIL", "apply ACCEPTED but admission rejection was expected"
         print("  ✗ apply ACCEPTED — the rule did not fire")
+        # The wrongly-accepted ISVC's cleanup must converge like any other case.
+        tnotes, tchecks = [], []
+        teardown_check(case_id, Ne + Nd + Nr, verdict, tnotes, tchecks)
+        for line in tchecks:
+            print(line)
+        if tnotes:
+            note = f"{note}; {'; '.join(tnotes)}"
     elif want and want not in r.stderr:
         verdict, note = "FAIL", f"rejected but message lacks reason '{want}': {msg[:160]}"
         print(f"  ✗ rejected for the WRONG reason (want ~{want}): {msg[:160]}")
@@ -2226,6 +3830,14 @@ def run_reject_case(case_id, yaml_file, desc, hdr):
 
 
 def run_case(case_id):
+    # Duplicate-id guard: refuse to run ANY case while the tree contains a
+    # duplicate id (find_isvc picks alphabetically-first and silently shadows
+    # the rest). Fails before any cluster op.
+    dups = duplicate_id_errors(collect_case_files())
+    if dups:
+        for e in dups:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     yaml_file = find_isvc(case_id)
     if yaml_file is None:
         print(f"ERROR: isvcs/**/{case_id}.yaml not found", file=sys.stderr)
@@ -2318,6 +3930,8 @@ def run_case(case_id):
 
     # State machine.
     state = "INIT"
+    inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
+    fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
     pod_state = {}                   # pod_name → {comp, alive, ready, hash, uid, newanno} | None
     peaks = {"engine": 0, "decoder": 0, "router": 0}
     last_counts = None
@@ -2337,8 +3951,9 @@ def run_case(case_id):
     gang_mixed_since = {}            # (comp, inst) → ts an Instance went mixed-revision (multi-node gang)
     gang_worst = {}                  # (comp, inst) → longest mixed-revision span observed (s)
     min_ready = {}                   # comp → min READY Instances seen mid-roll (capacity floor, Check 10)
+    floor_since = {}                 # comp → ts ready first dipped below the capacity floor (open dip)
+    floor_sust = {}                  # comp → longest below-floor dip span observed (s)
     collide_worst = {}               # comp → worst (alive_inst - distinct_alive_idx) shortfall seen mid-roll
-    collide_share_worst = {}         # comp → worst (distinct_new*ppi - new_pods) gang-share shortfall mid-roll
     old_drained = defaultdict(set)   # comp → set(old-rev pod names) observed draining (deletionTimestamp)
     new_ready = defaultdict(set)     # comp → set(new-rev pod names) observed Ready
     order_viol = {}                  # comp → worst (drained - ready - maxUnavail) surge-before-drain breach
@@ -2359,6 +3974,7 @@ def run_case(case_id):
                 line = line.strip() or None
 
             now = time.time()
+            _inv_tick(inv, pod_state, pods_per_inst)
 
             # CONVERGED is gated on `progressed`: we must have OBSERVED the rollout
             # perturb the pods first, else stable_since latches on the pre-rollout
@@ -2424,19 +4040,25 @@ def run_case(case_id):
                     old_drained[comp].add(name)
                 # Instances of headroom: SurgeThenDrain surges maxUnavailable=0, so
                 # drained pods must never lead ready-surge pods (per pods_per_inst).
-                mu_pods = info["max_unavail"].get(comp, 0) * pods_per_inst.get(comp, 1)
+                mu_pods = resolve_max_unavailable(info["max_unavail"].get(comp, 0),
+                                                  N.get(comp, 0)) * pods_per_inst.get(comp, 1)
                 breach = len(old_drained[comp]) - len(new_ready[comp]) - mu_pods
                 if breach > order_viol.get(comp, 0):
                     order_viol[comp] = breach
 
             if ev_type == "DELETED":
+                if uid:
+                    inv["dead_uids"].add(uid)   # stale-endpoint invariant
                 pod_state[name] = None
             else:
                 pod_state[name] = {"comp": comp,
                                    "inst": labels.get("ome.io/instance-index", "0"),
                                    "runner": labels.get("ome.io/runner", "default"),
+                                   "ord": labels.get("ome.io/pod-ordinal", "0"),
                                    "alive": deletion is None,
-                                   "ready": ready, "hash": rev, "uid": uid, "newanno": newanno}
+                                   "ready": ready, "hash": rev, "uid": uid, "newanno": newanno,
+                                   "serving": _pod_serving(obj),
+                                   "created": meta.get("creationTimestamp", "")}
 
             meas = {}
             agg = aggregate(pod_state, old_hashes, modes, pods_per_inst, measures=meas)
@@ -2468,6 +4090,11 @@ def run_case(case_id):
                                        if p and p["alive"] and p["comp"] == c and p.get("uid")}
                     rev_aware = bool(old_hashes)
                     print(f"  old revision hash(es): {sorted(old_hashes) or '(none)'}")
+                    ok_f, fmsg = _fault_setup(fault, case_id, hdr)
+                    if not ok_f:
+                        print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
+                        state = "INFRA-FAIL"
+                        break
                     patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL,
                                                           "ome.io/deploymentMode": "OMENative"}}
                                       for c in sorted(bumped)}}
@@ -2484,6 +4111,10 @@ def run_case(case_id):
                     state = "ROTATING"
             elif state == "ROTATING":
                 tnow = now - trigger_ts
+                # Fault phase hook: settling fires on the first ROTATING
+                # iteration; rotating fires once a surge/updated pod is seen.
+                _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": old_hashes,
+                             "pod_state": pod_state, "pods_per_inst": pods_per_inst})
                 # Per-Component timing for Sequential ordering/soak.
                 for c in bumped:
                     a, rd, up = agg.get(c, (0, 0, 0))
@@ -2542,12 +4173,22 @@ def run_case(case_id):
                 # Capacity floor (Check 10): once past the trigger boundary, track
                 # the MIN ready Instances per bumped Component. SurgeThenDrain
                 # (maxUnavailable=0) surges, so it must never drop below N; a drop
-                # means it recreated/dropped the gang instead of surging.
+                # means it recreated/dropped the gang instead of surging. Also
+                # track how long any below-floor dip PERSISTED — the hard check
+                # debounces on FLOOR_SUSTAIN_S so a readiness flap can't red it.
                 if tnow >= MINREADY_GRACE_S:
                     for c in bumped:
                         rd = agg.get(c, (0, 0, 0))[1]
                         if c not in min_ready or rd < min_ready[c]:
                             min_ready[c] = rd
+                        fl = N[c] - resolve_max_unavailable(info["max_unavail"].get(c, 0), N[c])
+                        if rd < fl:
+                            floor_since.setdefault(c, now)
+                            span = now - floor_since[c]
+                            if span > floor_sust.get(c, 0.0):
+                                floor_sust[c] = span
+                        else:
+                            floor_since.pop(c, None)
                 # Distinct-alive-index (fleet-wipe guard): track the WORST shortfall
                 # of distinct alive indices vs alive Instances, and the worst gang
                 # share shortfall, over the whole roll — the collapse is transient
@@ -2556,14 +4197,11 @@ def run_case(case_id):
                     for c in bumped:
                         if pods_per_inst.get(c, 1) <= 1:
                             continue
-                        distinct_alive, new_pods, distinct_new = meas.get(c, (0, 0, 0))
+                        distinct_alive = meas.get(c, (0, 0, 0))[0]
                         alive_inst = agg.get(c, (0, 0, 0))[0]
                         short = alive_inst - distinct_alive
                         if short > collide_worst.get(c, 0):
                             collide_worst[c] = short
-                        share_short = distinct_new * pods_per_inst[c] - new_pods
-                        if new_pods and share_short > collide_share_worst.get(c, 0):
-                            collide_share_worst[c] = share_short
                 # Convergence: every configured Component at N alive+ready, AND every
                 # BUMPED Component fully on the new revision. Non-bumped controls only
                 # need to stay at N (they should never roll).
@@ -2603,6 +4241,11 @@ def run_case(case_id):
     verdict = "PASS"
     notes = []
     checks = []
+    # blocked=1: the armed fault is EXPECTED to hold the rollout short of
+    # convergence — Check 4 inverts to parked-no-churn, Check 10's floor still
+    # applies (the fault must not cost settled capacity), and Check 9b's
+    # settle-partition check is moot (nothing ever settles).
+    blocked = bool(hdr.get("blocked")) and fault is not None
 
     # Check 1-3: peak alive ≤ ceiling per configured Component.
     for c in COMPS:
@@ -2616,7 +4259,30 @@ def run_case(case_id):
             checks.append(f"  ✓ {c} peak {peaks[c]} ≤ ceiling {ceil[c]}")
 
     # Check 4: convergence + every bumped Component fully rotated to the new revision.
-    if state != "CONVERGED":
+    # blocked=1 inverts it: the fault must HOLD the roll (ROTATE_TIMEOUT /
+    # NO_ROLLOUT are the expected terminal states) with pod churn stopped —
+    # RetryBlock-style parking, not a create/delete loop. Entry-level parking
+    # semantics are deliberately NOT asserted; only the observable contract
+    # (no convergence, no churn, floor held via Check 10).
+    if blocked:
+        if state == "CONVERGED":
+            verdict = "FAIL"
+            notes.append("blocked=1 but the rollout converged — fault never bound")
+            checks.append("  ✗ blocked=1: rollout converged despite the armed fault — the fault never bound (apparatus or product overshot the quota)")
+        elif state in ("ROTATE_TIMEOUT", "NO_ROLLOUT"):
+            checks.append(f"  ✓ blocked=1: rollout held short of convergence as expected (state={state})")
+            stable_ok, cdetail = _churn_stopped(case_id)
+            if stable_ok:
+                checks.append(f"  ✓ churn stopped: {cdetail}")
+            else:
+                verdict = "FAIL"
+                notes.append(f"blocked state churning: {cdetail}")
+                checks.append(f"  ✗ blocked state is NOT parked — {cdetail} (retry loop instead of bounded parking)")
+        else:
+            verdict = "FAIL"
+            notes.append(f"blocked=1 but case ended in state={state}")
+            checks.append(f"  ✗ blocked=1 expects a held rollout (ROTATE_TIMEOUT/NO_ROLLOUT), got state={state}")
+    elif state != "CONVERGED":
         verdict = "FAIL"
         rot = " ".join(f"{c}={new_final[c]}/{N[c]}" for c in sorted(bumped))
         notes.append(f"did not converge (state={state}, rotated {rot})")
@@ -2779,6 +4445,11 @@ def run_case(case_id):
             wc = max(collide, key=collide.get)
             notes.append(f"index collision: {wc} had {collide[wc]} alive Instance(s) with no distinct index")
             checks.append(f"  ✗ index collision: {len(collide)} Component(s) saw gangs collapse onto shared indices mid-roll (worst {wc}: {collide[wc]} Instance(s) short a distinct index) — the fleet-wipe shape")
+        if share and blocked:
+            # A quota-parked half-created surge gang IS the expected blocked
+            # state — there is no settle to assert a clean partition against.
+            share = {}
+            checks.append("  ⓘ settle-partition check skipped — blocked=1 holds a partial surge gang mid-flight by design")
         if share:
             verdict = "FAIL"
             ws = max(share, key=share.get)
@@ -2804,34 +4475,37 @@ def run_case(case_id):
         else:
             checks.append(f"  ✓ surge-before-drain held: every drain ({', '.join(surge_bumped)}) followed a Ready surge replacement")
 
-    # Check 10: capacity floor during the roll. A bumped Component should keep
+    # Check 10: capacity floor during the roll. A bumped Component must keep
     # >= N - maxUnavailable Instances serving throughout — SurgeThenDrain
     # (maxUnavailable=0) surges so it never drops below N. A dip below the floor
     # means it recreated / dropped the gang instead of surging (the p66 0/2 —
-    # the fleet-wipe shape). This is the invariant a fleet-wipe violates that no
-    # perm handler enforced.
+    # the fleet-wipe shape).
     #
-    # Hard FAIL only when the case opts in via floor_hard=1; otherwise
-    # informational (⚠). Kept opt-in because min_ready here is an INSTANTANEOUS
-    # min (see the min_ready tracking in the watch loop), so a single-sample
-    # readiness flap would false-fail. Turning floor_hard on for the
-    # SurgeThenDrain/maxUnavailable=0 cases is a follow-up that also needs a
-    # sustained-dip debounce (mirror RATIO_SUSTAIN_S) and cluster vetting across
-    # p01-p65. Default OFF => zero change to the current matrix.
+    # HARD by default: a below-floor dip that PERSISTED >= FLOOR_SUSTAIN_S fails
+    # the verdict; shorter dips are 1Hz-sampling/readiness flaps and are
+    # reported ⚠ but debounced. floor_hard=1 additionally asserts the
+    # instantaneous min (no debounce); floor_soft=1 opts a case out entirely
+    # (dip is by-design — reason belongs in the case file's header comment).
     floor_hard = bool(hdr.get("floor_hard"))
-    if state == "CONVERGED":
+    floor_soft = bool(hdr.get("floor_soft"))
+    # Also asserted for blocked=1: a fault that holds the surge must never cost
+    # settled capacity (the source keeps serving while the roll is parked).
+    if state == "CONVERGED" or blocked:
         for c in sorted(bumped):
-            floor = N[c] - info["max_unavail"].get(c, 0)
+            floor = N[c] - resolve_max_unavailable(info["max_unavail"].get(c, 0), N[c])
             mr = min_ready.get(c, N[c])
-            if mr < floor:
-                if floor_hard:
-                    verdict = "FAIL"
-                    notes.append(f"{c} capacity floor breached: min ready {mr} < N-maxUnavailable={floor}")
-                    checks.append(f"  ✗ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}) — did NOT preserve capacity (no surge / dropped the gang)")
-                else:
-                    checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}) — did NOT preserve capacity (no surge / dropped the gang); informational (set floor_hard=1 to enforce)")
-            else:
+            sust = floor_sust.get(c, 0.0)
+            if mr >= floor:
                 checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ N-maxUnavailable={floor}")
+            elif floor_soft:
+                checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}) — case opted out (floor_soft=1); informational")
+            elif floor_hard or sust >= FLOOR_SUSTAIN_S:
+                verdict = "FAIL"
+                held = "" if floor_hard else f", dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s"
+                notes.append(f"{c} capacity floor breached: min ready {mr} < N-maxUnavailable={floor}")
+                checks.append(f"  ✗ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}{held}) — did NOT preserve capacity (no surge / dropped the gang)")
+            else:
+                checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< N-maxUnavailable={floor}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap (not failed)")
 
     # Informational: post-convergence traffic + per-revision Services (BlueGreen
     # contract is currently status-only — reported, not asserted).
@@ -2853,14 +4527,29 @@ def run_case(case_id):
     # or maxUnavailable=0 with no surge). A FAIL there is the gate CORRECTLY
     # refusing to roll — expected, not a controller bug — so record it as
     # XFAIL rather than red. A surprise PASS (config turned out feasible /
-    # controller improved) is left as PASS. Real bugs in these cases still
-    # surface: peak-ceiling / isolation / gang-atomicity violations are
-    # distinct FAILs that are NOT softened here (only convergence + band
-    # FAILs are the expected gate-refusal outcome).
+    # controller improved) is left as PASS. The softening is WHOLESALE on
+    # verdict==FAIL — a peak/isolation/gang FAIL on an infeasible case is
+    # softened too; only the checks that run after this point (continuous
+    # invariants, fault apparatus, teardown) deliberately stay hard.
     if hdr.get("infeasible") and verdict == "FAIL":
         checks.append("  ⓘ marked infeasible — this FAIL is the coordination gate correctly "
                       "refusing an unsatisfiable config (expected); not a controller bug")
         verdict = "XFAIL"
+
+    # Check 11: continuous invariants + fault apparatus — AFTER the softening
+    # (same rationale as teardown_check): a status lie or a broken apparatus is
+    # never an expected failure, so they re-harden an XFAIL.
+    verdict = invariant_checks(inv, verdict, notes, checks)
+    verdict = _fault_finalize(fault, verdict, notes, checks)
+
+    # Cleanup + universal teardown gate (after the infeasible softening — a
+    # non-converging cleanup is never an expected failure).
+    if not os.getenv("OME_TEST_KEEP"):
+        kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
+        verdict = teardown_check(case_id, sum(N[c] * pods_per_inst.get(c, 1) for c in configured),
+                                 verdict, notes, checks)
+    else:
+        checks.append("  ⓘ OME_TEST_KEEP set — ISVC kept, teardown check skipped")
 
     note = "; ".join(notes)
     print(f"\n=== VERDICT: {verdict} ===")
@@ -2869,9 +4558,6 @@ def run_case(case_id):
     if note:
         print(f"\nFailure reasons: {note}")
 
-    # Cleanup
-    kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
-
     write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
                  converged_at, policy, verdict, note, new_final)
     return 0
@@ -2879,11 +4565,14 @@ def run_case(case_id):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: run.py <case_id>", file=sys.stderr)
+        print("usage: run.py <case_id> | run.py --validate-only [isvcs_dir]", file=sys.stderr)
         sys.exit(1)
+    if sys.argv[1] == "--validate-only":
+        sys.exit(validate_cases(sys.argv[2] if len(sys.argv) > 2 else None))
     _case = sys.argv[1]
+    _rc = 1
     try:
-        sys.exit(run_case(_case) or 0)
+        _rc = run_case(_case) or 0
     except Exception:
         # Cleanup-on-crash: a case that errors mid-run (before _finish) would
         # otherwise leak its already-applied ISVC. Always tear it down, then
@@ -2893,4 +4582,8 @@ if __name__ == "__main__":
         _f = find_isvc(_case)
         if _f:
             kubectl("delete", "-n", NS, "-f", str(_f), "--wait=false")
-        sys.exit(1)
+    finally:
+        # Fault apparatus teardown (quota delete + uncordon) runs no matter how
+        # the case ended — PASS, FAIL, INFRA-FAIL or crash.
+        _run_fault_cleanups()
+    sys.exit(_rc)

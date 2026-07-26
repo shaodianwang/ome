@@ -77,7 +77,19 @@ topology *or* both) without deep nesting. Four values:
 `rollout/` today: **27 `engine` · 38 `pd` · 13 `engine-mn` · 18 `pd-mn`** (96).
 The case-id (`pNN`, the filename stem) stays globally unique and is the result
 key, independent of which folder/topology a case lives in. `run.py` discovers
-`isvcs/**/<id>.yaml` at any depth.
+`isvcs/**/<id>.yaml` at any depth. Uniqueness is **enforced**: a duplicate id
+would be silently shadowed (alphabetically-first folder wins), so `run.py`
+refuses to run any case while the tree contains one, and
+
+```bash
+python3 run.py --validate-only            # the committed tree
+python3 run.py --validate-only /some/dir  # any case dir (e.g. a scratch copy)
+```
+
+checks the whole tree — id uniqueness plus the line-1 header schema (known
+keys, known `mode=` values, per-mode params) — with **zero cluster access**
+(no kubeconfig needed) and exits nonzero on any problem. Run it after editing
+or generating cases; the generators run it themselves on exit.
 
 Each case is a single ISVC YAML; **line 1 is a `key=value` header** carrying the
 description, replica counts (`Ne/Nd/Nr`), peak ceilings (`ceil_e/ceil_d/ceil_r`),
@@ -221,6 +233,28 @@ production-scale improvement too.) Each `batch.py` invocation stamps one `RUN_TS
 shared by its subprocesses, so a run's results land together under
 `results/<RUN_TS>/<feature>/<topo>/` with a `summary.txt`.
 
+### Fault cases: quota isolation, cordon impact, leak remediation
+
+- **`fault=quota` cases run serially.** A quota case creates a *namespace-wide*
+  ResourceQuota sized from a live usage snapshot, so run concurrently it both
+  blocks other cases' pod admissions and mis-sizes its own headroom.
+  `batch.py` partitions automatically: all other cases keep the concurrent
+  pool; quota cases run **serially after the pool drains** (the partition is
+  printed in the run banner). Nothing to do — just don't hand-craft a parallel
+  run that mixes a quota case with others.
+- **`fault=cordon` cases briefly cordon a real node**, so on a shared cluster
+  they momentarily affect scheduling for *everyone* in that node's pools.
+  run.py stamps the node with the `perm.test/cordoned=<case>` label at cordon
+  time and always uncordons in cleanup.
+- **Leak remediation after a SIGKILL.** run.py's fault cleanup runs on PASS,
+  FAIL and crash — but not on SIGKILL. `batch.py` sweeps both leak classes at
+  end of run; to remediate by hand (only harness-marked objects are touched):
+
+  ```bash
+  kubectl -n $OME_TEST_NS delete resourcequota -l perm.test/fault --ignore-not-found
+  kubectl get nodes -l perm.test/cordoned -o name | xargs -r -n1 kubectl uncordon
+  ```
+
 ## Verdicts
 
 | verdict        | meaning                                                          |
@@ -241,7 +275,21 @@ surviving pod's UID never rotated (skipped for gangs, where pods are recreated).
 Two generators (re-run after editing; both write into `isvcs/`):
 - `gen_cases.py` — the feature matrix (migration/restart/partition/scale/edge),
   permuting topology × lifecycle × coordination.
-- `gen_mn.py` — the multi-node (gang) rollout cases (`p66`+) → `isvcs/rollout/`.
+- `gen_mn.py` — the multi-node (gang) rollout cases (`p66`–`p99`, `p500`+) →
+  `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
+  `gen_cases.py`'s feature counters).
+
+Every generator finishes with `run.py --validate-only`, so a regeneration that
+would reintroduce a duplicate (shadowed) case id or a malformed header fails
+the generation itself. Hand-written cases parked in generator-owned folders
+(`scale/p188`+`p189` — the renamed former `scale/p97`+`p98`, `runtime-rev/p416`)
+are registered in each generator's `HAND_WRITTEN` set: the regen sweeps
+preserve them and the generators refuse to mint their ids.
+
+`isvcs/fault/` (`p600`+ — fault-injection cases: `fault=` header, plus the
+`blocked=1` / `expect=fail` / `lift=1` contract knobs) is entirely
+hand-written and outside both generators' sweep; the `p600`+ id block is
+reserved for it.
 
 Coordination is emitted under `spec.rollout.groups[]` (OEP-0017 v2: BlueGreen ->
 one `blueGreen` group; RollingUpdate -> a `rollingUpdate` group, +`maintainRatio`

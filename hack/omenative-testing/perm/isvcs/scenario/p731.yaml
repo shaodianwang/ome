@@ -1,0 +1,12 @@
+# p731: explicit migration request under Never policy — rejected: no surge, request consumed, terminal Failed entry names the policy  mode=migrate mig=Never inst=0 Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p731 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { migrationPolicy: { mode: "Never" }, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

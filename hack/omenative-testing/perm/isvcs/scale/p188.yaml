@@ -1,7 +1,7 @@
-# p97: scaledown engine N=4→2 (graceful drain, no surge-up)  mode=scaledown Ne=4 Nd=0 Nr=0 to_e=2 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine
+# p188: scaledown engine N=4→2 (graceful drain, no surge-up)  mode=scaledown Ne=4 Nd=0 Nr=0 to_e=2 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
-metadata: { name: p97 }
+metadata: { name: p188 }
 spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }

@@ -28,6 +28,8 @@ CRD field paths (pkg/apis/ome/v1beta1/lifecycle_types.go):
   ...inPlaceUpdateStrategy.{gracePeriodSeconds,markNotReadyDuringLifecycle}
 """
 import math
+import subprocess
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
@@ -247,6 +249,13 @@ def header(name, desc, kv):
 
 CASES = []
 COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "edge": 220, "canary": 300}
+# Hand-written cases parked inside generator-owned folders: main()'s idempotency
+# sweep preserves them and C() must never mint their ids. (p188/p189 are the
+# former scale/p97+p98, renamed out from under rollout/p97+p98's shadow.)
+HAND_WRITTEN = {"scale": {"p188", "p189"}}
+# isvcs/fault/ (p600+) and isvcs/scenario/ (p700+) are entirely hand-written
+# and NOT in COUNTERS — the regen sweep never touches them; keep the feature
+# counters below 600.
 
 
 def C(folder, desc, comps, coord=None, runtime=None, meta_ann=None, **kv):
@@ -751,14 +760,18 @@ Canalysis("breach at final 100pct step", "pd", "breach", n=PDN,
 def main():
     # Idempotency: drop previously-generated 3-digit cases (p100+) in the feature
     # folders so renumbering never leaves stale duplicates (a duplicate case-id
-    # across folders makes run.py.find_isvc pick the wrong file). Hand-written
-    # 2-digit cases (scale/p97, p98) are preserved.
+    # across folders makes run.py.find_isvc pick the wrong file — and run.py now
+    # hard-errors on one). HAND_WRITTEN cases are preserved, not regenerated.
     for folder in COUNTERS:
         d = ISVCS / folder
         for f in (d.glob("p[0-9][0-9][0-9].yaml") if d.exists() else []):
+            if f.stem in HAND_WRITTEN.get(folder, set()):
+                continue
             f.unlink()
     per_folder = {}
     for folder, name, desc, comps, coord, kv, opts in CASES:
+        if name in HAND_WRITTEN.get(folder, set()):
+            sys.exit(f"generated {folder}/{name} collides with a hand-written case — renumber the counter block or move the hand-written id")
         path = ISVCS / folder / f"{name}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(header(name, desc, kv) + "\n"
@@ -769,6 +782,11 @@ def main():
     for folder in sorted(per_folder):
         names = per_folder[folder]
         print(f"  {folder:10s} {len(names):2d}  {names[0]}..{names[-1]}")
+    # A regen must never reintroduce a duplicate/shadowed case id or a malformed
+    # header — fail the generation, not the next harness run.
+    rc = subprocess.run([sys.executable, str(HERE / "run.py"), "--validate-only"]).returncode
+    if rc:
+        sys.exit(rc)
 
 
 if __name__ == "__main__":
