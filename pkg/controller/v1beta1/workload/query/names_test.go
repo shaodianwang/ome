@@ -12,12 +12,12 @@ import (
 // TestPerRevisionServiceName_Bounded covers the DNS1035 63-char guard on
 // per-revision Service names. The headless variant of a long isvc name
 // previously produced a 66-char name that the apiserver rejected,
-// hot-looping OMENative coordination (see the msl-gcp-usc1-1 incident).
+// hot-looping OMENative coordination (seen in production).
 func TestPerRevisionServiceName_Bounded(t *testing.T) {
 	const max = validation.DNS1035LabelMaxLength // 63
 
-	// The incident's isvc: routing name fits (57), headless overflows (66).
-	longIsvc := "rift-yan9fan-metaai-t5-shadow-0bd7b9k"
+	// A representative long isvc: routing name fits (57), headless overflows (66).
+	longIsvc := "example-tenant-t5-shadow-model-0b7d9k"
 	routing := PerRevisionServiceName(longIsvc, workload.ComponentEngine, "91b28c47")
 	headless := PerRevisionHeadlessServiceName(longIsvc, workload.ComponentEngine, "91b28c47")
 
@@ -29,7 +29,7 @@ func TestPerRevisionServiceName_Bounded(t *testing.T) {
 	}
 	// Routing fits as-is (57) so it must be left unchanged — renaming it
 	// would orphan the live Service already on the cluster.
-	if want := "rift-yan9fan-metaai-t5-shadow-0bd7b9k-engine-rev-91b28c47"; routing != want {
+	if want := "example-tenant-t5-shadow-model-0b7d9k-engine-rev-91b28c47"; routing != want {
 		t.Errorf("routing name = %q, want unchanged %q", routing, want)
 	}
 	// Routing and headless must stay distinct Services.

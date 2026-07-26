@@ -1,4 +1,4 @@
-// Package runtimeinheritance implements OEP-0012 ServingRuntime
+// Package runtimeinheritance implements ServingRuntime
 // inheritance resolution.
 package runtimeinheritance
 
@@ -52,7 +52,7 @@ func Merge(parent, child *v1beta1.ServingRuntimeSpec) (*v1beta1.ServingRuntimeSp
 }
 
 // StripJSONNulls returns the JSON document with all null-valued object
-// keys removed. Exported because the OEP-0012 Part C webhook needs the
+// keys removed. Exported because the runtime-preset webhook needs the
 // same treatment when marshaling a mutated runtime back to JSON — the
 // embedded ServingRuntimePodSpec.Containers field lacks omitempty, and
 // CRD validation rejects null arrays.

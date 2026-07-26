@@ -45,8 +45,8 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //   - serving count never dips below desired — surge always rotates IN
 //     before old rotates OUT.
 //   - alive count peaks at desired+1 per Instance during the surge
-//     window. The dispatcher's CheckSurgeGate (added with the
-//     wire-up commit) caps concurrent surges across Instances.
+//     window. The surge gate (coordination GateContext.CheckSurge)
+//     caps concurrent surges across Instances.
 //   - no in-place patching — different pod NAMES throughout.
 //   - target stability across reconciles: once an Operation is recorded
 //     with a surge lifecycle Step and TargetRevision=X, the in-flight
@@ -102,7 +102,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// toward the current target through the normal gated path, so maxSurge / ratio
 	// / canary all re-apply. Without this, a surge that never becomes Ready and
 	// never escalates pins itself to a dead rev and holds the maxSurge budget until
-	// instanceReadyTimeout (the p416 deadlock). A surge that IS about to promote
+	// instanceReadyTimeout. A surge that IS about to promote
 	// (Ready) skips this and keeps the X-2 pin below so its promote stamps the rev
 	// its pods actually run. Only Step=Surge — later surge steps are past the
 	// point of no return (source already draining) and finish their cycle.
@@ -152,8 +152,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// spec bump. Pinning prevents the state machine from declaring the
 	// in-flight pod "on the new target" when it is actually on the
 	// previous target, which is the bump-during-bump corruption mode
-	// (X-2 in the SRT suite: 5 engine pods, status says vN but pods are
-	// still on vN-1). The next surge cycle for the newer target fires
+	// (status says vN but the pods are still on vN-1). The next surge
+	// cycle for the newer target fires
 	// naturally after this surge promotes, because detectUpdateTrigger
 	// observes RunningRevision != target.Name.
 	surgeTargetName := target.Name
@@ -245,8 +245,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// stale at the surge slot) and a subsequent reconcile re-create
 	// the surge pod with the correct rev.
 	if staleAtSurgeSlot && len(surgePods) == 0 {
-		// Mark the surge step transition once so the dispatcher's
-		// CheckSurgeGate accounting matches the in-flight phase even
+		// Mark the surge step transition once so surge-budget
+		// accounting matches the in-flight phase even
 		// while the surge pod is absent. Idempotent.
 		if err := patchInstanceStatusSurgeStepDrain(ctx, input, inst.Index); err != nil {
 			return false, fmt.Errorf("transition surge step to drain (instance=%d): %w", inst.Index, err)
@@ -459,9 +459,8 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 // and re-derived state from observed pod labels). Without this
 // recheck the ordinal partition would treat the stale pod as the
 // "valid surge" — Phase 3 would promote RunningRevision to the
-// pinned target while the actual pod is on a prior rev — exactly the
-// X-2 "v2 straggler labeled post-promote as v3" symptom captured in
-// production after a prior deploy.
+// pinned target while the actual pod is on a prior rev: a straggler
+// on the previous revision labeled post-promote as the new one.
 //
 // The recheck is narrow: a pod is reclassified into the drain set
 // ONLY when its revision-hash label matches the just-promoted

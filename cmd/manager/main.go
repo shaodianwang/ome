@@ -70,7 +70,7 @@ const (
 	LeaderElectionNamespace = "ome"
 
 	// multiClusterRoleControlPlane is the --multicluster-role value that makes
-	// this manager the OEP-0018 fan-out control plane: it runs the placement
+	// this manager the multi-cluster fan-out control plane: it runs the placement
 	// controller and disables the local InferenceService->pods reconcilers.
 	multiClusterRoleControlPlane = "control-plane"
 )
@@ -101,11 +101,11 @@ func init() {
 	utilruntime.Must(schedulerpluginsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kueuev1beta1.AddToScheme(scheme))
-	// OEP-0013 Slice 2 (decision Q6): KEDA is a hard dependency, not an
+	// KEDA is a hard dependency, not an
 	// optional CRD probe. Register the scheme unconditionally — if KEDA is
 	// absent from the cluster the first ScaledObject Create will fail with
 	// a clear apiserver error, which is the documented cluster-owner
-	// contract per the OEP.
+	// contract.
 	utilruntime.Must(kedav1.AddToScheme(scheme))
 }
 
@@ -163,9 +163,9 @@ func DefaultOptions() Options {
 		runtimeRevisionGracePeriod: 24 * time.Hour,
 		// The InferenceReplica controller defaults ON. The reconciler
 		// drives the per-Component pipeline via workload.Reconcile when
-		// an IR is created directly (PR 3 wires the ISVC controller to
-		// project IRs). The flag exists so operators can disable the
-		// controller if a regression lands.
+		// an IR is created directly (the ISVC controller projects IRs
+		// via irprojector). The flag exists so operators can disable
+		// the controller if a regression lands.
 		enableInferenceReplicaCtrl: true,
 		enableMultiCluster:         false,
 		multiClusterRole:           "",
@@ -394,7 +394,7 @@ func main() {
 		utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
 	}
 
-	// OEP-0010: select the active traffic translator based on
+	// Select the active traffic translator based on
 	// installed backend-policy CRDs (Envoy Gateway BackendTrafficPolicy,
 	// Istio DestinationRule, else Noop). The selection is process-
 	// level — the translator stays stable for the controller's
@@ -410,7 +410,7 @@ func main() {
 
 	// Setup Event Broadcaster
 	setupLog.Info("Configuring event broadcaster")
-	// OEP-0018 role resolution. On the control plane the placement (fan-out)
+	// Multi-cluster role resolution. On the control plane the placement (fan-out)
 	// controller owns InferenceServices — it clones them onto workload clusters
 	// — so the local ISVC->pods reconcilers must NOT run here.
 	isControlPlane := options.multiClusterRole == multiClusterRoleControlPlane
@@ -441,7 +441,7 @@ func main() {
 		}
 	}
 
-	// OEP-0018: the control plane owns no workloads, models, or runtimes —
+	// The control plane owns no workloads, models, or runtimes —
 	// those live on the workload clusters. Running the model/runtime lifecycle
 	// controllers here would reconcile against an empty local catalog (no-op
 	// at best, churn at worst), so gate them off under the control-plane role.
@@ -472,7 +472,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// OEP-0012: single inheritance reconciler that handles both CSR and
+		// Single inheritance reconciler that handles both CSR and
 		// SR via one source per GVK. Reconcile branches on req.Namespace.
 		servingRuntimeEventBroadcaster := record.NewBroadcaster()
 		servingRuntimeEventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
@@ -581,7 +581,7 @@ func main() {
 			Handler: &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
-		// OEP-0018: the InferenceService defaulter/validator runtime-selects
+		// The InferenceService defaulter/validator runtime-selects
 		// against the LOCAL cluster's runtime/model catalog. On the control
 		// plane that catalog is empty (runtimes/models live on the workload
 		// clusters), so running this webhook here would reject or mis-default

@@ -45,7 +45,7 @@ func baseConfig() Config {
 
 func TestBuildExternalNameService(t *testing.T) {
 	p := NewGatewayAPIPublisher(nil, baseConfig())
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cw-use2-2", BackendHost: "svc.prod.cw.example"}
+	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
 	svc := p.buildExternalNameService(testISVC(), target)
 
@@ -56,13 +56,13 @@ func TestBuildExternalNameService(t *testing.T) {
 	require.Len(t, svc.Spec.Ports, 1)
 	assert.Equal(t, int32(8080), svc.Spec.Ports[0].Port)
 	assert.Equal(t, ManagedByValue, svc.Labels[ManagedByLabel])
-	assert.Equal(t, "cw-use2-2", svc.Labels[PlacementClusterLabel])
+	assert.Equal(t, "cluster-a", svc.Labels[PlacementClusterLabel])
 	assert.Equal(t, "platform", svc.Labels["team"], "operator labels are merged in")
 }
 
 func TestBuildHTTPRoute(t *testing.T) {
 	p := NewGatewayAPIPublisher(nil, baseConfig())
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cw-use2-2", BackendHost: "svc.prod.cw.example"}
+	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
 	route := p.buildHTTPRoute(testISVC(), target)
 
@@ -127,7 +127,7 @@ func TestPublish_CreatesBothResources(t *testing.T) {
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cw-use2-2", BackendHost: "svc.prod.cw.example"}
+	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
 	require.NoError(t, p.Publish(context.Background(), isvc, target))
 
@@ -145,7 +145,7 @@ func TestPublish_Idempotent(t *testing.T) {
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cw-use2-2", BackendHost: "svc.prod.cw.example"}
+	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
 	require.NoError(t, p.Publish(context.Background(), isvc, target))
 	route := &gatewayapiv1.HTTPRoute{}
@@ -166,16 +166,16 @@ func TestPublish_RepointOnReplacement(t *testing.T) {
 
 	// Initial placement on cluster A.
 	require.NoError(t, p.Publish(context.Background(), isvc,
-		Target{GlobalHost: "svc.prod.global.example", Cluster: "cw-use2-2", BackendHost: "svc.prod.cw.example"}))
+		Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}))
 
 	// Re-placement onto cluster B: same global host, new backend host + cluster.
 	require.NoError(t, p.Publish(context.Background(), isvc,
-		Target{GlobalHost: "svc.prod.global.example", Cluster: "gcp-usc1-1", BackendHost: "svc.prod.gcp.example"}))
+		Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-b", BackendHost: "svc.prod.gcp.example"}))
 
 	svc := &corev1.Service{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, svc))
 	assert.Equal(t, "svc.prod.gcp.example", svc.Spec.ExternalName, "ExternalName repointed to the new winner")
-	assert.Equal(t, "gcp-usc1-1", svc.Labels[PlacementClusterLabel], "cluster label repointed")
+	assert.Equal(t, "cluster-b", svc.Labels[PlacementClusterLabel], "cluster label repointed")
 
 	// The HTTPRoute name/host are stable; the backendRef still names the same
 	// (stable) ExternalName Service, so the route did not need a backend swap.
@@ -190,7 +190,7 @@ func TestUnpublish_DeletesBoth(t *testing.T) {
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
 	require.NoError(t, p.Publish(context.Background(), isvc,
-		Target{GlobalHost: "svc.prod.global.example", Cluster: "cw-use2-2", BackendHost: "svc.prod.cw.example"}))
+		Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}))
 
 	require.NoError(t, p.Unpublish(context.Background(), isvc))
 

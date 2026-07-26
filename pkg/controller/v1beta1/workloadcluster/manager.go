@@ -13,7 +13,7 @@ import (
 )
 
 // Manager holds one live remote client per registered WorkloadCluster, keyed by
-// cluster name. It is the OEP-0018 cross-cluster transport: later phases create
+// cluster name. It is the cross-cluster transport: callers create
 // and watch remote objects via ClientFor(name).
 //
 // Safe for concurrent use across distinct cluster names; Connect/Disconnect for

@@ -75,7 +75,7 @@ func createRawURL(clientset kubernetes.Interface, metadata metav1.ObjectMeta) (*
 	}
 	domainService := services.NewDomainService()
 	url := &knapis.URL{}
-	// Honor the configured urlScheme (OEP-0023 Part 4) rather than hardcoding
+	// Honor the configured urlScheme rather than hardcoding
 	// http; NewIngressConfig defaults UrlScheme when unset, so this is never empty.
 	url.Scheme = ingressConfig.UrlScheme
 	url.Host, err = domainService.GenerateDomainName(metadata.Name, metadata, ingressConfig)

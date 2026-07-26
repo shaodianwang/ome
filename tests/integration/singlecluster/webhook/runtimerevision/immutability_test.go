@@ -14,7 +14,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-var _ = ginkgo.Describe("ControllerRevision immutability webhook (OEP-0014)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("ControllerRevision immutability webhook", ginkgo.Ordered, func() {
 
 	mkRevision := func(name string, omeOwned bool, dataPayload string) *appsv1.ControllerRevision {
 		labels := map[string]string{}

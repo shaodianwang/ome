@@ -43,7 +43,7 @@ func RelabelingsFromConfig(in []controllerconfig.RelabelConfig) []monitoringv1.R
 // ApplyManagedScrapeConfig stamps the cluster-scope PodMonitor defaults onto a
 // PodMonitor OME is about to create/update:
 //   - cfg.Labels are merged into metadata.labels (so a label-selecting collector
-//     such as the KTel target allocator will scrape it). They are intentionally
+//     such as a label-selecting target allocator will scrape it). They are intentionally
 //     NOT added to spec.selector, which must keep selecting pods by the
 //     component's own labels.
 //   - cfg.Relabelings are appended to every PodMetricsEndpoint's relabelings

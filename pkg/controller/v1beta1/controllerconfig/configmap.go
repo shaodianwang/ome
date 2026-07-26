@@ -75,8 +75,8 @@ type PodMonitorConfig struct {
 	// Labels are merged into each generated PodMonitor's metadata.labels (NOT
 	// its spec.selector, which continues to select pods by the component's own
 	// labels). Use this to opt the PodMonitor into an external scrape pipeline
-	// that selects monitors by label — e.g. a KTel / OpenTelemetry target
-	// allocator whose podMonitorSelector is {ktel.fb.com/scrape-tier: cluster}.
+	// that selects monitors by label — e.g. an OpenTelemetry target
+	// allocator whose podMonitorSelector is {scrape.example.com/tier: cluster}.
 	// Empty leaves the PodMonitor with only OME's own labels, in which case a
 	// label-selecting collector will not scrape it.
 	Labels map[string]string `json:"labels,omitempty"`
@@ -126,7 +126,7 @@ type IngressConfig struct {
 	// NO in-code default (config-driven per the no-hardcoded-magic-values
 	// constraint). Must match the RFC-1123 label form so it is safe as a
 	// selector / metrics / path token; invalid values are rejected at config-load.
-	// Empty ⇒ the primary endpoint carries no class. (OEP-0023 Part 5.)
+	// Empty ⇒ the primary endpoint carries no class.
 	OmeIngressGatewayClass   string    `json:"omeIngressGatewayClass,omitempty"`
 	IngressDomain            string    `json:"ingressDomain,omitempty"`
 	IngressClassName         *string   `json:"ingressClassName,omitempty"`
@@ -190,7 +190,7 @@ type IngressGatewaySpec struct {
 	// no-hardcoded-magic-values constraint). Must match the RFC-1123 label form
 	// [a-z0-9]([-a-z0-9]*[a-z0-9])? so it is safe as a selector / metrics / path
 	// token; invalid values are rejected at config-load. Empty ⇒ the endpoint
-	// carries no class. (OEP-0023 Part 5.)
+	// carries no class.
 	Class string `json:"class,omitempty"`
 }
 
@@ -722,7 +722,7 @@ func parseIngressConfig(configMap *v1.ConfigMap) (*IngressConfig, error) {
 			}
 		}
 
-		// OEP-0023 Part 5: an endpoint class is copied verbatim into status and
+		// An endpoint class is copied verbatim into status and
 		// used as a selector / metrics / path token, so reject a malformed one at
 		// config-load rather than emit an invalid status value later.
 		if err := validateIngressGatewayClasses(ingressConfig); err != nil {
@@ -751,8 +751,8 @@ func parseIngressConfig(configMap *v1.ConfigMap) (*IngressConfig, error) {
 
 // validateIngressGatewayClasses rejects any endpoint class that is not a valid
 // RFC-1123 DNS label. The class is copied verbatim onto status endpoints and is
-// meant to be safe as a selector key / metrics dimension / path segment
-// (OEP-0023 Part 5), so a malformed value is a config error, not something to
+// meant to be safe as a selector key / metrics dimension / path segment,
+// so a malformed value is a config error, not something to
 // sanitize silently. Empty classes are allowed (endpoint carries no class).
 func validateIngressGatewayClasses(cfg *IngressConfig) error {
 	if err := validateIngressClass("omeIngressGatewayClass", cfg.OmeIngressGatewayClass); err != nil {

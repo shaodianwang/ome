@@ -1,10 +1,10 @@
 // This file is copied and adapted from kubernetes-sigs/kueue
 // (pkg/controller/admissionchecks/multikueue/remote_client.go), Apache-2.0.
 // Synced from kueue commit ab2dff32b (2026-06-20); re-diff against upstream
-// before editing or extending (Phase 5 adds the watch funnel on top of this).
+// before editing or extending.
 // It provides a controller-runtime client that selectively caches chosen
 // kinds via a background informer cache, used by the WorkloadCluster
-// connection Manager (OEP-0018).
+// connection Manager.
 
 /*
 Copyright The Kubernetes Authors.

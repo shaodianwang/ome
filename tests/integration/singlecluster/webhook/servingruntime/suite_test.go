@@ -1,6 +1,6 @@
 // Package servingruntime hosts integration tests for the
 // ServingRuntime + ClusterServingRuntime ValidatingWebhook handlers,
-// focused on OEP-0012 inheritance + profile invariants.
+// focused on inheritance + profile invariants.
 //
 // Suite boots envtest with the testdata/webhooks.yaml fixture
 // (NOT the full config/webhook/manifests.yaml) so only the two

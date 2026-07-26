@@ -86,10 +86,8 @@ type Message struct {
 //
 // Self-healing branch: when the message list already contains msg but
 // Status is True we still issue a patch to flip Status back to False.
-// This recovers from the pre-fix shape — older builds of patchCondition
-// dropped the empty Message field (json:",omitempty") on the
-// last-writer-removed patch, leaving stale {UserAgent, Key} entries
-// in the message while Status had already flipped True. Without this
+// This resyncs a divergent shape — stale {UserAgent, Key} entries left
+// in the message while Status has already flipped True. Without this
 // recovery, a fresh in-place update reusing the same {idx, incarnation}
 // key would short-circuit as "already held", no NotReady patch fires,
 // drain.IsPodDrained sees the pod still Ready in the EndpointSlice,
@@ -203,9 +201,8 @@ func ContainsNotReadyKey(pod *corev1.Pod, msg Message) bool {
 	return false
 }
 
-// IsServing reports whether the condition exists with Status=True.
-// Equivalent to the old binary `IsServing` semantics — true iff no
-// writer currently holds the pod NotReady.
+// IsServing reports whether the condition exists with Status=True —
+// true iff no writer currently holds the pod NotReady.
 func IsServing(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false

@@ -1,15 +1,14 @@
 // Package irmanaged_kind exercises the IR-MANAGED OMENative path
 // end-to-end against a real KIND cluster (kubelet + scheduler +
-// containerd). This is the path that is the production default since
-// #320 (IsIRManagedComponent → true): the ISVC controller projects
-// each OMENative Component to an InferenceReplica CR, and the
+// containerd). This is the production default: the ISVC controller
+// projects each OMENative Component to an InferenceReplica CR, and the
 // inferencereplica controller reconciles that CR into pods + status.
 //
-// It is deliberately a SEPARATE suite/cluster from omenative_coordination_kind,
-// which disables IR-managed to exercise the legacy direct path. The two
-// paths aggregate status differently, so they get different harnesses.
-// Tests here use the fake-serving image built and kind-loaded by
-// RunKindSuite.
+// It is deliberately a SEPARATE suite/cluster from
+// omenative_coordination_kind: that suite owns the cross-Component
+// coordination contracts, while this one pins IR-controller-specific
+// rollout regressions. Tests here use the fake-serving image built and
+// kind-loaded by RunKindSuite.
 package irmanaged_kind
 
 import (
@@ -48,8 +47,8 @@ func TestIRManagedKindController(t *testing.T) {
 		Workers:     1,
 		BuildImages: kindfix.FakeServingImages(),
 		// Gang variants install the scheduler-plugins PodGroup CRD + scheme so the
-		// multi-node specs exercise real gang wiring (PodGroup creation). The other
-		// suites stay on OMEScheme/OMECRDPaths — see kindfix.GangScheme.
+		// multi-node specs exercise real gang wiring (PodGroup creation) —
+		// see kindfix.GangScheme.
 		CRDPaths: kindfix.GangCRDPaths(),
 		Scheme:   kindfix.GangScheme(),
 		// IR-managed ENABLED (production default) + the inferencereplica

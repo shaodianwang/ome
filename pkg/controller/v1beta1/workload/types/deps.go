@@ -48,8 +48,9 @@ type Deps struct {
 
 	// RenderHook is an optional per-pod template mutator invoked
 	// after composing the canonical pod (name, hostname, labels,
-	// controller env, owner ref) but before c.Create. The ISVC
-	// adapter wires this to coordination.InjectPeerEnv so
+	// controller env, owner ref) but before c.Create. The IR
+	// reconciler (the sole workload.Reconcile caller) wires this to
+	// coordination.InjectPeerEnv via core.ISVCRenderHook so
 	// OME_<PEER>_ENDPOINT vars land on every container.
 	//
 	// The hook MUST be idempotent — Render may be invoked twice in

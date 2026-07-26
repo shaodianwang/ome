@@ -4,7 +4,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// isvcGVK is the GroupVersionKind every OMENative-on-ISVC adapter
-// emits on owner references. Centralized so a future API version bump
-// flips this in one place. Consumed by render.go's RenderWithRevisionForISVC.
+// isvcGVK is the GroupVersionKind stamped on owner references emitted
+// for the parent InferenceService. Centralized so an API version bump
+// flips this in one place. Consumed by render.go.
 var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")

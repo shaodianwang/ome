@@ -19,7 +19,7 @@ import (
 // This is the gang analog of recreate_pod_kind's single-pod serving
 // floor: it wraps a multi-pod (Worker.Size=1) SurgeThenDrain roll in the
 // 100ms sampler and enforces the three fleet-wipe invariants at gang
-// granularity. Post-#618 multi-pod SurgeThenDrain surges a whole
+// granularity. Multi-pod SurgeThenDrain surges a whole
 // replacement gang at a FRESH instance index (its own PodGroup), then
 // drains the source gang — so the invariants are:
 //
@@ -28,7 +28,7 @@ import (
 //     Ready before the source gang drains — the exact ordering a
 //     fleet-wipe violates.
 //   - distinct surge index: alive gangs (grouped by instance-index) stay
-//     <= replicas + maxSurge. #618's distinct-surge-index fix means the
+//     <= replicas + maxSurge. The distinct-surge-index contract means the
 //     replacement gang lands on a new index without colliding with a
 //     live source gang; a collision would collapse two gangs into one
 //     bucket and let alive under-count while pods vanish.

@@ -208,7 +208,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("not found"))
 	})
 
-	// ---- OEP-0011 spec.traffic typed-core validation ----
+	// ---- spec.traffic typed-core validation ----
 
 	// trafficBaseISVC builds a minimal ISVC that passes every other
 	// validation rule, so each spec only exercises the spec.traffic
@@ -326,7 +326,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		}
 	})
 
-	// ---- OEP-0011 ome.io/* annotation validation ----
+	// ---- ome.io/* annotation validation ----
 
 	ginkgo.It("rejects ISVC with malformed int annotation", func() {
 		isvc := v1beta1testing.MakeInferenceService("ann-bad-int", "isvc-webhook").
@@ -405,7 +405,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("MissingRetryOn"))
 	})
 
-	// ----- OEP-0011 Test 19 backfill + new admission gaps -----
+	// ----- annotation-validation backfill + admission gaps -----
 
 	ginkgo.It("rejects ome.io/rollout-ready-timeout not a duration (InvalidDuration)", func() {
 		isvc := v1beta1testing.MakeInferenceService("isvc-bad-timeout", "isvc-webhook").
@@ -438,7 +438,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		}
 	})
 
-	// OEP-0014 Phase 2: explicit-pin admission validation. Three rejections
+	// Explicit-pin admission validation. Three rejections
 	// happen at the webhook so misconfigured pins never reach the controller:
 	// AutoSync conflict, wrong runtime in the name, wrong scope prefix.
 	ginkgo.It("rejects spec.runtime.revision when autoSync is true (silently-ignored pin)", func() {
@@ -497,9 +497,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	})
 
 	// =========================================================================
-	// OEP-0007 multi-node Phase 3: webhook validation rules.
-	// See .claude/specs/2026-05-27-multi-node-real-cluster-tests/README.md §M-E
-	// and .claude/specs/2026-05-27-omenative-multi-node/plan.md §Phase 3.
+	// Multi-node webhook validation rules.
 	// Unit coverage lives in pkg/validation/isvc_test.go +
 	// pkg/webhook/admission/isvc/inference_service_validation_test.go; the
 	// envtest specs below confirm the wired-up webhook rejects through the
@@ -546,17 +544,17 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	})
 
 	ginkgo.It("multi-node phase 3: rejects Sequential coordination with multi-pod engine and no Order (SequentialMultiPodRequiresOrder)", func() {
-		// OEP-0017: the Sequential coordination policy is removed. Cross-Component
+		// The Sequential coordination policy is removed. Cross-Component
 		// sequencing is now expressed as multiple single-Component groups in list
 		// order, so a "Sequential group without Order" is no longer expressible —
 		// there is no Order-on-Sequential rule. This rejection no longer fires;
 		// skip until/if a v2 multi-pod sequencing guard is reintroduced.
-		ginkgo.Skip("OEP-0017: Sequential policy removed; SequentialMultiPodRequiresOrder no longer applies")
+		ginkgo.Skip("Sequential policy removed; SequentialMultiPodRequiresOrder no longer applies")
 	})
 
 	ginkgo.It("multi-node phase 3: rejects lean multi-pod ISVC with no runner images (MultiPodLeanModelNeedsRunner)", func() {
 		// Lean = no spec.model + no spec.runtime. Lean single-pod is
-		// supported per #249; lean multi-pod needs explicit leader.runner +
+		// supported; lean multi-pod needs explicit leader.runner +
 		// worker.runner images because the controller has no defaulting
 		// source. To hit this validator we must bypass the earlier
 		// "at-least-one-of-model-or-runtime" check, which is impossible
@@ -623,40 +621,32 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	})
 
 	// =========================================================================
-	// task #36 — webhook coordination validation gap fixes.
-	// Reproduces W-1 / W-2 from
-	// .claude/specs/2026-05-25-real-cluster-tests/README.md, which the
-	// real-cluster test runs in May 2026 caught failing. Runtime
-	// ValidateGroupShape in pkg/.../coordination/groups.go:213 already
-	// rejects these shapes, but the admission webhook was letting them
-	// through. These specs assert the webhook now rejects them at
-	// admission time so operators see the conflict before the object
-	// lands in apiserver.
+	// Webhook coordination validation gap fixes (W-1 / W-2). Runtime
+	// ValidateGroupShape in the coordination groups resolver already
+	// rejects these shapes; these specs assert the webhook also rejects
+	// them at admission time so operators see the conflict before the
+	// object lands in apiserver.
 	// =========================================================================
 
-	// real-cluster W-1: Sequential + RatioBalanced is meaningless —
+	// W-1: Sequential + RatioBalanced is meaningless —
 	// Sequential serializes Components, so the cross-Component ratio
-	// RatioBalanced is supposed to enforce is undefined. Mirror of the
-	// YAML at .claude/specs/2026-05-25-real-cluster-tests/yamls/
-	// w1-invalid-sequential-ratiobalanced.yaml.
-	ginkgo.It("task #36: rejects Sequential + RatioBalanced pacing (SequentialIncompatibleWithRatioBalanced / real-cluster W-1)", func() {
-		// OEP-0017: Sequential policy and per-group Pacing are removed. A group
+	// RatioBalanced is supposed to enforce is undefined.
+	ginkgo.It("rejects Sequential + RatioBalanced pacing (SequentialIncompatibleWithRatioBalanced / W-1)", func() {
+		// The Sequential policy and per-group Pacing are removed. A group
 		// no longer carries a (Sequential) policy, and RatioBalanced pacing
 		// became the group-level MaintainRatio guard — which is meaningful on any
 		// multi-Component group. The "Sequential is incompatible with
 		// RatioBalanced" combination is therefore not expressible in v2, and
 		// ReasonSequentialIncompatibleWithRatioBalanced is no longer returned by
 		// any validator. Skip until/if an equivalent v2 guard is introduced.
-		ginkgo.Skip("OEP-0017: Sequential policy + per-group Pacing removed; SequentialIncompatibleWithRatioBalanced no longer applies")
+		ginkgo.Skip("Sequential policy + per-group Pacing removed; SequentialIncompatibleWithRatioBalanced no longer applies")
 	})
 
-	// real-cluster W-2: maxSurge=0 AND maxUnavailable=0 deadlocks any
-	// rollout — no surge headroom, no drain headroom. Mirror of the YAML
-	// at .claude/specs/2026-05-25-real-cluster-tests/yamls/
-	// w2-invalid-zero-budget.yaml.
-	ginkgo.It("task #36: rejects RollingUpdate group with maxSurge=0 and maxUnavailable=0 (ZeroBudgetPacingUnstartable / real-cluster W-2)", func() {
+	// W-2: maxSurge=0 AND maxUnavailable=0 deadlocks any
+	// rollout — no surge headroom, no drain headroom.
+	ginkgo.It("rejects RollingUpdate group with maxSurge=0 and maxUnavailable=0 (ZeroBudgetPacingUnstartable / W-2)", func() {
 		zero := intstr.FromInt(0)
-		isvc := v1beta1testing.MakeInferenceService("task36-w2-zero-budget", "isvc-webhook").
+		isvc := v1beta1testing.MakeInferenceService("w2-zero-budget", "isvc-webhook").
 			Runtime("any-runtime").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
@@ -687,14 +677,14 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	// Positive: a well-formed multi-Component coordination group must be
 	// accepted (no over-rejection from the pacing/budget checks).
 	//
-	// OEP-0017: the old "Sequential + PerComponent pacing" combination is
+	// The old "Sequential + PerComponent pacing" combination is
 	// re-expressed as the canonical v2 multi-Component group — engine +
 	// decoder rolling together under BlueGreen. (Sequential cross-Component
 	// ordering would now be two single-Component groups; the over-rejection
 	// guard being exercised here is the pacing/budget path, which a coupled
 	// multi-Component group covers.)
-	ginkgo.It("task #36: accepts well-formed multi-Component coordination group (no over-rejection)", func() {
-		isvc := v1beta1testing.MakeInferenceService("task36-seq-ok", "isvc-webhook").
+	ginkgo.It("accepts well-formed multi-Component coordination group (no over-rejection)", func() {
+		isvc := v1beta1testing.MakeInferenceService("coord-seq-ok", "isvc-webhook").
 			Runtime("any-runtime").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},

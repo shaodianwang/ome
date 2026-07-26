@@ -52,7 +52,7 @@ func (f *DefaultRuntimeFetcher) FetchRuntimes(ctx context.Context, namespace str
 	}, nil
 }
 
-// GetRuntime resolves a runtime to its OEP-0012 merged spec. Namespace-scoped
+// GetRuntime resolves a runtime to its merged (inheritance-resolved) spec. Namespace-scoped
 // takes precedence over cluster-scoped on name collision.
 func (f *DefaultRuntimeFetcher) GetRuntime(ctx context.Context, name string, namespace string) (*v1beta1.ServingRuntimeSpec, bool, error) {
 	if _, err := f.getNamespacedHead(ctx, namespace, name); err == nil {

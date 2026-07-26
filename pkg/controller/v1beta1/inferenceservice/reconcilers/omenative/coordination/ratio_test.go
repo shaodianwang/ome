@@ -1124,9 +1124,9 @@ func TestCheckSurgeGate_PercentBudget(t *testing.T) {
 
 // mkSymmetricRatioFixture builds a symmetric engine 4 : decoder 4
 // RatioBalanced group with an ObservedRatio snapshot of 4:4 and both
-// Components fully serving (4/4). This is the p32/p42 deadlock shape:
-// a 1:1 ratio where, at tolerance 25%, the discrete pod granularity
-// leaves no room for a single -1 drain.
+// Components fully serving (4/4). This is the symmetric deadlock
+// shape: a 1:1 ratio where, at tolerance 25%, the discrete pod
+// granularity leaves no room for a single -1 drain.
 func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
@@ -1163,16 +1163,15 @@ func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 // TestCheckRatio_SurgeVsDrainProjection_SymmetricBand pins that a
 // symmetric 4:4 RatioBalanced pair (tol=25% → band [0.75, 1.25]) is not
 // deadlocked in EITHER direction:
-//   - surge (+1) projects 5/4 = 1.25, in band → allowed (#401
-//     projection-sign fix);
+//   - surge (+1) projects 5/4 = 1.25, in band → allowed (the
+//     projection must carry the surge sign);
 //   - drain (-1) projects 4/3 = 1.333, which the STRICT band rejects, but
-//     the Part-2 discrete-granularity tiebreaker allows one rounding-error
+//     the discrete-granularity tiebreaker allows one rounding-error
 //     pod from a balanced baseline (1.333 <= 2x band 1.5) → allowed.
 //
-// Pre-#401 the code hardcoded -1 for ALL strategies, so even a
-// SurgeThenDrain roll hit the drain math and BOTH members deadlocked at
-// the start (the gate-projection bug exposed by activating the gate on the default
-// IR-managed path). Asymmetric large skews still stay denied — see
+// If the code hardcoded -1 for ALL strategies, even a SurgeThenDrain
+// roll would hit the drain math and BOTH members would deadlock at the
+// start. Asymmetric large skews still stay denied — see
 // ratio_drain_tiebreaker_test.go.
 func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
@@ -1187,9 +1186,9 @@ func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {
 }
 
 // TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked is the
-// end-to-end regression for the p32/p42 deadlock: a SurgeThenDrain roll
-// on a symmetric 4:4 RatioBalanced group must NOT be blocked by the gate
-// stack (it was, pre-fix, because CheckRatio projected -1 for it).
+// end-to-end symmetric-deadlock regression: a SurgeThenDrain roll on a
+// symmetric 4:4 RatioBalanced group must NOT be blocked by the gate
+// stack (it would be if CheckRatio projected -1 for it).
 func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	client := fakeClientForISVC(isvc)
@@ -1246,7 +1245,7 @@ func mkRatioProgressFixture(tol, origE, newE, origD, newD int32) *v1beta1.Infere
 }
 
 // TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent is the
-// regression for the live p72/p78/p80/p81/p83/p87/p95/p96 failures: a
+// leading-Component regression: a
 // multinode SurgeThenDrain RatioBalanced roll let the engine rotate its
 // Instances onto the new revision while the decoder lagged, holding the
 // live ready-capacity ratio off band for the whole gap. The serving
@@ -1268,11 +1267,11 @@ func TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent(t *testing.T) {
 		comp                     v1beta1.ComponentType
 		wantAllowed              bool
 	}{
-		{ // p72 start of roll: nobody is ahead → opening surge proceeds.
+		{ // Start of roll: nobody is ahead → opening surge proceeds.
 			name: "N=2 tol=25 both at 0 new — first surge allowed", tol: 25,
 			origE: 2, newE: 0, origD: 2, newD: 0, comp: eng, wantAllowed: true,
 		},
-		{ // p72 the actual bug: engine already 1/2 (50%), decoder 0/2 (0%);
+		{ // The leading-Component bug: engine already 1/2 (50%), decoder 0/2 (0%);
 			// engine's NEXT surge would extend a 50pp lead > 25% → HELD.
 			name: "N=2 tol=25 engine 1 ahead of decoder 0 — engine held", tol: 25,
 			origE: 2, newE: 1, origD: 2, newD: 0, comp: eng, wantAllowed: false,
@@ -1286,7 +1285,7 @@ func TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent(t *testing.T) {
 			name: "N=2 tol=25 both at 1 new — level, engine proceeds", tol: 25,
 			origE: 2, newE: 1, origD: 2, newD: 1, comp: eng, wantAllowed: true,
 		},
-		{ // p80 tight band at N=4: engine 1/4 (25%) vs decoder 0 (0%) is a
+		{ // Tight band at N=4: engine 1/4 (25%) vs decoder 0 (0%) is a
 			// 25pp lead > 10% tol → engine held one step earlier than at 25%.
 			name: "N=4 tol=10 engine 1 ahead — engine held", tol: 10,
 			origE: 4, newE: 1, origD: 4, newD: 0, comp: eng, wantAllowed: false,
@@ -1328,10 +1327,9 @@ func TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent(t *testing.T) {
 // surge from a balanced full-original baseline is allowed through regardless of
 // overshoot magnitude. Only mid-roll / already-skewed / zero-peer baselines
 // stay denied (guards (a) full-original + (b) balanced). The overshoot is NOT
-// capped: the earlier 2x-band cap permanently wedged the unavoidable minimal
-// surge at small N / tight band (N=1 2:1, tol 10% at N=4 5:4) — a roll that can
-// only proceed by surging. Playground: cleared shapes p54 (N=3), p52/p56
-// (asymmetric), and now p53/p55 (single-pod) + p80/p81/p96 (gangs).
+// capped: a 2x-band cap would permanently wedge the unavoidable minimal
+// surge at small N / tight band (N=1 2:1, tol 10% at N=4 5:4) — a roll
+// that can only proceed by surging.
 func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
 	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
 	cases := []struct {
@@ -1343,33 +1341,33 @@ func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
 		wantAllowed bool
 	}{
 		// Cleared — rounding-error overshoot within 2x band:
-		{ // p54: 3:3 -> 4:3 = 1.333 <= 2x band 1.5
+		{ // 3:3 -> 4:3 = 1.333 <= 2x band 1.5
 			name: "N=3 symmetric (ratio_n3)", tol: 25, comp: eng, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 3, dec: 3},
 			serving:  map[v1beta1.ComponentType]int32{eng: 3, dec: 3},
 		},
-		{ // p52: decoder 2->3, 4:3 = 1.333 within orig-2.0 2x band [1.0,3.0]
+		{ // decoder 2->3, 4:3 = 1.333 within orig-2.0 2x band [1.0,3.0]
 			name: "asymmetric 4:2, small decoder surges", tol: 25, comp: dec, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 4, dec: 2},
 			serving:  map[v1beta1.ComponentType]int32{eng: 4, dec: 2},
 		},
-		{ // p56: decoder 2->3, 8:3 = 2.667 within orig-4.0 2x band [2.0,6.0]
+		{ // decoder 2->3, 8:3 = 2.667 within orig-4.0 2x band [2.0,6.0]
 			name: "asymmetric 8:2, small decoder surges", tol: 25, comp: dec, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 8, dec: 2},
 			serving:  map[v1beta1.ComponentType]int32{eng: 8, dec: 2},
 		},
 		// Now CLEARED — a minimal +1 surge on a balanced full-original
 		// baseline is allowed regardless of overshoot magnitude: a surge
-		// can't starve a peer and SurgeThenDrain drains it back. The prior
-		// 2x-band cap left these as permanent deadlocks, wedging a roll that
-		// can ONLY proceed by surging — caught on the cluster as p53/p55
-		// (single-pod) and p80/p81/p96 (gangs).
-		{ // p55/p81: 1:1 -> 2:1 — N=1 can only roll by surging
+		// can't starve a peer and SurgeThenDrain drains it back. A
+		// 2x-band cap would leave these as permanent deadlocks, wedging
+		// a roll that can ONLY proceed by surging — seen in real-cluster
+		// testing on both single-pod and gang shapes.
+		{ // 1:1 -> 2:1 — N=1 can only roll by surging
 			name: "N=1 minimal surge (cleared)", tol: 25, comp: eng, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 1, dec: 1},
 			serving:  map[v1beta1.ComponentType]int32{eng: 1, dec: 1},
 		},
-		{ // p53/p80: 4:4 tol=10 -> 5:4 — band narrower than one pod
+		{ // 4:4 tol=10 -> 5:4 — band narrower than one pod
 			name: "tight tol=10 at N=4 minimal surge (cleared)", tol: 10, comp: eng, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
 			serving:  map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
@@ -1430,7 +1428,7 @@ func TestEvaluateSurge_DrainTiebreaker(t *testing.T) {
 	}{
 		{
 			// 4/3 = 1.333 > 1.25 (strict) but <= 1.5 (2x band) from a
-			// balanced 4:4 → tiebreaker allows the one pod. Clears p51.
+			// balanced 4:4 → tiebreaker allows the one pod.
 			name:        "symmetric 4:4 drain — tiebreaker allows one pod",
 			original:    map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
 			serving:     map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
@@ -1478,10 +1476,10 @@ func TestEvaluateSurge_DrainTiebreaker(t *testing.T) {
 }
 
 // TestEvaluateUpdateGate_RecreatePodSymmetricCleared is the end-to-end
-// Part-2 regression for p51: a RecreatePod (drain-first) roll on a
+// tiebreaker regression: a RecreatePod (drain-first) roll on a
 // symmetric 4:4 RatioBalanced group, with a MaxUnavailable budget so the
-// unavailability gate permits the pod, must now be allowed — the ratio
-// tiebreaker clears the drain that previously deadlocked.
+// unavailability gate permits the pod, must be allowed — the ratio
+// tiebreaker clears the drain that would otherwise deadlock.
 func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	mu := intstr.FromInt(3)
@@ -1495,7 +1493,7 @@ func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 }
 
 // TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups pins the
-// p51 cross-wake-up fix: when a prior recreate's drain is still in flight
+// cross-wake-up bound: when a prior recreate's drain is still in flight
 // (operation-tracked InFlightUnavail=1) but the cache-derived Serving still
 // over-reports a full 4:4 (the watch lag), the tiebreaker must NOT fire — it
 // would let a SECOND pod drain (2:4, past the band) during a recreate burst.
@@ -1533,10 +1531,8 @@ func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.
 // the group's pacing.maxSurge left unset → defaulted to "25%". Both
 // Components are bumped (the harness perturbs every group member), so each
 // rolls off its OWN revision and surges per its OWN budget — the documented
-// per-Component surge model (see the p62 header: "each component paces on its
-// OWN budget, no cross-ratio", and the ~40 sibling rollout cases p27/p30/p32/
-// p33/p41/p48/p62/p80/p243/p244 that all expect a bumped SurgeThenDrain
-// maxSurge=1 decoder to surge to N+1=5).
+// per-Component surge model ("each component paces on its OWN budget, no
+// cross-ratio"; a bumped SurgeThenDrain maxSurge=1 decoder surges to N+1=5).
 //
 // The correct decoder peak is therefore N(4) + maxSurge(1) = 5. These tests
 // lock that in at the gate level: the decoder is permitted EXACTLY ONE surge
@@ -1741,9 +1737,9 @@ func mkGangSurgeFixture() (*v1beta1.InferenceService, []v1beta1.OMENativeInstanc
 	}, engineInstances
 }
 
-// TestCheckRatioGate_GangSurgePeakDoesNotAuthorizeDrain reproduces the
-// multi-node RatioBalanced mis-pacing found on the cluster (p72/78/79/80/81/
-// 83/87/95/96, all confirmed isolated). Engine is mid gang SurgeThenDrain so
+// TestCheckRatioGate_GangSurgePeakDoesNotAuthorizeDrain reproduces a
+// multi-node RatioBalanced mis-pacing found in real-cluster testing.
+// Engine is mid gang SurgeThenDrain so
 // its ServingReplicas reads the transient PEAK N+1=3 against decoder's steady
 // N=2. A drain of one engine Instance would, once the surge settles back to
 // N, leave engine at 1 : decoder 2 = ratio 2.0 vs the 1:1 anchor — far past
@@ -1848,16 +1844,14 @@ func mkGangSurgeDrainedFixture() (*v1beta1.InferenceService, []v1beta1.OMENative
 	}, engineInstances
 }
 
-// TestCheckRatioGate_DrainedGangSurgeNotANetTrough is the follow-up to #528.
-// #528 nets the gang-surge PEAK (replacement serving beside the not-yet-drained
-// source) out of the gate's serving view. But it netted UNCONDITIONALLY: it
-// still subtracted the target after gangSurgeUpdate drained the source from
-// serving (its own #528 change), so in the post-drain / pre-promote window the
-// gate saw N-1 — a phantom TROUGH — even though ServingReplicas had already
+// TestCheckRatioGate_DrainedGangSurgeNotANetTrough: the gate nets the
+// gang-surge PEAK (replacement serving beside the not-yet-drained
+// source) out of its serving view. Netting it UNCONDITIONALLY — still
+// subtracting the target after gangSurgeUpdate drained the source from
+// serving — makes the gate see N-1 in the post-drain / pre-promote
+// window: a phantom TROUGH, even though ServingReplicas has already
 // collapsed to the steady N. With engine and decoder gangs flipping at
-// staggered times, that N-1 read swings the live ratio to 2:1 / 1:2 — exactly
-// the violation traced on the cluster (p72: e_serv=2 d_serv=1 sustained, then
-// e_serv=1 d_serv=2).
+// staggered times, that N-1 read swings the live ratio to 2:1 / 1:2.
 //
 // Here engine is in that window: source drained (0/2), target serving (2/2) →
 // engine's STEADY serving is N=2, equal to decoder. A DECODER drain would take

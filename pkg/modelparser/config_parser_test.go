@@ -597,7 +597,7 @@ func TestParseModelConfigFromFiles_QuantAwareSafetensorsCount(t *testing.T) {
 	})
 
 	files := []ModelConfigFileInput{
-		{Path: DefaultConfigFileName, Data: []byte(`{"model_type":"llama4x_text","architectures":["Llama4xForCausalLM"]}`)},
+		{Path: DefaultConfigFileName, Data: []byte(`{"model_type":"examplemoe_text","architectures":["ExampleMoeForCausalLM"]}`)},
 		{Path: "model.safetensors", Data: safetensorsBytes},
 		{Path: modelconfig.HFQuantConfigFileName, Data: []byte(`{
 			"quant_method": "modelopt",
@@ -633,7 +633,7 @@ func TestParseModelConfigDir_HFQuantConfigFallbackFromDisk(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(tempDir, DefaultConfigFileName),
-		[]byte(`{"model_type":"llama4x_text","architectures":["Llama4xForCausalLM"],"max_position_embeddings":32768}`),
+		[]byte(`{"model_type":"examplemoe_text","architectures":["ExampleMoeForCausalLM"],"max_position_embeddings":32768}`),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(
@@ -665,7 +665,7 @@ func TestParseModelConfigFromFiles_HFQuantConfigFallback(t *testing.T) {
 		loadModelConfig: modelconfig.LoadModelConfig,
 	}
 
-	configJSON := []byte(`{"model_type":"llama4x_text","architectures":["Llama4xForCausalLM"],"max_position_embeddings":32768}`)
+	configJSON := []byte(`{"model_type":"examplemoe_text","architectures":["ExampleMoeForCausalLM"],"max_position_embeddings":32768}`)
 	hfQuantJSON := []byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"NVFP4","group_size":16,"kv_cache_quant_algo":"FP8"}}`)
 
 	files := []ModelConfigFileInput{

@@ -75,7 +75,7 @@ IMAGES = [
     ("canary-metrics", "canary-metrics", "dockerfiles/canary-metrics.Dockerfile"),
     # MUSE console: one image serving the read-plane API + the built web UI.
     ("muse-server", "muse-server", "dockerfiles/muse-server.Dockerfile"),
-    # ome-scheduler: kube-scheduler + OMEGangPack (OEP-0022). Separate Go module
+    # ome-scheduler: kube-scheduler + OMEGangPack. Separate Go module
     # under scheduler/; pure-Go static binary, no xet.
     ("ome-scheduler", "ome-scheduler", "dockerfiles/ome-scheduler.Dockerfile"),
 ]
@@ -263,18 +263,17 @@ def ci_steps() -> str:
 {_gh_status("integration-test-kind")}
             # KIND-backed suites under
             # tests/integration/singlecluster/controller/omenative_coordination_kind/
-            # exercise OEP-0007.{{1,2}} + OEP-0011 contracts against real
-            # kubelet + scheduler + containerd that the envtest sibling's
-            # PodKubeletSimulator can't model (drain races, in-place
+            # exercise rollout-coordination contracts against real
+            # kubelet + scheduler + containerd that envtest
+            # can't model (drain races, in-place
             # patches, Sequential handoff timing, RatioBalanced gate at
-            # scale). ~5 min wall-clock, 24 specs.
+            # scale). ~30-60 min wall-clock full suite.
             #
             # Independent from integration-test — they run in parallel.
             #
             # soft_fail: the TW dind cannot run kind node containers
             # today. Its /proc/sys is read-only, which breaks bridge
-            # networking three independent ways (measured on builds
-            # 2268/2271/2272): kind's dual-stack `docker network create
+            # networking three independent ways: kind's dual-stack `docker network create
             # --ipv6` cannot write net.ipv6.conf.default.forwarding;
             # veth attach to even an IPv4-only bridge cannot write the
             # interface's disable_ipv6 sysctl; and net.ipv4.ip_forward

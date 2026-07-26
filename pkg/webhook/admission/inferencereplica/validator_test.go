@@ -245,7 +245,7 @@ func withModelPVCVolume(ir *v1beta1.InferenceReplica, volName string) *v1beta1.I
 }
 
 // withAutoscaler returns a clone with the Autoscaler block set on
-// spec.autoscaler. Used by the OEP-0013 IR-side webhook shape tests.
+// spec.autoscaler. Used by the IR-side webhook autoscaler shape tests.
 func withAutoscaler(ir *v1beta1.InferenceReplica, as *v1beta1.ComponentAutoscaler) *v1beta1.InferenceReplica {
 	out := ir.DeepCopy()
 	out.Spec.Autoscaler = as
@@ -369,7 +369,7 @@ func TestHandle(t *testing.T) {
 			},
 			wantAllowed: false,
 		},
-		// OEP-0013: IR-side defense-in-depth on spec.autoscaler shape.
+		// IR-side defense-in-depth on spec.autoscaler shape.
 		// Per Decision Q4 the IR webhook does NOT block external writes
 		// to spec.autoscaler (the /scale subresource only mutates
 		// spec.replicas), but any successful write must carry a

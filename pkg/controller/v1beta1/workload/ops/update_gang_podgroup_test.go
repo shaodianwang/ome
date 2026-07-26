@@ -46,12 +46,12 @@ func gangSchedClient(t *testing.T, initObjs ...client.Object) client.Client {
 // gang-rollout fix: gangSurgeUpdate must announce the surge index's
 // PodGroup to the gang scheduler BEFORE creating that gang's pods.
 //
-// Found by real-cluster multi-node canary testing (p304: engine-mn,
-// minReplicas=4, canary capacity 50%). The canary surges a new gang at a
-// fresh instance index; on the mkube-allocator (coscheduler-style) cluster
-// the surge pods were rejected with "0/1 nodes are available: 1 PodGroup
-// not found" and never scheduled, so the canary capacity gate never opened
-// and the rollout stalled at phase=Pending.
+// Scenario: a multi-node engine (minReplicas=4, canary capacity 50%).
+// The canary surges a new gang at a fresh instance index; on a
+// coscheduler-style cluster the surge pods are rejected with "0/1
+// nodes are available: 1 PodGroup not found" and never scheduled, so
+// the canary capacity gate never opens and the rollout stalls at
+// phase=Pending.
 //
 // Root cause: the surge gang's PodGroup is created by the top-level
 // EnsurePodGroups pass, which keys off plan.Instances — and the surge index
@@ -140,11 +140,10 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 // the ome.io/serving readiness gate AND'd in by kubelet) — not merely
 // ContainersReady. ome.io/serving is itself a readiness gate, so a just-served
 // pod is not PodReady (not in Service rotation) until kubelet re-evaluates the
-// gate. Draining the source on ContainersReady (the #528 behavior) drops it out
+// gate. Draining the source on ContainersReady alone drops it out
 // of rotation while the replacement is still not in it — an N-1 capacity
-// TROUGH. Across Components rolled on independent timelines those offset troughs
-// skew the live RatioBalanced ratio (the engine 2 : decoder 1 regression that
-// passed on 2026-06-08 and broke 2026-06-22).
+// TROUGH. Across Components rolled on independent timelines those offset
+// troughs skew the live RatioBalanced ratio.
 func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, _ := surgeISVCReady("p72", "prod", 1)

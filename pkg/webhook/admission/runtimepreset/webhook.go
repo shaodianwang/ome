@@ -1,8 +1,8 @@
-// Package runtimepreset implements OEP-0012 Part C: a mutating
-// webhook that injects engine defaults from a Go-defined preset when
-// ome.io/engine: <name> names a known engine. Part B's resolver
-// composes on top at consumer call sites; Part A's $(VAR) placeholders
-// are substituted by Kubernetes at pod-create time.
+// Package runtimepreset implements a mutating webhook that injects
+// engine defaults from a Go-defined preset when ome.io/engine: <name>
+// names a known engine. The runtime-inheritance resolver composes on
+// top at consumer call sites; $(VAR) placeholders are substituted by
+// Kubernetes at pod-create time.
 package runtimepreset
 
 import (
@@ -91,9 +91,9 @@ func applyPreset(annotations map[string]string, spec *v1beta1.ServingRuntimeSpec
 		return nil, &resp
 	}
 	// Runtime (child) wins on collision; preset (parent) fills unset
-	// positions. Same contract as Part B's resolver, so preset +
-	// inheritance compose commutatively for any field set by exactly
-	// one source.
+	// positions. Same contract as the runtime-inheritance resolver, so
+	// preset + inheritance compose commutatively for any field set by
+	// exactly one source.
 	merged, err := runtimeinheritance.Merge(factory(), spec)
 	if err != nil {
 		resp := admission.Errored(http.StatusInternalServerError, fmt.Errorf("merge %s preset: %w", engine, err))

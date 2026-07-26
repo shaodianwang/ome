@@ -13,11 +13,8 @@ import (
 
 // defaultRevisionRetention is the maximum number of non-live
 // ControllerRevisions the IR controller keeps per (parent ISVC,
-// Component). 10 matches the retired OMENative direct path
-// (omenative/status.go's defaultRevisionRetention, OEP §2.2) and the
-// StatefulSet default — enough headroom for rollback inspection without
-// unbounded etcd growth. Reusing the same bound keeps the IR-managed
-// path byte-equivalent to the path it replaced.
+// Component). 10 matches the StatefulSet default — enough headroom for
+// rollback inspection without unbounded etcd growth.
 const defaultRevisionRetention = 10
 
 // sweepRevisions trims accumulated ControllerRevisions for this IR down
@@ -26,12 +23,11 @@ const defaultRevisionRetention = 10
 // any InstanceStatus.RunningRevision / TargetRevision).
 //
 // Best-effort and non-fatal: a retention failure is logged + evented but
-// NEVER fails the reconcile. The retired OMENative direct path treated
-// retention as a post-commit step too; here we go a step further and
-// suppress the error entirely (matching the IR reconciler's headless-
-// Service and deferred-status-write suppression pattern) because the
-// next reconcile re-runs the sweep — a stale extra CR is harmless, a
-// failed reconcile is not.
+// NEVER fails the reconcile. Retention runs as a post-commit step and
+// the error is suppressed entirely (matching the IR reconciler's
+// headless-Service and deferred-status-write suppression pattern)
+// because the next reconcile re-runs the sweep — a stale extra CR is
+// harmless, a failed reconcile is not.
 //
 // MUST be called AFTER the status write so the live-name union reads the
 // just-committed CurrentRevision / UpdateRevision (the deferred status

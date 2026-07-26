@@ -47,7 +47,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	s, err := framework.NewSuite(&framework.Framework{
 		OptionalCRDs: []framework.OptionalCRDBundle{
 			framework.KEDA,
-			// EnvoyGateway gives the OEP-0011 traffic translator a
+			// EnvoyGateway gives the traffic translator a
 			// real BackendTrafficPolicy CRD to write against. Tests
 			// without spec.traffic / ome.io/* annotations see
 			// HasIntent=false and the translator is never invoked,
@@ -59,7 +59,7 @@ var _ = ginkgo.BeforeSuite(func() {
 			framework.GatewayAPI,
 			// PrometheusOperator registers PodMonitor (scheme + CRD).
 			// The ISVC RawDeployment path unconditionally reconciles a
-			// PodMonitor since #158 — without this the SetControllerReference
+			// PodMonitor — without this the SetControllerReference
 			// call fails with "no kind is registered for the type v1.PodMonitor".
 			framework.PrometheusOperator,
 		},

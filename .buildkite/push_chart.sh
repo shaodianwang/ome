@@ -3,8 +3,9 @@
 #
 # Usage: sh .buildkite/push_chart.sh <chart-name>
 #
-# Runs in the prod-inference-ci-base image with MKS pod-identity
-# annotations on the job pod (set by .buildkite/generate_pipeline.py).
+# Runs in the prod-inference-ci-base image under the TW docker plugin;
+# ECR auth via cloud_oss identity or Buildkite cluster secrets (see
+# _ecr_login.sh).
 set -eu
 
 CHART="${1:?chart required}"
@@ -85,8 +86,7 @@ if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then
 else
   # Exercise both registry logins on PR branches too — pushes are
   # main-only, but a broken credential path must fail the PR that
-  # breaks it, not the next main build. (The TW migration kept every
-  # PR green while main's chart/mirror steps all failed on login.)
+  # breaks it, not the next main build.
   ecr_login_for dev helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
   ecr_login_for prod helm registry login --username AWS --password-stdin "$PROD_ECR_REGISTRY"
   echo "branch=${BUILDKITE_BRANCH:-?} is not main; logins OK, skipping push"

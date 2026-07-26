@@ -43,8 +43,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced N=3", ginkgo.Ordered, fun
 	// ratioSkewRejected=true (the per-pair gate evaluates each ordered
 	// pair independently and the cross-pair composition deadlocks when
 	// a surge that satisfies one pair violates another). Deferred for
-	// design discussion — see
-	// .claude/specs/2026-06-01-ratio-balanced-deadlock-design/findings.md.
+	// design discussion.
 	ginkgo.PIt("RatioBalanced N=3 keeps engine/decoder and engine/router ratios in band", func() {
 		tol := int32(25)
 		maxUnavail := intstr.FromInt(1)

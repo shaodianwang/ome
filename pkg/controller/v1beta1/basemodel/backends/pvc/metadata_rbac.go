@@ -43,7 +43,7 @@ const metadataJobSourceNamespaceLabel = "models.ome/metadata-source-namespace"
 //  2. A RoleBinding in the OME namespace binding the existing cluster-
 //     scoped ClusterRole to the SA in `jobNamespace`. The agent only
 //     writes the per-model status ConfigMap in the OME namespace
-//     (model-metadata/metadata.go:179 hardcodes constants.OMENamespace),
+//     (model-metadata/metadata.go hardcodes constants.OMENamespace),
 //     so an in-namespace RoleBinding wouldn't help — the agent needs
 //     cross-namespace write to ome/configmaps.
 //

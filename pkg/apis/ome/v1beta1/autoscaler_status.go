@@ -51,7 +51,7 @@ const (
 // Alpha. The shape may change without notice.
 type ComponentAutoscalerStatus struct {
 	// Class echoes the resolved autoscaler class as picked by
-	// ResolveComponentAutoscaler. One of hpa | keda | external | none.
+	// ResolveComponentAutoscaler. One of HPA | KEDA | External | None.
 	// Mirrors the input that drove dispatch so the operator can confirm
 	// the inheritance chain landed on the expected class.
 	// +optional
@@ -111,8 +111,8 @@ type ComponentAutoscalerStatus struct {
 // target for a Component — the InferenceReplica (for OMENative) or the
 // underlying Deployment (for RawDeployment). Published on
 // status.components.<comp>.scaleTargetRef so an external scaler knows
-// which object to point at (matches the GroupKind the user would write
-// into kubectl scale --resource-version-target=...).
+// which object to point at (the same GroupKind the user would target
+// with kubectl scale <kind>/<name>).
 //
 // Empty when the Component has no active scaler (e.g., legacy
 // RawDeployment Components that have not migrated to the new Autoscaler

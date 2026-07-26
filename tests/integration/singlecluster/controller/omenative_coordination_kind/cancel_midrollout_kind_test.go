@@ -103,8 +103,8 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			// Either the CurrentRevision is the ORIGINAL v1EngineRev (the
 			// controller adopted the same ControllerRevision back), OR
 			// it's a new revision name that matches the v1 podSpec. The
-			// stronger assertion (which is what the round-2 spec
-			// implicitly wanted): NO pod is running on a v2 image.
+			// stronger assertion:
+			// NO pod is running on a v2 image.
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"rollout must return to Idle after revert converges")

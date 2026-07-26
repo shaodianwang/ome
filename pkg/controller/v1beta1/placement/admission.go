@@ -31,8 +31,7 @@ func componentIRStatuses(ctx context.Context, reads client.Reader, isvc *v1beta1
 
 // AnyInstanceAdmitted reports whether any component of the (derived) ISVC has at
 // least one Instance that has left the Kueue admission gate. Retained as a
-// low-level predicate (and for single-component callers); the OEP-0018 race
-// winner uses AllComponentsAdmitted, which is correct for multi-component (PD)
+// low-level predicate (and for single-component callers); // winner uses AllComponentsAdmitted, which is correct for multi-component (PD)
 // services. `statuses` is the authoritative per-component IR status assembled by
 // componentIRStatuses.
 func AnyInstanceAdmitted(statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) bool {
@@ -45,8 +44,7 @@ func AnyInstanceAdmitted(statuses map[v1beta1.ComponentType]*v1beta1.InferenceRe
 }
 
 // AllComponentsAdmitted reports whether EVERY component the derived ISVC declares
-// in its spec has at least one admitted Instance. This is the OEP-0018 race
-// signal: a cluster wins only once Kueue has admitted all of the service's
+// in its spec has at least one admitted Instance. This is // signal: a cluster wins only once Kueue has admitted all of the service's
 // components there. For a PD service (engine + decoder) this prevents declaring a
 // winner while the engine is admitted but the decoder is still gated — which
 // would otherwise delete the losers prematurely and strand a half-placed

@@ -1,7 +1,7 @@
-// Package runtimepreset hosts integration tests for OEP-0012 Part C:
+// Package runtimepreset hosts integration tests for
 // the engine-preset MutatingWebhook for ServingRuntime +
-// ClusterServingRuntime, including composition with Part B
-// inheritance (resolver called from the test client).
+// ClusterServingRuntime, including composition with the inheritance
+// resolver (called from the test client).
 package runtimepreset
 
 import (

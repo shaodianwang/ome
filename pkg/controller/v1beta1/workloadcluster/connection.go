@@ -1,4 +1,4 @@
-// Package workloadcluster implements the OEP-0018 WorkloadCluster registry
+// Package workloadcluster implements the WorkloadCluster registry
 // controller: it resolves each cluster's kubeconfig, connects, and reports a
 // Ready (reachable) condition. Capacity is never read here.
 package workloadcluster
@@ -42,7 +42,7 @@ func (p ExecCredentialPolicy) commandAllowed(cmd string) bool {
 
 // RESTConfigFromKubeConfig parses raw kubeconfig bytes into a *rest.Config and
 // rejects credential shapes that are unsafe to run from the control plane — a
-// stored kubeconfig is a cross-cluster blast radius (OEP-0018 security note).
+// stored kubeconfig is a cross-cluster blast radius.
 // It validates twice, mirroring Kueue's validateKubeconfig: once over the raw
 // kubeconfig (every cluster/user, before flattening) and once over the
 // flattened rest.Config.

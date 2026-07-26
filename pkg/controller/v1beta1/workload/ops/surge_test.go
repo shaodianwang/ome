@@ -171,8 +171,8 @@ func surgeISVCReady(name, ns string, incarnation int64) (*v1beta1.InferenceServi
 }
 
 // TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep
-// pins the surge entry helper's idempotency on the SurgeDrain step (PR
-// #246). The first pass through Phase 2 transitions Step from Surge to
+// pins the surge entry helper's idempotency on the SurgeDrain step.
+// The first pass through Phase 2 transitions Step from Surge to
 // SurgeDrain; on a subsequent pass the entry-point stamp must NOT
 // regress that Step back to Surge (which would re-fire the create branch
 // and resurrect the just-deleted old pod), and the Operation.ID must
@@ -268,7 +268,7 @@ func TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget(t *testing
 }
 
 // TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC pins the
-// MutateInstance mirror requirement (#246). After a MutateInstance
+// MutateInstance mirror requirement. After a MutateInstance
 // closure commits a status change to the apiserver, the closure must
 // ALSO mirror the new state onto the in-memory ISVC the test (and
 // production callers in the same reconcile) hold a pointer to —
@@ -304,7 +304,7 @@ func TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC(t *testing.T) {
 }
 
 // TestExpectedPodNamesForInstance_RespectsActiveOrdinal pins the
-// primary SurgeThenDrain drain-incomplete fix (#243): when a single-pod
+// SurgeThenDrain drain-completion contract: when a single-pod
 // Instance has a status entry whose ActiveOrdinal has been advanced by
 // a prior surge promote (e.g., from 0 → 1), expectedPodNamesForInstance
 // must emit a single target at THAT ordinal — NOT hard-code 0.
@@ -743,9 +743,9 @@ func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
 // desired target, whose surge pod is NOT yet Ready, is abandoned — the stuck surge
 // pod is deleted so the next reconcile re-surges toward the current target, while
 // the source pod at the old ordinal keeps serving (capacity holds; unlike the
-// Failed-recovery path this must NOT drain the source). This is the fix for the
-// p416 prod deadlock (a never-Ready, never-escalated surge pinned to a dead rev
-// holding the maxSurge budget until instanceReadyTimeout).
+// Failed-recovery path this must NOT drain the source). This guards against the
+// deadlock where a never-Ready, never-escalated surge pinned to a dead rev
+// holds the maxSurge budget until instanceReadyTimeout.
 func TestSurgeUpdate_SupersededSurge_AbandonsAndKeepsSource(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
@@ -798,8 +798,8 @@ func TestSurgeUpdate_SupersededSurge_AbandonsAndKeepsSource(t *testing.T) {
 	}
 }
 
-// TestSurgeUpdate_SingleBump_DoesNotShiftTarget pins the second-half
-// invariant of #256: a single bump (no in-flight surge) followed by a
+// TestSurgeUpdate_SingleBump_DoesNotShiftTarget pins the
+// target-stability invariant: a single bump (no in-flight surge) followed by a
 // re-invoke at the SAME target must NOT alter the recorded
 // Op.TargetRevision — idempotent on the in-flight surge.
 func TestSurgeUpdate_SingleBump_DoesNotShiftTarget(t *testing.T) {
@@ -1214,8 +1214,8 @@ func TestSurgeUpdate_GangSurges(t *testing.T) {
 }
 
 // gangSurgePlan builds a multi-pod (leader + worker) single-Instance
-// SurgeThenDrain ComponentPlan — the topology p247 (engine-mn) and
-// p248 (pd-mn) exercise. inst.TotalPods() == 2 routes surgeUpdate to
+// SurgeThenDrain ComponentPlan — the multi-node engine and PD
+// multi-node topologies. inst.TotalPods() == 2 routes surgeUpdate to
 // gangSurgeUpdate.
 func gangSurgePlan() workload.ComponentPlan {
 	return workload.ComponentPlan{
@@ -1295,8 +1295,7 @@ func gangInputWithRemove(isvc *v1beta1.InferenceService, c client.Client) worklo
 }
 
 // TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev pins the gang
-// (multi-pod) X-2 "re-bump mid-roll" convergence-safety invariant the
-// harness reproduced on p247 (engine-mn) / p248 (pd-mn).
+// (multi-pod) "re-bump mid-roll" convergence-safety invariant.
 //
 // Setup is the moment the v2 gang surge reaches its promote step: a v2
 // replacement gang at the surge index (idx=1) is Ready + serving, the
@@ -1478,11 +1477,11 @@ func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 // Instance is reset to Ready so the next reconcile re-surges toward the current
 // desired through the normal gated path. (A surge already Ready and about to
 // promote instead keeps its pin — see _PromotesPinnedRev — so its promote stays
-// truthful; that's the X-2 no-false-promote invariant this redirect preserves.)
+// truthful; that's the no-false-promote invariant this redirect preserves.)
 //
-// Replaces the pre-redirect behavior (create pods on the pinned intermediate rev),
-// which deadlocked when the intermediate surge never became Ready and never
-// escalated (the p416 prod incident): it held the maxSurge budget on a dead rev.
+// Without the redirect (creating pods on the pinned intermediate rev), an
+// intermediate surge that never became Ready and never escalated would
+// deadlock, holding the maxSurge budget on a dead rev.
 func TestGangSurgeUpdate_BumpDuringBump_AbandonsSupersededSurge(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, _ := surgeISVCReady("llama-70b", "prod", 1)

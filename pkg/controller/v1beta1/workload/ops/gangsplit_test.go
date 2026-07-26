@@ -56,7 +56,7 @@ func withUserPodAffinity(ps *corev1.PodSpec) *corev1.PodSpec {
 
 func TestMaybeWarnGangSplitRisk(t *testing.T) {
 	gangPlan, gangInst, gangRunners := multiPodPlan(3) // TopologyKey unset
-	keyedPlan, keyedInst, keyedRunners := multiPodPlanWithTopologyKey(3, "network.meta.com/domain")
+	keyedPlan, keyedInst, keyedRunners := multiPodPlanWithTopologyKey(3, "topology.example.com/domain")
 	singlePlan, singleInst, singleRunner := singlePodPlan()
 
 	leader := gangRunners[0]

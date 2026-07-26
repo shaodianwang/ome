@@ -1,4 +1,4 @@
-// Package servingruntime hosts integration tests for the OEP-0012
+// Package servingruntime hosts integration tests for the runtime
 // inheritance controllers (both cluster- and namespace-scoped).
 package servingruntime
 

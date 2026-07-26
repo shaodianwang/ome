@@ -15,7 +15,7 @@ import (
 )
 
 // Controller-side counterpart to the webhook's
-// TestResolveModelAndRuntime_ExplicitRuntimeCompatIsAdvisory (#460): when a
+// TestResolveModelAndRuntime_ExplicitRuntimeCompatIsAdvisory: when a
 // runtime is named explicitly, a pure compatibility mismatch (the runtime does
 // not declare the model's architecture/format/framework) must be downgraded to
 // an advisory event and the Deployment built anyway — the operator's deliberate

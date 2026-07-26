@@ -13,22 +13,20 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// E-1 follow-up — PerComponent maxSurge=1 ceiling MUST be enforced
+// PerComponent maxSurge=1 ceiling MUST be enforced
 // per-Component (across Instances), NOT per-Instance.
 //
-// Round-2 real-cluster test E-1 reported that with a multi-Instance
+// Real-cluster testing showed that with a multi-Instance
 // engine under SurgeThenDrain + PerComponent MaxSurge=1, the
 // per-Component surge budget could be violated by both Instances
 // surging in parallel — pod count would temporarily exceed
 // minReplicas+MaxSurge during the rollout window.
 //
-// The existing E-1 spec (percomponent_surge_kind_test.go) covers
+// The sibling spec (percomponent_surge_kind_test.go) covers
 // RollingUpdate policy + 2-Instance engine; this spec covers two
 // additional scenarios the original did not exercise:
 //
-//   - BlueGreen policy (matches the YAML in
-//     .claude/specs/2026-05-28-real-cluster-tests-round-2/yamls/
-//     e1-percomponent-surge.yaml).
+//   - BlueGreen policy.
 //   - 3-Instance engine, which forces the gate to deny on TWO
 //     successive within-wake-up dispatch attempts (Instance 1 and 2)
 //     after granting Instance 0. The original 2-Instance setup only

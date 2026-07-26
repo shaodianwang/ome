@@ -139,8 +139,8 @@ func createScaledObject(
 			Labels:      filteredLabels,
 			Annotations: componentMeta.Annotations,
 			// Forward OwnerReferences so the IR-managed dispatch can
-			// stamp the SO with the IR's controller-ref for foreground
-			// GC cascade. Raw Deployment callers go through
+			// stamp the SO with the IR's controller-ref for GC
+			// cascade. Raw Deployment callers go through
 			// createScaledObjectFromComponentExt → SetControllerReferences
 			// and don't populate componentMeta.OwnerReferences, so this is
 			// a no-op for them.

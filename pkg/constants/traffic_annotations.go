@@ -1,4 +1,4 @@
-// OEP-0011 traffic-management annotation keys.
+// Traffic-management annotation keys.
 //
 // All annotations live under the OME group prefix (ome.io/). Operators
 // set them on the InferenceService metadata; the traffic translator
@@ -13,8 +13,6 @@ package constants
 // the admission webhook; unknown keys with the `ome.io/` prefix that
 // look like one of these (Levenshtein 2) are rejected with a
 // Did-you-mean suggestion.
-//
-// Field-coverage matrix per translator lives in OEP-0011.
 var (
 	// Circuit breaker.
 	CircuitBreakerMaxConnectionsAnnotation            = OMEAPIGroupName + "/circuit-breaker-max-connections"
@@ -61,7 +59,7 @@ var (
 	// hash (copied from status.canary.canaryRevisionHash) — the hash guards
 	// against promoting a stale revision; "full" is also accepted. The
 	// controller clears the annotation after consuming it. No-op when
-	// spec.rollout.canary is unset.
+	// spec.rollout.groups[].canary is unset.
 	RolloutPromoteAnnotation = OMEAPIGroupName + "/rollout-promote"
 
 	// RolloutRollbackAnnotation is the operator verb for instant

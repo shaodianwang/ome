@@ -38,7 +38,7 @@ type IRDispatchInput struct {
 
 	// IR is the committed InferenceReplica returned by
 	// irprojector.EnsureInferenceReplica. Its UID is captured into
-	// the OwnerReference so foreground GC cascades the HPA / SO when
+	// the OwnerReference so GC cascades the HPA / SO when
 	// the IR is deleted. Required — DispatchForIRComponent returns
 	// an error if IR is nil or IR.UID is empty (guards against the
 	// caller dispatching before the IR is committed).
@@ -64,8 +64,8 @@ type IRDispatchInput struct {
 // The HPA + ScaledObject are stamped with:
 //
 //   - Owner: the live IR (Controller=true, BlockOwnerDeletion implied
-//     by controllerutil semantics). Foreground GC cascades on IR
-//     delete.
+//     by controllerutil semantics). Deleting the IR cascades to both
+//     via GC.
 //   - ScaleTargetRef: ome.io/v1beta1/InferenceReplica/<ir-name>. The
 //     IR's /scale subresource is the canonical scale target for
 //     IR-managed Components.

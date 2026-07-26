@@ -1,4 +1,4 @@
-// OEP-0011 annotation validation.
+// Traffic annotation validation.
 //
 // Parses, type-coerces, and cross-checks the ome.io/* traffic
 // annotations defined in pkg/constants/traffic_annotations.go.
@@ -30,7 +30,7 @@ const (
 )
 
 // trafficAnnotationKinds is the authoritative classifier for every
-// OEP-0011 ome.io/* annotation key. Keys not in this map and not
+// documented ome.io/* traffic annotation key. Keys not in this map and not
 // matching a pass-through prefix are unrecognised (subject to the
 // Did-you-mean check).
 //
@@ -61,8 +61,8 @@ var trafficAnnotationKinds = map[string]trafficAnnotationKind{
 	constants.RolloutRollbackAnnotation:        kindBool,
 }
 
-// validRetryOnTokens enumerates the Envoy retry-on tokens OEP-0011
-// documents. Tokens are case-sensitive (Envoy is case-sensitive).
+// validRetryOnTokens enumerates the documented Envoy retry-on
+// tokens. Tokens are case-sensitive (Envoy is case-sensitive).
 var validRetryOnTokens = map[string]struct{}{
 	"5xx":                    {},
 	"reset":                  {},
@@ -256,7 +256,7 @@ func crossRuleRolloutTimeoutSanity(annotations map[string]string) (string, error
 	return "", nil
 }
 
-// closestTrafficAnnotation returns the documented OEP-0011 traffic
+// closestTrafficAnnotation returns the documented traffic
 // annotation key closest to the given input under Damerau–Levenshtein
 // distance, capped at 2. Returns "", false when no candidate is
 // within distance 2.

@@ -521,8 +521,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// per-Component reconcilers WITHOUT short-circuiting — coordination
 	// must run at the end of every reconcile pass even when individual
 	// Components requeue (which they do constantly during active
-	// rollouts). Closes G1: previously the loop returned on the first
-	// requeuing reconciler, leaving Status.RolloutCoordination /
+	// rollouts). A loop that returned on the first requeuing
+	// reconciler would leave Status.RolloutCoordination /
 	// per-revision Services / Traffic[] stale until convergence.
 	var pendingRequeue reconcile.Result
 	for _, reconciler := range reconcilers {
@@ -762,7 +762,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	// We directly set URL and inference service status to Ready in VirtualDeployment mode
 
-	// Honor the configured urlScheme (OEP-0023 Part 4) rather than hardcoding http.
+	// Honor the configured urlScheme rather than hardcoding http.
 	ingressConfig, err := controllerconfig.NewIngressConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -1065,7 +1065,7 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// InferenceReplica is owned by the ISVC controller —
 		// the projector at the dispatch site (irprojector.EnsureInferenceReplica)
 		// stamps the ISVC as the IR's controller OwnerReference so
-		// foreground GC cascades on ISVC delete, and Owns() re-enqueues
+		// GC cascades on ISVC delete, and Owns() re-enqueues
 		// the parent ISVC when the IR controller flips IR.Status
 		// (Replicas / ReadyReplicas / phase progression). This is what
 		// lets the ISVC status aggregator pick up IR-side counter
@@ -1188,11 +1188,10 @@ func registerISVCRuntimeNameIndex(ctx context.Context, indexer client.FieldIndex
 //   - autoSync=false ("pinned"): the reconcile runs drift detection and
 //     warns the operator that the runtime edit was rejected; it does not roll.
 //
-// NOTE (deploy ordering): fanning out float ISVCs means a runtime edit now
-// rolls them. For RawDeployment that is a safe native rolling update; for
-// OMENative it rolls per the Component's updateStrategy — so any OMENative
-// ISVC still on RecreatePod with no rollout budget would be recreated
-// wholesale. Ship the rollout-budget fixes first.
+// NOTE: fanning out float ISVCs means a runtime edit rolls them. For
+// RawDeployment that is a safe native rolling update; for OMENative it
+// rolls per the Component's updateStrategy — an OMENative ISVC on
+// RecreatePod with no rollout budget is recreated wholesale.
 func (r *InferenceServiceReconciler) isvcsReferencingRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
 	runtimeName := obj.GetName()
 	runtimeNamespace := obj.GetNamespace() // empty for cluster-scoped
@@ -1240,7 +1239,7 @@ func (r *InferenceServiceReconciler) setExternalServiceURL(ctx context.Context, 
 	host := network.GetServiceHostname(externalService.Name, externalService.Namespace)
 	hostWithPort := fmt.Sprintf("%s:%d", host, port)
 
-	// Honor the configured urlScheme (OEP-0023 Part 4) rather than hardcoding http.
+	// Honor the configured urlScheme rather than hardcoding http.
 	isvc.Status.URL = &knapis.URL{
 		Host:   hostWithPort,
 		Scheme: ingressConfig.UrlScheme,

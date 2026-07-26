@@ -118,12 +118,12 @@ var (
 	RuntimeObservabilityProfileAnnotationKey = "runtime.ome.io/observability-profile"
 	RuntimeObservabilityPortAnnotationKey    = "runtime.ome.io/observability-port"
 
-	// OEP-0012: ServingRuntime inheritance + profile marker.
+	// ServingRuntime inheritance + profile marker.
 	RuntimeProfileAnnotationKey     = OMEAPIGroupName + "/runtime-profile"
 	RuntimeInheritFromAnnotationKey = OMEAPIGroupName + "/inherit-from"
 	RuntimeInheritMaxDepth          = 5
 	InheritanceReadyConditionType   = "InheritanceReady"
-	// OEP-0012 Part C: engine-preset annotation. Value selects an
+	// Engine-preset annotation. Value selects an
 	// OME-shipped preset (e.g. "sglang-pd") whose engine defaults a
 	// mutating webhook injects into the runtime spec at admission.
 	RuntimeEngineAnnotationKey = OMEAPIGroupName + "/engine"
@@ -187,8 +187,7 @@ var (
 	// annotation on every Create / Update of an InferenceReplica it owns.
 	// Convention enforcement, not a security boundary — RBAC restricting
 	// write on inferencereplicas to the OME ServiceAccount is the actual
-	// guard. See .claude/specs/2026-05-27-inference-workload-crd/README.md
-	// §"Access model — controller-only resource".
+	// guard.
 	InferenceReplicaControllerWriteAnnotationKey = OMEAPIGroupName + "/controller-write"
 	InferenceReplicaControllerWriteAnnotationVal = "true"
 )
@@ -509,8 +508,7 @@ const (
 	// PodGroupKind is the scheduler-plugins coscheduling PodGroup
 	// (`scheduling.x-k8s.io/v1alpha1`). Optional — OMENative degrades
 	// gracefully when the CRD is absent (sets the
-	// `GangSchedulingUnavailable=True` Component Condition) per
-	// OEP-0007 §"Gang Scheduling".
+	// `GangSchedulingUnavailable=True` Component Condition).
 	PodGroupKind = "PodGroup"
 )
 

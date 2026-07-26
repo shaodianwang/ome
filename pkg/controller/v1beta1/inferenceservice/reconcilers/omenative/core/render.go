@@ -13,13 +13,12 @@ import (
 )
 
 // RenderWithRevisionForISVC is the (ReconcileParams, plan, inst,
-// runner, ordinal, revisionHash) shape of workload/ops.RenderWithRevision
-// used by the legacy OMENative-on-ISVC dispatch path. Wires the
-// coordination.InjectPeerEnv hook so per-Component peer DNS env vars
-// land on each rendered pod.
+// runner, ordinal, revisionHash) shape of workload/ops.RenderWithRevision.
+// Wires the coordination.InjectPeerEnv hook so per-Component peer DNS
+// env vars land on each rendered pod.
 //
-// Adapter callers in future refactors skip this wrapper and pass the
-// hook directly via Deps.
+// Unused — adapters pass the hook directly via Deps.RenderHook (see
+// ISVCRenderHook); retained for compatibility.
 func RenderWithRevisionForISVC(
 	p ReconcileParams,
 	template *corev1.PodSpec,
@@ -109,8 +108,8 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 
 // WouldOverlayConflictForISVC is the (PodSpec, *MigrationOverlay)
 // wrapper around workload/ops.WouldOverlayConflictWithNodeAffinity.
-// Provided for the legacy ops/migrate.go callers; adapter callers in
-// future refactors use the workload form directly.
+// Unused — adapters use the workload form directly; retained for
+// compatibility.
 func WouldOverlayConflictForISVC(spec *corev1.PodSpec, overlay *workload.MigrationOverlay) bool {
 	return ops.WouldOverlayConflictWithNodeAffinity(spec, overlay)
 }

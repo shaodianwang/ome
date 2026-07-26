@@ -33,7 +33,7 @@ func ingressConfigMap(urlScheme string) *corev1.ConfigMap {
 	}
 }
 
-// TestCreateRawURL_HonorsUrlScheme is the OEP-0023 Part 4 guard: the raw
+// TestCreateRawURL_HonorsUrlScheme is the urlScheme guard: the raw
 // per-component status URL must carry the configured urlScheme, not a hardcoded
 // http.
 func TestCreateRawURL_HonorsUrlScheme(t *testing.T) {

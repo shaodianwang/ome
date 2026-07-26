@@ -122,7 +122,7 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 	}
 
 	// Set status URL, Address, and Addresses — all derived from the same builder
-	// that produces the HTTPRoutes (OEP-0023), so they cannot drift from routing.
+	// that produces the HTTPRoutes, so they cannot drift from routing.
 	return g.setStatusEndpoints(isvc)
 }
 

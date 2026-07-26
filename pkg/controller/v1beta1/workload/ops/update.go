@@ -291,11 +291,11 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 // promote scale-down pass runs — without the guard the spec-bump that
 // triggered the migration would race the surge promote.
 //
-// Exported for the dispatcher (omenative/ops/dispatch.go) which iterates
-// Instances and consults this before invoking Update.
+// Exported for the workload reconcile loop (workload/reconcile.go)
+// which iterates Instances and consults this before invoking Update.
 //
 // Self-lists only on the slow path (empty RunningRevision). The
-// dispatcher's per-reconcile update pass calls DetectUpdateTriggerWithPods
+// reconcile loop's per-Instance update pass calls DetectUpdateTriggerWithPods
 // with the Instance's pods from a single per-Component cached List +
 // bucket, so the rare per-pod fallback doesn't cost one List per Instance.
 //

@@ -1,10 +1,11 @@
 // Package v1beta1 — cross-Component rollout coordination types.
 //
-// RolloutCoordinationSpec is the operator-facing API for declaring how
-// OMENative-managed Components within an InferenceService coordinate
-// during a rollout. It plugs into InferenceServiceSpec as an optional
-// field; absent declaration preserves the historical
-// each-Component-rolls-independently behavior.
+// The operator-facing surface for declaring how OMENative-managed
+// Components within an InferenceService coordinate during a rollout is
+// spec.rollout (see rollout_types.go). The RolloutCoordinationSpec and
+// RolloutCoordinationGroup types below are unused — superseded by
+// spec.rollout — and are retained for compatibility, scheduled for
+// removal. The status and policy/pacing types remain in use.
 package v1beta1
 
 import (
@@ -16,6 +17,9 @@ import (
 // for OMENative-managed Components. Each group lists the Components
 // that roll together and the policy that governs their coordination.
 // Components not listed in any group roll independently.
+//
+// Unused — superseded by spec.rollout (RolloutSpec); retained for
+// compatibility, scheduled for removal.
 type RolloutCoordinationSpec struct {
 	// Groups is the list of coordination groups. Each group binds a
 	// set of Components under one policy. A Component may appear in
@@ -27,6 +31,9 @@ type RolloutCoordinationSpec struct {
 
 // RolloutCoordinationGroup binds a set of Components under one
 // coordination policy.
+//
+// Unused — superseded by spec.rollout.groups[] (RolloutGroup); retained
+// for compatibility, scheduled for removal.
 type RolloutCoordinationGroup struct {
 	// Components lists the Component names included in this group.
 	// Valid values: "router", "engine", "decoder".
@@ -170,8 +177,7 @@ const (
 // the InferenceService.
 type RolloutCoordinationStatus struct {
 	// Groups reports the observed state of each declared
-	// RolloutCoordinationGroup, indexed by position in
-	// spec.rolloutCoordination.groups[].
+	// rollout group, indexed by position in spec.rollout.groups[].
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -186,7 +192,7 @@ type RolloutCoordinationGroupStatus struct {
 	// (stringified) on first observation.
 	Name string `json:"name"`
 
-	// Components mirrors spec.rolloutCoordination.groups[i].components
+	// Components mirrors spec.rollout.groups[i].components
 	// for operator readability.
 	// +listType=atomic
 	Components []ComponentType `json:"components,omitempty"`

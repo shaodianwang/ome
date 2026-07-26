@@ -34,8 +34,9 @@ const DefaultHealthInterval = time.Minute
 // flipped to Ready=False and disconnected. A single failed /version probe (a
 // momentary blip) must not tear down a live, working connection. The operative
 // value is supplied by the manager flag / chart; this is the
-// graceful-degradation default. A non-positive ConnectionGracePeriod disables
-// grace (flip to Ready=False on the first failure — the original behavior).
+// graceful-degradation default. A negative ConnectionGracePeriod disables
+// grace (flip to Ready=False on the first failure); zero means "use this
+// default".
 const DefaultConnectionGracePeriod = 2 * time.Minute
 
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters,verbs=get;list;watch;create;update;patch;delete
@@ -44,7 +45,7 @@ const DefaultConnectionGracePeriod = 2 * time.Minute
 
 // Reconciler reconciles a WorkloadCluster: it resolves the cluster's
 // kubeconfig, probes reachability, and stamps the Ready condition. It does NOT
-// read capacity (OEP-0018) — that is a placer concern in a later phase.
+// read capacity — that is a placer concern.
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -62,7 +63,7 @@ type Reconciler struct {
 	ExecPolicy ExecCredentialPolicy
 	// ConnectionGracePeriod is how long a previously reachable cluster tolerates
 	// transient probe failures before it is flipped to Ready=False and
-	// disconnected; defaults to DefaultConnectionGracePeriod. A non-positive
+	// disconnected; zero defaults to DefaultConnectionGracePeriod. A negative
 	// value disables grace.
 	ConnectionGracePeriod time.Duration
 
@@ -296,7 +297,7 @@ func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (s
 	src := wc.Spec.ClusterSource
 	if src.KubeConfig == nil {
 		return metav1.ConditionFalse, "ClusterProfileUnsupported",
-			"clusterProfileRef is not yet resolved (Phase 1 supports kubeConfig only)", nil
+			"clusterProfileRef is not yet supported; use kubeConfig", nil
 	}
 
 	key := src.KubeConfig.Key

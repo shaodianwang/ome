@@ -1,8 +1,7 @@
 // Package inferencereplica implements the validating admission webhook
 // for the InferenceReplica CRD. InferenceReplica is a controller-only
-// resource (see design doc §"Access model — controller-only resource"):
-// users only ever write InferenceService, and the ISVC controller is the
-// sole writer of InferenceReplica specs.
+// resource: users only ever write InferenceService, and the ISVC
+// controller is the sole writer of InferenceReplica specs.
 //
 // This webhook enforces the convention by rejecting any Create / Update
 // that lacks the ome.io/controller-write=true annotation, and any
@@ -96,8 +95,7 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	// controller-write annotation must NOT also be able to change
 	// spec.parentRef.UID to the wrong parent or move the IR between
 	// Component slots. This is exactly the failure mode webhook gates
-	// exist for. See review §6 (fourth bullet) in
-	// .claude/specs/2026-05-30-code-quality-review/08-inferencereplica-controller.md.
+	// exist for.
 	if req.Operation == admissionv1.Update {
 		oldObj := &v1beta1.InferenceReplica{}
 		if err := v.Decoder.DecodeRaw(req.OldObject, oldObj); err != nil {
@@ -136,11 +134,11 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 		return denyDirectWrite(req.Operation, req.Namespace, req.Name)
 	}
 
-	// OEP-0013: validate the projected Autoscaler block shape. The IR
+	// Validate the projected Autoscaler block shape. The IR
 	// webhook is strict about all spec writes by default (controller-
 	// write annotation gate above); this is defense-in-depth against a
-	// misbehaving controller writing a malformed projection. Decision
-	// Q4 explicitly does NOT block external writes to spec.autoscaler —
+	// misbehaving controller writing a malformed projection. External
+	// writes to spec.autoscaler are deliberately NOT blocked —
 	// the /scale subresource only mutates spec.replicas, so a successful
 	// write here means either the controller did it or someone forged
 	// the annotation. Either way the shape must be valid.
@@ -153,9 +151,7 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	// Pacing.Partition must be <= effective Replicas, otherwise an
 	// over-Partition silently holds every Instance back forever (the
 	// rollout engine treats Partition as a per-index threshold and
-	// freezes any Instance with index < Partition). See review §6
-	// (second bullet) in
-	// .claude/specs/2026-05-30-code-quality-review/08-inferencereplica-controller.md.
+	// freezes any Instance with index < Partition).
 	if err := validateIRPacing(newObj); err != nil {
 		return admission.Denied(fmt.Sprintf(
 			"InferenceReplica %s/%s: %s",
@@ -232,8 +228,7 @@ func isFinalizerOnlyUpdate(oldObj, newObj *v1beta1.InferenceReplica) bool {
 // validation.ValidateAutoscaler directly — the
 // (*ComponentAutoscaler, *int) signature accepts this shape without
 // synthesizing a parent ComponentExtensionSpec. Shared with the
-// InferenceService and ServingRuntime webhooks; see review §4 in
-// .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+// InferenceService and ServingRuntime webhooks.
 func validateIRAutoscaler(ir *v1beta1.InferenceReplica) error {
 	if ir == nil {
 		return nil
@@ -252,8 +247,7 @@ func validateIRAutoscaler(ir *v1beta1.InferenceReplica) error {
 // per-index threshold and freezes any Instance with index < Partition,
 // so Partition >= Replicas freezes the whole replica set. Matches the
 // effective-Replicas default used by convert.desiredFromIR (nil or 0
-// → 1). See review §6 (second bullet) in
-// .claude/specs/2026-05-30-code-quality-review/08-inferencereplica-controller.md.
+// → 1).
 func validateIRPacing(ir *v1beta1.InferenceReplica) error {
 	if ir == nil || ir.Spec.Pacing == nil || ir.Spec.Pacing.Partition == nil {
 		return nil

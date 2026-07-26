@@ -19,7 +19,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OEP-0011 traffic-management integration specs.
+// Traffic-management integration specs.
 //
 // These exercise the traffic.Reconciler directly against a real
 // envtest apiserver with the Envoy Gateway BackendTrafficPolicy CRD
@@ -51,7 +51,7 @@ func newBTP() *unstructured.Unstructured {
 	return u
 }
 
-var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("traffic reconciler", ginkgo.Ordered, func() {
 	var (
 		ns *corev1.Namespace
 		r  *traffic.Reconciler
@@ -585,7 +585,7 @@ var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
 	})
 
 	ginkgo.It("C5: per-endpoint CB annotation + ConsistentHash → BTP carries both blocks (recommended composition)", func() {
-		// Per OEP-0011 README, the perEndpoint CB knob is the
+		// The perEndpoint CB knob is the
 		// recommended pairing with ConsistentHash so a single hot
 		// session can't open many connections to one pod and starve
 		// other sessions sharing the same hash bucket.
@@ -1137,7 +1137,7 @@ var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
 		// Layer (4) weighted HTTPRoute backendRefs was originally written
 		// against ComponentStatusSpec.Traffic []knservingv1.TrafficTarget;
 		// removed during Serverless cleanup and to be re-introduced once
-		// a non-Knative per-revision producer exists. See OEP-0011.
+		// a non-Knative per-revision producer exists.
 	})
 
 	ginkgo.It("I1: empty spec.traffic struct (all fields nil) → HasIntent=false, no BTP emitted", func() {

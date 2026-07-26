@@ -1,5 +1,5 @@
 // Package runtimerevision hosts integration tests for the apps/v1
-// ControllerRevision immutability webhook (OEP-0014 Phase 1).
+// ControllerRevision immutability webhook.
 package runtimerevision
 
 import (

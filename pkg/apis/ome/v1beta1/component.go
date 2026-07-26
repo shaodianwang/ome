@@ -40,8 +40,9 @@ type ComponentExtensionSpec struct {
 	DeploymentStrategy *appsv1.DeploymentStrategy `json:"deploymentStrategy,omitempty"`
 
 	// Lifecycle groups OMENative-specific lifecycle policies for this
-	// Component. Applies only when the Component is annotated
-	// ome.io/deploymentMode=OMENative; ignored otherwise. The status
+	// Component. Applies only when the Component resolves to deploymentMode
+	// OMENative (spec.deploymentMode or the per-Component
+	// ome.io/deploymentMode annotation); ignored otherwise. The status
 	// counterpart is status.components.<component>.lifecycle.
 	// +optional
 	Lifecycle *LifecycleSpec `json:"lifecycle,omitempty"`

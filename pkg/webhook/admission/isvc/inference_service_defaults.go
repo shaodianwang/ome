@@ -100,7 +100,7 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 		defaultRouter(isvc.Spec.Router, resolvedMode)
 	}
 	// Rollout pacing/structure defaults are applied at runtime by the resolve
-	// layer (coordination.ResolveGroups), not at admission — see OEP-0017.
+	// layer (coordination.ResolveGroups), not at admission.
 	return nil
 }
 
@@ -193,7 +193,7 @@ func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
 	return decoder.Worker != nil && decoder.Worker.Size != nil && *decoder.Worker.Size > 0
 }
 
-// defaultOMENativeComponent fills in OEP-0007 lifecycle-policy defaults on
+// defaultOMENativeComponent fills in lifecycle-policy defaults on
 // the Component's omenative sub-block. Only acts when the Component
 // resolves to OMENative — either via its own
 // ome.io/deploymentMode annotation or via the top-level
@@ -203,17 +203,12 @@ func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
 // restart + AllPodReady aggregation; a single-pod Instance defaults to
 // None for both.
 //
-// OEP-0007 multi-node Phase 3 multi-pod defaults (re-stated for
-// documentation; the rules below were already in place but Phase 3
-// pins them by explicit test):
+// Multi-pod defaults:
 //
-//   - RestartPolicy = RecreateInstanceOnPodRestart (gang restart;
-//     OEP-0007 §"Restart Policy")
+//   - RestartPolicy = RecreateInstanceOnPodRestart (gang restart)
 //   - ReadyPolicy = AllPodReady (Instance Ready iff every pod Ready)
 //   - UpdateStrategy.Type = SurgeThenDrain (same default as single-pod;
-//     the execution falls back to recreate for multi-pod per Phase-1
-//     sign-off in #242, and lights up automatically when Phase 5
-//     multi-pod surge ships — no operator spec churn needed)
+//     multi-pod gangs surge as a unit via the gang-surge path)
 func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod bool, specMode *constants.DeploymentModeType) {
 	if ext == nil {
 		return
@@ -240,10 +235,10 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	if spec.UpdateStrategy.Type == "" {
 		// SurgeThenDrain is the default. Single-pod Instances get a real
 		// zero-downtime surge (new pod at the alternate ordinal, drain
-		// the old, promote); multi-pod gangs currently fall back to
-		// recreate because per-gang-member surge ordinal allocation is
-		// not yet implemented. Either way it is safer than in-place
-		// because the dispatcher's MaxUnavailable gate throttles drains.
+		// the old, promote); multi-pod gangs surge a whole replacement
+		// gang at a fresh surge index before the source drains. Either
+		// way it is safer than in-place because the MaxUnavailable gate
+		// throttles drains.
 		spec.UpdateStrategy.Type = v1beta1.UpdateStrategySurgeThenDrain
 	}
 	if spec.UpdateStrategy.InPlaceUpdateStrategy == nil {

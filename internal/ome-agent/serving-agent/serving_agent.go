@@ -31,7 +31,7 @@ type ServingSidecar struct {
 	Config Config
 }
 
-// NewServingSidecar constructs a new replica agent from the given configuration.
+// NewServingSidecar constructs the serving sidecar from the given configuration.
 func NewServingSidecar(config *Config) (*ServingSidecar, error) {
 	return &ServingSidecar{
 		logger: config.AnotherLogger,

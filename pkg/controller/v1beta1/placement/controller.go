@@ -67,13 +67,13 @@ type ClusterClients interface {
 	Connected() []string
 }
 
-// Reconciler is the OEP-0018 control-plane fan-out controller. It clones the
+// Reconciler is the control-plane fan-out controller. It clones the
 // derived ISVC onto every matched candidate cluster, lets each cluster's Kueue
 // gate the pods, declares the first candidate (by sorted name) whose Kueue admits
 // the pods the winner, deletes the losers, and re-places if the winner is later
 // lost. It runs ONLY on the control-plane cluster, where the local ISVC->pods
-// reconciler is disabled. Status refresh is poll-based (the remote watch-funnel
-// is Phase 3c).
+// reconciler is disabled. Status refresh is event-driven via the remote
+// watch funnel, with a poll fallback (the Requeue cadence).
 type Reconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme

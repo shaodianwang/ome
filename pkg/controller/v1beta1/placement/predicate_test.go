@@ -22,10 +22,10 @@ func wcWithReady(status metav1.ConditionStatus, labels map[string]string) *v1bet
 // Routine status heartbeats (Ready unchanged, labels unchanged) must NOT
 // re-enqueue ISVCs — this is the fan-out the predicate exists to suppress.
 func TestPlacementRelevantClusterChange_DropsHeartbeat(t *testing.T) {
-	wc := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "use2"})
+	wc := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "region-a"})
 	// Same readiness + labels, a fresh re-stamp of the Ready condition (new
 	// LastTransitionTime / resourceVersion the heartbeat would carry).
-	updated := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "use2"})
+	updated := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "region-a"})
 	assert.False(t, placementRelevantClusterChange.Update(event.UpdateEvent{ObjectOld: wc, ObjectNew: updated}))
 }
 
@@ -39,7 +39,7 @@ func TestPlacementRelevantClusterChange_ReadyFlip(t *testing.T) {
 
 // A label change can change which clusters a selector matches and MUST re-enqueue.
 func TestPlacementRelevantClusterChange_LabelChange(t *testing.T) {
-	old := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "use2"})
+	old := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "region-a"})
 	updated := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "usw2"})
 	assert.True(t, placementRelevantClusterChange.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: updated}))
 }

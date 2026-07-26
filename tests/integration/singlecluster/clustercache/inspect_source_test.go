@@ -50,7 +50,7 @@ func singleConfigJSONManifest(rootURI, configPath string, size uint64) fileMetad
 // InspectSource integration through the real clustercache provider.
 // CheckSource pins SourceReachable=True via /file_metadata; this suite
 // pins what happens *after* that — the metadata extraction state
-// machine that PR #123 (lazy-fetch) introduced and that has zero
+// machine that lazy-fetch introduced and that has zero
 // pre-existing integration coverage.
 var _ = ginkgo.Describe("ClusterCache InspectSource → MetadataExtracted state machine", ginkgo.Ordered, func() {
 
@@ -122,7 +122,7 @@ var _ = ginkgo.Describe("ClusterCache InspectSource → MetadataExtracted state 
 		// with NO requeue — only an operator-driven spec change can
 		// re-trigger. Pinning this prevents a regression where a
 		// structural fault degrades into a MetadataPending retry loop
-		// (the pre-#123 behavior, which the unit test
+		// (the eager-fetch behavior, which the unit test
 		// TestInspectSourceRequiresConfigOrModelIndex explicitly calls
 		// out as the wrong outcome).
 		const root = "s3://bucket/safetensors-only-no-config"

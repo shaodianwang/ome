@@ -3,10 +3,9 @@
 // create, retention.
 //
 // Boundary: this package is a leaf. It depends on Kubernetes API
-// machinery and the workload package's own type set; the v1beta1
-// import was removed in the workload-extraction refactor — adapters
-// convert from CRD-typed status into workload.InstanceStatus before
-// calling CollectLiveRevisionNames. The labels stamped on emitted CRs
+// machinery and the workload package's own type set; it does not
+// import v1beta1 — adapters convert from CRD-typed status into
+// workload.InstanceStatus before calling CollectLiveRevisionNames. The labels stamped on emitted CRs
 // are taken from the caller-supplied revision.Key so the same labels
 // carry through the pod-selector composition the rest of the workload
 // pipeline does.
@@ -282,11 +281,11 @@ func PayloadFromControllerRevision(cr *appsv1.ControllerRevision) (*DataPayload,
 // the hash — `<key.Name>-<hash>`. Deterministic, so "reuse-if-exists"
 // works.
 //
-// For the ISVC adapter, key.Name = "<isvc>-<component>", producing the
-// same name shape (`<isvc>-<component>-<hash>`) that existed pre-refactor.
-// IR-adapter callers set key.Name the same way (since one IR is one
-// (ISVC, Component) tuple), so cross-adapter CRs share the same name and
-// the in-place migration window stays seamless.
+// The ISVC adapter sets key.Name = "<isvc>-<component>", producing
+// `<isvc>-<component>-<hash>`. IR-adapter callers set key.Name the same
+// way (since one IR is one (ISVC, Component) tuple), so cross-adapter
+// CRs share the same name and the in-place migration window stays
+// seamless.
 func Name(key Key, hash string) string {
 	return fmt.Sprintf("%s-%s", key.Name, hash)
 }

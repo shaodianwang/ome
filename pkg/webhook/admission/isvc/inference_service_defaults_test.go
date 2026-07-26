@@ -204,7 +204,7 @@ func TestDeploymentModeDetection(t *testing.T) {
 // the leader+worker heuristic (no spec.deploymentMode, no per-component
 // annotation) must still get the rollout budget defaults. Before the fix,
 // componentResolvesToOMENative only saw the per-component annotation + spec
-// field, so the whole defaulter (including the #619 25% budgets) was skipped for
+// field, so the whole defaulter (including the 25% budgets) was skipped for
 // these shapes, leaving the rollout uncapped.
 func TestDefaultInferenceService_OMENativeBudgetViaAnnotationAndHeuristic(t *testing.T) {
 	mnEngine := func() *v1beta1.EngineSpec {
@@ -569,8 +569,8 @@ func TestDefaultRouter_OMENativeAlwaysSinglePod(t *testing.T) {
 	assert.Equal(t, v1beta1.InstanceRestartPolicyNone, *router.Lifecycle.RestartPolicy)
 }
 
-// TestDefaultWorkerSize_MultiPodWithoutSize covers the OEP-0007
-// Phase-3 defaulter rule that Worker.Size = nil with Leader set is
+// TestDefaultWorkerSize_MultiPodWithoutSize covers the
+// defaulter rule that Worker.Size = nil with Leader set is
 // treated as "minimum-viable multi-pod" (Size=1). The downstream
 // engineIsMultiPod / decoderIsMultiPod detection sees the defaulted
 // Size and the gang lifecycle policies kick in.
@@ -660,8 +660,8 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 	})
 }
 
-// TestDefaultOMENativeComponent_MultiPodPhase3 pins the OEP-0007
-// Phase-3 multi-pod defaulter rules as a single explicit before/after
+// TestDefaultOMENativeComponent_MultiPodDefaults pins the
+// multi-pod defaulter rules as a single explicit before/after
 // test, complementing TestDefaultOMENativeComponent which already
 // covers the underlying mechanic.
 //
@@ -669,8 +669,8 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 //   - RestartPolicy → RecreateInstanceOnPodRestart
 //   - ReadyPolicy   → AllPodReady
 //   - UpdateStrategy.Type → SurgeThenDrain (same as single-pod;
-//     execution falls back to recreate per Phase-1 sign-off)
-func TestDefaultOMENativeComponent_MultiPodPhase3(t *testing.T) {
+//     multi-pod gangs surge as a unit via the gang-surge path)
+func TestDefaultOMENativeComponent_MultiPodDefaults(t *testing.T) {
 	ext := &v1beta1.ComponentExtensionSpec{
 		Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 	}
@@ -684,7 +684,7 @@ func TestDefaultOMENativeComponent_MultiPodPhase3(t *testing.T) {
 	require.NotNil(t, ext.Lifecycle)
 	require.NotNil(t, ext.Lifecycle.RestartPolicy)
 	assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *ext.Lifecycle.RestartPolicy,
-		"multi-pod must default to RecreateInstanceOnPodRestart per OEP-0007 §Restart Policy")
+		"multi-pod must default to RecreateInstanceOnPodRestart (gang restart)")
 
 	require.NotNil(t, ext.Lifecycle.ReadyPolicy)
 	assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *ext.Lifecycle.ReadyPolicy,
@@ -692,12 +692,12 @@ func TestDefaultOMENativeComponent_MultiPodPhase3(t *testing.T) {
 
 	require.NotNil(t, ext.Lifecycle.UpdateStrategy)
 	assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, ext.Lifecycle.UpdateStrategy.Type,
-		"multi-pod must default to SurgeThenDrain — same as single-pod — so Phase 5 lights up auto")
+		"multi-pod must default to SurgeThenDrain — same as single-pod")
 }
 
-// TestDefaultOMENativeComponent_SinglePodPhase3 confirms the
-// Phase-3 rules do NOT affect single-pod defaulting.
-func TestDefaultOMENativeComponent_SinglePodPhase3(t *testing.T) {
+// TestDefaultOMENativeComponent_SinglePodDefaults confirms the
+// multi-pod rules do NOT affect single-pod defaulting.
+func TestDefaultOMENativeComponent_SinglePodDefaults(t *testing.T) {
 	ext := &v1beta1.ComponentExtensionSpec{
 		Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 	}
@@ -736,9 +736,3 @@ func TestDefault(t *testing.T) {
 		assert.Contains(t, err.Error(), "expected an InferenceService object but got")
 	})
 }
-
-// OEP-0017: the webhook defaultRolloutCoordination helper was removed when the
-// v1 coordination spec collapsed into the v2 rollout groups model. Rollout
-// pacing/structure defaults are now supplied at runtime by the resolve layer,
-// not at admission, so the per-group pacing-default webhook tests that lived
-// here no longer have a function to exercise and were deleted.

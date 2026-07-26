@@ -23,7 +23,7 @@ const ClusterLocalEndpointClass = "cluster-local"
 // Endpoint is one reachable endpoint for an InferenceService route: the tuple
 // (class, host, path, scheme) the status writer publishes, derived from the same
 // logic that builds the HTTPRoute hosts + paths so status and routing cannot
-// drift (OEP-0023 Part 1). Host + Path together form the reachable URL
+// drift. Host + Path together form the reachable URL
 // "<Scheme>://<Host><Path>"; in the shared-host scheme Path is the load-bearing
 // "/<namespace>/<service>/" prefix, and "/" in the per-ISVC-subdomain scheme.
 type Endpoint struct {
@@ -51,7 +51,7 @@ type HTTPRouteBuilder interface {
 	// serviceName ("<isvc>" for the top-level route, "<isvc>-engine" etc. for a
 	// component), one per gateway the route attaches to. It is derived from the
 	// same gateway/host/path logic as BuildHTTPRoute so status never drifts from
-	// the actual routing (OEP-0023 Part 1).
+	// the actual routing.
 	Endpoints(isvc *v1beta1.InferenceService, serviceName string) ([]Endpoint, error)
 }
 

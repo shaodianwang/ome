@@ -45,10 +45,10 @@ var terminalPullFailureReasons = map[string]struct{}{
 	// with broken entrypoint. Permanent until the spec changes — even
 	// if the pod briefly transitions through Running between attempts,
 	// the kubelet's stable steady-state for a wedged container is
-	// Waiting{Reason=CrashLoopBackOff}. Closes the follow-up where a
-	// bumped image that pulls cleanly but crashes immediately was not
-	// classified as terminal and the rollout sat at Phase=Updating for
-	// the full 30-minute InstanceReadyTimeout.
+	// Waiting{Reason=CrashLoopBackOff}. Without terminal
+	// classification here, a bumped image that pulls cleanly but
+	// crashes immediately would sit at Phase=Updating until
+	// InstanceReadyTimeout expires.
 	"CrashLoopBackOff": {},
 	// RunContainerError signals the container runtime rejected the
 	// start (corrupt manifest, missing required shared libraries,
@@ -270,9 +270,10 @@ func CountReadyInstances(insts []InstanceStatus, desiredByIdx map[int32]int32) i
 }
 
 // CountServingInstances counts Instances whose desired-many pods are
-// BOTH ContainersReady AND serving=True. This is the count
-// CheckUnavailabilityGate uses — "instances actually in the load
-// balancer rotation right now."
+// BOTH ContainersReady AND serving=True. This is the count the
+// coordination unavailability gate (GateContext.CheckUnavailability)
+// works from — "instances actually in the load balancer rotation
+// right now."
 func CountServingInstances(insts []InstanceStatus, desiredByIdx map[int32]int32) int32 {
 	var n int32
 	for _, s := range insts {
@@ -563,8 +564,8 @@ func disposableAttempt(s *InstanceStatus, desiredPods int32) bool {
 // Adapter-agnostic by construction: writes Phase=Failed via
 // input.MutateInstance, emits the operator-facing event via
 // input.WarnInstanceFailed. The ISVC adapter wires both behind
-// status.MutateInstance / status.RecordWarning; the IR adapter will
-// wire its own equivalents.
+// status.MutateInstance / status.RecordWarning; the IR adapter wires
+// its own equivalents.
 func EscalateStuckPodFailures(ctx context.Context, deps Deps, input ReconcileInput, p EscalationParams) error {
 	if p.StuckPodGrace <= 0 {
 		return nil
@@ -669,11 +670,9 @@ func ShouldCheckForStuckPods(s *InstanceStatus, pods []*corev1.Pod, currentHash,
 }
 
 // StampInstanceFailedForStuckPod escalates Phase to Failed via
-// input.MutateInstance. Mirrors the omenative-side
-// stampInstanceFailedForStuckPod guard logic: a fresh-empty slot
-// (Phase=="") is treated as a sentinel for "resurrected slot, don't
-// touch", a Phase=Failed slot is a no-op, and any other Phase flips to
-// Failed.
+// input.MutateInstance. Guard logic: a fresh-empty slot (Phase=="") is
+// treated as a sentinel for "resurrected slot, don't touch", a
+// Phase=Failed slot is a no-op, and any other Phase flips to Failed.
 //
 // The Operation field is preserved (when present) — operators want to
 // see WHAT was in flight when the kubelet wedge surfaced. termination,

@@ -16,7 +16,7 @@ import (
 )
 
 // Overlay end-to-end. Each spec asserts the controller renders the
-// expected pod-spec shape per the OEP-0010 contract:
+// expected pod-spec shape per the overlay contract:
 //
 //   - PVC / PerNode overlay → Volume + VolumeMount at
 //     /opt/ml/model-overlays/<name> (ReadOnly)

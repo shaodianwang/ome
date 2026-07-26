@@ -33,7 +33,7 @@ func WithISVCModelCacheProvider(p sharded.Provider) InferenceServiceOption {
 	return func(o *inferenceServiceOpts) { o.modelCacheProvider = p }
 }
 
-// WithTrafficTranslator pins the active OEP-0011 traffic translator
+// WithTrafficTranslator pins the active traffic translator
 // for the test. When unset, SetupInferenceService runs the factory
 // against the manager's rest.Config so the translator matches what
 // the cluster's installed CRDs would yield in production (Envoy

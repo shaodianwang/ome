@@ -11,9 +11,8 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// OEP-0007 multi-node validation reason constants. Operators and the
-// test plan (.claude/specs/2026-05-27-multi-node-real-cluster-tests
-// §M-E) reference these by name, so they're exported and stable.
+// Multi-node validation reason constants. Operators reference these
+// by name, so they're exported and stable.
 const (
 	// ReasonInvalidLeaderWorkerPairing is the legacy umbrella reason
 	// for any leader/worker shape mismatch. Retained for back-compat
@@ -38,7 +37,7 @@ const (
 	ReasonWorkerRequiresLeader = "WorkerRequiresLeader"
 
 	// ReasonLeaderSizeMustBeOne rejects user attempts to scale the
-	// leader Runner above 1. OEP-0007 fixes leader at size=1: the
+	// leader Runner above 1. The leader is fixed at size=1: the
 	// OME_LEADER_ADDRESS contract resolves to a single
 	// <isvc>-<comp>-<inst>-leader-0 FQDN, so multiple leaders would
 	// produce ambiguous DNS. LeaderSpec has no explicit Size field
@@ -49,7 +48,7 @@ const (
 	// ReasonMultiPodLeanModelNeedsRunner rejects lean (no spec.model,
 	// no spec.runtime) ISVCs that declare a multi-pod Component
 	// without populating both leader.runner.image and
-	// worker.runner.image. The lean path is supported per #249, but
+	// worker.runner.image. The lean path is supported, but
 	// multi-pod lean specs cannot be filled in by runtime selection
 	// (no runtime) or model parsing (no model), so the operator must
 	// supply images explicitly.
@@ -63,8 +62,7 @@ const (
 	// never finish reconciling. Defaulted nil values are not zero —
 	// the defaulter fills 25% for both — so this reason only fires when
 	// the operator has explicitly set both to 0. Mirrored as a runtime
-	// safety net in pkg/.../coordination/groups.go:266. Reproduces W-2
-	// in .claude/specs/2026-05-25-real-cluster-tests/README.md.
+	// safety net in the coordination groups resolver.
 	ReasonZeroBudgetPacingUnstartable = "ZeroBudgetPacingUnstartable"
 )
 
@@ -90,7 +88,7 @@ func ValidateEngineDecoderConfig(spec *v1beta1.InferenceServiceSpec) error {
 //
 // Error strings embed both the legacy "InvalidLeaderWorkerPairing"
 // reason (for back-compat with operators / tests grepping for it) and
-// a more-specific reason from the OEP-0007 reason constants.
+// a more-specific reason from the reason constants above.
 func ValidateLeaderWorkerPairing(spec *v1beta1.InferenceServiceSpec) error {
 	if spec.Engine != nil {
 		if err := validateLeaderWorkerPairing("engine", spec.Engine.Leader, spec.Engine.Worker); err != nil {
@@ -131,7 +129,7 @@ func validateLeaderWorkerPairing(component string, leader *v1beta1.LeaderSpec, w
 }
 
 // ValidateLeaderSize enforces that no Component sets a leader Runner
-// size greater than 1. OEP-0007 fixes the leader at size=1: the
+// size greater than 1. The leader is fixed at size=1: the
 // OME_LEADER_ADDRESS env var that workers (and the leader itself)
 // consult resolves to <isvc>-<comp>-<inst>-leader-0; a second leader
 // pod would shadow the DNS contract and break tensor-parallel
@@ -176,7 +174,7 @@ func validateLeaderSize(component string, spec interface{}) error {
 // ValidateMultiPodLeanRunner enforces that a lean (no spec.model AND
 // no spec.runtime) InferenceService declaring a multi-pod Component
 // (Engine or Decoder) populates both leader.runner.image and
-// worker.runner.image. Per #249, lean ISVCs are supported for the
+// worker.runner.image. Lean ISVCs are supported for the
 // single-pod path because the operator supplies a single Runner
 // image. For multi-pod the controller renders distinct PodSpecs for
 // leader and worker — without a runtime or model to fill in defaults,
@@ -338,7 +336,7 @@ func ValidateReplicaBounds(min, max *int) error {
 //
 // KEDA opt-in is accepted via either route:
 //
-//   - OEP-0013 typed per-Component field: spec.<component>.autoscaler.class
+//   - Typed per-Component field: spec.<component>.autoscaler.class
 //     == KEDA (v1beta1.AutoscalerKEDA, "KEDA"). This is the preferred
 //     surface and is evaluated PER Component — the specific Component that
 //     sets MinReplicas=0 must itself be KEDA-autoscaled.
@@ -456,7 +454,7 @@ func ValidateHPAMetrics(metric string) error {
 	return fmt.Errorf("[%s] is not a supported metric", metric)
 }
 
-// OEP-0013 webhook validation reason constants. Operators and the
+// Autoscaler webhook validation reason constants. Operators and the
 // envtest suite (.../webhook/inferenceservice) reference these by
 // name, so they're exported and stable.
 const (
@@ -489,7 +487,7 @@ const (
 
 	// ReasonAutoscalerAnnotationConflict rejects an ISVC that carries
 	// both the legacy ome.io/autoscalerClass annotation AND a new
-	// Autoscaler block on any Component. Per OEP-0013 Decision Q2, the
+	// Autoscaler block on any Component. The
 	// per-Component Autoscaler block wins; this validation pre-empts
 	// confusion by forcing operators to remove the annotation.
 	ReasonAutoscalerAnnotationConflict = "AutoscalerAnnotationConflict"
@@ -544,15 +542,12 @@ func ValidateComponentsAutoscalers(checks []ComponentAutoscalerCheck) error {
 	return nil
 }
 
-// ValidateAutoscaler is the core per-Component Autoscaler shape check
-// per OEP-0013 "Webhook validation" (oeps/0013/README 1103-1142),
-// filtered by the user-locked decisions (5.Decisions in
-// .claude/specs/2026-05-29-oep-0013-wiring-plan/plan.md):
+// ValidateAutoscaler is the core per-Component Autoscaler shape check:
 //
-//   - Q5: `none` and `external` are status-field twins; both are
+//   - `none` and `external` are status-field twins; both are
 //     accepted at the webhook layer with no Class-specific shape
 //     requirements.
-//   - Q6: the KEDA-installed probe is removed entirely; cluster
+//   - There is no KEDA-installed probe; the cluster
 //     contract is "KEDA is always present". The webhook does not
 //     validate KEDA availability.
 //
@@ -566,7 +561,7 @@ func ValidateComponentsAutoscalers(checks []ComponentAutoscalerCheck) error {
 //  3. class=hpa with HPA.Metrics: every entry's declared Type must have
 //     the corresponding pointer-field populated (Type=Resource ⇒
 //     Resource != nil, etc.). HPA.Metrics empty/nil is allowed — the
-//     controller defaults to CPU=80% per OEP backcompat table 1148.
+//     controller defaults to CPU=80%.
 //  4. class=keda with both Keda.IdleReplicaCount and the supplied
 //     minReplicas set: IdleReplicaCount must be strictly less than
 //     minReplicas.
@@ -699,7 +694,7 @@ func validateHPAMetricSpec(idx int, m autoscalingv2.MetricSpec) error {
 
 // ValidateAutoscalerAnnotationConflict rejects an InferenceService that
 // declares the legacy ome.io/autoscalerClass annotation AND a new
-// Autoscaler block on any Component. Per Decision Q2 (plan §5), the
+// Autoscaler block on any Component. The
 // per-Component Autoscaler block wins; this validator pre-empts confusion
 // by forcing the operator to pick one.
 //

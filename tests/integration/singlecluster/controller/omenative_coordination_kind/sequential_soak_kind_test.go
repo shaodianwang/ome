@@ -38,11 +38,10 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// PIt: PARKED — real product bug (racy soak arming) + fragile test.
+	// PARKED — real product bug (racy soak arming) + fragile test.
 	//
-	// Root cause (verified on KIND 2026-05-29, not the stale claim below):
-	// #237 fixed the soak gate's timestamp SOURCE (it now reads the prior
-	// Component's Available-condition LastTransitionTime, not the group
+	// Root cause: the soak gate reads its timestamp from the prior
+	// Component's Available-condition LastTransitionTime (not the group
 	// Phase's). The gate LOGIC is correct — sequential_gate_test.go proves
 	// it denies engine when handed a fresh decoder-Available timestamp.
 	// What remains broken is soak ARMING: both the action-side

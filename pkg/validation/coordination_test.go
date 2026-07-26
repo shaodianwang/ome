@@ -91,31 +91,6 @@ func TestValidateCoordination_ComponentMustBeOMENative(t *testing.T) {
 	}
 }
 
-// OEP-0017: the Sequential policy is gone — cross-Component sequencing is now
-// expressed as separate single-Component groups in list order, so
-// "Sequential without order", "Sequential incomplete order", and
-// "Sequential single component" are not v2 concepts. The validator no longer
-// has those rules (the v1 Sequential reason constants were removed). Tests
-// below are skipped and flagged for human review.
-func TestValidateCoordination_SequentialWithoutOrder(t *testing.T) {
-	t.Skip("OEP-0017: Sequential policy removed; ordering is now group list order, no SequentialRequiresOrder rule")
-}
-
-func TestValidateCoordination_SequentialIncompleteOrder(t *testing.T) {
-	t.Skip("OEP-0017: Sequential policy removed; per-group Order must only subset the group's own components, no whole-fleet completeness rule")
-}
-
-func TestValidateCoordination_SequentialSingleComponentRejected(t *testing.T) {
-	t.Skip("OEP-0017: Sequential policy removed; a single-Component group is the canonical v2 spelling and is valid")
-}
-
-// OEP-0017: v2 places no minimum-component requirement on a rollingUpdate group;
-// a single-Component rollingUpdate group is valid. ReasonRollingUpdateRequires-
-// MultipleComponents is no longer emitted. Skipped and flagged.
-func TestValidateCoordination_RollingUpdateSingleComponentRejected(t *testing.T) {
-	t.Skip("OEP-0017: single-Component rollingUpdate groups are valid; no RollingUpdateRequiresMultipleComponents rule")
-}
-
 func TestValidateCoordination_InvalidOrderComponent(t *testing.T) {
 	// Order references router, which is not one of the group's components → the
 	// per-group order-subset rule rejects it (still enforced in v2).
@@ -161,21 +136,6 @@ func TestValidateCoordination_HappyPath_Sequential(t *testing.T) {
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("happy sequential: unexpected error %v", err)
 	}
-}
-
-// OEP-0017: W-1 (Sequential + RatioBalanced is meaningless) is gone — there is no
-// Sequential policy and no RatioBalanced pacing knob in v2. MaintainRatio is a
-// per-group field that only attaches to multi-Component groups; a single-Component
-// (Sequential-spelled) group simply has no MaintainRatio. Nothing to reject.
-func TestValidateCoordination_SequentialWithRatioBalancedRejected(t *testing.T) {
-	t.Skip("OEP-0017: no Sequential policy and no RatioBalanced pacing; SequentialIncompatibleWithRatioBalanced not applicable")
-}
-
-// OEP-0017: Sequential + PerComponent pacing is gone. The positive intent
-// (sequenced rollout is accepted) is preserved by the HappyPath_Sequential test;
-// the PerComponent pacing knob has no v2 equivalent on BlueGreen-spelled groups.
-func TestValidateCoordination_SequentialWithPerComponentPacingAccepted(t *testing.T) {
-	t.Skip("OEP-0017: PerComponent pacing knob removed; sequenced-rollout acceptance covered by HappyPath_Sequential")
 }
 
 // Positive case: a multi-Component group guarding the cross-Component ratio

@@ -20,7 +20,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OEP-0014 Phase 1 ISVC pinning tests. Covers all combinations of
+// ISVC pinning tests. Covers all combinations of
 // (autoSync default vs explicit), drift / ack, explicit revision
 // rollback, deletion recovery, and naming.
 //
@@ -28,7 +28,7 @@ import (
 // The suite creates that namespace once via BeforeAll; specs query
 // it for find-by-runtime label scans.
 
-var _ = ginkgo.Describe("InferenceService pinning (OEP-0014 Phase 1)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("InferenceService pinning", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeAll(func() {
 		err := k8sClient.Create(suiteCtx, &corev1.Namespace{
@@ -539,7 +539,7 @@ var _ = ginkgo.Describe("InferenceService pinning (OEP-0014 Phase 1)", ginkgo.Or
 	})
 
 	// =========================================================================
-	// DELETION RECOVERY — the core OEP-0014 value proposition
+	// DELETION RECOVERY — the core pinning value proposition
 	// =========================================================================
 
 	ginkgo.When("the pinned ISVC's Deployment is deleted while runtime has drifted", func() {

@@ -417,7 +417,7 @@ func TestValidateAutoscalerConfig(t *testing.T) {
 }
 
 // TestValidateLeaderWorkerPairing_ReasonConstants confirms the
-// OEP-0007 Phase-3 reason constants appear in the error strings the
+// Multi-node validation reason constants appear in the error strings the
 // validator emits. Operators and the M-E webhook test suite grep for
 // these exact tokens.
 func TestValidateLeaderWorkerPairing_ReasonConstants(t *testing.T) {
@@ -540,7 +540,7 @@ func TestValidateLeaderSize(t *testing.T) {
 	}
 }
 
-// TestValidateMultiPodLeanRunner covers the OEP-0007 Phase-3 rule
+// TestValidateMultiPodLeanRunner covers the rule
 // that a lean (no spec.model, no spec.runtime) multi-pod ISVC must
 // declare both leader.runner.image and worker.runner.image. The
 // controller has no defaulting source for those images.
@@ -667,7 +667,7 @@ func TestValidateMultiPodLeanRunner(t *testing.T) {
 }
 
 // TestValidateComponentAutoscaler is the table-driven coverage for
-// OEP-0013 webhook validation of the new per-Component Autoscaler
+// Webhook validation of the per-Component Autoscaler
 // block. The cases mirror the user-locked decisions in
 // .claude/specs/2026-05-29-oep-0013-wiring-plan/plan.md §5:
 //
@@ -1072,7 +1072,7 @@ func TestValidateComponentsAutoscalers(t *testing.T) {
 	})
 }
 
-// TestValidateAutoscalerAnnotationConflict covers the OEP-0013 rule
+// TestValidateAutoscalerAnnotationConflict covers the rule
 // that the legacy ome.io/autoscalerClass annotation cannot coexist
 // with a new per-Component Autoscaler block (Decision Q2 — the
 // per-Component Autoscaler block wins; this validator pre-empts the
@@ -1209,7 +1209,7 @@ func TestValidateAutoscalerTargetUtilizationPercentage(t *testing.T) {
 	}
 }
 
-// TestValidateLegacyAutoscalerFieldsRaw exercises the OEP-0013
+// TestValidateLegacyAutoscalerFieldsRaw exercises the
 // defense-in-depth check that rejects requests carrying the deleted
 // scaleTarget / scaleMetric fields with a friendly migration message.
 // Most paths NEVER trigger in practice (CRD schema pruning drops the
@@ -1296,7 +1296,7 @@ func TestValidateLegacyAutoscalerFieldsRaw(t *testing.T) {
 
 // TestValidateScaleToZero covers the MinReplicas=0 KEDA gate. The two
 // accept-paths are (a) the legacy whole-ISVC ome.io/autoscalerClass=keda
-// annotation and (b) the OEP-0013 typed per-Component
+// annotation and (b) the typed per-Component
 // spec.<component>.autoscaler.class=KEDA block. The typed path is
 // evaluated PER Component: a zero-replica Component must itself be
 // KEDA-autoscaled — a KEDA block on a *different* Component does not
@@ -1336,7 +1336,7 @@ func TestValidateScaleToZero(t *testing.T) {
 			},
 		},
 		{
-			name: "engine MinReplicas=0 with typed KEDA autoscaler — accepted (OEP-0013)",
+			name: "engine MinReplicas=0 with typed KEDA autoscaler — accepted",
 			isvc: &v1beta1.InferenceService{
 				Spec: v1beta1.InferenceServiceSpec{
 					Engine: &v1beta1.EngineSpec{
@@ -1349,7 +1349,7 @@ func TestValidateScaleToZero(t *testing.T) {
 			},
 		},
 		{
-			name: "decoder MinReplicas=0 with typed KEDA autoscaler — accepted (OEP-0013)",
+			name: "decoder MinReplicas=0 with typed KEDA autoscaler — accepted",
 			isvc: &v1beta1.InferenceService{
 				Spec: v1beta1.InferenceServiceSpec{
 					Decoder: &v1beta1.DecoderSpec{
@@ -1362,7 +1362,7 @@ func TestValidateScaleToZero(t *testing.T) {
 			},
 		},
 		{
-			name: "router MinReplicas=0 with typed KEDA autoscaler — accepted (OEP-0013)",
+			name: "router MinReplicas=0 with typed KEDA autoscaler — accepted",
 			isvc: &v1beta1.InferenceService{
 				Spec: v1beta1.InferenceServiceSpec{
 					Router: &v1beta1.RouterSpec{

@@ -13,11 +13,11 @@ import (
 func TestWorkloadClusterRoundTrip(t *testing.T) {
 	wc := &WorkloadCluster{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "ome.io/v1beta1", Kind: "WorkloadCluster"},
-		ObjectMeta: metav1.ObjectMeta{Name: "cw-use2-2", Labels: map[string]string{"gpu": "gb300"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-a", Labels: map[string]string{"gpu": "gb300"}},
 		Spec: WorkloadClusterSpec{
 			ClusterSource: ClusterConnectionSource{
 				KubeConfig: &KubeConfigSource{
-					SecretRef: corev1.SecretReference{Name: "cw-use2-2-kubeconfig", Namespace: "ome-system"},
+					SecretRef: corev1.SecretReference{Name: "cluster-a-kubeconfig", Namespace: "ome-system"},
 					Key:       "kubeconfig",
 				},
 			},

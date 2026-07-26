@@ -190,11 +190,11 @@ func annotationsDiff(podAnnotations, previousTargetAnnotations, newTargetAnnotat
 // metadata.annotations to reconcile it toward the target revision's
 // PodMeta. previousTargetAnnotations is the running revision's PodMeta
 // (used to compute which keys OMENative owns and is allowed to
-// delete). Idempotent — no patch is issued when the diff is empty
-// (closes Bug #51: in-place updates previously left
-// pod.metadata.annotations stuck at the value the pod was created with,
-// so spec.{component}.annotations edits during an in-place-eligible
-// rollout never reached the pod).
+// delete). Idempotent — no patch is issued when the diff is empty.
+// Without this reconcile, in-place updates would leave
+// pod.metadata.annotations stuck at the value the pod was created
+// with, so spec.{component}.annotations edits during an
+// in-place-eligible rollout would never reach the pod.
 func patchPodAnnotations(ctx context.Context, c client.Client, pod *corev1.Pod, previousTargetAnnotations, newTargetAnnotations map[string]string) error {
 	if pod == nil {
 		return fmt.Errorf("patchPodAnnotations: nil pod")

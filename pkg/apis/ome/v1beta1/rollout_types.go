@@ -110,9 +110,10 @@ type GroupCanary struct {
 	Steps []RolloutGroupStep `json:"steps,omitempty"`
 
 	// Prometheus is the metrics source (connection) shared by every analysis step
-	// in this canary: where to query and how to authenticate. When omitted, the
-	// controller targets the bundled Prometheus Service
-	// (http://ome-prometheus.<namespace>.svc:9090). It is only the source — WHAT to
+	// in this canary: where to query and how to authenticate. When omitted (or when
+	// its serverAddress is empty), the operator-configured default source
+	// (canaryAnalysis.bundledPrometheusAddress) is used; if that is also unset the
+	// analysis has no source and its samples read inconclusive. It is only the source — WHAT to
 	// check is each step's analysis — and it gates nothing by itself.
 	// +optional
 	Prometheus *AnalysisPrometheus `json:"prometheus,omitempty"`

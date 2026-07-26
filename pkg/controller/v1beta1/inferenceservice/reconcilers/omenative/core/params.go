@@ -1,16 +1,10 @@
 // Package core is the ISVC-side carrier types and adapter glue for the
-// OMENative reconciler. After the workload-package extraction the bulk
-// of the planning + expectations logic lives in
-// pkg/controller/v1beta1/workload/; this package re-exports the
-// workload types as ISVC-adapter-facing aliases and provides the
-// ReconcileParams shim the legacy dispatch layer still passes around.
-//
-// The aliases let pre-extraction call sites
-// (omenative.{ComponentPlan,InstancePlan,...,NewExpectations})
-// keep compiling unchanged while the bodies live in workload/.
-// Adapter-aware callers should depend on workload directly; this
-// package will shrink to the per-Source projection helpers in future
-// refactors.
+// OMENative reconciler: re-exported workload type aliases, the
+// ReconcileParams carrier, revision helpers, and the pod-render hook
+// shared with the InferenceReplica controller. The bulk of the
+// planning + expectations logic lives in
+// pkg/controller/v1beta1/workload/. Adapter-aware callers should
+// depend on workload directly.
 package core
 
 import (
@@ -46,14 +40,11 @@ var (
 	DefaultExpectations = workload.DefaultExpectations
 )
 
-// ReconcileParams is the input bag the OMENative reconciler reads on each
-// invocation. Constructed at the dispatch site in
-// components/{engine,decoder,router}.go from the values reconcileDeployment
-// already has in scope.
+// ReconcileParams is the input bag consumed by the ISVC-side
+// render / revision helpers in this package (see render.go).
 //
 // The Expectations field's type comes from the workload package via the
-// re-export above so the ISVC adapter and the future IR adapter can
-// share the same cache instance.
+// re-export above so both adapters can share the same cache instance.
 type ReconcileParams struct {
 	// ISVC is the parent InferenceService being reconciled.
 	ISVC *v1beta1.InferenceService
@@ -110,24 +101,23 @@ type ReconcileParams struct {
 	// When set it is used for the correctness-critical reads in revision
 	// bookkeeping where stale cache contents could cause spurious
 	// collisions or duplicate Revision numbers. When nil the cached Client
-	// is used and the caller accepts the cache-lag exposure. Callers wire
-	// this in once the controller manager exposes a live reader; tests
-	// leave it nil since the fake client is a live source.
+	// is used and the caller accepts the cache-lag exposure. Tests leave
+	// it nil since the fake client is a live source.
 	APIReader client.Reader
 
 	// Expectations is the create/delete bookkeeping cache the OMENative
 	// reconciler uses to avoid re-issuing batches before the controller-
-	// runtime watch has confirmed prior writes. Production wires the
-	// same instance into the Pod event handler (watches.go) so observed
-	// create / delete events release expectations immediately. When nil
-	// the package-level DefaultExpectations singleton is used.
+	// runtime watch has confirmed prior writes. Wire the same instance
+	// into the pod event handler so observed create / delete events
+	// release expectations immediately. When nil the package-level
+	// DefaultExpectations singleton is used.
 	Expectations *Expectations
 
 	// Recorder emits K8s Events against the parent InferenceService at
 	// lifecycle transitions (InstanceCreated, InPlaceUpdateStarted,
-	// MigrationCompleted, etc. — see events.go for the full reason
-	// set). nil-safe: when unset, recordEventf is a no-op so tests
-	// don't need to plumb a recorder.
+	// MigrationCompleted, etc. — see workload/types/events.go for the
+	// full reason set). nil-safe: when unset, event emission is a
+	// no-op so tests don't need to plumb a recorder.
 	Recorder record.EventRecorder
 
 	// Clock supplies wall-clock time to omenative lifecycle helpers.

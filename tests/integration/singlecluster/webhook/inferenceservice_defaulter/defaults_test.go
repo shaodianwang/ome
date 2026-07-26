@@ -132,7 +132,7 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 	})
 
 	ginkgo.It("OMENative + omitted rollingUpdate → MaxSurge and MaxUnavailable default to 25%", func() {
-		// #619 rollout-budget lock: an OMENative Component that omits
+		// Rollout-budget lock: an OMENative Component that omits
 		// lifecycle.updateStrategy.rollingUpdate must not resolve to the
 		// uncapped BudgetNoLimit — that is the fleet-wipe failure mode where
 		// a spec bump drained every Instance at once. The defaulter fills

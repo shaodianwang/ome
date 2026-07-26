@@ -124,6 +124,12 @@ type StorageSpec struct {
 	// - OCI Object Storage:   oci://n/{namespace}/b/{bucket}/o/{object_path}
 	// - Persistent Volume:    pvc://{pvc-name}/{sub-path}
 	// - Vendor-specific:      vendor://{vendor-name}/{resource-type}/{resource-path}
+	// - Hugging Face:         hf://{org}/{repo}[@{revision}]
+	// - Amazon S3:            s3://{bucket}/{object_path}
+	// - Azure Blob Storage:   az://{account}/{container}/{object_path}
+	// - Google Cloud Storage: gs://{bucket}/{object_path}
+	// - GitHub:               github://{org}/{repo}[@{tag}]
+	// - Local filesystem:     local://{path}
 	// This field is required.
 	// +required
 	StorageUri *string `json:"storageUri,omitempty"`
@@ -397,7 +403,7 @@ type FineTunedWeightSpec struct {
 	// +required
 	Storage *StorageSpec `json:"storage,omitempty"`
 
-	// TrainingJobID is the ID of the training job that produced this weight
+	// TrainingJobRef references the training job that produced this weight
 	// +optional
 	TrainingJobRef ObjectReference `json:"trainingJobRef,omitempty"`
 }

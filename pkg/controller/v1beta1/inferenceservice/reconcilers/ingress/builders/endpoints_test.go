@@ -15,7 +15,7 @@ import (
 
 // builderWithConfig builds an HTTPRouteBuilder over an explicit IngressConfig so
 // each Endpoints case pins the exact routing knobs (subdomain vs shared-host,
-// gateways, scheme) the OEP-0023 correctness matrix enumerates.
+// gateways, scheme) the correctness matrix enumerates.
 func builderWithConfig(cfg *controllerconfig.IngressConfig) *HTTPRouteBuilder {
 	return &HTTPRouteBuilder{
 		ingressConfig: cfg,
@@ -25,7 +25,7 @@ func builderWithConfig(cfg *controllerconfig.IngressConfig) *HTTPRouteBuilder {
 	}
 }
 
-// TestHTTPRouteBuilder_Endpoints walks the OEP-0023 correctness matrix: the
+// TestHTTPRouteBuilder_Endpoints walks the correctness matrix: the
 // endpoint the status writer publishes must equal <scheme>://<host><path> for
 // every gateway, in both routing modes.
 func TestHTTPRouteBuilder_Endpoints(t *testing.T) {
@@ -129,7 +129,7 @@ func TestHTTPRouteBuilder_Endpoints(t *testing.T) {
 // input, the endpoints the status writer would publish must carry exactly the
 // hostnames the HTTPRoute exposes and the path its match requires. This is the
 // regression test that keeps status and routing derived from one renderer
-// (OEP-0023 root cause: two renderers drift).
+// (two independent renderers would drift).
 func TestHTTPRouteBuilder_Endpoints_MatchRoutes(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

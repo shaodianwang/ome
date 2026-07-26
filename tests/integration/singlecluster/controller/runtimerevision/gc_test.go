@@ -21,7 +21,7 @@ import (
 
 // Suite uses retention=2, grace=2s, resync=1s for fast observation.
 
-var _ = ginkgo.Describe("RuntimeRevision GC controller (OEP-0014 Phase 3)", func() {
+var _ = ginkgo.Describe("RuntimeRevision GC controller", func() {
 
 	mkRev := func(name, runtimeOf string, ageOffset time.Duration, omeOwned bool) *appsv1.ControllerRevision {
 		labels := map[string]string{}

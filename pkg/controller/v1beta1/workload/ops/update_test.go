@@ -40,7 +40,7 @@ func TestUpdate_NilClient(t *testing.T) {
 }
 
 // TestUpdate_InPlace_RechecksServingBeforePatch pins the in-place
-// pre-patch race fix (#246): a concurrent writer (another controller,
+// pre-patch race contract: a concurrent writer (another controller,
 // a pod-mutating webhook re-injecting a sidecar) could flip
 // serving=True between the drain check passing and the image patch
 // firing. The fix re-reads each pod immediately before patching and,

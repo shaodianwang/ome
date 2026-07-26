@@ -36,10 +36,7 @@ const envNodeImage = "KIND_NODE_IMAGE"
 // envEnabled reports whether the named env var is set to a truthy
 // value. Accepts "1", "true", "yes", "on" (case-insensitive) so the
 // flag behaves the same whether it's set by `make test-kind`
-// (KIND_KEEP_CLUSTER=true) or by hand (KIND_KEEP_CLUSTER=1). Before
-// this, the code checked only == "1" while the Makefile and READMEs
-// documented =true, so `make test-kind` silently never reused the
-// cluster — every run paid the full ~25s recreate.
+// (KIND_KEEP_CLUSTER=true) or by hand (KIND_KEEP_CLUSTER=1).
 func envEnabled(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
 	case "1", "true", "yes", "on":

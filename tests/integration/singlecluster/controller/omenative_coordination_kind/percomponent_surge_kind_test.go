@@ -16,7 +16,7 @@ import (
 //
 // Companion to B (which pins maxSurge=0). Asserts that during the
 // rollout, the alive pod count for engine never exceeds
-// minReplicas + maxSurge. With real SurgeThenDrain (PR #238) the
+// minReplicas + maxSurge. With real SurgeThenDrain the
 // gate's CheckSurgeGate IS exercised here — verified by injecting a
 // deliberate gate bypass which makes both Instances surge in parallel
 // and pushes alive=4 (the round-2 E-1 bug report's symptom). See

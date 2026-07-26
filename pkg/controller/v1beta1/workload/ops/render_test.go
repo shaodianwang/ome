@@ -956,7 +956,7 @@ func TestInjectTPUGangAffinity_Idempotent(t *testing.T) {
 // topologyKey is that key and whose selector targets the SAME Instance's
 // leader using the configured topology key.
 func TestRender_MultiPod_GangDomainAffinity(t *testing.T) {
-	plan, inst, runners := multiPodPlanWithTopologyKey(2, "network.meta.com/domain")
+	plan, inst, runners := multiPodPlanWithTopologyKey(2, "topology.example.com/domain")
 	worker := runners[1]
 
 	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
@@ -967,8 +967,8 @@ func TestRender_MultiPod_GangDomainAffinity(t *testing.T) {
 	if len(terms) != 1 {
 		t.Fatalf("worker required podAffinity: got %d terms want 1: %+v", len(terms), terms)
 	}
-	if got := terms[0].TopologyKey; got != "network.meta.com/domain" {
-		t.Errorf("topologyKey: got %q want network.meta.com/domain", got)
+	if got := terms[0].TopologyKey; got != "topology.example.com/domain" {
+		t.Errorf("topologyKey: got %q want topology.example.com/domain", got)
 	}
 	wantSel := map[string]string{
 		constants.InferenceServicePodLabelKey: "llama-70b",
@@ -1032,7 +1032,7 @@ func TestRender_GangDomainAffinity_InstanceScoped(t *testing.T) {
 			Component:   workload.ComponentEngine,
 			Replicas:    2,
 			Instances:   []workload.InstancePlan{inst},
-			TopologyKey: "network.meta.com/domain",
+			TopologyKey: "topology.example.com/domain",
 		}
 
 		pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[1], 0)
@@ -1056,7 +1056,7 @@ func TestRender_GangDomainAffinity_InstanceScoped(t *testing.T) {
 // leader.
 func TestRender_GangDomainAffinity_Negatives(t *testing.T) {
 	// Leader gets nothing — it's the domain anchor, not a follower.
-	plan, inst, runners := multiPodPlanWithTopologyKey(1, "network.meta.com/domain")
+	plan, inst, runners := multiPodPlanWithTopologyKey(1, "topology.example.com/domain")
 	leaderPod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[0], 0)
 	if err != nil {
 		t.Fatalf("leader: %v", err)
@@ -1068,7 +1068,7 @@ func TestRender_GangDomainAffinity_Negatives(t *testing.T) {
 	// Single-pod shape: "default" runner, no leader → nothing, even
 	// though the plan carries a topologyKey.
 	splan, sinst, srunner := singlePodPlan()
-	splan.TopologyKey = "network.meta.com/domain"
+	splan.TopologyKey = "topology.example.com/domain"
 	spod, err := testRender(basicISVC(), basicPodSpec(), splan, sinst, srunner, 0)
 	if err != nil {
 		t.Fatalf("single-pod: %v", err)
@@ -1082,7 +1082,7 @@ func TestRender_GangDomainAffinity_Negatives(t *testing.T) {
 		Component:   workload.ComponentRouter,
 		Replicas:    1,
 		Instances:   []workload.InstancePlan{sinst},
-		TopologyKey: "network.meta.com/domain",
+		TopologyKey: "topology.example.com/domain",
 	}
 	rpod, err := testRender(basicISVC(), basicPodSpec(), rplan, sinst, srunner, 0)
 	if err != nil {
@@ -1114,11 +1114,11 @@ func TestRender_GangDomainAffinity_NoTopologyKey(t *testing.T) {
 // the OME term is still appended.
 func TestRender_GangDomainAffinity_RespectsUserOverride(t *testing.T) {
 	// User declared their own term on the gang topologyKey → no dup.
-	plan, inst, runners := multiPodPlanWithTopologyKey(1, "network.meta.com/domain")
+	plan, inst, runners := multiPodPlanWithTopologyKey(1, "topology.example.com/domain")
 	worker := runners[1]
 	ps := basicPodSpec()
 	userTerm := corev1.PodAffinityTerm{
-		TopologyKey: "network.meta.com/domain",
+		TopologyKey: "topology.example.com/domain",
 		LabelSelector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{"app": "user-hand-written"},
 		},
@@ -1162,7 +1162,7 @@ func TestRender_GangDomainAffinity_RespectsUserOverride(t *testing.T) {
 	if terms2[0].TopologyKey != "kubernetes.io/hostname" {
 		t.Errorf("user term clobbered or reordered: %+v", terms2[0])
 	}
-	if terms2[1].TopologyKey != "network.meta.com/domain" {
+	if terms2[1].TopologyKey != "topology.example.com/domain" {
 		t.Errorf("injected gang-domain term missing/wrong: %+v", terms2[1])
 	}
 }

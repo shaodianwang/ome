@@ -17,7 +17,7 @@ import (
 )
 
 // Three-way and mixed-mode PD topologies (Router + Engine + Decoder).
-// Operator deployment shapes for OEP-0007.1: a Router fronts the PD
+// Operator deployment shapes: a Router fronts the PD
 // pair, and operators sometimes opt one component out of OMENative.
 // These specs extend the 2-way contracts in pd_kind / pd_isolation_kind
 // to three Components and to OMENative + Raw mixed deployments.
@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 	})
 
 	// All three Components (Router + Engine + Decoder) reach
-	// Ready under OMENative. The single most-critical OEP-0007.1
+	// Ready under OMENative. The single most-critical
 	// topology gate.
 	ginkgo.It("Router + Engine + Decoder all OMENative converge to Ready", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx1-isvc"),

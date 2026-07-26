@@ -185,7 +185,7 @@ func (w *InferenceServiceWrapper) Label(k, v string) *InferenceServiceWrapper {
 	return w
 }
 
-// Traffic sets spec.traffic (OEP-0011 typed core).
+// Traffic sets spec.traffic (typed core).
 func (w *InferenceServiceWrapper) Traffic(t *v1beta1.TrafficSpec) *InferenceServiceWrapper {
 	w.Spec.Traffic = t
 	return w

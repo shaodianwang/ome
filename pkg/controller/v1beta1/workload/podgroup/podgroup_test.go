@@ -73,25 +73,25 @@ func TestBuildPodGroup_SinglePodRejected(t *testing.T) {
 // TestBuildPodGroup_NameUsesOwnerNameNotOwnerObject pins the IR-path naming
 // fix: the PodGroup NAME must follow ownerName (the workload owner name =
 // Key.OwnerName, what the pod renderer uses), NOT owner.GetName(). On the
-// IR-managed path the owner OBJECT is the InferenceReplica ("p66-engine"),
-// but the pods' pod-group label is "p66-engine-0" (ISVC "p66"). Using
-// owner.GetName() would emit "p66-engine-engine-0" → the gang scheduler's
+// IR-managed path the owner OBJECT is the InferenceReplica ("gang-engine"),
+// but the pods' pod-group label is "gang-engine-0" (ISVC "gang"). Using
+// owner.GetName() would emit "gang-engine-engine-0" → the gang scheduler's
 // "PodGroup not found". The OwnerReference must still target the owner object
 // (the IR) for GC.
 func TestBuildPodGroup_NameUsesOwnerNameNotOwnerObject(t *testing.T) {
-	irOwner := newPodGroupISVC("sandbox", "p66-engine") // owner object named like an IR: "<isvc>-<component>"
+	irOwner := newPodGroupISVC("test-ns", "gang-engine") // owner object named like an IR: "<isvc>-<component>"
 	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 15 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
 
-	pg, err := BuildPodGroup(irOwner, testPodGroupOwnerGVK, "p66", plan, inst) // ownerName = ISVC name (Key.OwnerName)
+	pg, err := BuildPodGroup(irOwner, testPodGroupOwnerGVK, "gang", plan, inst) // ownerName = ISVC name (Key.OwnerName)
 	if err != nil {
 		t.Fatalf("BuildPodGroup: %v", err)
 	}
-	if pg.Name != "p66-engine-0" {
-		t.Errorf("Name: got %q want p66-engine-0 — must follow ownerName, not owner.GetName()=%q (which would give p66-engine-engine-0)", pg.Name, irOwner.GetName())
+	if pg.Name != "gang-engine-0" {
+		t.Errorf("Name: got %q want gang-engine-0 — must follow ownerName, not owner.GetName()=%q (which would give gang-engine-engine-0)", pg.Name, irOwner.GetName())
 	}
-	if len(pg.OwnerReferences) != 1 || pg.OwnerReferences[0].Name != "p66-engine" {
-		t.Errorf("OwnerReference must still target the owner object (IR p66-engine) for GC; got %+v", pg.OwnerReferences)
+	if len(pg.OwnerReferences) != 1 || pg.OwnerReferences[0].Name != "gang-engine" {
+		t.Errorf("OwnerReference must still target the owner object (IR gang-engine) for GC; got %+v", pg.OwnerReferences)
 	}
 }
 

@@ -89,9 +89,9 @@ type permCase struct {
 	// tracked. Clear it to re-enable once the underlying behavior is fixed.
 	skip string
 
-	// Optional coordination group over members (legacy path only — the
-	// IR-managed path does no coordination). Empty members == no group, so the
-	// trigger bumps engine alone and decoder/router are negative controls.
+	// Optional coordination group over members. Empty members == no group,
+	// so the trigger bumps engine alone and decoder/router are negative
+	// controls.
 	members      []v1beta1.ComponentType
 	policy       v1beta1.CoordinationPolicy
 	order        []v1beta1.ComponentType
@@ -262,7 +262,7 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 	if pc.rtr != nil {
 		isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: ext(v1beta1.RouterComponent), PodSpec: pod()}
 	}
-	// OEP-0017: the v1 coordination-group knobs on permCase (policy/members/
+	// The v1 coordination-group knobs on permCase (policy/members/
 	// order/soak/pacing) are translated into the v2 spec.rollout groups model.
 	// The permCase fields stay as the test's source of truth (runner_test.go
 	// asserts directly off pc.policy / pc.pacingType / pc.order); only the spec
@@ -336,7 +336,7 @@ func buildPermCases() []permCase {
 	decEg := []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent}
 
 	return []permCase{
-		// --- engine-only lifecycle (path-agnostic; works IR-managed or legacy) ---
+		// --- engine-only lifecycle ---
 		{id: "p01", desc: "engine-only N=4 ST surge=1 unavail=0",
 			eng: st(4, pi(1), pi(0)), ceilE: 5},
 		{id: "p02", desc: "engine-only N=4 ST surge=2 unavail=0",
@@ -356,7 +356,7 @@ func buildPermCases() []permCase {
 		{id: "p22", desc: "engine-only N=8 ST surge=1 unavail=0",
 			eng: st(8, pi(1), pi(0)), ceilE: 9},
 
-		// --- PD coordination (legacy path) ---
+		// --- PD coordination ---
 		{id: "p26", desc: "PD e4 d4 r2 ST surge=1, NO group (engine-only bump; d+r isolated)",
 			eng: stD(4), dec: stD(4), rtr: stD(2), ceilE: 5, ceilD: 5, ceilR: 3},
 		{id: "p34", desc: "PD e4 d4 r2 Sequential order=[decoder,engine] soak=0s",

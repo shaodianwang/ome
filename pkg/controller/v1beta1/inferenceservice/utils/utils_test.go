@@ -1159,12 +1159,12 @@ func TestMergeTopologyKey_Resolution(t *testing.T) {
 		assert.Equal(t, "isvc.domain/key", *merged.TopologyKey, "ISVC topologyKey must override the runtime value")
 	})
 	t.Run("engine-inherits-runtime-when-isvc-unset", func(t *testing.T) {
-		runtime := &v1beta1.EngineSpec{TopologyKey: strPtr("network.meta.com/domain")}
+		runtime := &v1beta1.EngineSpec{TopologyKey: strPtr("topology.example.com/domain")}
 		isvc := &v1beta1.EngineSpec{} // no topologyKey
 		merged, err := MergeEngineSpec(runtime, isvc)
 		assert.NoError(t, err)
 		assert.NotNil(t, merged.TopologyKey, "runtime topologyKey must be inherited when ISVC leaves it unset")
-		assert.Equal(t, "network.meta.com/domain", *merged.TopologyKey)
+		assert.Equal(t, "topology.example.com/domain", *merged.TopologyKey)
 	})
 	t.Run("engine-nil-on-both", func(t *testing.T) {
 		merged, err := MergeEngineSpec(&v1beta1.EngineSpec{}, &v1beta1.EngineSpec{})
@@ -1180,12 +1180,12 @@ func TestMergeTopologyKey_Resolution(t *testing.T) {
 		assert.Equal(t, "isvc.domain/key", *merged.TopologyKey)
 	})
 	t.Run("decoder-inherits-runtime-when-isvc-unset", func(t *testing.T) {
-		runtime := &v1beta1.DecoderSpec{TopologyKey: strPtr("network.meta.com/domain")}
+		runtime := &v1beta1.DecoderSpec{TopologyKey: strPtr("topology.example.com/domain")}
 		isvc := &v1beta1.DecoderSpec{}
 		merged, err := MergeDecoderSpec(runtime, isvc)
 		assert.NoError(t, err)
 		assert.NotNil(t, merged.TopologyKey)
-		assert.Equal(t, "network.meta.com/domain", *merged.TopologyKey)
+		assert.Equal(t, "topology.example.com/domain", *merged.TopologyKey)
 	})
 }
 

@@ -12,11 +12,10 @@ func PtrIntOrStringFromString(s string) *intstr.IntOrString {
 
 // ScaledCountFromIntOrString resolves an IntOrString budget (a pod
 // count or a percentage of total) into an absolute, non-negative count.
-// It is the single replacement for the hand-rolled int/percent → count
-// helpers that previously lived in coordination/status.go,
-// workload/budget.go, and canary/capacity.go.
+// It is the single int/percent → count helper shared across the
+// coordination, workload-budget, and canary-capacity callers.
 //
-// Semantics (chosen to reproduce all three former copies byte-for-byte):
+// Semantics:
 //
 //   - nil v → 0.
 //   - Integer form: the literal value, floored at 0. NOT clamped to

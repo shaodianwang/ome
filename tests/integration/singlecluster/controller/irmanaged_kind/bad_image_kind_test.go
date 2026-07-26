@@ -11,18 +11,16 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// bad-image failure on the IR-managed path — closes the production
-// reproduction reported as bug #52 follow-up: a bumped engine image
+// bad-image failure on the IR-managed path: a bumped engine image
 // to a non-existent tag must escalate the per-Instance Phase to
 // Failed within the stuck-pod grace window (default 60s + kubelet
 // pull-retry headroom) so the parent ISVC's coordination layer can
 // see Component.Failed and flip the group's Phase to Failed.
 //
-// The omenative-direct-path bad-image scenario is covered by
-// omenative_coordination_kind/bad_image_kind_test.go. This spec is the
-// IR-managed equivalent — without it the operator-reported regression
-// (Phase=Updating for 30+ minutes on the production default path)
-// would re-surface every time the IR-managed path drifts.
+// The coordination-suite bad-image scenario is covered by
+// omenative_coordination_kind/bad_image_kind_test.go. This spec pins
+// the IR-controller escalation path — without it, a wedged bad-image
+// rollout would sit at Phase=Updating until InstanceReadyTimeout.
 //
 // Single-replica engine with the default SurgeThenDrain strategy.
 // InstanceReadyTimeout is intentionally left at the default 30

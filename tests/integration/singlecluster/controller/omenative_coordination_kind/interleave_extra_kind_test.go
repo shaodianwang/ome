@@ -13,7 +13,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// State-machine interleaving specs ported from envtest interleave_test.go.
+// State-machine interleaving specs.
 // The reconciler runs ops in a fixed order (delete extras → restart →
 // migrate → update) and each pass writes status before the next runs.
 // These specs assert that realistic operator-driven interleavings don't
@@ -22,12 +22,10 @@ import (
 // INT-5 (rapid spec bumps converge + CR retention cap) is already
 // covered by interleave_kind_test.go, so it's omitted here.
 //
-// The suite runs a 2-node cluster, so the migration surge pod schedules
+// The suite runs two schedulable worker nodes, so the migration surge pod schedules
 // onto the other node (a single-node cluster would leave it Pending).
 // These specs pin the controller-side state machine (audit ledger,
-// surge index allocation, peer-Component non-interference); a direct
-// "migrated to a different node" assertion is now feasible and is a
-// candidate follow-up.
+// surge index allocation, peer-Component non-interference).
 var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

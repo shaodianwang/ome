@@ -150,8 +150,8 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 
 	desired := IRStatusToComponentStatus(ir)
 	// topCond is the standard top-level Component-ready condition
-	// (EngineReady / DecoderReady / RouterReady) derived from the same
-	// OMENative counters the legacy direct path uses. Computed once
+	// (EngineReady / DecoderReady / RouterReady) derived from the
+	// OMENative counters. Computed once
 	// outside the retry closure: the derivation is a pure function of
 	// `desired`, which is recomputed only when the IR changes (a
 	// separate reconcile would re-enter AggregateIRStatus). On a peer

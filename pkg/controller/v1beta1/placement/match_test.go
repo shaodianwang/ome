@@ -37,27 +37,27 @@ func isvcReq(accel, selector string) *v1beta1.InferenceService {
 
 func TestMatchCandidates(t *testing.T) {
 	clusters := []v1beta1.WorkloadCluster{
-		wc("cw", true, map[string]string{"gpu": "gb300", "provider": "cw"}),
-		wc("gcp", true, map[string]string{"gpu": "gb300", "provider": "gcp"}),
-		wc("cw-h100", true, map[string]string{"gpu": "h100", "provider": "cw"}),
-		wc("cw-down", false, map[string]string{"gpu": "gb300", "provider": "cw"}),
+		wc("cluster-a", true, map[string]string{"gpu": "gb300", "provider": "prov-a"}),
+		wc("cluster-b", true, map[string]string{"gpu": "gb300", "provider": "prov-b"}),
+		wc("cluster-a-h100", true, map[string]string{"gpu": "h100", "provider": "prov-a"}),
+		wc("cluster-a-down", false, map[string]string{"gpu": "gb300", "provider": "prov-a"}),
 	}
 
 	// accelerator requirement "gpu=gb300" -> the two Ready gb300 clusters, sorted.
 	got, reason, err := MatchCandidates(isvcReq("gpu=gb300", ""), clusters)
 	assert.NoError(t, err)
-	assert.Equal(t, []string{"cw", "gcp"}, got)
+	assert.Equal(t, []string{"cluster-a", "cluster-b"}, got)
 	assert.Equal(t, MatchReason(""), reason)
 
 	// accelerator requirement AND-ed with cluster-selector.
-	got, _, err = MatchCandidates(isvcReq("gpu=gb300", "provider=cw"), clusters)
+	got, _, err = MatchCandidates(isvcReq("gpu=gb300", "provider=prov-a"), clusters)
 	assert.NoError(t, err)
-	assert.Equal(t, []string{"cw"}, got)
+	assert.Equal(t, []string{"cluster-a"}, got)
 
 	// cluster-selector alone is a sufficient requirement (counts as a requirement).
-	got, _, err = MatchCandidates(isvcReq("", "gpu=gb300,provider=gcp"), clusters)
+	got, _, err = MatchCandidates(isvcReq("", "gpu=gb300,provider=prov-b"), clusters)
 	assert.NoError(t, err)
-	assert.Equal(t, []string{"gcp"}, got)
+	assert.Equal(t, []string{"cluster-b"}, got)
 
 	// HIGH-bug guard: an ISVC with NO requirement must NOT fan out to every
 	// Ready cluster — it matches NOTHING with reason NoRequirements.
@@ -74,7 +74,7 @@ func TestMatchCandidates(t *testing.T) {
 
 	// requirements declared but no Ready clusters at all.
 	got, reason, err = MatchCandidates(isvcReq("gpu=gb300", ""), []v1beta1.WorkloadCluster{
-		wc("cw-down", false, map[string]string{"gpu": "gb300"}),
+		wc("cluster-a-down", false, map[string]string{"gpu": "gb300"}),
 	})
 	assert.NoError(t, err)
 	assert.Nil(t, got)

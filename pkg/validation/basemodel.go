@@ -7,7 +7,7 @@ import (
 	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
-// ValidatePVCStorage enforces OEP-0004 URI rules:
+// ValidatePVCStorage enforces the PVC URI shape rules:
 //
 //   - namespaced BaseModel: pvc:// URIs must NOT carry a namespace prefix
 //   - ClusterBaseModel: pvc:// URIs MUST carry a namespace prefix

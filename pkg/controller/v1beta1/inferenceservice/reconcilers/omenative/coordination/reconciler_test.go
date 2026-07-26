@@ -836,9 +836,10 @@ func TestBuildComponentObservation_MultipleFailedInstancesListedInMessage(t *tes
 }
 
 func TestBuildComponentObservation_IRSourceMatchesLegacyCopy(t *testing.T) {
-	// TDD: ensure the IR-sourced buildComponentObservation produces
-	// identical ComponentObservation values to the legacy ISVC-copy
-	// path, so swapping data sources is behavior-preserving.
+	// buildComponentObservation must produce identical
+	// ComponentObservation values whether sourced from IR status or
+	// the equivalent per-Component ISVC copy — the two representations
+	// must agree.
 	irStatus := &v1beta1.InferenceReplicaStatus{
 		Replicas: 4, ReadyReplicas: 3, ServingReplicas: 3,
 		UpdatedReplicas: 2, UpdatedReadyReplicas: 2,

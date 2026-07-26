@@ -140,7 +140,7 @@ func TestSecondaryCapacityReady_PerComponentHashes(t *testing.T) {
 }
 
 // TestSecondaryCapacityReady_UnbumpedSecondary covers the primary-only-bumped PD
-// canary (p302's real trigger): only the router template changed, so engine and
+// canary: only the router template changed, so engine and
 // decoder have no canary revision distinct from stable. Those secondaries have
 // nothing to stage and must NOT block the rollout.
 func TestSecondaryCapacityReady_UnbumpedSecondary(t *testing.T) {

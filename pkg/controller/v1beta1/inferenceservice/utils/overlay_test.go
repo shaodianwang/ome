@@ -13,7 +13,7 @@ func TestOverlayEnvVarName(t *testing.T) {
 	}{
 		{"foo", "OVERLAY_FOO_MODEL_PATH"},
 		{"foo-pvc", "OVERLAY_FOO_PVC_MODEL_PATH"},
-		{"avo-tier5-pd-test", "OVERLAY_AVO_TIER5_PD_TEST_MODEL_PATH"},
+		{"llama-70b-pd-test", "OVERLAY_LLAMA_70B_PD_TEST_MODEL_PATH"},
 		{"already_underscored", "OVERLAY_ALREADY_UNDERSCORED_MODEL_PATH"},
 		{"Mixed-Case-Name", "OVERLAY_MIXED_CASE_NAME_MODEL_PATH"},
 	}
@@ -35,5 +35,5 @@ func TestSanitizeOverlayName_HyphenUnderscoreCollision(t *testing.T) {
 
 func TestOverlayMountPath(t *testing.T) {
 	assert.Equal(t, "/opt/ml/model-overlays/foo-pvc", OverlayMountPath("foo-pvc"))
-	assert.Equal(t, "/opt/ml/model-overlays/avo-tier5-pd-test", OverlayMountPath("avo-tier5-pd-test"))
+	assert.Equal(t, "/opt/ml/model-overlays/llama-70b-pd-test", OverlayMountPath("llama-70b-pd-test"))
 }

@@ -43,7 +43,7 @@ func factsFromPodGroup(pg *schedv1alpha1.PodGroup, topologyKeyAnnotation string,
 	return int(pg.Spec.MinMember), pg.Annotations[topologyKeyAnnotation], timeout
 }
 
-// get resolves a PodGroup into (minMember, topologyKey, timeout, found). Any
+// get resolves a PodGroup into (minMember, topologyKey, timeout, uid, found). Any
 // lookup error or missing PodGroup is reported as not-found; PreFilter holds a
 // labeled member until the informer can validate the group.
 func (r *informerReader) get(namespace, name string) (minMember int, topologyKey string, timeout time.Duration, uid string, found bool) {

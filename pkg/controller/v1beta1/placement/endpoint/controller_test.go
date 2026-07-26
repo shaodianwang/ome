@@ -62,7 +62,7 @@ func updateEvent(old, nw *v1beta1.InferenceService) event.UpdateEvent {
 }
 
 func TestReconcile_PlacedPublishesAndFinalizes(t *testing.T) {
-	r, c := newReconciler(t, baseConfig(), placedISVC("cw-use2-2", "svc.prod.cw.example"))
+	r, c := newReconciler(t, baseConfig(), placedISVC("cluster-a", "svc.prod.cw.example"))
 
 	reconcile(t, r)
 
@@ -81,13 +81,13 @@ func TestReconcile_PlacedPublishesAndFinalizes(t *testing.T) {
 }
 
 func TestReconcile_RepointsOnReplacement(t *testing.T) {
-	r, c := newReconciler(t, baseConfig(), placedISVC("cw-use2-2", "svc.prod.cw.example"))
+	r, c := newReconciler(t, baseConfig(), placedISVC("cluster-a", "svc.prod.cw.example"))
 	reconcile(t, r)
 
 	// Simulate the placement controller re-homing onto a new cluster.
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "prod"}, cur))
-	cur.Status.Placement.Cluster = "gcp-usc1-1"
+	cur.Status.Placement.Cluster = "cluster-b"
 	cur.Status.Placement.Endpoint = apis.HTTPS("svc.prod.gcp.example")
 	require.NoError(t, c.Status().Update(context.Background(), cur))
 
@@ -96,11 +96,11 @@ func TestReconcile_RepointsOnReplacement(t *testing.T) {
 	svc := &corev1.Service{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, svc))
 	assert.Equal(t, "svc.prod.gcp.example", svc.Spec.ExternalName, "ExternalName repointed to new winner")
-	assert.Equal(t, "gcp-usc1-1", svc.Labels[PlacementClusterLabel])
+	assert.Equal(t, "cluster-b", svc.Labels[PlacementClusterLabel])
 }
 
 func TestReconcile_UnplacedTearsDownAndDropsFinalizer(t *testing.T) {
-	r, c := newReconciler(t, baseConfig(), placedISVC("cw-use2-2", "svc.prod.cw.example"))
+	r, c := newReconciler(t, baseConfig(), placedISVC("cluster-a", "svc.prod.cw.example"))
 	reconcile(t, r) // publish + finalizer
 
 	// Placement regresses to Racing (winner lost). Publisher must tear down.
@@ -143,7 +143,7 @@ func TestReconcile_PlacedButNoEndpointYet(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "uid-1"},
 		Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
-			Phase: v1beta1.PlacementPhasePlaced, Cluster: "cw-use2-2", Endpoint: nil,
+			Phase: v1beta1.PlacementPhasePlaced, Cluster: "cluster-a", Endpoint: nil,
 		}},
 	}
 	r, c := newReconciler(t, baseConfig(), isvc)
@@ -155,7 +155,7 @@ func TestReconcile_PlacedButNoEndpointYet(t *testing.T) {
 }
 
 func TestReconcile_DeletionTearsDown(t *testing.T) {
-	r, c := newReconciler(t, baseConfig(), placedISVC("cw-use2-2", "svc.prod.cw.example"))
+	r, c := newReconciler(t, baseConfig(), placedISVC("cluster-a", "svc.prod.cw.example"))
 	reconcile(t, r) // publish + finalizer
 
 	// Delete the ISVC; with the finalizer present it sticks around for teardown.
@@ -175,7 +175,7 @@ func TestReconcile_DeletionTearsDown(t *testing.T) {
 func TestReconcile_BackendDisabledIsNoOp(t *testing.T) {
 	cfg := baseConfig()
 	cfg.GlobalGateway = "" // backend not configured
-	r, c := newReconciler(t, cfg, placedISVC("cw-use2-2", "svc.prod.cw.example"))
+	r, c := newReconciler(t, cfg, placedISVC("cluster-a", "svc.prod.cw.example"))
 
 	reconcile(t, r)
 
@@ -186,7 +186,7 @@ func TestReconcile_BackendDisabledIsNoOp(t *testing.T) {
 func TestReconcile_NoGlobalHostNeverPublishes(t *testing.T) {
 	cfg := baseConfig()
 	cfg.GlobalHostTemplate = "" // no template, ISVC has no annotation -> no host
-	r, c := newReconciler(t, cfg, placedISVC("cw-use2-2", "svc.prod.cw.example"))
+	r, c := newReconciler(t, cfg, placedISVC("cluster-a", "svc.prod.cw.example"))
 
 	reconcile(t, r)
 

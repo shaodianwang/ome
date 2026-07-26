@@ -70,7 +70,7 @@ func TestApplyManagedScrapeConfig_RelabelingsAndMetricRelabelings(t *testing.T) 
 	pm.Spec.PodMetricsEndpoints[0].MetricRelabelConfigs = []monitoringv1.RelabelConfig{existing}
 
 	cfg := controllerconfig.PodMonitorConfig{
-		Labels: map[string]string{"ktel.fb.com/scrape-tier": "cluster"},
+		Labels: map[string]string{"scrape.example.com/tier": "cluster"},
 		Relabelings: []controllerconfig.RelabelConfig{{
 			SourceLabels: []string{"__meta_kubernetes_pod_label_ome_io_inferenceservice"},
 			TargetLabel:  "inferenceservice",
@@ -80,7 +80,7 @@ func TestApplyManagedScrapeConfig_RelabelingsAndMetricRelabelings(t *testing.T) 
 
 	ApplyManagedScrapeConfig(pm, cfg)
 
-	if got := pm.Labels["ktel.fb.com/scrape-tier"]; got != "cluster" {
+	if got := pm.Labels["scrape.example.com/tier"]; got != "cluster" {
 		t.Errorf("want metadata label scrape-tier=cluster, got %q", got)
 	}
 

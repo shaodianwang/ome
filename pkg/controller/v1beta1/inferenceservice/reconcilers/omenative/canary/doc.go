@@ -8,7 +8,8 @@
 // per-revision Services and traffic-weight writer rather than re-implementing
 // them.
 //
-// Scope (Phase 1): single-component. The capacity/traffic/promotion machinery
-// is component-agnostic; multi-component (PD) capacity fan-out and the
-// same-revision internal-pairing dependency are a later increment.
+// The capacity/traffic/promotion machinery is component-agnostic. In a
+// multi-Component (PD) group the primary Component drives the traffic
+// steps while every other bumped Component stages its own canary
+// capacity (see dispatch.go).
 package canary

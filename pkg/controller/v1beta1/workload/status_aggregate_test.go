@@ -755,7 +755,7 @@ func TestReconcileInput_Compiles(t *testing.T) {
 	}
 }
 
-// Stuck-pod escalation (#398) must preserve the wedged pod's diagnostics
+// Stuck-pod escalation must preserve the wedged pod's diagnostics
 // into InstanceStatus.LastFailure when it flips the Instance to Failed —
 // the escalation is followed by a recreate / teardown that deletes the
 // wedged pod, so this is the surviving trace operators read.

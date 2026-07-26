@@ -8,12 +8,12 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// OEP-0013 Slice 5: ServingRuntime webhook validation for the new
+// ServingRuntime webhook validation for the
 // per-Component Autoscaler block. ServingRuntime can declare
-// autoscaler defaults inherited by ISVCs (OEP "Inheritance chain"),
+// autoscaler defaults inherited by ISVCs,
 // so the same shape rules apply at admission time on the runtime
 // side too.
-var _ = ginkgo.Describe("ClusterServingRuntime webhook Autoscaler validation (OEP-0013 Slice 5)", func() {
+var _ = ginkgo.Describe("ClusterServingRuntime webhook Autoscaler validation", func() {
 
 	ginkgo.It("rejects engineConfig.autoscaler unknown class", func() {
 		csr := &v1beta1.ClusterServingRuntime{

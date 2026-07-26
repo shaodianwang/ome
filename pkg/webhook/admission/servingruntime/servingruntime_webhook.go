@@ -47,7 +47,7 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	// OEP-0012: profile validation runs before the disabled-shortcut
+	// Profile validation runs before the disabled-shortcut
 	// below so a broken profile can't slip through "because it was
 	// disabled anyway".
 	if err := validateProfileMarker(servingRuntime.Annotations, servingRuntime.Spec.Disabled); err != nil {
@@ -67,10 +67,10 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Allowed("")
 	}
 
-	// OEP-0013: per-Component Autoscaler block validation. Same rules
+	// Per-Component Autoscaler block validation. Same rules
 	// applied to the ISVC's blocks; ServingRuntime can declare
-	// autoscaler defaults that inherit to ISVCs (OEP "Inheritance
-	// chain"), so the same shape constraints apply.
+	// autoscaler defaults that inherit to ISVCs, so the same shape
+	// constraints apply.
 	if err := validateRuntimeComponentAutoscalers(&servingRuntime.Spec); err != nil {
 		return admission.Denied(err.Error())
 	}
@@ -113,7 +113,7 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 		return admission.Allowed("")
 	}
 
-	// OEP-0013: per-Component Autoscaler block validation; see ServingRuntime.Handle.
+	// Per-Component Autoscaler block validation; see ServingRuntime.Handle.
 	if err := validateRuntimeComponentAutoscalers(&clusterServingRuntime.Spec); err != nil {
 		return admission.Denied(err.Error())
 	}
@@ -207,8 +207,7 @@ func validateServingRuntimePriority(newSpec, existingSpec *v1beta1.ServingRuntim
 // Autoscaler shape check against each Component on a ServingRuntime
 // spec. The per-Component dispatch is shared with the InferenceService
 // and InferenceReplica webhooks via
-// validation.ValidateComponentsAutoscalers — see review §4 in
-// .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+// validation.ValidateComponentsAutoscalers.
 // Mirrors the per-Component dispatch on the ISVC webhook so a
 // runtime-level Autoscaler block carrying a malformed shape is rejected
 // at admission rather than silently inherited into an ISVC at

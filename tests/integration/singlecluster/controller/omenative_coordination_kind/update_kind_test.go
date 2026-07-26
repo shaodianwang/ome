@@ -11,7 +11,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OMENative Update path specs ported from envtest update_test.go.
+// OMENative Update path specs.
 // chooseUpdateMode branches on:
 //   - InPlaceIfPossible + image-only diff → in-place patch
 //   - InPlaceIfPossible + non-image (env-var) diff → recreate

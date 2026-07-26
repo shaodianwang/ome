@@ -37,7 +37,7 @@ var KEDA = OptionalCRDBundle{
 }
 
 // EnvoyGateway bundle: gateway.envoyproxy.io/v1alpha1.BackendTrafficPolicy.
-// Required for the OEP-0011 traffic translator (Envoy Gateway path)
+// Required for the traffic translator (Envoy Gateway path)
 // integration tests. The translator emits unstructured BTPs so the
 // bundle has no schemes — the apiserver-side CRD is the only thing
 // envtest needs.
@@ -74,7 +74,7 @@ var GatewayAPI = OptionalCRDBundle{
 }
 
 // PrometheusOperator bundle: monitoring.coreos.com/v1.PodMonitor.
-// Required for the ISVC RawDeployment path (added in #158) which
+// Required for the ISVC RawDeployment path, which
 // always reconciles a PodMonitor via owner-ref + Create. The
 // prometheus-operator Go module ships the types but not the CRD
 // YAMLs, so the YAML in dep-crds/prometheus-operator/ is hand-vendored
@@ -89,7 +89,7 @@ var PrometheusOperator = OptionalCRDBundle{
 
 // Kueue bundle: kueue.x-k8s.io/v1beta1.{ResourceFlavor,ClusterQueue,
 // LocalQueue,Workload,Cohort,AdmissionCheck,…} plus the v1alpha1 types
-// (Topology, etc.). Required for the OEP-0018 real-Kueue placement
+// (Topology, etc.). Required for the real-Kueue placement
 // validation harness, which runs Kueue's full admission stack
 // (StartKueue) in-process against envtest and gates→admits→ungates
 // queue-labeled pods with no kubelet.

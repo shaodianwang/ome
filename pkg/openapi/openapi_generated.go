@@ -617,7 +617,7 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CanaryStatus tracks progress of a spec.rollout.canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
+				Description: "CanaryStatus tracks progress of a spec.rollout.groups[].canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"canaryRevisionHash": {
@@ -629,7 +629,7 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 					},
 					"currentStep": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CurrentStep is the zero-based index into spec.rollout.canary.Steps.",
+							Description: "CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.",
 							Default:     0,
 							Type:        []string{"integer"},
 							Format:      "int32",
@@ -710,7 +710,7 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate in the",
+				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate in the placement race.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"cluster": {
@@ -1017,7 +1017,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref common.ReferenceC
 				Properties: map[string]spec.Schema{
 					"class": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler. One of hpa | keda | external | none. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
+							Description: "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler. One of HPA | KEDA | External | None. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -1182,7 +1182,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -1227,7 +1227,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle reports OMENative-managed lifecycle state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec. Nil otherwise.",
+							Description: "Lifecycle reports OMENative-managed lifecycle state for this Component when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation). Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec. Nil otherwise.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus"),
 						},
 					},
@@ -1254,7 +1254,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"previousRolledoutRevision": {
 						SchemaProps: spec.SchemaProps{
-							Description: "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reverence during partial rollbacks.",
+							Description: "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reference during partial rollbacks.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -1999,7 +1999,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -2748,7 +2748,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -3017,7 +3017,7 @@ func schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref common.ReferenceCallbac
 					},
 					"trainingJobRef": {
 						SchemaProps: spec.SchemaProps{
-							Description: "TrainingJobID is the ID of the training job that produced this weight",
+							Description: "TrainingJobRef references the training job that produced this weight",
 							Default:     map[string]interface{}{},
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference"),
 						},
@@ -3070,7 +3070,7 @@ func schema_pkg_apis_ome_v1beta1_GroupCanary(ref common.ReferenceCallback) commo
 					},
 					"prometheus": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Prometheus is the metrics source (connection) shared by every analysis step in this canary: where to query and how to authenticate. When omitted, the controller targets the bundled Prometheus Service (http://ome-prometheus.<namespace>.svc:9090). It is only the source — WHAT to check is each step's analysis — and it gates nothing by itself.",
+							Description: "Prometheus is the metrics source (connection) shared by every analysis step in this canary: where to query and how to authenticate. When omitted (or when its serverAddress is empty), the operator-configured default source (canaryAnalysis.bundledPrometheusAddress) is used; if that is also unset the analysis has no source and its samples read inconclusive. It is only the source — WHAT to check is each step's analysis — and it gates nothing by itself.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisPrometheus"),
 						},
 					},
@@ -6767,7 +6767,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutCoordinationGroup binds a set of Components under one coordination policy.",
+				Description: "RolloutCoordinationGroup binds a set of Components under one coordination policy.\n\nUnused — superseded by spec.rollout.groups[] (RolloutGroup); retained for compatibility, scheduled for removal.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"components": {
@@ -6861,7 +6861,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref common.Refer
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Components mirrors spec.rolloutCoordination.groups[i].components for operator readability.",
+							Description: "Components mirrors spec.rollout.groups[i].components for operator readability.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -7027,7 +7027,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref common.ReferenceCal
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.",
+				Description: "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.\n\nUnused — superseded by spec.rollout (RolloutSpec); retained for compatibility, scheduled for removal.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"groups": {
@@ -7074,7 +7074,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref common.ReferenceC
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Groups reports the observed state of each declared RolloutCoordinationGroup, indexed by position in spec.rolloutCoordination.groups[].",
+							Description: "Groups reports the observed state of each declared rollout group, indexed by position in spec.rollout.groups[].",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -7841,7 +7841,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -8222,7 +8222,7 @@ func schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref common.ReferenceCallback) co
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.<comp>.scaleTargetRef so an external scaler knows which object to point at (matches the GroupKind the user would write into kubectl scale --resource-version-target=...).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha. The shape may change without notice.",
+				Description: "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.<comp>.scaleTargetRef so an external scaler knows which object to point at (the same GroupKind the user would target with kubectl scale <kind>/<name>).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha. The shape may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"apiVersion": {
@@ -8621,7 +8621,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ServingRuntimeSpec defines the desired state of ServingRuntime. This spec is currently provisional and are subject to change as details regarding single-model serving and multi-model serving are hammered out.",
+				Description: "ServingRuntimeSpec defines the desired state of ServingRuntime.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"supportedModelFormats": {
@@ -8983,7 +8983,7 @@ func schema_pkg_apis_ome_v1beta1_StorageSpec(ref common.ReferenceCallback) commo
 					},
 					"storageUri": {
 						SchemaProps: spec.SchemaProps{
-							Description: "StorageUri specifies the source URI of the model in a supported storage backend. Supported formats: - OCI Object Storage:   oci://n/{namespace}/b/{bucket}/o/{object_path} - Persistent Volume:    pvc://{pvc-name}/{sub-path} - Vendor-specific:      vendor://{vendor-name}/{resource-type}/{resource-path} This field is required.",
+							Description: "StorageUri specifies the source URI of the model in a supported storage backend. Supported formats: - OCI Object Storage:   oci://n/{namespace}/b/{bucket}/o/{object_path} - Persistent Volume:    pvc://{pvc-name}/{sub-path} - Vendor-specific:      vendor://{vendor-name}/{resource-type}/{resource-path} - Hugging Face:         hf://{org}/{repo}[@{revision}] - Amazon S3:            s3://{bucket}/{object_path} - Azure Blob Storage:   az://{account}/{container}/{object_path} - Google Cloud Storage: gs://{bucket}/{object_path} - GitHub:               github://{org}/{repo}[@{tag}] - Local filesystem:     local://{path} This field is required.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

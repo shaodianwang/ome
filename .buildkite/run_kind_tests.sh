@@ -2,21 +2,20 @@
 # KIND-backed integration test step for the BuildKite pipeline.
 #
 # Runs the KIND-backed suites under tests/integration/singlecluster/
-# controller/omenative_coordination_kind/. Each suite spins up a TWO-node KIND
-# cluster (1 control-plane + 1 worker — migration/interleave specs need
-# a second node to schedule the off-source surge pod), builds the
-# fake-serving image, kind-loads it, starts an in-process
-# controller-runtime manager pointed at the kind apiserver, and runs
-# Ginkgo specs against real kubelet + scheduler + containerd.
+# controller/omenative_coordination_kind/. Each suite spins up a
+# THREE-node KIND cluster (1 control-plane + 2 workers —
+# migration/interleave specs need a second schedulable node for the
+# off-source surge pod), builds the fake-serving image, kind-loads it,
+# starts an in-process controller-runtime manager pointed at the kind
+# apiserver, and runs Ginkgo specs against real kubelet + scheduler +
+# containerd.
 #
-# Coverage: ~40 spec files / 80+ active specs covering the OEP-0007.1 +
-# OEP-0007.2 + OEP-0011 contracts the envtest sibling cannot exercise
-# under its instant-Ready PodKubeletSimulator (pod-lifecycle timing,
-# drain races, per-revision Service convergence, in-place image
-# patches, RatioBalanced gate at scale, mid-rollout pause, Sequential
-# active-Component handoff, partial-failure recovery, bad-image
-# escalation). A handful of BlueGreen surge / HTTPRoute-cutover specs
-# are still parked (ginkgo.PIt) — see the suite README spec map.
+# Coverage: rollout-coordination contract specs that envtest cannot
+# exercise (pod-lifecycle timing, drain races, per-revision Service
+# convergence, in-place image patches, RatioBalanced gate at scale,
+# mid-rollout pause, Sequential active-Component handoff,
+# partial-failure recovery, bad-image escalation). Some specs are
+# still parked (ginkgo.PIt) — see the suite spec files.
 #
 # Infrastructure requirements (Docker on the agent host):
 #   - kind (installed by this script via `go install`)

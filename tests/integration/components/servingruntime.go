@@ -36,7 +36,7 @@ func SetupServingRuntimeWebhooks(mgr ctrl.Manager) error {
 	return nil
 }
 
-// SetupServingRuntimeInheritanceControllers wires the unified OEP-0012
+// SetupServingRuntimeInheritanceControllers wires the unified
 // inheritance reconciler (one source per GVK; reconciles both CSR + SR
 // types by branching on request namespace).
 func SetupServingRuntimeInheritanceControllers(ctx context.Context, mgr ctrl.Manager) error {

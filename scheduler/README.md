@@ -82,5 +82,6 @@ Pinned to the target Kubernetes minor version (currently 1.35 →
 minors, so version bumps are deliberate, reviewed changes: regenerate the
 `replace` block from the matching `sigs.k8s.io/scheduler-plugins` release.
 Kubernetes 1.35 currently requires the published `v0.35.4-devel` tag because no
-stable scheduler-plugins v0.35 tag is available; keep this scheduler alpha and
-opt-in until that supply-chain risk is removed.
+stable scheduler-plugins v0.35 tag is available; note the supply-chain caveat:
+`v0.35.4-devel` is a pre-release tag — move to the stable scheduler-plugins
+v0.35 tag when one is published.

@@ -6,8 +6,8 @@ import (
 )
 
 // Endpoints returns every reachable endpoint for the route named by serviceName,
-// one per gateway the route attaches to. It is the single-renderer status
-// derivation the OEP-0023 root cause demands: the same resolvedGateways +
+// one per gateway the route attaches to. It is the single-renderer
+// status derivation: the same resolvedGateways +
 // gatewayHostnameForDomain + pathPrefix that produce the HTTPRoute produce these
 // tuples, so status.url / status.addresses cannot drift from the actual routing.
 //

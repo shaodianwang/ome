@@ -63,13 +63,13 @@ func nodeFitsPod(ni framework.NodeInfo, pod *v1.Pod) bool {
 	return true
 }
 
-// boundGangMembers scans the node snapshot for pods already placed (assumed or
-// bound) that belong to the same gang as pod — i.e. share its PodGroup. It
-// returns how many were found and the domain they sit in (the domain of the last
-// such node seen; a healthy gang is single-domain). This is how the plugin
-// recovers a gang whose in-memory pin was lost (scheduler restart / leader
-// failover): the truth of where a gang lives is where its members already are.
-// The pod being scheduled is not yet in any node's pod list, so it never counts
+// boundGangPlacement is the result of scanning the node snapshot for pods
+// already placed (assumed or bound) that share the pod's PodGroup: how many
+// were found and the domain they sit in (the domain of the last such node
+// seen; a healthy gang is single-domain). This is how the plugin recovers a
+// gang whose in-memory pin was lost (scheduler restart / leader failover):
+// the truth of where a gang lives is where its members already are. The pod
+// being scheduled is not yet in any node's pod list, so it never counts
 // itself.
 type boundGangPlacement struct {
 	domain string

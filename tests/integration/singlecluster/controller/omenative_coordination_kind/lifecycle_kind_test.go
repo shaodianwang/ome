@@ -13,7 +13,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Lifecycle specs ported from envtest lifecycle_test.go covering pod
+// Lifecycle specs covering pod
 // naming, scale, MinReplicas=0 behavior, and delete-then-recreate. The
 // basic "ISVC creates pods + Service + InstanceStatus=Ready" path is
 // covered by baseline_no_coord_kind_test (A-6) and lifecycle_basic_kind_test

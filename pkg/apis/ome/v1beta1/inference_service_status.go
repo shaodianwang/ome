@@ -115,7 +115,9 @@ type ComponentStatusSpec struct {
 	Address *duckv1.Addressable `json:"address,omitempty"`
 
 	// Lifecycle reports OMENative-managed lifecycle state for this Component
-	// when the Component is annotated `ome.io/deploymentMode: OMENative`.
+	// when the Component resolves to deploymentMode OMENative
+	// (spec.deploymentMode or the per-Component ome.io/deploymentMode
+	// annotation).
 	// Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec.
 	// Nil otherwise.
 	// +optional
@@ -146,7 +148,7 @@ type ComponentStatusSpec struct {
 
 	// PreviousRolledoutRevision names the prior rolled-out
 	// ControllerRevision, retained for diagnosis and traffic
-	// reverence during partial rollbacks.
+	// reference during partial rollbacks.
 	// +optional
 	PreviousRolledoutRevision string `json:"previousRolledoutRevision,omitempty"`
 
@@ -485,6 +487,7 @@ type PlacementStatus struct {
 }
 
 // CandidatePlacement is the per-cluster state of a fan-out candidate in the
+// placement race.
 type CandidatePlacement struct {
 	// Cluster is the WorkloadCluster name.
 	Cluster string `json:"cluster"`

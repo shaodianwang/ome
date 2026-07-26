@@ -169,9 +169,9 @@ func RenderWithRevision(
 		applyRequiredNodeExclusion(pod, node)
 	}
 
-	// Adapter-supplied hook: peer-env injection for the ISVC adapter,
-	// nil for the IR adapter (peer-env stays on the parent ISVC
-	// controller for v1).
+	// Adapter-supplied hook: peer-env injection. The IR reconciler
+	// (the sole workload.Reconcile caller) wires it via
+	// core.ISVCRenderHook; nil skips injection.
 	if hook != nil {
 		hook(pod, runner.Name, ordinal, revisionHash)
 	}

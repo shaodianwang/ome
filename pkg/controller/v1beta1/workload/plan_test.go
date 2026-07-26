@@ -70,10 +70,10 @@ func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
 	}
 }
 
-// TestBuildPlan_MultiPodDefaultsMatchOEP pins the defaults for multi-pod
+// TestBuildPlan_MultiPodDefaults pins the defaults for multi-pod
 // Instances: RestartPolicy=RecreateInstance, ReadyPolicy=AllPodReady.
 // Single-pod defaults stay None for both.
-func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
+func TestBuildPlan_MultiPodDefaults(t *testing.T) {
 	desired := multiPodDesired(1, 1, Lifecycle{})
 	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
 	if err != nil {

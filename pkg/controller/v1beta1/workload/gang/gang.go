@@ -53,8 +53,8 @@ func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.Comp
 		// In-flight migration source / surge stay in the plan via the
 		// migration-protected branch in BuildPlan; they will not land
 		// in this 'extras' list. No-op explicitly to mirror
-		// ops.extraInstanceIndices' semantics in case BuildPlan ever
-		// regresses.
+		// workload.ExtraInstanceIndices' semantics in case BuildPlan
+		// ever regresses.
 		if s.Phase == workload.InstancePhaseMigrating {
 			continue
 		}
@@ -98,7 +98,7 @@ func EnsureSurgePodGroup(deps workload.Deps) workload.EnsureGangPodGroupFn {
 }
 
 // EnsurePodGroups drives the per-Instance PodGroup lifecycle for one
-// Component reconcile. Wired into ReconcileComponent BEFORE the
+// Component reconcile. Adapters call it BEFORE workload.Reconcile's
 // per-Instance Create state machine so the gang is announced to the
 // scheduler before the per-Instance Create op brings up the first
 // pod — announcing it after would let the scheduler place pods

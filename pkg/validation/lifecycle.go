@@ -48,7 +48,7 @@ const (
 // InferenceService. Today the only per-Component knobs that need
 // semantic validation past the CRD schema are
 // UpdateStrategy.RollingUpdate.MaxUnavailable and .MaxSurge — both
-// were widened from *int32 to *intstr.IntOrString (Gap 4 / Gap 5).
+// *intstr.IntOrString.
 // Wired into the webhook from inference_service_validation.go.
 func ValidateLifecycle(spec *v1beta1.InferenceServiceSpec) error {
 	if spec == nil {
@@ -99,15 +99,15 @@ func validateComponentLifecycle(name string, lc *v1beta1.LifecycleSpec) error {
 // pod not-ready while it patches the running container, which consumes the
 // per-Component MaxUnavailable budget — so maxUnavailable=0 stalls an
 // in-place roll exactly like a surge/drain one: the patch never starts and
-// the pods sit untouched. #408 briefly exempted in-place here on the premise
-// that it "neither surges nor drains"; real-cluster testing showed the
-// mark-not-ready does consume the budget, so the exemption only converted a
-// fail-fast admission error into a silent runtime deadlock. Hence reverted.
+// the pods sit untouched. Exempting in-place on the premise that it
+// "neither surges nor drains" would be wrong — the mark-not-ready does
+// consume the budget, so an exemption only converts a fail-fast
+// admission error into a silent runtime deadlock.
 //
 // Either field nil (operator left it for the layer below to default)
 // does NOT trip this check; the per-Component layer treats nil as "no
 // cap" and defers to the coordination-group ceiling, which has its
-// own non-zero defaults (25% / 0). The check only fires when the
+// own non-zero defaults (25% / 25%). The check only fires when the
 // operator wrote 0 on BOTH knobs intentionally.
 //
 // Mirrors the upstream appsv1.Deployment.Strategy.RollingUpdate

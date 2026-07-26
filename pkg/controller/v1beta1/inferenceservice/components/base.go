@@ -42,26 +42,23 @@ type BaseComponentFields struct {
 	Client    client.Client
 	Clientset kubernetes.Interface
 	// APIReader is the live (uncached) reader, typically mgr.GetAPIReader().
-	// Use it for reads where cache lag would be a correctness problem —
-	// OMENative passes it through to ReconcileParams.APIReader for revision
-	// bookkeeping, audit ledger dedup, and EndpointSlice drain checks.
+	// Intended for reads where cache lag would be a correctness problem.
+	// Currently unread on the ISVC side — the InferenceReplica controller
+	// owns revision bookkeeping, audit ledger dedup, and EndpointSlice
+	// drain checks.
 	APIReader client.Reader
 	// Expectations is the OMENative per-controller create/delete
-	// bookkeeping cache. Threaded through ReconcileParams so the
-	// per-reconcile dispatch and the SetupWithManager-registered Pod
-	// event handler share the same instance. nil for non-OMENative
-	// modes — they don't consult it.
+	// bookkeeping cache. Currently unread on the ISVC side — the
+	// InferenceReplica controller owns its own instance. nil for
+	// non-OMENative modes.
 	Expectations *omenative.Expectations
-	// Recorder is the parent controller's event recorder. Threaded
-	// through ReconcileParams so OMENative ops emit K8s Events against
-	// the parent ISVC at lifecycle transitions.
+	// Recorder is the parent controller's event recorder.
 	Recorder record.EventRecorder
 	// GangSchedulingAvailable is the cluster-discovery boolean threaded
 	// from the InferenceServiceReconciler — true when the cluster has
 	// the scheduler-plugins `scheduling.x-k8s.io/v1alpha1/PodGroup` CRD
-	// installed. OMENative's reconciler reads this via
-	// ReconcileParams.GangSchedulingAvailable to decide whether to call
-	// podgroup.EnsurePodGroup for each multi-pod Instance. Other
+	// installed. Currently unread on the ISVC side — the projected IR
+	// carries the flag and the IR controller consults it. Other
 	// deployment modes (Raw / PD) ignore this field.
 	GangSchedulingAvailable           bool
 	Scheme                            *runtime.Scheme
@@ -842,7 +839,7 @@ func ReconcileOMENativeSubresources(
 		// metadata.labels only (spec.selector keeps selecting pods by
 		// baseSelector), relabelings append to every endpoint. Without this the
 		// PodMonitor carries only OME's own labels and a label-selecting
-		// collector (e.g. the KTel target allocator) never scrapes it.
+		// collector (e.g. an external target allocator) never scrapes it.
 		if b.InferenceServiceConfig != nil {
 			podmonitor.ApplyManagedScrapeConfig(target, b.InferenceServiceConfig.PodMonitor)
 		}

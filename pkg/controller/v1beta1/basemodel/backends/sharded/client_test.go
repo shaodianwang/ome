@@ -252,7 +252,7 @@ func TestCheckSourceReturnsErrorForTransientHeadFailure(t *testing.T) {
 
 func TestFileMetadataInspectionUsesCanonicalRootAndRelativePaths(t *testing.T) {
 	mtime := uint64(1710000000)
-	source := Source{URI: "manifold://bucket/model"}
+	source := Source{URI: "s3://bucket/model"}
 	response := &fileMetadataResponse{
 		Root: "s3://bucket/model",
 		Files: []fileMetadataEntry{
@@ -415,7 +415,7 @@ func TestInspectSourceFetchesHFQuantConfigWhenPresent(t *testing.T) {
 	configPath := sourceURI + "/config.json"
 	hfQuantPath := sourceURI + "/hf_quant_config.json"
 
-	configJSON := []byte(`{"model_type":"llama4x_text"}`)
+	configJSON := []byte(`{"model_type":"examplemoe_text"}`)
 	hfQuantJSON := []byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"NVFP4","group_size":16}}`)
 	mtimeConfig := uint64(1710000000)
 	mtimeQuant := uint64(1710000001)

@@ -238,7 +238,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		// the source before then drops it out of rotation while the replacement
 		// is still not in it — an N-1 capacity TROUGH. Across Components rolled
 		// on independent timelines those offset troughs skew the live
-		// RatioBalanced ratio (the engine 2 : decoder 1 regression). Waiting
+		// RatioBalanced ratio. Waiting
 		// keeps true capacity overlap: N -> N+1 -> N, never below N. (Gated
 		// only when there is a source to drain; a source already gone — the
 		// promote step below — has no trough to guard against.)

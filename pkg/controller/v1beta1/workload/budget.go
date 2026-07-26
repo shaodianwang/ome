@@ -5,16 +5,12 @@
 // input.UpdateGate: both layers are independent capacities, the
 // effective gate allows an Instance start only when BOTH layers do.
 //
-// Background. Before this file the only rollout budget the dispatcher
-// consulted was the coordination-group MaxSurge / MaxUnavailable
-// (group-wide ceiling across Components in a RolloutCoordinationGroup).
-// The per-Component LifecycleSpec.UpdateStrategy.RollingUpdate fields
-// were widened to *intstr.IntOrString and the converter copies them onto
-// workload.RollingUpdate — but the dispatcher never read them. This
-// file closes that gap: budgets here cap WITHIN-Component pod surge /
-// drain, regardless of whether the Component participates in any
-// coordination group. Group-wide ceilings still apply through the
-// UpdateGate callback in workload.Reconcile.
+// Budgets here cap WITHIN-Component pod surge / drain, regardless of
+// whether the Component participates in any coordination group: the
+// per-Component LifecycleSpec.UpdateStrategy.RollingUpdate fields are
+// copied by the converter onto workload.RollingUpdate and consumed by
+// this file. Group-wide ceilings still apply through the UpdateGate
+// callback in workload.Reconcile.
 //
 // Composition rule (documented in lifecycle_types.go on RollingUpdate.MaxSurge):
 //
@@ -30,7 +26,7 @@
 //
 // Defaults: nil per-Component RollingUpdate.{MaxSurge,MaxUnavailable}
 // → "no per-Component cap" (the coordination-group ceiling is the
-// only constraint). The 25% / 0 defaults the API documents are
+// only constraint). The 25% / 25% defaults the API documents are
 // applied by upstream defaulters (webhook) when the operator wants
 // them; an unset value here is treated as "uncapped" so we don't
 // silently impose a budget the operator didn't write.

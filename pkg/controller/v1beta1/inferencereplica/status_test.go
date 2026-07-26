@@ -30,13 +30,13 @@ import (
 // map, available-pod set) tuple, it stamps each Instance's per-pod
 // counters off the live pod state. This is the load-bearing step that
 // lets the downstream workload.CountReadyInstances classifier see the
-// real pod state instead of the legacy Phase-only proxy.
+// real pod state instead of a Phase-only proxy.
 //
-// Regression guard for the round-2 recreate-path bug: before the fix,
-// the IR aggregator never populated per-Instance ReadyPodCount —
-// downstream rollups read zero on every Instance even when the
-// underlying pods were ContainersReady. This test pins the exact
-// counter-write contract so a future refactor can't silently drop it.
+// Regression guard: an IR aggregator that never populates per-Instance
+// ReadyPodCount makes downstream rollups read zero on every Instance
+// even when the underlying pods are ContainersReady. This test pins
+// the exact counter-write contract so a future refactor can't silently
+// drop it.
 func TestPopulateInstancePodCounters_StampsLivePodState(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 2)
@@ -106,8 +106,8 @@ func TestPopulateInstancePodCounters_EmptyPodSet(t *testing.T) {
 // TestPopulateInstancePodCounters_Admitted verifies the Admitted signal
 // is computed correctly: true when the Instance has pods and none carry
 // an admission scheduling gate (Kueue has granted quota), false while
-// gated/queued or before pods exist. Used by the OEP-0018 control plane
-// to decide the fan-out race winner.
+// gated/queued or before pods exist. Used by the multi-cluster control
+// plane to decide the fan-out race winner.
 func TestPopulateInstancePodCounters_Admitted(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 3)
@@ -384,16 +384,14 @@ func TestAggregateStatus_ReadyCondition_ObservedGenerationStamped(t *testing.T) 
 		"Ready condition must stamp ObservedGeneration off status.ObservedGeneration")
 }
 
-// TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods pins
-// the round-2 cluster-test bug: during a recreate or SurgeThenDrain
-// rollout the per-Instance lifecycle Phase can lag the live pod state
-// (Phase=Updating while the new pod has flipped ContainersReady but
-// the workload pipeline hasn't yet stamped Phase=Ready). The IR
-// rollup MUST count the Instance as Ready off the live pod state
-// rather than the lifecycle bookkeeping — otherwise ISVC's
-// engine.omenative.readyReplicas reads 0 even though the pod is
-// already serving, blocking E-1/X-2/G-2/G-4 + the cascaded E-2/E-3/
-// E-4/E-5 tests.
+// TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods:
+// during a recreate or SurgeThenDrain rollout the per-Instance
+// lifecycle Phase can lag the live pod state (Phase=Updating while the
+// new pod has flipped ContainersReady but the workload pipeline hasn't
+// yet stamped Phase=Ready). The IR rollup MUST count the Instance as
+// Ready off the live pod state rather than the lifecycle bookkeeping —
+// otherwise ISVC's engine.omenative.readyReplicas reads 0 even though
+// the pod is already serving.
 //
 // Setup mirrors the post-recreate moment: Instance 0 carries
 // Phase=Updating with a deep operation snapshot (drain step

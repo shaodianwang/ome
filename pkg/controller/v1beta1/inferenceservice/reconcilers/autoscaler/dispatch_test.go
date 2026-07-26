@@ -240,7 +240,7 @@ func TestDispatchAutoscaler_Branches(t *testing.T) {
 			if tc.wantHPAExists {
 				require.NoError(t, hpaErr, "expected HPA to exist")
 				assert.Equal(t, dispatchScaleTargetRef(name), gotHPA.Spec.ScaleTargetRef, "HPA scaleTargetRef should target the IR")
-				// Owner-ref should pin the HPA to the IR (foreground GC cascade).
+				// Owner-ref should pin the HPA to the IR (GC cascade).
 				require.Len(t, gotHPA.OwnerReferences, 1, "HPA should have exactly one ownerRef")
 				assert.Equal(t, "InferenceReplica", gotHPA.OwnerReferences[0].Kind)
 				assert.Equal(t, name, gotHPA.OwnerReferences[0].Name)

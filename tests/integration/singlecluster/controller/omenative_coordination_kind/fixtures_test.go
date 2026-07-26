@@ -12,13 +12,12 @@ import (
 
 // translateCoordGroupToV2 maps a single v1 RolloutCoordinationGroup (the
 // operator-facing shape the specs in this suite still author for readability)
-// into the OEP-0017 v2 RolloutGroup list the controller now consumes. The v1
+// into the v2 RolloutGroup list the controller now consumes. The v1
 // types still exist as spec/status helpers, so the test literals keep
 // compiling; this is the one central seam that retargets them to
 // spec.rollout.groups[].
 //
-// The mapping is per-Policy and is intentionally lossy in exactly the ways
-// OEP-0017 prescribes:
+// The mapping is per-Policy and is intentionally lossy:
 //   - BlueGreen     -> one v2 group with BlueGreen progression (Order, Soak carried).
 //   - RollingUpdate -> one v2 group with RollingUpdate progression; pacing MaxSurge/
 //     MaxUnavailable carry into GroupRollingUpdate, and RatioBalanced pacing becomes
@@ -519,7 +518,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	isvc := wrapper.Obj()
 	if len(o.coordGroups) > 0 {
 		// Translate the operator-facing v1 coordination groups the specs
-		// author into OEP-0017 v2 spec.rollout.groups[]. Independent groups
+		// author into v2 spec.rollout.groups[]. Independent groups
 		// translate to nothing (a Component in no group rolls independently),
 		// so the resulting v2 list may be shorter than coordGroups — or empty,
 		// in which case Spec.Rollout stays nil (no rollout block at all).

@@ -51,7 +51,7 @@ const (
 // OMEScheme builds the scheme every OME KIND suite needs: core k8s + OME
 // v1beta1 (kindutil.BaseScheme) plus prometheus-operator (PodMonitor) and KEDA
 // (ScaledObject). The ISVC controller emits a PodMonitor on every OMENative
-// reconcile and Owns ScaledObject unconditionally (PR #337), so without those
+// reconcile and Owns ScaledObject unconditionally, so without those
 // schemes cache-sync fails and the suite never reaches a spec. Gang scheduling
 // (PodGroup) is NOT registered here — see GangScheme.
 func OMEScheme() *runtime.Scheme {
@@ -63,10 +63,10 @@ func OMEScheme() *runtime.Scheme {
 
 // GangScheme is OMEScheme plus the scheduler-plugins PodGroup type. Only the
 // multi-node gang suite needs it: registering PodGroup makes the controller's
-// gang-availability discovery succeed, and the direct path then sets a gang
+// gang-availability discovery succeed, and the reconciler then sets a gang
 // schedulerName — which leaves pods Pending on a KIND cluster that has no gang
-// scheduler. So the single-pod / direct-path suites use OMEScheme and stay on
-// the non-gang path; only the IR-managed gang suite opts into this.
+// scheduler. So the single-pod suites use OMEScheme and stay on
+// the non-gang path; only the gang suite opts into this.
 func GangScheme() *runtime.Scheme {
 	s := OMEScheme()
 	utilruntime.Must(schedulingv1alpha1.AddToScheme(s))

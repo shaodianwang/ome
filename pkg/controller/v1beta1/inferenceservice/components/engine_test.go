@@ -1149,7 +1149,7 @@ func TestEngineReconcileOMENativeSubresources_ExtraEndpoints(t *testing.T) {
 	g.Expect(pm.Spec.PodMetricsEndpoints[1].Path).To(gomega.Equal("/engine_metrics"))
 }
 
-// TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig pins the KTel
+// TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig pins the external-allocator
 // wiring: the podMonitor config block (metadata labels + endpoint relabelings)
 // is applied to the generated PodMonitor. The label goes to metadata.labels so
 // a label-selecting collector scrapes it, but must NOT leak into spec.selector
@@ -1192,7 +1192,7 @@ func TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig(t *testing.T) 
 
 	cfg := &controllerconfig.InferenceServicesConfig{
 		PodMonitor: controllerconfig.PodMonitorConfig{
-			Labels: map[string]string{"ktel.fb.com/scrape-tier": "cluster"},
+			Labels: map[string]string{"scrape.example.com/tier": "cluster"},
 			Relabelings: []controllerconfig.RelabelConfig{
 				{
 					SourceLabels: []string{"__meta_kubernetes_pod_label_ome_io_inferenceservice"},
@@ -1222,10 +1222,10 @@ func TestEngineReconcileOMENativeSubresources_ManagedScrapeConfig(t *testing.T) 
 		client.ObjectKey{Namespace: "default", Name: "test-isvc-engine"},
 		pm)).To(gomega.Succeed())
 
-	// KTel selection label is on metadata.labels...
-	g.Expect(pm.Labels).To(gomega.HaveKeyWithValue("ktel.fb.com/scrape-tier", "cluster"))
+	// The allocator selection label is on metadata.labels...
+	g.Expect(pm.Labels).To(gomega.HaveKeyWithValue("scrape.example.com/tier", "cluster"))
 	// ...but NOT on spec.selector (would break pod matching).
-	g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey("ktel.fb.com/scrape-tier"))
+	g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey("scrape.example.com/tier"))
 	g.Expect(pm.Spec.Selector.MatchLabels).To(gomega.HaveKeyWithValue(constants.OMEComponentLabel, string(v1beta1.EngineComponent)))
 
 	// Relabelings appended to every endpoint (default + extra).

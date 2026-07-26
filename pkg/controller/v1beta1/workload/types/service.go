@@ -1,10 +1,10 @@
 // service.go declares the typed input the workload package consumes
 // when rendering per-Component supporting Services. Splitting the spec
 // type out of the renderer keeps `workload/services.go` free of any
-// owner-CRD coupling: adapters (the ISVC OMENative dispatcher today,
-// the InferenceReplica controller tomorrow) populate
-// PerComponentServiceSpec from their respective owner shapes and hand
-// it to `workload.ReconcileHeadlessService`.
+// owner-CRD coupling: adapters (the ISVC OMENative dispatcher and the
+// InferenceReplica controller) populate PerComponentServiceSpec from
+// their respective owner shapes and hand it to
+// `workload.ReconcileHeadlessService`.
 //
 // Why this lives here and not under `workload/`: the parent workload
 // package's Service helpers in services.go must depend on this type,
@@ -27,8 +27,8 @@ import (
 // code reads the spec opaquely and never reaches back into the owner.
 //
 // One Service per (workload-key, component). The ISVC adapter
-// constructs one spec per ReconcileComponent pass; the future IR
-// adapter will construct one spec per InferenceReplica reconcile.
+// constructs one spec per Component reconcile pass; the IR adapter
+// constructs one spec per InferenceReplica reconcile.
 type PerComponentServiceSpec struct {
 	// Name is the Service object name. The workload renderer stamps it
 	// verbatim but does NOT compute it — adapters pass the canonical
@@ -46,7 +46,7 @@ type PerComponentServiceSpec struct {
 	// the workload owns (not RawDeployment pods that may share the bare
 	// Component label). The ISVC adapter wires
 	// `ome.io/inferenceservice + component + managed-by=OMENative`; the
-	// IR adapter will wire the IR-side equivalent.
+	// IR adapter wires the IR-side equivalent.
 	Selector map[string]string
 
 	// Labels are stamped on the Service object metadata block for

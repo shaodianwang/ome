@@ -627,12 +627,12 @@ func TestReconcile_PerComponentBudget_PercentForm(t *testing.T) {
 }
 
 // TestReconcile_ConcurrentGangSurge_DistinctIndices pins the
-// distinct-surge-index contract #618 established at the reconcile level.
-// When several multi-pod (gang) Instances start a SurgeThenDrain rollout
-// in the SAME wake-up, each gangSurgeUpdate must allocate a DISTINCT
-// surge index. The fleet-wipe SEV was two colliding gangs sharing one
-// surge index: when the single shared surge became Ready, the drain
-// logic released BOTH sources at once, collapsing capacity.
+// distinct-surge-index contract at the reconcile level. When several
+// multi-pod (gang) Instances start a SurgeThenDrain rollout in the
+// SAME wake-up, each gangSurgeUpdate must allocate a DISTINCT surge
+// index. Two colliding gangs sharing one surge index collapse
+// capacity: when the single shared surge becomes Ready, the drain
+// logic releases BOTH sources at once.
 //
 // Setup: one multi-pod Component (leader:1 + worker:1 = a gang per
 // Instance), Replicas=3, MaxSurge=2, all three Ready on the prior
@@ -643,11 +643,11 @@ func TestReconcile_PerComponentBudget_PercentForm(t *testing.T) {
 //   - no two gangs stamped the SAME SurgeIndex, and
 //   - no stamped SurgeIndex collides with a steady index 0/1/2.
 //
-// Regression direction: pre-#618 both gangs picked the lowest-free index
-// (3), so the captured set would contain a duplicate and this test would
-// fail. On current main AllocateSurgeIndex excludes in-flight
-// Operation.SurgeIndex and gangSurgeUpdate reserves the claim on the
-// source snapshot, so the two gangs pick distinct indices (3 and 4).
+// Regression direction: if both gangs picked the lowest-free index
+// (3), the captured set would contain a duplicate and this test would
+// fail. AllocateSurgeIndex excludes in-flight Operation.SurgeIndex and
+// gangSurgeUpdate reserves the claim on the source snapshot, so the
+// two gangs pick distinct indices (3 and 4).
 func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()

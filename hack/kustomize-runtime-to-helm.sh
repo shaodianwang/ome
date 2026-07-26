@@ -23,7 +23,7 @@ Arguments:
   output-file   Path to output Helm template
 
 Options:
-  -p, --prefix PREFIX  Helm values prefix (default: auto-detected)
+  -p, --prefix PREFIX  Helm values prefix (required)
   -c, --use-common-image     Use common image path (.Values.{runtime}.commonImage)
   -r, --run-time       Runtime (vllm, sglang)
   -h, --help           Show this help message
@@ -40,7 +40,7 @@ process_yaml() {
   local run_time="${5:-}"
 
   [[ -z "$helm_prefix" ]] && {
-    log "ERROR" "Failed to extract metadata.name from input"
+    log "ERROR" "--prefix is required"
     exit 1
   }
 

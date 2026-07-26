@@ -23,10 +23,11 @@ const (
 	// pod's serving gate is being flipped.
 	updateStepSurge = "Surge"
 	// updateStepSurgeDrain is the SurgeThenDrain drain phase. Distinct
-	// from updateStepDrain so the dispatcher's CheckSurgeGate can
-	// recognize in-flight surge operations by step name alone (the
-	// surge contributes an extra pod alive — the unavailability gate
-	// doesn't apply; the surge gate does).
+	// from updateStepDrain so surge-budget accounting
+	// (workload.CurrentSurgeInFlight, coordination
+	// GateContext.CheckSurge) can recognize in-flight surge operations
+	// by step name alone (the surge contributes an extra pod alive —
+	// the unavailability gate doesn't apply; the surge gate does).
 	updateStepSurgeDrain = "SurgeDrain"
 	// updateStepSurgeDrainSettle is entered after EndpointSlice confirms
 	// the old pod is no longer eligible for new traffic. The controller
@@ -37,9 +38,9 @@ const (
 )
 
 // UpdateStepInPlace is the exported alias for the in-place step name.
-// Used by the omenative timeouts handler to identify in-flight in-place
-// updates (Type=Update, Step=InPlace) that need to fall back to
-// recreate when their deadline elapses.
+// Used by the stuck-operation deadline machinery to identify in-flight
+// in-place updates (Type=Update, Step=InPlace) that need to fall back
+// to recreate when their deadline elapses.
 const UpdateStepInPlace = updateStepInPlace
 
 // UpdateStepDrain is the exported alias for the recreate-drain step name.
@@ -185,7 +186,7 @@ func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.Rec
 		// to drive to — the surge pod never goes Ready, so every pass
 		// re-stamps Updating and the escalator re-stamps Failed. A real
 		// corrective edit changes TargetRevision, so the guard falls
-		// through and the re-surge proceeds (the #711 recovery path).
+		// through and the re-surge proceeds.
 		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 			isSurgeUpdateStep(s.Operation.Step) &&
 			s.TargetRevision == targetRev &&
@@ -214,8 +215,8 @@ func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.Rec
 // patchInstanceStatusSurgeStepDrain transitions the surge operation
 // from Step=Surge to Step=SurgeDrain once the surge pod is Ready and
 // we're about to flip serving gates. Distinct from updateStepDrain
-// (which recreate uses) so the dispatcher's CheckSurgeGate can
-// identify in-flight surges by step name. Updates LastProgressAt for
+// (which recreate uses) so surge-budget accounting can identify
+// in-flight surges by step name. Updates LastProgressAt for
 // the stuck-operation timeout machinery. Idempotent — no-op if
 // already on SurgeDrain.
 func patchInstanceStatusSurgeStepDrain(ctx context.Context, input workload.ReconcileInput, idx int32) error {

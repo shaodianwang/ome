@@ -182,7 +182,7 @@ func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T
 	// Decoder's resolved mode is intentionally NOT OMENative.
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.DecoderComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{Replicas: 42}, // sentinel from direct path
+			Lifecycle: &v1beta1.LifecycleStatus{Replicas: 42}, // pre-existing sentinel value
 		},
 	}
 	ir := liveIR("llama", "prod", 2)

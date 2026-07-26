@@ -51,7 +51,7 @@ func skippedOverlay(name, reason string) isvcutils.ResolvedOverlay {
 func TestAppendOverlayVolumes(t *testing.T) {
 	overlays := []isvcutils.ResolvedOverlay{
 		pvcOverlay("foo-pvc", "default", "data-pvc", "weights/v1"),
-		shardedOverlay("foo-sharded", "manifold://bucket/tree"),
+		shardedOverlay("foo-sharded", "s3://bucket/tree"),
 		perNodeOverlay("foo-pernode", "/mnt/models/foo"),
 		skippedOverlay("foo-gone", "not found"),
 	}
@@ -79,7 +79,7 @@ func TestAppendOverlayVolumes(t *testing.T) {
 func TestAppendOverlayVolumeMounts(t *testing.T) {
 	overlays := []isvcutils.ResolvedOverlay{
 		pvcOverlay("foo-pvc", "default", "data-pvc", "weights/v1"),
-		shardedOverlay("foo-sharded", "manifold://bucket/tree"),
+		shardedOverlay("foo-sharded", "s3://bucket/tree"),
 		perNodeOverlay("foo-pernode", "/mnt/models/foo"),
 	}
 	c := &corev1.Container{}
@@ -101,10 +101,10 @@ func TestAppendOverlayVolumeMounts(t *testing.T) {
 }
 
 func TestAppendOverlayEnvVars(t *testing.T) {
-	manifoldURI := "manifold://bucket/tree/weights"
+	s3URI := "s3://bucket/tree/weights"
 	overlays := []isvcutils.ResolvedOverlay{
 		pvcOverlay("foo-pvc", "default", "data-pvc", "weights/v1"),
-		shardedOverlay("foo-sharded", manifoldURI),
+		shardedOverlay("foo-sharded", s3URI),
 		perNodeOverlay("foo-pernode", "/mnt/models/foo"),
 		skippedOverlay("foo-gone", "not found"),
 	}
@@ -116,7 +116,7 @@ func TestAppendOverlayEnvVars(t *testing.T) {
 		envs[e.Name] = e.Value
 	}
 	assert.Equal(t, "/opt/ml/model-overlays/foo-pvc", envs["OVERLAY_FOO_PVC_MODEL_PATH"])
-	assert.Equal(t, manifoldURI, envs["OVERLAY_FOO_SHARDED_MODEL_PATH"],
+	assert.Equal(t, s3URI, envs["OVERLAY_FOO_SHARDED_MODEL_PATH"],
 		"Sharded overlay env is the storage URI verbatim — runner fetches via cluster_cache client")
 	assert.Equal(t, "/opt/ml/model-overlays/foo-pernode", envs["OVERLAY_FOO_PERNODE_MODEL_PATH"])
 	_, gone := envs["OVERLAY_FOO_GONE_MODEL_PATH"]
@@ -133,7 +133,7 @@ func TestAnyOverlayIsSharded(t *testing.T) {
 		{"only PVC", []isvcutils.ResolvedOverlay{pvcOverlay("a", "ns", "pvc", "p")}, false},
 		{"PVC + Sharded mixed", []isvcutils.ResolvedOverlay{
 			pvcOverlay("a", "ns", "pvc", "p"),
-			shardedOverlay("b", "manifold://x"),
+			shardedOverlay("b", "s3://x"),
 		}, true},
 		{"skipped Sharded does not count", []isvcutils.ResolvedOverlay{
 			skippedOverlay("a", "not found"),
@@ -149,7 +149,7 @@ func TestAnyOverlayIsSharded(t *testing.T) {
 func TestMountedOverlaySummary(t *testing.T) {
 	overlays := []isvcutils.ResolvedOverlay{
 		pvcOverlay("foo-pvc", "default", "data-pvc", "weights/v1"),
-		shardedOverlay("foo-sharded", "manifold://bucket/tree"),
+		shardedOverlay("foo-sharded", "s3://bucket/tree"),
 		skippedOverlay("foo-gone", "not found"),
 	}
 	got := MountedOverlaySummary(overlays)

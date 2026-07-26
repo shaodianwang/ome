@@ -1,4 +1,4 @@
-// Package placement implements the OEP-0018 control-plane fan-out controller:
+// Package placement implements the multi-cluster control-plane fan-out controller:
 // it places an InferenceService onto a workload cluster and mirrors its status.
 package placement
 
@@ -7,7 +7,7 @@ import "github.com/ome-projects/ome/pkg/constants"
 const (
 	// AcceleratorRequirementsAnnotation holds a label-selector string of the
 	// accelerator/capability labels a candidate WorkloadCluster MUST satisfy
-	// for this ISVC (e.g. "gpu=gb300"). Per OEP-0018, candidate clusters are
+	// for this ISVC (e.g. "gpu=gb300"). Candidate clusters are
 	// those whose labels satisfy the ISVC's accelerator requirements; an ISVC
 	// that declares no requirement (neither this nor ClusterSelectorAnnotation)
 	// is NOT fanned out fleet-wide. The value is user/GitOps-supplied — there is

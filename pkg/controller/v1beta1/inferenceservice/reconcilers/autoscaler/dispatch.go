@@ -38,7 +38,7 @@ type DispatchParams struct {
 
 	// Owner is the OwnerReference stamped on every emitted HPA /
 	// ScaledObject. For the IR-managed path it points at the
-	// InferenceReplica so foreground GC cascades the autoscaler when
+	// InferenceReplica so GC cascades the autoscaler when
 	// the IR is deleted. Required — DispatchAutoscaler returns an
 	// error if Owner.UID is empty (defends against a caller wiring
 	// an owner-ref before the IR is committed).
@@ -93,8 +93,7 @@ type DispatchParams struct {
 // switch keda → hpa (and vice versa) is idempotent: re-running the
 // dispatch after a no-op state-change reads NotFound and skips the
 // Delete. Owner-ref + controller flag are stamped from p.Owner so a
-// deletion of the parent (IR) cascades the autoscaler via foreground
-// GC.
+// deletion of the parent (IR) cascades the autoscaler via GC.
 //
 // Errors are wrapped with the offending object kind + key for grep-
 // ability in operator logs. A failure on the cross-class delete short-

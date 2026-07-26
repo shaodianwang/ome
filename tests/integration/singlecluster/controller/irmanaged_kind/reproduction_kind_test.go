@@ -17,7 +17,7 @@ import (
 // IR-managed OMENative rollout specs.
 //
 // Regression coverage for the bug where, on the IR-managed path (the
-// production default since #320), a spec change wedged the rollout:
+// production default), a spec change wedged the rollout:
 // the Instance pinned at Phase=Updating, readyReplicas stuck at 0, ISVC
 // Ready stuck False. Root cause: the InferenceReplica controller never
 // fed pod create/delete observations into the Expectations cache its
@@ -25,10 +25,6 @@ import (
 // gates (ExpectationsCache().Satisfied()) only released on the 2-minute
 // TTL. Fixed by wiring a pod event handler (inferencereplica/watches.go)
 // onto the IR controller's own Expectations instance.
-//
-// These run ONLY against the IR-managed path — suite mgrSetup enables
-// IR-managed and registers the inferencereplica controller. The legacy
-// direct path is covered by omenative_coordination_kind (which disables IR).
 var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

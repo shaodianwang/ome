@@ -359,7 +359,7 @@ func (typedNilHTTPRouteBuilder) Endpoints(_ *v1beta1.InferenceService, _ string)
 // TestGatewayAPIStrategy_ReconcileComponentHTTPRoute_TypedNilBuilderDoesNotPanic
 // pins the layer-2 defense for the typed-nil-through-interface panic.
 //
-// Production trace (PD-disaggregated ISVC sandbox/sglang-llama4x-nvfp4-pd-cc-fallback):
+// Production trace (PD-disaggregated ISVC example-ns/sglang-example-nvfp4-pd-fallback):
 //
 //	panic: runtime error: invalid memory address or nil pointer dereference
 //	  gateway_api_strategy.go:165
@@ -494,11 +494,11 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 // test asserts the downstream status-check tolerates the resulting absence
 // of HTTPRoutes by continuing past them rather than failing.
 //
-// Production trace (sandbox/sglang-llama4x-nvfp4-pd-cc-fallback):
+// Production trace (example-ns/sglang-example-nvfp4-pd-fallback):
 //
 //	ERROR Reconciler error ...
 //	  error: "fails to reconcile ingress: HTTPRoute.gateway.networking.k8s.io
-//	         \"sglang-llama4x-nvfp4-pd-cc-fallback-engine\" not found"
+//	         \"sglang-example-nvfp4-pd-fallback-engine\" not found"
 func TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1beta1.AddToScheme(scheme))
@@ -565,7 +565,7 @@ func addressName(a duckv1.Addressable) string {
 	return *a.Name
 }
 
-// TestGatewayAPIStrategy_setStatusEndpoints is the OEP-0023 status contract:
+// TestGatewayAPIStrategy_setStatusEndpoints is the status-endpoints contract:
 // status.addresses carries one entry per gateway (tagged with the declared
 // class) plus the cluster-local address, status.url projects the primary gateway
 // endpoint, and status.address projects the cluster-local one — all derived from

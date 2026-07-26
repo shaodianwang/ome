@@ -27,10 +27,9 @@ import (
 const perRevisionServicePort int32 = 8080
 
 // isvcGroupVersionKind identifies the InferenceService owner reference
-// on each per-revision Service. Duplicated from the top-level
-// omenative.services.go's copy to keep this subpackage importable from
-// either the top-level reconciler or its caller without closing an
-// import cycle.
+// on each per-revision Service. Declared locally so this subpackage
+// stays importable from either the top-level reconciler or its caller
+// without closing an import cycle.
 var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
 // PerRevisionService describes the routing + headless pair OMENative

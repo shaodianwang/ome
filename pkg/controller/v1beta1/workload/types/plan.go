@@ -18,9 +18,10 @@ type ComponentPlan struct {
 	// (= MinReplicas, or 1 when MinReplicas is unset).
 	Replicas int32
 
-	// Instances enumerates the desired Instances, one entry per index
-	// 0..Replicas-1. Sparse indices (resulting from surge migration)
-	// are introduced in a follow-up PR.
+	// Instances enumerates the desired Instances. Normally one entry
+	// per index 0..Replicas-1; indices may be sparse while a surge
+	// migration is in flight (the surge Instance carries an
+	// out-of-band index until promotion settles the plan).
 	Instances []InstancePlan
 
 	// RestartPolicy is the effective Instance-group restart policy.

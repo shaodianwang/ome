@@ -471,8 +471,8 @@ func TestReconcile_Create_AlsoCreatesHeadlessService(t *testing.T) {
 		"Reconcile should not error on the first Create pass with headless Service wire-in")
 
 	// The Service name is derived from the parent ISVC name (ParentRef.Name)
-	// — pods, services, and selectors all key off the ISVC name so the
-	// shape stays byte-identical to the legacy omenative-controller path.
+	// — pods, services, and selectors all key off the ISVC name, not the
+	// IR name.
 	wantName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 	svc := &corev1.Service{}
 	g.Expect(c.Get(context.Background(),
@@ -487,10 +487,8 @@ func TestReconcile_Create_AlsoCreatesHeadlessService(t *testing.T) {
 	g.Expect(svc.Spec.PublishNotReadyAddresses).To(gomega.BeTrue(),
 		"headless Service must publish not-ready addresses for gang init")
 
-	// Selector must match the legacy OMENative pod-selector trio so the
-	// Service selects the same pods workload renderer stamps. Both paths
-	// (ISVC-direct + IR-driven) use the same selector — this is what
-	// makes shadow-mode diffs byte-identical.
+	// Selector must match the OMENative pod-selector trio so the
+	// Service selects the same pods the workload renderer stamps.
 	g.Expect(svc.Spec.Selector).To(gomega.Equal(map[string]string{
 		constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
 		constants.OMEComponentLabel:           string(ir.Spec.Component),

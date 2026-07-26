@@ -150,7 +150,7 @@ func (b *HTTPRouteBuilder) gatewayHostnameForDomain(isvc *v1beta1.InferenceServi
 // resolvedGateway pairs a resolved gateway spec with its endpoint class and
 // whether it is the config-designated primary gateway. It is the single source
 // both gatewaysForRoute (routing) and Endpoints (status) iterate, so the two
-// cannot drift (OEP-0023 Part 1).
+// cannot drift.
 type resolvedGateway struct {
 	spec    controllerconfig.IngressGatewaySpec
 	class   string

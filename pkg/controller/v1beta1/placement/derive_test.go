@@ -51,7 +51,7 @@ func TestDeriveISVC(t *testing.T) {
 	// control-plane identity stamped from the supplied id.
 	assert.Equal(t, "cp-east", d.Labels[PlacementControlPlaneLabel])
 	// Kueue queue-name label stamped on the engine component pod metadata
-	// (the sole Kueue stamp; the inert "serving" annotation was removed).
+	// (the sole Kueue stamp).
 	require.NotNil(t, d.Spec.Engine)
 	assert.Equal(t, "serving-lq", d.Spec.Engine.ComponentExtensionSpec.Labels[constants.KueueQueueLabelKey])
 	// ...and on the decoder component too.

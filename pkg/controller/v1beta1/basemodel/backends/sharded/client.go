@@ -21,7 +21,7 @@ const (
 	defaultHeaderConcurrency = 16
 
 	// defaultChunkSizeBytes mirrors cluster_cache's CACHE_CHUNK_SIZE_MB
-	// default (main.rs:587 — 96 MiB). cluster_cache caches chunks under
+	// default (96 MiB). cluster_cache caches chunks under
 	// (path, offset, mtime) with no size in the key; writing a smaller
 	// chunk shadows the real one. Operators who override the daemon's
 	// chunk size must pass options.chunk_size_bytes to keep this in

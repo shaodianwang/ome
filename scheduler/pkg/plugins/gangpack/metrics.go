@@ -14,14 +14,13 @@ import (
 const metricsSubsystem = "ome_scheduler"
 
 var (
-	// gangPinTotal counts domain-placement decisions in PreFilter by result:
-	// "pinned" (a fitting domain was chosen) or "no_fit" (no domain had room, the
-	// gang waits).
+	// gangPinTotal counts domain-placement decisions by result: pinned,
+	// no_fit, adopted, stale_replan, topology_replan.
 	gangPinTotal = metrics.NewCounterVec(
 		&metrics.CounterOpts{
 			Subsystem:      metricsSubsystem,
 			Name:           "gang_pin_total",
-			Help:           "Gang domain-placement decisions by result (pinned, no_fit).",
+			Help:           "Gang domain-placement decisions by result (pinned, no_fit, adopted, stale_replan, topology_replan).",
 			StabilityLevel: metrics.ALPHA,
 		},
 		[]string{"result"},

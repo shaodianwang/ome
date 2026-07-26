@@ -9,7 +9,7 @@ IMG=${1:-}
 RESOURCE_NAME=${2:-}
 
 if [ -z "$IMG" ] || [ -z "$RESOURCE_NAME" ]; then
-  echo "Usage: patch_image.sh <IMAGE> <RESOURCE_NAME>"
+  echo "Usage: patch_image_dev.sh <IMAGE> <RESOURCE_NAME>"
   exit 1
 fi
 

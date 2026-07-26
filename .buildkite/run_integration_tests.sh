@@ -1,9 +1,11 @@
 #!/bin/sh
 # Integration test step for the BuildKite pipeline.
 #
-# Runs `make integration-test` (Ginkgo + envtest under tests/) which
-# exercises the BaseModel reconciler + metadata agent against a real
-# kube-apiserver/etcd downloaded by setup-envtest. No real cluster needed.
+# Runs `make integration-test` (Ginkgo + envtest under tests/) —
+# webhooks, BaseModel/ServingRuntime/RuntimeRevision reconcilers,
+# ClusterCache, agent metadata, and the multicluster sim suite —
+# against a real kube-apiserver/etcd downloaded by setup-envtest. No
+# real cluster needed.
 #
 # Mirrors run_tests.sh's environment setup (libxet link deps, IPv6
 # advertise-address shim, etc.) so the two share the same base.

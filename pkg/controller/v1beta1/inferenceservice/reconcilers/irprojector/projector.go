@@ -27,9 +27,8 @@
 //     Status only — see ReadInferenceReplica in status.go);
 //   - duplicate pod-spec rendering (the dispatch site already computed
 //     the PodSpec; ensure passes it through verbatim);
-//   - manage IR deletion outside foreground GC (owner-ref cascade
-//     handles it on ISVC delete; explicit operator IR deletes are out
-//     of scope).
+//   - manage IR deletion beyond the owner-ref cascade (GC handles it
+//     on ISVC delete; explicit operator IR deletes are out of scope).
 package irprojector
 
 import (
@@ -95,15 +94,13 @@ type Params struct {
 	// don't influence the IR Spec.
 	ComponentExt *v1beta1.ComponentExtensionSpec
 
-	// ObjectMeta is the rendered per-Component metadata the omenative
-	// path would stamp on each pod. Threaded into the IR via the
-	// PodTemplateSpec.ObjectMeta on each Runner so the IR-rendered
-	// pods inherit the same labels / annotations the legacy path
-	// produced.
+	// ObjectMeta is the rendered per-Component pod metadata. Threaded
+	// into the IR via the PodTemplateSpec.ObjectMeta on each Runner so
+	// the IR-rendered pods inherit the canonical OMENative labels /
+	// annotations.
 	ObjectMeta metav1.ObjectMeta
 
-	// PodSpec is the rendered leader / single-pod template the
-	// omenative path would have used. Required.
+	// PodSpec is the rendered leader / single-pod template. Required.
 	PodSpec *corev1.PodSpec
 
 	// WorkerPodSpec is the rendered worker template for multi-pod
@@ -277,7 +274,7 @@ func validateParams(p Params) error {
 
 // newInferenceReplica builds a fresh IR from Params for the Create
 // branch. The owner-ref stamps the ISVC as the controller (so
-// foreground GC cascades on ISVC delete) and stamps the
+// GC cascades on ISVC delete) and stamps the
 // controller-write annotation the IR validating webhook gates on.
 //
 // Labels are inherited from the rendered per-Component ObjectMeta so
@@ -333,7 +330,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// label-set the IR controller emits.
 	ir.Labels = copyMap(p.ObjectMeta.Labels)
 
-	// Owner-ref must stamp the live ISVC so foreground GC cascades
+	// Owner-ref must stamp the live ISVC so GC cascades
 	// the IR on ISVC delete. Update overwrites any drifted owner ref
 	// (operators who edit the IR's owner refs by hand will see them
 	// re-stamped next reconcile — intentional).

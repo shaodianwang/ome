@@ -111,8 +111,7 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// template).
 	//
 	// RawDeployment keeps its dispatcher-side service+podmonitor calls
-	// because its selector is mode-specific (nil → pod template labels);
-	// hoisting it is queued as a separate follow-up.
+	// because its selector is mode-specific (nil → pod template labels).
 	if e.DeploymentMode == constants.OMENative {
 		if err := e.reconcileOMENativeSubresources(ctx, isvc, objectMeta, podSpec); err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile engine OMENative sub-resources")
@@ -193,7 +192,7 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
 		}
 		// Autoscaler dispatch is always-on per InferenceReplica.
-		// Owner-ref the HPA / SO to the IR so foreground GC cascades
+		// Owner-ref the HPA / SO to the IR so GC cascades
 		// when the IR is deleted; ScaleTargetRef points at the IR's
 		// /scale subresource. external + none are status-field twins —
 		// both fall through to the dispatch's "delete both" branch

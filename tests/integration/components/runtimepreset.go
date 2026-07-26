@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/pkg/webhook/admission/runtimepreset"
 )
 
-// SetupRuntimePresetWebhooks registers the OEP-0012 Part C engine-preset
+// SetupRuntimePresetWebhooks registers the engine-preset
 // mutators (namespaced + cluster scope). Paths must match the installed
 // MutatingWebhookConfiguration.
 func SetupRuntimePresetWebhooks(mgr ctrl.Manager) error {

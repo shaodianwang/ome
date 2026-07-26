@@ -193,7 +193,7 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 
 		// Block BOTH members initially so neither wins and both deriveds persist —
 		// this lets us deterministically observe member2's gated instance status
-		// (the #607 path) BEFORE any winner-sweep removes it. We then release
+		// (the null-deadline path) BEFORE any winner-sweep removes it. We then release
 		// member1 to resolve the race.
 		ginkgo.By("granting a zero quota on BOTH members (no winner yet)")
 		applyQuota(member1Cluster, isvcNS, queue, "0")
@@ -208,7 +208,7 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 		expectDerivedOn(member1Cluster, isvcNS, isvcName, true)
 		expectDerivedOn(member2Cluster, isvcNS, isvcName, true)
 
-		// The #607 path: member2's instance is long-gated, so its Operation.Deadline
+		// The null-deadline path: member2's instance is long-gated, so its Operation.Deadline
 		// is null/parked. The IR controller must still be able to write the gated
 		// instance's status — if the apiserver rejected the null-deadline status the
 		// write would fail and no InstanceStatus would ever appear.
@@ -221,7 +221,7 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 				types.NamespacedName{Namespace: isvcNS, Name: isvcName + "-" + string(v1beta1.EngineComponent)}, ir)).
 				To(gomega.Succeed(), "engine InferenceReplica status must be written for the gated instance")
 			g.Expect(ir.Status.InstanceStatuses).NotTo(gomega.BeEmpty(),
-				"a gated instance must still record an InstanceStatus (the #607 null-deadline write path)")
+				"a gated instance must still record an InstanceStatus (the null-deadline write path)")
 			for _, is := range ir.Status.InstanceStatuses {
 				g.Expect(is.Admitted).To(gomega.BeFalse(), "member2's instance must stay un-admitted under zero quota")
 			}

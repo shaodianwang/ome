@@ -16,7 +16,7 @@ type MatchReason string
 
 const (
 	// MatchReasonNoRequirements: the ISVC declared no accelerator/capability
-	// requirements at all. Per OEP-0018, candidates are the clusters whose
+	// requirements at all. Candidates are the clusters whose
 	// labels SATISFY the ISVC's requirements; with no requirements there is
 	// nothing to satisfy, so we deliberately match NOTHING rather than fan out
 	// to every Ready cluster (the unsafe default this guards against).
@@ -56,7 +56,7 @@ func requirementSelector(isvc *v1beta1.InferenceService) (sel labels.Selector, h
 
 // MatchCandidates returns the names (sorted) of Ready WorkloadClusters whose
 // capability labels satisfy the ISVC's accelerator/capability requirements
-// (OEP-0018 candidate selection). The requirements are the AND of the ISVC's
+// (candidate selection). The requirements are the AND of the ISVC's
 // accelerator-requirements annotation and the optional cluster-selector
 // annotation. An ISVC that declares NO requirement matches NO cluster (it is not
 // fanned out fleet-wide). When the result is empty, the returned MatchReason

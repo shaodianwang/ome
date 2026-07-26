@@ -24,7 +24,7 @@ const ReasonCanaryRequiresOMENative = "CanaryRequiresOMENative"
 // declares more than one canary group. The canary engine drives a single group
 // (the dispatcher resolves it via GetCanaryGroup, which returns the first);
 // additional canary groups are executed by neither engine and would roll
-// ungated. Sequenced multi-group canary (the OEP's Sequential×canary target)
+// ungated. Sequenced multi-group canary
 // needs the cross-group sequencer that does not exist yet, so admission rejects
 // the shape rather than silently mis-executing all but the first group.
 const ReasonMultipleCanaryGroups = "MultipleCanaryGroups"

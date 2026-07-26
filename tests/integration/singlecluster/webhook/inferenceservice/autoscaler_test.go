@@ -15,15 +15,15 @@ import (
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
 
-// OEP-0013 webhook validation for the new per-Component Autoscaler
-// block (Slice 5 of the wiring plan). One envtest spec per rejection
+// Webhook validation for the per-Component Autoscaler
+// block. One envtest spec per rejection
 // rule, plus the annotation/block conflict rule; reach the apiserver
 // over the validating webhook (no direct unit-test bypass).
 //
-// Decision Q5 (status-field twins of `none` and `external`) and Q6
-// (no KEDA-installed probe) are reflected in the absence of negative
+// The status-field-twin treatment of `none` and `external` and
+// the absence of a KEDA-installed probe are reflected in the absence of negative
 // specs for those classes.
-var _ = ginkgo.Describe("InferenceService webhook Autoscaler validation (OEP-0013 Slice 5)", func() {
+var _ = ginkgo.Describe("InferenceService webhook Autoscaler validation", func() {
 	ginkgo.BeforeEach(ensureNamespace)
 
 	// Helper to wrap a ComponentAutoscaler block onto a minimal

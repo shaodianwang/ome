@@ -998,8 +998,8 @@ func TestHTTPRouteBuilder_PerISVCSubdomainScheme(t *testing.T) {
 }
 
 // TestHTTPRouteBuilder_PerISVCSubdomain_KeepsBackendPortResolution confirms the
-// opt-in scheme still resolves the backendRef port from the live Service (the
-// #511 behavior), independent of host/path changes.
+// opt-in scheme still resolves the backendRef port from the live Service,
+// independent of host/path changes.
 func TestHTTPRouteBuilder_PerISVCSubdomain_KeepsBackendPortResolution(t *testing.T) {
 	const customPort int32 = 8000
 

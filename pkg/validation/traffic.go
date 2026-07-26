@@ -1,4 +1,4 @@
-// OEP-0011 traffic-management validation.
+// Traffic-management validation.
 //
 // Webhook-level validation for the TrafficSpec typed core (LB
 // algorithm, hash key, endpoint override). Annotation parsing and

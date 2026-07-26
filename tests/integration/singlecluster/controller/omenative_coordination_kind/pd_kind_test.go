@@ -12,9 +12,9 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OMENative PD-disaggregated foundation specs ported from envtest
-// pd_test.go. Each spec asserts a slice of the per-Component isolation
-// contract — none rely on OEP-0007.1 coordination policies (those are
+// OMENative PD-disaggregated foundation specs.
+// Each spec asserts a slice of the per-Component isolation
+// contract — none rely on coordination policies (those are
 // covered in the sibling bluegreen / sequential / independent / pause
 // / inplace specs in this package).
 //

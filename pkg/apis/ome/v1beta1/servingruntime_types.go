@@ -156,9 +156,7 @@ type ServingRuntimePodSpec struct {
 	HostNetwork bool `json:"hostNetwork,omitempty" protobuf:"varint,11,opt,name=hostNetwork"`
 }
 
-// ServingRuntimeSpec defines the desired state of ServingRuntime. This spec is currently provisional
-// and are subject to change as details regarding single-model serving and multi-model serving
-// are hammered out.
+// ServingRuntimeSpec defines the desired state of ServingRuntime.
 // +k8s:openapi-gen=true
 type ServingRuntimeSpec struct {
 	// Model formats and version supported by this runtime

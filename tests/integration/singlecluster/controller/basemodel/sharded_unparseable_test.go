@@ -16,7 +16,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Pins the OEP-0009 follow-up: providers signal "this source layout is
+// Pins the provider contract: providers signal "this source layout is
 // structurally unparseable, retrying won't help" via
 // sharded.ErrSourceUnparseable; the BaseModel controller must transition
 // the model to state=Failed with reason=MetadataUnparseable instead of

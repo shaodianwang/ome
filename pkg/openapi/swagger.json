@@ -289,7 +289,7 @@
       }
     },
     "v1beta1.CanaryStatus": {
-      "description": "CanaryStatus tracks progress of a spec.rollout.canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
+      "description": "CanaryStatus tracks progress of a spec.rollout.groups[].canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
       "type": "object",
       "required": [
         "currentStep",
@@ -306,7 +306,7 @@
           "type": "string"
         },
         "currentStep": {
-          "description": "CurrentStep is the zero-based index into spec.rollout.canary.Steps.",
+          "description": "CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.",
           "type": "integer",
           "format": "int32",
           "default": 0
@@ -348,7 +348,7 @@
       }
     },
     "v1beta1.CandidatePlacement": {
-      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate in the",
+      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate in the placement race.",
       "type": "object",
       "required": [
         "cluster"
@@ -522,7 +522,7 @@
       "type": "object",
       "properties": {
         "class": {
-          "description": "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler. One of hpa | keda | external | none. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
+          "description": "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler. One of HPA | KEDA | External | None. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
           "type": "string"
         },
         "conditions": {
@@ -590,7 +590,7 @@
           }
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -647,11 +647,11 @@
           "type": "string"
         },
         "lifecycle": {
-          "description": "Lifecycle reports OMENative-managed lifecycle state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec. Nil otherwise.",
+          "description": "Lifecycle reports OMENative-managed lifecycle state for this Component when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation). Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec. Nil otherwise.",
           "$ref": "#/definitions/v1beta1.LifecycleStatus"
         },
         "previousRolledoutRevision": {
-          "description": "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reverence during partial rollbacks.",
+          "description": "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reference during partial rollbacks.",
           "type": "string"
         },
         "restURL": {
@@ -911,7 +911,7 @@
           "$ref": "#/definitions/v1beta1.LeaderSpec"
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -1336,7 +1336,7 @@
           "$ref": "#/definitions/v1beta1.LeaderSpec"
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -1665,7 +1665,7 @@
           "$ref": "#/definitions/v1beta1.StorageSpec"
         },
         "trainingJobRef": {
-          "description": "TrainingJobID is the ID of the training job that produced this weight",
+          "description": "TrainingJobRef references the training job that produced this weight",
           "default": {},
           "$ref": "#/definitions/v1beta1.ObjectReference"
         },
@@ -1687,7 +1687,7 @@
       "type": "object",
       "properties": {
         "prometheus": {
-          "description": "Prometheus is the metrics source (connection) shared by every analysis step in this canary: where to query and how to authenticate. When omitted, the controller targets the bundled Prometheus Service (http://ome-prometheus.\u003cnamespace\u003e.svc:9090). It is only the source — WHAT to check is each step's analysis — and it gates nothing by itself.",
+          "description": "Prometheus is the metrics source (connection) shared by every analysis step in this canary: where to query and how to authenticate. When omitted (or when its serverAddress is empty), the operator-configured default source (canaryAnalysis.bundledPrometheusAddress) is used; if that is also unset the analysis has no source and its samples read inconclusive. It is only the source — WHAT to check is each step's analysis — and it gates nothing by itself.",
           "$ref": "#/definitions/v1beta1.AnalysisPrometheus"
         },
         "scaleDownDelaySeconds": {
@@ -3835,7 +3835,7 @@
       }
     },
     "v1beta1.RolloutCoordinationGroup": {
-      "description": "RolloutCoordinationGroup binds a set of Components under one coordination policy.",
+      "description": "RolloutCoordinationGroup binds a set of Components under one coordination policy.\n\nUnused — superseded by spec.rollout.groups[] (RolloutGroup); retained for compatibility, scheduled for removal.",
       "type": "object",
       "required": [
         "components",
@@ -3880,7 +3880,7 @@
       "type": "object",
       "properties": {
         "components": {
-          "description": "Components mirrors spec.rolloutCoordination.groups[i].components for operator readability.",
+          "description": "Components mirrors spec.rollout.groups[i].components for operator readability.",
           "type": "array",
           "items": {
             "type": "string",
@@ -3974,7 +3974,7 @@
       }
     },
     "v1beta1.RolloutCoordinationSpec": {
-      "description": "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.",
+      "description": "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.\n\nUnused — superseded by spec.rollout (RolloutSpec); retained for compatibility, scheduled for removal.",
       "type": "object",
       "properties": {
         "groups": {
@@ -3993,7 +3993,7 @@
       "type": "object",
       "properties": {
         "groups": {
-          "description": "Groups reports the observed state of each declared RolloutCoordinationGroup, indexed by position in spec.rolloutCoordination.groups[].",
+          "description": "Groups reports the observed state of each declared rollout group, indexed by position in spec.rollout.groups[].",
           "type": "array",
           "items": {
             "default": {},
@@ -4258,7 +4258,7 @@
           }
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -4644,7 +4644,7 @@
       }
     },
     "v1beta1.ScaleTargetRef": {
-      "description": "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.\u003ccomp\u003e.scaleTargetRef so an external scaler knows which object to point at (matches the GroupKind the user would write into kubectl scale --resource-version-target=...).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha. The shape may change without notice.",
+      "description": "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.\u003ccomp\u003e.scaleTargetRef so an external scaler knows which object to point at (the same GroupKind the user would target with kubectl scale \u003ckind\u003e/\u003cname\u003e).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha. The shape may change without notice.",
       "type": "object",
       "required": [
         "apiVersion",
@@ -4868,7 +4868,7 @@
       }
     },
     "v1beta1.ServingRuntimeSpec": {
-      "description": "ServingRuntimeSpec defines the desired state of ServingRuntime. This spec is currently provisional and are subject to change as details regarding single-model serving and multi-model serving are hammered out.",
+      "description": "ServingRuntimeSpec defines the desired state of ServingRuntime.",
       "type": "object",
       "properties": {
         "affinity": {
@@ -5081,7 +5081,7 @@
           "type": "string"
         },
         "storageUri": {
-          "description": "StorageUri specifies the source URI of the model in a supported storage backend. Supported formats: - OCI Object Storage:   oci://n/{namespace}/b/{bucket}/o/{object_path} - Persistent Volume:    pvc://{pvc-name}/{sub-path} - Vendor-specific:      vendor://{vendor-name}/{resource-type}/{resource-path} This field is required.",
+          "description": "StorageUri specifies the source URI of the model in a supported storage backend. Supported formats: - OCI Object Storage:   oci://n/{namespace}/b/{bucket}/o/{object_path} - Persistent Volume:    pvc://{pvc-name}/{sub-path} - Vendor-specific:      vendor://{vendor-name}/{resource-type}/{resource-path} - Hugging Face:         hf://{org}/{repo}[@{revision}] - Amazon S3:            s3://{bucket}/{object_path} - Azure Blob Storage:   az://{account}/{container}/{object_path} - Google Cloud Storage: gs://{bucket}/{object_path} - GitHub:               github://{org}/{repo}[@{tag}] - Local filesystem:     local://{path} This field is required.",
           "type": "string"
         }
       }

@@ -283,14 +283,3 @@ func TestValidateCanary_MaintainRatioRejected(t *testing.T) {
 		t.Fatalf("maintainRatio on a canary group must be rejected, got: %v", err)
 	}
 }
-
-// TestValidateCanary_MutexWithCoordination is removed under OEP-0017: there is no
-// canary-vs-coordination fork in v2 — both are just rollout groups, and a single
-// group is exactly one progression (canary | blueGreen | rollingUpdate). The
-// mutual-exclusion concept (and the RolloutSpec.Coordination field that drove it)
-// no longer exists, so there is nothing to assert.
-
-// TestValidateCanary_OldCapacitySurgeRejected is removed under OEP-0017: the
-// per-step OldCapacity field was dropped from the v2 canary step
-// (RolloutGroupStep has only Capacity, Traffic, Pause). With no OldCapacity there
-// is no oldCapacity-implies-surge rule to validate.

@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OMENative status surface specs ported from envtest status_test.go.
+// OMENative status surface specs.
 // Pin the parts of AggregateAndWriteStatus that downstream tooling
 // depends on (HPA, kubectl wait, dashboards).
 //

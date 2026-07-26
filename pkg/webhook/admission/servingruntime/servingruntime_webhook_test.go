@@ -1978,7 +1978,7 @@ func TestClusterServingRuntimeValidator_SelfUpdateNotFlagged(t *testing.T) {
 		"self-update should not be flagged as a priority conflict; got rejection: %v", resp.Result)
 }
 
-// TestClusterServingRuntimeValidator_AutoscalerShape covers OEP-0013
+// TestClusterServingRuntimeValidator_AutoscalerShape covers
 // per-Component Autoscaler block validation on the CSR webhook path.
 // Same shared validator.ValidateComponentAutoscaler that the ISVC
 // webhook calls is invoked here against EngineConfig / DecoderConfig /

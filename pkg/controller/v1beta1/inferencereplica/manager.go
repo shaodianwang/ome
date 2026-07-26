@@ -36,8 +36,7 @@ import (
 //     2-minute TTL — every rollout stalls with the Instance pinned at
 //     Phase=Updating and readyReplicas=0. Owns(Pod) alone would
 //     re-enqueue but never feed the cache, so we use Watches with the
-//     observe-then-enqueue handler instead (mirrors the legacy omenative
-//     path's pod watch on the ISVC controller).
+//     observe-then-enqueue handler instead.
 //   - ControllerRevisions (owned): re-enqueue on revision GC so the
 //     workload-side retention sweep doesn't fight a manual delete.
 //   - HorizontalPodAutoscaler (owned): re-enqueue when the dispatcher-
@@ -51,9 +50,11 @@ import (
 // its parent means the parent's controller already gets re-enqueued
 // on IR status churn via ISVC's Owns(&InferenceReplica{}).
 //
-// Services / PodMonitor are NOT watched: the ISVC controller still owns
-// them — the IR controller can't observe-only on resources it doesn't
-// manage without confusing the owner-ref shape.
+// Services / PodMonitor are NOT watched: the IR re-reconciles its
+// headless Service unconditionally every pass (drift self-heals on the
+// next reconcile), and the routing Services / PodMonitor belong to the
+// ISVC controller — the IR controller can't observe-only on resources
+// it doesn't manage without confusing the owner-ref shape.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Own an Expectations cache so this controller is self-consistent:
 	// the same instance is read by the workload dispatcher (via

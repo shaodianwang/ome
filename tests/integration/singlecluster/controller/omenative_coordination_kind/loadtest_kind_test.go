@@ -20,7 +20,7 @@ import (
 // Exercises "3 parallel drains gated by RatioBalanced" against real
 // kubelet so the gate's in-flight projection actually matters.
 //
-// Why this is the heaviest spec in the suite: 20 pods on a single-node
+// Why this is the heaviest spec in the suite: 20 pods on a two-worker
 // KIND cluster takes minutes to schedule + reach ContainersReady, and
 // the rollout itself recreates 15 pods sequentially-ish (gated to
 // MaxUnavailable=3 concurrent). Budget for ~6-8 minutes wall.
@@ -54,7 +54,7 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		// Wait for v1 convergence. 20 pods on a single-node KIND can
+		// Wait for v1 convergence. 20 pods on a two-worker KIND cluster can
 		// take a few minutes to all reach Ready; budget generously.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "load-h")
@@ -101,8 +101,8 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// rollout converges. 15 sequential-ish recreates on a
-		// single-node cluster — budget generously.
+		// rollout converges. 15 sequential-ish recreates —
+		// budget generously.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "load-h")
 			engCS := c.Status.Components[v1beta1.EngineComponent]

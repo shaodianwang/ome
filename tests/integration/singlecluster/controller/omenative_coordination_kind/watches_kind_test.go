@@ -10,8 +10,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OMENative Loop B (pod / EndpointSlice event handler) specs ported
-// from envtest watches_test.go.
+// OMENative Loop B (pod / EndpointSlice event handler) specs.
 //
 // Coverage already in partial_failure_kind_test.go (PF-1/2/3):
 //   - PodFailed triggers Restart and fresh pod created (PF-1 uses

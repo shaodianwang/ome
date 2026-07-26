@@ -32,7 +32,7 @@ import (
 // of a group. RatioBalanced pacing became the group-level MaintainRatio
 // guard. Several v1 Sequential/Independent/RollingUpdate-single-component
 // admission rejections have no v2 equivalent — those specs are skipped with
-// an OEP-0017 note (see the per-spec comments).
+// a note (see the per-spec comments).
 //
 // Defaulter-side tests (MaxSurge/MaxUnavailable/MaintainRatio fills) live in
 // tests/integration/singlecluster/webhook/inferenceservice_defaulter/. The
@@ -145,7 +145,7 @@ func setupCoordCBMandCSR() {
 	}
 }
 
-var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.groups[] (OEP-0017)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.groups[]", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeAll(setupCoordCBMandCSR)
 
@@ -231,26 +231,26 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		Expect(err).To(HaveOccurred(), "CRD MinItems=1 or webhook should reject")
 	})
 
-	// W-6: (OEP-0017) Sequential-without-order is gone. v2 has no
+	// W-6: Sequential-without-order is gone. v2 has no
 	// Sequential policy — cross-Component sequencing is expressed as
 	// multiple single-Component groups in list order, so there is no
 	// "Sequential requires order" rejection to assert. Skipped.
 	ginkgo.It("W-6 rejects Sequential without order → SequentialRequiresOrder", func() {
-		ginkgo.Skip("OEP-0017: Sequential policy removed; sequencing is now group list order, no SequentialRequiresOrder check")
+		ginkgo.Skip("Sequential policy removed; sequencing is now group list order, no SequentialRequiresOrder check")
 	})
 
-	// W-7: (OEP-0017) Sequential-with-one-component is gone. A
+	// W-7: Sequential-with-one-component is gone. A
 	// single-Component group is a valid (degenerate) v2 shape; there is
 	// no SequentialRequiresMultipleComponents rejection in v2. Skipped.
 	ginkgo.It("W-7 rejects Sequential with 1 Component → SequentialRequiresMultipleComponents", func() {
-		ginkgo.Skip("OEP-0017: Sequential policy removed; a single-Component group is valid, no SequentialRequiresMultipleComponents check")
+		ginkgo.Skip("Sequential policy removed; a single-Component group is valid, no SequentialRequiresMultipleComponents check")
 	})
 
-	// W-8: (OEP-0017) Sequential-incomplete-order is gone. v2 Order is
+	// W-8: Sequential-incomplete-order is gone. v2 Order is
 	// just a surge sequence and may be a partial subset of components;
 	// there is no SequentialIncompleteOrder rejection. Skipped.
 	ginkgo.It("W-8 rejects Sequential order missing one Component → SequentialIncompleteOrder", func() {
-		ginkgo.Skip("OEP-0017: Sequential policy removed; Order is now an optional surge subset, no SequentialIncompleteOrder check")
+		ginkgo.Skip("Sequential policy removed; Order is now an optional surge subset, no SequentialIncompleteOrder check")
 	})
 
 	// W-9: an Order entry not in components[] is a typo. v2 keeps the
@@ -270,12 +270,12 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		Expect(err.Error()).To(ContainSubstring("order must reference only Components listed in this group"))
 	})
 
-	// W-10: (OEP-0017) RollingUpdate-with-one-component is gone. v2's
+	// W-10: RollingUpdate-with-one-component is gone. v2's
 	// rollingUpdate progression is valid on a single-Component group, so
 	// there is no RollingUpdateRequiresMultipleComponents rejection.
 	// Skipped.
 	ginkgo.It("W-10 rejects RollingUpdate with 1 Component → RollingUpdateRequiresMultipleComponents", func() {
-		ginkgo.Skip("OEP-0017: single-Component rollingUpdate group is valid, no RollingUpdateRequiresMultipleComponents check")
+		ginkgo.Skip("single-Component rollingUpdate group is valid, no RollingUpdateRequiresMultipleComponents check")
 	})
 
 	// W-11: MaintainRatio.Tolerance above the warning threshold (50%)
@@ -480,7 +480,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 	})
 })
 
-// ---------- UPDATE-path specs (OEP-0017) ----------
+// ---------- UPDATE-path specs ----------
 //
 // The webhook's ValidateUpdate path runs validation.ValidateCoordinationUpdate
 // (RollingUpdate lockstep) + validation.ValidateCoordination (the
@@ -542,7 +542,7 @@ func withDecoderRunner(isvc *v1beta1.InferenceService, image string) {
 	}}
 }
 
-var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.rollout.groups[] (OEP-0017)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.rollout.groups[]", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeAll(setupCoordCBMandCSR)
 
@@ -592,7 +592,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
-	// WU-3: (OEP-0017) the old "switch a group's Policy to Independent
+	// WU-3: the old "switch a group's Policy to Independent
 	// mid-rollout" is now "drop the group entirely" — a Component in no
 	// group rolls independently. The structural validator just re-runs
 	// the shape rules on the new spec (here: no groups, trivially valid).
@@ -621,7 +621,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
-	// WU-6: (OEP-0017) the old "swap Sequential Order mid-rollout" is
+	// WU-6: the old "swap Sequential Order mid-rollout" is
 	// now "reorder the single-Component groups in the list" — sequencing
 	// is group list order in v2. The structural validator re-runs and
 	// accepts any valid new shape; runtime behavior at the controller is

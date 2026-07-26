@@ -16,9 +16,9 @@ import (
 
 // Concurrent gang-surge index-collision regression gate.
 //
-// Pins the #618 fix: when >=2 multi-pod (gang) Instances surge in the
+// Pins the distinct-surge-index contract: when >=2 multi-pod (gang) Instances surge in the
 // SAME reconcile pass, each replacement gang MUST claim a DISTINCT
-// instance-index. The pre-#618 bug had every sibling gang re-pick the
+// instance-index. Without it, every sibling gang re-picks the
 // same lowest-free index from the start-of-pass snapshot; when that one
 // shared surge became Ready, the drain-on-ready path released ALL sharing
 // sources at once — the 64->1 fleet-wipe. gangSurgeUpdate now records each
@@ -153,7 +153,7 @@ var _ = ginkgo.Describe("concurrent gang surge — distinct index per gang", gin
 				g.Expect(incs).To(HaveLen(1),
 					"instance-index %d hosts %d distinct gangs (incarnations %v); "+
 						"two gangs sharing one index is the shared-surge-index "+
-						"fleet-wipe signature (#618)", idx, len(incs), incarnationSet(incs))
+						"fleet-wipe signature", idx, len(incs), incarnationSet(incs))
 			}
 		})
 		defer stop()

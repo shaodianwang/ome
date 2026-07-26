@@ -15,7 +15,7 @@ import (
 
 // ClusterBaseModelWrapper mirrors BaseModelWrapper for the cluster-
 // scoped variant. ClusterBaseModel takes no namespace; the storage
-// URI must carry a namespace prefix per OEP-0004.
+// URI must carry a namespace prefix (pvc://{namespace}:{pvc-name}/{sub-path}).
 type ClusterBaseModelWrapper struct {
 	v1beta1.ClusterBaseModel
 }

@@ -1,6 +1,6 @@
-// Package runtimerevision hosts integration tests for the OEP-0014
-// Phase 3 GC controller (deletes stale ControllerRevisions in the OME
-// namespace).
+// Package runtimerevision hosts integration tests for the
+// runtime-revision GC controller (deletes stale ControllerRevisions in
+// the OME namespace).
 package runtimerevision
 
 import (
