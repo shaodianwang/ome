@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/go-logr/logr v1.4.3
+	github.com/go-logr/logr v1.4.4
 	github.com/go-playground/validator/v10 v10.20.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
