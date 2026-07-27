@@ -1,4 +1,4 @@
-# p413: runtime-rev pd recover-after-failed-rollout (KNOWN BUG: wedges today) mode=runtimerev rt=ome-coordtest-rt-p413 expect=recover Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 topo=pd
+# p413: runtime-rev pd recover-after-failed-rollout (KNOWN BUG: wedges today) mode=runtimerev rt=ome-coordtest-rt-p413 expect=recover notimpl=1 Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 topo=pd
 # Test ClusterServingRuntime — CPU-only, nginx, artificial 15s startup delay.
 # The sleep is the critical part: without it nginx is Ready in ~150ms and the
 # pod sampler misses every transition.

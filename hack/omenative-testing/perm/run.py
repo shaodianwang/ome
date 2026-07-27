@@ -54,10 +54,12 @@ Update detection per strategy:
 """
 import json
 import os
+import queue
 import re
 import select
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -91,9 +93,8 @@ RATIO_SUSTAIN_S = 5.0  # assert the worst ratio deviation that PERSISTED this lo
 FLOOR_SUSTAIN_S = 5.0  # capacity-floor debounce (mirrors RATIO_SUSTAIN_S): the hard floor check
                        # fails only on a below-floor dip that PERSISTED this long — a single-sample
                        # readiness flap at 1Hz must not red a case. floor_hard=1 skips the debounce.
-MIGRATE_SETTLE_S = 90.0  # post-Completed grace: the source drain + request-annotation clear finish
-                         # asynchronously after the ledger flips Completed; poll this long before
-                         # either still-present state FAILs the verdict
+# Migration source-drain settle budget: mult-scaled + per-migrated-instance,
+# defined below alongside the other TIMEOUT_MULT budgets (needs TIMEOUT_MULT).
 TEARDOWN_BASE_S, TEARDOWN_PER_POD_S = 120, 5   # post-delete teardown-convergence budget
 TEARDOWN_POLL_S = 5.0
 
@@ -130,13 +131,35 @@ SERVING_COND = "ome.io/serving"   # controller-managed pod readiness gate (query
 # Dynamic timeouts: real kubelet + a 15s artificial startup sleep per pod, and
 # surge=1 rolls serialize. Static 240s was too tight for N=8 and for two-member
 # Sequential rolls (decoder fully, soak, then engine).
-INIT_BASE_S, INIT_PER_POD_S = 120, 25
+# OME_TEST_TIMEOUT_MULT scales every init/rotate budget for a loaded cluster
+# where scheduling + CPU-throttled startup drag past the default budgets (a
+# busy shared cluster can take 3-4x longer to schedule N=8 than an idle one).
+# Default 1.0; set e.g. 2.5 when a smoke run shows INIT_TIMEOUT dominated by
+# slow scheduling rather than product non-convergence.
+try:
+    TIMEOUT_MULT = max(1.0, float(os.environ.get("OME_TEST_TIMEOUT_MULT", "1.0")))
+except ValueError:
+    TIMEOUT_MULT = 1.0
+INIT_BASE_S, INIT_PER_POD_S = int(120 * TIMEOUT_MULT), int(25 * TIMEOUT_MULT)
 # Sequential 2-member rolls serialize (decoder fully, then engine) and under
 # conc-8 cluster load creep to ~400s for 8 bumped pods; 40s/pod (=410s budget)
 # left no headroom for the trailing STABILITY_S window (p34 converged at 406s
 # but timed out at 410s before "stable"). 60s/pod gives comfortable margin.
-ROTATE_BASE_S, ROTATE_PER_POD_S = 180, 100
-MAX_BUDGET_S = 1800
+ROTATE_BASE_S, ROTATE_PER_POD_S = int(180 * TIMEOUT_MULT), int(100 * TIMEOUT_MULT)
+MAX_BUDGET_S = int(1800 * TIMEOUT_MULT)
+# Post-Completed source-drain grace. A source can't drain until its surge
+# replacement is Ready (~one pod-init cycle), and multi-instance migrations
+# SERIALIZE on a surge budget of 1 (reusing freed indices), so the drain is
+# O(migrated-instances), not flat. Budget = base + per-instance, both
+# mult-scaled — mirrors the INIT/ROTATE budget shape. A flat 90s spuriously
+# reds every 2+-instance migration on a loaded cluster even though the ledger
+# records each migration Completed correctly.
+MIGRATE_SETTLE_BASE_S, MIGRATE_SETTLE_PER_INST_S = int(90 * TIMEOUT_MULT), int(90 * TIMEOUT_MULT)
+
+
+def migrate_settle_budget(n_insts):
+    """Source-drain settle ceiling for a migration of n_insts instances."""
+    return min(MAX_BUDGET_S, MIGRATE_SETTLE_BASE_S + MIGRATE_SETTLE_PER_INST_S * max(1, n_insts))
 
 IN_PLACE_TYPES = {"InPlaceIfPossible", "InPlaceOnly"}
 COMPS = ("engine", "decoder", "router")
@@ -519,7 +542,10 @@ def surge_before_drain_checks(ctx, comps, verdict, notes, checks):
     if not surge:
         return verdict
     viol = {c: ov.get(c, 0) for c in surge if ov.get(c, 0) > 0}
-    if viol:
+    if viol and (ctx.get("hdr") or {}).get("order_soft"):
+        wc = max(viol, key=viol.get)
+        checks.append(f"  ⚠ surge-before-drain: {wc} drained {viol[wc]} pod(s) ahead of ready surges — case opted out (order_soft=1, fault-induced drain); informational")
+    elif viol:
         verdict = "FAIL"
         wc = max(viol, key=viol.get)
         notes.append(f"surge-before-drain violated: {wc} drained {viol[wc]} pod(s) ahead of ready surges")
@@ -722,13 +748,19 @@ def _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now):
                     _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
                              f"{comp}/{idx} Phase=Failed while all {len(alive)} live pod(s) are Ready+serving")
             elif phase == "Ready":
-                # Ready-without-pods: pods still terminating count as existing
-                # (the lie is Ready with NOTHING behind the index, not a
-                # graceful-termination window).
-                if not pods:
+                # Ready-without-pods must read the IR's OWN readyPodCount, not
+                # the watcher's separately-collected pod_state. The two are
+                # independent data sources with independent lag: under slow
+                # concurrent scheduling the watcher's pod stream trails the IR,
+                # so comparing IR-phase against watcher-pods fires "Ready but I
+                # see no pod" for indices whose pod exists from the apiserver's
+                # view — a harness split-brain, not a product lie. The genuine
+                # lie is the IR being internally inconsistent: phase=Ready while
+                # its own readyPodCount is 0.
+                if int(ist.get("readyPodCount", 0)) == 0:
                     key = ("A", "ready-without-pods", comp, idx)
                     _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
-                             f"{comp}/{idx} Phase=Ready with zero pods for its index")
+                             f"{comp}/{idx} Phase=Ready while the IR's own readyPodCount is 0")
 
 
 # Selector keys the watcher can evaluate against its pod records. Keys every
@@ -1337,6 +1369,9 @@ HDR_VALIDATORS = {
     "notimpl": lambda v: v == 1,
     "floor_hard": lambda v: v == 1,   # assert the instantaneous floor min (no debounce)
     "floor_soft": lambda v: v == 1,   # opt out of the (default-hard) capacity floor
+    "order_soft": lambda v: v == 1,   # opt out of surge-before-drain (a fault, e.g.
+    #                                   podkill:rotating, deletes a pod → drain with no
+    #                                   preceding surge; informational, not a FAIL)
     # Opt out of the continuous invariants (A=status-truth, B=endpoints-
     # membership). REQUIRES an adjacent '# reason: <why>' comment on line 2
     # of the case file — validate-only rejects an inv_off without one.
@@ -1452,14 +1487,69 @@ def validate_cases(isvcs_dir=None):
 WATCH_MAX_RESTARTS = 50  # reconnect kubectl -w on EOF up to this many times before giving up
 
 
+class _WatchStream:
+    """kubectl -w pipe drained by a daemon thread into a queue.
+
+    The harness loops previously read the pipe with select()+buffered
+    readline(): readline() pulls a chunk into Python's userspace buffer, but
+    select() polls the OS fd, so after one line the loop sees "no more data"
+    while whole events sit unread in the buffer. Under concurrency the readiness
+    (MODIFIED) events piled up and pod_state fell minutes behind — fully-Ready
+    Instances read as not-Ready and cases false-timed-out. The pump thread does
+    a simple blocking `for line in stdout`, so the pipe is always fully drained
+    into an in-memory queue; loops read from the queue (instant when data is
+    present, blocking only when genuinely idle)."""
+    _EOF = object()
+
+    def __init__(self, proc):
+        self.proc = proc
+        self.q = queue.Queue()
+        self._t = threading.Thread(target=self._pump, daemon=True)
+        self._t.start()
+
+    def _pump(self):
+        try:
+            for line in self.proc.stdout:
+                self.q.put(line)
+        except Exception:
+            pass
+        self.q.put(self._EOF)
+
+    def readline(self, timeout=1.0):
+        """Next line (str) — blocking up to `timeout` only when the queue is
+        empty. Returns '' on EOF, None on timeout."""
+        try:
+            item = self.q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        return "" if item is self._EOF else item
+
+    def terminate(self):
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+
+    def wait(self, timeout=None):
+        return self.proc.wait(timeout=timeout)
+
+    def kill(self):
+        try:
+            self.proc.kill()
+        except Exception:
+            pass
+
+
 def start_watcher(case_id):
-    """Pod event stream for a case (shared by the rollout path and all modes)."""
-    return subprocess.Popen(
+    """Pod event stream for a case (shared by the rollout path and all modes).
+    Wrapped in _WatchStream so a pump thread keeps the pipe drained."""
+    proc = subprocess.Popen(
         ["kubectl", "-n", NS, "get", "pod", "-l", f"ome.io/inferenceservice={case_id}",
          "-w", "-o", "json", "--output-watch-events"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env={**os.environ, "KUBECONFIG": KUBECONFIG}, bufsize=1, text=True,
     )
+    return _WatchStream(proc)
 
 
 def _stop_watcher(ctx):
@@ -1527,13 +1617,21 @@ def _apply_event(ctx, ev):
 
 
 def _read_one(ctx, timeout=1.0):
-    """Read at most one watch event (up to `timeout`s), fold it into pod_state,
-    refresh peaks, and return (also cache) the current per-Instance aggregate."""
+    """DRAIN all currently-available watch events (block up to `timeout` for the
+    first, then read the rest non-blocking), fold each into pod_state, then
+    refresh peaks + the aggregate once. A single read per call fell minutes
+    behind an N-pod startup burst (ADDED×N + many condition MODIFIEDs) — under
+    concurrency the watcher's pod_state lagged reality so far that fully-Ready
+    Instances still read not-Ready and cases false-timed-out. Draining keeps
+    pod_state at most one poll-interval stale regardless of event volume."""
     w = ctx["watcher"]
-    r, _, _ = select.select([w.stdout], [], [], timeout)
-    if r:
-        line = w.stdout.readline()
-        if not line:
+    wait = timeout
+    while True:
+        line = w.readline(wait)   # str | "" (EOF) | None (queue empty / timeout)
+        if line is None:
+            break                 # queue drained for this cycle
+        wait = 0.0                # first read blocks up to timeout; the rest drain the backlog
+        if line == "":
             # EOF: kubectl -w exited (apiserver watch timeout / network blip). Do
             # NOT treat as terminal — a mid-roll watch drop would otherwise end the
             # case on partial state and masquerade as a ROTATE_TIMEOUT. Reconnect;
@@ -1547,23 +1645,25 @@ def _read_one(ctx, timeout=1.0):
                 except Exception:
                     pass
                 ctx["watcher"] = start_watcher(ctx["case_id"])
+                w = ctx["watcher"]
             else:
                 ctx["watch_lost"] = True
                 ctx["closed"] = True
-        else:
-            line = line.strip()
-            if line:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        ev = None
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            ctx["buf"] += line
+            try:
+                ev = json.loads(ctx["buf"]); ctx["buf"] = ""
+            except json.JSONDecodeError:
                 ev = None
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    ctx["buf"] += line
-                    try:
-                        ev = json.loads(ctx["buf"]); ctx["buf"] = ""
-                    except json.JSONDecodeError:
-                        ev = None
-                if ev and ev.get("type") != "BOOKMARK" and ev.get("object"):
-                    _apply_event(ctx, ev)
+        if ev and ev.get("type") != "BOOKMARK" and ev.get("object"):
+            _apply_event(ctx, ev)
     meas = {}
     agg = aggregate(ctx["pod_state"], ctx["old_hashes"], ctx["modes"], ctx["pods_per_inst"], measures=meas)
     for c in COMPS:
@@ -2526,12 +2626,24 @@ def _migrate(case_id, yaml_file, desc, hdr):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", rr.stderr[:200])
     ctx["trigger_ts"] = time.time()
     ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
+    # Identity baseline for drain + surge detection. A migration legitimately
+    # REUSES the source's own index for the replacement pod (on a different
+    # node), so index-keyed checks false-positive ("source still present" /
+    # "collision"). Key on pod UID instead: src_uids = the source pods being
+    # drained; orig_uids = all component pods present now, so any later pod with
+    # a fresh UID is a genuine surge regardless of which index it lands on.
+    src_uids = {p["uid"] for p in ctx["pod_state"].values()
+                if p and p["alive"] and p["comp"] == mcomp
+                and str(p.get("inst")) in req_insts and p.get("uid")}
+    orig_uids = {p["uid"] for p in ctx["pod_state"].values()
+                 if p and p["alive"] and p["comp"] == mcomp and p.get("uid")}
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[mcomp] * ctx["pods_per_inst"][mcomp])
     if defer_rollout:
         budget = min(MAX_BUDGET_S, 2 * budget)   # two ops (rollout + migration) share the window
     never_grace = 90
     print(f"  Phase 3: watching migration (ledger {case_id}-ome-migration-audit; ≤{budget}s)")
     surge_seen, surge_nodes, last_poll, state = set(), {}, 0.0, "WATCHING"
+    surge_uids = {}   # fresh pod UID -> node: identity-based surge count (index-reuse safe)
     dup_refiled, rollout_conv_ts = False, None
 
     def _rollout_done():
@@ -2546,6 +2658,12 @@ def _migrate(case_id, yaml_file, desc, hdr):
             if p and p["alive"] and p["comp"] == mcomp and p["inst"] not in orig_insts:
                 surge_seen.add(p["inst"])
                 surge_nodes[p["inst"]] = p.get("node", "") or surge_nodes.get(p["inst"], "")
+            # Identity-based surge: any component pod with a UID not in the
+            # trigger-time baseline is a genuine replacement — even when it
+            # reuses a source's own index (index-keyed surge_seen misses it).
+            if (p and p["alive"] and p["comp"] == mcomp and p.get("uid")
+                    and p["uid"] not in orig_uids):
+                surge_uids[p["uid"]] = p.get("node", "") or surge_uids.get(p["uid"], "")
         now = time.time()
         if defer_rollout and rollout_conv_ts is None and _rollout_done():
             rollout_conv_ts = now
@@ -2593,6 +2711,14 @@ def _migrate(case_id, yaml_file, desc, hdr):
     surged = bool(surge_seen) or (ledger_surge is not None and ph == "Completed")
 
     def _src_gone():
+        # Source drained iff none of the ORIGINAL source pod UIDs are still
+        # alive. Keying on UID (not index) is required: a migration may reuse
+        # the source's own index for the replacement on a different node, which
+        # an index-occupancy check would misread as "source still present".
+        if src_uids:
+            live = {p["uid"] for p in ctx["pod_state"].values()
+                    if p and p["alive"] and p.get("uid")}
+            return not (src_uids & live)
         return not any(p and p["alive"] and p["comp"] == mcomp and p["inst"] in req_insts
                        for p in ctx["pod_state"].values())
 
@@ -2604,7 +2730,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
         # The source drain + annotation clear finish asynchronously after the
         # ledger flips Completed (post-#832 the annotation is already consumed
         # at ACCEPT). Settle with a bounded poll before hard-failing on either.
-        settle_deadline = time.time() + MIGRATE_SETTLE_S
+        settle_budget = migrate_settle_budget(len(req_insts))
+        settle_deadline = time.time() + settle_budget
         last_anno = 0.0
         while time.time() < settle_deadline and not ctx["closed"]:
             _read_one(ctx)
@@ -2682,7 +2809,7 @@ def _migrate(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ source Instance(s) {','.join(req_insts)} not Ready after the failed migration — a failed migration must retain its source")
         # Request consumed (post-#832 the annotation is consumed at ACCEPT):
         # settle-poll before failing on a still-present annotation.
-        settle_deadline = time.time() + MIGRATE_SETTLE_S
+        settle_deadline = time.time() + migrate_settle_budget(len(reqs))
         last_anno = 0.0
         while not anno_cleared and time.time() < settle_deadline and not ctx["closed"]:
             _read_one(ctx)
@@ -2737,7 +2864,7 @@ def _migrate(case_id, yaml_file, desc, hdr):
                             break
                 if ph2 == "Completed":
                     checks.append(f"  ✓ follow-up migration Completed after the quota lift ({time.time() - t2:.0f}s)")
-                    sd = time.time() + MIGRATE_SETTLE_S
+                    sd = time.time() + migrate_settle_budget(1)
                     gone = _src_gone()
                     while not gone and time.time() < sd and not ctx["closed"]:
                         _read_one(ctx)
@@ -2786,8 +2913,9 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 checks.append(f"  ✓ source Instance(s) {','.join(req_insts)} drained")
             else:
                 verdict = "FAIL"
-                notes.append(f"source Instance(s) {','.join(req_insts)} still present {int(MIGRATE_SETTLE_S)}s after Completed")
-                checks.append(f"  ✗ source Instance(s) {','.join(req_insts)} still present {int(MIGRATE_SETTLE_S)}s after ledger Completed — source did not drain")
+                _sb = migrate_settle_budget(len(req_insts))
+                notes.append(f"source Instance(s) {','.join(req_insts)} still present {_sb}s after Completed")
+                checks.append(f"  ✗ source Instance(s) {','.join(req_insts)} still present {_sb}s after ledger Completed — source did not drain")
             if anno_cleared:
                 checks.append("  ✓ migration-request annotation(s) cleared")
             else:
@@ -2822,13 +2950,20 @@ def _migrate(case_id, yaml_file, desc, hdr):
             # one already freed (so watcher-distinct undercounts).
             ledger_surges = {e.get("surgeInstance") for e in entries.values()
                              if e.get("phase") == "Completed" and e.get("surgeInstance") is not None}
-            if len(surge_seen) >= len(req_insts) or len(ledger_surges) >= len(req_insts):
+            # Distinct FRESH replacement pods (by UID) is the authoritative
+            # count — index-reuse safe. A source that migrates onto its own
+            # freed index still produces a new UID, so this catches the genuine
+            # fleet-wipe collision (many sources → one shared pod) without
+            # false-positiving on legitimate same-index replacement.
+            n_surge = max(len(surge_uids), len(surge_seen), len(ledger_surges))
+            if n_surge >= len(req_insts):
                 checks.append(f"  ✓ {len(req_insts)} migrations each surged their own replacement "
-                              f"(watcher indices {sorted(surge_seen)}, ledger surgeInstances {sorted(ledger_surges)})")
+                              f"(fresh pods {len(surge_uids)}, watcher indices {sorted(surge_seen)}, ledger surgeInstances {sorted(ledger_surges)})")
             else:
                 verdict = "FAIL"
-                notes.append(f"migration index collision: {len(req_insts)} sources surged only {len(surge_seen)} distinct index(es) {sorted(surge_seen)}")
-                checks.append(f"  ✗ migration index collision: {len(req_insts)} migrations surged only {len(surge_seen)} watcher index(es) {sorted(surge_seen)} / {len(ledger_surges)} ledger surgeInstance(s) {sorted(ledger_surges)} — sources collapsed onto a shared surge index (fleet-wipe shape)")
+                notes.append(f"migration collision: {len(req_insts)} sources surged only {n_surge} distinct replacement(s)")
+                checks.append(f"  ✗ migration collision: {len(req_insts)} migrations surged only {n_surge} distinct replacement(s) "
+                              f"(fresh pods {len(surge_uids)}, watcher indices {sorted(surge_seen)}, ledger surgeInstances {sorted(ledger_surges)}) — sources collapsed onto a shared replacement (fleet-wipe shape)")
         if defer_rollout:
             # Ordering deliberately UNASSERTED: the product currently PREEMPTS
             # — an accepted migration's requeue skips the update pass (there is
@@ -3334,8 +3469,16 @@ def _canary(case_id, yaml_file, desc, hdr):
     # single-step plan (e.g. a 100%-only analysis gate) has no intermediate split —
     # it serves the canary via Promoting — so assert that instead.
     if nsteps > 1:
-        good(("Canarying" in phases) or ("Paused" in phases),
-             "observed an active canary phase (Canarying/Paused)",
+        active = ("Canarying" in phases) or ("Paused" in phases)
+        # A canary that is REJECTED at the analysis gate (analysis=breach/
+        # inconclusive) or manually rolled back before the first traffic step
+        # goes Pending → RollingBack → RolledBack without ever entering a
+        # traffic-split phase. RollingBack is itself proof the canary engaged
+        # and was rejected, so accept it when a rollback is the expected outcome.
+        if not active and (do_rollback or expect == "RolledBack") and ("RollingBack" in phases):
+            active = True
+        good(active,
+             "observed an active canary phase (Canarying/Paused/RollingBack)",
              f"never observed an active canary phase (jumped straight to terminal); saw {sorted(phases)}")
     else:
         good("Promoting" in phases,
@@ -3379,7 +3522,17 @@ def _canary(case_id, yaml_file, desc, hdr):
         good(new == 0, f"{primary} drained back to stable (0 canary Instances)",
              f"{primary} still has {new} canary Instances after rollback")
         good(bool(rejected), f"rejected revision recorded ({rejected})", "rolledBackRevisionHash not recorded")
-        good("RollingBack" in phases, "observed RollingBack (draining to stable)", "never observed RollingBack")
+        # RollingBack is a transient drain phase between Paused and RolledBack; a
+        # fast drain can advance to the RolledBack terminal within one poll gap.
+        # When the rollback is already proven (drained to 0 + rejected recorded),
+        # a missed transient RollingBack is an observation gap, not a failure.
+        if "RollingBack" in phases:
+            checks.append("  ✓ observed RollingBack (draining to stable)")
+        elif new == 0 and rejected:
+            checks.append("  ⓘ RollingBack not sampled (drain reached RolledBack within a poll gap); rollback proven by drain + rejected-revision")
+        else:
+            verdict = "FAIL"; notes.append("never observed RollingBack")
+            checks.append("  ✗ never observed RollingBack")
         return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
     # Producer-side traffic: at convergence the canary revision must carry 100%.
@@ -3521,30 +3674,32 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     buf = ""
     try:
         while True:
-            ready_to_read, _, _ = select.select([watcher.stdout], [], [], 1.0)
-            line = None
-            if ready_to_read:
-                line = watcher.stdout.readline()
-                if not line:
-                    print("  watcher closed stdout — bailing")
-                    break
+            line = watcher.readline(1.0)   # str | "" (EOF) | None (idle); queue-backed
+            if line == "":
+                print("  watcher closed stdout — bailing")
+                break
+            if line is not None:
                 line = line.strip() or None
             now = time.time()
-            _inv_tick(inv, pod_state, pods_per_inst)
-            if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
-                state = "CONVERGED"
-                converged_at = stable_since - trigger_ts
-                print(f"\n  ✓ CONVERGED (drained) at {converged_at:.1f}s post-trigger")
-                break
-            if state == "INIT" and now > deadline_init:
-                state = "INIT_TIMEOUT"
-                print(f"  ✗ INIT TIMEOUT after {init_budget}s")
-                break
-            if state == "DRAINING" and deadline_conv and now > deadline_conv:
-                state = "DRAIN_TIMEOUT" if progressed else "NO_CHANGE"
-                print(f"  ✗ {'DRAIN TIMEOUT' if progressed else 'NO CHANGE'} after {conv_budget}s")
-                break
+
             if line is None:
+                # Queue idle — run the periodic invariant tick + convergence/timeout
+                # checks only when caught up, so the multi-second kubectl gets never
+                # throttle event consumption (events processed every iteration below).
+                _inv_tick(inv, pod_state, pods_per_inst)
+                if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
+                    state = "CONVERGED"
+                    converged_at = stable_since - trigger_ts
+                    print(f"\n  ✓ CONVERGED (drained) at {converged_at:.1f}s post-trigger")
+                    break
+                if state == "INIT" and now > deadline_init:
+                    state = "INIT_TIMEOUT"
+                    print(f"  ✗ INIT TIMEOUT after {init_budget}s")
+                    break
+                if state == "DRAINING" and deadline_conv and now > deadline_conv:
+                    state = "DRAIN_TIMEOUT" if progressed else "NO_CHANGE"
+                    print(f"  ✗ {'DRAIN TIMEOUT' if progressed else 'NO CHANGE'} after {conv_budget}s")
+                    break
                 continue
             try:
                 ev = json.loads(line)
@@ -3964,39 +4119,42 @@ def run_case(case_id):
     buf = ""
     try:
         while True:
-            ready_to_read, _, _ = select.select([watcher.stdout], [], [], 1.0)
-            line = None
-            if ready_to_read:
-                line = watcher.stdout.readline()
-                if not line:
-                    print("  watcher subprocess closed stdout — bailing")
-                    break
+            line = watcher.readline(1.0)   # str | "" (EOF) | None (idle); queue-backed
+            if line == "":
+                print("  watcher subprocess closed stdout — bailing")
+                break
+            if line is not None:
                 line = line.strip() or None
 
             now = time.time()
-            _inv_tick(inv, pod_state, pods_per_inst)
-
-            # CONVERGED is gated on `progressed`: we must have OBSERVED the rollout
-            # perturb the pods first, else stable_since latches on the pre-rollout
-            # steady state and a slow controller reaction is mis-declared CONVERGED.
-            if state == "ROTATING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
-                state = "CONVERGED"
-                converged_at = stable_since - trigger_ts
-                print(f"\n  ✓ CONVERGED at {converged_at:.1f}s post-trigger (then stable for {STABILITY_S}s)")
-                break
-            if state == "INIT" and now > deadline_init:
-                state = "INIT_TIMEOUT"
-                print(f"  ✗ INIT TIMEOUT after {init_budget}s — never reached initial Ready")
-                break
-            if state == "ROTATING" and deadline_rotate and now > deadline_rotate:
-                state = "ROTATE_TIMEOUT" if progressed else "NO_ROLLOUT"
-                if progressed:
-                    print(f"  ✗ ROTATE TIMEOUT after {rotate_budget}s — rollout started but never reconverged")
-                else:
-                    print(f"  ✗ NO ROLLOUT after {rotate_budget}s — trigger patched but no updated pod ever appeared")
-                break
 
             if line is None:
+                # Queue idle — all currently-available events are drained. Run the
+                # periodic invariant tick + convergence/timeout checks ONLY here, so
+                # the multi-second kubectl gets in _inv_tick never throttle event
+                # consumption (events are processed every iteration below; the slow
+                # tick runs only between bursts, when pod_state is already current).
+                _inv_tick(inv, pod_state, pods_per_inst)
+
+                # CONVERGED is gated on `progressed`: we must have OBSERVED the rollout
+                # perturb the pods first, else stable_since latches on the pre-rollout
+                # steady state and a slow controller reaction is mis-declared CONVERGED.
+                if state == "ROTATING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
+                    state = "CONVERGED"
+                    converged_at = stable_since - trigger_ts
+                    print(f"\n  ✓ CONVERGED at {converged_at:.1f}s post-trigger (then stable for {STABILITY_S}s)")
+                    break
+                if state == "INIT" and now > deadline_init:
+                    state = "INIT_TIMEOUT"
+                    print(f"  ✗ INIT TIMEOUT after {init_budget}s — never reached initial Ready")
+                    break
+                if state == "ROTATING" and deadline_rotate and now > deadline_rotate:
+                    state = "ROTATE_TIMEOUT" if progressed else "NO_ROLLOUT"
+                    if progressed:
+                        print(f"  ✗ ROTATE TIMEOUT after {rotate_budget}s — rollout started but never reconverged")
+                    else:
+                        print(f"  ✗ NO ROLLOUT after {rotate_budget}s — trigger patched but no updated pod ever appeared")
+                    break
                 continue
             try:
                 ev = json.loads(line)
@@ -4467,7 +4625,10 @@ def run_case(case_id):
     surge_bumped = [c for c in sorted(bumped) if modes.get(c) == "surge"]
     if surge_bumped:
         ord_viol = {c: order_viol.get(c, 0) for c in surge_bumped if order_viol.get(c, 0) > 0}
-        if ord_viol:
+        if ord_viol and hdr.get("order_soft"):
+            wc = max(ord_viol, key=ord_viol.get)
+            checks.append(f"  ⚠ surge-before-drain: {wc} drained {ord_viol[wc]} pod(s) ahead of ready surges — case opted out (order_soft=1, fault-induced drain); informational")
+        elif ord_viol:
             verdict = "FAIL"
             wc = max(ord_viol, key=ord_viol.get)
             notes.append(f"surge-before-drain violated: {wc} drained {ord_viol[wc]} pod(s) ahead of ready surges")

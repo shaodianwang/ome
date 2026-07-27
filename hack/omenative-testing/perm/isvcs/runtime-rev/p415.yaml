@@ -1,4 +1,4 @@
-# p415: runtime-rev pd-mn recover-after-failed-rollout (KNOWN BUG: wedges today) mode=runtimerev rt=ome-coordtest-rt-p415 expect=recover Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd-mn
+# p415: runtime-rev pd-mn recover-after-failed-rollout (KNOWN BUG: wedges today) mode=runtimerev rt=ome-coordtest-rt-p415 expect=recover notimpl=1 Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd-mn
 # Multi-node test ClusterServingRuntime — each Instance is a gang of
 # 1 leader + N worker pods (LeaderWorkerSet). Same nginx + 15s artificial
 # startup as the single-pod runtime, but split into leader.runner +

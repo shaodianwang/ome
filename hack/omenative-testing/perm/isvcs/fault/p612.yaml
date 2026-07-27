@@ -1,4 +1,4 @@
-# p612: settled gang leader killed mid-rotation — whole-gang co-restart, roll still converges with gangs atomic (floor_soft: the kill intentionally costs one gang's capacity while it recreates)  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=podkill:rotating floor_soft=1 co=none topo=engine-mn
+# p612: settled gang leader killed mid-rotation — whole-gang co-restart, roll still converges with gangs atomic (floor_soft: the kill intentionally costs one gang's capacity while it recreates)  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=podkill:rotating floor_soft=1 order_soft=1 co=none topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p612 }

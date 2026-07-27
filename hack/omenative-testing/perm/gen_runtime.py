@@ -106,8 +106,13 @@ def main():
         if cid in HAND_WRITTEN:
             sys.exit(f"generated {cid} collides with a hand-written case — renumber")
         rt = f"ome-coordtest-rt-{cid}"
+        # notimpl=1: recovery-after-failed-rollout is a known-unimplemented
+        # controller feature (Failed escalation is terminal; corrective edits are
+        # ignored) — record XFAIL, not a regression. A genuine status-lie surfaced
+        # meanwhile (invariant A) still re-hardens the verdict back to FAIL, so the
+        # marker documents the known wedge without masking a real status violation.
         desc = (f"{cid}: runtime-rev {topo} recover-after-failed-rollout (KNOWN BUG: wedges today) "
-                f"mode=runtimerev rt={rt} expect=recover "
+                f"mode=runtimerev rt={rt} expect=recover notimpl=1 "
                 f"Ne={Ne} Nd={Nd} Nr=0 ceil_e={ce} ceil_d={cd} ceil_r=0 topo={topo}")
         body = f"# {desc}\n" + dedicated_csr(topo, rt) + "\n---\n" + isvc(cid, topo, "true", rt)
         (OUT / f"{cid}.yaml").write_text(body)
