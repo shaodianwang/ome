@@ -770,7 +770,7 @@ func TestBuildComponentObservation_NoStatusReturnsZero(t *testing.T) {
 	// No IR status available (nil summary) — observation must
 	// report zero values, NOT Failed (otherwise a brand-new ISVC would
 	// flip the group to Failed).
-	obs := buildComponentObservation("isvc-test", nil, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(nil, v1beta1.EngineComponent, nil)
 	if obs.Failed {
 		t.Errorf("missing status must not report Failed; got %+v", obs)
 	}
@@ -789,7 +789,7 @@ func TestBuildComponentObservation_NoFailedInstancesIsNotFailed(t *testing.T) {
 			{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
 		},
 	}
-	obs := buildComponentObservation("isvc-test", summary, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil)
 	if obs.Failed {
 		t.Errorf("no Failed Instances should not flip Failed; got %+v", obs)
 	}
@@ -805,7 +805,7 @@ func TestBuildComponentObservation_AnyFailedInstanceMarksComponentFailed(t *test
 			{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
 		},
 	}
-	obs := buildComponentObservation("isvc-test", summary, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil)
 	if !obs.Failed {
 		t.Errorf("any Failed Instance must mark Component Failed; got %+v", obs)
 	}
@@ -826,7 +826,7 @@ func TestBuildComponentObservation_MultipleFailedInstancesListedInMessage(t *tes
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
 		},
 	}
-	obs := buildComponentObservation("isvc-test", summary, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil)
 	if !obs.Failed {
 		t.Errorf("two Failed Instances must mark Component Failed; got %+v", obs)
 	}
@@ -850,7 +850,7 @@ func TestBuildComponentObservation_IRSourceMatchesLegacyCopy(t *testing.T) {
 		},
 	}
 	perRev := map[string]int32{"aaaa": 2, "bbbb": 2}
-	got := buildComponentObservation("svc", irStatus, v1beta1.EngineComponent, perRev)
+	got := buildComponentObservation(irStatus, v1beta1.EngineComponent, perRev)
 	if got.DesiredReplicas != 4 || got.ReadyPods != 3 || got.ServingPods != 3 ||
 		got.NewRevisionPods != 2 || got.NewRevisionReadyPods != 2 ||
 		got.TotalPods != 4 || !got.RolloutInFlight || !got.Failed {

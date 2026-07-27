@@ -315,16 +315,15 @@ func existingPodsMatchTargetRevision(existing []*corev1.Pod, target *appsv1.Cont
 	if len(existing) == 0 || target == nil {
 		return false
 	}
-	want := query.RevisionHashFromControllerRevisionName(target.Name)
-	if want == "" {
+	tgt := query.RevisionOf(target)
+	if tgt.IsZero() {
 		return false
 	}
 	for _, pod := range existing {
 		if pod == nil {
 			return false
 		}
-		got, ok := pod.Labels[query.LabelRevisionHash]
-		if !ok || got != want {
+		if !query.RevisionFromPod(pod).Same(tgt) {
 			return false
 		}
 	}
@@ -461,18 +460,12 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 // pass-through to RenderWithRevision; an empty hash skips the
 // ome.io/revision-hash label.
 func revisionHashFromTarget(target *appsv1.ControllerRevision) string {
-	if target == nil {
-		return ""
-	}
-	return query.RevisionHashFromControllerRevisionName(target.Name)
+	return query.RevisionOf(target).Hash()
 }
 
 // revisionNameFromTarget returns target.Name, or "" for a nil target.
 func revisionNameFromTarget(target *appsv1.ControllerRevision) string {
-	if target == nil {
-		return ""
-	}
-	return target.Name
+	return query.RevisionOf(target).Name()
 }
 
 // patchInstanceStatusCreating idempotently stamps Phase=Creating with the

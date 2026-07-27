@@ -265,6 +265,77 @@ func TestDispose_WorkloadCaused_CreateFallsBackToUpdateRevision(t *testing.T) {
 	}
 }
 
+// TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision is the
+// #837 regression: after a corrective edit retargets an instance to a new
+// revision, the prior failed attempt's bad pod can linger in its drain
+// window. Attributing that pod's failure to the freshly-stamped
+// Operation.TargetRevision would record a RetryBlock against the GOOD
+// corrective revision and wedge recovery. A cause pod whose revision-hash
+// is not the target's must be skipped: no block, no instance mutation.
+func TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts := []workload.InstanceStatus{{
+		Index: 0,
+		Phase: workload.InstancePhaseUpdating,
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			TargetRevision: "own-engine-newgood",
+		},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-newgood", nil, nil)
+	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
+	pod.Labels = map[string]string{"ome.io/revision-hash": "oldbad"} // prior bad rev
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
+		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != workload.DispositionSkippedSuperseded {
+		t.Fatalf("outcome: got %v want DispositionSkippedSuperseded", outcome)
+	}
+	if len(rec.blockCalls) != 0 {
+		t.Fatalf("no RetryBlock must be recorded for a superseded leftover; got %+v", rec.blockCalls)
+	}
+	if len(rec.commits) != 0 {
+		t.Fatalf("no instance mutation must occur (Operation stays intact); got %+v", rec.commits)
+	}
+}
+
+// TestDispose_TargetRevisionPod_StillHeld guards the non-poisoning case:
+// when the stuck pod actually belongs to the current target revision, the
+// block is still recorded against it (the guard must not over-fire), and a
+// label-less pod (unknown revision) also still records — the guard is inert
+// unless the pod is provably on a different revision.
+func TestDispose_TargetRevisionPod_StillHeld(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts := []workload.InstanceStatus{{
+		Index: 0,
+		Phase: workload.InstancePhaseUpdating,
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			TargetRevision: "own-engine-newgood",
+		},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-newgood", nil, nil)
+	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
+	pod.Labels = map[string]string{"ome.io/revision-hash": "newgood"} // belongs to target
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
+		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != workload.DispositionHeldRevision {
+		t.Fatalf("outcome: got %v want DispositionHeldRevision", outcome)
+	}
+	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "own-engine-newgood" {
+		t.Fatalf("block calls: got %+v want one call for own-engine-newgood", rec.blockCalls)
+	}
+}
+
 // TestDispose_RelocationDirective_GPUCase covers the deliberate
 // GPU-on-Ready-node handling: CrashLoopBackOff is NOT workload-caused
 // evidence, so a single-node Auto-mode attempt with budget records a

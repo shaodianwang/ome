@@ -842,8 +842,8 @@ func (r *Reconciler) applyRollbackPayload(ctx context.Context, ir *v1beta1.Infer
 		}
 		return fmt.Errorf("legacy multi-pod rollback with configured topology requires IR and target revision")
 	}
-	targetHash := query.RevisionHashFromControllerRevisionName(target.Name)
-	if targetHash == "" {
+	targetRev := query.RevisionFromName(target.Name)
+	if targetRev.Hash() == "" {
 		return fmt.Errorf("legacy rollback revision %q has no recognizable revision hash", target.Name)
 	}
 	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
@@ -853,7 +853,7 @@ func (r *Reconciler) applyRollbackPayload(ctx context.Context, ir *v1beta1.Infer
 	}
 	targetPods := make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
-		if pod != nil && pod.Labels[query.LabelRevisionHash] == targetHash {
+		if pod != nil && query.RevisionFromPod(pod).Same(targetRev) {
 			targetPods = append(targetPods, pod)
 		}
 	}

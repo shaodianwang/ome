@@ -15,6 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // workloadCausedWaitingReasons is the set of kubelet container
@@ -87,6 +88,13 @@ const (
 	// Phase=Failed, no RetryBlock (failure not proven revision-scoped;
 	// the recreate lands via the scheduler on healthy nodes).
 	DispositionTerminal
+	// DispositionSkippedSuperseded — the only workload-caused pod belongs
+	// to a SUPERSEDED revision (its revision-hash label is not the current
+	// target's), so it is a drain leftover from a prior failed attempt, not
+	// this attempt's failure. Nothing is mutated: recording a block would
+	// poison the freshly-retargeted corrective revision and wedge recovery
+	// (#837); the update pass drains the leftover and drives the current surge.
+	DispositionSkippedSuperseded
 )
 
 // DispositionDeps carries the operator-config inputs and adapter hooks
@@ -173,6 +181,21 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 			// Create ops carry no TargetRevision — the attempt was
 			// toward the owner's current rollout target.
 			targetRev = input.ObservedState.UpdateRevision
+		}
+		// Superseded-leftover guard (#837): a corrective edit retargets the
+		// instance to a new revision C, but the prior failed attempt's bad pod
+		// (revision B) can linger in its drain window. Attributing that B pod's
+		// failure to the freshly-stamped Operation.TargetRevision (now C) would
+		// record a RetryBlock against C — the good revision — and the update
+		// trigger would then deny C forever, wedging recovery. Skip only when
+		// the cause pod is on a KNOWN, DIFFERENT revision than the target; the
+		// update pass drains the leftover and drives the current surge. Inert
+		// when the pod carries no revision-hash label (zero), so the ordinary
+		// same-revision failure path is unchanged.
+		podRev := query.RevisionFromPod(pod)
+		tgtRev := query.RevisionFromName(targetRev)
+		if !podRev.IsZero() && !tgtRev.IsZero() && !podRev.Same(tgtRev) {
+			return DispositionSkippedSuperseded, nil
 		}
 		if targetRev != "" {
 			// Writer ordering: RetryBlock upsert lands BEFORE the mutation

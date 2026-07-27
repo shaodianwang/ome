@@ -447,7 +447,7 @@ func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 	// runningRev=rev2, targetHash=rev3 — the normal mid-cycle state.
 	surge, drain := reclassifyByRevisionHash(
 		[]*corev1.Pod{validSurge, unrelated, missingLabel},
-		nil, "rev3", "rev2",
+		nil, query.RevisionFromHash("rev3"), query.RevisionFromHash("rev2"),
 		false,
 	)
 	if len(drain) != 0 {
@@ -461,7 +461,7 @@ func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 	// a fully mismatched label.
 	mismatched := mk("anything")
 	surge2, drain2 := reclassifyByRevisionHash(
-		[]*corev1.Pod{mismatched}, nil, "rev3", "", false,
+		[]*corev1.Pod{mismatched}, nil, query.RevisionFromHash("rev3"), query.RevisionFromHash(""), false,
 	)
 	if len(drain2) != 0 || len(surge2) != 1 {
 		t.Errorf("empty runningRev should leave buckets untouched; surge=%d drain=%d",
@@ -486,7 +486,7 @@ func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 
 	surge, drain := reclassifyByRevisionHash(
 		[]*corev1.Pod{staleRev2, validRev3},
-		[]*corev1.Pod{}, "rev3", "rev2",
+		[]*corev1.Pod{}, query.RevisionFromHash("rev3"), query.RevisionFromHash("rev2"),
 		false,
 	)
 	if len(drain) != 1 || drain[0] != staleRev2 {
@@ -507,17 +507,17 @@ func TestReclassifyByRevisionHash_FailedRecoverDrainsBadRev(t *testing.T) {
 			Labels: map[string]string{query.LabelRevisionHash: rev}}}
 	}
 	// Non-failed: a bad-rev pod (≠ target, ≠ runningRev) stays in surge.
-	surge, drain := reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, "revGOOD", "revOLD", false)
+	surge, drain := reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, query.RevisionFromHash("revGOOD"), query.RevisionFromHash("revOLD"), false)
 	if len(drain) != 0 || len(surge) != 1 {
 		t.Fatalf("non-failed: bad-rev pod must stay in surge; surge=%d drain=%d", len(surge), len(drain))
 	}
 	// Failed-recover: the bad-rev pod is drained.
-	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, "revGOOD", "revOLD", true)
+	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, query.RevisionFromHash("revGOOD"), query.RevisionFromHash("revOLD"), true)
 	if len(drain) != 1 || len(surge) != 0 {
 		t.Fatalf("failed-recover: bad-rev pod must drain; surge=%d drain=%d", len(surge), len(drain))
 	}
 	// Failed-recover: a pod already on the target is not churned.
-	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revGOOD")}, nil, "revGOOD", "revOLD", true)
+	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revGOOD")}, nil, query.RevisionFromHash("revGOOD"), query.RevisionFromHash("revOLD"), true)
 	if len(drain) != 0 || len(surge) != 1 {
 		t.Fatalf("failed-recover: target-rev pod must stay in surge; surge=%d drain=%d", len(surge), len(drain))
 	}

@@ -403,10 +403,10 @@ func revisionHashForInstance(input workload.ReconcileInput, idx int32) string {
 		return ""
 	}
 	if s.RunningRevision != "" {
-		return query.RevisionHashFromControllerRevisionName(s.RunningRevision)
+		return query.RevisionFromName(s.RunningRevision).Hash()
 	}
 	if s.TargetRevision != "" {
-		return query.RevisionHashFromControllerRevisionName(s.TargetRevision)
+		return query.RevisionFromName(s.TargetRevision).Hash()
 	}
 	return ""
 }

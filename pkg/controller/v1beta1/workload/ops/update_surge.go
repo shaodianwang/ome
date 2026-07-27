@@ -175,8 +175,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			surgeTargetName = s.Operation.TargetRevision
 		}
 	}
-	surgeTargetHash := query.RevisionHashFromControllerRevisionName(surgeTargetName)
-	runningRevHash := query.RevisionHashFromControllerRevisionName(runningRevName)
+	surgeTargetRev := query.RevisionFromName(surgeTargetName)
+	runningRev := query.RevisionFromName(runningRevName)
 
 	// Re-route any pod stranded at the surge ordinal but labeled with
 	// the just-promoted RunningRevision through the drain path —
@@ -185,7 +185,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// target while the actual pod is on the prior rev. See
 	// reclassifyByRevisionHash's header for the X-2 recovery path this
 	// guards.
-	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetHash, runningRevHash, instanceFailed)
+	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetRev, runningRev, instanceFailed)
 
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
 	// already there. Idempotent on the second pass. Writes
@@ -235,7 +235,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			Runner:  runner,
 			Ordinal: newOrdinal,
 		}}
-		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, targets, query.RevisionHashFromControllerRevisionName(surgeTargetName)); err != nil {
+		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, targets, query.RevisionFromName(surgeTargetName).Hash()); err != nil {
 			return false, fmt.Errorf("create surge pod (instance=%d, ordinal=%d): %w", inst.Index, newOrdinal, err)
 		}
 		return false, nil
@@ -478,8 +478,8 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 // stuck on a bad revision so a corrective target can re-surge — without it, the
 // failed pod stays in the surge bucket forever (arbitrary-rev pods are otherwise
 // kept on purpose) and the Instance is wedged. No effect on non-failed surges.
-func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, targetHash, runningRevHash string, failedRecover bool) (newSurge, newDrain []*corev1.Pod) {
-	if !failedRecover && (runningRevHash == "" || runningRevHash == targetHash) {
+func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, target, runningRev query.RevisionID, failedRecover bool) (newSurge, newDrain []*corev1.Pod) {
+	if !failedRecover && (runningRev.Hash() == "" || runningRev.Same(target)) {
 		return surge, drainPods
 	}
 	newSurge = surge[:0]
@@ -492,7 +492,8 @@ func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, targetHash, runnin
 			newSurge = append(newSurge, pod)
 			continue
 		}
-		if hash == runningRevHash || (failedRecover && hash != targetHash) {
+		podRev := query.RevisionFromPod(pod)
+		if podRev.Same(runningRev) || (failedRecover && !podRev.Same(target)) {
 			// Stale: pod is labeled with the just-promoted rev but is
 			// sitting at the surge ordinal. Drain + delete so the
 			// next reconcile's Phase 1 re-creates with the

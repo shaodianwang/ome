@@ -12,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // DefaultRevisionRetention caps non-live ControllerRevisions per
@@ -304,8 +305,9 @@ func CountAvailableInstances(insts []InstanceStatus, desiredByIdx map[int32]int3
 // gate — what HPA's scale-aware rollout pacing reads. The Ready check
 // shares the same surge-tolerant classifier as CountReadyInstances.
 func CountUpdatedInstances(insts []InstanceStatus, targetRevName string, desiredByIdx map[int32]int32) (updated, updatedReady int32) {
+	tgt := query.RevisionFromName(targetRevName)
 	for _, s := range insts {
-		if s.RunningRevision != targetRevName {
+		if !query.RevisionFromName(s.RunningRevision).Same(tgt) {
 			continue
 		}
 		updated++
@@ -326,11 +328,12 @@ func RolloutComplete(insts []InstanceStatus, targetRevName string) bool {
 	if len(insts) == 0 {
 		return false
 	}
+	tgt := query.RevisionFromName(targetRevName)
 	for _, s := range insts {
 		if s.Phase != InstancePhaseReady {
 			return false
 		}
-		if s.RunningRevision != targetRevName {
+		if !query.RevisionFromName(s.RunningRevision).Same(tgt) {
 			return false
 		}
 	}
@@ -383,6 +386,7 @@ func HasWedgedPodAgainstCurrent(pods []*corev1.Pod, currentHash, revisionHashLab
 	if currentHash == "" || revisionHashLabel == "" {
 		return false
 	}
+	current := query.RevisionFromHash(currentHash)
 	for _, pod := range pods {
 		if pod == nil {
 			continue
@@ -391,7 +395,7 @@ func HasWedgedPodAgainstCurrent(pods []*corev1.Pod, currentHash, revisionHashLab
 		if hash == "" {
 			continue
 		}
-		if hash != currentHash {
+		if !query.RevisionFromHash(hash).Same(current) {
 			return true
 		}
 	}

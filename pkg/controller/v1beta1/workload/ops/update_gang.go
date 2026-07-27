@@ -201,7 +201,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		// Stamp the pinned in-flight rev hash (NOT the latest target) so
 		// the gang's pods match the revision this surge committed to and
 		// the per-revision drain Service selects them. See surgeTargetName.
-		if _, cerr := createMissingPods(ctx, deps, input, renderPlan, surgeInst, surgeIdx, missing, query.RevisionHashFromControllerRevisionName(surgeTargetName)); cerr != nil {
+		if _, cerr := createMissingPods(ctx, deps, input, renderPlan, surgeInst, surgeIdx, missing, query.RevisionFromName(surgeTargetName).Hash()); cerr != nil {
 			return false, fmt.Errorf("create surge gang (instance=%d): %w", surgeIdx, cerr)
 		}
 		return false, nil

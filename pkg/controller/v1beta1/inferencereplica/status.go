@@ -382,7 +382,7 @@ func (r *Reconciler) escalateStuckPodFailures(ctx context.Context, ir *v1beta1.I
 	return workload.EscalateStuckPodFailures(ctx, r.escalationDeps(), r.buildEscalationInput(ir, parent, retryPolicy), workload.EscalationParams{
 		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
 		PodsByIndex:         byIndex,
-		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(ir.Status.CurrentRevision),
+		CurrentRevisionHash: query.RevisionFromName(ir.Status.CurrentRevision).Hash(),
 		RevisionHashLabel:   query.LabelRevisionHash,
 		StuckPodGrace:       stuckPodGrace,
 		DesiredPodsByIndex:  desiredByIdx,

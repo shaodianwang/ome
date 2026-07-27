@@ -141,7 +141,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		// Restamp the revision-hash label so the in-place-rolled pod is
 		// recognized as the target revision by per-revision Service routing,
 		// drain, and stuck-pod detection (all keyed on this label). Idempotent.
-		if err := patchPodRevisionHashLabel(ctx, deps.Client, pod, query.RevisionHashFromControllerRevisionName(target.Name)); err != nil {
+		if err := patchPodRevisionHashLabel(ctx, deps.Client, pod, query.RevisionOf(target).Hash()); err != nil {
 			return false, fmt.Errorf("patch revision-hash label (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

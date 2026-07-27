@@ -79,26 +79,26 @@ func TestDesiredFor(t *testing.T) {
 // holds CurrentRevision in place.
 func TestRolloutComplete(t *testing.T) {
 	allReady := []workload.InstanceStatus{
-		{Phase: workload.InstancePhaseReady, RunningRevision: "rev"},
-		{Phase: workload.InstancePhaseReady, RunningRevision: "rev"},
+		{Phase: workload.InstancePhaseReady, RunningRevision: "isvc-engine-aaaaaaaa"},
+		{Phase: workload.InstancePhaseReady, RunningRevision: "isvc-engine-aaaaaaaa"},
 	}
-	if !workload.RolloutComplete(allReady, "rev") {
+	if !workload.RolloutComplete(allReady, "isvc-engine-aaaaaaaa") {
 		t.Errorf("all Ready on rev should be complete")
 	}
 	oneCreating := []workload.InstanceStatus{
-		{Phase: workload.InstancePhaseCreating, RunningRevision: "rev"},
-		{Phase: workload.InstancePhaseReady, RunningRevision: "rev"},
+		{Phase: workload.InstancePhaseCreating, RunningRevision: "isvc-engine-aaaaaaaa"},
+		{Phase: workload.InstancePhaseReady, RunningRevision: "isvc-engine-aaaaaaaa"},
 	}
-	if workload.RolloutComplete(oneCreating, "rev") {
+	if workload.RolloutComplete(oneCreating, "isvc-engine-aaaaaaaa") {
 		t.Errorf("Phase=Creating should keep rollout incomplete")
 	}
 	stale := []workload.InstanceStatus{
-		{Phase: workload.InstancePhaseReady, RunningRevision: "old"},
+		{Phase: workload.InstancePhaseReady, RunningRevision: "isvc-engine-bbbbbbbb"},
 	}
-	if workload.RolloutComplete(stale, "rev") {
+	if workload.RolloutComplete(stale, "isvc-engine-aaaaaaaa") {
 		t.Errorf("stale RunningRevision should keep rollout incomplete")
 	}
-	if workload.RolloutComplete(nil, "rev") {
+	if workload.RolloutComplete(nil, "isvc-engine-aaaaaaaa") {
 		t.Errorf("empty instance list should not be complete")
 	}
 }

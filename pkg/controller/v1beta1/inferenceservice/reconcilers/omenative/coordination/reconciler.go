@@ -511,26 +511,12 @@ func latestRevisionHash(ctx context.Context, reads client.Reader, namespace, isv
 		return ""
 	}
 	if name := summary.UpdateRevision; name != "" {
-		return revisionHashFromName(isvcName, c, name)
+		return query.RevisionFromName(name).Hash()
 	}
 	if name := summary.CurrentRevision; name != "" {
-		return revisionHashFromName(isvcName, c, name)
+		return query.RevisionFromName(name).Hash()
 	}
 	return ""
-}
-
-// revisionHashFromName extracts the hash suffix from a
-// ControllerRevision name of the form `<isvc>-<component>-<hash>`.
-// Returns "" when the name doesn't match the expected shape.
-func revisionHashFromName(isvc string, c v1beta1.ComponentType, name string) string {
-	prefix := isvc + "-" + string(c) + "-"
-	if len(name) <= len(prefix) {
-		return ""
-	}
-	if name[:len(prefix)] != prefix {
-		return ""
-	}
-	return name[len(prefix):]
 }
 
 // buildGroupObservation builds the GroupObservation the state machine
@@ -542,7 +528,7 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 	}
 	for _, c := range g.Components {
 		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
-		obs.Components[c] = buildComponentObservation(isvc.Name, summary, c, perRevisionPods[c])
+		obs.Components[c] = buildComponentObservation(summary, c, perRevisionPods[c])
 	}
 	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
 		obs.PausedGlobal = true
@@ -552,7 +538,7 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 
 // buildComponentObservation aggregates one Component's observation from
 // the authoritative InferenceReplica status and per-revision pod counts.
-func buildComponentObservation(isvcName string, summary *v1beta1.InferenceReplicaStatus, c v1beta1.ComponentType, perRevisionPods map[string]int32) ComponentObservation {
+func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta1.ComponentType, perRevisionPods map[string]int32) ComponentObservation {
 	out := ComponentObservation{
 		Component: c,
 	}
@@ -565,11 +551,11 @@ func buildComponentObservation(isvcName string, summary *v1beta1.InferenceReplic
 	out.ServingPods = summary.ServingReplicas
 	out.NewRevisionPods = summary.UpdatedReplicas
 	out.NewRevisionReadyPods = summary.UpdatedReadyReplicas
-	currentHash := revisionHashFromName(isvcName, c, summary.CurrentRevision)
-	targetHash := revisionHashFromName(isvcName, c, summary.UpdateRevision)
-	out.CurrentRevisionHash = currentHash
-	out.TargetRevisionHash = targetHash
-	out.RolloutInFlight = targetHash != "" && targetHash != currentHash
+	cur := query.RevisionFromName(summary.CurrentRevision)
+	tgt := query.RevisionFromName(summary.UpdateRevision)
+	out.CurrentRevisionHash = cur.Hash()
+	out.TargetRevisionHash = tgt.Hash()
+	out.RolloutInFlight = !tgt.IsZero() && !tgt.Same(cur)
 
 	// Per-Instance failure rollup: any Instance escalated to
 	// Phase=Failed by ExpireOperationsIfDeadlinePassed (or any other

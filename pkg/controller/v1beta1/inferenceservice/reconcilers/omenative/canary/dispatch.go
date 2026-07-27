@@ -244,7 +244,7 @@ func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.
 	var bestRev int64
 	for i := range list.Items {
 		cr := &list.Items[i]
-		if query.RevisionHashFromControllerRevisionName(cr.Name) == rejectedHash {
+		if query.RevisionOf(cr).Same(query.RevisionFromHash(rejectedHash)) {
 			continue
 		}
 		if bestName == "" || cr.Revision > bestRev {
@@ -353,10 +353,10 @@ func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.In
 		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, c)}
 		if err := reads.Get(ctx, key, ir); err == nil {
 			if name := ir.Status.UpdateRevision; name != "" {
-				return query.RevisionHashFromControllerRevisionName(name)
+				return query.RevisionFromName(name).Hash()
 			}
 			if name := ir.Status.CurrentRevision; name != "" {
-				return query.RevisionHashFromControllerRevisionName(name)
+				return query.RevisionFromName(name).Hash()
 			}
 		}
 	}

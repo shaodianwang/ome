@@ -320,6 +320,15 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	if isMigrateOwnedStatus(s) {
 		return false, 0, nil
 	}
+	// A gang surge-target MARKER is the replacement gang's index, created and
+	// driven by its SOURCE instance's gangSurgeUpdate — not an independent
+	// update target. Triggering it here mis-drives it as a fresh surge source
+	// (allocating a phantom surge index), which corrupts the rollout when a
+	// corrective edit moves the target while the marker still runs the old
+	// surge revision. Skip; the source owns the marker's lifecycle. (#837)
+	if isGangSurgeTargetMarker(s) {
+		return false, 0, nil
+	}
 	if s.Phase == workload.InstancePhaseUpdating {
 		return true, 0, nil
 	}
@@ -408,6 +417,17 @@ func isMigrateOwnedStatus(s *workload.InstanceStatus) bool {
 		return true
 	}
 	return false
+}
+
+// isGangSurgeTargetMarker reports whether s is a gang surge-target marker —
+// the transient replacement-gang index stamped by patchInstanceStatusGangSurgeTarget
+// (Op{Update, Step=GangSurgeTarget}). Its lifecycle is owned by the source
+// instance's gangSurgeUpdate, so the update trigger must not treat it as an
+// independent target.
+func isGangSurgeTargetMarker(s *workload.InstanceStatus) bool {
+	return s != nil && s.Operation != nil &&
+		s.Operation.Type == workload.InstanceOperationUpdate &&
+		s.Operation.Step == workload.UpdateStepGangSurgeTarget
 }
 
 // podMatchesTarget compares pod's runtime PodSpec to target — same

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // conditionAvailable is the Component-level condition type stamped by
@@ -171,11 +172,11 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 		obs := ComponentObservation{Component: c}
 		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
 		if summary != nil {
-			currentHash := revisionHashFromName(isvc.Name, c, summary.CurrentRevision)
-			targetHash := revisionHashFromName(isvc.Name, c, summary.UpdateRevision)
-			obs.CurrentRevisionHash = currentHash
-			obs.TargetRevisionHash = targetHash
-			revisionSkew := targetHash != "" && targetHash != currentHash
+			cur := query.RevisionFromName(summary.CurrentRevision)
+			tgt := query.RevisionFromName(summary.UpdateRevision)
+			obs.CurrentRevisionHash = cur.Hash()
+			obs.TargetRevisionHash = tgt.Hash()
+			revisionSkew := !tgt.IsZero() && !tgt.Same(cur)
 			generationSkew := summary.ObservedGeneration < isvc.Generation
 			obs.RolloutInFlight = revisionSkew || generationSkew
 		}

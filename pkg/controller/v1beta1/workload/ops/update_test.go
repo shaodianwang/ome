@@ -918,6 +918,37 @@ func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 	}
 }
 
+// TestDetectUpdateTrigger_GangSurgeTargetMarkerSuppressed: a gang
+// surge-target marker (Op{Update, Step=GangSurgeTarget}) is driven by its
+// SOURCE instance's gangSurgeUpdate, not as an independent target. Even
+// when its running revision differs from the current target (a corrective
+// edit moved the target mid-surge), the trigger must be suppressed — else
+// the marker is mis-driven as a fresh surge source and corrupts the
+// rollout (#837, gang route).
+func TestDetectUpdateTrigger_GangSurgeTargetMarkerSuppressed(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+		Type: v1beta1.InstanceOperationUpdate,
+		Step: "GangSurgeTarget",
+	}
+	// Marker still runs the old surge revision while the target moved on.
+	ir.Status.InstanceStatuses[0].RunningRevision = "llama-70b-engine-oldrev"
+	c := legacyNewFakeClient(t, isvc, ir)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+	target := legacyTargetSpecImage("llama:v2")
+	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("gang surge-target marker must suppress Update — the source owns its lifecycle")
+	}
+}
+
 // TestDetectUpdateTrigger_RunningRevisionMatchesTarget: Status's
 // RunningRevision matches the target CR name — no update.
 func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {

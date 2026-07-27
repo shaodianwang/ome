@@ -141,9 +141,9 @@ func mkSequentialFixture(name string, soak time.Duration) *v1beta1.InferenceServ
 
 // setComponentRevisions stamps Status.Components[c].Lifecycle with
 // ControllerRevision names that produce the desired RolloutInFlight
-// answer (target!=current ⇒ in flight). Revision-name shape mirrors
-// what coordination.revisionHashFromName parses:
-// <isvcName>-<component>-<hash>.
+// answer (target!=current ⇒ in flight). Revision-name shape is
+// <isvcName>-<component>-<hash>, which query.RevisionFromName splits
+// to extract the trailing hash.
 func setComponentRevisions(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, currentHash, targetHash string) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
