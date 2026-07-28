@@ -649,6 +649,11 @@ func writeComponentAutoscalerStatus(b *BaseComponentFields, isvc *v1beta1.Infere
 		objectName = irprojector.InferenceReplicaName(isvc.Name, componentType)
 	}
 
+	if isvc.Status.Components == nil {
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	existing := isvc.Status.Components[componentType]
+
 	asStatus, stRef, err := autoscaler.WriteAutoscalerStatus(
 		context.Background(),
 		b.Client,
@@ -657,15 +662,12 @@ func writeComponentAutoscalerStatus(b *BaseComponentFields, isvc *v1beta1.Infere
 		resolved,
 		source,
 		scaleTargetRef,
+		existing.Autoscaler,
 	)
 	if err != nil {
 		return err
 	}
 
-	if isvc.Status.Components == nil {
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
-	}
-	existing := isvc.Status.Components[componentType]
 	existing.Autoscaler = asStatus
 	existing.ScaleTargetRef = stRef
 	isvc.Status.Components[componentType] = existing

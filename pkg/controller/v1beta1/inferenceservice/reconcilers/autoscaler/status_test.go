@@ -104,6 +104,7 @@ func TestWriteAutoscalerStatus_ManagedByMatrix(t *testing.T) {
 			status, stRef, err := WriteAutoscalerStatus(
 				context.Background(), cli, "ns1", "isvc-engine",
 				tc.resolved, SpecSourceISVC, ref,
+				nil,
 			)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(status).NotTo(gomega.BeNil())
@@ -142,6 +143,7 @@ func TestWriteAutoscalerStatus_SpecSourcePropagation(t *testing.T) {
 				context.Background(), cli, "ns1", "name1",
 				&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA},
 				src, v1beta1.ScaleTargetRef{},
+				nil,
 			)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(status.SpecSource).To(gomega.Equal(string(src)))
@@ -203,6 +205,7 @@ func TestWriteAutoscalerStatus_HPAMirror(t *testing.T) {
 		resolved, SpecSourceISVC, v1beta1.ScaleTargetRef{
 			APIVersion: "ome.io/v1beta1", Kind: "InferenceReplica", Name: "isvc-engine",
 		},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(status.ManagedBy).To(gomega.Equal(v1beta1.AutoscalerManagedByOME))
@@ -237,6 +240,7 @@ func TestWriteAutoscalerStatus_HPAMirror_NotFound(t *testing.T) {
 	status, _, err := WriteAutoscalerStatus(
 		context.Background(), cli, "ns1", "isvc-engine",
 		resolved, SpecSourceISVC, v1beta1.ScaleTargetRef{},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred(),
 		"NotFound on HPA Get must degrade gracefully — no error")
@@ -302,6 +306,7 @@ func TestWriteAutoscalerStatus_ScaledObjectMirror(t *testing.T) {
 		resolved, SpecSourceRuntime, v1beta1.ScaleTargetRef{
 			APIVersion: "ome.io/v1beta1", Kind: "InferenceReplica", Name: "isvc-engine",
 		},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(status.ManagedBy).To(gomega.Equal(v1beta1.AutoscalerManagedByOME))
@@ -350,6 +355,7 @@ func TestWriteAutoscalerStatus_ScaledObjectMirror_NoDerivedHPA(t *testing.T) {
 	status, _, err := WriteAutoscalerStatus(
 		context.Background(), cli, "ns1", "isvc-engine",
 		resolved, SpecSourceDefault, v1beta1.ScaleTargetRef{},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(status.CurrentReplicas).To(gomega.BeZero(),
@@ -374,6 +380,7 @@ func TestWriteAutoscalerStatus_ScaleTargetRef_EmptyOmitsField(t *testing.T) {
 	_, stRef, err := WriteAutoscalerStatus(
 		context.Background(), cli, "ns1", "name1",
 		nil, SpecSourceDefault, v1beta1.ScaleTargetRef{},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(stRef).To(gomega.BeNil(),
@@ -394,6 +401,7 @@ func TestWriteAutoscalerStatus_NilClient(t *testing.T) {
 		resolved, SpecSourceISVC, v1beta1.ScaleTargetRef{
 			APIVersion: "ome.io/v1beta1", Kind: "InferenceReplica", Name: "name1",
 		},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(status.ManagedBy).To(gomega.Equal(v1beta1.AutoscalerManagedByOME))
@@ -427,6 +435,7 @@ func TestWriteAutoscalerStatus_ExternalManagedSkipsMirror(t *testing.T) {
 	status, _, err := WriteAutoscalerStatus(
 		context.Background(), cli, "ns1", "isvc-engine",
 		resolved, SpecSourceISVC, v1beta1.ScaleTargetRef{},
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(status.ManagedBy).To(gomega.Equal(v1beta1.AutoscalerManagedByExternal))
@@ -480,6 +489,7 @@ func TestWriteAutoscalerStatus_HPAMirror_StableAcrossPodNameChurn(t *testing.T) 
 		status, _, err := WriteAutoscalerStatus(
 			context.Background(), cli, "ns1", "isvc-decoder",
 			resolved, SpecSourceISVC, ref,
+			nil,
 		)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		return status
@@ -505,4 +515,114 @@ func TestWriteAutoscalerStatus_HPAMirror_StableAcrossPodNameChurn(t *testing.T) 
 	g.Expect(c.Message).To(gomega.HaveSuffix("of Pod <pod>"))
 	g.Expect(c.Message).NotTo(gomega.ContainSubstring("abcde"))
 	g.Expect(c.Message).NotTo(gomega.ContainSubstring("zzzzz"))
+}
+
+// findCond returns a pointer to the condition of the given type, or nil.
+func findCond(conds []metav1.Condition, t string) *metav1.Condition {
+	for i := range conds {
+		if conds[i].Type == t {
+			return &conds[i]
+		}
+	}
+	return nil
+}
+
+// kedaSOWithBareConditions builds a ScaledObject whose conditions mirror
+// what live KEDA actually writes: Ready/Active/Fallback carry a reason but
+// NO lastTransitionTime, and Paused carries NEITHER a reason nor a time.
+// Copying these verbatim onto the ISVC status fails the CRD's condition
+// schema (lastTransitionTime required, reason min-1-char), which rejects
+// every status update and wedges the ISVC reconcile in a permanent error
+// loop — the bug the sanitizer guards against.
+func kedaSOWithBareConditions(pausedStatus metav1.ConditionStatus) *kedav1.ScaledObject {
+	soName := utils.GetScaledObjectName("isvc-engine")
+	return &kedav1.ScaledObject{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: soName},
+		Status: kedav1.ScaledObjectStatus{
+			Conditions: kedav1.Conditions{
+				{Type: kedav1.ConditionReady, Status: metav1.ConditionTrue, Reason: "ScaledObjectReady", Message: "ready"},
+				{Type: kedav1.ConditionActive, Status: metav1.ConditionTrue, Reason: "ScalerActive", Message: "active"},
+				{Type: kedav1.ConditionFallback, Status: metav1.ConditionTrue, Reason: "FallbackExists", Message: "fallback"},
+				// The CRD-invalid one: no reason, no lastTransitionTime.
+				{Type: kedav1.ConditionPaused, Status: pausedStatus},
+			},
+		},
+	}
+}
+
+// TestWriteAutoscalerStatus_ScaledObjectMirror_SanitizesConditionsForCRD is
+// the regression guard for the TPU status-update wedge: KEDA conditions
+// mirrored onto the ISVC status must satisfy the ISVC CRD (non-empty reason,
+// non-zero lastTransitionTime) even though KEDA supplies neither for some.
+func TestWriteAutoscalerStatus_ScaledObjectMirror_SanitizesConditionsForCRD(t *testing.T) {
+	g := gomega.NewWithT(t)
+	cli := fake.NewClientBuilder().WithScheme(newStatusTestScheme(t)).
+		WithObjects(kedaSOWithBareConditions(metav1.ConditionFalse)).Build()
+	resolved := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerKEDA}
+	ref := v1beta1.ScaleTargetRef{APIVersion: "ome.io/v1beta1", Kind: "InferenceReplica", Name: "isvc-engine"}
+
+	status, _, err := WriteAutoscalerStatus(
+		context.Background(), cli, "ns1", "isvc-engine",
+		resolved, SpecSourceISVC, ref, nil,
+	)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(status.Conditions).To(gomega.HaveLen(4))
+	for _, c := range status.Conditions {
+		g.Expect(c.Reason).NotTo(gomega.BeEmpty(),
+			"condition %s must have a non-empty reason (CRD requires >=1 char)", c.Type)
+		g.Expect(c.LastTransitionTime.IsZero()).To(gomega.BeFalse(),
+			"condition %s must have a lastTransitionTime (CRD requires it)", c.Type)
+	}
+	// The reason-less Paused condition falls back to its Type as the reason.
+	paused := findCond(status.Conditions, "Paused")
+	g.Expect(paused).NotTo(gomega.BeNil())
+	g.Expect(paused.Reason).To(gomega.Equal("Paused"))
+}
+
+// TestWriteAutoscalerStatus_ScaledObjectMirror_TimestampStableAndTransitions
+// pins that the synthesized KEDA lastTransitionTime is byte-stable across
+// reconciles when nothing changed (preserved from prior status, so the
+// status writer's DeepEqual diff doesn't storm updates) but re-stamps on a
+// real Status transition.
+func TestWriteAutoscalerStatus_ScaledObjectMirror_TimestampStableAndTransitions(t *testing.T) {
+	g := gomega.NewWithT(t)
+	resolved := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerKEDA}
+	ref := v1beta1.ScaleTargetRef{APIVersion: "ome.io/v1beta1", Kind: "InferenceReplica", Name: "isvc-engine"}
+	mirror := func(so *kedav1.ScaledObject, prev *v1beta1.ComponentAutoscalerStatus) *v1beta1.ComponentAutoscalerStatus {
+		cli := fake.NewClientBuilder().WithScheme(newStatusTestScheme(t)).WithObjects(so).Build()
+		st, _, err := WriteAutoscalerStatus(
+			context.Background(), cli, "ns1", "isvc-engine",
+			resolved, SpecSourceISVC, ref, prev,
+		)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		return st
+	}
+
+	// Prior status with an old timestamp on every condition so we can prove
+	// preservation (unchanged status) vs re-stamp (status flip).
+	old := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	prev := &v1beta1.ComponentAutoscalerStatus{Conditions: []metav1.Condition{
+		{Type: "Ready", Status: metav1.ConditionTrue, Reason: "ScaledObjectReady", LastTransitionTime: old},
+		{Type: "Active", Status: metav1.ConditionTrue, Reason: "ScalerActive", LastTransitionTime: old},
+		{Type: "Fallback", Status: metav1.ConditionTrue, Reason: "FallbackExists", LastTransitionTime: old},
+		{Type: "Paused", Status: metav1.ConditionFalse, Reason: "Paused", LastTransitionTime: old},
+	}}
+
+	// Same observed statuses → timestamps preserved (byte-stable, no churn).
+	stable := mirror(kedaSOWithBareConditions(metav1.ConditionFalse), prev)
+	for _, c := range stable.Conditions {
+		g.Expect(c.LastTransitionTime.Time.Equal(old.Time)).To(gomega.BeTrue(),
+			"condition %s unchanged → lastTransitionTime must be preserved", c.Type)
+	}
+
+	// Paused flips False→True → only its timestamp re-stamps; others preserved.
+	flipped := mirror(kedaSOWithBareConditions(metav1.ConditionTrue), prev)
+	paused := findCond(flipped.Conditions, "Paused")
+	g.Expect(paused).NotTo(gomega.BeNil())
+	g.Expect(paused.LastTransitionTime.Time.Equal(old.Time)).To(gomega.BeFalse(),
+		"Paused transitioned → lastTransitionTime must advance")
+	ready := findCond(flipped.Conditions, "Ready")
+	g.Expect(ready).NotTo(gomega.BeNil())
+	g.Expect(ready.LastTransitionTime.Time.Equal(old.Time)).To(gomega.BeTrue(),
+		"Ready unchanged → lastTransitionTime preserved even when a sibling transitions")
 }

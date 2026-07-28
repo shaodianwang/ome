@@ -62,6 +62,12 @@ import (
 // the static fields (Class / ManagedBy / SpecSource) only. Useful for unit
 // tests that exercise the mapping logic without a live client.
 //
+// prev is the previously-written ComponentAutoscalerStatus (nil on first
+// reconcile). It is used only to preserve KEDA condition LastTransitionTime
+// across reconciles (KEDA conditions carry no timestamp), keeping the
+// mirrored status byte-stable so the writer's DeepEqual diff doesn't storm
+// status updates.
+//
 // Alpha API. The signature may change without notice.
 func WriteAutoscalerStatus(
 	ctx context.Context,
@@ -71,6 +77,7 @@ func WriteAutoscalerStatus(
 	resolvedAutoscaler *v1beta1.ComponentAutoscaler,
 	specSource SpecSource,
 	scaleTargetRef v1beta1.ScaleTargetRef,
+	prev *v1beta1.ComponentAutoscalerStatus,
 ) (*v1beta1.ComponentAutoscalerStatus, *v1beta1.ScaleTargetRef, error) {
 	class := resolvedClass(resolvedAutoscaler)
 	managedBy := managedByForClass(class)
@@ -88,7 +95,7 @@ func WriteAutoscalerStatus(
 				return nil, nil, fmt.Errorf("mirror HPA status (ns=%s, name=%s): %w", namespace, objectName, err)
 			}
 		case v1beta1.AutoscalerKEDA:
-			if err := mirrorScaledObjectStatus(ctx, cli, namespace, objectName, status); err != nil {
+			if err := mirrorScaledObjectStatus(ctx, cli, namespace, objectName, status, prevConditions(prev)); err != nil {
 				return nil, nil, fmt.Errorf("mirror ScaledObject status (ns=%s, name=%s): %w", namespace, objectName, err)
 			}
 		}
@@ -106,6 +113,15 @@ func WriteAutoscalerStatus(
 	}
 
 	return status, stRef, nil
+}
+
+// prevConditions returns the condition slice from a previously-written
+// ComponentAutoscalerStatus, nil-safe (nil status → nil conditions).
+func prevConditions(prev *v1beta1.ComponentAutoscalerStatus) []metav1.Condition {
+	if prev == nil {
+		return nil
+	}
+	return prev.Conditions
 }
 
 // resolvedClass extracts Class from the resolved ComponentAutoscaler. A nil
@@ -174,7 +190,7 @@ func mirrorHPAStatus(ctx context.Context, cli client.Client, namespace, name str
 // hasn't installed KEDA but somebody resolved class=keda upstream
 // (shouldn't happen at steady state because dispatch validates earlier),
 // we still want the parent reconcile to make forward progress.
-func mirrorScaledObjectStatus(ctx context.Context, cli client.Client, namespace, name string, status *v1beta1.ComponentAutoscalerStatus) error {
+func mirrorScaledObjectStatus(ctx context.Context, cli client.Client, namespace, name string, status *v1beta1.ComponentAutoscalerStatus, prevConds []metav1.Condition) error {
 	soName := utils.GetScaledObjectName(name)
 	obj := &kedav1.ScaledObject{}
 	err := cli.Get(ctx, types.NamespacedName{Namespace: namespace, Name: soName}, obj)
@@ -190,7 +206,7 @@ func mirrorScaledObjectStatus(ctx context.Context, cli client.Client, namespace,
 		return err
 	}
 
-	status.Conditions = kedaConditionsToMetav1(obj.Status.Conditions)
+	status.Conditions = kedaConditionsToMetav1(obj.Status.Conditions, prevConds)
 	if obj.Status.LastActiveTime != nil {
 		t := *obj.Status.LastActiveTime
 		status.LastScaleTime = &t
@@ -263,23 +279,75 @@ func hpaConditionsToMetav1(in []autoscalingv2.HorizontalPodAutoscalerCondition) 
 }
 
 // kedaConditionsToMetav1 translates kedav1.Conditions (a slice of
-// kedav1.Condition, which lacks LastTransitionTime) into metav1.Condition.
-// We leave LastTransitionTime as the zero value because KEDA's Condition
-// struct doesn't carry one — operators looking for transition timestamps
-// should consult LastScaleTime instead.
-func kedaConditionsToMetav1(in kedav1.Conditions) []metav1.Condition {
+// kedav1.Condition) into metav1.Condition for the ISVC status surface.
+//
+// KEDA's Condition struct carries neither a LastTransitionTime nor,
+// for some conditions (e.g. Paused), a Reason. Both are REQUIRED by the
+// ISVC CRD's condition schema (lastTransitionTime required, reason min 1
+// char), so copying KEDA conditions verbatim makes every status update
+// fail apiserver validation — which wedges the ISVC reconcile in a
+// permanent error loop (the status never persists). We therefore
+// synthesize both:
+//
+//   - Reason: fall back to the condition Type when KEDA leaves it empty
+//     (Type is always a valid single-word reason: Ready/Active/Fallback/
+//     Paused), or "Unknown" as a last resort.
+//   - LastTransitionTime: preserve the timestamp from the prior status
+//     when the observed Status is unchanged, else stamp now. Preserving
+//     it keeps the mirrored status byte-stable across reconciles (the
+//     status writer diffs with equality.Semantic.DeepEqual), so a fresh
+//     Now() every pass doesn't storm status updates.
+//
+// prev is the previously-written condition set (nil on first observation).
+func kedaConditionsToMetav1(in kedav1.Conditions, prev []metav1.Condition) []metav1.Condition {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make([]metav1.Condition, 0, len(in))
 	for i := range in {
 		c := in[i]
-		out = append(out, metav1.Condition{
+		cond := metav1.Condition{
 			Type:    string(c.Type),
 			Status:  c.Status,
-			Reason:  c.Reason,
+			Reason:  kedaConditionReason(c),
 			Message: normalizeAutoscalerMessage(c.Message),
-		})
+		}
+		cond.LastTransitionTime = kedaConditionTransitionTime(cond, prev)
+		out = append(out, cond)
 	}
 	return out
+}
+
+// kedaConditionReason returns a CRD-valid (non-empty) reason for a KEDA
+// condition. KEDA leaves Reason empty for some conditions (notably
+// Paused), but the ISVC CRD requires at least one character; we fall back
+// to the condition Type (always a valid single word) and finally to a
+// generic constant.
+func kedaConditionReason(c kedav1.Condition) string {
+	if c.Reason != "" {
+		return c.Reason
+	}
+	if t := string(c.Type); t != "" {
+		return t
+	}
+	return "Unknown"
+}
+
+// kedaConditionTransitionTime returns a stable LastTransitionTime for a
+// synthesized KEDA condition: the prior recorded time when a same-typed
+// condition existed with the same Status (no real transition), otherwise
+// now (first observation or an actual Status flip). This keeps the
+// mirrored status byte-stable across reconciles.
+func kedaConditionTransitionTime(cond metav1.Condition, prev []metav1.Condition) metav1.Time {
+	for i := range prev {
+		p := prev[i]
+		if p.Type != cond.Type {
+			continue
+		}
+		if p.Status == cond.Status && !p.LastTransitionTime.IsZero() {
+			return p.LastTransitionTime
+		}
+		break
+	}
+	return metav1.Now()
 }
