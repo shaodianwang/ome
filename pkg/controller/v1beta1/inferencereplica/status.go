@@ -48,6 +48,12 @@ const (
 	// Status=Unknown so `kubectl wait --for=condition=Ready` doesn't
 	// short-circuit while a rollout is mid-flight.
 	ReasonRolloutInProgress = "RolloutInProgress"
+	// ReasonStaged is stamped when the IR has converged to a static
+	// rollingUpdate.partition — (replicas-partition) Instances on the target
+	// revision and `partition` held on the prior one, all Ready. Ready=True:
+	// a partitioned rollout is intentionally complete-and-holding, not
+	// "in progress". Distinct from AllInstancesReady (fully rolled). (#838)
+	ReasonStaged = "Staged"
 	// ReasonInstanceFailed is stamped when at least one Instance has
 	// terminally failed (stuck-pod escalation, InstanceReadyTimeout).
 	// Maps to Status=False so operators paging on Ready=False catch the
@@ -626,6 +632,30 @@ func hasFailedInstance(insts []v1beta1.OMENativeInstanceStatus) bool {
 // responsible for invoking apimeta.SetStatusCondition to merge the
 // returned condition into status.Conditions (which handles
 // LastTransitionTime correctly).
+// effectivePartition returns the IR's static rollingUpdate.partition, or 0
+// when unset.
+func effectivePartition(pacing *v1beta1.InferenceReplicaPacing) int32 {
+	if pacing == nil || pacing.Partition == nil {
+		return 0
+	}
+	return *pacing.Partition
+}
+
+// stagedAtPartition reports whether the IR has converged to a static,
+// non-zero partition: (replicas-partition) Instances Ready on the target
+// revision and `partition` Instances held Ready on the prior one. Zero
+// partition (full rollout) is not staged — it converges via the normal
+// promotion path. (#838)
+func stagedAtPartition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.InferenceReplicaPacing) bool {
+	part := effectivePartition(pacing)
+	if part <= 0 {
+		return false
+	}
+	return workload.ReachedDesiredShape(
+		v1beta1convert.InstanceStatusSliceToWorkload(status.InstanceStatuses),
+		status.UpdateRevision, part, status.Replicas)
+}
+
 func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.InferenceReplicaPacing) metav1.Condition {
 	cond := metav1.Condition{
 		Type:               InferenceReplicaConditionReady,
@@ -636,6 +666,15 @@ func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, pacing *v1bet
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = ReasonInstanceFailed
 		cond.Message = "At least one Instance has Phase=Failed"
+	case stagedAtPartition(status, pacing):
+		// Converged to a static partition: intentionally holding old-revision
+		// Instances, all Ready. Ready=True (not RolloutInProgress/Unknown) —
+		// the rollout is complete for the configured partition. (#838)
+		part := effectivePartition(pacing)
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = ReasonStaged
+		cond.Message = fmt.Sprintf("Staged at partition %d: %d/%d Instances on %s, %d held on the prior revision",
+			part, status.Replicas-part, status.Replicas, status.UpdateRevision, part)
 	case status.UpdateRevision != "" && status.CurrentRevision != status.UpdateRevision:
 		cond.Status = metav1.ConditionUnknown
 		cond.Reason = ReasonRolloutInProgress

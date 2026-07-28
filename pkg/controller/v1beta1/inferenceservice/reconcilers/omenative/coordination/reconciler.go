@@ -17,6 +17,7 @@ import (
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -528,7 +529,12 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 	}
 	for _, c := range g.Components {
 		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
-		obs.Components[c] = buildComponentObservation(summary, c, perRevisionPods[c])
+		// ResolveGroups excludes canary groups, so every Component here is
+		// coordination-owned and reads its static spec partition. Canary-owned
+		// Components never reach this loop (they leave Partition 0, driven by
+		// the canary reconciler's own EffectivePartition path).
+		partition := staticPartitionFor(isvc, c)
+		obs.Components[c] = buildComponentObservation(summary, c, perRevisionPods[c], partition)
 	}
 	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
 		obs.PausedGlobal = true
@@ -538,9 +544,10 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 
 // buildComponentObservation aggregates one Component's observation from
 // the authoritative InferenceReplica status and per-revision pod counts.
-func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta1.ComponentType, perRevisionPods map[string]int32) ComponentObservation {
+func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta1.ComponentType, perRevisionPods map[string]int32, partition int32) ComponentObservation {
 	out := ComponentObservation{
 		Component: c,
+		Partition: partition,
 	}
 	if summary == nil {
 		return out
@@ -570,7 +577,48 @@ func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta
 		out.Failed = true
 		out.FailureMessage = formatFailedInstancesMessage(c, failedInstances)
 	}
+
+	// Convergence: has the Component reached its desired staged shape —
+	// (Replicas-Partition) instances Ready on the target revision and
+	// Partition instances Ready on the prior revision? Partition=0 means
+	// this is the RolloutComplete predicate. (#838)
+	out.AtDesiredShape = workload.ReachedDesiredShape(
+		v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
+		summary.UpdateRevision, partition, summary.Replicas)
 	return out
+}
+
+// staticPartitionFor returns the Component's static
+// updateStrategy.rollingUpdate.partition from the ISVC spec (0 when unset).
+// Total: a nil Component / lifecycle / updateStrategy / rollingUpdate / partition
+// at any level resolves to 0.
+func staticPartitionFor(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) int32 {
+	if isvc == nil {
+		return 0
+	}
+	var ext *v1beta1.ComponentExtensionSpec
+	switch c {
+	case v1beta1.EngineComponent:
+		if isvc.Spec.Engine != nil {
+			ext = &isvc.Spec.Engine.ComponentExtensionSpec
+		}
+	case v1beta1.DecoderComponent:
+		if isvc.Spec.Decoder != nil {
+			ext = &isvc.Spec.Decoder.ComponentExtensionSpec
+		}
+	case v1beta1.RouterComponent:
+		if isvc.Spec.Router != nil {
+			ext = &isvc.Spec.Router.ComponentExtensionSpec
+		}
+	}
+	if ext == nil || ext.Lifecycle == nil || ext.Lifecycle.UpdateStrategy == nil {
+		return 0
+	}
+	ru := ext.Lifecycle.UpdateStrategy.RollingUpdate
+	if ru == nil || ru.Partition == nil {
+		return 0
+	}
+	return *ru.Partition
 }
 
 // collectFailedInstanceIndices returns the indices of every Instance

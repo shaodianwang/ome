@@ -282,6 +282,38 @@ func TestAggregateStatus_ReadyCondition_UnknownDuringRollout(t *testing.T) {
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress))
 }
 
+// TestAggregateStatus_ReadyCondition_StagedAtPartition pins the #838
+// staged branch: a static rollingUpdate.partition holds Instances on the
+// prior revision by design (CurrentRevision != UpdateRevision forever), so
+// Ready must be True/Staged — NOT Unknown/RolloutInProgress.
+func TestAggregateStatus_ReadyCondition_StagedAtPartition(t *testing.T) {
+	g := gomega.NewWithT(t)
+	part := int32(1)
+	status := &v1beta1.InferenceReplicaStatus{
+		Replicas:             3,
+		ReadyReplicas:        3,
+		UpdatedReadyReplicas: 2,
+		CurrentRevision:      "rev-a",
+		UpdateRevision:       "rev-b",
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-b"},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-b"},
+			{Index: 2, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-a"}, // held by partition
+		},
+	}
+	cond := computeReadyCondition(status, &v1beta1.InferenceReplicaPacing{Partition: &part})
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
+		"Ready=True when converged to a static partition (2 on target + 1 held, all Ready)")
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonStaged))
+
+	// Not yet converged (held instance still updating) → back to RolloutInProgress.
+	status.InstanceStatuses[2].Phase = v1beta1.OMENativeInstanceUpdating
+	status.ReadyReplicas = 2
+	cond = computeReadyCondition(status, &v1beta1.InferenceReplicaPacing{Partition: &part})
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress),
+		"not staged until the partitioned shape is fully reached")
+}
+
 // TestAggregateStatus_ReadyCondition_FalseOnStuck pins the
 // stuck-replica-count branch: ReadyReplicas < Replicas with
 // CurrentRevision == UpdateRevision (no rollout in flight) →

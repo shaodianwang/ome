@@ -770,7 +770,7 @@ func TestBuildComponentObservation_NoStatusReturnsZero(t *testing.T) {
 	// No IR status available (nil summary) — observation must
 	// report zero values, NOT Failed (otherwise a brand-new ISVC would
 	// flip the group to Failed).
-	obs := buildComponentObservation(nil, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(nil, v1beta1.EngineComponent, nil, 0)
 	if obs.Failed {
 		t.Errorf("missing status must not report Failed; got %+v", obs)
 	}
@@ -789,7 +789,7 @@ func TestBuildComponentObservation_NoFailedInstancesIsNotFailed(t *testing.T) {
 			{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
 		},
 	}
-	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil, 0)
 	if obs.Failed {
 		t.Errorf("no Failed Instances should not flip Failed; got %+v", obs)
 	}
@@ -805,7 +805,7 @@ func TestBuildComponentObservation_AnyFailedInstanceMarksComponentFailed(t *test
 			{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
 		},
 	}
-	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil, 0)
 	if !obs.Failed {
 		t.Errorf("any Failed Instance must mark Component Failed; got %+v", obs)
 	}
@@ -826,7 +826,7 @@ func TestBuildComponentObservation_MultipleFailedInstancesListedInMessage(t *tes
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
 		},
 	}
-	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil)
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil, 0)
 	if !obs.Failed {
 		t.Errorf("two Failed Instances must mark Component Failed; got %+v", obs)
 	}
@@ -850,7 +850,7 @@ func TestBuildComponentObservation_IRSourceMatchesLegacyCopy(t *testing.T) {
 		},
 	}
 	perRev := map[string]int32{"aaaa": 2, "bbbb": 2}
-	got := buildComponentObservation(irStatus, v1beta1.EngineComponent, perRev)
+	got := buildComponentObservation(irStatus, v1beta1.EngineComponent, perRev, 0)
 	if got.DesiredReplicas != 4 || got.ReadyPods != 3 || got.ServingPods != 3 ||
 		got.NewRevisionPods != 2 || got.NewRevisionReadyPods != 2 ||
 		got.TotalPods != 4 || !got.RolloutInFlight || !got.Failed {
@@ -858,6 +858,52 @@ func TestBuildComponentObservation_IRSourceMatchesLegacyCopy(t *testing.T) {
 	}
 	if got.CurrentRevisionHash != "aaaa" || got.TargetRevisionHash != "bbbb" {
 		t.Fatalf("revision hashes diverged: %+v", got)
+	}
+}
+
+func TestBuildComponentObservation_AtDesiredShapeWithStaticPartition(t *testing.T) {
+	// Replicas=8, partition=2: 6 instances Ready on the target (update)
+	// revision + 2 held instances Ready on the prior revision is the
+	// desired staged shape. buildComponentObservation reports Partition=2
+	// and AtDesiredShape=true.
+	const target = "svc-engine-bbbb"
+	const prior = "svc-engine-aaaa"
+	instances := make([]v1beta1.OMENativeInstanceStatus, 0, 8)
+	// Indices 0,1 are held on the prior revision (index < partition).
+	for i := int32(0); i < 2; i++ {
+		instances = append(instances, v1beta1.OMENativeInstanceStatus{
+			Index: i, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: prior,
+		})
+	}
+	// Indices 2..7 have rolled to the target revision.
+	for i := int32(2); i < 8; i++ {
+		instances = append(instances, v1beta1.OMENativeInstanceStatus{
+			Index: i, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: target,
+		})
+	}
+	summary := &v1beta1.InferenceReplicaStatus{
+		Replicas:         8,
+		UpdateRevision:   target,
+		InstanceStatuses: instances,
+	}
+	obs := buildComponentObservation(summary, v1beta1.EngineComponent, nil, 2)
+	if obs.Partition != 2 {
+		t.Fatalf("Partition: got %d want 2", obs.Partition)
+	}
+	if !obs.AtDesiredShape {
+		t.Fatalf("expected AtDesiredShape=true for the converged staged shape; got %+v", obs)
+	}
+
+	// Flip one held instance to a non-Ready phase — the staged shape is no
+	// longer at rest (held instances must be Ready too), so AtDesiredShape
+	// drops to false.
+	instances[0].Phase = v1beta1.OMENativeInstanceUpdating
+	obs = buildComponentObservation(summary, v1beta1.EngineComponent, nil, 2)
+	if obs.AtDesiredShape {
+		t.Fatalf("a non-Ready held instance must make AtDesiredShape=false; got %+v", obs)
+	}
+	if obs.Partition != 2 {
+		t.Fatalf("Partition should stay 2 regardless of convergence; got %d", obs.Partition)
 	}
 }
 

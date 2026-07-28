@@ -368,6 +368,31 @@ func TestShouldCheckForStuckPods(t *testing.T) {
 	}
 }
 
+func TestReachedDesiredShape(t *testing.T) {
+	ready := func(rev string) workload.InstanceStatus {
+		return workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: rev}
+	}
+	newRev, oldRev := "isvc-engine-newaaaaa", "isvc-engine-oldbbbbb"
+	// 8 instances, partition=2 → want 6 on new + 2 on old, all Ready.
+	staged := []workload.InstanceStatus{ready(newRev), ready(newRev), ready(newRev), ready(newRev),
+		ready(newRev), ready(newRev), ready(oldRev), ready(oldRev)}
+	if !workload.ReachedDesiredShape(staged, newRev, 2, 8) {
+		t.Fatal("6 new + 2 held, all Ready → reached")
+	}
+	if workload.ReachedDesiredShape(staged, newRev, 0, 8) { // partition 0 wants all 8 new
+		t.Fatal("partition 0 must require all on new")
+	}
+	degraded := append([]workload.InstanceStatus{}, staged...)
+	degraded[7].Phase = workload.InstancePhaseUpdating
+	if workload.ReachedDesiredShape(degraded, newRev, 2, 8) {
+		t.Fatal("held instance not Ready → not reached")
+	}
+	allNew := []workload.InstanceStatus{ready(newRev), ready(newRev)}
+	if workload.RolloutComplete(allNew, newRev) != workload.ReachedDesiredShape(allNew, newRev, 0, 2) {
+		t.Fatal("RolloutComplete must equal ReachedDesiredShape(...,0,len)")
+	}
+}
+
 // TestEscalateStuckPodFailures_EscalatesAndEmitsEvent pins the
 // integration contract for the adapter-agnostic escalator: a wedged
 // pod past grace flips the InstanceStatus Phase to Failed via

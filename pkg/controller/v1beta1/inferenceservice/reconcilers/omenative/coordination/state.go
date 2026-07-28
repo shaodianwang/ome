@@ -54,6 +54,19 @@ type ComponentObservation struct {
 	// override (e.g., for tests).
 	RolloutInFlight bool
 
+	// Partition is the component's desired static rollingUpdate.partition
+	// (instances with index < Partition are held on the prior revision).
+	// 0 = full rollout. Resolved only for non-canary groups; canary-owned
+	// components leave it 0 (they use the canary reconciler's own path).
+	Partition int32
+
+	// AtDesiredShape is true when the component has converged to its desired
+	// staged shape (workload.ReachedDesiredShape): (Replicas-Partition)
+	// instances Ready on the target revision and Partition instances Ready on
+	// the prior revision. The state machine rests (Staged) and Sequential
+	// hands off on this. (#838)
+	AtDesiredShape bool
+
 	// Failed is true when the Component's OMENative reconciler
 	// flagged a terminal failure (Ready timeout, persistent op error).
 	Failed bool
@@ -219,6 +232,27 @@ func blueGreenTransition(obs GroupObservation) GroupTransition {
 		}
 	}
 
+	// Converged to a partitioned target: every component reached its desired
+	// staged shape and at least one intentionally holds old-revision pods.
+	// Rest at Staged instead of churning Shifting/ScalingDown forever (#838).
+	stagedAll, anyPartition := true, false
+	for _, c := range obs.Components {
+		if !c.AtDesiredShape {
+			stagedAll = false
+			break
+		}
+		if c.Partition > 0 {
+			anyPartition = true
+		}
+	}
+	if stagedAll && anyPartition {
+		return GroupTransition{
+			Phase:          v1beta1.CoordinationPhaseStaged,
+			CompositePhase: string(v1beta1.CoordinationPhaseStaged),
+			Message:        "converged to partitioned target; holding old-revision pods by design",
+		}
+	}
+
 	// All Components have surge pods AND every surge pod is Ready.
 	// Walk Shifting → Draining → ScalingDown. We collapse the
 	// post-Ready phases into a single Shifting return here so the
@@ -298,6 +332,31 @@ func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 		}
 		if c.TotalPods > c.NewRevisionPods {
 			anyScalingDown = true
+		}
+	}
+	// Converged to a partitioned target (see blueGreen): if every rolling
+	// component reached its desired staged shape and a partition holds old
+	// pods, rest at Staged rather than ScalingDown forever (#838).
+	if !anySurging && !anyWaiting {
+		stagedAll, anyPartition := true, false
+		for _, c := range obs.Components {
+			if !c.RolloutInFlight {
+				continue
+			}
+			if !c.AtDesiredShape {
+				stagedAll = false
+				break
+			}
+			if c.Partition > 0 {
+				anyPartition = true
+			}
+		}
+		if stagedAll && anyPartition {
+			return GroupTransition{
+				Phase:          v1beta1.CoordinationPhaseStaged,
+				CompositePhase: string(v1beta1.CoordinationPhaseStaged),
+				Message:        "converged to partitioned target; holding old-revision pods by design",
+			}
 		}
 	}
 	switch {
@@ -469,16 +528,21 @@ func sequentialTransition(obs GroupObservation) GroupTransition {
 	}
 }
 
-// activeSequentialComponent returns the first Component in `order`
-// whose observation has RolloutInFlight=true. The state machine routes
-// Sequential's "which Component is currently rolling" decision off
+// activeSequentialComponent returns the first Component in `order` that
+// is still genuinely unfinished for handoff. A Component is "done for
+// handoff" — and thus skipped — when its rollout is not in flight OR it
+// has converged to its desired staged shape (AtDesiredShape). The latter
+// releases a partitioned Component that keeps RolloutInFlight=true forever
+// by design (old pods held by the partition): once it reaches its staged
+// shape it must not block the next Component (#838). The state machine
+// routes Sequential's "which Component is currently rolling" decision off
 // this; the dispatcher's CheckSequentialGate consumes the same helper
 // so the two surfaces never disagree on what's active. Returns ok=false
-// when no Component in `order` is rolling (Sequential is idle).
+// when no Component in `order` is still unfinished (Sequential is idle).
 func activeSequentialComponent(order []v1beta1.ComponentType, components map[v1beta1.ComponentType]ComponentObservation) (v1beta1.ComponentType, bool) {
 	for _, c := range order {
 		comp, ok := components[c]
-		if !ok || !comp.RolloutInFlight {
+		if !ok || !comp.RolloutInFlight || comp.AtDesiredShape {
 			continue
 		}
 		return c, true
@@ -487,9 +551,12 @@ func activeSequentialComponent(order []v1beta1.ComponentType, components map[v1b
 }
 
 // completedSequentialComponents counts the number of leading Components
-// in the Order that have finished their rollout (RolloutInFlight is
-// false on them). The count drives Sequential's "which Component is
-// next" decision.
+// in the Order that are done for handoff. A Component counts as completed
+// when its rollout is not in flight OR it has converged to its desired
+// staged shape (!RolloutInFlight || AtDesiredShape). The AtDesiredShape
+// clause advances the count past a partitioned leading Component that
+// holds old pods by design and never clears RolloutInFlight (#838). The
+// count drives Sequential's "which Component is next" decision.
 func completedSequentialComponents(obs GroupObservation) int {
 	count := 0
 	for _, c := range obs.Group.Order {
@@ -497,7 +564,7 @@ func completedSequentialComponents(obs GroupObservation) int {
 		if !ok {
 			return count
 		}
-		if comp.RolloutInFlight {
+		if comp.RolloutInFlight && !comp.AtDesiredShape {
 			return count
 		}
 		count++

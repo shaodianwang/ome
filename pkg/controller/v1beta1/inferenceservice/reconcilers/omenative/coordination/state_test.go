@@ -173,6 +173,110 @@ func TestComputeTransition_BlueGreenPaused(t *testing.T) {
 	}
 }
 
+// TestComputeTransition_BlueGreenStaged verifies a BlueGreen group that
+// has converged to a static partition rests at Staged instead of
+// churning Shifting forever (#838). The component reached its desired
+// staged shape (AtDesiredShape) with a partition intentionally holding
+// old-revision pods (TotalPods > NewRevisionPods by design).
+func TestComputeTransition_BlueGreenStaged(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
+	obs := idleObs(g)
+	engine := obs.Components[v1beta1.EngineComponent]
+	engine.RolloutInFlight = true
+	engine.AtDesiredShape = true
+	engine.Partition = 2
+	engine.DesiredReplicas = 8
+	engine.NewRevisionPods = 6
+	engine.NewRevisionReadyPods = 6
+	engine.TotalPods = 8 // 6 new + 2 held old by partition
+	engine.TargetRevisionHash = "rev2"
+	obs.Components[v1beta1.EngineComponent] = engine
+	tr := ComputeTransition(obs)
+	if tr.Phase != v1beta1.CoordinationPhaseStaged {
+		t.Errorf("BlueGreen partitioned converged: got %q want Staged", tr.Phase)
+	}
+}
+
+// TestComputeTransition_RollingUpdateStaged is the RollingUpdate
+// companion: a rolling component converged to a static partition rests
+// at Staged instead of ScalingDown forever (#838).
+func TestComputeTransition_RollingUpdateStaged(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
+	obs := idleObs(g)
+	engine := obs.Components[v1beta1.EngineComponent]
+	engine.RolloutInFlight = true
+	engine.AtDesiredShape = true
+	engine.Partition = 2
+	engine.DesiredReplicas = 8
+	engine.NewRevisionPods = 6
+	engine.NewRevisionReadyPods = 6
+	engine.TotalPods = 8 // 6 new + 2 held old by partition
+	engine.TargetRevisionHash = "rev2"
+	obs.Components[v1beta1.EngineComponent] = engine
+	tr := ComputeTransition(obs)
+	if tr.Phase != v1beta1.CoordinationPhaseStaged {
+		t.Errorf("RollingUpdate partitioned converged: got %q want Staged", tr.Phase)
+	}
+}
+
+// TestComputeTransition_StagedNotWhenMidRoll is a regression guard: a
+// component that has NOT reached its desired shape (new pods not all
+// Ready) must NOT be reported Staged — it walks the normal
+// Surging/Waiting path.
+func TestComputeTransition_StagedNotWhenMidRoll(t *testing.T) {
+	for _, policy := range []v1beta1.CoordinationPolicy{
+		v1beta1.CoordinationPolicyBlueGreen,
+		v1beta1.CoordinationPolicyRollingUpdate,
+	} {
+		g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: policy}
+		obs := idleObs(g)
+		engine := obs.Components[v1beta1.EngineComponent]
+		engine.RolloutInFlight = true
+		engine.AtDesiredShape = false // mid-roll
+		engine.Partition = 2
+		engine.DesiredReplicas = 8
+		engine.NewRevisionPods = 6
+		engine.NewRevisionReadyPods = 4 // not all Ready
+		engine.TotalPods = 8
+		engine.TargetRevisionHash = "rev2"
+		obs.Components[v1beta1.EngineComponent] = engine
+		tr := ComputeTransition(obs)
+		if tr.Phase == v1beta1.CoordinationPhaseStaged {
+			t.Errorf("%s mid-roll must NOT be Staged; got %q", policy, tr.Phase)
+		}
+		if tr.Phase != v1beta1.CoordinationPhaseWaiting {
+			t.Errorf("%s mid-roll: got %q want Waiting", policy, tr.Phase)
+		}
+	}
+}
+
+// TestComputeTransition_StagedNotWhenPartitionZero is a regression
+// guard: a full rollout (Partition=0) that converged must NOT hijack
+// the Staged path — it reaches ScalingDown/Idle via the existing flow.
+func TestComputeTransition_StagedNotWhenPartitionZero(t *testing.T) {
+	for _, policy := range []v1beta1.CoordinationPolicy{
+		v1beta1.CoordinationPolicyBlueGreen,
+		v1beta1.CoordinationPolicyRollingUpdate,
+	} {
+		g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: policy}
+		obs := idleObs(g)
+		engine := obs.Components[v1beta1.EngineComponent]
+		engine.RolloutInFlight = true
+		engine.AtDesiredShape = true
+		engine.Partition = 0 // full rollout
+		engine.DesiredReplicas = 8
+		engine.NewRevisionPods = 6
+		engine.NewRevisionReadyPods = 6
+		engine.TotalPods = 8 // old pods still draining
+		engine.TargetRevisionHash = "rev2"
+		obs.Components[v1beta1.EngineComponent] = engine
+		tr := ComputeTransition(obs)
+		if tr.Phase == v1beta1.CoordinationPhaseStaged {
+			t.Errorf("%s full rollout (Partition=0) must NOT be Staged; got %q", policy, tr.Phase)
+		}
+	}
+}
+
 func TestComputeTransition_RollingUpdateSurging(t *testing.T) {
 	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
 	obs := idleObs(g)
@@ -560,5 +664,96 @@ func TestComputeSurgeBudgetWithRatio_NewPodsBaselineWouldDeadlock(t *testing.T) 
 	_, skew := computeSurgeBudgetWithRatio(obs)
 	if !skew {
 		t.Errorf("with ServingPods=0 (the pre-fix baseline behavior) the gate MUST trip skew — this test pins the deadlock shape so a re-regression is visible at unit level, not just in KIND")
+	}
+}
+
+// --- Sequential handoff on desired-shape convergence (#838) ---
+
+// TestActiveSequentialComponent_SkipsAtDesiredShape verifies a leading
+// Component that reached its desired staged shape is treated as done for
+// handoff (skipped) even though RolloutInFlight is still true, so the
+// active selector advances to the next genuinely-unfinished Component.
+func TestActiveSequentialComponent_SkipsAtDesiredShape(t *testing.T) {
+	order := []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+	components := map[v1beta1.ComponentType]ComponentObservation{
+		v1beta1.EngineComponent:  {Component: v1beta1.EngineComponent, RolloutInFlight: true, AtDesiredShape: true},
+		v1beta1.DecoderComponent: {Component: v1beta1.DecoderComponent, RolloutInFlight: true, AtDesiredShape: false},
+	}
+	got, ok := activeSequentialComponent(order, components)
+	if !ok || got != v1beta1.DecoderComponent {
+		t.Errorf("active: got (%q,%v) want (decoder,true) — a staged engine must not block", got, ok)
+	}
+}
+
+// TestActiveSequentialComponent_StillBlocksWhenNotStaged is the
+// regression guard: a leading Component that is in flight and NOT at its
+// desired shape must still be the active/blocking Component.
+func TestActiveSequentialComponent_StillBlocksWhenNotStaged(t *testing.T) {
+	order := []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+	components := map[v1beta1.ComponentType]ComponentObservation{
+		v1beta1.EngineComponent:  {Component: v1beta1.EngineComponent, RolloutInFlight: true, AtDesiredShape: false},
+		v1beta1.DecoderComponent: {Component: v1beta1.DecoderComponent, RolloutInFlight: true, AtDesiredShape: false},
+	}
+	got, ok := activeSequentialComponent(order, components)
+	if !ok || got != v1beta1.EngineComponent {
+		t.Errorf("active: got (%q,%v) want (engine,true) — an unconverged engine must still block", got, ok)
+	}
+}
+
+// TestCompletedSequentialComponents_CountsAtDesiredShape verifies a
+// staged leading Component counts as completed so the count advances past
+// it to the next Component.
+func TestCompletedSequentialComponents_CountsAtDesiredShape(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Order:      []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicySequential,
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.EngineComponent:  {Component: v1beta1.EngineComponent, RolloutInFlight: true, AtDesiredShape: true},
+			v1beta1.DecoderComponent: {Component: v1beta1.DecoderComponent, RolloutInFlight: true, AtDesiredShape: false},
+		},
+	}
+	if got := completedSequentialComponents(obs); got != 1 {
+		t.Errorf("completed: got %d want 1 — a staged engine must count as completed", got)
+	}
+}
+
+// TestComputeTransition_SequentialHandsOffOnStaged is the end-to-end
+// selector+counter check: with engine staged (RolloutInFlight, staged)
+// and decoder genuinely rolling, the group drives decoder — not engine.
+func TestComputeTransition_SequentialHandsOffOnStaged(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Order:      []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicySequential,
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.EngineComponent: {
+				Component: v1beta1.EngineComponent, DesiredReplicas: 2,
+				RolloutInFlight: true, AtDesiredShape: true, Partition: 1,
+			},
+			v1beta1.DecoderComponent: {
+				Component: v1beta1.DecoderComponent, DesiredReplicas: 2,
+				RolloutInFlight: true, AtDesiredShape: false,
+				NewRevisionPods: 0, TargetRevisionHash: "rev2",
+			},
+		},
+	}
+	tr := ComputeTransition(obs)
+	if tr.CurrentComponent != v1beta1.DecoderComponent {
+		t.Errorf("CurrentComponent: got %q want decoder — staged engine must hand off", tr.CurrentComponent)
+	}
+	if tr.PreviousComponent != v1beta1.EngineComponent {
+		t.Errorf("PreviousComponent: got %q want engine", tr.PreviousComponent)
+	}
+	if tr.Phase != v1beta1.CoordinationPhaseSurging {
+		t.Errorf("phase: got %q want Surging", tr.Phase)
 	}
 }

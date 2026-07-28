@@ -30575,6 +30575,7 @@ spec:
                               - Shifting
                               - Draining
                               - ScalingDown
+                              - Staged
                               - Failed
                               - RollingBack
                               - Paused

@@ -319,25 +319,39 @@ func CountUpdatedInstances(insts []InstanceStatus, targetRevName string, desired
 	return updated, updatedReady
 }
 
+// ReachedDesiredShape reports whether insts have converged to the desired
+// staged shape: exactly (replicas-partition) instances Ready on targetRev,
+// the remaining `partition` instances Ready on a prior revision, and no
+// missing/extra instances. partition=0 is full rollout, so RolloutComplete
+// is ReachedDesiredShape(insts, target, 0, len(insts)). Held instances must
+// be Ready too — a staged component is only "at rest" when every instance
+// (new and held) is healthy.
+func ReachedDesiredShape(insts []InstanceStatus, targetRevName string, partition, replicas int32) bool {
+	if replicas <= 0 || int32(len(insts)) != replicas || partition < 0 || partition > replicas {
+		return false
+	}
+	tgt := query.RevisionFromName(targetRevName)
+	var onTarget, held int32
+	for _, s := range insts {
+		if s.Phase != InstancePhaseReady {
+			return false
+		}
+		if query.RevisionFromName(s.RunningRevision).Same(tgt) {
+			onTarget++
+		} else {
+			held++
+		}
+	}
+	return onTarget == replicas-partition && held == partition
+}
+
 // RolloutComplete is the CurrentRevision promotion gate: every Instance
 // on targetRevName AND Phase=Ready.
 //
 // Operates on workload.InstanceStatus so both adapters share the same
 // gate without converting back to a v1beta1 shape.
 func RolloutComplete(insts []InstanceStatus, targetRevName string) bool {
-	if len(insts) == 0 {
-		return false
-	}
-	tgt := query.RevisionFromName(targetRevName)
-	for _, s := range insts {
-		if s.Phase != InstancePhaseReady {
-			return false
-		}
-		if !query.RevisionFromName(s.RunningRevision).Same(tgt) {
-			return false
-		}
-	}
-	return true
+	return ReachedDesiredShape(insts, targetRevName, 0, int32(len(insts)))
 }
 
 // FirstStuckPodForInstance returns the first pod in pods that is stuck

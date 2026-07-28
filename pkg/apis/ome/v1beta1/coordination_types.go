@@ -250,7 +250,7 @@ type RolloutCoordinationGroupStatus struct {
 
 // CoordinationPhase is the metric-stable enum for a coordination
 // group's base reconcile phase.
-// +kubebuilder:validation:Enum=Idle;Surging;Waiting;Shifting;Draining;ScalingDown;Failed;RollingBack;Paused
+// +kubebuilder:validation:Enum=Idle;Surging;Waiting;Shifting;Draining;ScalingDown;Staged;Failed;RollingBack;Paused
 type CoordinationPhase string
 
 const (
@@ -279,6 +279,13 @@ const (
 	// CoordinationPhaseScalingDown indicates the group is deleting
 	// old-revision pods per the pacing budget.
 	CoordinationPhaseScalingDown CoordinationPhase = "ScalingDown"
+
+	// CoordinationPhaseStaged indicates the group has converged to a
+	// partitioned target and is intentionally holding old-revision pods
+	// (static rollingUpdate.partition). A terminal RESTING phase, distinct
+	// from Idle ("no rollout / single revision"): the rollout is complete
+	// for the configured partition. (#838)
+	CoordinationPhaseStaged CoordinationPhase = "Staged"
 
 	// CoordinationPhaseFailed indicates a permanent error during the
 	// rollout (Ready timeout, persistent reconcile error, etc.).

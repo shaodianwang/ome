@@ -138,6 +138,7 @@ func ComputeCoordinationReady(groups []v1beta1.RolloutCoordinationGroupStatus) *
 	anyFailed := false
 	anyMidRollout := false
 	anyPending := false
+	anyStaged := false
 	failedGroups := make([]string, 0)
 	midRolloutGroups := make([]string, 0)
 	for _, g := range groups {
@@ -145,9 +146,14 @@ func ComputeCoordinationReady(groups []v1beta1.RolloutCoordinationGroupStatus) *
 		case v1beta1.CoordinationPhaseFailed:
 			anyFailed = true
 			failedGroups = append(failedGroups, g.Name)
-		case v1beta1.CoordinationPhaseIdle, "":
+		case v1beta1.CoordinationPhaseIdle, v1beta1.CoordinationPhaseStaged, "":
+			// Staged is a terminal RESTING state (converged to a static
+			// partition, holding old pods by design) — ready, like Idle. (#838)
 			if g.Phase == "" {
 				anyPending = true
+			}
+			if g.Phase == v1beta1.CoordinationPhaseStaged {
+				anyStaged = true
 			}
 		default:
 			anyMidRollout = true
@@ -177,10 +183,14 @@ func ComputeCoordinationReady(groups []v1beta1.RolloutCoordinationGroupStatus) *
 			Message: "rollout coordination not yet observed",
 		}
 	default:
+		reason := "Idle"
+		if anyStaged {
+			reason = "Staged"
+		}
 		return &apis.Condition{
 			Type:   apis.ConditionType(v1beta1.RolloutCoordinationReady),
 			Status: corev1.ConditionTrue,
-			Reason: "Idle",
+			Reason: reason,
 		}
 	}
 }

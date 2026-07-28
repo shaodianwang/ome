@@ -10,6 +10,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -169,7 +171,12 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) map[v1beta1.ComponentType]ComponentObservation {
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
-		obs := ComponentObservation{Component: c}
+		// Static spec partition, resolved the same way as
+		// buildComponentObservation. Needed both to carry Partition and to
+		// compute AtDesiredShape below so activeSequentialComponent can
+		// release a converged staged Component here (#838).
+		partition := staticPartitionFor(isvc, c)
+		obs := ComponentObservation{Component: c, Partition: partition}
 		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
 		if summary != nil {
 			cur := query.RevisionFromName(summary.CurrentRevision)
@@ -179,6 +186,12 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 			revisionSkew := !tgt.IsZero() && !tgt.Same(cur)
 			generationSkew := summary.ObservedGeneration < isvc.Generation
 			obs.RolloutInFlight = revisionSkew || generationSkew
+			// Convergence to the desired staged shape — mirrors
+			// buildComponentObservation so the gate's active-selector sees
+			// the same "done for handoff" signal the state machine does.
+			obs.AtDesiredShape = workload.ReachedDesiredShape(
+				v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
+				summary.UpdateRevision, partition, summary.Replicas)
 		}
 		out[c] = obs
 	}

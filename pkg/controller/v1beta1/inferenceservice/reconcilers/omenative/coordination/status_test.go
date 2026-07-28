@@ -147,6 +147,33 @@ func TestComputeCoordinationReady_AllIdle(t *testing.T) {
 	}
 }
 
+func TestComputeCoordinationReady_Staged(t *testing.T) {
+	// A group parked at a static partition (Staged) is a terminal resting
+	// state — ready, distinct Reason from Idle. (#838)
+	cond := ComputeCoordinationReady([]v1beta1.RolloutCoordinationGroupStatus{
+		{Name: "0", Phase: v1beta1.CoordinationPhaseStaged},
+	})
+	if cond == nil || cond.Status != corev1.ConditionTrue || cond.Reason != "Staged" {
+		t.Errorf("staged: got %+v want True/Staged", cond)
+	}
+	// Staged alongside Idle is still ready.
+	cond = ComputeCoordinationReady([]v1beta1.RolloutCoordinationGroupStatus{
+		{Name: "0", Phase: v1beta1.CoordinationPhaseIdle},
+		{Name: "1", Phase: v1beta1.CoordinationPhaseStaged},
+	})
+	if cond == nil || cond.Status != corev1.ConditionTrue {
+		t.Errorf("staged+idle: got %+v want True", cond)
+	}
+	// Staged does not mask a real in-flight group.
+	cond = ComputeCoordinationReady([]v1beta1.RolloutCoordinationGroupStatus{
+		{Name: "0", Phase: v1beta1.CoordinationPhaseStaged},
+		{Name: "1", Phase: v1beta1.CoordinationPhaseSurging},
+	})
+	if cond == nil || cond.Status != corev1.ConditionFalse || cond.Reason != "InProgress" {
+		t.Errorf("staged+surging: got %+v want False/InProgress", cond)
+	}
+}
+
 func TestComputeCoordinationReady_AnyFailed(t *testing.T) {
 	cond := ComputeCoordinationReady([]v1beta1.RolloutCoordinationGroupStatus{
 		{Name: "0", Phase: v1beta1.CoordinationPhaseIdle},

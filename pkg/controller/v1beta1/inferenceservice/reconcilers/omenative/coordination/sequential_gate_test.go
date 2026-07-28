@@ -604,6 +604,117 @@ func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
 	}
 }
 
+// --- Sequential handoff on desired-shape convergence (#838) ---
+
+// mkSequentialFixtureEngineFirst returns an ISVC with a Sequential run
+// [engine, decoder] (engine first in Order) and a static
+// rollingUpdate.partition on the engine Component, so the gate's own
+// observation computes engine AtDesiredShape from a partitioned target.
+func mkSequentialFixtureEngineFirst(name string, enginePartition int32) *v1beta1.InferenceService {
+	p := enginePartition
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Engine: &v1beta1.EngineSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Lifecycle: &v1beta1.LifecycleSpec{
+						UpdateStrategy: &v1beta1.UpdateStrategy{
+							RollingUpdate: &v1beta1.RollingUpdate{Partition: &p},
+						},
+					},
+				},
+			},
+			Decoder: &v1beta1.DecoderSpec{},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+					{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+				},
+			},
+		},
+	}
+	isvc.Name = name
+	return isvc
+}
+
+// seqIR builds an InferenceReplica carrying the instance-level status
+// the desired-shape convergence check reads (Replicas + InstanceStatuses)
+// on top of the revision names. Namespace is empty to match the
+// namespace-less fixtures ComponentIRStatus reads with isvc.Namespace="".
+func seqIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHash string, replicas int32, insts []v1beta1.OMENativeInstanceStatus) client.Object {
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: isvcName + "-" + string(c),
+		},
+		Status: v1beta1.InferenceReplicaStatus{
+			CurrentRevision:  isvcName + "-" + string(c) + "-" + currentHash,
+			UpdateRevision:   isvcName + "-" + string(c) + "-" + updateHash,
+			Replicas:         replicas,
+			InstanceStatuses: insts,
+		},
+	}
+}
+
+// revName is the <isvcName>-<component>-<hash> ControllerRevision-name
+// shape query.RevisionFromName splits to compare hashes.
+func revName(isvcName string, c v1beta1.ComponentType, hash string) string {
+	return isvcName + "-" + string(c) + "-" + hash
+}
+
+func TestCheckSequentialGate_StagedLeaderHandsOffToNext(t *testing.T) {
+	// Engine (first in Order) reached its desired staged shape: partition=1
+	// holds one instance on OLD, one instance rolled to NEW, both Ready. Its
+	// revisions still skew (CurrentRevision=OLD != UpdateRevision=NEW) so
+	// RolloutInFlight stays true — but AtDesiredShape releases it for
+	// handoff. Decoder is genuinely rolling. The gate must ALLOW decoder
+	// (pre-#838 it returned "Sequential waiting on engine" forever).
+	const name = "seq-isvc"
+	isvc := mkSequentialFixtureEngineFirst(name, 1)
+	client := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
+		seqIR(name, v1beta1.EngineComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.EngineComponent, "NEW")},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.EngineComponent, "OLD")},
+		}),
+		seqIR(name, v1beta1.DecoderComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
+		}),
+	).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent)
+	if !allowed {
+		t.Errorf("staged engine must hand off; decoder MUST be allowed, got denied: %s", reason)
+	}
+	if !strings.Contains(reason, "Sequential active Component") {
+		t.Errorf("allowance reason should signal active-Component path: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_UnconvergedLeaderStillBlocks(t *testing.T) {
+	// Regression: engine is in flight and NOT at its desired shape (an
+	// instance is still Updating on OLD, none on NEW). It must STILL be the
+	// active/blocking Component; decoder's gate stays denied.
+	const name = "seq-isvc"
+	isvc := mkSequentialFixtureEngineFirst(name, 1)
+	client := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
+		seqIR(name, v1beta1.EngineComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: revName(name, v1beta1.EngineComponent, "OLD")},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.EngineComponent, "OLD")},
+		}),
+		seqIR(name, v1beta1.DecoderComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
+		}),
+	).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.DecoderComponent)
+	if allowed {
+		t.Errorf("unconverged engine must still block decoder, got allowed: %s", reason)
+	}
+	if !strings.Contains(reason, "engine") || !strings.Contains(reason, "Sequential waiting") {
+		t.Errorf("denial reason should name the active Component (engine) and say 'Sequential waiting': %s", reason)
+	}
+}
+
 // emitSequentialDeferredEvent: when an operator bumps a later-in-Order
 // Component's spec while an earlier Component is still rolling,
 // Sequential semantics defer the later rollout and the controller
