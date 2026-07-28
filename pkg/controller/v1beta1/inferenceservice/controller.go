@@ -1012,10 +1012,14 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	runtimeSelectorConfig.ModelCacheProvider = r.ModelCache.Name
 	r.RuntimeSelector = runtimeselector.NewWithConfig(runtimeSelectorConfig)
 
-	// KEDA is a hard dependency, not an optional CRD probe.
-	// Owns(&kedav1.ScaledObject{}) is unconditional below; if KEDA is
-	// absent from the cluster the controller will fail fast on the first
-	// reconcile rather than silently ignoring scaler-class=keda.
+	// KEDA is an optional CRD: probe and only watch ScaledObject when present.
+	// An unconditional watch fails manager startup (cache-sync timeout) when the
+	// CRD is absent, crash-looping the controller for every ISVC. A class=keda
+	// ISVC still fails loudly on its own reconcile when KEDA is missing.
+	kedaFound, err := utils.IsCrdAvailable(r.ClientConfig, kedav1.SchemeGroupVersion.String(), constants.KEDAScaledObjectKind)
+	if err != nil {
+		return err
+	}
 
 	podMonitorFound, err := utils.IsCrdAvailable(r.ClientConfig, monitoringv1.SchemeGroupVersion.String(), constants.PodMonitorKind)
 	if err != nil {
@@ -1079,13 +1083,14 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(omenative.EndpointSliceToISVC),
-		).
-		// KEDA ScaledObject is owned unconditionally — the scheme is
-		// registered at startup and KEDA is a hard cluster-side
-		// dependency for OME. Ignore its status-only churn for the same
-		// reason as the HPA above (KEDA continuously rewrites SO status /
-		// the derived HPA conditions).
-		Owns(&kedav1.ScaledObject{}, builder.WithPredicates(ownedStatusIgnoringPredicate()))
+		)
+
+	// Owned only when the CRD is present; ignore status-only churn like the HPA.
+	if kedaFound {
+		ctrlBuilder = ctrlBuilder.Owns(&kedav1.ScaledObject{}, builder.WithPredicates(ownedStatusIgnoringPredicate()))
+	} else {
+		r.Log.Info("The InferenceService controller won't watch keda.sh/v1alpha1/ScaledObject resources because the CRD is not available; InferenceServices requesting KEDA autoscaling will fail on reconcile until KEDA is installed.")
+	}
 
 	if podMonitorFound {
 		ctrlBuilder = ctrlBuilder.Owns(&monitoringv1.PodMonitor{})

@@ -42,9 +42,9 @@ import (
 //   - HorizontalPodAutoscaler (owned): re-enqueue when the dispatcher-
 //     emitted HPA changes — the status writer mirrors
 //     HPA.Status.Conditions onto the IR / ISVC status surface.
-//   - ScaledObject (owned): KEDA scheme is registered unconditionally
-//     so the Owns() is unconditional. Re-enqueue on
-//     ScaledObject status churn for the same status mirror.
+//   - ScaledObject (owned): watched only when the KEDA CRD is present
+//     (probed at setup); an unconditional watch would fail manager
+//     startup when KEDA is absent (cache-sync timeout).
 //
 // The parent InferenceService is NOT watched — the IR's owner ref to
 // its parent means the parent's controller already gets re-enqueued
@@ -88,14 +88,27 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := r.validateWiring(); err != nil {
 		return err
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+
+	// Optional CRD (mirrors the ISVC controller): only watch ScaledObject when
+	// present, else manager startup fails on cache sync when KEDA is absent.
+	kedaFound, err := utils.IsCrdAvailable(mgr.GetConfig(), kedav1.SchemeGroupVersion.String(), constants.KEDAScaledObjectKind)
+	if err != nil {
+		return err
+	}
+
+	b := ctrl.NewControllerManagedBy(mgr).
 		// MaxConcurrentReconciles parallelizes reconciles for distinct IRs;
 		// zero (unset) falls back to controller-runtime's single-worker default.
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		For(&v1beta1.InferenceReplica{}).
 		Owns(&appsv1.ControllerRevision{}).
-		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
-		Owns(&kedav1.ScaledObject{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{})
+	if kedaFound {
+		b = b.Owns(&kedav1.ScaledObject{})
+	} else {
+		r.Log.Info("The InferenceReplica controller won't watch keda.sh/v1alpha1/ScaledObject resources because the CRD is not available; InferenceReplicas requesting KEDA autoscaling will fail on reconcile until KEDA is installed.")
+	}
+	return b.
 		Watches(
 			&corev1.Pod{},
 			newPodEventHandler(r.Expectations),
