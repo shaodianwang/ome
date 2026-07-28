@@ -220,6 +220,15 @@ resources:
     memory: 6Gi
 
 podAnnotations: {}
+
+# Extra environment variables appended to the muse-server container. Used to point
+# the injected cloud_oss exec-credential plugin at this pod's identity cert for
+# GCP-IAM auth to GKE clusters, e.g.:
+#   - {name: THRIFT_TLS_CL_CERT_PATH, value: /var/facebook/x509_identities/combined.pem}
+#   - {name: THRIFT_TLS_CL_KEY_PATH,  value: /var/facebook/x509_identities/combined.pem}
+#   - {name: THRIFT_TLS_SRV_CA_PATH,  value: /var/facebook/x509_identities/combined.pem}
+extraEnv: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

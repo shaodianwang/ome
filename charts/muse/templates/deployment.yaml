@@ -16,10 +16,13 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "muse.serviceAccountName" . }}
-      securityContext:
-        runAsNonRoot: true
       containers:
         - name: muse-server
+          # Enforce non-root on muse-server itself (container-scoped, not pod-scoped)
+          # so it does not constrain the MKS identity webhook's root-running
+          # `copy-auth-tools` init container when GCP-IAM injection is enabled.
+          securityContext:
+            runAsNonRoot: true
           image: {{ include "muse.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
@@ -143,6 +146,11 @@ spec:
             - name: MUSE_METRICS_TIME_RANGES_JSON
               value: {{ toJson . | quote }}
             {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            # Extra env (e.g. THRIFT_TLS_* paths so the injected cloud_oss exec
+            # credential plugin can load this pod's identity cert for GCP-IAM auth).
+            {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:
             - name: http
