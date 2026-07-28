@@ -536,6 +536,132 @@ func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
 	}
 }
 
+// setStaticPartition stamps the Component's
+// spec.<component>.lifecycle.updateStrategy.rollingUpdate.partition —
+// the path staticPartitionFor reads. Only Decoder is needed by the
+// tests here, but the switch keeps it symmetric.
+func setStaticPartition(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, partition int32) {
+	ext := &v1beta1.ComponentExtensionSpec{
+		Lifecycle: &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				RollingUpdate: &v1beta1.RollingUpdate{Partition: &partition},
+			},
+		},
+	}
+	switch c {
+	case v1beta1.DecoderComponent:
+		isvc.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: *ext}
+	case v1beta1.EngineComponent:
+		isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: *ext}
+	case v1beta1.RouterComponent:
+		isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: *ext}
+	}
+}
+
+// seqReadyIR builds an InferenceReplica whose status models `replicas`
+// instances all Ready on runningHash, with the given current/update
+// revision hashes and ObservedGeneration. Unlike fakeClientForSeqISVC —
+// which copies only the Lifecycle fields off the ISVC — this seeds
+// Replicas + InstanceStatuses so ReachedDesiredShape (and thus
+// AtDesiredShape) is actually exercised. The absence of these fields is
+// exactly why TestCheckSequentialGate_MomentOfBump missed the #840
+// regression below.
+func seqReadyIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHash, runningHash string, replicas int32, observedGen int64) *v1beta1.InferenceReplica {
+	rev := func(h string) string { return isvcName + "-" + string(c) + "-" + h }
+	insts := make([]v1beta1.OMENativeInstanceStatus, replicas)
+	for i := range insts {
+		insts[i] = v1beta1.OMENativeInstanceStatus{
+			Index:           int32(i),
+			Phase:           v1beta1.OMENativeInstanceReady,
+			RunningRevision: rev(runningHash),
+		}
+	}
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: isvcName + "-" + string(c)},
+		Status: v1beta1.InferenceReplicaStatus{
+			ObservedGeneration: observedGen,
+			CurrentRevision:    rev(currentHash),
+			UpdateRevision:     rev(updateHash),
+			Replicas:           replicas,
+			InstanceStatuses:   insts,
+		},
+	}
+}
+
+// TestCheckSequentialGate_MomentOfBump_SteadyStateInstances is the
+// regression for the #840 overlap observed on use2-2 (p34: engine
+// started at t=0, 398s before decoder finished). At the moment of bump
+// every instance is still Ready on the OLD revision — the realistic
+// steady state — and the gen-skew window leaves UpdateRevision naming
+// the OLD CR.
+//
+// Bug: observeSequentialComponentsForGate computed AtDesiredShape from
+// that stale UpdateRevision. With all instances Ready on OLD,
+// ReachedDesiredShape(insts-on-old, target=old, partition=0, replicas)
+// returns true → AtDesiredShape=true on BOTH Components at once, while
+// RolloutInFlight is also true (gen skew). activeSequentialComponent
+// skips on AtDesiredShape, finds nothing active, and the gate falls
+// through to "Sequential group idle" — so engine dispatches concurrently
+// with decoder.
+//
+// TestCheckSequentialGate_MomentOfBump did not catch this because its
+// fake IRs carried no Replicas/InstanceStatuses, so ReachedDesiredShape
+// returned false and AtDesiredShape was accidentally false.
+func TestCheckSequentialGate_MomentOfBump_SteadyStateInstances(t *testing.T) {
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 2 // operator's spec bump just landed
+
+	cl := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
+		// Steady state, one reconcile behind the bump: current==update==OLD
+		// (revisionSkew silent), ObservedGeneration one behind, all
+		// instances Ready on OLD.
+		seqReadyIR("seq-isvc", v1beta1.DecoderComponent, "rev1", "rev1", "rev1", 4, 1),
+		seqReadyIR("seq-isvc", v1beta1.EngineComponent, "rev1", "rev1", "rev1", 4, 1),
+	).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), cl, isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("engine must be gated at moment-of-bump with steady-state instances (overlap): %s", reason)
+	}
+	if !strings.Contains(reason, "Sequential waiting") || !strings.Contains(reason, "decoder") {
+		t.Errorf("denial should name the active Component (decoder): %s", reason)
+	}
+	if allowed, reason := CheckSequentialGate(context.Background(), cl, isvc, v1beta1.DecoderComponent); !allowed {
+		t.Errorf("decoder must be allowed as the active Component: %s", reason)
+	}
+}
+
+// TestCheckSequentialGate_StagedPartitionReleasesNext guards the other
+// direction of the #840 fix: the revisionSkew guard must NOT suppress a
+// legitimately-known target. A partitioned leading Component (#838) holds
+// old pods by design and keeps RolloutInFlight=true forever, but once its
+// status records the NEW target (genuine revisionSkew) AND it has
+// converged to its staged shape, AtDesiredShape must be computed and the
+// gate must release the next Component.
+func TestCheckSequentialGate_StagedPartitionReleasesNext(t *testing.T) {
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 3
+	// Static partition=1 on decoder: 3 of 4 roll to NEW, 1 held on OLD.
+	setStaticPartition(isvc, v1beta1.DecoderComponent, 1)
+
+	cl := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
+		// Decoder: genuine revisionSkew (target rev2 recorded), converged
+		// to the staged shape — 3 instances on rev2, 1 held on rev1.
+		func() *v1beta1.InferenceReplica {
+			ir := seqReadyIR("seq-isvc", v1beta1.DecoderComponent, "rev1", "rev2", "rev2", 4, 3)
+			ir.Status.InstanceStatuses[3].RunningRevision = "seq-isvc-decoder-rev1" // held
+			return ir
+		}(),
+		// Engine: also bumped to rev2, nothing rolled yet.
+		seqReadyIR("seq-isvc", v1beta1.EngineComponent, "rev1", "rev2", "rev1", 4, 3),
+	).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), cl, isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("engine must be released once decoder reached its staged partition shape: %s", reason)
+	}
+}
+
 func TestCheckSequentialGate_GenerationSkewOnlyOneComponent(t *testing.T) {
 	// Defensive: only decoder's status is stale (engine already
 	// caught up in a prior reconcile, e.g. a partial bump on a

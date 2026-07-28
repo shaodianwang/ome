@@ -189,9 +189,24 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 			// Convergence to the desired staged shape — mirrors
 			// buildComponentObservation so the gate's active-selector sees
 			// the same "done for handoff" signal the state machine does.
-			obs.AtDesiredShape = workload.ReachedDesiredShape(
-				v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
-				summary.UpdateRevision, partition, summary.Replicas)
+			//
+			// Gate on revisionSkew: AtDesiredShape means "converged to the
+			// NEW target's staged shape", which is undefined until status
+			// records that target. During the generation-skew window (status
+			// one reconcile behind a fresh bump) UpdateRevision still names
+			// the OLD CR, so ReachedDesiredShape compares instances-on-old
+			// against target-old and spuriously reports convergence. That
+			// released the Sequential gate the moment both images were
+			// bumped — every Component saw RolloutInFlight=true (via gen
+			// skew) AND AtDesiredShape=true (via stale target) at once, the
+			// active-selector found nothing active, and all Components
+			// started rolling at t=0 (overlap). Only trust AtDesiredShape
+			// once the target is genuinely known to differ. (#838 regression)
+			if revisionSkew {
+				obs.AtDesiredShape = workload.ReachedDesiredShape(
+					v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
+					summary.UpdateRevision, partition, summary.Replicas)
+			}
 		}
 		out[c] = obs
 	}
