@@ -235,6 +235,13 @@ const (
 	// False with a reason when one or more were skipped; informational —
 	// the primary still drives the deployment.
 	OverlaysReady apis.ConditionType = "OverlaysReady"
+	// RuntimeReady is False with reason=RuntimeNotFound when the ISVC's
+	// spec.runtime (or the auto-selected runtime) cannot be resolved.
+	// Advisory only — NOT a dependent of the aggregate Ready condition
+	// (conditionSet), so a currently-serving ISVC whose spec is edited to
+	// point at a missing runtime stays Ready=True on its running pods; only
+	// the new spec is withheld until the runtime exists.
+	RuntimeReady apis.ConditionType = "RuntimeReady"
 )
 
 type ModelStatus struct {
