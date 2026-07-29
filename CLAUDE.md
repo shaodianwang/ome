@@ -12,6 +12,14 @@ OME (Open Model Engine) is a Kubernetes operator for managing and serving Large 
 
 This is a **blocker, not a preference**: any change that introduces (or preserves) a hardcoded value like this must be called out explicitly and justified before it is accepted — do not add it silently. When you encounter an existing hardcode while working nearby, flag it. The fix pattern: add a config field (no in-code default) + supply the value via the chart/GitOps (e.g. the `sharedHostPrefix` field replacing the old hardcoded `"llm."` host prefix). This applies everywhere in the repo.
 
+## Code Comments
+
+Comments describe what the code **is** and **why** — never what *changed* or what's *coming*.
+
+- **No work-progress / diff-narrative comments.** Banned in source: "…no longer / not X anymore", "moved from/to", "previously", "used to", "…in a later step/PR", and roadmap or task tags (e.g. `(single-transition-owner)`). These belong in the commit message or PR body; in code they go stale the instant the next change lands and read as a changelog, not documentation. If a comment only makes sense to someone reading the diff, delete it or rewrite it as the current invariant.
+- **No incident narrative.** Don't retell a debugging story or name narrow internals inside general-purpose code — state the general reason instead.
+- Keep comments short (1–3 lines), match the surrounding density, and explain the "why" over the "what".
+
 ## Common Commands
 
 ### Build
