@@ -33,6 +33,7 @@ use tokio::sync::broadcast;
 
 pub use kube::runtime::reflector::Store;
 
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
 use k8s_openapi::api::core::v1::{Container, Node, Pod, PodSpec, PodStatus};
 
 use crate::listers::Lister;
@@ -79,6 +80,11 @@ prune_managed_fields_only!(
     ClusterServingRuntime,
     FineTunedWeight,
     WorkloadCluster,
+    // OME's own control-plane workloads (MUSE system-status view, OEP-0021.2).
+    // Their specs/status are small (a handful of replica counts + conditions), so
+    // stripping managedFields is the only pruning they need.
+    Deployment,
+    DaemonSet,
 );
 
 impl Prune for Node {

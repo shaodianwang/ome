@@ -75,6 +75,30 @@ config:
     prefixCache:
       warningBelow: 0.7
       criticalBelow: 0.4
+  # OME's own control-plane components surfaced in the System panel (OEP-0021.2).
+  # No baked-in set: the namespaces and label selectors that identify the
+  # controller / scheduler / webhook / model-agent are install-specific, so they
+  # live here (GitOps), not in the image. Empty ⇒ the System panel is empty rather
+  # than guessing. Each entry: { name, group?, kind: Deployment|DaemonSet,
+  # namespace, resourceName (exact object name) OR selector (matchLabels),
+  # clusters? (omit ⇒ all aggregated clusters) }. Prefer resourceName for
+  # control-plane singletons — and it is required for workloads that carry no
+  # metadata labels of their own (the OME model-agent DaemonSet labels only its
+  # pod template, so a label selector would never match it).
+  # NOTE the RBAC caveat: components on remote workload clusters are read through
+  # their mounted kubeconfig, whose identity must also have get/list/watch on
+  # apps/v1 deployments+daemonsets.
+  systemComponents: []
+  #  - name: Controller manager
+  #    group: control-plane
+  #    kind: Deployment
+  #    namespace: ome
+  #    resourceName: ome-controller-manager
+  #  - name: Model agent
+  #    group: data-plane
+  #    kind: DaemonSet
+  #    namespace: ome
+  #    resourceName: ome-model-agent-daemonset
   chat: # in-console inference test proxy (POST /v1/.../chat)
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60

@@ -140,11 +140,20 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
     let cache_sync_timeout = config
         .cache_sync_timeout_secs
         .map(|seconds| Duration::from_secs(seconds.get()));
+    // Configured System-panel components (empty when unset), used to decide which
+    // (if any) apps/v1 informers each cluster needs.
+    let system_components = config
+        .system_components
+        .as_ref()
+        .map(|components| components.0.as_slice())
+        .unwrap_or(&[]);
     for cluster_ref in config.cluster_refs()? {
+        let system_kinds = system_kinds_for(&cluster_ref.name, system_components);
         match build_cluster(
             &cluster_ref,
             config.list_strategy,
             cache_sync_timeout,
+            system_kinds,
             &feed,
             &invalidations,
             &signal,
@@ -228,6 +237,13 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             },
             dashboard_policy,
             metrics_time_ranges,
+            system_components: std::sync::Arc::new(
+                config
+                    .system_components
+                    .clone()
+                    .map(|components| components.0)
+                    .unwrap_or_default(),
+            ),
         },
     );
     server::serve(&config, state).await
@@ -236,10 +252,29 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
 /// Connect to one cluster, preflight it, build its informer set, and kick off the
 /// background cache warm-up. Returns as soon as the listers exist (initially
 /// empty), so a slow-syncing giant cluster never blocks the console from serving.
+/// Which apps/v1 kinds the System panel needs on this cluster — the kinds used by
+/// descriptors applicable to it (`applies_to`). A kind no applicable descriptor
+/// uses is left unwatched.
+fn system_kinds_for(
+    cluster: &str,
+    components: &[protocol::SystemComponent],
+) -> informers::SystemKinds {
+    use protocol::SystemComponentKind::{DaemonSet, Deployment};
+    let applicable = || components.iter().filter(|c| c.applies_to(cluster));
+    informers::SystemKinds {
+        deployments: applicable().any(|c| c.kind == Deployment),
+        daemon_sets: applicable().any(|c| c.kind == DaemonSet),
+    }
+}
+
+// Internal cluster-wiring function: a flat parameter list is clearer here than an
+// ad-hoc params struct, so allow the extra argument.
+#[expect(clippy::too_many_arguments)]
 async fn build_cluster(
     cluster_ref: &config::ClusterRef,
     list_strategy: config::ListStrategy,
     cache_sync_timeout: Option<Duration>,
+    system_kinds: informers::SystemKinds,
     feed: &informers::Feed,
     invalidations: &informers::Invalidations,
     signal: &informers::CapacitySignal,
@@ -288,6 +323,7 @@ async fn build_cluster(
         info.git_version.clone(),
         &factory,
         &ome,
+        system_kinds,
         informers::ChangeSinks {
             feed,
             invalidations,

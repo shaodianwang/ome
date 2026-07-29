@@ -1,0 +1,32 @@
+title: "MUSE system status: an admin view of OME's own control plane"
+oep-number: "0021.2"
+authors:
+  - "@nigupta"
+status: implemented
+creation-date: 2026-07-28
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follows OEP-0021 (the MUSE read+write layer). This follow-up adds a read-only,
+# admin-facing view of OME's *own* system components — the controller manager, the
+# scheduler, the admission webhook, the model-agent DaemonSet — per aggregated
+# cluster. It reads apps/v1 Deployments/DaemonSets from informer caches (never a
+# per-request apiserver call) and derives a health rollup. The set of components
+# is entirely config-driven: no component name, namespace, or label selector is
+# baked into the binary.
+see-also:
+  - "/oeps/0021-muse-console"             # parent: the read plane this rides on (informer transport, panel/route conventions)
+  - "/oeps/0021.1-muse-write-plane"       # sibling follow-up: the write plane; this doc stays strictly read-only
+  - "/oeps/0019-control-plane-split"      # defines the split control plane whose processes this view surfaces
+  - "/oeps/0018-multi-cluster-placement"  # the per-cluster client fan-out the view reports across
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

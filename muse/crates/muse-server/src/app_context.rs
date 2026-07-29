@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::{
     chat_proxy::ChatProxy,
     informers::{CapacitySignal, ClusterState, Feed, Invalidations},
-    protocol::{to_val, DashboardPolicy, MetricsTimeRanges, Topology},
+    protocol::{to_val, DashboardPolicy, MetricsTimeRanges, SystemComponent, Topology},
     rollup,
     service::{error::ApiError, metrics::MetricsBackend},
 };
@@ -46,6 +46,9 @@ pub struct AppState {
     sse_keep_alive: Option<Duration>,
     dashboard_policy: Option<DashboardPolicy>,
     metrics_time_ranges: Option<MetricsTimeRanges>,
+    /// OME control-plane components the System panel reports on. Empty ⇒ the panel
+    /// is empty (no baked-in set; see [`SystemComponent`]).
+    system_components: Arc<Vec<SystemComponent>>,
 }
 
 /// Pre-computed capacity responses (already serialized to JSON).
@@ -63,6 +66,7 @@ pub struct AppStateConfig {
     pub capacity_limits: rollup::CapacityLimits,
     pub dashboard_policy: Option<DashboardPolicy>,
     pub metrics_time_ranges: Option<MetricsTimeRanges>,
+    pub system_components: Arc<Vec<SystemComponent>>,
 }
 
 impl AppState {
@@ -92,6 +96,7 @@ impl AppState {
             sse_keep_alive: config.sse_keep_alive,
             dashboard_policy: config.dashboard_policy,
             metrics_time_ranges: config.metrics_time_ranges,
+            system_components: config.system_components,
         };
         // Warm the cache once so the first request is served, not computed.
         state.refresh_capacity();
@@ -256,6 +261,12 @@ impl AppState {
     /// Optional operator-configured range choices for Deployment Monitoring.
     pub fn metrics_time_ranges(&self) -> Option<&MetricsTimeRanges> {
         self.metrics_time_ranges.as_ref()
+    }
+
+    /// The configured OME control-plane components for the System panel. Empty
+    /// when unconfigured — the endpoint then returns an empty listing.
+    pub fn system_components(&self) -> &[SystemComponent] {
+        &self.system_components
     }
 }
 

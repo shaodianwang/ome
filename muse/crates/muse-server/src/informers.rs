@@ -25,7 +25,10 @@ use std::{
 use kube::Resource;
 use ome_client::{
     informers::{InformerEvent, Prune, SharedInformerFactory},
-    k8s_openapi::api::core::v1::{Node, Pod},
+    k8s_openapi::api::{
+        apps::v1::{DaemonSet, Deployment},
+        core::v1::{Node, Pod},
+    },
     listers::Lister,
     BaseModel, ClusterBaseModel, ClusterServingRuntime, FineTunedWeight, InferenceReplica,
     InferenceService, ServingRuntime, WorkloadCluster,
@@ -54,6 +57,12 @@ pub struct ClusterState {
     pub workload_clusters: Lister<WorkloadCluster>,
     pub nodes: Lister<Node>,
     pub pods: Lister<Pod>,
+    /// OME's own control-plane workloads (the `ome-manager` controller, scheduler,
+    /// webhook, …), watched so the system-status view can report desired-vs-ready
+    /// — including a component scaled to zero or absent, which a Pod scan alone
+    /// cannot see (OEP-0021.2). Always watched (apps/v1 is always present).
+    pub deployments: Lister<Deployment>,
+    pub daemon_sets: Lister<DaemonSet>,
     /// Initial informer-cache synchronization state.
     pub cache: CacheState,
 }
@@ -164,11 +173,21 @@ pub struct ChangeSinks<'a> {
 /// Nothing here blocks on initial sync: the returned [`ClusterState`] serves
 /// (empty, then filling) right away, and the caller awaits the returned futures
 /// in the background to learn when the cluster is fully warm.
+/// Which apps/v1 kinds the System panel needs watched on a given cluster, derived
+/// from the configured descriptors applicable to it. A kind no descriptor uses is
+/// not watched at all — so absent config means no extra watches and no extra RBAC.
+#[derive(Clone, Copy, Default)]
+pub struct SystemKinds {
+    pub deployments: bool,
+    pub daemon_sets: bool,
+}
+
 pub fn build_cluster_state(
     name: String,
     version: String,
     factory: &SharedInformerFactory,
     ome: &HashSet<String>,
+    system_kinds: SystemKinds,
     changes: ChangeSinks<'_>,
 ) -> (ClusterState, Vec<ReadyFut>) {
     let mut readies = Vec::new();
@@ -265,6 +284,13 @@ pub fn build_cluster_state(
             Some(i("Pod")),
             Some(changes.capacity.clone()),
         ),
+        // Control-plane workloads for the System panel. Started only for the kinds
+        // some applicable descriptor uses (else an empty lister, no watch, no RBAC
+        // needed), and *best-effort*: their readiness is NOT gated into the cluster
+        // cache, so a 403 or watch failure degrades only System — never the shared
+        // Fleet/Capacity/workload caches. apps/v1 is built-in, so no CRD gate.
+        deployments: warm_system::<Deployment>(factory, system_kinds.deployments, i("Deployment")),
+        daemon_sets: warm_system::<DaemonSet>(factory, system_kinds.daemon_sets, i("DaemonSet")),
         name,
         version,
         cache: CacheState::default(),
@@ -397,6 +423,42 @@ where
             .await
             .map_err(|error| error.to_string())
     }));
+    informer.lister()
+}
+
+/// Start a best-effort informer for a System-panel kind. Unlike [`warm`], its
+/// readiness is deliberately NOT added to the cluster's readiness gate: it warms
+/// in the background and marks live-query invalidations on change, but if the
+/// cluster's credentials lack `get/list/watch` for this kind, the resulting watch
+/// failure degrades only the System view (its lister stays empty) rather than
+/// marking the whole cluster cache failed and taking Fleet/Capacity/workloads
+/// offline. `present == false` starts nothing and returns an empty lister, so a
+/// kind no descriptor uses adds neither a watch nor an RBAC requirement.
+fn warm_system<K>(
+    factory: &SharedInformerFactory,
+    present: bool,
+    invalidate: InvalidationSub,
+) -> Lister<K>
+where
+    K: Resource<DynamicType = ()>
+        + Clone
+        + DeserializeOwned
+        + Debug
+        + Send
+        + Sync
+        + Prune
+        + 'static,
+{
+    if !present {
+        return empty_lister::<K>();
+    }
+    let informer = factory.informer_lazy::<K>();
+    let mut rx = informer.subscribe();
+    tokio::spawn(async move {
+        while let Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) = rx.recv().await {
+            invalidate.invalidations.mark(invalidate.resource);
+        }
+    });
     informer.lister()
 }
 

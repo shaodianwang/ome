@@ -321,6 +321,34 @@ export interface RolloutItem {
   age?: string;
 }
 
+/** One OME control-plane component's health on one cluster (`GET /v1/system`,
+ *  OEP-0021.2). `status` distinguishes `missing` (expected but absent) and
+ *  `unknown` (scaled to zero) from a live `degraded`/`unavailable`. */
+export type ComponentStatus = "healthy" | "degraded" | "unavailable" | "missing" | "unknown";
+/** One pod backing a system component (name/phase/node; restarts + readiness are
+ *  not carried — the shared Pod cache prunes container statuses). */
+export interface SystemPod {
+  name: string;
+  phase: string;
+  node?: string;
+}
+export interface SystemComponentItem {
+  cluster: string;
+  name: string;
+  group?: string;
+  kind: "Deployment" | "DaemonSet";
+  namespace: string;
+  status: ComponentStatus;
+  desired: number;
+  ready: number;
+  updated?: number;
+  message?: string;
+  /** Matched workload object name(s) on this cluster (empty ⇒ missing). */
+  objects?: string[];
+  conditions?: ConditionItem[];
+  pods?: SystemPod[];
+}
+
 /** Health thresholds where larger values are worse. */
 export interface UpperThresholdPolicy {
   warningAt: number;
@@ -570,6 +598,7 @@ export const api = {
     getJSON<NodeDetail>(`/v1/nodes/${enc(name)}?cluster=${enc(cluster)}`),
   events: () => getJSON<ListResp<EventItem>>("/v1/events"),
   rollouts: () => getJSON<ListResp<RolloutItem>>("/v1/rollouts"),
+  system: () => getJSON<ListResp<SystemComponentItem>>("/v1/system"),
   // Per-object detail for the drawers; kind + cluster + namespace + name preserve
   // full identity. Namespace remains optional for backward-compatible deep links.
   inferenceService: (ref: Selected) =>

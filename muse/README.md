@@ -52,6 +52,7 @@ from the placement planner rather than collapsed into a fabricated domain.
 | `GET /healthz` `/livez` `/readyz` | health |
 | `GET /v1/clusters` | registered clusters + per-cluster summary |
 | `GET /v1/capacity[?cluster=]` | fleet GPU allocatable/allocated/free, grouped by cluster / RDMA island / NVLink domain / instance type |
+| `GET /v1/system[?cluster=]` | OME control-plane component health (controller / scheduler / webhook / model-agent), from the config-driven component set; empty when unconfigured |
 | `GET /v1/metrics?cluster=&namespace=&inferenceservice=[&range=]` | cached Query Gateway metrics for one exact deployment; fleet scope is available only when the configured catalog declares safe fleet queries |
 | `GET /v1/{kind}[?cluster=]` | list a kind across clusters; each row tagged with `cluster` |
 | `GET /v1/{kind}/{name}[?raw=true][?cluster=][?namespace=]` | get one by full identity (projected view, or full object with `raw=true`); `namespace` disambiguates namespaced kinds |

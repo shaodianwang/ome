@@ -63,6 +63,18 @@ export const IconCapacity = (p: P) => (
   </svg>
 );
 
+export const IconSystem = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth={1.7} />
+    <path
+      d="M10 3v2m4-2v2m-4 14v2m4-2v2M3 10h2m-2 4h2m14-4h2m-2 4h2"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 export const IconRuntimes = (p: P) => (
   <svg {...base(p)}>
     <rect x="5" y="5" width="14" height="14" rx="2" stroke="currentColor" strokeWidth={1.7} />

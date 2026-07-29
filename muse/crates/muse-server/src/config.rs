@@ -15,7 +15,7 @@ use clap::Parser;
 
 use crate::{
     chat_proxy::ChatProxyConfig,
-    protocol::{DashboardPolicy, MetricsTimeRanges},
+    protocol::{DashboardPolicy, MetricsTimeRanges, SystemComponent, SystemComponents},
 };
 
 /// A workload cluster to aggregate: a name + an optional explicit kubeconfig
@@ -277,6 +277,48 @@ fn parse_metrics_time_ranges(spec: &str) -> Result<MetricsTimeRanges, String> {
         .map_err(|error| format!("invalid metrics time-range JSON: {error}"))?;
     validate_metrics_time_ranges(&ranges)?;
     Ok(ranges)
+}
+
+fn validate_system_component(component: &SystemComponent) -> Result<(), String> {
+    if component.name.trim().is_empty() {
+        return Err("system component name must not be empty".to_owned());
+    }
+    if component.namespace.trim().is_empty() {
+        return Err(format!(
+            "system component '{}' must set a namespace",
+            component.name
+        ));
+    }
+    let has_name = component
+        .resource_name
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty());
+    if !has_name && component.selector.is_empty() {
+        return Err(format!(
+            "system component '{}' must set resourceName or a non-empty selector",
+            component.name
+        ));
+    }
+    Ok(())
+}
+
+fn parse_system_components(spec: &str) -> Result<SystemComponents, String> {
+    let mut components: SystemComponents = serde_json::from_str(spec)
+        .map_err(|error| format!("invalid system components JSON: {error}"))?;
+    for component in &mut components.0 {
+        // Normalize resourceName: trim, and treat a blank string as absent. Without
+        // this, `resourceName: " "` plus a valid selector would pass validation but
+        // then make matching look for an object literally named " " (ignoring the
+        // selector) — a misleading `missing`.
+        component.resource_name = component
+            .resource_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        validate_system_component(component)?;
+    }
+    Ok(components)
 }
 
 fn parse_non_empty(spec: &str) -> Result<String, String> {
@@ -593,6 +635,20 @@ pub struct Config {
         value_parser = parse_dashboard_policy
     )]
     pub dashboard_policy: Option<DashboardPolicy>,
+
+    /// OME's own control-plane components to surface in the System panel, as one
+    /// JSON array of descriptors — each `{ name, group?, kind:
+    /// "Deployment"|"DaemonSet", namespace, selector, clusters? }`. No baked-in
+    /// set: the namespaces and label selectors that identify the controller /
+    /// scheduler / webhook / model-agent are install-specific, so the deployment
+    /// config owns them (flag / env / GitOps). Absent or `[]` ⇒ the System panel
+    /// is empty rather than guessing at a component.
+    #[arg(
+        long = "system-components-json",
+        env = "MUSE_SYSTEM_COMPONENTS_JSON",
+        value_parser = parse_system_components
+    )]
+    pub system_components: Option<SystemComponents>,
 
     /// Node label(s) naming the accelerator's outer topology domain — the RDMA
     /// island / network fabric for GPUs, or the physical block for TPUs — used to
@@ -993,9 +1049,67 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        load_queries, validate_metrics_time_ranges_against_queries, Config, QueryDef, QueryScope,
-        QueryType,
+        load_queries, parse_system_components, validate_metrics_time_ranges_against_queries,
+        Config, QueryDef, QueryScope, QueryType,
     };
+
+    #[test]
+    fn system_components_parse_and_validate() {
+        let ok = parse_system_components(
+            r#"[
+              { "name": "Controller manager", "group": "control-plane",
+                "kind": "Deployment", "namespace": "ome",
+                "selector": { "control-plane": "ome-controller-manager" },
+                "clusters": ["hub"] },
+              { "name": "Model agent", "kind": "DaemonSet", "namespace": "ome",
+                "resourceName": "ome-model-agent-daemonset" }
+            ]"#,
+        )
+        .expect("valid descriptors parse")
+        .0;
+        assert_eq!(ok.len(), 2);
+        assert!(ok[0].applies_to("hub"));
+        assert!(!ok[0].applies_to("member"));
+        // No `clusters` ⇒ expected on every aggregated cluster.
+        assert!(ok[1].applies_to("member"));
+        // Matching by object name alone (no selector) is valid.
+        assert_eq!(
+            ok[1].resource_name.as_deref(),
+            Some("ome-model-agent-daemonset")
+        );
+
+        // Neither resourceName nor selector, an unknown kind, and a blank namespace
+        // are each rejected.
+        assert!(parse_system_components(
+            r#"[{ "name": "x", "kind": "Deployment", "namespace": "ome", "selector": {} }]"#
+        )
+        .is_err());
+        assert!(parse_system_components(
+            r#"[{ "name": "x", "kind": "StatefulSet", "namespace": "ome",
+                 "selector": { "a": "b" } }]"#
+        )
+        .is_err());
+        assert!(parse_system_components(
+            r#"[{ "name": "x", "kind": "Deployment", "namespace": "",
+                 "selector": { "a": "b" } }]"#
+        )
+        .is_err());
+
+        // A present-but-blank resourceName normalizes to None, so matching falls
+        // back to the selector rather than looking for an object named " ".
+        let blank = parse_system_components(
+            r#"[{ "name": "x", "kind": "Deployment", "namespace": "ome",
+                 "resourceName": "  ", "selector": { "a": "b" } }]"#,
+        )
+        .expect("blank resourceName with a selector is valid")
+        .0;
+        assert!(blank[0].resource_name.is_none());
+        // Blank resourceName with no selector is still rejected.
+        assert!(parse_system_components(
+            r#"[{ "name": "x", "kind": "Deployment", "namespace": "ome", "resourceName": " " }]"#
+        )
+        .is_err());
+    }
 
     fn configured_args(chat_enabled: bool, allow_http: bool) -> Vec<String> {
         [

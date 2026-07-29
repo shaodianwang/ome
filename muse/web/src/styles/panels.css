@@ -404,3 +404,113 @@ td .free-strong {
     flex-wrap: wrap;
   }
 }
+
+/* System panel (OEP-0021.2): OME control-plane component health. */
+.sys-group-head {
+  margin-top: 8px;
+}
+.sys-group-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--t-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+}
+.sys-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sys-clusters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sys-clusters > li {
+  border-bottom: 1px solid var(--border);
+}
+.sys-clusters > li:last-child {
+  border-bottom: none;
+}
+.sys-cluster {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+  padding: 7px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--t-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.sys-cluster:hover {
+  background: var(--bg-2);
+}
+.sys-cluster-name {
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sys-cluster-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sys-cluster-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-3);
+}
+.sys-cluster-msg {
+  grid-column: 1 / -1;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+/* Drawer: conditions + pods lists. */
+.sys-conditions,
+.sys-pods {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sys-conditions > li,
+.sys-pods > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: var(--t-sm);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sys-conditions > li:last-child,
+.sys-pods > li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.sys-cond-type,
+.sys-pod-name {
+  font-weight: 600;
+}
+.sys-cond-reason,
+.sys-pod-node {
+  color: var(--fg-3);
+}
+.sys-cond-msg {
+  flex-basis: 100%;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}

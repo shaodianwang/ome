@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod resources;
 pub mod rollouts;
 mod sse;
+pub mod system;
 
 /// The complete route table, still awaiting its state. `server::build_app` applies
 /// the state, the static-console fallback, and the middleware layers.
@@ -37,6 +38,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/events", get(events::list))
         .route("/v1/stream", get(events::stream))
         .route("/v1/rollouts", get(rollouts::list))
+        .route("/v1/system", get(system::list))
         .route("/v1/config", get(config::get))
         // Static metrics paths coexist with the `/v1/{kind}/{name}` catch-all below
         // (matchit prefers the static match), mirroring the `.../chat` route.

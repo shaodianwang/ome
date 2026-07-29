@@ -93,6 +93,12 @@ spec:
             - name: MUSE_DASHBOARD_POLICY_JSON
               value: {{ toJson . | quote }}
             {{- end }}
+            {{- with .Values.config.systemComponents }}
+            # OME control-plane components surfaced in the System panel. No baked-in
+            # set — an empty list leaves the panel empty rather than guessing.
+            - name: MUSE_SYSTEM_COMPONENTS_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: MUSE_METRICS_REFRESH_SECS
               value: {{ .Values.config.metrics.refreshSecs | quote }}
             {{- if .Values.config.metrics.enabled }}

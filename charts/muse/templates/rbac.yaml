@@ -22,6 +22,13 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "pods"]
     verbs: ["get", "list", "watch"]
+  # OME control-plane workloads for the System panel (OEP-0021.2): desired-vs-ready
+  # health of the controller / scheduler / webhook / model-agent. Read-only.
+  # Remote workload clusters read via their mounted kubeconfig, whose identity must
+  # carry the same get/list/watch on these apps/v1 kinds.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

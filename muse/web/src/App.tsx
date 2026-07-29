@@ -8,6 +8,7 @@ import {
   IconFleet,
   IconModels,
   IconRuntimes,
+  IconSystem,
   IconWorkloads,
   Menu,
 } from "./icons";
@@ -18,11 +19,12 @@ import { isLegacySelected } from "./resource";
 import type { Selected } from "./resource";
 import { Models } from "./panels/Models";
 import { Runtimes } from "./panels/Runtimes";
+import { System } from "./panels/System";
 import { Workloads } from "./panels/Workloads";
 import { useRoute } from "./route";
 import type { Route } from "./route";
 
-export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "capacity";
+export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "capacity" | "system";
 export type DepFilter = "all" | "attention" | "ready";
 
 const LABELS: Record<PanelKey, string> = {
@@ -31,6 +33,7 @@ const LABELS: Record<PanelKey, string> = {
   models: "Models",
   runtimes: "Runtimes",
   capacity: "Capacity",
+  system: "System",
 };
 
 export default function App() {
@@ -136,6 +139,7 @@ export default function App() {
           {navItem("models", "Models", IconModels)}
           {navItem("runtimes", "Runtimes", IconRuntimes)}
           {navItem("capacity", "Capacity", IconCapacity)}
+          {navItem("system", "System", IconSystem)}
         </nav>
 
         <div className="sidebar-foot">
@@ -214,6 +218,7 @@ export default function App() {
             />
           )}
           {panel === "capacity" && <Capacity />}
+          {panel === "system" && <System />}
         </div>
       </div>
     </div>
