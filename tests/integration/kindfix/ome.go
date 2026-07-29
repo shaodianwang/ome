@@ -22,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -132,6 +133,16 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 			return err
 		}
 		if err := util.SeedDefaultConfigMaps(ctx, directClient); err != nil {
+			return err
+		}
+
+		// Register the OMENative pod field-index on the manager cache, exactly
+		// as cmd/manager does (query.RegisterOMENativePodIndex). Without it the
+		// IR + coordination reconcilers' indexed pod lookups fail with "Index
+		// with name field:ome.io/omenative-pod does not exist", so status never
+		// converges. The KIND harness drifted from cmd/manager when the IR path
+		// added this index.
+		if err := query.RegisterOMENativePodIndex(ctx, mgr.GetFieldIndexer()); err != nil {
 			return err
 		}
 
