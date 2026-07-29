@@ -169,7 +169,10 @@ func requeueOnConflict(err error) (ctrl.Result, error) {
 // deletions, and the global-host annotation — so routine ISVC spec churn does
 // not re-publish on every reconcile.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Named explicitly so it doesn't collide with the placement controller
+	// (both do For(&InferenceService{})).
 	return ctrl.NewControllerManagedBy(mgr).
+		Named(PlacementEndpointControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(placementPublishChange)).
 		Complete(r)
 }

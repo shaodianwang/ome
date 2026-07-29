@@ -805,6 +805,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...ConvergeOption) 
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
+		Named(PlacementControllerName).
 		For(&v1beta1.InferenceService{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Watches(&v1beta1.WorkloadCluster{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForClusterChange),

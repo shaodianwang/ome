@@ -1,5 +1,9 @@
 package endpoint
 
+// PlacementEndpointControllerName names the endpoint publisher — explicit so it
+// doesn't collide with the placement controller (both watch InferenceService).
+const PlacementEndpointControllerName = "placement-endpoint"
+
 const (
 	// ManagedByLabel marks the HTTPRoute + ExternalName Service the endpoint
 	// publisher creates, so they are discoverable (kubectl get -l ...) and the

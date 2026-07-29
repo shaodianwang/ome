@@ -4,6 +4,11 @@ package placement
 
 import "github.com/ome-projects/ome/pkg/constants"
 
+// PlacementControllerName names the fan-out placement controller — explicit so
+// it doesn't collide with other InferenceService-watching controllers on the
+// derived name "inferenceservice".
+const PlacementControllerName = "placement"
+
 const (
 	// AcceleratorRequirementsAnnotation holds a label-selector string of the
 	// accelerator/capability labels a candidate WorkloadCluster MUST satisfy
