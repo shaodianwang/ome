@@ -1,0 +1,163 @@
+# Self-contained validation that `kind` boots inside a privileged pod on a
+# GKE cluster — the exact capability the TW Buildkite dind lacks (read-only
+# /proc/sys/net, ip_forward=0). No repo checkout, no secrets, no Buildkite.
+#
+# It proves the whole networking stack the OMENative KIND suite depends on:
+#   1. a privileged dind daemon starts and has a WRITABLE /proc/sys/net,
+#   2. `kind create cluster` succeeds (2 nodes: control-plane + worker),
+#   3. net.ipv4.ip_forward=1 inside the node (the TW failure mode),
+#   4. nodes reach Ready (kindnet CNI + kubelet work),
+#   5. a 2-replica Deployment schedules across nodes and its Service is
+#      reachable pod-to-pod (bridge networking + kube-proxy + DNS).
+#
+# If this Job succeeds, kind-on-this-cluster works and the OME suite is just
+# `go test` on top. This manifest also doubles as the reference pod shape for
+# the agent-stack-k8s default pod spec (see .buildkite/README-gke-kind.md):
+# a privileged `docker:dind` sidecar + a workload container sharing the pod
+# network namespace, so the apiserver kind publishes on 127.0.0.1 is
+# reachable from the workload.
+#
+# Apply (from your session, which has cluster creds):
+#   ! kubectl --context <msl-gcp-usc1-rc-1 ctx> apply -f .buildkite/gke-kind-validation-job.yaml
+#   ! kubectl logs -f job/ome-kind-validation -c test
+#   ! kubectl get job ome-kind-validation          # COMPLETIONS 1/1 == pass
+#   ! kubectl delete -f .buildkite/gke-kind-validation-job.yaml
+#
+# You may need to set a namespace you can use, and a nodeSelector/tolerations
+# for the node pool that permits privileged pods + has ~8Gi free.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ome-kind-validation
+  labels:
+    app: ome-kind-validation
+spec:
+  backoffLimit: 0          # one shot; a failure is a real signal, don't retry
+  completions: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: ome-kind-validation
+    spec:
+      restartPolicy: Never
+      # nodeSelector / tolerations: uncomment + set for your GKE node pool if
+      # the default pool taints privileged workloads or lacks capacity.
+      # nodeSelector:
+      #   cloud.google.com/gke-nodepool: <pool>
+      # tolerations:
+      #   - { key: <taint-key>, operator: Exists, effect: NoSchedule }
+      containers:
+        # -----------------------------------------------------------------
+        # dind: the privileged Docker daemon kind's node containers run on.
+        # Shares the pod network namespace with `test`, so the apiserver
+        # kind publishes on 127.0.0.1:<port> is reachable from `test`.
+        # -----------------------------------------------------------------
+        - name: dind
+          image: docker:28-dind
+          securityContext:
+            privileged: true          # required: dind + kind write net sysctls
+          env:
+            - name: DOCKER_TLS_CERTDIR # empty => listen on tcp://0.0.0.0:2375 (no TLS)
+              value: ""
+          volumeMounts:
+            - name: docker-graph
+              mountPath: /var/lib/docker   # real disk for the overlay store
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi
+              ephemeral-storage: 8Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+              ephemeral-storage: 16Gi
+        # -----------------------------------------------------------------
+        # test: drives docker (in the sidecar) + kind + kubectl. Alpine-based
+        # docker CLI image; kind and kubectl are static Go binaries and run
+        # on musl fine. Exits 0 only if every stage passes.
+        # -----------------------------------------------------------------
+        - name: test
+          image: docker:28-cli
+          env:
+            - name: DOCKER_HOST
+              value: tcp://127.0.0.1:2375
+            - name: KIND_VERSION
+              value: v0.27.0
+            - name: KIND_NODE_IMAGE
+              value: kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              echo "=== [1/6] wait for the dind daemon ==="
+              i=0
+              until docker info >/dev/null 2>&1; do
+                i=$((i+1)); [ "$i" -gt 60 ] && { echo "FATAL: dind never became ready"; exit 1; }
+                sleep 2
+              done
+              docker version --format '{{.Server.Version}}' | sed 's/^/dind server: /'
+
+              echo "=== [2/6] proof: /proc/sys/net is writable in the dind (the TW blocker) ==="
+              # This is the crux. On the TW dind this write fails with EPERM.
+              docker run --rm --privileged busybox sh -c \
+                'sysctl -w net.ipv4.ip_forward=1 && echo "  ip_forward writable: OK"' \
+                || { echo "FATAL: cannot write net.ipv4.ip_forward in a privileged container — same block as TW"; exit 1; }
+
+              echo "=== install kind + kubectl (static binaries) ==="
+              arch=amd64; [ "$(uname -m)" = "aarch64" ] && arch=arm64
+              wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}"
+              chmod +x /usr/local/bin/kind
+              kver=$(wget -qO- https://dl.k8s.io/release/stable.txt)
+              wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/${kver}/bin/linux/${arch}/kubectl"
+              chmod +x /usr/local/bin/kubectl
+              kind --version
+
+              echo "=== [3/6] pre-pull node image + create a 2-node kind cluster ==="
+              docker pull -q "$KIND_NODE_IMAGE"
+              cat >/tmp/kind.yaml <<'EOF'
+              kind: Cluster
+              apiVersion: kind.x-k8s.io/v1alpha4
+              nodes:
+                - role: control-plane
+                - role: worker
+              EOF
+              kind create cluster --name ome-validate --image "$KIND_NODE_IMAGE" \
+                --config /tmp/kind.yaml --wait 120s
+              trap 'kind delete cluster --name ome-validate >/dev/null 2>&1 || true' EXIT
+
+              echo "=== [4/6] ip_forward inside the kind node == 1 ==="
+              got=$(docker exec ome-validate-control-plane sysctl -n net.ipv4.ip_forward)
+              echo "  node net.ipv4.ip_forward=$got"
+              [ "$got" = "1" ] || { echo "FATAL: ip_forward not enabled in node"; exit 1; }
+
+              echo "=== [5/6] nodes Ready (kindnet CNI + kubelet) ==="
+              kubectl wait --for=condition=Ready nodes --all --timeout=120s
+              kubectl get nodes -o wide
+
+              echo "=== [6/6] pod scheduling + Service networking + DNS ==="
+              kubectl create deployment web --image=registry.k8s.io/e2e-test-images/agnhost:2.45 \
+                --replicas=2 -- /agnhost netexec --http-port=8080
+              kubectl expose deployment web --port=80 --target-port=8080
+              kubectl rollout status deployment/web --timeout=120s
+              # In-cluster client hits the Service by DNS — exercises kube-proxy,
+              # the pod bridge network, and CoreDNS all at once.
+              kubectl run probe --image=registry.k8s.io/e2e-test-images/agnhost:2.45 \
+                --restart=Never --attach --rm -q -- \
+                /bin/sh -c 'for i in $(seq 1 30); do wget -qO- http://web.default.svc.cluster.local/hostname && exit 0; sleep 2; done; echo PROBE_FAILED; exit 1'
+
+              echo ""
+              echo "=================================================="
+              echo " PASS: kind boots and networks on this GKE cluster"
+              echo "=================================================="
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              ephemeral-storage: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              ephemeral-storage: 8Gi
+      volumes:
+        - name: docker-graph
+          emptyDir: {}

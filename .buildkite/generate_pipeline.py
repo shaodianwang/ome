@@ -60,6 +60,27 @@ DOCKER_PLUGIN_REF = "https://github.com/buildkite-plugins/docker-buildkite-plugi
 
 DEFAULT_QUEUE = "tw-cpu-x86"
 BUILD_QUEUE = "tw-cpu-x86"
+# GKE-backed queue for the sharded KIND suite. Unlike the TW dind, GKE agents
+# run on real VMs / privileged dind where kind can create bridge networks
+# (writable /proc/sys/net + ip_forward=1). The queue's agents must provide a
+# reachable, privileged Docker daemon — see .buildkite/README-gke-kind.md.
+GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-kind-x86")
+# Fan-out for the GKE KIND suite: N parallel pods, each running a disjoint
+# subset of the ~72 spec files (sharded by BUILDKITE_PARALLEL_JOB in
+# run_kind_tests_gke.sh). 8 → ~9 files/shard.
+GKE_KIND_PARALLELISM = int(os.environ.get("GKE_KIND_PARALLELISM", "8"))
+
+
+def _truthy(val: str) -> bool:
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Emit the GKE KIND step ONLY when the queue actually exists. A step
+# targeting a queue with no agents blocks the whole build waiting for an
+# agent (soft_fail does not help — the job never runs to fail), so the
+# step stays out of the pipeline until infra sets GKE_KIND_ENABLED. See
+# .buildkite/README-gke-kind.md for standing up the queue.
+GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", ""))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
@@ -157,6 +178,40 @@ def _tw_docker_plugin(
         f"{pad}      - /var/facebook/tupperware/tls:/var/facebook/tupperware/tls:ro\n"
         f"{pad}      - /data/buildkite/cloud.cli:/opt/cloud.cli:ro\n"
         f"{extra_volume_lines}"
+    )
+
+
+def _gke_kind_step() -> str:
+    """Emit the sharded GKE-backed KIND step (final 2-space step indent).
+
+    Same omenative_coordination_kind suite as the parked TW
+    `integration-test-kind` step, but on a GKE cluster where kind boots
+    (real VMs / privileged dind → writable /proc/sys/net + ip_forward=1).
+    Buildkite `parallelism` fans it into N pods; each pod runs a disjoint
+    subset of the ~72 spec files (run_kind_tests_gke.sh partitions by
+    BUILDKITE_PARALLEL_JOB and selects with -ginkgo.focus-file). Appended
+    only when GKE_KIND_ENABLED (see the constant), so an absent queue
+    never blocks builds.
+
+    No plugin block: the queue's agents supply the workload image
+    (golang:1.25-bookworm) and a privileged Docker daemon via the queue's
+    default pod spec — see .buildkite/README-gke-kind.md. The TW docker
+    plugin's identity/cert mounts are TW-host-specific and do not apply.
+    """
+    return (
+        f'  - label: ":test_tube: Integration Tests (KIND on GKE)"\n'
+        f'    key: "integration-test-kind-gke"\n'
+        f"{_gh_status('integration-test-kind-gke', indent=4)}\n"
+        # soft_fail until this step has proven green on the live queue;
+        # flip to hard fail (and delete the parked TW integration-test-kind
+        # step) once it is. Kept alongside GKE_KIND_ENABLED so enabling the
+        # step doesn't immediately gate merges on a first, unproven run.
+        f"    soft_fail: true\n"
+        f"    parallelism: {GKE_KIND_PARALLELISM}\n"
+        f"    command: |\n"
+        f"      sh .buildkite/run_kind_tests_gke.sh\n"
+        f"    agents:\n"
+        f'      queue: "{GKE_QUEUE}"\n'
     )
 
 
@@ -389,7 +444,10 @@ def ci_steps() -> str:
             "dep-crds",
         ),
     ]
-    return base + "\n" + "\n".join(drift_checks)
+    steps = base + "\n" + "\n".join(drift_checks)
+    if GKE_KIND_ENABLED:
+        steps += "\n" + _gke_kind_step()
+    return steps
 
 
 # ---------------------------------------------------------------------------
