@@ -3,6 +3,8 @@ package inferencereplica
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -33,6 +35,23 @@ import (
 // that mirrors IR conditions onto the parent ISVC, and future autoscaler
 // scalers that read the IR all key off this condition.
 const InferenceReplicaConditionReady = "Ready"
+
+// InferenceReplicaConditionRolloutStalled is an ADVISORY condition that
+// surfaces a rollout wedged on failing Instances (most commonly a new-revision
+// pod stuck in CrashLoopBackOff). It is deliberately NOT a dependent of the
+// Ready condition: old-revision pods keep serving during a failed surge
+// update, so a healthy IR/ISVC stays Ready=True while this flags the otherwise-
+// invisible wedge (rollout stuck at N/total) for operators + dashboards. (#850)
+const InferenceReplicaConditionRolloutStalled = "RolloutStalled"
+
+const (
+	// ReasonInstancesFailing — RolloutStalled=True: >=1 Instance recorded a
+	// terminal failure while not yet on the target revision.
+	ReasonInstancesFailing = "InstancesFailing"
+	// ReasonRolloutProgressing — RolloutStalled=False: rollout in flight with
+	// no failing Instances, or no rollout in flight.
+	ReasonRolloutProgressing = "Progressing"
+)
 
 // Reason strings for the InferenceReplicaConditionReady condition. Kept
 // short and machine-readable so
@@ -222,6 +241,10 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		//                  `kubectl wait --for=condition=Ready` doesn't
 		//                  short-circuit mid-rollout.
 		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeReadyCondition(&fresh.Status, fresh.Spec.Pacing))
+		// Advisory RolloutStalled condition — surfaces a rollout wedged on
+		// failing Instances (e.g. new-rev CrashLoopBackOff) without affecting
+		// the Ready condition above (old-rev pods keep serving). (#850)
+		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeRolloutStalledCondition(&fresh.Status))
 
 		// Skip the write when the recomputed status matches what's
 		// already live: a no-op reconcile must perform ZERO writes so it
@@ -654,6 +677,67 @@ func stagedAtPartition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.I
 	return workload.ReachedDesiredShape(
 		v1beta1convert.InstanceStatusSliceToWorkload(status.InstanceStatuses),
 		status.UpdateRevision, part, status.Replicas)
+}
+
+// computeRolloutStalledCondition derives the advisory RolloutStalled
+// condition (see InferenceReplicaConditionRolloutStalled). True when a rollout
+// is in flight (UpdateRevision set and != CurrentRevision) AND one or more
+// Instances carry a terminal LastFailure while not yet on the target revision
+// — i.e. the rollout is wedged on failing Instances. Keyed on LastFailure (not
+// live Phase) so it stays stable even when a stuck Instance oscillates
+// Updating<->Failed each reconcile. Advisory only: not folded into Ready.
+func computeRolloutStalledCondition(status *v1beta1.InferenceReplicaStatus) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               InferenceReplicaConditionRolloutStalled,
+		ObservedGeneration: status.ObservedGeneration,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonRolloutProgressing,
+	}
+	if status.UpdateRevision == "" || status.CurrentRevision == status.UpdateRevision {
+		cond.Message = "no rollout in flight"
+		return cond
+	}
+	stalled := 0
+	reasons := map[string]int{}
+	for i := range status.InstanceStatuses {
+		s := status.InstanceStatuses[i]
+		// Already on the target revision → a stale prior failure isn't blocking.
+		if s.LastFailure == nil || s.RunningRevision == status.UpdateRevision {
+			continue
+		}
+		stalled++
+		if r := s.LastFailure.Reason; r != "" {
+			reasons[r]++
+		}
+	}
+	if stalled == 0 {
+		cond.Message = fmt.Sprintf("Rolling out %s (%d/%d Instances on target)",
+			status.UpdateRevision, status.UpdatedReadyReplicas, status.Replicas)
+		return cond
+	}
+	cond.Status = metav1.ConditionTrue
+	cond.Reason = ReasonInstancesFailing
+	cond.Message = fmt.Sprintf("%d/%d Instance(s) failing rollout to %s (%s)",
+		stalled, status.Replicas, status.UpdateRevision, summarizeFailureReasons(reasons))
+	return cond
+}
+
+// summarizeFailureReasons renders a stable, compact "Reason xN" summary
+// (sorted by reason for byte-stability across reconciles).
+func summarizeFailureReasons(reasons map[string]int) string {
+	if len(reasons) == 0 {
+		return "terminal failure"
+	}
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s x%d", k, reasons[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.InferenceReplicaPacing) metav1.Condition {

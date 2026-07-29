@@ -261,10 +261,26 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 	if err := failInstanceClearingOperation(ctx, input, inst.Index, termination); err != nil {
 		return outcome, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
 	}
-	if input.WarnInstanceFailed != nil {
+	// Suppress the per-reconcile warn+event storm when an instance is stuck
+	// oscillating on the SAME unresolved failure — e.g. a same-target update
+	// whose new-revision pod persistently CrashLoopBackOffs: the Terminal
+	// disposition clears the op + stamps Failed, the next pass re-detects the
+	// still-needed update and re-attempts (no pod actually replaced), and this
+	// path re-fires every ~reconcile. inst is the pre-disposition observation,
+	// so inst.LastFailure carries the prior reason; only warn when this is a
+	// NEW terminal reason. (#850)
+	if input.WarnInstanceFailed != nil && !sameTerminalFailure(inst, shortReason) {
 		input.WarnInstanceFailed(inst.Index, "", fmt.Sprintf("%s: %s", reason, detail))
 	}
 	return outcome, nil
+}
+
+// sameTerminalFailure reports whether the instance's prior LastFailure already
+// records this terminal reason, so a repeated disposition of the same
+// unresolved failure doesn't re-emit the operator warning + Warning event
+// every reconcile. (#850)
+func sameTerminalFailure(inst InstanceStatus, reason string) bool {
+	return inst.LastFailure != nil && inst.LastFailure.Reason == reason
 }
 
 // migrationModeAllowsRelocation gates branch 2 on the effective

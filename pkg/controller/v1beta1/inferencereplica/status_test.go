@@ -1052,3 +1052,49 @@ func TestAggregateStatus_DeadlineFuture_NoEscalation(t *testing.T) {
 		To(gomega.Equal(v1beta1.OMENativeInstanceCreating),
 			"Operation.Deadline in the future must NOT escalate (backstop respects the timeout window)")
 }
+
+// TestComputeRolloutStalledCondition pins the advisory RolloutStalled
+// condition: True only when a rollout is in flight AND an Instance carries a
+// terminal failure while not yet on the target; and it is a DISTINCT condition
+// type from Ready (advisory, not a Ready dependent). (#850)
+func TestComputeRolloutStalledCondition(t *testing.T) {
+	const target = "isvc-engine-5af56222"
+	const cur = "isvc-engine-0f41b090"
+	mk := func() *v1beta1.InferenceReplicaStatus {
+		return &v1beta1.InferenceReplicaStatus{Replicas: 3, CurrentRevision: cur, UpdateRevision: target}
+	}
+
+	// in-flight rollout + an Instance failing while NOT on target → stalled.
+	s := mk()
+	s.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, RunningRevision: target},
+		{Index: 1, RunningRevision: cur, LastFailure: &v1beta1.InstanceTermination{Reason: "CrashLoopBackOff"}},
+	}
+	if c := computeRolloutStalledCondition(s); c.Status != metav1.ConditionTrue || c.Reason != ReasonInstancesFailing {
+		t.Errorf("failing Instance mid-rollout: got %s/%s want True/%s", c.Status, c.Reason, ReasonInstancesFailing)
+	}
+
+	// stale failure on an Instance ALREADY on target → not stalled.
+	s2 := mk()
+	s2.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, RunningRevision: target, LastFailure: &v1beta1.InstanceTermination{Reason: "CrashLoopBackOff"}},
+	}
+	if c := computeRolloutStalledCondition(s2); c.Status != metav1.ConditionFalse {
+		t.Errorf("stale failure on updated Instance must not stall: got %s", c.Status)
+	}
+
+	// no rollout in flight (converged) → not stalled even with a failure.
+	s3 := mk()
+	s3.CurrentRevision = target
+	s3.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, RunningRevision: cur, LastFailure: &v1beta1.InstanceTermination{Reason: "CrashLoopBackOff"}},
+	}
+	if c := computeRolloutStalledCondition(s3); c.Status != metav1.ConditionFalse {
+		t.Errorf("converged rollout must not stall: got %s", c.Status)
+	}
+
+	// Advisory: distinct condition type from Ready (never folds into it).
+	if computeRolloutStalledCondition(mk()).Type == InferenceReplicaConditionReady {
+		t.Errorf("RolloutStalled must be a distinct condition type from Ready")
+	}
+}

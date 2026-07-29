@@ -1083,3 +1083,45 @@ func TestExpireOperations_GangCreateDisposed(t *testing.T) {
 		t.Errorf("RetryBlock: got %+v want one block for rev-update (Create fallback target)", rec.blockCalls)
 	}
 }
+
+// TestDispose_Terminal_SuppressesRepeatWarnForSameFailure: an instance stuck
+// oscillating on the SAME terminal reason (e.g. a same-target update whose
+// new-revision pod persistently CrashLoopBackOffs) must warn once, not on
+// every disposition. The warn is keyed on the prior LastFailure reason. (#850)
+func TestDispose_Terminal_SuppressesRepeatWarnForSameFailure(t *testing.T) {
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	c := fakeLedgerClient(t)
+	owner := ledgerOwnerCM()
+	deps := workload.Deps{Client: c, Clock: fc}
+	// MigrationMode unset → no relocation → pure Terminal backstop path.
+	dd := workload.DispositionDeps{}
+	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+
+	dispose := func(prior *workload.InstanceTermination) *dispositionRecorders {
+		insts := []workload.InstanceStatus{{
+			Index:       0,
+			Phase:       workload.InstancePhaseUpdating,
+			Operation:   &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+			LastFailure: prior,
+		}}
+		input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
+		if _, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff"); err != nil {
+			t.Fatalf("DisposeExpiredAttempt: %v", err)
+		}
+		return rec
+	}
+
+	// First disposition (no prior failure) → warn fires once.
+	if rec := dispose(nil); len(rec.warns) != 1 {
+		t.Fatalf("first dispose: got %d warns want 1", len(rec.warns))
+	}
+	// Repeat with the SAME prior terminal reason → suppressed (debounced).
+	if rec := dispose(&workload.InstanceTermination{Reason: "CrashLoopBackOff"}); len(rec.warns) != 0 {
+		t.Errorf("repeat dispose of same CrashLoopBackOff failure: got %d warns want 0 (debounced)", len(rec.warns))
+	}
+	// A DIFFERENT prior reason is a genuinely new failure → NOT suppressed.
+	if rec := dispose(&workload.InstanceTermination{Reason: "OOMKilled"}); len(rec.warns) != 1 {
+		t.Errorf("dispose with different prior reason: got %d warns want 1 (not debounced)", len(rec.warns))
+	}
+}
