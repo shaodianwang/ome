@@ -78,6 +78,12 @@ IMAGES = [
     # ome-scheduler: kube-scheduler + OMEGangPack. Separate Go module
     # under scheduler/; pure-Go static binary, no xet.
     ("ome-scheduler", "ome-scheduler", "dockerfiles/ome-scheduler.Dockerfile"),
+    # kind-ci: toolchain + baked kindest/node & busybox for the GKE-backed KIND
+    # step (integration-test-kind-gke) and the offline kind validation Job. The
+    # RC cluster is egress-restricted, so this is built on TW (has egress) and
+    # mirrored to prod ECR (which the cluster can pull); at run time nothing is
+    # fetched from a public registry. See dockerfiles/kind-ci.Dockerfile.
+    ("kind-ci", "kind-ci", "dockerfiles/kind-ci.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler"]
@@ -510,6 +516,11 @@ def cd_steps() -> str:
     for label, ecr_name, dockerfile in IMAGES:
         parts.append(_build_image_step(label, ecr_name, dockerfile))
         parts.append(_mirror_image_step(label, ecr_name))
+        # kind-ci is CI tooling, not a runtime image any chart stamps, so keep it
+        # out of the chart depends_on set — otherwise chart publishing would
+        # needlessly block on its (large, slow) build.
+        if label == "kind-ci":
+            continue
         image_keys.append(f"build-{label}")
         image_keys.append(f"mirror-{label}")
     for chart in CHARTS:
