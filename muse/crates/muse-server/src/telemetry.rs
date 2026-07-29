@@ -69,9 +69,17 @@ pub fn init_metrics(
         "muse_http_request_duration_seconds",
         "HTTP request latency in seconds"
     );
-    metrics::describe_gauge!(
-        "muse_metrics_refresh_duration_seconds",
-        "Duration of the last fleet metrics snapshot refresh in seconds"
+    metrics::describe_histogram!(
+        "muse_metrics_query_snapshot_duration_seconds",
+        "Query Gateway scoped metrics snapshot evaluation latency in seconds"
+    );
+    metrics::describe_counter!(
+        "muse_metrics_queries_total",
+        "Query Gateway requests by outcome"
+    );
+    metrics::describe_counter!(
+        "muse_metrics_cache_requests_total",
+        "Scoped metrics cache lookups by outcome"
     );
 
     // Histogram bucket rotation — required when using install_recorder.

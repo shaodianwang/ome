@@ -22,7 +22,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use kube::{Client, Resource};
+use kube::Resource;
 use ome_client::{
     informers::{InformerEvent, Prune, SharedInformerFactory},
     k8s_openapi::api::core::v1::{Node, Pod},
@@ -44,9 +44,6 @@ pub struct ClusterState {
     pub name: String,
     /// Apiserver `gitVersion` (e.g. "v1.35.6"), captured at connect time.
     pub version: String,
-    /// The cluster's kube client, retained past informer setup for the metrics
-    /// proxy (PromQL over the apiserver `services/proxy`). Cheap to clone (Arc).
-    pub client: Client,
     pub inference_services: Lister<InferenceService>,
     pub base_models: Lister<BaseModel>,
     pub serving_runtimes: Lister<ServingRuntime>,
@@ -170,7 +167,6 @@ pub struct ChangeSinks<'a> {
 pub fn build_cluster_state(
     name: String,
     version: String,
-    client: Client,
     factory: &SharedInformerFactory,
     ome: &HashSet<String>,
     changes: ChangeSinks<'_>,
@@ -271,7 +267,6 @@ pub fn build_cluster_state(
         ),
         name,
         version,
-        client,
         cache: CacheState::default(),
     };
     (state, readies)

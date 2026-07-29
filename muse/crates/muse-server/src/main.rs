@@ -175,7 +175,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         }),
         None => Vec::new(),
     };
-    let metrics_time_ranges = if config.prom_service.is_some() {
+    let metrics_time_ranges = if config.metrics_gateway_url.is_some() {
         config.metrics_time_ranges.clone().and_then(|ranges| {
             match config::validate_metrics_time_ranges_against_queries(&ranges, &metrics_queries) {
                 Ok(()) => Some(ranges),
@@ -192,6 +192,22 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         None
     };
     let metrics_queries = std::sync::Arc::new(metrics_queries);
+    let metrics_backend = match config.metrics_gateway_config() {
+        Ok(Some(gateway)) => {
+            match service::metrics::MetricsBackend::new(gateway, metrics_queries.clone()) {
+                Ok(backend) => Some(backend),
+                Err(err) => {
+                    tracing::error!(error = %err, "metrics gateway configuration invalid; metrics disabled");
+                    None
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(err) => {
+            tracing::error!(error = %err, "metrics gateway configuration incomplete; metrics disabled");
+            None
+        }
+    };
 
     let state = app_context::AppState::new(
         clusters,
@@ -201,15 +217,10 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         signal,
         chat,
         app_context::AppStateConfig {
-            prom: config.prom_service.clone(),
-            queries: metrics_queries,
+            metrics: metrics_backend,
             refresh: Duration::from_secs(config.metrics_refresh_secs),
             sse_keep_alive: config
                 .sse_keep_alive_secs
-                .map(|seconds| Duration::from_secs(seconds.get())),
-            query_concurrency: config.metrics_query_concurrency,
-            request_timeout: config
-                .metrics_request_timeout_secs
                 .map(|seconds| Duration::from_secs(seconds.get())),
             capacity_limits: rollup::CapacityLimits {
                 max_fragments: config.capacity_max_fragments,
@@ -275,7 +286,6 @@ async fn build_cluster(
     let (state, readies) = informers::build_cluster_state(
         cluster_ref.name.clone(),
         info.git_version.clone(),
-        client,
         &factory,
         &ome,
         informers::ChangeSinks {

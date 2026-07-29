@@ -59,6 +59,8 @@ export function Monitoring({
   metricsOn,
   policy,
   timeRanges,
+  selectedTimeRangeId,
+  onTimeRangeChange,
   loading,
   error,
   queryCount,
@@ -71,6 +73,8 @@ export function Monitoring({
   metricsOn: boolean;
   policy?: DashboardPolicy;
   timeRanges?: MetricsTimeRanges;
+  selectedTimeRangeId: string;
+  onTimeRangeChange: (id: string) => void;
   loading: boolean;
   error: string | null;
   queryCount: number;
@@ -78,7 +82,6 @@ export function Monitoring({
   updatedAt?: number;
   source?: MetricsSourceState;
 }) {
-  const [selectedTimeRangeId, setSelectedTimeRangeId] = useState("");
   const [selectedReplicaIdentity, setSelectedReplicaIdentity] = useState("");
   const activeTimeRange =
     timeRanges?.options.find((option) => option.id === selectedTimeRangeId) ??
@@ -95,7 +98,7 @@ export function Monitoring({
           value: option.id,
           label: option.label,
         }))}
-        onChange={setSelectedTimeRangeId}
+        onChange={onTimeRangeChange}
         accent
       />
     </div>
@@ -103,7 +106,7 @@ export function Monitoring({
   const metricsNotice = error ? (
     <DataNotice
       tone="warning"
-      title="Live metrics disconnected"
+      title="Metrics refresh failed"
       detail={`${updatedAt ? `Showing the snapshot from ${ago(updatedAt)}. ` : ""}${error}`}
     />
   ) : failedQueryCount > 0 ? (
@@ -127,17 +130,14 @@ export function Monitoring({
   }
   if (source && source.status !== "available" && !hasAnyServingData) {
     const unconfigured = source.status === "unconfigured";
-    const forbidden = source.error?.code === "prometheus_service_discovery_forbidden";
     return (
       <DataNotice
         tone={unconfigured ? "warning" : "danger"}
         title={unconfigured ? "Serving metrics are not configured" : "Serving metrics unavailable"}
         detail={
           unconfigured
-            ? `Prometheus Service ${source.target} is not configured in this cluster.`
-            : forbidden
-              ? `The cluster credential cannot read Prometheus Service ${source.target}.`
-              : `Muse could not validate Prometheus Service ${source.target}.`
+            ? "No metrics cluster ID is configured for this cluster."
+            : `Muse could not reach Query Gateway ${source.target}.`
         }
       />
     );
@@ -153,7 +153,7 @@ export function Monitoring({
       <DataNotice
         tone="danger"
         title="Serving metrics unavailable"
-        detail="No Prometheus query results were returned for this cluster."
+        detail="No Query Gateway results were returned for this cluster."
       />
     );
   }

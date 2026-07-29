@@ -41,7 +41,6 @@ pub fn routes() -> Router<AppState> {
         // Static metrics paths coexist with the `/v1/{kind}/{name}` catch-all below
         // (matchit prefers the static match), mirroring the `.../chat` route.
         .route("/v1/metrics", get(metrics::snapshot))
-        .route("/v1/metrics/stream", get(metrics::stream))
         .route("/v1/inferenceservices/{name}/chat", post(chat::proxy))
         .route("/v1/{kind}", get(resources::list_kind))
         .route("/v1/{kind}/{name}", get(resources::get_kind))

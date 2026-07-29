@@ -11,10 +11,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { api } from "./api";
 import type { EventItem, InvalidationEvent, MetricsSnapshot } from "./api";
-import { METRICS_STREAM_URL, STREAM_URL } from "./api";
-import { metricsTransportState } from "./dataState";
-import { createMetricsStream } from "./metricsStream";
-import type { MetricsEventSource } from "./metricsStream";
+import { STREAM_URL } from "./api";
 
 type ActivityListener = (event: EventItem) => void;
 type InvalidationListener = (event: InvalidationEvent) => void;
@@ -237,75 +234,63 @@ export function useEventFeed(limit = 60): {
 }
 
 // ---------------------------------------------------------------------------
-// Metrics: a second shared SSE connection carrying the full fleet metrics
-// snapshot, pushed by the server on each refresh. Separate from the resource
-// change stream above (different data, different cadence); one connection for the
-// whole app, and subscribers never poll.
+// Metrics: query only the active fleet/deployment scope. The server cache
+// coalesces identical requests and bounds Query Gateway concurrency.
 // ---------------------------------------------------------------------------
 
-const metricsStream = createMetricsStream(METRICS_STREAM_URL, {
-  createSource: (url) => new EventSource(url) as unknown as MetricsEventSource,
-  scheduleReconnect: (callback, delayMs) => {
-    const timer = setTimeout(callback, delayMs);
-    return () => clearTimeout(timer);
-  },
-});
-
-/**
- * Subscribe to the live fleet metrics snapshot. The server pushes a fresh snapshot
- * on each refresh, so there is no polling — the SSE payload *is* the data. Pass
- * `enabled=false` (e.g. metrics unconfigured) to skip the connection entirely.
- */
 export function useMetrics(
+  fetcher: () => Promise<MetricsSnapshot>,
   enabled = true,
-  reconnectSecs?: number,
+  refreshSecs?: number,
+  requestKey = "",
 ): {
   data: MetricsSnapshot | null;
   error: string | null;
   loading: boolean;
 } {
-  const [data, setData] = useState<MetricsSnapshot | null>(metricsStream.currentSnapshot());
-  const [fetchError, setFetchError] = useState<string | null>(null);
-  const [streamError, setStreamError] = useState<string | null>(null);
+  const [data, setData] = useState<MetricsSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
+
   useEffect(() => {
     if (!enabled) {
-      setFetchError(null);
-      setStreamError(null);
+      setData(null);
+      setError(null);
+      setLoading(false);
       return;
     }
     let alive = true;
-    metricsStream.configureReconnect(reconnectSecs);
-    // The SSE pushes the snapshot on connect and on every refresh — that's the live
-    // path. A one-time GET on mount is a fallback so metrics still show if a proxy
-    // drops the stream; it's served from the server's cached snapshot (no upstream
-    // cost) and there's no polling (mirrors useEventFeed: fetch once, then stream).
-    api
-      .metrics()
-      .then((s) => {
-        if (!alive) return;
-        metricsStream.publishSnapshot(s);
-        setFetchError(null);
-      })
-      .catch((e: unknown) => {
-        if (!alive) return;
-        setFetchError(e instanceof Error ? e.message : String(e));
-      });
-    const current = metricsStream.currentSnapshot();
-    if (current) setData(current);
-    const unsubscribe = metricsStream.subscribe({
-      onSnapshot: (snapshot) => {
-        if (!alive) return;
-        setData(snapshot);
-        setFetchError(null);
-      },
-      onStatus: (nextError) => {
-        if (alive) setStreamError(nextError);
-      },
-    });
+    let inFlight = false;
+    setData(null);
+    setError(null);
+    setLoading(true);
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      fetcherRef
+        .current()
+        .then((snapshot) => {
+          if (!alive) return;
+          setData(snapshot);
+          setError(null);
+        })
+        .catch((cause: unknown) => {
+          if (!alive) return;
+          setError(cause instanceof Error ? cause.message : String(cause));
+        })
+        .finally(() => {
+          inFlight = false;
+          if (alive) setLoading(false);
+        });
+    };
+    load();
+    const interval = refreshSecs ? setInterval(load, refreshSecs * 1000) : undefined;
     return () => {
       alive = false;
-      unsubscribe();
+      if (interval) clearInterval(interval);
     };
-  }, [enabled, reconnectSecs]);
-  return { data, ...metricsTransportState(data, fetchError, streamError, enabled) };
+  }, [enabled, refreshSecs, requestKey]);
+  return { data, error, loading };
 }

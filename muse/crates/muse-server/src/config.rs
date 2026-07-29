@@ -4,7 +4,7 @@
 //! Helm chart; local-development values live in `muse/config/dev.env`.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
@@ -26,6 +26,54 @@ pub struct ClusterRef {
     pub kubeconfig: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MetricsClusterId {
+    cluster: String,
+    id: String,
+}
+
+fn parse_metrics_cluster_id(spec: &str) -> Result<MetricsClusterId, String> {
+    let (cluster, id) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("expected cluster=ods-id, got '{spec}'"))?;
+    if cluster.trim().is_empty() || id.trim().is_empty() {
+        return Err(format!("expected cluster=ods-id, got '{spec}'"));
+    }
+    Ok(MetricsClusterId {
+        cluster: cluster.to_owned(),
+        id: id.to_owned(),
+    })
+}
+
+fn parse_metrics_gateway_url(spec: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(spec).map_err(|error| format!("invalid gateway URL: {error}"))?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err("metrics gateway URL must be an absolute HTTPS URL".to_owned());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("metrics gateway URL must not contain a query or fragment".to_owned());
+    }
+    if !url.path().ends_with('/') {
+        return Err("metrics gateway URL path must end with '/'".to_owned());
+    }
+    Ok(url)
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsGatewayConfig {
+    pub url: reqwest::Url,
+    pub ca_cert: Option<PathBuf>,
+    pub query_routing: u8,
+    pub cluster_ids: HashMap<String, String>,
+    pub query_concurrency: NonZeroUsize,
+    pub request_timeout: std::time::Duration,
+    pub cache_ttl: std::time::Duration,
+    pub cache_max_entries: NonZeroUsize,
+    pub max_response_bytes: usize,
+    pub max_series: NonZeroUsize,
+    pub max_scope_pods: NonZeroUsize,
+}
+
 fn parse_cluster(spec: &str) -> Result<ClusterRef, String> {
     let (name, path) = spec
         .split_once('=')
@@ -36,32 +84,6 @@ fn parse_cluster(spec: &str) -> Result<ClusterRef, String> {
     Ok(ClusterRef {
         name: name.to_owned(),
         kubeconfig: Some(PathBuf::from(path)),
-    })
-}
-
-/// A Prometheus the apiserver can proxy PromQL to: `namespace/name:port` (e.g.
-/// `ome/ome-prometheus:9090`). The metrics endpoint reaches it through the
-/// cluster's own kube client via the `services/proxy` subresource, so MUSE holds
-/// no Prometheus credential of its own.
-#[derive(Debug, Clone)]
-pub struct PromTarget {
-    pub namespace: String,
-    pub service: String,
-    pub port: u16,
-}
-
-fn parse_prom_target(spec: &str) -> Result<PromTarget, String> {
-    let err = || format!("expected namespace/name:port, got '{spec}'");
-    let (namespace, rest) = spec.split_once('/').ok_or_else(err)?;
-    let (service, port) = rest.split_once(':').ok_or_else(err)?;
-    if namespace.is_empty() || service.is_empty() {
-        return Err(err());
-    }
-    let port = port.parse().map_err(|_| format!("bad port in '{spec}'"))?;
-    Ok(PromTarget {
-        namespace: namespace.to_owned(),
-        service: service.to_owned(),
-        port,
     })
 }
 
@@ -96,6 +118,18 @@ fn parse_positive_usize(spec: &str) -> Result<usize, String> {
 fn parse_positive_nonzero_usize(spec: &str) -> Result<NonZeroUsize, String> {
     let value = parse_positive_usize(spec)?;
     NonZeroUsize::new(value).ok_or_else(|| format!("expected a positive integer, got '{spec}'"))
+}
+
+fn parse_query_routing(spec: &str) -> Result<u8, String> {
+    let value = spec
+        .parse::<u8>()
+        .map_err(|_| format!("expected a Query Gateway routing value from 0 to 4, got '{spec}'"))?;
+    if value > 4 {
+        return Err(format!(
+            "expected a Query Gateway routing value from 0 to 4, got '{spec}'"
+        ));
+    }
+    Ok(value)
 }
 
 fn parse_positive_float(spec: &str) -> Result<f64, String> {
@@ -182,9 +216,8 @@ fn parse_dashboard_policy(spec: &str) -> Result<DashboardPolicy, String> {
     Ok(policy)
 }
 
-/// Validate a `{ default, options: [{ id, label, seconds }] }` selector policy.
-/// `context` labels the failing knob (e.g. "metrics time-range") so both the
-/// metrics range selector and the log since selector share one validator.
+/// Validate a configured metrics range selector, including its per-range
+/// Query Gateway evaluation cadence.
 fn validate_time_options(context: &str, ranges: &MetricsTimeRanges) -> Result<(), String> {
     if ranges.default.trim().is_empty() {
         return Err(format!("{context} default must not be empty"));
@@ -207,6 +240,18 @@ fn validate_time_options(context: &str, ranges: &MetricsTimeRanges) -> Result<()
         if option.seconds == 0 {
             return Err(format!(
                 "{context} option '{}' must use positive seconds",
+                option.id
+            ));
+        }
+        if option.step_seconds == 0 {
+            return Err(format!(
+                "{context} option '{}' must use positive stepSeconds",
+                option.id
+            ));
+        }
+        if option.step_seconds > option.seconds {
+            return Err(format!(
+                "{context} option '{}' stepSeconds must not exceed its window",
                 option.id
             ));
         }
@@ -251,8 +296,15 @@ pub enum QueryType {
     Range,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryScope {
+    Fleet,
+    Deployment,
+}
+
 /// One dashboard metric: an id the console renders by, the PromQL to run, and — for
-/// range queries — the lookback window and step, both in seconds.
+/// range queries — the maximum lookback and minimum permitted step, in seconds.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct QueryDef {
     pub id: String,
@@ -260,6 +312,7 @@ pub struct QueryDef {
     pub kind: QueryType,
     pub window: Option<u64>,
     pub step: Option<u64>,
+    pub scopes: Vec<QueryScope>,
 }
 
 /// Load the dashboard query set from a JSON file (`{ "queries": [ … ] }`).
@@ -272,7 +325,26 @@ pub fn load_queries(path: &Path) -> anyhow::Result<Vec<QueryDef>> {
         .with_context(|| format!("read metrics queries file {}", path.display()))?;
     let file: QueriesFile = serde_json::from_str(&text)
         .with_context(|| format!("parse metrics queries file {}", path.display()))?;
+    let mut ids = HashSet::new();
     for query in &file.queries {
+        if query.id.trim().is_empty() || !ids.insert(query.id.as_str()) {
+            anyhow::bail!(
+                "metrics query IDs must be non-empty and unique: '{}'",
+                query.id
+            );
+        }
+        if query.scopes.is_empty() {
+            anyhow::bail!(
+                "metrics query '{}' must configure at least one scope",
+                query.id
+            );
+        }
+        if !query.promql.contains("{{cluster_id}}") {
+            anyhow::bail!("metrics query '{}' is missing {{cluster_id}}", query.id);
+        }
+        if !query.promql.contains("{{pod_matcher}}") {
+            anyhow::bail!("metrics query '{}' is missing {{pod_matcher}}", query.id);
+        }
         if matches!(query.kind, QueryType::Range)
             && (!matches!(query.window, Some(value) if value > 0)
                 || !matches!(query.step, Some(value) if value > 0))
@@ -286,7 +358,8 @@ pub fn load_queries(path: &Path) -> anyhow::Result<Vec<QueryDef>> {
     Ok(file.queries)
 }
 
-/// Ensure every configured UI range is fully represented by every range query.
+/// Ensure every configured UI range is fully represented by every range query
+/// and does not request a cadence finer than the catalog permits.
 /// The selector is optional, so callers can disable only it on an incompatible
 /// custom query catalog while retaining the full fetched metrics snapshot.
 pub fn validate_metrics_time_ranges_against_queries(
@@ -311,10 +384,10 @@ pub fn validate_metrics_time_ranges_against_queries(
         return Err("metrics time ranges require at least one range query".to_owned());
     };
     for option in &ranges.options {
-        if option.seconds < maximum_step {
+        if option.step_seconds < maximum_step {
             return Err(format!(
-                "metrics time-range option '{}' ({}s) is shorter than the largest query step ({}s)",
-                option.id, option.seconds, maximum_step
+                "metrics time-range option '{}' step ({}s) is shorter than the largest query minimum step ({}s)",
+                option.id, option.step_seconds, maximum_step
             ));
         }
         if option.seconds > minimum_window {
@@ -652,18 +725,39 @@ pub struct Config {
     #[arg(long = "chat-ca-cert", env = "MUSE_CHAT_CA_CERT")]
     pub chat_ca_cert: Option<String>,
 
-    /// Prometheus to proxy PromQL to, per cluster, as `namespace/name:port`
-    /// (e.g. `ome/ome-prometheus:9090`). Reached through each cluster's own kube
-    /// client via the apiserver `services/proxy` subresource — no separate
-    /// Prometheus credential. No baked default: unset ⇒ the `/v1/metrics/*`
-    /// endpoints are disabled and the console hides its metric panels. Supply it
-    /// via deployment config (flag / env / GitOps).
-    #[arg(long = "prom-service", env = "MUSE_PROM_SERVICE", value_parser = parse_prom_target)]
-    pub prom_service: Option<PromTarget>,
+    /// PromQL HTTP base URL, including its configured API prefix and a trailing
+    /// slash. No binary default; absent leaves external metrics disabled.
+    #[arg(
+        long = "metrics-gateway-url",
+        env = "MUSE_METRICS_GATEWAY_URL",
+        value_parser = parse_metrics_gateway_url
+    )]
+    pub metrics_gateway_url: Option<reqwest::Url>,
 
-    /// How often (seconds) the background refresher re-polls each cluster's
-    /// Prometheus for the dashboard query set and pushes a new snapshot to SSE
-    /// subscribers. One poll per interval regardless of how many consoles are open.
+    /// Optional PEM CA bundle used to verify the Query Gateway server identity.
+    #[arg(long = "metrics-gateway-ca-cert", env = "MUSE_METRICS_GATEWAY_CA_CERT")]
+    pub metrics_gateway_ca_cert: Option<PathBuf>,
+
+    /// Query Gateway backend routing value applied to every metrics request.
+    /// No binary default; the deployment must choose its metrics backend.
+    #[arg(
+        long = "metrics-query-routing",
+        env = "MUSE_METRICS_QUERY_ROUTING",
+        value_parser = parse_query_routing
+    )]
+    pub metrics_query_routing: Option<u8>,
+
+    /// Explicit MUSE cluster-name to metrics-backend cluster-ID mappings.
+    #[arg(
+        long = "metrics-cluster-id",
+        env = "MUSE_METRICS_CLUSTER_IDS",
+        value_delimiter = ',',
+        value_parser = parse_metrics_cluster_id
+    )]
+    pub metrics_cluster_ids: Vec<MetricsClusterId>,
+
+    /// How often (seconds) an active console view refetches its scoped metrics
+    /// snapshot. The server cache coalesces identical requests within its TTL.
     #[arg(
         long = "metrics-refresh-secs",
         env = "MUSE_METRICS_REFRESH_SECS",
@@ -671,11 +765,8 @@ pub struct Config {
     )]
     pub metrics_refresh_secs: u64,
 
-    /// Maximum number of in-flight Prometheus requests per MUSE replica, shared
-    /// across every workload cluster. This bounds both Service discovery and the
-    /// query catalog instead of spawning one task per cluster/query pair. The
-    /// deployment config owns the load/freshness tradeoff. No binary default:
-    /// absent preserves serial request execution.
+    /// Maximum number of in-flight Query Gateway requests per MUSE replica,
+    /// shared across every active scope and workload cluster.
     #[arg(
         long = "metrics-query-concurrency",
         env = "MUSE_METRICS_QUERY_CONCURRENCY",
@@ -683,18 +774,42 @@ pub struct Config {
     )]
     pub metrics_query_concurrency: Option<NonZeroUsize>,
 
-    /// Maximum seconds for one Service discovery or Prometheus proxy request.
-    /// A timed-out query becomes a per-query error; it does not hold the entire
-    /// snapshot refresh open indefinitely. The deployment config owns this value.
-    /// No binary default: absent waits for each request normally.
+    /// Maximum seconds for one Query Gateway request. A timeout becomes a
+    /// per-query error and does not fail inventory or successful queries.
     #[arg(
         long = "metrics-request-timeout-secs",
         env = "MUSE_METRICS_REQUEST_TIMEOUT_SECS"
     )]
     pub metrics_request_timeout_secs: Option<NonZeroU64>,
 
+    /// Seconds a completed scoped snapshot may be reused by this replica.
+    #[arg(long = "metrics-cache-ttl-secs", env = "MUSE_METRICS_CACHE_TTL_SECS")]
+    pub metrics_cache_ttl_secs: Option<NonZeroU64>,
+
+    /// Maximum distinct scoped snapshots retained by this replica.
+    #[arg(
+        long = "metrics-cache-max-entries",
+        env = "MUSE_METRICS_CACHE_MAX_ENTRIES"
+    )]
+    pub metrics_cache_max_entries: Option<NonZeroUsize>,
+
+    /// Maximum bytes accepted from one Query Gateway response.
+    #[arg(
+        long = "metrics-max-response-bytes",
+        env = "MUSE_METRICS_MAX_RESPONSE_BYTES"
+    )]
+    pub metrics_max_response_bytes: Option<NonZeroU64>,
+
+    /// Maximum result series accepted from one PromQL response.
+    #[arg(long = "metrics-max-series", env = "MUSE_METRICS_MAX_SERIES")]
+    pub metrics_max_series: Option<NonZeroUsize>,
+
+    /// Maximum unambiguous deployment pods admitted into one scoped query.
+    #[arg(long = "metrics-max-scope-pods", env = "MUSE_METRICS_MAX_SCOPE_PODS")]
+    pub metrics_max_scope_pods: Option<NonZeroUsize>,
+
     /// Deployment Monitoring range selector configuration as one JSON object:
-    /// `{ "default": "15m", "options": [{ "id", "label", "seconds" }] }`.
+    /// `{ "default": "15m", "options": [{ "id", "label", "seconds", "stepSeconds" }] }`.
     /// The deployment owns every option and the default. Unset keeps the full
     /// cached query range visible and omits the selector.
     #[arg(
@@ -704,10 +819,9 @@ pub struct Config {
     )]
     pub metrics_time_ranges: Option<MetricsTimeRanges>,
 
-    /// Path to the dashboard metrics query set: JSON `{ "queries": [ … ] }`, each
-    /// `{ id, promql, kind: "instant"|"range", window?, step? }`. No baked-in
-    /// queries — engine-specific metric names (e.g. sglang vs vllm) come from this
-    /// file, supplied per environment via deployment config. Unset ⇒ empty snapshot.
+    /// Path to the dashboard query set. Every entry declares its allowed
+    /// scopes and reserved cluster/pod placeholders. Engine and table
+    /// names remain deployment data rather than Rust constants.
     #[arg(long = "metrics-queries-file", env = "MUSE_METRICS_QUERIES_FILE")]
     pub metrics_queries_file: Option<PathBuf>,
 
@@ -744,6 +858,77 @@ impl Config {
 
     pub fn metrics_addr(&self) -> SocketAddr {
         SocketAddr::new(self.host, self.metrics_port)
+    }
+
+    /// Build the effective Query Gateway policy. Supplying an endpoint opts in;
+    /// every load-control value must then be explicit so the binary never invents
+    /// an operational limit.
+    pub fn metrics_gateway_config(&self) -> Result<Option<MetricsGatewayConfig>, String> {
+        let Some(url) = self.metrics_gateway_url.clone() else {
+            return Ok(None);
+        };
+        let required = |name: &str| {
+            format!("metrics gateway enabled without {name}; metrics will remain disabled")
+        };
+        let query_concurrency = self
+            .metrics_query_concurrency
+            .ok_or_else(|| required("MUSE_METRICS_QUERY_CONCURRENCY"))?;
+        let query_routing = self
+            .metrics_query_routing
+            .ok_or_else(|| required("MUSE_METRICS_QUERY_ROUTING"))?;
+        let request_timeout = self
+            .metrics_request_timeout_secs
+            .ok_or_else(|| required("MUSE_METRICS_REQUEST_TIMEOUT_SECS"))?;
+        let cache_ttl = self
+            .metrics_cache_ttl_secs
+            .ok_or_else(|| required("MUSE_METRICS_CACHE_TTL_SECS"))?;
+        if cache_ttl.get() < request_timeout.get() {
+            return Err(
+                "MUSE_METRICS_CACHE_TTL_SECS must be at least MUSE_METRICS_REQUEST_TIMEOUT_SECS"
+                    .to_owned(),
+            );
+        }
+        let cache_max_entries = self
+            .metrics_cache_max_entries
+            .ok_or_else(|| required("MUSE_METRICS_CACHE_MAX_ENTRIES"))?;
+        let max_response_bytes = self
+            .metrics_max_response_bytes
+            .ok_or_else(|| required("MUSE_METRICS_MAX_RESPONSE_BYTES"))?;
+        let max_response_bytes = usize::try_from(max_response_bytes.get())
+            .map_err(|_| required("a platform-sized MUSE_METRICS_MAX_RESPONSE_BYTES"))?;
+        let max_series = self
+            .metrics_max_series
+            .ok_or_else(|| required("MUSE_METRICS_MAX_SERIES"))?;
+        let max_scope_pods = self
+            .metrics_max_scope_pods
+            .ok_or_else(|| required("MUSE_METRICS_MAX_SCOPE_PODS"))?;
+
+        let mut cluster_ids = HashMap::new();
+        for mapping in &self.metrics_cluster_ids {
+            if cluster_ids
+                .insert(mapping.cluster.clone(), mapping.id.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate metrics cluster mapping for '{}'",
+                    mapping.cluster
+                ));
+            }
+        }
+
+        Ok(Some(MetricsGatewayConfig {
+            url,
+            ca_cert: self.metrics_gateway_ca_cert.clone(),
+            query_routing,
+            cluster_ids,
+            query_concurrency,
+            request_timeout: std::time::Duration::from_secs(request_timeout.get()),
+            cache_ttl: std::time::Duration::from_secs(cache_ttl.get()),
+            cache_max_entries,
+            max_response_bytes,
+            max_series,
+            max_scope_pods,
+        }))
     }
 
     /// The clusters to watch — the configured list, or the ambient config under
@@ -808,7 +993,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        load_queries, validate_metrics_time_ranges_against_queries, Config, QueryDef, QueryType,
+        load_queries, validate_metrics_time_ranges_against_queries, Config, QueryDef, QueryScope,
+        QueryType,
     };
 
     fn configured_args(chat_enabled: bool, allow_http: bool) -> Vec<String> {
@@ -912,6 +1098,15 @@ mod tests {
         assert_eq!(config.http_latency_buckets, [0.001, 0.1, 1.0]);
         assert_eq!(config.metrics_query_concurrency, None);
         assert_eq!(config.metrics_request_timeout_secs, None);
+        assert_eq!(config.metrics_gateway_url, None);
+        assert_eq!(config.metrics_gateway_ca_cert, None);
+        assert_eq!(config.metrics_query_routing, None);
+        assert!(config.metrics_cluster_ids.is_empty());
+        assert_eq!(config.metrics_cache_ttl_secs, None);
+        assert_eq!(config.metrics_cache_max_entries, None);
+        assert_eq!(config.metrics_max_response_bytes, None);
+        assert_eq!(config.metrics_max_series, None);
+        assert_eq!(config.metrics_max_scope_pods, None);
         assert_eq!(config.metrics_time_ranges, None);
         assert_eq!(config.cluster_refs().unwrap()[0].name, "test-cluster");
         assert!(config.dashboard_policy.is_none());
@@ -922,18 +1117,22 @@ mod tests {
         let config = parse_with(
             false,
             false,
-            &[r#"--metrics-time-ranges-json={"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"1h","label":"1h","seconds":3600}]}"#],
+            &[r#"--metrics-time-ranges-json={"default":"15m","options":[{"id":"15m","label":"15m","seconds":900,"stepSeconds":60},{"id":"1h","label":"1h","seconds":3600,"stepSeconds":60}]}"#],
         )
         .unwrap();
         let ranges = config.metrics_time_ranges.unwrap();
         assert_eq!(ranges.default, "15m");
         assert_eq!(ranges.options[0].seconds, 900);
+        assert_eq!(ranges.options[0].step_seconds, 60);
 
         for invalid in [
             r#"{"default":"15m","options":[]}"#,
-            r#"{"default":"missing","options":[{"id":"15m","label":"15m","seconds":900}]}"#,
-            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":0}]}"#,
-            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"15m","label":"other","seconds":3600}]}"#,
+            r#"{"default":"missing","options":[{"id":"15m","label":"15m","seconds":900,"stepSeconds":60}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":900}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":0,"stepSeconds":60}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":900,"stepSeconds":0}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":60,"stepSeconds":120}]}"#,
+            r#"{"default":"15m","options":[{"id":"15m","label":"15m","seconds":900,"stepSeconds":60},{"id":"15m","label":"other","seconds":3600,"stepSeconds":60}]}"#,
         ] {
             let arg = format!("--metrics-time-ranges-json={invalid}");
             assert!(
@@ -948,21 +1147,22 @@ mod tests {
         let config = parse_with(
             false,
             false,
-            &[r#"--metrics-time-ranges-json={"default":"15m","options":[{"id":"15m","label":"15m","seconds":900},{"id":"6h","label":"6h","seconds":21600}]}"#],
+            &[r#"--metrics-time-ranges-json={"default":"15m","options":[{"id":"15m","label":"15m","seconds":900,"stepSeconds":60},{"id":"6h","label":"6h","seconds":21600,"stepSeconds":300}]}"#],
         )
         .unwrap();
         let ranges = config.metrics_time_ranges.unwrap();
         let query = |id: &str, window: u64, step: u64| QueryDef {
             id: id.to_owned(),
-            promql: "up".to_owned(),
+            promql: "up{t=\"test\",cluster_id=\"{{cluster_id}}\"{{pod_matcher}}}".to_owned(),
             kind: QueryType::Range,
             window: Some(window),
             step: Some(step),
+            scopes: vec![QueryScope::Fleet, QueryScope::Deployment],
         };
 
         assert!(validate_metrics_time_ranges_against_queries(
             &ranges,
-            &[query("wide", 21_600, 300), query("dense", 43_200, 60)],
+            &[query("wide", 21_600, 60), query("dense", 43_200, 60)],
         )
         .is_ok());
         assert!(validate_metrics_time_ranges_against_queries(
@@ -1075,6 +1275,105 @@ mod tests {
     }
 
     #[test]
+    fn metrics_gateway_configuration_is_explicit_and_bounded() {
+        let config = parse_with(
+            false,
+            false,
+            &[
+                "--metrics-gateway-url=https://query.example/api/v1/",
+                "--metrics-gateway-ca-cert=/etc/muse/query-ca.pem",
+                "--metrics-query-routing=2",
+                "--metrics-cluster-id=cluster-a=123/us-east-2/cluster-a",
+                "--metrics-cluster-id=cluster-b=456/us-west-2/cluster-b",
+                "--metrics-query-concurrency=4",
+                "--metrics-request-timeout-secs=12",
+                "--metrics-cache-ttl-secs=20",
+                "--metrics-cache-max-entries=128",
+                "--metrics-max-response-bytes=8388608",
+                "--metrics-max-series=2000",
+                "--metrics-max-scope-pods=1000",
+            ],
+        )
+        .unwrap();
+        let gateway = config.metrics_gateway_config().unwrap().unwrap();
+
+        assert_eq!(gateway.url.as_str(), "https://query.example/api/v1/");
+        assert_eq!(gateway.query_routing, 2);
+        assert_eq!(
+            gateway.ca_cert.as_deref(),
+            Some(std::path::Path::new("/etc/muse/query-ca.pem"))
+        );
+        assert_eq!(gateway.cluster_ids["cluster-a"], "123/us-east-2/cluster-a");
+        assert_eq!(gateway.query_concurrency.get(), 4);
+        assert_eq!(gateway.request_timeout, Duration::from_secs(12));
+        assert_eq!(gateway.cache_ttl, Duration::from_secs(20));
+        assert_eq!(gateway.cache_max_entries.get(), 128);
+        assert_eq!(gateway.max_response_bytes, 8_388_608);
+        assert_eq!(gateway.max_series.get(), 2000);
+        assert_eq!(gateway.max_scope_pods.get(), 1000);
+    }
+
+    #[test]
+    fn metrics_gateway_requires_every_load_limit() {
+        let base = [
+            "--metrics-gateway-url=https://query.example/api/v1/",
+            "--metrics-query-routing=2",
+            "--metrics-query-concurrency=4",
+            "--metrics-request-timeout-secs=12",
+            "--metrics-cache-ttl-secs=20",
+            "--metrics-cache-max-entries=128",
+            "--metrics-max-response-bytes=8388608",
+            "--metrics-max-series=2000",
+            "--metrics-max-scope-pods=1000",
+        ];
+        for omitted in &base[1..] {
+            let args = base
+                .iter()
+                .copied()
+                .filter(|value| value != omitted)
+                .collect::<Vec<_>>();
+            let config = parse_with(false, false, &args).unwrap();
+            assert!(
+                config.metrics_gateway_config().is_err(),
+                "accepted missing {omitted}"
+            );
+        }
+
+        for flag in [
+            "metrics-cache-ttl-secs",
+            "metrics-cache-max-entries",
+            "metrics-max-response-bytes",
+            "metrics-max-series",
+            "metrics-max-scope-pods",
+        ] {
+            assert!(parse_with(false, false, &[&format!("--{flag}=0")]).is_err());
+        }
+        assert!(parse_with(
+            false,
+            false,
+            &["--metrics-gateway-url=http://query.example/api/v1/"]
+        )
+        .is_err());
+        let short_cache = parse_with(
+            false,
+            false,
+            &[
+                "--metrics-gateway-url=https://query.example/api/v1/",
+                "--metrics-query-routing=2",
+                "--metrics-query-concurrency=4",
+                "--metrics-request-timeout-secs=12",
+                "--metrics-cache-ttl-secs=5",
+                "--metrics-cache-max-entries=128",
+                "--metrics-max-response-bytes=8388608",
+                "--metrics-max-series=2000",
+                "--metrics-max-scope-pods=1000",
+            ],
+        )
+        .unwrap();
+        assert!(short_cache.metrics_gateway_config().is_err());
+    }
+
+    #[test]
     fn histogram_buckets_must_be_strictly_increasing() {
         let mut config = parse_with(false, false, &[]).unwrap();
         config.http_latency_buckets = vec![0.1, 0.1];
@@ -1098,7 +1397,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            r#"{"queries":[{"id":"instant","promql":"up","kind":"instant"}]}"#,
+            r#"{"queries":[{"id":"instant","promql":"up{t=\"test\",cluster_id=\"{{cluster_id}}\"{{pod_matcher}}}","kind":"instant","scopes":["fleet","deployment"]}]}"#,
         )
         .unwrap();
         let instant = load_queries(&path).unwrap();
@@ -1108,12 +1407,64 @@ mod tests {
 
         fs::write(
             &path,
-            r#"{"queries":[{"id":"range","promql":"up","kind":"range","window":0,"step":1}]}"#,
+            r#"{"queries":[{"id":"range","promql":"up{t=\"test\",cluster_id=\"{{cluster_id}}\"{{pod_matcher}}}","kind":"range","window":0,"step":1,"scopes":["fleet"]}]}"#,
         )
         .unwrap();
         let range = load_queries(&path);
         let _ = fs::remove_file(path);
         assert!(range.is_err());
+    }
+
+    #[test]
+    fn metrics_queries_require_scope_and_reserved_placeholders() {
+        let path = std::env::temp_dir().join(format!(
+            "muse-query-scope-config-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+
+        for invalid in [
+            r#"{"queries":[{"id":"missing-scopes","promql":"up{t=\"test\",cluster_id=\"{{cluster_id}}\"{{pod_matcher}}}","kind":"instant","scopes":[]}]}"#,
+            r#"{"queries":[{"id":"missing-cluster","promql":"up{t=\"test\"{{pod_matcher}}}","kind":"instant","scopes":["fleet"]}]}"#,
+            r#"{"queries":[{"id":"missing-deployment","promql":"up{t=\"test\",cluster_id=\"{{cluster_id}}\"}","kind":"instant","scopes":["deployment"]}]}"#,
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(load_queries(&path).is_err(), "accepted {invalid}");
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bundled_grafana_catalog_is_deployment_only_and_fully_scoped() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../charts/muse/files/metrics-queries.json");
+        let queries = load_queries(&path).unwrap();
+
+        assert_eq!(queries.len(), 25);
+        for query in queries {
+            assert!(
+                !query.promql.contains("t=\""),
+                "{} still contains an ODS table selector",
+                query.id
+            );
+            assert!(
+                query.promql.contains("{{cluster_id}}"),
+                "{} has no cluster scope",
+                query.id
+            );
+            assert!(
+                query.promql.contains("{{pod_matcher}}"),
+                "{} has no deployment scope",
+                query.id
+            );
+            assert_eq!(
+                query.promql.matches("{{cluster_id}}").count(),
+                query.promql.matches("cluster=\"{{cluster_id}}\"").count(),
+                "{} has a cluster placeholder outside a Grafana cluster selector",
+                query.id
+            );
+            assert_eq!(query.scopes, [QueryScope::Deployment]);
+        }
     }
 
     #[test]

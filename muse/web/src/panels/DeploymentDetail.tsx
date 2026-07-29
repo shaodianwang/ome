@@ -54,6 +54,7 @@ export function DeploymentDetail({
   metricIdentity: DeploymentMetricIdentity;
 }) {
   const [tab, setTab] = useState<TabId>("overview");
+  const [metricsRangeId, setMetricsRangeId] = useState("");
   const detail = useLive<IsvcDetail>(() => api.inferenceService(sel), {
     kinds: ["InferenceService"],
     throttleMs: 4_000,
@@ -62,10 +63,24 @@ export function DeploymentDetail({
   const feed = useEventFeed(200);
   const d = detail.data;
 
-  // This deployment's serving metrics (from the live snapshot; SSE-pushed).
+  // Query only this deployment. The server coalesces identical requests and
+  // applies the configured Query Gateway concurrency limit.
   const metricsOn = !!cfg.data?.metrics;
-  const metrics = useMetrics(metricsOn, cfg.data?.metricsRefreshSecs);
   const namespace = d?.namespace ?? sel.namespace;
+  const requestedRange = metricsRangeId || cfg.data?.metricsTimeRanges?.default;
+  const metricsEnabled = metricsOn && !!d && !!namespace && metricIdentity === "unambiguous";
+  const metrics = useMetrics(
+    () =>
+      api.metrics({
+        cluster: sel.cluster,
+        namespace,
+        inferenceservice: sel.name,
+        range: requestedRange,
+      }),
+    metricsEnabled,
+    cfg.data?.metricsRefreshSecs,
+    `${sel.cluster}|${namespace ?? ""}|${sel.name}|${requestedRange ?? ""}`,
+  );
   const m = isvcMetrics(
     metrics.data,
     sel.cluster,
@@ -194,6 +209,8 @@ export function DeploymentDetail({
                 metricsOn={metricsOn}
                 policy={cfg.data?.dashboardPolicy}
                 timeRanges={cfg.data?.metricsTimeRanges}
+                selectedTimeRangeId={metricsRangeId}
+                onTimeRangeChange={setMetricsRangeId}
                 loading={metrics.loading || !metricState.ready}
                 error={metrics.error}
                 queryCount={metricState.queryCount}

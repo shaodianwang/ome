@@ -52,6 +52,7 @@ from the placement planner rather than collapsed into a fabricated domain.
 | `GET /healthz` `/livez` `/readyz` | health |
 | `GET /v1/clusters` | registered clusters + per-cluster summary |
 | `GET /v1/capacity[?cluster=]` | fleet GPU allocatable/allocated/free, grouped by cluster / RDMA island / NVLink domain / instance type |
+| `GET /v1/metrics?cluster=&namespace=&inferenceservice=[&range=]` | cached Query Gateway metrics for one exact deployment; fleet scope is available only when the configured catalog declares safe fleet queries |
 | `GET /v1/{kind}[?cluster=]` | list a kind across clusters; each row tagged with `cluster` |
 | `GET /v1/{kind}/{name}[?raw=true][?cluster=][?namespace=]` | get one by full identity (projected view, or full object with `raw=true`); `namespace` disambiguates namespaced kinds |
 
@@ -66,3 +67,9 @@ escapes to the full object). But cross-resource analytics — GPU
 allocated-vs-allocatable (a Node × Pod join) and fleet roll-ups across clusters —
 live here because the frontend can't cheaply join thousands of pods or fan out to
 N clusters.
+
+Monitoring is the exception to the informer-only rule: it calls the configured
+PromQL Query Gateway on demand. The server owns the query catalog, safely expands
+only configured cluster identity and exact cached pod names, coalesces identical requests, and
+bounds upstream concurrency, timeout, response bytes, result series, and cache
+size. Missing metrics configuration never affects Kubernetes inventory.

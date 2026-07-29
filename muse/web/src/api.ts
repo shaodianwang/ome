@@ -348,6 +348,7 @@ export interface MetricsTimeRangeOption {
   id: string;
   label: string;
   seconds: number;
+  stepSeconds: number;
 }
 
 /** Available Monitoring windows and their explicit initial selection. */
@@ -366,7 +367,9 @@ export interface AppConfig {
   chatClientGraceSecs?: number;
   /** Whether the metrics proxy is configured server-side; panels hide when false. */
   metrics?: boolean;
-  /** Shared server refresh and terminal metrics-stream reconnect cadence. */
+  /** Whether the catalog can safely attribute fleet-wide metrics. */
+  fleetMetrics?: boolean;
+  /** Active-view metrics polling cadence. */
   metricsRefreshSecs?: number;
   dashboardPolicy?: DashboardPolicy;
   metricsTimeRanges?: MetricsTimeRanges;
@@ -395,8 +398,7 @@ export interface MetricsSourceState {
     httpStatus?: number;
   };
 }
-/** The fleet metrics snapshot: per cluster, per query id, a Prometheus result.
- *  Built server-side on a timer and pushed over `METRICS_STREAM_URL`. */
+/** A scoped metrics snapshot: per cluster, per query id, a Prometheus result. */
 export interface MetricsSnapshot {
   updatedAt: number;
   /** Shared Prometheus evaluation timestamp for every query in this snapshot. */
@@ -404,6 +406,13 @@ export interface MetricsSnapshot {
   clusters: Record<string, Record<string, PromResult>>;
   /** Per-cluster target discovery. Non-available sources have no query results. */
   sources?: Record<string, MetricsSourceState>;
+}
+
+export interface MetricsRequest {
+  cluster?: string;
+  namespace?: string;
+  inferenceservice?: string;
+  range?: string;
 }
 
 /** Minimal OpenAI-style chat completion response (only what the console reads). */
@@ -420,10 +429,6 @@ const at = (path: string) => BASE + path.replace(/^\//, "");
 
 /** SSE endpoint for named activity and query-invalidation events (see `live.ts`). */
 export const STREAM_URL = at("/v1/stream");
-
-/** SSE endpoint for the live metrics snapshot, pushed on each server-side refresh
- *  (see `useMetrics` in `live.ts`). The console subscribes once and never polls. */
-export const METRICS_STREAM_URL = at("/v1/metrics/stream");
 
 /**
  * Parse a response body as JSON, turning a non-JSON payload into a legible error
@@ -538,6 +543,16 @@ function resourcePath(ref: Selected): string {
   return `/v1/${RESOURCE_PLURALS[ref.kind]}/${enc(ref.name)}?${resourceParams(ref)}`;
 }
 
+function metricsPath(request: MetricsRequest): string {
+  const params = new URLSearchParams();
+  if (request.cluster) params.set("cluster", request.cluster);
+  if (request.namespace) params.set("namespace", request.namespace);
+  if (request.inferenceservice) params.set("inferenceservice", request.inferenceservice);
+  if (request.range) params.set("range", request.range);
+  const query = params.toString();
+  return `/v1/metrics${query ? `?${query}` : ""}`;
+}
+
 export const api = {
   clusters: () => getJSON<ClustersResp>("/v1/clusters"),
   capacity: () => getJSON<CapacityResp>("/v1/capacity"),
@@ -578,8 +593,8 @@ export const api = {
     ),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
-  // Latest fleet metrics snapshot (initial load; live updates arrive via SSE).
-  metrics: () => getJSON<MetricsSnapshot>("/v1/metrics"),
+  // Query or reuse one bounded fleet/deployment metrics scope.
+  metrics: (request: MetricsRequest = {}) => getJSON<MetricsSnapshot>(metricsPath(request)),
   chat: (ref: Selected, path: string, base: string, body: unknown, timeoutMs?: number) => {
     const sp = resourceParams(ref);
     sp.set("path", path);

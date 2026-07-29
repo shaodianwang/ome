@@ -114,36 +114,56 @@ config:
         issuerName: prodra
         name: "" # empty ⇒ derived <cluster>/<namespace>/<serviceAccount> from the release; set to override
         type: MKS_SERVICEACCOUNT
-  # Fleet metrics: muse-server proxies PromQL to each cluster's in-cluster
-  # Prometheus (via the apiserver services/proxy on that cluster's client — no
-  # separate credential) and pushes a snapshot to the console over SSE. Remote
-  # kubeconfig identities need get access to both services and services/proxy.
+  # On-demand monitoring through the shared PromQL Query Gateway. The
+  # endpoint, trust, cluster identity, cache, and overload policy are deployment
+  # config; muse-server has no compiled operational defaults.
   metrics:
-    enabled: true # false ⇒ no --prom-service; the console hides its metric panels
-    promService: ome/ome-prometheus:9090 # namespace/name:port, applied per cluster
-    refreshSecs: 15 # background poll and terminal metrics-SSE reconnect cadence
-    queryConcurrency: 8 # max in-flight discovery/PromQL requests per Muse replica
-    requestTimeoutSecs: 15 # deadline for each discovery/PromQL request
-    # Deployment Monitoring filters the already-fetched range in the browser; it
-    # never issues viewer-specific Prometheus queries. The selected window must be
-    # no shorter than every query step and no longer than every query window.
+    enabled: true
+    gatewayUrl: https://observability-query-gateway.fbinfra.net/api/v1/
+    queryRouting: 2 # Grafana Cloud native Prometheus metrics
+    # MKS injects this service-identity certificate chain. The path is explicit so
+    # non-MKS deployments can supply their own CA bundle instead.
+    gatewayCaCert: /var/facebook/x509_identities/combined.pem
+    # MUSE display cluster name -> metrics backend cluster ID. Missing entries produce one
+    # unconfigured source and no upstream query fan-out for that cluster.
+    clusterIds:
+      msl-cw-use2-1: 652086758864/us-east-2/msl-cw-use2-1
+      msl-cw-use2-2: 652086758864/us-east-2/msl-cw-use2-2
+      msl-cw-use2-dev-2: 652086758864/us-east-2/msl-cw-use2-dev-2
+      msl-gcp-usc1-1-tpu: msl-gcp-1-uwob1/us-central1/msl-gcp-usc1-1-tpu
+      msl-gcp-usc1-2-tpu: msl-gcp-1-uwob1/us-central1/msl-gcp-usc1-2-tpu
+    refreshSecs: 30 # active browser view refresh cadence
+    queryConcurrency: 4 # shared Query Gateway in-flight limit per MUSE replica
+    requestTimeoutSecs: 15
+    cacheTtlSecs: 30
+    cacheMaxEntries: 256
+    maxResponseBytes: 8388608
+    maxSeries: 5000
+    maxScopePods: 2000
+    # Each selected range supplies its Query Gateway lookback and evaluation step.
+    # stepSeconds must be at least every catalog query's minimum step and no larger
+    # than the range's seconds. Query Gateway currently accepts 60s granularity.
     timeRanges:
       default: 15m
       options:
         - id: 15m
           label: 15m
           seconds: 900
+          stepSeconds: 60
         - id: 1h
           label: 1h
           seconds: 3600
+          stepSeconds: 60
         - id: 6h
           label: 6h
           seconds: 21600
+          stepSeconds: 300
     queriesFile: /etc/muse/metrics/metrics-queries.json # mount path (internal)
     # Default query set ships from charts/muse/files/metrics-queries.json
     # (deployment ranges: router → sglang → vllm; engine replica diagnostics:
     # instant only). Override per environment with a list of
-    # { id, kind: instant|range, promql, window, step }.
+    # { id, kind: instant|range, promql, window, step }, where range-query step
+    # is the minimum cadence allowed for that expression.
     queries: []
   # jemalloc tuning (MALLOC_CONF). A background thread purges freed pages back to
   # the OS after a short decay, so RSS drops after the initial-list allocation
@@ -185,7 +205,6 @@ route:
     # then rewrites the request back to the full backend path.
     paths:
       - /v1/stream
-      - /v1/metrics/stream
   # Needed only if the backend Service is in a different namespace than the route
   # (it isn't here — both are in the release namespace).
   referenceGrant: false

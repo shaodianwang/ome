@@ -7,7 +7,6 @@ import {
   metricsHealth,
   metricsQueryIssue,
   metricsSourceIssues,
-  metricsTransportState,
   summarizeFleetIssues,
 } from "./dataState";
 
@@ -68,35 +67,6 @@ describe("loadClusterCapacity", () => {
     expect(result[1].capacityError).toBe("upstream unavailable");
     expect(result[2].status).toBe("failed");
     expect(result[2].cacheError).toBe("watcher stopped");
-  });
-});
-
-describe("metricsTransportState", () => {
-  const snapshot: MetricsSnapshot = { updatedAt: 123, clusters: {} };
-
-  it("keeps GET fallback failures separate from live-stream health", () => {
-    expect(metricsTransportState(snapshot, "GET failed", null, true)).toEqual({
-      error: null,
-      loading: false,
-    });
-    expect(metricsTransportState({ updatedAt: 0, clusters: {} }, "GET failed", null, true)).toEqual(
-      {
-        error: null,
-        loading: true,
-      },
-    );
-    expect(metricsTransportState(snapshot, null, "stream disconnected", true)).toEqual({
-      error: "stream disconnected",
-      loading: false,
-    });
-    expect(metricsTransportState(null, "GET failed", null, true)).toEqual({
-      error: "GET failed",
-      loading: false,
-    });
-    expect(metricsTransportState(null, null, null, true)).toEqual({
-      error: null,
-      loading: true,
-    });
   });
 });
 

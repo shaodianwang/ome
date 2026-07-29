@@ -1662,6 +1662,9 @@ pub struct MetricsTimeRangeOption {
     pub id: String,
     pub label: String,
     pub seconds: u64,
+    /// Query Gateway evaluation cadence for this window. Kept in deployment
+    /// configuration because supported granularity and cost are backend-specific.
+    pub step_seconds: u64,
 }
 
 /// The Deployment Monitoring range choices and their explicit initial selection.
@@ -1685,10 +1688,12 @@ pub struct ConfigResp {
     /// config rather than baked into the console.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_client_grace_secs: Option<u64>,
-    /// Whether the metrics proxy (`/v1/metrics/*` → a cluster's Prometheus) is
-    /// configured; the console hides its metric panels when false.
+    /// Whether the Query Gateway client is configured; the console hides
+    /// metric panels when false.
     pub metrics: bool,
-    /// Shared server refresh and terminal browser reconnect cadence.
+    /// Whether the catalog contains queries with safe fleet-wide attribution.
+    pub fleet_metrics: bool,
+    /// Active-view browser refresh cadence.
     pub metrics_refresh_secs: u64,
     /// Optional health classification policy. Omitted when no categories are
     /// configured, which tells the console to render neutral status.
@@ -1750,11 +1755,13 @@ mod tests {
             chat_timeout_secs: None,
             chat_client_grace_secs: None,
             metrics: true,
+            fleet_metrics: false,
             metrics_refresh_secs: 15,
             dashboard_policy: None,
             metrics_time_ranges: None,
         };
         let value = serde_json::to_value(response).expect("config response serializes");
         assert_eq!(value.get("metricsRefreshSecs"), Some(&Value::from(15)));
+        assert_eq!(value.get("fleetMetrics"), Some(&Value::Bool(false)));
     }
 }

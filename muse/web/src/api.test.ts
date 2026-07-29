@@ -12,6 +12,31 @@ function jsonResponse(value: unknown, status = 200): Response {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("resource identity requests", () => {
+  it("scopes metrics requests to the active fleet or deployment view", async () => {
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ clusters: {} })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.metrics({ cluster: "member-a", range: "15m" });
+    await api.metrics({
+      cluster: "member-b",
+      namespace: "team-a",
+      inferenceservice: "model-a",
+      range: "1h",
+    });
+
+    const fleet = new URL(fetch.mock.calls[0][0], "http://muse.test");
+    expect(fleet.pathname).toBe("/v1/metrics");
+    expect(fleet.searchParams.get("cluster")).toBe("member-a");
+    expect(fleet.searchParams.get("range")).toBe("15m");
+    expect(fleet.searchParams.has("namespace")).toBe(false);
+
+    const deployment = new URL(fetch.mock.calls[1][0], "http://muse.test");
+    expect(deployment.searchParams.get("cluster")).toBe("member-b");
+    expect(deployment.searchParams.get("namespace")).toBe("team-a");
+    expect(deployment.searchParams.get("inferenceservice")).toBe("model-a");
+    expect(deployment.searchParams.get("range")).toBe("1h");
+  });
+
   it("includes namespace for namespaced details and omits it for cluster-scoped details", async () => {
     const fetch = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
     vi.stubGlobal("fetch", fetch);

@@ -58,6 +58,9 @@ export function Fleet({
   openDeployments: (f: DepFilter) => void;
   openDeployment: (s: Selected) => void;
 }) {
+  const [fCluster, setFCluster] = useState("all");
+  const [fModel, setFModel] = useState("all");
+  const [fAccel, setFAccel] = useState("all");
   const clusters = useLive(api.clusters, {
     kinds: ["Cluster", "InferenceService", "Node"],
     throttleMs: 8_000,
@@ -76,12 +79,15 @@ export function Fleet({
   });
   const events = useEventFeed(30);
   const cfg = useLive(api.config, { kinds: [] });
-  const metricsOn = !!cfg.data?.metrics;
-  const metrics = useMetrics(metricsOn, cfg.data?.metricsRefreshSecs);
-
-  const [fCluster, setFCluster] = useState("all");
-  const [fModel, setFModel] = useState("all");
-  const [fAccel, setFAccel] = useState("all");
+  const metricsOn = !!cfg.data?.fleetMetrics;
+  const metricsCluster = fCluster === "all" ? undefined : fCluster;
+  const metricsRange = cfg.data?.metricsTimeRanges?.default;
+  const metrics = useMetrics(
+    () => api.metrics({ cluster: metricsCluster, range: metricsRange }),
+    metricsOn,
+    cfg.data?.metricsRefreshSecs,
+    `${metricsCluster ?? "all"}|${metricsRange ?? ""}`,
+  );
 
   // One scoping pass — the whole dashboard reads from `scope`, so the filter bar
   // re-scopes every panel together (deployments, rollouts, activity, capacity).
@@ -127,11 +133,11 @@ export function Fleet({
   const metricsTransportIssue: FleetNoticeIssue | null =
     metricsOn && metrics.error
       ? {
-          domain: "Metrics stream",
+          domain: "Metrics refresh",
           message:
             metricState.ready && scope.metrics
-              ? `${metrics.error.replace(/^Live metrics stream\s*/i, "")} Showing the snapshot from ${ago(scope.metrics.updatedAt)}`
-              : metrics.error.replace(/^Live metrics stream\s*/i, ""),
+              ? `${metrics.error} Showing the snapshot from ${ago(scope.metrics.updatedAt)}`
+              : metrics.error,
           tone: metricState.ready ? "warning" : "danger",
         }
       : null;

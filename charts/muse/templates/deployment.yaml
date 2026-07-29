@@ -95,10 +95,22 @@ spec:
             {{- end }}
             - name: MUSE_METRICS_REFRESH_SECS
               value: {{ .Values.config.metrics.refreshSecs | quote }}
+            {{- if .Values.config.metrics.enabled }}
             - name: MUSE_METRICS_QUERY_CONCURRENCY
               value: {{ .Values.config.metrics.queryConcurrency | quote }}
             - name: MUSE_METRICS_REQUEST_TIMEOUT_SECS
               value: {{ .Values.config.metrics.requestTimeoutSecs | quote }}
+            - name: MUSE_METRICS_CACHE_TTL_SECS
+              value: {{ .Values.config.metrics.cacheTtlSecs | quote }}
+            - name: MUSE_METRICS_CACHE_MAX_ENTRIES
+              value: {{ .Values.config.metrics.cacheMaxEntries | quote }}
+            - name: MUSE_METRICS_MAX_RESPONSE_BYTES
+              value: {{ .Values.config.metrics.maxResponseBytes | int64 | quote }}
+            - name: MUSE_METRICS_MAX_SERIES
+              value: {{ .Values.config.metrics.maxSeries | quote }}
+            - name: MUSE_METRICS_MAX_SCOPE_PODS
+              value: {{ .Values.config.metrics.maxScopePods | quote }}
+            {{- end }}
             - name: MUSE_CHAT_ENABLED
               value: {{ .Values.config.chat.enabled | quote }}
             {{- with .Values.config.chat.timeoutSecs }}
@@ -137,9 +149,23 @@ spec:
               value: {{ .Values.config.chat.tls.caCert | quote }}
             {{- end }}
             {{- if .Values.config.metrics.enabled }}
-            # Fleet metrics proxy → each cluster's Prometheus; query set mounted below.
-            - name: MUSE_PROM_SERVICE
-              value: {{ .Values.config.metrics.promService | quote }}
+            # On-demand PromQL through Query Gateway; query set mounted below.
+            - name: MUSE_METRICS_GATEWAY_URL
+              value: {{ .Values.config.metrics.gatewayUrl | quote }}
+            - name: MUSE_METRICS_QUERY_ROUTING
+              value: {{ .Values.config.metrics.queryRouting | quote }}
+            {{- with .Values.config.metrics.gatewayCaCert }}
+            - name: MUSE_METRICS_GATEWAY_CA_CERT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.metrics.clusterIds }}
+            {{- $clusterIds := list }}
+            {{- range $cluster, $id := . }}
+            {{- $clusterIds = append $clusterIds (printf "%s=%s" $cluster $id) }}
+            {{- end }}
+            - name: MUSE_METRICS_CLUSTER_IDS
+              value: {{ join "," $clusterIds | quote }}
+            {{- end }}
             - name: MUSE_METRICS_QUERIES_FILE
               value: {{ .Values.config.metrics.queriesFile | quote }}
             {{- with .Values.config.metrics.timeRanges }}

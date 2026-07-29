@@ -9,12 +9,11 @@ and exposes it through an existing Envoy Gateway — no nginx, no separate front
 - **Deployment** `muse-server` (API + UI) + **Service** (ClusterIP `:8080`, metrics `:9090`).
 - **Headless Service** `muse-api` for direct, server-to-server API access through
   the MKS HTTP frontend.
-- **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`;
-  metrics add `get` on `services` and `services/proxy` for discovery and queries.
+- **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`.
 - **HTTPRoute** on the shared Envoy Gateway, serving the console under `/muse` — the
   general route strips the prefix (`URLRewrite`), so muse-server serves at root.
-  Exact activity and metrics stream rules disable the Gateway request timeout
-  without removing that protection from REST or chat; set
+  The exact activity stream rule disables the Gateway request timeout without
+  removing that protection from REST, metrics, or chat; set
   `route.streams.requestTimeout: null` to omit those exact rules.
 - Optional **ReferenceGrant** and **CiliumNetworkPolicy**.
 
@@ -96,30 +95,43 @@ clusters:
     kubeconfigSecret: muse-kubeconfig-cw-use2-1
 ```
 
-When fleet metrics are enabled, each remote kubeconfig also needs `get` permission
-for core `services` and `services/proxy`. MUSE validates that the configured
-`config.metrics.promService` and port exist independently in every workload
-cluster before running the query catalog. A missing Service or port marks that
-cluster's metrics source unconfigured; a failed discovery read marks it unavailable.
-Both include a machine-readable code and target details, and skip the query catalog.
-Other resource and capacity views for that cluster remain available.
+Monitoring uses the configured PromQL Query Gateway with Grafana Cloud routing,
+independently of the workload-cluster kubeconfigs. Map each MUSE cluster name to
+its metrics identity:
 
-Metrics requests are bounded per Muse replica by
-`config.metrics.queryConcurrency`, and every Service discovery or PromQL call
-uses `config.metrics.requestTimeoutSecs` as its deadline. Tune the concurrency
-with the replica count and Prometheus capacity in mind; timed-out PromQL calls
-remain visible as individual query errors while the rest of the snapshot publishes.
-Both settings are optional outside the chart: without them, requests run serially
-and wait without a Muse-imposed deadline.
+```yaml
+config:
+  metrics:
+    gatewayUrl: https://observability-query-gateway.fbinfra.net/api/v1/
+    queryRouting: 2
+    gatewayCaCert: /var/facebook/x509_identities/combined.pem
+    clusterIds:
+      msl-cw-use2-1: 652086758864/us-east-2/msl-cw-use2-1
+      msl-cw-use2-2: 652086758864/us-east-2/msl-cw-use2-2
+      msl-cw-use2-dev-2: 652086758864/us-east-2/msl-cw-use2-dev-2
+      msl-gcp-usc1-1-tpu: msl-gcp-1-uwob1/us-central1/msl-gcp-usc1-1-tpu
+      msl-gcp-usc1-2-tpu: msl-gcp-1-uwob1/us-central1/msl-gcp-usc1-2-tpu
+```
 
-Deployment Monitoring range choices come from `config.metrics.timeRanges`. Muse
-still fetches each query's configured maximum `window` once per refresh and sends
-that shared cached snapshot to every console; changing the selector only filters
-the returned timestamps in the browser. Each option must be at least the largest
-configured query `step` and at most the smallest configured query `window`.
-Consequently, the bundled 5-minute step yields at most four samples in a 15-minute
-view. Lower the query-set `step` when an environment needs denser charts, accounting
-for the corresponding Prometheus evaluation and snapshot-size increase.
+A missing mapping marks only that cluster's metrics source unconfigured; its
+inventory, capacity, runtime, and activity views remain available. Workload
+kubeconfigs do not need `services` or `services/proxy` access for metrics.
+
+The bundled catalog queries Grafana Cloud native Prometheus metrics only for the
+active exact deployment scope. A future catalog can enable fleet scope only when
+its measurements expose safe deployment attribution. Identical requests are
+coalesced by the per-replica cache. `queryConcurrency`, `requestTimeoutSecs`,
+`cacheTtlSecs`, `cacheMaxEntries`, `maxResponseBytes`, and `maxSeries` bound load
+and memory; `maxScopePods` bounds one deployment's selector.
+Tune them with both the MUSE replica count and the shared Query Gateway budget in
+mind; 429 and 503 responses remain visible as query errors and are not retried
+immediately.
+
+Deployment Monitoring range choices come from `config.metrics.timeRanges`. The
+selected option's `seconds` and `stepSeconds` are sent to MUSE. The window can
+shorten but never expand a query's catalog `window`; the configured step must be
+no smaller than any catalog query's minimum `step` and no larger than its window.
+The bundled choices use `60s` for 15m and 1h, and `300s` for 6h.
 
 ## Inference test (chat)
 
@@ -167,14 +179,14 @@ the default policy and the server exposes the effective typed policy via
 
 ## Serving metric identity
 
-The bundled query set aggregates historical dashboard signals by
-`namespace,inferenceservice`, so deployments with the same name stay separate.
-Replica diagnostics are engine-only instant queries grouped by
-`namespace,inferenceservice,pod,component`; router signals remain deployment-level
-because a router request cannot be attributed to one engine pod. Keeping replica
-queries instant avoids returning a per-pod time series for the entire fleet on
-every refresh.
+MUSE resolves the exact deployment's pods from its informer cache, rejects
+ambiguous pod names, and inserts an anchored pod allowlist into every Query
+Gateway selector. Returned pod series are checked against that allowlist and
+enriched with namespace, InferenceService, and component labels from the same
+cache.
 
-The bundled OME Prometheus scrape config supplies all four labels. A custom
-Prometheus or PodMonitor pipeline must preserve them for exact deployment and
-replica selection.
+Every catalog selector carries the configured Grafana Cloud `cluster` identity
+and receives the exact pod matcher. Replica diagnostics group only by `pod`; the
+bundled catalog is
+deployment-only, so `/v1/config` reports `fleetMetrics: false` and the console
+hides unsupported fleet performance panels instead of issuing broad queries.

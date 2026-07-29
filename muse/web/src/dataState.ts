@@ -182,15 +182,3 @@ export function metricAvailable(snapshot: MetricsSnapshot | null, queryId: strin
 }
 
 /** Derive transport state without letting the GET fallback race the live stream. */
-export function metricsTransportState(
-  snapshot: MetricsSnapshot | null,
-  fetchError: string | null,
-  streamError: string | null,
-  enabled: boolean,
-): { error: string | null; loading: boolean } {
-  if (!enabled) return { error: null, loading: false };
-  const hasSnapshot = snapshot != null;
-  const ready = snapshot != null && snapshot.updatedAt > 0;
-  const error = streamError ?? (hasSnapshot ? null : fetchError);
-  return { error, loading: !ready && error == null };
-}

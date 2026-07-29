@@ -72,20 +72,6 @@ pub async fn serve(config: &Config, state: AppState) -> anyhow::Result<()> {
         }
     });
 
-    // Metrics: one poll of each cluster's Prometheus per interval (regardless of
-    // how many consoles are open), pushed to SSE subscribers. Only runs when a
-    // Prometheus target is configured; otherwise the snapshot stays empty.
-    if state.metrics_enabled() {
-        let ms = state.clone();
-        let interval = state.metrics_refresh_interval();
-        tokio::spawn(async move {
-            loop {
-                service::metrics::refresh(&ms).await;
-                tokio::time::sleep(interval).await;
-            }
-        });
-    }
-
     let app = build_app(state, config.web_dir.clone());
     let addr = config.api_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -118,10 +104,8 @@ async fn shutdown_signal(grace: Duration) {
         () = ctrl_c => tracing::info!("received Ctrl-C, shutting down"),
         () = terminate => tracing::info!("received SIGTERM, shutting down"),
     }
-    // Long-lived SSE streams (/v1/stream and /v1/metrics/stream)
-    // never close on their own, so axum's graceful drain would otherwise hang on
-    // them indefinitely. Arm a short hard deadline: let quick in-flight requests
-    // finish, then force-exit.
+    // The activity SSE stream never closes on its own, so Axum's graceful drain
+    // would otherwise hang on it indefinitely. Arm a short hard deadline.
     tokio::spawn(async move {
         tokio::time::sleep(grace).await;
         tracing::warn!("shutdown grace elapsed (open streams) — forcing exit");

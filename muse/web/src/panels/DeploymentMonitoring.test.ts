@@ -30,6 +30,8 @@ const baseProps = {
   error: null,
   queryCount: 1,
   failedQueryCount: 0,
+  selectedTimeRangeId: "",
+  onTimeRangeChange: () => {},
 };
 
 describe("Deployment Monitoring time range", () => {
@@ -40,8 +42,8 @@ describe("Deployment Monitoring time range", () => {
         timeRanges: {
           default: "full",
           options: [
-            { id: "recent", label: "Recent", seconds: 100 },
-            { id: "full", label: "Full history", seconds: 200 },
+            { id: "recent", label: "Recent", seconds: 100, stepSeconds: 10 },
+            { id: "full", label: "Full history", seconds: 200, stepSeconds: 20 },
           ],
         },
       }),
@@ -66,8 +68,8 @@ describe("Deployment Monitoring time range", () => {
         timeRanges: {
           default: "recent",
           options: [
-            { id: "recent", label: "Recent", seconds: 100 },
-            { id: "full", label: "Full history", seconds: 1_000 },
+            { id: "recent", label: "Recent", seconds: 100, stepSeconds: 10 },
+            { id: "full", label: "Full history", seconds: 1_000, stepSeconds: 20 },
           ],
         },
       }),
