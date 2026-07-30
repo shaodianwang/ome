@@ -46,13 +46,20 @@ cleanup_ome_clusters() {
 }
 trap cleanup_ome_clusters EXIT
 
-echo "--- docker preflight (dind sidecar) ---"
+echo "--- docker preflight: wait for the dind sidecar ---"
 command -v docker >/dev/null 2>&1 || { echo "FATAL: docker CLI missing from kind-ci image." >&2; exit 1; }
-if ! docker info >/dev/null 2>&1; then
-  echo "FATAL: no reachable Docker daemon. Expect a privileged docker:dind" >&2
-  echo "  sidecar reachable at DOCKER_HOST=${DOCKER_HOST:-<unset>}." >&2
-  exit 1
-fi
+# The dind sidecar starts in parallel with this container and takes a few
+# seconds to accept connections, so poll rather than checking once.
+i=0
+until docker info >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -gt 60 ]; then
+    echo "FATAL: no reachable Docker daemon after ~120s. Expect a privileged" >&2
+    echo "  docker:dind sidecar at DOCKER_HOST=${DOCKER_HOST:-<unset>}." >&2
+    exit 1
+  fi
+  sleep 2
+done
 docker version --format 'client {{.Client.Version}} / server {{.Server.Version}}'
 
 echo "--- load baked images into dind (no registry pulls) ---"

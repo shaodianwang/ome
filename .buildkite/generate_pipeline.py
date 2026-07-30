@@ -19,6 +19,7 @@ Environment variables read at runtime:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import textwrap
@@ -184,34 +185,68 @@ def _tw_docker_plugin(
 def _gke_kind_step() -> str:
     """Emit the sharded GKE-backed KIND step (final 2-space step indent).
 
-    Same omenative_coordination_kind suite as the parked TW
-    `integration-test-kind` step, but on a GKE cluster where kind boots
-    (real VMs / privileged dind → writable /proc/sys/net + ip_forward=1).
-    Buildkite `parallelism` fans it into N pods; each pod runs a disjoint
-    subset of the ~72 spec files (run_kind_tests_gke.sh partitions by
-    BUILDKITE_PARALLEL_JOB and selects with -ginkgo.focus-file). Appended
-    only when GKE_KIND_ENABLED (see the constant), so an absent queue
-    never blocks builds.
+    Runs the omenative_coordination_kind suite on a GKE agent-stack-k8s
+    queue where kind boots (privileged dind → writable /proc/sys/net +
+    ip_forward=1). Buildkite `parallelism` fans it into N pods; each runs a
+    disjoint subset of the ~72 spec files (run_kind_tests_gke.sh partitions
+    by BUILDKITE_PARALLEL_JOB and selects with -ginkgo.focus-file). Appended
+    only when GKE_KIND_ENABLED, so an absent queue never blocks builds.
 
-    No plugin block: the queue's agents supply the workload image
-    (golang:1.25-bookworm) and a privileged Docker daemon via the queue's
-    default pod spec — see .buildkite/README-gke-kind.md. The TW docker
-    plugin's identity/cert mounts are TW-host-specific and do not apply.
+    The step carries its own pod via the agent-stack-k8s `kubernetes` plugin
+    (podSpecPatch): container-0 runs the offline `kind-ci` image (baked Go +
+    Rust + module/cargo caches + kindest-node/fake-serving tarballs) with
+    DOCKER_HOST pointed at a privileged `dind` sidecar. This lets it run on a
+    shared queue (e.g. gke-tpu-v7x) without a dedicated controller. Both
+    images are on prod ECR (pulled by the node's creds). The test is fully
+    offline (GOPROXY=off, docker load from /images); only git checkout needs
+    egress, which the queue's controller already provides.
     """
+    kindci = "168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/kind-ci:latest"
+    dind = "168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/library/docker:28-dind"
+    # container-0 runs the offline kind-ci image against a privileged dind
+    # sidecar. The podSpecPatch is deeply nested, so build it as a dict and emit
+    # it as JSON (a subset of YAML) rather than hand-indenting a block scalar.
+    plugins = [
+        {
+            "kubernetes": {
+                "podSpecPatch": {
+                    "containers": [
+                        {
+                            "name": "container-0",
+                            "image": kindci,
+                            "env": [
+                                {"name": "DOCKER_HOST", "value": "tcp://localhost:2375"},
+                            ],
+                        },
+                        {
+                            "name": "dind",
+                            "image": dind,
+                            "securityContext": {"privileged": True},
+                            "env": [{"name": "DOCKER_TLS_CERTDIR", "value": ""}],
+                            "volumeMounts": [
+                                {"name": "docker-graph", "mountPath": "/var/lib/docker"},
+                            ],
+                        },
+                    ],
+                    "volumes": [{"name": "docker-graph", "emptyDir": {}}],
+                }
+            }
+        }
+    ]
     return (
         f'  - label: ":test_tube: Integration Tests (KIND on GKE)"\n'
         f'    key: "integration-test-kind-gke"\n'
         f"{_gh_status('integration-test-kind-gke', indent=4)}\n"
-        # soft_fail until this step has proven green on the live queue;
-        # flip to hard fail (and delete the parked TW integration-test-kind
-        # step) once it is. Kept alongside GKE_KIND_ENABLED so enabling the
-        # step doesn't immediately gate merges on a first, unproven run.
+        # soft_fail until proven green on the queue; flip off (and delete the
+        # parked TW integration-test-kind step) once it is. Paired with
+        # GKE_KIND_ENABLED so enabling doesn't immediately gate merges.
         f"    soft_fail: true\n"
         f"    parallelism: {GKE_KIND_PARALLELISM}\n"
-        f"    command: |\n"
-        f"      sh .buildkite/run_kind_tests_gke.sh\n"
         f"    agents:\n"
         f'      queue: "{GKE_QUEUE}"\n'
+        f"    command: |\n"
+        f"      sh .buildkite/run_kind_tests_gke.sh\n"
+        f"    plugins: {json.dumps(plugins)}\n"
     )
 
 
