@@ -23,6 +23,7 @@ type (
 	InstanceOperationType   = types.InstanceOperationType
 	InstanceOperation       = types.InstanceOperation
 	InstanceStatus          = types.InstanceStatus
+	InstanceMutation        = types.InstanceMutation
 	InstanceTermination     = types.InstanceTermination
 	Key                     = types.Key
 	ReconcileInput          = types.ReconcileInput
@@ -57,6 +58,7 @@ type (
 	RetryBlockDisposition   = types.RetryBlockDisposition
 	RetryPolicy             = types.RetryPolicy
 	ForceDeletePolicy       = types.ForceDeletePolicy
+	DispositionDeps         = types.DispositionDeps
 )
 
 const (

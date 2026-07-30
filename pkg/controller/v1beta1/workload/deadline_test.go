@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -13,8 +14,9 @@ import (
 // expireFixture wires a ReconcileInput whose MutateInstance applies the
 // callback to the local insts slice (mirroring the per-Instance status
 // the adapter would persist) and whose WarnInstanceFailed records the
-// last event + a fire count. Returns the input and pointers the test
-// asserts on.
+// last event + a fire count. ObservedState carries its own copy of
+// insts (the pre-write observation the escalation pass iterates).
+// Returns the input and pointers the test asserts on.
 func expireFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *[]workload.InstanceStatus, *struct {
 	idx    int32
 	reason string
@@ -42,7 +44,29 @@ func expireFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *[
 			event.count++
 		},
 	}
+	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
 	return input, &store, &event
+}
+
+// runEscalationPass drives the workload escalation pass with
+// pre-bucketed pods, mirroring how Reconcile invokes it at the end of
+// the pass pipeline. Instances come from input.ObservedState; the
+// stuck-pod grace from input.StuckPodGrace; the disposition config from
+// input.Disposition + plan.MigrationMode; desired pod counts from
+// plan.Instances.
+func runEscalationPass(t *testing.T, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, byIdx map[int32][]*corev1.Pod) error {
+	t.Helper()
+	return workload.EscalateFromEvidenceForTest(context.Background(), deps, input, plan, nil,
+		workload.SnapshotWithPodsForTest(input, byIdx))
+}
+
+// singleInstancePlan returns a ComponentPlan whose desired pod count for
+// instance idx is pods — the DesiredPodCountByInstance input the pass
+// derives disposable-vs-gang routing from.
+func singleInstancePlan(idx, pods int32) workload.ComponentPlan {
+	return workload.ComponentPlan{
+		Instances: []workload.InstancePlan{{Index: idx, Runners: []workload.RunnerPlan{{Name: "default", Size: pods}}}},
+	}
 }
 
 // TestExpireOperations_ExpiredDeadlineFailsInstance pins the gang-path
@@ -68,8 +92,8 @@ func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := (*store)[0]
@@ -105,8 +129,8 @@ func TestExpireOperations_NotYetExpiredUntouched(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if (*store)[0].Phase != workload.InstancePhaseUpdating {
@@ -132,8 +156,8 @@ func TestExpireOperations_ZeroDeadlineNeverExpires(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if (*store)[0].Phase != workload.InstancePhaseCreating {
@@ -167,9 +191,10 @@ func TestExpireOperations_AlreadyFailedNoOp(t *testing.T) {
 			t.Errorf("WarnInstanceFailed must not fire on an already-Failed Instance")
 		},
 	}
+	input.ObservedState.InstanceStatuses = insts
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 	if mutated {
 		t.Errorf("MutateInstance must not be called for an already-Failed Instance")
@@ -189,8 +214,8 @@ func TestExpireOperations_TerminalPhaseUntouched(t *testing.T) {
 			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationDelete, Deadline: expired},
 		}}
 		input, store, event := expireFixture(insts)
-		if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-			t.Fatalf("ExpireOperationsIfDeadlinePassed(%s): %v", phase, err)
+		if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+			t.Fatalf("escalation pass (%s): %v", phase, err)
 		}
 		if (*store)[0].Phase != phase {
 			t.Errorf("phase %s: got %q want untouched", phase, (*store)[0].Phase)
@@ -240,8 +265,8 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 	}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if got := (*store)[0]; got.Phase != workload.InstancePhaseMigrating || got.Operation == nil {
@@ -260,8 +285,8 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 func TestExpireOperations_NoOperationUntouched(t *testing.T) {
 	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseUpdating}}
 	input, store, event := expireFixture(insts)
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: insts}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 	if (*store)[0].Phase != workload.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (no operation)", (*store)[0].Phase)

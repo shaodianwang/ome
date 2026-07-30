@@ -17,87 +17,6 @@ import (
 // ("pod stuck in CrashLoopBackOff").
 const DeadlineExceededReason = "DeadlineExceeded"
 
-// ExpireOperationsIfDeadlinePassed walks every InstanceStatus and fails
-// any whose in-flight Operation.Deadline has elapsed. It is the broad
-// backstop for InstanceReadyTimeout: the per-op writers stamp
-// Operation.Deadline = StartedAt + InstanceReadyTimeout when they begin
-// a Create / Update / Restart, and this consumer reads it back and
-// escalates the Instance to Phase=Failed once the deadline passes.
-//
-// Migrate Operations are NOT expired here — neither the source
-// (Phase=Migrating) nor the surge (Phase=Creating + Migrate op). A
-// migration's timeout authority is the owner's status.migrations
-// record: the dispatcher's migration-expiry pass consumes the record's
-// Deadline, tears the surge down, and restores the source phase from
-// observation. Stamping either side Failed here would mark a healthy
-// serving source Failed while the record keeps driving the pair.
-//
-// Relationship to EscalateStuckPodFailures: both backstops converge on
-// Phase=Failed, but they cover different wedges.
-//
-//   - EscalateStuckPodFailures is the FAST path: a pod stuck in a
-//     terminal kubelet waiting state (CrashLoopBackOff, ImagePullBackOff,
-//     ...) fails the Instance after the configured grace period.
-//   - ExpireOperationsIfDeadlinePassed is the BROAD path: any operation
-//     that never converges — a perpetually-Pending gang, a run-then-crash
-//     loop the kubelet never parks in a terminal waiting reason — fails
-//     once InstanceReadyTimeout (default 30m) elapses.
-//
-// They don't fight: the idempotency guard skips an already-Failed
-// Instance, so whichever fires first wins and the other no-ops.
-//
-// Only transient-phase Instances (Creating / Updating / Restarting /
-// Migrating) with a non-zero Deadline are eligible. Terminal phases
-// (Ready / Failed / Deleting) and the zero Deadline (unset → "never
-// expires") are skipped.
-//
-// Instances with a disposable in-flight attempt (single-pod-updateable
-// Create/Update Operations — see disposableAttempt) route through
-// DisposeExpiredAttempt instead of the bare stamp; gang Update attempts
-// keep the Failed-preserving-Operation stamp (the gang abandon path
-// consumes the continuation), and Restart expiries are unchanged.
-// Reads p.PodsByIndex (via podsForStuckCheck, so a gang
-// surge's replacement pods attribute to the source) and
-// p.DesiredPodsByIndex for the routing; p.StuckPodGrace is not
-// consulted here.
-//
-// Adapter-agnostic, mirroring EscalateStuckPodFailures: writes
-// Phase=Failed via input.MutateInstance, emits the operator-facing event
-// via input.WarnInstanceFailed.
-func ExpireOperationsIfDeadlinePassed(ctx context.Context, deps Deps, input ReconcileInput, p EscalationParams) error {
-	now := input.Now()
-	for _, s := range p.Instances {
-		// Migrate pairs are owned by the status.migrations record —
-		// the migration-expiry pass consumes their deadline, never this
-		// backstop.
-		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
-			continue
-		}
-		if !operationDeadlinePassed(&s, now) {
-			continue
-		}
-		// Idempotent: skip the mutate when already Failed so the
-		// operator-facing event fires exactly once per escalation.
-		if s.Phase == InstancePhaseFailed {
-			continue
-		}
-		op := s.Operation
-		desired := DesiredFor(p.DesiredPodsByIndex, s.Index, s.PodCount)
-		if disposableAttempt(&s, desired) {
-			pods := podsForStuckCheck(s, p.PodsByIndex)
-			if _, err := DisposeExpiredAttempt(ctx, deps, input, p.Disposition, s, pods, deadlineFailureMessage(op)); err != nil {
-				return fmt.Errorf("dispose expired attempt (instance=%d): %w", s.Index, err)
-			}
-			continue
-		}
-		if err := stampInstanceFailedForDeadline(ctx, input, s.Index, now, op); err != nil {
-			return fmt.Errorf("stamp Phase=Failed after deadline (instance=%d): %w", s.Index, err)
-		}
-		input.WarnInstanceFailed(s.Index, "", deadlineFailureMessage(op))
-	}
-	return nil
-}
-
 // operationDeadlinePassed reports whether s is in a transient phase with
 // an in-flight Operation whose Deadline lies in the past. A zero
 // Deadline (the metav1.Time zero value) is treated as "never expires" so
@@ -143,11 +62,12 @@ func PodAdmissionGated(pod *corev1.Pod) bool {
 // ReconcileGatedDeadlines keeps InstanceReadyTimeout measured from
 // admission, not from operation start, so a workload an external admission
 // authority (e.g. Kueue) legitimately holds queued is not failed by the
-// deadline backstop. It runs BEFORE ExpireOperationsIfDeadlinePassed.
+// deadline backstop (the escalation pass additionally skips gated
+// Instances outright, covering the window before a gate-enter is parked).
 //
 // For each transient-phase Instance with an in-flight Operation:
 //   - gated  -> PARK: zero the deadline (the "never expires" sentinel
-//     ExpireOperationsIfDeadlinePassed already honors). The clock pauses.
+//     the deadline predicate already honors). The clock pauses.
 //   - un-gated with a parked (zero) deadline -> RESTART: now+timeout. The
 //     clock starts from admission.
 //   - un-gated with a live (non-zero) deadline -> untouched, so the
@@ -203,21 +123,27 @@ func deadlineFailureMessage(op *InstanceOperation) string {
 	return fmt.Sprintf("%s: %s/%s exceeded InstanceReadyTimeout", DeadlineExceededReason, op.Type, op.Step)
 }
 
-// stampInstanceFailedForDeadline escalates Phase to Failed via
-// input.MutateInstance and records the DeadlineExceeded diagnostic on
-// LastFailure. Mirrors StampInstanceFailedForStuckPod's guard logic: a
-// fresh-empty slot (Phase=="") from MutateInstance's append path is a
+// deadlineFailedMutation builds the Phase=Failed stamp for an elapsed
+// Operation deadline, recording the DeadlineExceeded diagnostic on
+// LastFailure. Mirrors stuckPodFailedMutation's guard logic: a
+// fresh-empty slot (Phase=="") from the writer's append path is a
 // sentinel for a slot deleted out from under us (don't resurrect), an
 // already-Failed slot is a no-op, and any other phase flips to Failed.
+// A slot whose Operation is already gone is also a no-op: the attempt
+// concluded (or was disposed) since the deadline was observed, so there
+// is nothing in flight left to expire.
 //
 // The Operation is preserved — operators want to see WHAT was in flight
 // when the deadline elapsed.
-func stampInstanceFailedForDeadline(ctx context.Context, input ReconcileInput, idx int32, now time.Time, op *InstanceOperation) error {
-	return input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
+func deadlineFailedMutation(now time.Time, op *InstanceOperation) func(*InstanceStatus) bool {
+	return func(s *InstanceStatus) bool {
 		if s.Phase == "" {
 			return false
 		}
 		if s.Phase == InstancePhaseFailed {
+			return false
+		}
+		if s.Operation == nil {
 			return false
 		}
 		s.Phase = InstancePhaseFailed
@@ -227,5 +153,5 @@ func stampInstanceFailedForDeadline(ctx context.Context, input ReconcileInput, i
 			Time:    metav1.NewTime(now),
 		}
 		return true
-	})
+	}
 }

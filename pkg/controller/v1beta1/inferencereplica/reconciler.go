@@ -285,7 +285,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// escalation is disabled and wedged teardowns are left alone.
 	forceDeletePolicy := r.resolveForceDeletePolicy(log)
 
-	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy)
+	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, stuckPodGrace, autoMigrateBudget)
 
 	// Relocation-directive memory: prune AutoRecover ledger records for
 	// instances observed Ready (the success-prune mirror of the
@@ -330,7 +330,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if input.DesiredSpec.Paused {
 		// A paused pass only parks deadlines; the timeout is used solely when
 		// rearming during the normal aggregate path after unpause.
-		if derr := r.reconcileHeldDeadlines(ctx, ir, parent, nil, true, 0); derr != nil {
+		if derr := r.reconcileHeldDeadlines(ctx, ir, nil, true, 0); derr != nil {
 			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: park paused operation deadlines: %w", derr)
 		}
 	}
@@ -393,7 +393,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// workload is paused. A live-read or PodGroup error must not bypass that
 	// circuit-breaker bookkeeping.
 	defer func() {
-		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget, stuckPodGrace, retryPolicy, autoMigrateBudget); serr != nil {
+		// CurrentRevision promotion: component-level revision rollup against
+		// the SPEC target (paired with the aggregator's UpdateRevision stamp;
+		// coordination reads their skew as RolloutInFlight, and canary
+		// rollback resolves stable revisions assuming CurrentRevision names
+		// the last fully-rolled-forward revision). Runs before the aggregator
+		// so the Ready condition below observes the promoted value. Conflict
+		// tolerance matches the aggregator: requeue, don't error.
+		if specTarget != nil {
+			if perr := buildPromoteCurrentRevision(r.Client, ir)(ctx, specTarget.Name); perr != nil {
+				if err == nil {
+					if apierrors.IsConflict(perr) {
+						result, err = ctrl.Result{Requeue: true}, nil
+						return
+					}
+					result = ctrl.Result{}
+					err = fmt.Errorf("InferenceReplica reconciler: promote current revision: %w", perr)
+					return
+				}
+				log.V(1).Error(perr, "CurrentRevision promotion also failed; primary error preserved")
+			}
+		}
+		if serr := r.aggregateAndWriteStatus(ctx, ir, plan, specTarget); serr != nil {
 			if err == nil {
 				if apierrors.IsConflict(serr) {
 					result, err = ctrl.Result{Requeue: true}, nil

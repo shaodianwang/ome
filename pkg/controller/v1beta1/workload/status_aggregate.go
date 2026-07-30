@@ -7,7 +7,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
@@ -479,38 +478,6 @@ func (c InstanceCounters) String() string {
 		c.PodCount, c.ReadyPodCount, c.ServingPodCount, c.ScheduledPodCount, c.AvailablePodCount, c.NodesOccupied)
 }
 
-// EscalationParams bundles the inputs the two terminal-failure
-// backstops (EscalateStuckPodFailures, ExpireOperationsIfDeadlinePassed)
-// share.
-//
-// Instances is observed AFTER any retry-loop status commit has
-// landed. PodsByIndex is the per-Instance pod bucket the caller
-// already computed for counters. CurrentRevisionHash is the
-// ControllerRevision-name suffix (empty hash suppresses the wedged
-// branch; nothing has been promoted yet). RevisionHashLabel is the
-// adapter-specific pod-label key holding the per-pod revision hash.
-// StuckPodGrace is the wait window before fast escalation; a zero or
-// negative value disables fast escalation this pass (the
-// InstanceReadyTimeout backstop still fires).
-//
-// DesiredPodsByIndex maps Instance index → planned pod count
-// (DesiredPodCountByInstance) so the escalators can tell single-pod
-// attempts (deadline-disposition territory) from gang updates (which
-// keep the Failed-with-Operation continuation the abandon path
-// consumes); a missing entry falls back to the observed PodCount.
-// Disposition carries the operator-config inputs the disposition
-// branches on; the zero value fails safe (no relocation, terminal
-// branch for non-workload-caused failures).
-type EscalationParams struct {
-	Instances           []InstanceStatus
-	PodsByIndex         map[int32][]*corev1.Pod
-	CurrentRevisionHash string
-	RevisionHashLabel   string
-	StuckPodGrace       time.Duration
-	DesiredPodsByIndex  map[int32]int32
-	Disposition         DispositionDeps
-}
-
 // disposableAttempt reports whether s's in-flight attempt is owned by
 // the deadline disposition (DisposeExpiredAttempt) rather than the
 // plain Failed-preserving-Operation stamp.
@@ -548,81 +515,6 @@ func disposableAttempt(s *InstanceStatus, desiredPods int32) bool {
 	default:
 		return false
 	}
-}
-
-// EscalateStuckPodFailures walks every InstanceStatus and escalates to
-// Phase=Failed when one of two conditions holds:
-//
-//  1. (Transient-phase path) The Instance has an in-flight Operation AND
-//     its Phase is one of {Creating, Updating, Restarting, Migrating}
-//     AND at least one of its pods has been in a terminal kubelet
-//     waiting state past the configured grace period.
-//
-//  2. (Wedged-pod recovery path) The Instance has at least one pod
-//     whose revision-hash label disagrees with CurrentRevisionHash AND
-//     that pod is stuck past the grace window. Catches the post-surge
-//     cluster shape where the per-Instance state machine has been
-//     reset out of the transient phase set but a real wedged surge
-//     pod still exists.
-//
-// Idempotent: a second pass on an already-Failed Instance is a no-op
-// (no status write, no event). The coordination layer sees the
-// Phase=Failed flip on the next read and lifts it to Component.Failed
-// → group Phase=Failed.
-//
-// A zero or negative StuckPodGrace disables fast escalation this pass;
-// returns nil early (the InstanceReadyTimeout backstop still fires).
-//
-// Instances with a disposable in-flight attempt (single-pod-updateable
-// Create/Update Operations — see disposableAttempt) route through
-// DisposeExpiredAttempt instead of the bare stamp; gang Update
-// attempts and everything else keep the Failed-preserving-Operation
-// stamp (the gang abandon path consumes the continuation).
-//
-// Adapter-agnostic by construction: writes Phase=Failed via
-// input.MutateInstance, emits the operator-facing event via
-// input.WarnInstanceFailed. The ISVC adapter wires both behind
-// status.MutateInstance / status.RecordWarning; the IR adapter wires
-// its own equivalents.
-func EscalateStuckPodFailures(ctx context.Context, deps Deps, input ReconcileInput, p EscalationParams) error {
-	if p.StuckPodGrace <= 0 {
-		return nil
-	}
-	now := input.Now()
-	for _, s := range p.Instances {
-		pods := podsForStuckCheck(s, p.PodsByIndex)
-		if !ShouldCheckForStuckPods(&s, pods, p.CurrentRevisionHash, p.RevisionHashLabel) {
-			continue
-		}
-		stuckPod, reason := FirstStuckPodForInstance(pods, now, p.StuckPodGrace)
-		if stuckPod == nil {
-			continue
-		}
-		// Idempotent: skip the mutate when already at Phase=Failed so
-		// the operator-facing event fires exactly once per escalation.
-		if s.Phase == InstancePhaseFailed {
-			continue
-		}
-		desired := DesiredFor(p.DesiredPodsByIndex, s.Index, s.PodCount)
-		if disposableAttempt(&s, desired) {
-			if _, err := DisposeExpiredAttempt(ctx, deps, input, p.Disposition, s, pods, reason); err != nil {
-				return fmt.Errorf("dispose stuck attempt (instance=%d): %w", s.Index, err)
-			}
-			continue
-		}
-		// Preserve the stuck pod's diagnostics into LastFailure alongside
-		// the Phase=Failed flip — the escalation is followed by a recreate
-		// (or operator teardown) that deletes the wedged pod, so this is
-		// the surviving trace. `reason` is the live waiting-state reason the
-		// classifier matched; PodTerminationWithReason fills in container /
-		// exit-code detail when present and falls back to the bare reason.
-		termination := PodTerminationWithReason(stuckPod, reason, metav1.NewTime(now))
-		if err := StampInstanceFailedForStuckPod(ctx, input, s.Index, termination); err != nil {
-			return fmt.Errorf("stamp Phase=Failed (instance=%d): %w", s.Index, err)
-		}
-		input.WarnInstanceFailed(s.Index, stuckPod.Name, reason)
-	}
-	return nil
 }
 
 // podsForStuckCheck returns the pods whose stuck state should escalate s.
@@ -687,21 +579,21 @@ func ShouldCheckForStuckPods(s *InstanceStatus, pods []*corev1.Pod, currentHash,
 	return HasWedgedPodAgainstCurrent(pods, currentHash, revisionHashLabel)
 }
 
-// StampInstanceFailedForStuckPod escalates Phase to Failed via
-// input.MutateInstance. Guard logic: a fresh-empty slot (Phase=="") is
-// treated as a sentinel for "resurrected slot, don't touch", a
-// Phase=Failed slot is a no-op, and any other Phase flips to Failed.
+// stuckPodFailedMutation builds the Phase=Failed stamp for a stuck pod.
+// Guard logic: a fresh-empty slot (Phase=="") is treated as a sentinel
+// for "resurrected slot, don't touch", a Phase=Failed slot is a no-op,
+// and any other Phase flips to Failed.
 //
 // The Operation field is preserved (when present) — operators want to
 // see WHAT was in flight when the kubelet wedge surfaced. termination,
 // when non-nil, is recorded on LastFailure in the same write so the
 // wedged pod's diagnostics survive the recreate / teardown that follows
 // the escalation; nil leaves LastFailure untouched.
-func StampInstanceFailedForStuckPod(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) error {
-	return input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
+func stuckPodFailedMutation(termination *InstanceTermination) func(*InstanceStatus) bool {
+	return func(s *InstanceStatus) bool {
 		if s.Phase == "" {
-			// Fresh-empty slot from MutateInstance's append path — the
-			// real InstanceStatus was deleted out from under us
+			// Fresh-empty slot from the writer's append path — the real
+			// InstanceStatus was deleted out from under us
 			// (migrate-abandon cleanup, etc.). Don't resurrect.
 			return false
 		}
@@ -714,5 +606,5 @@ func StampInstanceFailedForStuckPod(ctx context.Context, input ReconcileInput, i
 			s.LastFailure = &captured
 		}
 		return true
-	})
+	}
 }

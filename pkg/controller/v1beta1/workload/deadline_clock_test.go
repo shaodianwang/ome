@@ -1,6 +1,7 @@
 package workload_test
 
-// Verifies ExpireOperationsIfDeadlinePassed consults the injected clock:
+// Verifies the escalation pass consults the injected clock for deadline
+// expiry:
 // one tick before the deadline nothing expires; one tick after, the
 // instance fails with DeadlineExceeded. Only possible with a fake clock.
 
@@ -43,8 +44,11 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 			warned = append(warned, idx)
 		},
 	}
+	// Same backing slice: the second and third pass observe the prior
+	// pass's mutations, like consecutive reconciles would.
+	input.ObservedState.InstanceStatuses = instances
 
-	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), wl.Deps{}, input, wl.EscalationParams{Instances: instances}); err != nil {
+	if err := wl.EscalateFromEvidenceForTest(context.Background(), wl.Deps{}, input, wl.ComponentPlan{}, nil, wl.SnapshotWithPodsForTest(input, nil)); err != nil {
 		t.Fatalf("expire (before deadline): %v", err)
 	}
 	if len(mutated) != 0 {
@@ -53,7 +57,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 
 	// AT the deadline: now.After(deadline) is false — still no expiry.
 	fc.SetTime(deadline)
-	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), wl.Deps{}, input, wl.EscalationParams{Instances: instances}); err != nil {
+	if err := wl.EscalateFromEvidenceForTest(context.Background(), wl.Deps{}, input, wl.ComponentPlan{}, nil, wl.SnapshotWithPodsForTest(input, nil)); err != nil {
 		t.Fatalf("expire (at deadline): %v", err)
 	}
 	if len(mutated) != 0 {
@@ -61,7 +65,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 	}
 
 	fc.SetTime(deadline.Add(time.Second)) // 1s AFTER
-	if err := wl.ExpireOperationsIfDeadlinePassed(context.Background(), wl.Deps{}, input, wl.EscalationParams{Instances: instances}); err != nil {
+	if err := wl.EscalateFromEvidenceForTest(context.Background(), wl.Deps{}, input, wl.ComponentPlan{}, nil, wl.SnapshotWithPodsForTest(input, nil)); err != nil {
 		t.Fatalf("expire (after deadline): %v", err)
 	}
 	if len(mutated) != 1 || mutated[0] != 0 {

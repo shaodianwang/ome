@@ -394,8 +394,9 @@ func TestReachedDesiredShape(t *testing.T) {
 }
 
 // TestEscalateStuckPodFailures_EscalatesAndEmitsEvent pins the
-// integration contract for the adapter-agnostic escalator: a wedged
-// pod past grace flips the InstanceStatus Phase to Failed via
+// integration contract for the escalation pass's wedged-pod recovery
+// branch: a wedged pod past grace whose revision-hash label disagrees
+// with CurrentRevision flips the InstanceStatus Phase to Failed via
 // MutateInstance and fires WarnInstanceFailed exactly once.
 func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 	grace := 1 * time.Millisecond
@@ -406,7 +407,7 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-0-default-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-new"},
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
@@ -414,7 +415,7 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 	}
 
 	// Local mirror of the per-Instance status the closure mutates.
-	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseReady, RunningRevision: "rev-old"}}
+	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseReady, RunningRevision: "own-engine-oldhash"}}
 	var eventFired struct {
 		idx    int32
 		pod    string
@@ -422,6 +423,7 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 		count  int
 	}
 	input := workload.ReconcileInput{
+		StuckPodGrace: grace,
 		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 			for i := range insts {
 				if insts[i].Index == idx {
@@ -438,16 +440,13 @@ func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
 			eventFired.count++
 		},
 	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
 
-	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
-		Instances:           insts,
-		PodsByIndex:         map[int32][]*corev1.Pod{0: {stuck}},
-		CurrentRevisionHash: "rev-old",
-		RevisionHashLabel:   "ome.io/revision-hash",
-		StuckPodGrace:       grace,
-	})
+	err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}})
 	if err != nil {
-		t.Fatalf("EscalateStuckPodFailures: %v", err)
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if insts[0].Phase != workload.InstancePhaseFailed {
@@ -478,7 +477,7 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-0-leader-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-old"},
+			Labels:            map[string]string{"ome.io/revision-hash": "oldhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
@@ -489,7 +488,7 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-2-leader-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-bad"},
+			Labels:            map[string]string{"ome.io/revision-hash": "badhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
@@ -500,7 +499,7 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 	insts := []workload.InstanceStatus{{
 		Index:           0,
 		Phase:           workload.InstancePhaseUpdating,
-		RunningRevision: "rev-old",
+		RunningRevision: "own-engine-oldhash",
 		Operation: &workload.InstanceOperation{
 			Type:       workload.InstanceOperationUpdate,
 			Step:       "Surge",
@@ -513,6 +512,7 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 		count int
 	}
 	input := workload.ReconcileInput{
+		StuckPodGrace: grace,
 		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 			for i := range insts {
 				if insts[i].Index == idx {
@@ -528,16 +528,13 @@ func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
 			eventFired.count++
 		},
 	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
 
-	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
-		Instances:           insts,
-		PodsByIndex:         map[int32][]*corev1.Pod{0: {healthy}, 2: {surgeStuck}},
-		CurrentRevisionHash: "rev-old",
-		RevisionHashLabel:   "ome.io/revision-hash",
-		StuckPodGrace:       grace,
-	})
+	err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {healthy}, 2: {surgeStuck}})
 	if err != nil {
-		t.Fatalf("EscalateStuckPodFailures: %v", err)
+		t.Fatalf("escalation pass: %v", err)
 	}
 	if insts[0].Phase != workload.InstancePhaseFailed {
 		t.Errorf("source Phase: got %q want Failed", insts[0].Phase)
@@ -562,7 +559,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-0-leader-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-old"},
+			Labels:            map[string]string{"ome.io/revision-hash": "oldhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{
@@ -574,7 +571,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-2-leader-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-new"},
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{
@@ -603,7 +600,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 			insts := []workload.InstanceStatus{{
 				Index:           0,
 				Phase:           workload.InstancePhaseUpdating,
-				RunningRevision: "rev-old",
+				RunningRevision: "own-engine-oldhash",
 				Operation: &workload.InstanceOperation{
 					Type:       workload.InstanceOperationUpdate,
 					Step:       "Surge",
@@ -612,6 +609,7 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 			}}
 			var eventPod string
 			input := workload.ReconcileInput{
+				StuckPodGrace: grace,
 				MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 					for i := range insts {
 						if insts[i].Index == idx {
@@ -622,19 +620,16 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 				},
 				WarnInstanceFailed: func(_ int32, podName, _ string) { eventPod = podName },
 			}
+			input.ObservedState.InstanceStatuses = insts
+			input.ObservedState.CurrentRevision = "own-engine-newhash"
 
-			err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
-				Instances: insts,
-				PodsByIndex: map[int32][]*corev1.Pod{
+			err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{},
+				map[int32][]*corev1.Pod{
 					0: {oldStuck},
 					2: tc.replacement,
-				},
-				CurrentRevisionHash: "rev-new",
-				RevisionHashLabel:   "ome.io/revision-hash",
-				StuckPodGrace:       grace,
-			})
+				})
 			if err != nil {
-				t.Fatalf("EscalateStuckPodFailures: %v", err)
+				t.Fatalf("escalation pass: %v", err)
 			}
 			if insts[0].Phase != tc.wantPhase {
 				t.Errorf("source Phase: got %q want %q", insts[0].Phase, tc.wantPhase)
@@ -658,7 +653,7 @@ func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-0-default-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-new"},
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
@@ -668,22 +663,20 @@ func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
 	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseFailed}}
 	var eventFired int
 	input := workload.ReconcileInput{
+		StuckPodGrace: grace,
 		MutateInstance: func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
 			t.Errorf("MutateInstance must not be called for already-Failed Instance")
 			return nil
 		},
 		WarnInstanceFailed: func(_ int32, _, _ string) { eventFired++ },
 	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
 
-	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
-		Instances:           insts,
-		PodsByIndex:         map[int32][]*corev1.Pod{0: {stuck}},
-		CurrentRevisionHash: "rev-old",
-		RevisionHashLabel:   "ome.io/revision-hash",
-		StuckPodGrace:       grace,
-	})
+	err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}})
 	if err != nil {
-		t.Fatalf("EscalateStuckPodFailures: %v", err)
+		t.Fatalf("escalation pass: %v", err)
 	}
 	if eventFired != 0 {
 		t.Errorf("event count: got %d want 0 (already-Failed must not re-fire)", eventFired)
@@ -707,6 +700,7 @@ func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
 	}
 	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{}}}
 	input := workload.ReconcileInput{
+		StuckPodGrace: 1 * time.Millisecond,
 		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 			for i := range insts {
 				if insts[i].Index == idx {
@@ -720,12 +714,10 @@ func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
 		// shape (see workload.ReconcileInput docs).
 		WarnInstanceFailed: func(_ int32, _, _ string) {},
 	}
-	if err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
-		Instances:     insts,
-		PodsByIndex:   map[int32][]*corev1.Pod{0: {stuck}},
-		StuckPodGrace: 1 * time.Millisecond,
-	}); err != nil {
-		t.Fatalf("EscalateStuckPodFailures with no-op WarnInstanceFailed: %v", err)
+	input.ObservedState.InstanceStatuses = insts
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
+		t.Fatalf("escalation pass with no-op WarnInstanceFailed: %v", err)
 	}
 	if insts[0].Phase != workload.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed (escalation must land even with no-op warn callback)", insts[0].Phase)
@@ -792,7 +784,7 @@ func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "engine-0-leader-0",
 			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-			Labels:            map[string]string{"ome.io/revision-hash": "rev-new"},
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{
@@ -802,8 +794,9 @@ func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
 		},
 	}
 
-	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseUpdating, RunningRevision: "rev-old", Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: "Drain"}}}
+	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseUpdating, RunningRevision: "own-engine-oldhash", Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: "Drain"}}}
 	input := workload.ReconcileInput{
+		StuckPodGrace: grace,
 		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 			for i := range insts {
 				if insts[i].Index == idx {
@@ -815,15 +808,12 @@ func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
 		},
 		WarnInstanceFailed: func(_ int32, _, _ string) {},
 	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
 
-	if err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{}, input, workload.EscalationParams{
-		Instances:           insts,
-		PodsByIndex:         map[int32][]*corev1.Pod{0: {stuck}},
-		CurrentRevisionHash: "rev-old",
-		RevisionHashLabel:   "ome.io/revision-hash",
-		StuckPodGrace:       grace,
-	}); err != nil {
-		t.Fatalf("EscalateStuckPodFailures: %v", err)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if insts[0].Phase != workload.InstancePhaseFailed {

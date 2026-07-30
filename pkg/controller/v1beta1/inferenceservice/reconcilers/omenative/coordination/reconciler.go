@@ -565,7 +565,7 @@ func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta
 	out.RolloutInFlight = !tgt.IsZero() && !tgt.Same(cur)
 
 	// Per-Instance failure rollup: any Instance escalated to
-	// Phase=Failed by ExpireOperationsIfDeadlinePassed (or any other
+	// Phase=Failed by the workload escalation pass (or any other
 	// terminal-failure path) marks the whole Component Failed. The
 	// per-policy state machines (BlueGreen, RollingUpdate, Sequential,
 	// Independent) all read Component.Failed and translate it into the

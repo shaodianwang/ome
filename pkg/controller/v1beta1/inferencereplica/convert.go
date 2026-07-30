@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -68,8 +70,7 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // ObservedState.Migrations): the workload dispatcher selects the oldest
 // non-terminal Manual record and MutateMigration is the write-back seam
 // for phase advancement. The migration-request annotation is consumed
-// into status.migrations by consumeMigrationRequests before dispatch;
-// no detection callback exists anymore.
+// into status.migrations by consumeMigrationRequests before dispatch.
 //
 // UpdateGate IS wired (when the parent ISVC is resolvable) onto the
 // shared coordination.EvaluateUpdateGate decision site — the identical
@@ -98,7 +99,13 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // forceDeletePolicy is the stuck-Terminating force-delete policy,
 // likewise resolved ONCE per reconcile by the caller; nil means
 // unconfigured and the escalation is disabled entirely.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy) workload.ReconcileInput {
+//
+// stuckPodGrace and autoMigrateBudget feed the workload escalation pass:
+// the stuck-pod fast-escalation window (zero disables it) and the
+// relocation budget of the terminal-failure disposition (zero disables
+// the relocation branch). Both resolved ONCE per reconcile by the caller
+// from the operator lifecycle config.
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, stuckPodGrace time.Duration, autoMigrateBudget int32) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -125,6 +132,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		DesiredSpec:             desired,
 		ObservedState:           observed,
 		MutateInstance:          buildMutateInstance(r.Client, ir),
+		ApplyInstanceMutations:  buildApplyInstanceMutations(r.Client, ir),
 		RemoveInstance:          buildRemoveInstance(r.Client, ir, r.Expectations),
 		WriteAggregateCondition: buildWriteAggregateCondition(r.Client, ir),
 		// Same-target RetryBlock persistence + policy. The
@@ -143,19 +151,39 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// Stuck-Terminating force-delete gate. nil disables the
 		// escalation; non-nil durations are validated > 0 upstream.
 		ForceDelete: forceDeletePolicy,
-		Clock:       r.Clock,
-		// WarnInstanceFailed bridges the workload-side escalator to the
+		// Stuck-pod fast-escalation window for the workload escalation
+		// pass. Zero (unconfigured) disables fast escalation; the
+		// InstanceReadyTimeout backstop still fires.
+		StuckPodGrace: stuckPodGrace,
+		Clock:         r.Clock,
+		// WarnInstanceFailed bridges the workload escalation pass to the
 		// reconciler's event recorder so the operator sees the
 		// per-Instance Failed escalation against the EventTarget (parent
-		// ISVC when set, else IR). The stuck-pod aggregator is invoked
-		// from the IR's aggregateAndWriteStatus tail (see
-		// status.go::escalateStuckPodFailures) so the contract surface
-		// here matches the omenative direct path byte-for-byte.
-		WarnInstanceFailed: r.warnInstanceFailedFunc(ir, eventTarget, instanceFailedStuckPodMsg),
+		// ISVC when set, else IR).
+		WarnInstanceFailed: r.warnInstanceFailedFunc(ir, eventTarget),
 		// WarnRetryHeld surfaces the terminal same-target retry exhaustion
 		// (RetryBlock → Held) to the operator. Emitted by the workload
 		// writer exactly once, at the transition into Held.
 		WarnRetryHeld: r.warnRetryHeldFunc(ir, eventTarget),
+	}
+	// Operator-config inputs of the terminal-failure disposition the
+	// escalation pass runs. The template specs feed the relocation
+	// branch's required-affinity guard: an exclusion the template can
+	// never satisfy (required In pin on the suspect node) disposes
+	// terminal instead of recording. Captured from the spec-rendered
+	// templates here — a canary rollback later swaps DesiredSpec's
+	// templates, and the disposition judges the spec's own affinity, not
+	// the rollback overlay's. MigrationMode is plan-derived and overlaid
+	// by the escalation pass.
+	input.Disposition = workload.DispositionDeps{
+		AutoMigrateMaxAttempts: autoMigrateBudget,
+		PodSpec:                desired.PodSpec,
+		WorkerPodSpec:          desired.WorkerPodSpec,
+		// Count each recorded relocation directive on the auto-migration
+		// counter, keyed by the user-facing parent ISVC.
+		OnRelocationDirective: func(component string) {
+			coordination.RecordAutoMigrationTriggered(ir.Namespace, ir.Spec.ParentRef.Name, component, audit.ReasonAutoRecover)
+		},
 	}
 
 	// Wire the coordination UpdateGate onto the shared decision site so the
@@ -187,22 +215,18 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	return input
 }
 
-// The two InstanceFailed message shapes. Same argument tuple
-// (namespace, name, component, instance, pod, reason); the dispatch
-// input always names the stuck pod while the escalation input covers
-// the deadline backstop's empty podName.
-const (
-	instanceFailedStuckPodMsg   = "InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)"
-	instanceFailedEscalationMsg = "InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed (pod=%q): %s"
-)
+// instanceFailedMsg formats the operator-facing InstanceFailed Warning:
+// (namespace, name, component, instance, pod, reason). podName is empty
+// for the deadline backstop (no single pod to blame); reason carries the
+// cause either way (kubelet waiting-state reason for the stuck-pod path,
+// "DeadlineExceeded: <op>/<step> ..." for the deadline path).
+const instanceFailedMsg = "InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed (pod=%q): %s"
 
-// warnInstanceFailedFunc returns the WarnInstanceFailed closure shared
-// by buildReconcileInput and buildEscalationInput: mirror the
-// escalation onto the controller log (operator-facing; log-aggregated
-// views see it without the events stream), then emit the
-// InstanceFailed Warning against eventTarget (user-facing). messageFmt
-// formats (namespace, name, component, instance, pod, reason).
-func (r *Reconciler) warnInstanceFailedFunc(ir *v1beta1.InferenceReplica, eventTarget client.Object, messageFmt string) func(idx int32, podName, reason string) {
+// warnInstanceFailedFunc returns the WarnInstanceFailed closure: mirror
+// the escalation onto the controller log (operator-facing;
+// log-aggregated views see it without the events stream), then emit the
+// InstanceFailed Warning against eventTarget (user-facing).
+func (r *Reconciler) warnInstanceFailedFunc(ir *v1beta1.InferenceReplica, eventTarget client.Object) func(idx int32, podName, reason string) {
 	return func(idx int32, podName, reason string) {
 		r.Log.Info("Instance escalated to Phase=Failed",
 			"inferencereplica", client.ObjectKeyFromObject(ir),
@@ -214,15 +238,14 @@ func (r *Reconciler) warnInstanceFailedFunc(ir *v1beta1.InferenceReplica, eventT
 			return
 		}
 		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workload.EventReasonInstanceFailed),
-			messageFmt, ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
+			instanceFailedMsg, ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
 	}
 }
 
-// warnRetryHeldFunc returns the WarnRetryHeld closure shared by
-// buildReconcileInput and buildEscalationInput: surface the terminal
-// same-target retry exhaustion (RetryBlock → Held) on the controller
-// log and as a RetryHeld Warning against eventTarget. The workload
-// writer invokes it exactly once, at the transition into Held.
+// warnRetryHeldFunc returns the WarnRetryHeld closure: surface the
+// terminal same-target retry exhaustion (RetryBlock → Held) on the
+// controller log and as a RetryHeld Warning against eventTarget. The
+// workload writer invokes it exactly once, at the transition into Held.
 func (r *Reconciler) warnRetryHeldFunc(ir *v1beta1.InferenceReplica, eventTarget client.Object) func(targetRevision string, attempts int32, reason string) {
 	return func(targetRevision string, attempts int32, reason string) {
 		r.Log.Info("Same-target update retries exhausted; revision Held",
@@ -510,6 +533,87 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 	}
 }
 
+// buildApplyInstanceMutations is the batched sibling of
+// buildMutateInstance — the ReconcileInput.ApplyInstanceMutations
+// capability: ONE fresh Get under retry.RetryOnConflict, every mutation
+// applied to its located-or-appended InstanceStatus slot, ONE
+// Status().Update when any mutation reported a change, zero writes
+// otherwise. A conflicted batch retries as a whole. Per-slot semantics
+// match buildMutateInstance exactly: a mutation on a missing index gets
+// a fresh slot that is appended only if the callback reports a change,
+// and NotFound on Get or Update is a successful no-op (the IR was
+// deleted under us). Every committed slot is mirrored onto the caller's
+// in-memory IR so later steps in the same reconcile observe the
+// post-write values.
+func buildApplyInstanceMutations(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
+	key := client.ObjectKeyFromObject(ir)
+	return func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
+		if len(muts) == 0 {
+			return nil
+		}
+		var committed []v1beta1.OMENativeInstanceStatus
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			committed = nil
+			fresh := &v1beta1.InferenceReplica{}
+			if err := c.Get(ctx, key, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("re-read IR: %w", err)
+			}
+			insts := fresh.Status.InstanceStatuses
+			var touched []int
+			for _, m := range muts {
+				pos := -1
+				for i := range insts {
+					if insts[i].Index == m.Index {
+						pos = i
+						break
+					}
+				}
+				slot := v1beta1.OMENativeInstanceStatus{Index: m.Index}
+				if pos != -1 {
+					slot = insts[pos]
+				}
+				w := v1beta1convert.InstanceStatusToWorkload(slot)
+				if !m.Mutate(&w) {
+					continue
+				}
+				slot = v1beta1convert.InstanceStatusFromWorkload(w)
+				if pos == -1 {
+					insts = append(insts, slot)
+					pos = len(insts) - 1
+				} else {
+					insts[pos] = slot
+				}
+				touched = append(touched, pos)
+			}
+			if len(touched) == 0 {
+				return nil
+			}
+			fresh.Status.InstanceStatuses = insts
+			if err := c.Status().Update(ctx, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("update IR status: %w", err)
+			}
+			committed = make([]v1beta1.OMENativeInstanceStatus, 0, len(touched))
+			for _, pos := range touched {
+				committed = append(committed, *insts[pos].DeepCopy())
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for i := range committed {
+			mirrorInstanceStatus(ir, committed[i])
+		}
+		return nil
+	}
+}
+
 // mirrorInstanceStatus copies the just-committed InstanceStatus onto
 // the caller's in-memory IR snapshot. Subsequent ops in the same
 // reconcile pass observe the post-write state instead of the stale
@@ -530,6 +634,71 @@ func mirrorInstanceStatus(ir *v1beta1.InferenceReplica, src v1beta1.OMENativeIns
 		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, src)
 	} else {
 		ir.Status.InstanceStatuses[pos] = src
+	}
+}
+
+// buildPromoteCurrentRevision returns the CurrentRevision promotion step.
+// The IR controller owns the component-level revision pair: CurrentRevision
+// and UpdateRevision are both stamped against the SPEC target (never the
+// roll target — during a canary rollback the two diverge, and coordination
+// reads their skew as RolloutInFlight, so promoting against the roll target
+// would fabricate a permanent phantom-rollout skew; the canary rollback
+// machinery also load-bears on "CurrentRevision names the last revision
+// fully rolled forward onto"). The reconciler calls this from its deferred
+// status tail on every return path, so promotion timing is uniform across
+// success, early-requeue, and paused reconciles.
+//
+//   - fresh-Get the IR so the RolloutComplete evaluation observes this
+//     reconcile's just-applied per-Instance updates;
+//   - promote CurrentRevision = targetName IFF workload.RolloutComplete
+//     (every Instance Ready on targetName at partition 0). Partition>0
+//     never satisfies RolloutComplete, so a staged rollout does not
+//     promote — the Staged Ready reason derives downstream from the
+//     CurrentRevision != UpdateRevision skew;
+//   - already-equal short-circuits with no write (a converged steady
+//     state performs ZERO writes);
+//   - retry.RetryOnConflict + NotFound-as-no-op mirror buildMutateInstance.
+//
+// On a committed promotion the new CurrentRevision is mirrored onto the
+// caller's in-memory IR so the deferred aggregator's Ready computation and
+// the reconciler's promotion log observe the post-write value.
+func buildPromoteCurrentRevision(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetName string) error {
+	key := client.ObjectKeyFromObject(ir)
+	return func(ctx context.Context, targetName string) error {
+		if targetName == "" {
+			return nil
+		}
+		var committed string
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			committed = ""
+			fresh := &v1beta1.InferenceReplica{}
+			if err := c.Get(ctx, key, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("re-read IR: %w", err)
+			}
+			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
+			if fresh.Status.CurrentRevision == targetName || !workload.RolloutComplete(insts, targetName) {
+				return nil
+			}
+			fresh.Status.CurrentRevision = targetName
+			if err := c.Status().Update(ctx, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("update IR status: %w", err)
+			}
+			committed = targetName
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if committed != "" && ir != nil {
+			ir.Status.CurrentRevision = committed
+		}
+		return nil
 	}
 }
 

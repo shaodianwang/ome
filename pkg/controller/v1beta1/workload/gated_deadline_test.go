@@ -144,11 +144,11 @@ func TestGatedInstance_NotFailedByDeadlineBackstop(t *testing.T) {
 	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
-	// Rebuild the snapshot from the parked store, mirroring how the IR
-	// adapter re-reads ir.Status before the expiry backstop runs.
-	snapshot := append([]workload.InstanceStatus(nil), (*store)...)
-	if err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{}, input, workload.EscalationParams{Instances: snapshot}); err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	// Rebuild the observation from the parked store, mirroring the fresh
+	// status read the next reconcile's escalation pass consumes.
+	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), (*store)...)
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if (*store)[0].Phase == workload.InstancePhaseFailed {

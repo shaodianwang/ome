@@ -971,16 +971,14 @@ func TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused(t *testing.T) 
 	}}
 	policy := &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-bad", policy, nil)
+	input.ObservedState.InstanceStatuses = insts
+	input.StuckPodGrace = time.Second
 	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 
-	err := workload.EscalateStuckPodFailures(context.Background(), workload.Deps{Clock: fc}, input, workload.EscalationParams{
-		Instances:          insts,
-		PodsByIndex:        map[int32][]*corev1.Pod{0: {pod}},
-		StuckPodGrace:      time.Second,
-		DesiredPodsByIndex: map[int32]int32{0: 1},
-	})
+	err := runEscalationPass(t, workload.Deps{Clock: fc}, input, singleInstancePlan(0, 1),
+		map[int32][]*corev1.Pod{0: {pod}})
 	if err != nil {
-		t.Fatalf("EscalateStuckPodFailures: %v", err)
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if insts[0].Phase != workload.InstancePhaseFailed {
@@ -1016,16 +1014,16 @@ func TestExpireOperations_SinglePodCrashLoopRecordsDirective(t *testing.T) {
 		},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
+	input.ObservedState.InstanceStatuses = insts
+	input.Disposition = workload.DispositionDeps{AutoMigrateMaxAttempts: 3}
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Hour))
 
-	err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{Client: c, Clock: fc}, input, workload.EscalationParams{
-		Instances:          insts,
-		PodsByIndex:        map[int32][]*corev1.Pod{0: {pod}},
-		DesiredPodsByIndex: map[int32]int32{0: 1},
-		Disposition:        workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto},
-	})
+	plan := singleInstancePlan(0, 1)
+	plan.MigrationMode = workload.MigrationModeAuto
+	err := runEscalationPass(t, workload.Deps{Client: c, Clock: fc}, input, plan,
+		map[int32][]*corev1.Pod{0: {pod}})
 	if err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if insts[0].Phase != workload.InstancePhaseFailed || insts[0].Operation != nil {
@@ -1065,15 +1063,13 @@ func TestExpireOperations_GangCreateDisposed(t *testing.T) {
 		},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-update", nil, nil)
+	input.ObservedState.InstanceStatuses = insts
 	leader := waitingPod("engine-0-leader-0", "ImagePullBackOff", "node-a", t0.Add(-time.Hour))
 
-	err := workload.ExpireOperationsIfDeadlinePassed(context.Background(), workload.Deps{Clock: fc}, input, workload.EscalationParams{
-		Instances:          insts,
-		PodsByIndex:        map[int32][]*corev1.Pod{0: {leader}},
-		DesiredPodsByIndex: map[int32]int32{0: 3},
-	})
+	err := runEscalationPass(t, workload.Deps{Clock: fc}, input, singleInstancePlan(0, 3),
+		map[int32][]*corev1.Pod{0: {leader}})
 	if err != nil {
-		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if insts[0].Phase != workload.InstancePhaseFailed || insts[0].Operation != nil {

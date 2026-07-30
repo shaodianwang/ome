@@ -241,7 +241,7 @@ func TestAggregateStatus_PreservesMigrations(t *testing.T) {
 		},
 	}
 
-	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil, 60*time.Second, nil, 0)).To(gomega.Succeed())
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, plan, nil)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}, got)).To(gomega.Succeed())

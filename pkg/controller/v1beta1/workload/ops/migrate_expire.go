@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -85,11 +86,7 @@ func ExpireMigrations(ctx context.Context, deps workload.Deps, input workload.Re
 	expired := 0
 	for i := range input.ObservedState.Migrations {
 		rec := &input.ObservedState.Migrations[i]
-		if rec.Trigger != workload.MigrationTriggerManual || rec.Phase.Terminal() {
-			continue
-		}
-		// Zero Deadline = never expires (mirrors the instance-op rule).
-		if rec.Deadline.IsZero() || !now.After(rec.Deadline.Time) {
+		if !isExpiredMigrationCandidate(rec, now) {
 			continue
 		}
 		if input.MutateMigration == nil {
@@ -104,6 +101,29 @@ func ExpireMigrations(ctx context.Context, deps workload.Deps, input workload.Re
 		}
 	}
 	return expired, nil
+}
+
+// isExpiredMigrationCandidate reports whether rec is an expiry
+// candidate: a non-terminal Manual record whose Deadline has passed. A
+// zero Deadline never expires (mirrors the instance-op rule).
+func isExpiredMigrationCandidate(rec *workload.MigrationRecord, now time.Time) bool {
+	if rec.Trigger != workload.MigrationTriggerManual || rec.Phase.Terminal() {
+		return false
+	}
+	return !rec.Deadline.IsZero() && now.After(rec.Deadline.Time)
+}
+
+// HasExpiredMigrationCandidate reports whether any record is an expiry
+// candidate ExpireMigrations would consume. The dispatcher's decision
+// layer consults this so the (pure) selection and the (effectful)
+// consumption share one filter.
+func HasExpiredMigrationCandidate(records []workload.MigrationRecord, now time.Time) bool {
+	for i := range records {
+		if isExpiredMigrationCandidate(&records[i], now) {
+			return true
+		}
+	}
+	return false
 }
 
 // expireMigrationRecord consumes one expired record. Returns

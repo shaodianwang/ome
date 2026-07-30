@@ -6,11 +6,6 @@
 //
 // What this dispatcher does NOT own (the caller runs these around
 // Reconcile):
-//   - ExpireOperationsIfDeadlinePassed (deadline.go) — the broad
-//     InstanceReadyTimeout backstop. Workload-typed: walks
-//     []InstanceStatus and fails any whose Operation.Deadline elapsed.
-//     The IR caller runs it in its status aggregator tail, next to the
-//     stuck-pod escalator EscalateStuckPodFailures.
 //   - PodMonitor — handled by the top-level podmonitor reconciler.
 //   - ensureRevisionWithCollisionRetry — ISVC-shape collision-counter
 //     bookkeeping; the caller computes the target ControllerRevision
@@ -52,6 +47,11 @@ const ratioGateRequeueInterval = 3 * time.Second
 // + Deps + plan + target and calls Reconcile once per per-Component
 // reconcile pass.
 //
+// Shape: observe → plan → execute. One ObservedSnapshot is built up
+// front; Plan (plan_decision.go) evaluates every pass trigger against
+// it and produces the Decision; Execute applies the Decision through
+// the workload/ops state machines and runs the escalation pass.
+//
 // The op chain:
 //
 //  1. Scale-down — Delete for any InstanceStatus index the plan no
@@ -74,6 +74,12 @@ const ratioGateRequeueInterval = 3 * time.Second
 //     in-flight counters and consults input.UpdateGate so
 //     cross-Component coordination can throttle the rollout.
 //  6. Create — materialize any missing Instances.
+//  7. Escalation — the terminal-failure pass (escalation.go): stuck-pod
+//     and elapsed-deadline evidence from the snapshot decides the
+//     Phase=Failed transition through the disposition classification.
+//     Runs after the op passes on every non-teardown, non-paused,
+//     non-error return — including the in-flight early-requeue paths, so
+//     a wedged surge or gang is escalated while its op keeps requeueing.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -86,8 +92,10 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	// Teardown mode: the owner is being deleted. The planned index set is
 	// treated as empty so every observed Instance is a scale-down extra
 	// and runs the ordinary Delete pipeline; nothing else runs — not the
-	// Paused gate, not Restart / Migrate / Update / Create. The caller
-	// owns completion detection and finalizer decisions.
+	// Paused gate, not Restart / Migrate / Update / Create, not the
+	// escalation pass (the Delete pipeline owns wedge escalation via
+	// lifecycle.forceDelete). The caller owns completion detection and
+	// finalizer decisions.
 	//
 	// includeMigrating=true: a mid-migration source and its surge are
 	// deleted like everything else. The normal-path exclusion protects an
@@ -108,91 +116,100 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{}, nil
 	}
 
-	// 1. Scale-down.
-	extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false)
-	allDeleted, err := deleteExtraInstances(ctx, deps, input, plan, extras)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !allDeleted {
-		return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
-	}
+	// Single observation for this reconcile: pod reads are lazy + memoized
+	// per source (live for destructive planning, cached otherwise), so each
+	// source is Listed at most once and only when a pass needs it.
+	snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
 
-	// Paused is an operator circuit breaker. Keep scale-down above active so a
-	// deliberate replica reduction still releases capacity, but do not start or
-	// advance any lifecycle operation that can create, replace, or migrate pods.
-	// Pod and spec watches will enqueue the workload again after unpause; no
-	// periodic requeue is needed while the desired state is intentionally held.
-	if plan.Paused {
-		return ctrl.Result{}, nil
+	decision, perr := Plan(ctx, input, plan, target, snapshot)
+	if perr != nil {
+		return ctrl.Result{}, perr
 	}
+	return Execute(ctx, deps, input, plan, target, snapshot, decision)
+}
 
-	// 2. Per-Instance restart pass.
-	anyRestarting := false
-	if plan.RestartPolicy == RestartPolicyRecreateInstance {
-		// One live List + bucket for the whole Component instead of one
-		// live List per Instance (the gang-default O(gangs^2) hot path).
-		// The live reader matches DetectRestartTrigger's own read source —
-		// restart is destructive, so it must not act on a stale cache.
-		liveByInstance, lerr := liveBucketPods(ctx, deps, input, plan.Component)
-		if lerr != nil {
-			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: list pods for restart pass (component=%s): %w", plan.Component, lerr)
-		}
-		for _, inst := range plan.Instances {
-			needsRestart, reason := workloadops.DetectRestartTriggerWithPods(input, plan, inst, liveByInstance[inst.Index])
-			if !needsRestart {
-				continue
+// Execute applies the Decision: the op-pass action loop, then the
+// escalation pass when Decision.Escalate allows it. Escalation runs on
+// every non-error action-loop return — including the in-flight
+// early-requeue returns — so a wedged surge or gang is escalated while
+// its op keeps requeueing; an op-pass error requeues with backoff and
+// the next reconcile escalates from fresh evidence.
+func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
+	res, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
+	if err != nil || !d.Escalate {
+		return res, err
+	}
+	if eerr := escalateFromEvidence(ctx, deps, input, plan, target, snapshot); eerr != nil {
+		return ctrl.Result{}, eerr
+	}
+	return res, nil
+}
+
+// executeActions runs the op-pass pipeline (steps 1-6 of the chain
+// documented on Reconcile) for the Decision's selected actions, in
+// order. Early returns are in-flight requeues; the ops decide them —
+// the Decision selects which op advances, the op's outcome decides
+// whether the pipeline stops here.
+func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
+	for _, action := range d.Actions {
+		switch action.Kind {
+		// 1. Scale-down.
+		case ActionScaleDown:
+			allDeleted, err := deleteExtraInstances(ctx, deps, input, plan, action.Extras)
+			if err != nil {
+				return ctrl.Result{}, err
 			}
-			done, rerr := workloadops.Restart(ctx, deps, input, plan, inst, reason)
-			if rerr != nil {
-				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: restart instance %d: %w", inst.Index, rerr)
+			if !allDeleted {
+				return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
 			}
-			if !done {
-				anyRestarting = true
+
+		// 2. Per-Instance restart pass.
+		case ActionRestart:
+			anyRestarting := false
+			for _, sel := range action.Restarts {
+				done, rerr := workloadops.Restart(ctx, deps, input, plan, sel.Instance, sel.Reason)
+				if rerr != nil {
+					return ctrl.Result{}, fmt.Errorf("workload.Reconcile: restart instance %d: %w", sel.Instance.Index, rerr)
+				}
+				if !done {
+					anyRestarting = true
+				}
 			}
-		}
-	}
-	if anyRestarting {
-		return ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}, nil
-	}
+			if anyRestarting {
+				return ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}, nil
+			}
 
-	// 3. Migration expiry pass — the deadline consumer. Runs BEFORE the
-	// drive pass so an expired record is consumed before it can be
-	// driven (re-stamped) again, and regardless of MigrationMode so a
-	// mode flip to Never can never strand a non-terminal record. When
-	// anything expired, requeue immediately: ObservedState and plan are
-	// now stale (record terminal, pair ops cleared), and the next
-	// pass's rebuilt plan drops the unpinned surge index so the
-	// ordinary step-1 Delete pipeline tears it down.
-	if expiredCount, eerr := workloadops.ExpireMigrations(ctx, deps, input, plan); eerr != nil {
-		return ctrl.Result{}, fmt.Errorf("workload.Reconcile: expire migrations: %w", eerr)
-	} else if expiredCount > 0 {
-		return ctrl.Result{Requeue: true}, nil
-	}
+		// 3. Migration expiry pass. When anything expired, requeue
+		// immediately: ObservedState and plan are now stale (record
+		// terminal, pair ops cleared), and the next pass's rebuilt plan
+		// drops the unpinned surge index so the ordinary step-1 Delete
+		// pipeline tears it down.
+		case ActionMigrateExpiry:
+			if expiredCount, eerr := workloadops.ExpireMigrations(ctx, deps, input, plan); eerr != nil {
+				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: expire migrations: %w", eerr)
+			} else if expiredCount > 0 {
+				return ctrl.Result{Requeue: true}, nil
+			}
 
-	// 4. Per-Component migration pass. Work comes from the owner's
-	// status.migrations records (ObservedState.Migrations): the oldest
-	// non-terminal Manual record is driven, one per pass (dispatch
-	// pacing unchanged). Terminal records and Auto records (born
-	// terminal) are excluded structurally — records, never work. Skip
-	// when mode is Never.
-	//
-	// Migrate's third return (accepted) distinguishes two done=false
-	// modes:
-	//   - accepted=true: migration is mid-flight (record carries the
-	//     surge index, statuses stamped). Requeue at the Migrate
-	//     interval; do NOT fall through (DetectUpdateTrigger already
-	//     suppresses Migrate-owned status, so falling through would be
-	//     a no-op anyway, but the explicit requeue is cleaner).
-	//   - accepted=false: migration deferred without taking ownership
-	//     (fresh record, source not yet steady-Ready because of an
-	//     in-flight Update/Restart/Create). Fall through to Update/Create
-	//     so the in-flight op converges. Without fall-through the
-	//     dispatcher loops indefinitely at the MigrateRequeueInterval and
-	//     the in-flight op never runs — the affinity-trigger-not-detected
-	//     deadlock.
-	if plan.MigrationMode != MigrationModeNever {
-		if rec := NextManualMigration(input.ObservedState.Migrations); rec != nil {
+		// 4. Per-Component migration pass (dispatch pacing unchanged:
+		// one record per pass).
+		//
+		// Migrate's third return (accepted) distinguishes two done=false
+		// modes:
+		//   - accepted=true: migration is mid-flight (record carries the
+		//     surge index, statuses stamped). Requeue at the Migrate
+		//     interval; do NOT fall through (DetectUpdateTrigger already
+		//     suppresses Migrate-owned status, so falling through would be
+		//     a no-op anyway, but the explicit requeue is cleaner).
+		//   - accepted=false: migration deferred without taking ownership
+		//     (fresh record, source not yet steady-Ready because of an
+		//     in-flight Update/Restart/Create). Fall through to Update/Create
+		//     so the in-flight op converges. Without fall-through the
+		//     dispatcher loops indefinitely at the MigrateRequeueInterval and
+		//     the in-flight op never runs — the affinity-trigger-not-detected
+		//     deadlock.
+		case ActionMigrate:
+			rec := action.Migration.Record
 			// Reconstruct the executor's request view from the record —
 			// the annotation was consumed at accept time.
 			req := &audit.MigrationRequest{
@@ -228,205 +245,168 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 			// to Update/Create so the in-flight op converges; the next
 			// reconcile re-picks the same record against a steady-Ready
 			// source.
+
+		// 5. Per-Instance update pass.
+		case ActionUpdate:
+			res, stop, uerr := executeUpdatePass(ctx, deps, input, plan, target, snapshot, action.Update, d.RequeueAfter)
+			if uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			if stop {
+				return res, nil
+			}
+
+		// 6. Create pass.
+		case ActionCreate:
+			res, cerr := workloadops.Create(ctx, deps, input, plan, target)
+			if cerr != nil {
+				return res, cerr
+			}
+			return foldRetryAfter(res, d.RequeueAfter), nil
 		}
 	}
 
-	// 5. Per-Instance update pass.
-	// retryBlockWait is the earliest not-yet-due Backoff RetryBlock
-	// wake-up reported by the detect pass; folded into this pass's
-	// result so the gate is re-evaluated on time. Only ever ADDS a
-	// wake-up — never delays one an op already scheduled.
-	var retryBlockWait time.Duration
-	if target != nil {
-		anyUpdating := false
-		anyGated := false
-		// anyUpdateRan tracks whether ANY Update call fired this wake-up
-		// — including ones that returned done=true (e.g., a surge that
-		// just promoted Phase to Ready and stamped RunningRevision). Even
-		// a "done" Update mutates InstanceStatus; the subsequent Create
-		// pass would observe the pre-Update ObservedState snapshot, which
-		// is stale wrt ActiveOrdinal / RunningRevision / Phase. Letting
-		// Create run on stale state leads to two bugs:
-		//
-		//   1. Create's Ready-promote stamps RunningRevision=target.Name
-		//      even when the existing pods carry a different revision
-		//      (the X-2 bump-during-bump corruption mode where status
-		//      says vN but pods are still on vN-1). Bug #58.
-		//   2. Create's scale-up reads activeOrdinalForInstance from
-		//      stale ObservedState, sees a "missing" pod at the
-		//      pre-promote ordinal slot, and creates a duplicate
-		//      alongside the post-surge canonical pod.
-		//
-		// Skipping Create + requeue when Update fired forces the next
-		// reconcile to read fresh ObservedState that reflects the just-
-		// committed mutations, so Create's per-pod decisions are made
-		// against the current cluster state.
-		anyUpdateRan := false
-		// Track only instances STARTING a new update this wake-up.
-		// Instances already in Phase=Updating from a prior wake-up are
-		// already reflected in status.ServingReplicas — counting them
-		// would double-charge the budget and deadlock the in-flight pod.
-		// Closes the within-wake-up stale-snapshot hole that otherwise
-		// lets the dispatcher fire every instance in one shot (mass
-		// outage at scale).
-		var inFlightUnavail int32
-		var inFlightSurge int32
-		// SurgeThenDrain doesn't take pods offline; gate selection
-		// branches on strategy so each is throttled by the budget that
-		// actually applies. Empty Type defaults to SurgeThenDrain —
-		// matches workload.BuildPlan's defaulting.
-		strategy := plan.UpdateStrategy.Type
-		if strategy == "" {
-			strategy = UpdateStrategySurgeThenDrain
-		}
-		isSurgeStrategy := strategy == UpdateStrategySurgeThenDrain
-		// Per-Component within-Component budget — distinct layer from
-		// the cross-Component coordination-group gate that input.UpdateGate
-		// enforces. Both layers must allow before an Instance starts a
-		// fresh update; first denial stops the start. See
-		// budget.go's package comment for the composition rule:
-		//   effective_cap = min(group_cap, per_component_cap)
-		// nil RollingUpdate or nil MaxSurge / MaxUnavailable returns
-		// BudgetNoLimit → this layer doesn't cap, the group layer is the
-		// only constraint.
-		var rollingUpdate *RollingUpdate
-		if plan.UpdateStrategy.RollingUpdate != nil {
-			rollingUpdate = plan.UpdateStrategy.RollingUpdate
-		}
-		perCompSurgeBudget := PerComponentMaxSurgeBudget(rollingUpdate, plan.Replicas)
-		perCompUnavailBudget := PerComponentMaxUnavailableBudget(rollingUpdate, plan.Replicas)
-		// Snapshot the prior-pass in-flight counts ONCE — same anchor the
-		// per-wake-up counters layer on top of. Without this anchor the
-		// per-Component check would re-count every iteration and double-
-		// charge the budget against the same Instance.
-		priorSurgeInFlight := CurrentSurgeInFlight(input.ObservedState.InstanceStatuses)
-		priorUnavailInFlight := CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses)
-		// One cached List + bucket for the whole Component instead of one
-		// cached List per Instance inside DetectUpdateTrigger / Update (the
-		// O(instances^2) update hot path). Cached reader matches the
-		// non-destructive per-Instance read source those ops used.
-		updateByInstance, lerr := cachedBucketPods(ctx, deps, input, plan.Component)
-		if lerr != nil {
-			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, lerr)
-		}
-		for _, inst := range plan.Instances {
-			// RollingUpdate.Partition (canary): normally hold Instances with index
-			// < Partition on the old revision (skip their update). skipAsHeld carves
-			// out the one exception — a held Instance ALREADY mid-surge must finish,
-			// not strand its surge pod (see skipAsHeld for the deadlock it avoids).
-			if skipAsHeld(rollingUpdate, inst.Index,
-				findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
-				continue
+	// Only a paused Decision ends without a Create action: scale-down
+	// (if any) has run, nothing else may.
+	return ctrl.Result{}, nil
+}
+
+// executeUpdatePass runs the Update op for the Decision's selected
+// Instances, throttled by the within-pass counters, the per-Component
+// budget, and the coordination UpdateGate. The gate consult lives HERE,
+// not in Plan: it reads live peer/self state, so it must run at the
+// update pass's position — after earlier passes' effects (a restart
+// completion, a finished scale-down) have landed — to observe the same
+// state the pass pipeline showed it. stop=true means the pass consumed
+// the reconcile (the caller returns res without running Create).
+func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, sel *UpdateSelection, retryBlockWait time.Duration) (res ctrl.Result, stop bool, err error) {
+	anyUpdating := false
+	anyGated := false
+	// anyUpdateRan tracks whether ANY Update call fired this wake-up
+	// — including ones that returned done=true (e.g., a surge that
+	// just promoted Phase to Ready and stamped RunningRevision). Even
+	// a "done" Update mutates InstanceStatus; the subsequent Create
+	// pass would observe the pre-Update ObservedState snapshot, which
+	// is stale wrt ActiveOrdinal / RunningRevision / Phase. Letting
+	// Create run on stale state leads to two bugs:
+	//
+	//   1. Create's Ready-promote stamps RunningRevision=target.Name
+	//      even when the existing pods carry a different revision
+	//      (the X-2 bump-during-bump corruption mode where status
+	//      says vN but pods are still on vN-1). Bug #58.
+	//   2. Create's scale-up reads activeOrdinalForInstance from
+	//      stale ObservedState, sees a "missing" pod at the
+	//      pre-promote ordinal slot, and creates a duplicate
+	//      alongside the post-surge canonical pod.
+	//
+	// Skipping Create + requeue when Update fired forces the next
+	// reconcile to read fresh ObservedState that reflects the just-
+	// committed mutations, so Create's per-pod decisions are made
+	// against the current cluster state.
+	anyUpdateRan := false
+	// Count only Instances STARTING a new update this wake-up
+	// (item.StartingFresh). Instances already in Phase=Updating from a
+	// prior wake-up are anchored in the selection's Prior* counts —
+	// counting them again would double-charge the budget and deadlock
+	// the in-flight pod. Closes the within-wake-up stale-snapshot hole
+	// that otherwise lets the dispatcher fire every instance in one
+	// shot (mass outage at scale).
+	var inFlightUnavail int32
+	var inFlightSurge int32
+	isSurgeStrategy := sel.Strategy == UpdateStrategySurgeThenDrain
+	// Same memoized cached read Plan selected from — the pods handed to
+	// the Update op match the selection's evidence.
+	updateByInstance, lerr := snapshot.CachedPods(ctx)
+	if lerr != nil {
+		return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, lerr)
+	}
+	for _, item := range sel.Items {
+		if item.AdoptRevision {
+			if berr := workloadops.BackfillRunningRevision(ctx, input, item.Instance.Index, target.Name); berr != nil {
+				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: detect update trigger (instance=%d): %w", item.Instance.Index, berr)
 			}
-			needs, retryAfter, derr := workloadops.DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
-			if derr != nil {
-				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect update trigger (instance=%d): %w", inst.Index, derr)
-			}
-			if !needs {
-				// Denied by a not-yet-due Backoff RetryBlock — keep the
-				// earliest re-evaluation time across Instances.
-				if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
-					retryBlockWait = retryAfter
-				}
-				continue
-			}
-			s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-			// An Instance mid-operation (Operation set) that escalated to
-			// Phase=Failed is still a CONTINUATION of that in-flight surge/drain,
-			// not a fresh start: its own in-flight pod already counts against the
-			// surge/unavailable budget (Operation.Step is preserved through the
-			// Failed stamp), so charging it again would project over budget and
-			// gate the recovery forever. Treat it as a continuation so it bypasses
-			// the budget and UpdateWithPods replaces the failed pod at the target.
-			startingFresh := s == nil ||
-				(s.Phase != InstancePhaseUpdating && !(s.Phase == InstancePhaseFailed && s.Operation != nil))
-			if startingFresh {
-				// Per-Component within-Component cap. Independent from
-				// the coordination-group cap below: each is its own
-				// capacity, both must allow. We project (prior + this-
-				// wake-up + 1) against the layer's budget the same way
-				// coordination/ratio.go's CheckSurge / CheckUnavailability
-				// project against the group budget.
-				if isSurgeStrategy {
-					if perCompSurgeBudget != BudgetNoLimit {
-						projected := priorSurgeInFlight + inFlightSurge + 1
-						if projected > perCompSurgeBudget {
-							anyGated = true
-							continue
-						}
-					}
-				} else {
-					if perCompUnavailBudget != BudgetNoLimit {
-						projected := priorUnavailInFlight + inFlightUnavail + 1
-						if projected > perCompUnavailBudget {
-							anyGated = true
-							continue
-						}
+			continue
+		}
+		if item.StartingFresh {
+			// Per-Component within-Component cap. Independent from
+			// the coordination-group cap below: each is its own
+			// capacity, both must allow; first denial stops the start.
+			// We project (prior + this-wake-up + 1) against the layer's
+			// budget the same way coordination/ratio.go's CheckSurge /
+			// CheckUnavailability project against the group budget.
+			if isSurgeStrategy {
+				if sel.SurgeBudget != BudgetNoLimit {
+					projected := sel.PriorSurgeInFlight + inFlightSurge + 1
+					if projected > sel.SurgeBudget {
+						anyGated = true
+						continue
 					}
 				}
-				if input.UpdateGate != nil {
-					// Pass in-flight counters so the gate can project
-					// against the post-this-pass shape. Independent
-					// layer from the per-Component check above.
-					if allowed, _ := input.UpdateGate(strategy, inFlightSurge, inFlightUnavail); !allowed {
+			} else {
+				if sel.UnavailBudget != BudgetNoLimit {
+					projected := sel.PriorUnavailInFlight + inFlightUnavail + 1
+					if projected > sel.UnavailBudget {
 						anyGated = true
 						continue
 					}
 				}
 			}
-			done, uerr := workloadops.UpdateWithPods(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
-			if uerr != nil {
-				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: update instance %d: %w", inst.Index, uerr)
-			}
-			anyUpdateRan = true
-			if startingFresh {
-				// Charge the wake-up budget only for fresh starts —
-				// subsequent gate checks must account for this pod.
-				if isSurgeStrategy {
-					inFlightSurge++
-				} else {
-					inFlightUnavail++
+			if input.UpdateGate != nil {
+				// Pass in-flight counters so the gate can project
+				// against the post-this-pass shape. Independent
+				// layer from the per-Component check above.
+				if allowed, _ := input.UpdateGate(sel.Strategy, inFlightSurge, inFlightUnavail); !allowed {
+					anyGated = true
+					continue
 				}
 			}
-			if !done {
-				anyUpdating = true
+		}
+		done, uerr := workloadops.UpdateWithPods(ctx, deps, input, plan, item.Instance, target, input.DesiredSpec.PodSpec, updateByInstance[item.Instance.Index])
+		if uerr != nil {
+			return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: update instance %d: %w", item.Instance.Index, uerr)
+		}
+		anyUpdateRan = true
+		if item.StartingFresh {
+			// Charge the wake-up budget only for fresh starts —
+			// subsequent gate checks must account for this pod.
+			if isSurgeStrategy {
+				inFlightSurge++
+			} else {
+				inFlightUnavail++
 			}
 		}
-		if anyUpdating || anyGated || anyUpdateRan {
-			// About to requeue without the full Create pass. Brand-new
-			// (surge-free) indices legitimately bypass the skip-Create
-			// gate above: they have a genuine ActiveOrdinal=0 and no
-			// RunningRevision to mis-stamp, so neither X-2 corruption
-			// mode applies — see ops.CreateFreshIndices. Materialize them
-			// now so a concurrent scale-up isn't starved behind the
-			// in-flight rollout. The full Create pass still owns
-			// surge-sensitive (touched) indices once the rollout drains.
-			if _, ferr := workloadops.CreateFreshIndices(ctx, deps, input, plan, target); ferr != nil {
-				return ctrl.Result{}, ferr
-			}
-		}
-		if anyUpdating {
-			return foldRetryAfter(ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, retryBlockWait), nil
-		}
-		if anyGated {
-			return foldRetryAfter(ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, retryBlockWait), nil
-		}
-		// All Updates that ran returned done=true (steady-state for those
-		// instances). Requeue without running Create so the next pass
-		// sees fresh ObservedState — see anyUpdateRan comment above for
-		// the X-2 (bump-during-bump) corruption modes this guards against.
-		// Immediate requeue is already sooner than any retryBlockWait.
-		if anyUpdateRan {
-			return ctrl.Result{Requeue: true}, nil
+		if !done {
+			anyUpdating = true
 		}
 	}
-
-	// 6. Create pass.
-	res, cerr := workloadops.Create(ctx, deps, input, plan, target)
-	if cerr != nil {
-		return res, cerr
+	if anyUpdating || anyGated || anyUpdateRan {
+		// About to requeue without the full Create pass. Brand-new
+		// (surge-free) indices legitimately bypass the skip-Create
+		// gate above: they have a genuine ActiveOrdinal=0 and no
+		// RunningRevision to mis-stamp, so neither X-2 corruption
+		// mode applies — see ops.CreateFreshIndices. Materialize them
+		// now so a concurrent scale-up isn't starved behind the
+		// in-flight rollout. The full Create pass still owns
+		// surge-sensitive (touched) indices once the rollout drains.
+		if _, ferr := workloadops.CreateFreshIndices(ctx, deps, input, plan, target); ferr != nil {
+			return ctrl.Result{}, false, ferr
+		}
 	}
-	return foldRetryAfter(res, retryBlockWait), nil
+	if anyUpdating {
+		return foldRetryAfter(ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, retryBlockWait), true, nil
+	}
+	if anyGated {
+		return foldRetryAfter(ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, retryBlockWait), true, nil
+	}
+	// All Updates that ran returned done=true (steady-state for those
+	// instances). Requeue without running Create so the next pass
+	// sees fresh ObservedState — see anyUpdateRan above for the X-2
+	// (bump-during-bump) corruption modes this guards against.
+	// Immediate requeue is already sooner than any retryBlockWait.
+	if anyUpdateRan {
+		return ctrl.Result{Requeue: true}, true, nil
+	}
+	return ctrl.Result{}, false, nil
 }
 
 // deleteExtraInstances dispatches workloadops.Delete for every index in

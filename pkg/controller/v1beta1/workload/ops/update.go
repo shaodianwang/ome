@@ -312,13 +312,73 @@ func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload
 // "not pre-listed"; the function then self-lists on the fallback path,
 // preserving the standalone DetectUpdateTrigger contract. Semantics are
 // otherwise identical.
+//
+// Composition of the pure evaluation (EvaluateUpdateTrigger) with its
+// two effects: the fallback self-list and the AdoptRevision backfill
+// write (BackfillRunningRevision).
 func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) (trigger bool, retryAfter time.Duration, err error) {
-	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-	if s == nil {
+	dec, needPods := evaluateUpdateTriggerFast(input, inst, target)
+	if needPods {
+		pods := instancePods
+		if pods == nil {
+			all, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, true)
+			if err != nil {
+				return false, 0, err
+			}
+			pods = filterPodsByInstance(all, inst.Index)
+		}
+		dec = evaluateUpdateTriggerPods(pods, targetSpec)
+	}
+	if dec.AdoptRevision {
+		if err := BackfillRunningRevision(ctx, input, inst.Index, target.Name); err != nil {
+			return false, 0, err
+		}
 		return false, 0, nil
 	}
+	return dec.Trigger, dec.RetryAfter, nil
+}
+
+// UpdateTriggerDecision is the pure outcome of the update-trigger
+// evaluation for one Instance.
+type UpdateTriggerDecision struct {
+	// Trigger: the Instance needs the Update op this pass.
+	Trigger bool
+	// RetryAfter > 0: fresh re-triggering was denied by a not-yet-due
+	// Backoff RetryBlock for the current target; re-evaluate then. 0
+	// otherwise (including Held, which has no time bound).
+	RetryAfter time.Duration
+	// AdoptRevision: RunningRevision is empty but the Instance's
+	// runtime-ready pods already match the target — stamp
+	// Ready-on-target (BackfillRunningRevision) so future evaluations
+	// take the fast path. The stamp is an EFFECT; the evaluation only
+	// selects it.
+	AdoptRevision bool
+}
+
+// EvaluateUpdateTrigger is the pure update-trigger evaluation: no
+// client reads, no status writes. instancePods must already be
+// filtered to inst.Index (nil is an empty pod set); they are consulted
+// only on the empty-RunningRevision fallback path. The clock is read
+// through input.Now.
+func EvaluateUpdateTrigger(input workload.ReconcileInput, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) UpdateTriggerDecision {
+	dec, needPods := evaluateUpdateTriggerFast(input, inst, target)
+	if !needPods {
+		return dec
+	}
+	return evaluateUpdateTriggerPods(instancePods, targetSpec)
+}
+
+// evaluateUpdateTriggerFast runs the status-only portion of the
+// update-trigger evaluation. needPods=true means the fast paths did not
+// decide (empty RunningRevision) and the caller must run
+// evaluateUpdateTriggerPods over the Instance's pods.
+func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.InstancePlan, target *appsv1.ControllerRevision) (dec UpdateTriggerDecision, needPods bool) {
+	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+	if s == nil {
+		return UpdateTriggerDecision{}, false
+	}
 	if isMigrateOwnedStatus(s) {
-		return false, 0, nil
+		return UpdateTriggerDecision{}, false
 	}
 	// A gang surge-target MARKER is the replacement gang's index, created and
 	// driven by its SOURCE instance's gangSurgeUpdate — not an independent
@@ -327,10 +387,10 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	// corrective edit moves the target while the marker still runs the old
 	// surge revision. Skip; the source owns the marker's lifecycle. (#837)
 	if isGangSurgeTargetMarker(s) {
-		return false, 0, nil
+		return UpdateTriggerDecision{}, false
 	}
 	if s.Phase == workload.InstancePhaseUpdating {
-		return true, 0, nil
+		return UpdateTriggerDecision{Trigger: true}, false
 	}
 	// A Failed Instance must still re-trigger toward a NEW target. Once a
 	// rollout escalates an Instance to Phase=Failed (e.g. a bad image →
@@ -340,7 +400,7 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	// changed target re-drives it (the reconciler's budget path lets a
 	// mid-operation Failed Instance continue rather than start fresh).
 	if s.Phase != workload.InstancePhaseReady && s.Phase != workload.InstancePhaseFailed {
-		return false, 0, nil
+		return UpdateTriggerDecision{}, false
 	}
 
 	// Same-target retry gate: a persisted RetryBlock for the
@@ -355,49 +415,53 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 		denied, retryAfter := evaluateRetryBlockGate(b, input.Now(),
 			anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name))
 		if denied {
-			return false, retryAfter, nil
+			return UpdateTriggerDecision{RetryAfter: retryAfter}, false
 		}
 	}
 
 	// RunningRevision is the cheap fast-path comparison.
 	if s.RunningRevision != "" && s.RunningRevision != target.Name {
-		return true, 0, nil
+		return UpdateTriggerDecision{Trigger: true}, false
 	}
 	if s.RunningRevision == target.Name {
-		return false, 0, nil
+		return UpdateTriggerDecision{}, false
 	}
-	// Empty RunningRevision — fall back to per-pod diff and backfill. Use
-	// the caller-supplied pods when present; otherwise self-list (the
-	// standalone DetectUpdateTrigger path).
-	pods := instancePods
-	if pods == nil {
-		all, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, true)
-		if err != nil {
-			return false, 0, err
-		}
-		pods = filterPodsByInstance(all, inst.Index)
-	}
+	// Empty RunningRevision — fall back to the per-pod diff.
+	return UpdateTriggerDecision{}, true
+}
+
+// evaluateUpdateTriggerPods runs the empty-RunningRevision fallback:
+// per-pod diff against the target spec, and the AdoptRevision
+// selection.
+func evaluateUpdateTriggerPods(pods []*corev1.Pod, targetSpec *corev1.PodSpec) UpdateTriggerDecision {
 	for _, pod := range pods {
 		if !podMatchesTarget(pod, targetSpec) {
-			return true, 0, nil
+			return UpdateTriggerDecision{Trigger: true}
 		}
 	}
 	// Spec-match alone proves nothing about health: a wedged pod (e.g.
 	// ImagePullBackOff) spec-matches the very revision that broke it, and
-	// the Ready stamp below prunes that revision's RetryBlock — Ready is
+	// the adoption stamp prunes that revision's RetryBlock — Ready is
 	// only stamped on proof. Require the same runtime-readiness the
 	// canonical Ready promotions gate on before adopting; unproven pods
 	// are simply left alone (a corrective target re-triggers via the
 	// per-pod diff above, and pods that later become ready are adopted
 	// on a subsequent pass).
 	if !query.AllPodsRuntimeReady(pods) {
-		return false, 0, nil
+		return UpdateTriggerDecision{}
 	}
-	// Backfill so future reconciles take the fast-path.
-	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {
-		return false, 0, fmt.Errorf("backfill RunningRevision (instance=%d): %w", inst.Index, err)
+	return UpdateTriggerDecision{AdoptRevision: true}
+}
+
+// BackfillRunningRevision stamps the Instance Ready on rev
+// (Phase=Ready, RunningRevision=rev, Operation cleared) — the
+// AdoptRevision effect, so future trigger evaluations take the
+// RunningRevision fast path.
+func BackfillRunningRevision(ctx context.Context, input workload.ReconcileInput, idx int32, rev string) error {
+	if err := patchInstanceStatusReadyOnRevision(ctx, input, idx, rev); err != nil {
+		return fmt.Errorf("backfill RunningRevision (instance=%d): %w", idx, err)
 	}
-	return false, 0, nil
+	return nil
 }
 
 // isMigrateOwnedStatus reports whether the InstanceStatus carries an

@@ -104,8 +104,10 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// index set is treated as empty); the input/plan only need to be
 	// well-formed so Delete can read Key/Component/InstanceReadyTimeout.
 	// The same-target update retry policy is nil: the Update pass never
-	// runs in teardown.
-	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy)
+	// runs in teardown, and neither does the escalation pass (zero grace
+	// / zero relocation budget — wedge escalation belongs to the Delete
+	// pipeline's lifecycle.forceDelete).
+	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, 0, 0)
 	input.Teardown = true
 
 	plan, perr := workload.BuildPlan(v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), input.DesiredSpec, input.ObservedState)
@@ -114,12 +116,13 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	}
 
 	// The normal path's deferred aggregateAndWriteStatus is NOT
-	// installed here: its counter/condition writes die with the IR, and
-	// its escalation backstops (stuck-pod, InstanceReadyTimeout expiry)
-	// assume a converging rollout — firing them against Phase=Deleting
-	// bookkeeping would fight the Delete pipeline that already owns
-	// wedge escalation (via lifecycle.forceDelete). Instance statuses
-	// still drain through RemoveInstance as each Delete completes.
+	// installed here: its counter/condition writes die with the IR. The
+	// workload escalation pass does not run under Teardown either — the
+	// stuck-pod / InstanceReadyTimeout backstops assume a converging
+	// rollout, and firing them against Phase=Deleting bookkeeping would
+	// fight the Delete pipeline that already owns wedge escalation (via
+	// lifecycle.forceDelete). Instance statuses still drain through
+	// RemoveInstance as each Delete completes.
 	deps := workload.Deps{
 		Client:       r.Client,
 		APIReader:    r.APIReader,

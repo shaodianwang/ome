@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/clock"
@@ -65,6 +66,17 @@ type ReconcileInput struct {
 	// workload code panics on a nil callback rather than silently
 	// dropping status updates.
 	MutateInstance func(ctx context.Context, idx int32, mutate func(*InstanceStatus) bool) error
+
+	// ApplyInstanceMutations applies a batch of InstanceMutations in ONE
+	// status write: one fresh read, every mutation applied to its slot,
+	// one persist, retried on conflict as a whole. Only mutations whose
+	// Mutate reports a change are persisted; a batch with no changes
+	// writes nothing. Callers may batch only mutations with no ordering
+	// dependency on a later external effect in the same reconcile —
+	// write-ahead intent stamps stay on per-call MutateInstance.
+	//
+	// Optional: nil falls back to one MutateInstance call per mutation.
+	ApplyInstanceMutations func(ctx context.Context, muts []InstanceMutation) error
 
 	// RemoveInstance drops the InstanceStatus entry for idx and
 	// returns (true, nil) when a real removal happened, (false, nil)
@@ -151,6 +163,20 @@ type ReconcileInput struct {
 	// guarantees it, consumers never re-check.
 	ForceDelete *ForceDeletePolicy
 
+	// StuckPodGrace is the wait window before the terminal-failure
+	// escalation pass fast-fails an Instance on a pod parked in a
+	// terminal kubelet waiting state. Operator config
+	// (lifecycle.stuckPodGracePeriod); zero or negative disables fast
+	// escalation (the InstanceReadyTimeout backstop still fires).
+	StuckPodGrace time.Duration
+
+	// Disposition carries the operator-config inputs the terminal-failure
+	// disposition (DisposeExpiredAttempt) branches on. The zero value
+	// fails safe (no relocation, terminal branch for non-workload-caused
+	// failures). MigrationMode is plan-derived: the escalation pass
+	// overlays ComponentPlan.MigrationMode, so adapters leave it zero.
+	Disposition DispositionDeps
+
 	// Teardown marks this reconcile as owner-deletion teardown. When
 	// set, the dispatcher treats the planned index set as empty — every
 	// observed Instance is a scale-down extra and runs the ordinary
@@ -164,6 +190,45 @@ type ReconcileInput struct {
 	// Clock mirrors Deps.Clock for helpers that receive only the input.
 	// See Deps.Now for the rule.
 	Clock clock.Clock
+}
+
+// InstanceMutation is one buffered InstanceStatus mutation, keyed by
+// Instance index. Mutate follows the MutateInstance callback contract:
+// it receives the located (or fresh-appended) slot's workload mirror
+// and returns true when a real change was made.
+type InstanceMutation struct {
+	Index  int32
+	Mutate func(*InstanceStatus) bool
+}
+
+// DispositionDeps carries the operator-config inputs and adapter hooks
+// the disposition branches on. Resolved once per reconcile by the
+// adapter.
+type DispositionDeps struct {
+	// AutoMigrateMaxAttempts bounds the relocation branch per
+	// (component, instance) against the audit ledger's AutoRecover
+	// entry count. <= 0 (unconfigured) disables relocation entirely.
+	AutoMigrateMaxAttempts int32
+	// MigrationMode is the effective migration disposition from the
+	// plan (MigrationModeOrDefault). Only Auto (and its Surge spelling
+	// alias) enables relocation; the zero value fails safe to the
+	// terminal branch.
+	MigrationMode MigrationMode
+	// PodSpec / WorkerPodSpec are the Component's desired pod templates
+	// (leader/single-pod and worker role). The relocation branch
+	// consults their REQUIRED node affinity before recording a
+	// directive: when excluding the suspect node (plus the instance's
+	// already-recorded exclusions) would leave a template unschedulable
+	// — e.g. a required In[node] pin on the wedged node — the attempt
+	// disposes terminal instead of recording an unsatisfiable exclusion
+	// that would leave the rebuild permanently Pending. Nil skips the
+	// guard.
+	PodSpec       *corev1.PodSpec
+	WorkerPodSpec *corev1.PodSpec
+	// OnRelocationDirective, when non-nil, is invoked once per recorded
+	// relocation directive with the component name — the adapter's
+	// metrics hook (the IR adapter wires the auto-migration counter).
+	OnRelocationDirective func(component string)
 }
 
 // ForceDeletePolicy configures the stuck-Terminating force-delete

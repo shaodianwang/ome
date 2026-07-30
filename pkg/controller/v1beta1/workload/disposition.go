@@ -97,36 +97,6 @@ const (
 	DispositionSkippedSuperseded
 )
 
-// DispositionDeps carries the operator-config inputs and adapter hooks
-// the disposition branches on. Resolved once per reconcile by the
-// adapter.
-type DispositionDeps struct {
-	// AutoMigrateMaxAttempts bounds the relocation branch per
-	// (component, instance) against the audit ledger's AutoRecover
-	// entry count. <= 0 (unconfigured) disables relocation entirely.
-	AutoMigrateMaxAttempts int32
-	// MigrationMode is the effective migration disposition from the
-	// plan (MigrationModeOrDefault). Only Auto (and its Surge spelling
-	// alias) enables relocation; the zero value fails safe to the
-	// terminal branch.
-	MigrationMode MigrationMode
-	// PodSpec / WorkerPodSpec are the Component's desired pod templates
-	// (leader/single-pod and worker role). The relocation branch
-	// consults their REQUIRED node affinity before recording a
-	// directive: when excluding the suspect node (plus the instance's
-	// already-recorded exclusions) would leave a template unschedulable
-	// — e.g. a required In[node] pin on the wedged node — the attempt
-	// disposes terminal instead of recording an unsatisfiable exclusion
-	// that would leave the rebuild permanently Pending. Nil skips the
-	// guard.
-	PodSpec       *corev1.PodSpec
-	WorkerPodSpec *corev1.PodSpec
-	// OnRelocationDirective, when non-nil, is invoked once per recorded
-	// relocation directive with the component name — the adapter's
-	// metrics hook (the IR adapter wires the auto-migration counter).
-	OnRelocationDirective func(component string)
-}
-
 // DisposeExpiredAttempt classifies one expired / stuck Create-or-Update
 // attempt and acts:
 //
