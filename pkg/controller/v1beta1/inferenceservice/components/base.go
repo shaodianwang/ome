@@ -798,6 +798,13 @@ func ReconcileOMENativeSubresources(
 		return errors.Wrap(err, "stable service")
 	}
 
+	// PodMonitor is optional: its scheme is registered only when the Prometheus
+	// operator CRD is present (manager startup). On a cluster without it, skip
+	// creation rather than failing the whole reconcile.
+	if !b.Scheme.Recognizes(monitoringv1.SchemeGroupVersion.WithKind(constants.PodMonitorKind)) {
+		return nil
+	}
+
 	// PodMonitor scrape port follows the Raw fallback rules: prefer a
 	// port named "metrics", else the first declared port, else "http".
 	portName := "http"
