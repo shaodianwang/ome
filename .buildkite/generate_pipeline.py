@@ -65,7 +65,10 @@ BUILD_QUEUE = "tw-cpu-x86"
 # run on real VMs / privileged dind where kind can create bridge networks
 # (writable /proc/sys/net + ip_forward=1). The queue's agents must provide a
 # reachable, privileged Docker daemon — see .buildkite/README-gke-kind.md.
-GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-kind-x86")
+# Default targets the live agent-stack-k8s TPU queue, which lands kind jobs on
+# its CPU node pool via the per-step kubernetes plugin. Flip GKE_KIND_QUEUE to a
+# dedicated GKE CPU queue (e.g. gke-kind-x86) once infra provisions one.
+GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-tpu-v7x")
 # Fan-out for the GKE KIND suite: N parallel pods, each running a disjoint
 # subset of the ~72 spec files (sharded by BUILDKITE_PARALLEL_JOB in
 # run_kind_tests_gke.sh). 8 → ~9 files/shard.
@@ -76,12 +79,12 @@ def _truthy(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-# Emit the GKE KIND step ONLY when the queue actually exists. A step
-# targeting a queue with no agents blocks the whole build waiting for an
-# agent (soft_fail does not help — the job never runs to fail), so the
-# step stays out of the pipeline until infra sets GKE_KIND_ENABLED. See
-# .buildkite/README-gke-kind.md for standing up the queue.
-GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", ""))
+# The GKE KIND step runs by default. It stays soft_fail (below) so an unproven
+# shard never gates merges, and GKE_QUEUE targets a live queue so the step never
+# blocks a build waiting for a nonexistent agent. Kill switch: set
+# GKE_KIND_ENABLED=0 to drop the step entirely (e.g. if the queue goes away).
+# See .buildkite/README-gke-kind.md.
+GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
@@ -189,8 +192,8 @@ def _gke_kind_step() -> str:
     queue where kind boots (privileged dind → writable /proc/sys/net +
     ip_forward=1). Buildkite `parallelism` fans it into N pods; each runs a
     disjoint subset of the ~72 spec files (run_kind_tests_gke.sh partitions
-    by BUILDKITE_PARALLEL_JOB and selects with -ginkgo.focus-file). Appended
-    only when GKE_KIND_ENABLED, so an absent queue never blocks builds.
+    by BUILDKITE_PARALLEL_JOB and selects with -ginkgo.focus-file). Emitted by
+    default; drop it with GKE_KIND_ENABLED=0 if the queue goes away.
 
     The step carries its own pod via the agent-stack-k8s `kubernetes` plugin
     (podSpecPatch): container-0 runs the offline `kind-ci` image (baked Go +

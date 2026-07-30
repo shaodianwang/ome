@@ -1,11 +1,14 @@
 # Track A — the GKE Buildkite agent queue for `integration-test-kind-gke`
 
-This is the setup to stand up the **`gke-kind-x86`** Buildkite queue on the MSL
-GCP cluster so the sharded OMENative KIND suite runs in CI. Until it exists the
-`integration-test-kind-gke` step is **not emitted** — `generate_pipeline.py`
-adds it only when `GKE_KIND_ENABLED` is truthy (a step targeting a queue with no
-agents would hang every build; `soft_fail` doesn't help because the job never
-runs to fail).
+This is the setup to stand up a dedicated **`gke-kind-x86`** Buildkite queue on
+the MSL GCP cluster for the sharded OMENative KIND suite. The suite already runs
+in CI: `generate_pipeline.py` emits `integration-test-kind-gke` **by default**,
+targeting the live `gke-tpu-v7x` queue (via the per-step `kubernetes` plugin,
+which lands the job on that pool's CPU nodes). It stays `soft_fail: true` so it
+never gates merges. Disable it entirely with `GKE_KIND_ENABLED=0`; retarget it
+with `GKE_KIND_QUEUE=<queue>` once this dedicated CPU queue exists. Keep any
+queue you point it at live — a step targeting a queue with no agents hangs every
+build, and `soft_fail` doesn't help because the job never runs to fail.
 
 ## Why GKE (recap)
 
@@ -138,8 +141,8 @@ kubectl -n <agent-ns> create secret generic buildkite-agent-token \
 1. Confirm the 5 prerequisites (esp. #3 proxy egress) with Cloud Foundation.
 2. `helm install` the controller with the values above; verify agents register
    under `queue=gke-kind-x86` in Buildkite.
-3. Set **`GKE_KIND_ENABLED=1`** in the `ome` pipeline env (optionally
-   `GKE_KIND_PARALLELISM` / `GKE_KIND_QUEUE`) so the step is emitted.
+3. Point the step at the new queue with **`GKE_KIND_QUEUE=gke-kind-x86`** in the
+   `ome` pipeline env (the step is already emitted by default on `gke-tpu-v7x`).
 4. Open a PR touching `.buildkite/`; confirm the step fans into 8 jobs, each
    runs a disjoint 9-file shard, all green. It ships `soft_fail: true` so this
    first run doesn't gate merges.
