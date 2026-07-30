@@ -323,11 +323,19 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			cands = append(cands, v1beta1.CandidatePlacement{Cluster: c, Phase: v1beta1.CandidatePhasePlaced})
 		}
 		res, err := r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhaseRacing, candidates: cands})
-		if err == nil && hold > 0 {
-			// An incremental round is still in flight; re-evaluate when it is due to
-			// elapse (or at the poll cadence, whichever is sooner) so the next batch
-			// is nominated promptly rather than a full poll past the round deadline.
-			res.RequeueAfter = min(hold, res.RequeueAfter)
+		if err == nil {
+			// Racing is an active wait for Kueue admission, so re-poll at the fast
+			// cadence to observe the winner promptly. writePlacement otherwise
+			// returns the long steady-state backstop, which only suffices when the
+			// status funnel event-drives re-reconciles; without the funnel that
+			// would leave the race unresolved until the backstop fires.
+			res.RequeueAfter = r.requeue()
+			// An incremental round in flight re-evaluates when it is due to elapse
+			// (or the poll cadence, whichever is sooner) so the next batch is
+			// nominated without waiting a full poll past the round deadline.
+			if hold > 0 {
+				res.RequeueAfter = min(hold, res.RequeueAfter)
+			}
 		}
 		return res, err
 	}

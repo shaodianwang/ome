@@ -184,6 +184,30 @@ func TestReconcile_FansOutToAllCandidates(t *testing.T) {
 	assert.Len(t, p.Candidates, 2)
 }
 
+// TestReconcile_RacingRequeuesAtPollCadence guards the convergence bug where a
+// race in progress requeued at the long steady-state safety backstop
+// (DefaultStatusSafetyRequeue, 10m) instead of the fast poll cadence. With the
+// status funnel off (the default), that backstop is the only re-trigger, so the
+// winner is not observed until it fires — the race appears stuck. Racing must
+// re-poll at r.requeue() (the harness's 1s).
+func TestReconcile_RacingRequeuesAtPollCadence(t *testing.T) {
+	s := testScheme(t)
+	wa, wb := emptyWorker(s), emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	require.Equal(t, v1beta1.PlacementPhaseRacing, cpPlacement(t, cp).Phase)
+	assert.Equal(t, time.Second, res.RequeueAfter,
+		"racing must requeue at the poll cadence, not the steady-state backstop")
+	assert.Less(t, res.RequeueAfter, DefaultStatusSafetyRequeue)
+}
+
 func TestReconcile_FirstAdmittedWinsAndDeletesLosers(t *testing.T) {
 	s := testScheme(t)
 	wa := emptyWorker(s)
