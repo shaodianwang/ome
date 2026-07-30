@@ -7,6 +7,7 @@ import (
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -264,14 +265,11 @@ func deleteScaledObjectIfExists(ctx context.Context, c client.Client, namespace,
 	soName := utils.GetScaledObjectName(name)
 	obj := &kedav1.ScaledObject{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: soName}, obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		// KEDA scheme is registered unconditionally at manager startup.
-		// IsNotRegistered is dead code at steady state, but we keep the
-		// defensive guard so a rolling-uninstall-during-reconcile race
-		// doesn't panic.
-		if runtime.IsNotRegisteredError(err) {
+		// Nothing to clean up when the ScaledObject is gone (IsNotFound), or when
+		// KEDA is not installed at all — CRD absent yields no REST mapping
+		// (IsNoMatchError), and the type may be unregistered in the scheme
+		// (IsNotRegisteredError). None of these should fail the reconcile.
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
 			return nil
 		}
 		return err

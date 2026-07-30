@@ -7,12 +7,12 @@ import (
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	apierr "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -37,8 +37,6 @@ func (*NoOpAutoscaler) Reconcile() error {
 func (a *NoOpAutoscaler) SetControllerReferences(owner metav1.Object, scheme *runtime.Scheme) error {
 	return nil
 }
-
-var log = logf.Log.WithName("AutoscalerReconciler")
 
 // AutoscalerReconciler is the struct of Raw K8S Object
 type AutoscalerReconciler struct {
@@ -114,16 +112,11 @@ func deleteExistingScaledObject(client client.Client, componentMeta metav1.Objec
 		Name:      scaledObjectName,
 	}, scaledObject)
 	if err != nil {
-		if apierr.IsNotFound(err) {
-			return nil
-		}
-		// KEDA is a hard dependency, so `IsNotRegisteredError` cannot fire
-		// at steady state. We keep it as a defensive guard for the narrow
-		// window where KEDA was uninstalled out from under a running
-		// manager.
-		if runtime.IsNotRegisteredError(err) {
-			log.Info("KEDA ScaledObject type not registered in scheme, skipping cleanup",
-				"namespace", componentMeta.Namespace, "name", scaledObjectName)
+		// Nothing to clean up when the ScaledObject is gone (IsNotFound), or when
+		// KEDA is not installed — CRD absent yields no REST mapping
+		// (IsNoMatchError) and the type may be unregistered in the scheme
+		// (IsNotRegisteredError). None of these should fail the reconcile.
+		if apierr.IsNotFound(err) || meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
 			return nil
 		}
 		return err
