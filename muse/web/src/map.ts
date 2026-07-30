@@ -65,28 +65,40 @@ export function toRollouts(rollouts: RolloutItem[]): Rollout[] {
 
 // ---- Workloads ------------------------------------------------------------
 
-/** Roll up ready/desired replicas across an ISVC's Components into one cell. */
+/** Ready/total counts for one Component. Prefers the lifecycle counts
+ *  (which exclude still-initializing Instances); falls back to the autoscaler
+ *  scale counts for non-OMENative components that report no lifecycle. */
+export function componentReplicas(c: ComponentItem): {
+  ready: number | null;
+  total: number | null;
+} {
+  const ready = c.readyReplicas ?? c.currentReplicas ?? null;
+  const total = c.totalReplicas ?? c.desiredReplicas ?? null;
+  return { ready, total };
+}
+
+/** Roll up ready/total replicas across an ISVC's Components into one cell. */
 export function replicaRollup(components?: ComponentItem[]): { label: string; tone: Tone } {
   if (!components || components.length === 0) return { label: "—", tone: "slate" };
-  let current = 0;
-  let desired = 0;
-  let haveCurrent = false;
-  let haveDesired = false;
+  let ready = 0;
+  let total = 0;
+  let haveReady = false;
+  let haveTotal = false;
   for (const c of components) {
-    if (c.currentReplicas != null) {
-      current += c.currentReplicas;
-      haveCurrent = true;
+    const r = componentReplicas(c);
+    if (r.ready != null) {
+      ready += r.ready;
+      haveReady = true;
     }
-    if (c.desiredReplicas != null) {
-      desired += c.desiredReplicas;
-      haveDesired = true;
+    if (r.total != null) {
+      total += r.total;
+      haveTotal = true;
     }
   }
-  if (!haveCurrent && !haveDesired) return { label: "—", tone: "slate" };
-  if (!haveDesired) return { label: `${current}`, tone: "slate" };
-  const tone: Tone =
-    current >= desired && desired > 0 ? "green" : current < desired ? "amber" : "slate";
-  return { label: `${current}/${desired}`, tone };
+  if (!haveReady && !haveTotal) return { label: "—", tone: "slate" };
+  if (!haveTotal) return { label: `${ready}`, tone: "slate" };
+  const tone: Tone = ready >= total && total > 0 ? "green" : ready < total ? "amber" : "slate";
+  return { label: `${ready}/${total}`, tone };
 }
 
 // ---- Deployment overview tiles ---------------------------------------------
@@ -114,10 +126,11 @@ export function sortConditions(conditions: ConditionItem[]): ConditionItem[] {
 /** Tile tone for one component: red when nothing is live against a nonzero
  *  target, amber when short of target or reported not ready. */
 export function componentTone(c: ComponentItem): "ok" | "warn" | "bad" {
-  const cur = c.currentReplicas ?? 0;
-  const des = c.desiredReplicas ?? 0;
-  if (des > 0 && cur === 0) return "bad";
-  return c.ready === false || cur < des ? "warn" : "ok";
+  const { ready, total } = componentReplicas(c);
+  const r = ready ?? 0;
+  const t = total ?? 0;
+  if (t > 0 && r === 0) return "bad";
+  return c.ready === false || r < t ? "warn" : "ok";
 }
 
 /** A short model-load summary: loaded/failed copies, else a non-steady state. */

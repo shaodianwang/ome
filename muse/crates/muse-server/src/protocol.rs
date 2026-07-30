@@ -704,6 +704,14 @@ pub struct ComponentView {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready: Option<bool>,
+    /// Ready Instances, from `lifecycle.readyReplicas`. Excludes still-
+    /// initializing Instances, unlike the autoscaler's `currentReplicas`
+    /// scale count below. None for non-OMENative Components.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "readyReplicas")]
+    pub ready_replicas: Option<i32>,
+    /// Total Instances, from `lifecycle.replicas`. None for non-OMENative Components.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "totalReplicas")]
+    pub total_replicas: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "currentReplicas")]
     pub current_replicas: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "desiredReplicas")]
@@ -748,6 +756,8 @@ fn components_of(status: &InferenceServiceStatus) -> Vec<ComponentView> {
         .map(|(name, c)| ComponentView {
             name: name.clone(),
             ready: component_ready(status, name),
+            ready_replicas: c.lifecycle.as_ref().and_then(|l| l.ready_replicas),
+            total_replicas: c.lifecycle.as_ref().and_then(|l| l.replicas),
             current_replicas: c.autoscaler.as_ref().and_then(|a| a.current_replicas),
             desired_replicas: c.autoscaler.as_ref().and_then(|a| a.desired_replicas),
             rollout_phase: c.rollout_phase.as_ref().and_then(enum_str),

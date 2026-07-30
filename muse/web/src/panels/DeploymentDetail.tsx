@@ -9,6 +9,7 @@ import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import type { StreamConnectionState } from "../live";
 import {
+  componentReplicas,
   componentTone,
   conditionRank,
   replicaRollup,
@@ -315,8 +316,9 @@ function OverviewPane({
             {components.length ? (
               <div className="comp-tiles">
                 {components.map((c) => {
-                  const cur = c.currentReplicas ?? 0;
-                  const des = c.desiredReplicas ?? 0;
+                  const { ready: readyCount, total } = componentReplicas(c);
+                  const cur = readyCount ?? 0;
+                  const des = total ?? 0;
                   const pct = des > 0 ? Math.round((cur / des) * 100) : cur > 0 ? 100 : 0;
                   const tone = componentTone(c);
                   const barTone = tone === "ok" ? "green" : tone === "warn" ? "amber" : "red";

@@ -117,6 +117,11 @@ export interface ConditionItem {
 export interface ComponentItem {
   name: string;
   ready?: boolean;
+  /** Ready Instances (lifecycle.readyReplicas). Excludes still-initializing
+   *  Instances, unlike `currentReplicas`. Absent for non-OMENative components. */
+  readyReplicas?: number;
+  /** Total Instances (lifecycle.replicas). Absent for non-OMENative components. */
+  totalReplicas?: number;
   currentReplicas?: number;
   desiredReplicas?: number;
   rolloutPhase?: string;

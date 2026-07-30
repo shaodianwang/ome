@@ -87,6 +87,24 @@ describe("replicaRollup", () => {
     ).toEqual({ label: "2/3", tone: "amber" });
   });
 
+  it("prefers lifecycle ready/total over the autoscaler scale count", () => {
+    // 38 scaled, 8 still initializing: readyReplicas (30) is the numerator,
+    // not currentReplicas (38).
+    expect(
+      replicaRollup(
+        comps([
+          {
+            name: "engine",
+            readyReplicas: 30,
+            totalReplicas: 38,
+            currentReplicas: 38,
+            desiredReplicas: 38,
+          },
+        ]),
+      ),
+    ).toEqual({ label: "30/38", tone: "amber" });
+  });
+
   it("returns an em dash when there are no components or no counts", () => {
     expect(replicaRollup(undefined)).toEqual({ label: "—", tone: "slate" });
     expect(replicaRollup([])).toEqual({ label: "—", tone: "slate" });
@@ -120,6 +138,21 @@ describe("condition and component tiles", () => {
     expect(componentTone({ name: "e", ready: false, currentReplicas: 0, desiredReplicas: 2 })).toBe(
       "bad",
     );
+  });
+
+  it("tones from lifecycle readiness, not the autoscaler scale count", () => {
+    // readyReplicas (30) < totalReplicas (38) → warn, even though the
+    // autoscaler reports currentReplicas == desiredReplicas == 38.
+    expect(
+      componentTone({
+        name: "engine",
+        ready: true,
+        readyReplicas: 30,
+        totalReplicas: 38,
+        currentReplicas: 38,
+        desiredReplicas: 38,
+      }),
+    ).toBe("warn");
   });
 });
 
