@@ -326,6 +326,80 @@ func TestReconcile_ReplaceOnWinnerLostAfterGrace(t *testing.T) {
 	assert.False(t, ok, "grace marker cleared after re-race")
 }
 
+// workerWithUnadmittedDerived returns a worker whose derived ISVC exists but
+// whose engine IR reports NO admitted instance — the shape of a winner that
+// Kueue preempted (pods evicted back behind the admission gate).
+func workerWithUnadmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	engineIR := irWithInstances(v1beta1.EngineComponent, false) // present, NOT admitted
+	return fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+}
+
+func TestReconcile_WinnerLostAdmissionWithinGraceHolds(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithUnadmittedDerived(t, s) // b's derived present but de-admitted (preempted)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Minute // first pass arms the clock, within window
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter, "requeues to re-check after grace")
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, "b", p.Cluster, "winner held during grace")
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase, "phase held during grace")
+	assert.False(t, hasDerived(t, wa), "must NOT re-fan-out to a while within grace")
+}
+
+func TestReconcile_WinnerLostAdmissionReRacesAfterGrace(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithUnadmittedDerived(t, s) // b's derived present but de-admitted (preempted)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Minute
+	// Pre-seed the grace clock so the window is already elapsed on this pass.
+	r.winnerLostSince.Store(isvc.UID, time.Now().Add(-2*time.Minute))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Empty(t, p.Cluster, "de-admitted winner cleared after grace")
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
+	assert.True(t, hasDerived(t, wa), "re-fanned out to a after grace")
+	_, ok := r.winnerLostSince.Load(isvc.UID)
+	assert.False(t, ok, "grace marker cleared after re-race")
+}
+
 func TestReconcile_WinnerFailedSurfacesFailed(t *testing.T) {
 	s := testScheme(t)
 	// b's derived ISVC reports an engine instance Phase=Failed.

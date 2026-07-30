@@ -231,8 +231,6 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			return ctrl.Result{RequeueAfter: r.requeue()}, nil
 
 		case winnerDerivedPresent:
-			// Recovered (or never lost): drop any pending grace marker.
-			r.clearGrace(isvc.UID)
 			cl, ok := r.Clusters.ClientFor(winner)
 			if !ok {
 				// Winner disconnected between the derived GET and now; hold
@@ -263,9 +261,27 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 					url:        u,
 				})
 			}
-			// Re-apply on the winner and sweep any stray derived on the other
-			// candidates (origin-guarded, so a same-named user ISVC is safe).
-			// cl was resolved above.
+			// The winner must still hold its Kueue admission. If it lost it (e.g.
+			// preemption evicted every instance of a component), the placement is no
+			// longer live even though the derived object exists. Ride out a transient
+			// dip (rollout, brief re-gate) with the same grace window a vanished
+			// derived uses, then re-race off the healthy candidates. Without this a
+			// preempted winner is reported Placed forever while serving nothing.
+			if !AllComponentsAdmitted(derived, statuses) {
+				if remaining := r.graceRemaining(isvc.UID, time.Now()); remaining > 0 {
+					r.Log.Info("sticky winner: lost admission; within grace window, holding placement",
+						"cluster", winner, "isvc", isvc.Namespace+"/"+isvc.Name, "graceRemaining", remaining)
+					return ctrl.Result{RequeueAfter: min(remaining, r.requeue())}, nil
+				}
+				r.clearGrace(isvc.UID)
+				r.Log.Info("sticky winner: lost admission past grace window; re-racing",
+					"cluster", winner, "isvc", isvc.Namespace+"/"+isvc.Name)
+				break // exit the switch; fall through to the re-race path below
+			}
+			// Admitted and present: healthy. Drop any pending grace marker, re-apply
+			// on the winner, and sweep any stray derived on the other candidates
+			// (origin-guarded, so a same-named user ISVC is safe).
+			r.clearGrace(isvc.UID)
 			if err := r.placeOnBounded(ctx, cl, isvc); err != nil {
 				return ctrl.Result{}, err
 			}
