@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -113,6 +114,14 @@ func (e Entry) CompletedAtTime() (time.Time, bool) {
 // payload.
 type Ledger struct {
 	Entries []Entry `json:"entries"`
+
+	// loadedResourceVersion pins persists to the ConfigMap state this
+	// ledger was loaded from. PersistLedgerForOwner writes against it so
+	// a concurrent writer (sibling IR on the shared parent CM) surfaces
+	// as a 409 for the caller's reconcile/retry loop to reload and
+	// re-apply, instead of being silently blob-overwritten. Empty means
+	// the ConfigMap did not exist at load time.
+	loadedResourceVersion string
 }
 
 // ExtractRequestUUID returns the UUID suffix of a migration-request
@@ -152,6 +161,8 @@ func ConfigMapNameForOwner(owner metav1.Object) string {
 // LoadLedgerForOwner fetches the per-owner audit ConfigMap and parses
 // its history.json payload. Returns an empty ledger (and no error) when
 // the ConfigMap doesn't exist yet — first migration on this owner.
+// The returned ledger remembers the ConfigMap revision it was loaded
+// at; PersistLedgerForOwner writes against that revision (CAS).
 // Owner is held as metav1.Object so this helper is owner-agnostic; the
 // ISVC adapter and the IR adapter use the same persistence path.
 func LoadLedgerForOwner(ctx context.Context, reads client.Reader, owner metav1.Object) (*Ledger, error) {
@@ -165,12 +176,13 @@ func LoadLedgerForOwner(ctx context.Context, reads client.Reader, owner metav1.O
 	}
 	raw, ok := cm.Data[LedgerKey]
 	if !ok || raw == "" {
-		return &Ledger{}, nil
+		return &Ledger{loadedResourceVersion: cm.ResourceVersion}, nil
 	}
 	var l Ledger
 	if err := json.Unmarshal([]byte(raw), &l); err != nil {
 		return nil, fmt.Errorf("unmarshal audit ledger %s: %w", key.Name, err)
 	}
+	l.loadedResourceVersion = cm.ResourceVersion
 	return &l, nil
 }
 
@@ -195,16 +207,21 @@ func (l *Ledger) HasCompletedOrFailedRequest(uuid string) bool {
 	return false
 }
 
-// InFlightEntry returns the in-progress entry for uuid, or nil when
-// the ledger has no Started-but-not-yet-terminal entry for this UUID.
-// Used by the migration state machine to resume across reconciles.
+// InFlightEntry returns a copy of the in-progress entry for uuid, or
+// nil when the ledger has no Started-but-not-yet-terminal entry for
+// this UUID. Used by the migration state machine to resume across
+// reconciles. A copy — not an interior pointer — because trim and
+// UpsertEntry compact Entries in place, which would re-point an
+// aliasing pointer at a different row; write changes back through
+// UpsertEntry.
 func (l *Ledger) InFlightEntry(uuid string) *Entry {
 	for i := range l.Entries {
 		if l.Entries[i].RequestUUID != uuid {
 			continue
 		}
 		if l.Entries[i].Phase == PhaseStarted {
-			return &l.Entries[i]
+			e := l.Entries[i]
+			return &e
 		}
 	}
 	return nil
@@ -282,8 +299,16 @@ func (l *Ledger) trim() {
 // PersistLedgerForOwner writes the ledger back to the per-owner audit
 // ConfigMap. Creates the CM on first call stamped with the OMENative-
 // managed-by label + a controller OwnerReference back to the owner so
-// the cluster GC sweeps it when the owner is deleted. Race-on-create
-// falls through to read-modify-write.
+// the cluster GC sweeps it when the owner is deleted.
+//
+// Writes are compare-and-swap against the ConfigMap state the ledger
+// was loaded from: a concurrent writer's persist (or a create race)
+// returns a Conflict error instead of silently erasing the other
+// writer's entries. Callers inherit the retry via their reconcile
+// requeue (or an explicit retry.RetryOnConflict around load+mutate+
+// persist): reload, re-apply the mutation, persist again. A successful
+// persist re-pins the ledger to the written revision, so sequential
+// persists of the same in-memory ledger within one pass keep working.
 //
 // Owner is held as metav1.Object and the OwnerReference GVK is passed
 // explicitly so the workload package stays free of CRD-specific imports;
@@ -299,13 +324,10 @@ func PersistLedgerForOwner(
 	if err != nil {
 		return fmt.Errorf("marshal audit ledger: %w", err)
 	}
-	cm := &corev1.ConfigMap{}
 	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: ConfigMapNameForOwner(owner)}
-	if err := c.Get(ctx, key, cm); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get audit configmap %s: %w", key.Name, err)
-		}
-		cm = &corev1.ConfigMap{
+
+	if l.loadedResourceVersion == "" {
+		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            key.Name,
 				Namespace:       key.Namespace,
@@ -315,32 +337,69 @@ func PersistLedgerForOwner(
 			Data: map[string]string{LedgerKey: string(raw)},
 		}
 		if err := c.Create(ctx, cm); err != nil {
-			if !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("create audit configmap %s: %w", key.Name, err)
+			if apierrors.IsAlreadyExists(err) {
+				return apierrors.NewConflict(corev1.Resource("configmaps"), key.Name,
+					fmt.Errorf("audit configmap created concurrently since ledger load"))
 			}
-			// Lost a race; fall through to read-modify-write below.
-			if err := c.Get(ctx, key, cm); err != nil {
-				return fmt.Errorf("re-get audit configmap after race: %w", err)
-			}
-		} else {
-			return nil
+			return fmt.Errorf("create audit configmap %s: %w", key.Name, err)
 		}
+		l.loadedResourceVersion = cm.ResourceVersion
+		return nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := c.Get(ctx, key, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Deleted since load (owner teardown cascade); a reload
+			// decides whether recreating is still meaningful.
+			return apierrors.NewConflict(corev1.Resource("configmaps"), key.Name,
+				fmt.Errorf("audit configmap deleted since ledger load"))
+		}
+		return fmt.Errorf("get audit configmap %s: %w", key.Name, err)
 	}
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
 	cm.Data[LedgerKey] = string(raw)
 	// Claim ownership when we land on a pre-existing CM without our
-	// controller ref. The race path (Create -> AlreadyExists -> Get)
-	// silently took whatever was there; without this we'd happily write
-	// to a CM the cluster GC won't sweep when the owner is deleted.
-	if !hasControllerRefForOwner(cm, owner) {
-		cm.OwnerReferences = append(cm.OwnerReferences, *metav1.NewControllerRef(owner, gvk))
-	}
+	// controller ref; without this we'd happily write to a CM the
+	// cluster GC won't sweep when the owner is deleted.
+	claimControllerRef(ctx, cm, owner, gvk)
+	// CAS anchor: write against the revision the ledger was loaded at,
+	// not whatever Get just returned.
+	cm.ResourceVersion = l.loadedResourceVersion
 	if err := c.Update(ctx, cm); err != nil {
 		return fmt.Errorf("update audit configmap %s: %w", key.Name, err)
 	}
+	l.loadedResourceVersion = cm.ResourceVersion
 	return nil
+}
+
+// claimControllerRef ensures the ConfigMap carries exactly one
+// controller OwnerReference — the current owner's. A stale
+// predecessor's controller ref (owner deleted and recreated under the
+// same name, new UID) is replaced rather than appended beside: two
+// Controller=true refs make the apiserver reject every subsequent
+// write until GC sweeps the CM.
+func claimControllerRef(ctx context.Context, cm *corev1.ConfigMap, owner metav1.Object, gvk schema.GroupVersionKind) {
+	if hasControllerRefForOwner(cm, owner) {
+		return
+	}
+	kept := make([]metav1.OwnerReference, 0, len(cm.OwnerReferences)+1)
+	stale := 0
+	for _, ref := range cm.OwnerReferences {
+		if ref.Controller != nil && *ref.Controller {
+			stale++
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	cm.OwnerReferences = append(kept, *metav1.NewControllerRef(owner, gvk))
+	if stale > 0 {
+		log.FromContext(ctx).Info("adopting audit configmap from stale controller owner",
+			"configmap", cm.Namespace+"/"+cm.Name,
+			"owner", owner.GetName(), "ownerUID", owner.GetUID(), "staleRefs", stale)
+	}
 }
 
 // hasControllerRefForOwner reports whether obj already has a controller
