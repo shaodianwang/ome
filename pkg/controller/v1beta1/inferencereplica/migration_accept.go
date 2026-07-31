@@ -67,8 +67,10 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 	sort.Strings(keys)
 
 	// The ledger is parent-owned on this path (same rule as
-	// buildReconcileInput's LedgerOwner).
-	ledger, err := audit.LoadLedgerForOwner(ctx, r.Client, parent)
+	// buildReconcileInput's LedgerOwner). Live read: sibling IRs of the
+	// same parent write this ledger concurrently, and a cache-lagged
+	// snapshot persisted wholesale below would drop their rows.
+	ledger, err := audit.LoadLedgerForOwner(ctx, r.reader(), parent)
 	if err != nil {
 		return false, fmt.Errorf("load migration audit ledger: %w", err)
 	}

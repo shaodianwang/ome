@@ -414,18 +414,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				log.V(1).Error(perr, "CurrentRevision promotion also failed; primary error preserved")
 			}
 		}
-		if serr := r.aggregateAndWriteStatus(ctx, ir, plan, specTarget); serr != nil {
-			if err == nil {
-				if apierrors.IsConflict(serr) {
-					result, err = ctrl.Result{Requeue: true}, nil
-					return
-				}
-				result = ctrl.Result{}
-				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
-				return
-			}
+		serr := r.aggregateAndWriteStatus(ctx, ir, plan, specTarget)
+		if serr != nil && err != nil {
 			log.V(1).Error(serr, "Status write also failed; primary error preserved")
 		}
+		// The retention sweep runs regardless of a status-write failure:
+		// it is best-effort against the last committed status and re-runs
+		// next pass, so a failed write must not skip it (symmetric with
+		// the non-nil-primary-error path).
 		r.sweepRevisions(ctx, ir)
 		if priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "" {
 			log.Info("Rollout complete; CurrentRevision promoted",
@@ -434,6 +430,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 		if !priorAnyFailed && hasFailedInstance(ir.Status.InstanceStatuses) {
 			log.Info("Instance escalation observed; at least one Instance reached Phase=Failed")
+		}
+		if serr != nil && err == nil {
+			if apierrors.IsConflict(serr) {
+				result, err = ctrl.Result{Requeue: true}, nil
+				return
+			}
+			result = ctrl.Result{}
+			err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
 		}
 	}()
 
@@ -657,7 +661,8 @@ func (r *Reconciler) resolveTeardownDeadline(log logr.Logger) (*time.Duration, s
 //     relocation budget reset (mirror of the RetryBlock promote-prune;
 //     done here, adapter-side, because the workload promote stampers
 //     have no client handle, and gated on the ledger actually holding
-//     entries so the steady-state hot path pays one cached GET at most).
+//     entries so the steady-state hot path pays one cached GET at most —
+//     the live reader is touched only when a prune must persist).
 //  2. Projection: build the Instance-index → excluded-nodes map from
 //     the remaining AutoRecover entries, each list bounded to the most
 //     recent autoMigrateBudget entries.
@@ -682,6 +687,11 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 		owner = parent
 		gvk = isvcGVK
 	}
+	// Cached read for the projection path: the overlay is a placement
+	// steer re-derived every pass, so cache lag at worst delays an
+	// exclusion by one sync. r.APIReader stays reserved for writes that
+	// need an authoritative base — the persist branch below (mirrors
+	// the aggregateAndWriteStatus cached-read rationale in status.go).
 	ledger, err := audit.LoadLedgerForOwner(ctx, r.Client, owner)
 	if err != nil {
 		log.V(1).Info("relocation directives unavailable: ledger load failed; rendering without node exclusions this pass", "error", err.Error())
@@ -692,21 +702,36 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 	}
 	component := string(ir.Spec.Component)
 
-	pruned := false
-	for i := range ir.Status.InstanceStatuses {
-		s := &ir.Status.InstanceStatuses[i]
-		if s.Phase != v1beta1.OMENativeInstanceReady || s.Operation != nil {
-			continue
+	pruneReadyInstances := func(l *audit.Ledger) bool {
+		pruned := false
+		for i := range ir.Status.InstanceStatuses {
+			s := &ir.Status.InstanceStatuses[i]
+			if s.Phase != v1beta1.OMENativeInstanceReady || s.Operation != nil {
+				continue
+			}
+			if audit.RemoveAutoRecoverEntries(l, component, s.Index) {
+				pruned = true
+			}
 		}
-		if audit.RemoveAutoRecoverEntries(ledger, component, s.Index) {
-			pruned = true
-		}
+		return pruned
 	}
-	if pruned {
-		if err := audit.PersistLedgerForOwner(ctx, r.Client, owner, gvk, ledger); err != nil {
-			// Projection below still uses the pruned in-memory view; the
+	if pruneReadyInstances(ledger) {
+		// Persist branch: re-load LIVE and re-prune before writing —
+		// sibling IRs of the same parent write this ledger concurrently,
+		// and the persist writes the snapshot wholesale, so a cache-lagged
+		// base would drop their rows.
+		if live, lerr := audit.LoadLedgerForOwner(ctx, r.reader(), owner); lerr != nil {
+			// Projection below uses the cache-pruned in-memory view; the
 			// persisted prune retries next pass.
-			log.V(1).Info("relocation-directive prune persist failed; will retry next pass", "error", err.Error())
+			log.V(1).Info("relocation-directive prune: live ledger re-load failed; will retry next pass", "error", lerr.Error())
+		} else {
+			if pruneReadyInstances(live) {
+				if perr := audit.PersistLedgerForOwner(ctx, r.Client, owner, gvk, live); perr != nil {
+					// Same fallback: project from memory, retry the persist.
+					log.V(1).Info("relocation-directive prune persist failed; will retry next pass", "error", perr.Error())
+				}
+			}
+			ledger = live
 		}
 	}
 

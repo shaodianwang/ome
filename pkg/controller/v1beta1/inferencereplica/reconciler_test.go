@@ -20,6 +20,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -27,6 +28,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
@@ -804,4 +806,86 @@ func newReconcilerWithGrace(t *testing.T, grace time.Duration, objs ...client.Ob
 	r.ConfigCache = controllerconfig.NewConfigCache(0) // zero TTL = always refetch
 
 	return r, c
+}
+
+// A deferred status-write failure must not skip the retention sweep:
+// the sweep is best-effort against the last committed status and the
+// tail must stay symmetric with the non-nil-primary-error path. The
+// EndpointSlice List interceptor fails only the aggregator's
+// availability read, so the primary reconcile succeeds and the failure
+// surfaces purely through the deferred tail.
+func TestReconcile_StatusWriteFailureStillSweepsRevisions(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+
+	liveCR := seedControllerRevision(ir, "live", 1)
+	ir.Status.CurrentRevision = liveCR.Name
+
+	const extra = 5
+	nonLive := make([]*appsv1.ControllerRevision, 0, defaultRevisionRetention+extra)
+	for i := 0; i < defaultRevisionRetention+extra; i++ {
+		nonLive = append(nonLive, seedControllerRevision(ir, fmt.Sprintf("nonlive%02d", i), int64(i+2)))
+	}
+	objs := []client.Object{ir, liveCR}
+	for _, cr := range nonLive {
+		objs = append(objs, cr)
+	}
+
+	boom := errors.New("endpointslice list unavailable")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(objs...).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*discoveryv1.EndpointSliceList); ok {
+					return boom
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+	r := &Reconciler{
+		Client:       c,
+		Log:          logf.Log.WithName("test"),
+		Expectations: workload.NewExpectations(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).To(gomega.HaveOccurred(), "the status-write failure must still surface")
+	g.Expect(err.Error()).To(gomega.ContainSubstring("write status"))
+
+	survivors := listRevisionNames(t, c, ir.Namespace)
+	g.Expect(survivors).To(gomega.HaveKey(liveCR.Name))
+	for i := 0; i < extra; i++ {
+		g.Expect(survivors).NotTo(gomega.HaveKey(nonLive[i].Name),
+			"retention sweep must run even when the deferred status write fails")
+	}
+}
+
+// reconcileRelocationDirectives loads the projection-path ledger via
+// the CACHED client — the steady-state hot path must not pay a live
+// GET per pass. The ledger here exists ONLY behind APIReader, so an
+// empty exclusion map proves the cached client is the load source.
+func TestReconcileRelocationDirectives_ProjectionUsesCachedClient(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate}},
+	}
+	r, _ := newReconciler(t, ir)
+
+	readerClient := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	ledger := &audit.Ledger{}
+	ledger.UpsertEntry(directiveEntry("u0", "engine", 0, "n1"))
+	if err := audit.PersistLedgerForOwner(context.Background(), readerClient, ir, irGVK, ledger); err != nil {
+		t.Fatalf("seed live-reader ledger: %v", err)
+	}
+	r.APIReader = readerClient
+
+	if got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3); got != nil {
+		t.Fatalf("exclusions: got %v want nil (projection must read the cache, where no ledger exists)", got)
+	}
 }

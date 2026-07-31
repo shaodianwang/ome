@@ -8,6 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -107,6 +108,98 @@ func TestReconcileRelocationDirectives_PrunesOnReady(t *testing.T) {
 	}
 	if audit.CountAutoRecoverAttempts(after, "engine", 1) != 1 {
 		t.Errorf("instance 1 directives must survive: %+v", after.Entries)
+	}
+}
+
+// The prune-persist branch re-loads the ledger LIVE and re-prunes
+// before writing: the persist writes the snapshot wholesale, so basing
+// it on a lagged cache would drop rows written concurrently by sibling
+// IRs. The sibling decoder row here exists ONLY behind APIReader and
+// must survive the persisted prune.
+func TestReconcileRelocationDirectives_PrunePersistsFromLiveSnapshot(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate}},
+	}
+	r, c := newReconciler(t, ir)
+
+	cached := &audit.Ledger{}
+	cached.UpsertEntry(directiveEntry("u0", "engine", 0, "n1"))
+	cached.UpsertEntry(directiveEntry("u1", "engine", 1, "n2"))
+	if err := audit.PersistLedgerForOwner(context.Background(), c, ir, irGVK, cached); err != nil {
+		t.Fatalf("seed cached ledger: %v", err)
+	}
+	readerClient := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	live := &audit.Ledger{}
+	live.UpsertEntry(directiveEntry("u0", "engine", 0, "n1"))
+	live.UpsertEntry(directiveEntry("u1", "engine", 1, "n2"))
+	live.UpsertEntry(directiveEntry("dec", "decoder", 0, "n9"))
+	if err := audit.PersistLedgerForOwner(context.Background(), readerClient, ir, irGVK, live); err != nil {
+		t.Fatalf("seed live ledger: %v", err)
+	}
+	r.APIReader = readerClient
+
+	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n2" {
+		t.Fatalf("map: got %v want only instance 1 → [n2]", got)
+	}
+
+	after, err := audit.LoadLedgerForOwner(context.Background(), c, ir)
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 0) != 0 {
+		t.Errorf("instance 0 directives not pruned: %+v", after.Entries)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 1) != 1 {
+		t.Errorf("instance 1 directives must survive: %+v", after.Entries)
+	}
+	if audit.CountAutoRecoverAttempts(after, "decoder", 0) != 1 {
+		t.Errorf("sibling decoder row must survive the wholesale persist: %+v", after.Entries)
+	}
+}
+
+// failingGetReader errors every Get — stands in for a live re-load
+// failure inside the prune-persist branch.
+type failingGetReader struct{ client.Reader }
+
+func (failingGetReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return fmt.Errorf("live read down")
+}
+
+// A live re-load failure in the persist branch fails open: the
+// projection still uses the cache-pruned in-memory view, and the
+// persisted ledger stays untouched so the prune retries next pass.
+func TestReconcileRelocationDirectives_LiveReloadFailureSkipsPersist(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate}},
+	}
+	r, c := newReconciler(t, ir)
+
+	ledger := &audit.Ledger{}
+	ledger.UpsertEntry(directiveEntry("u0", "engine", 0, "n1"))
+	ledger.UpsertEntry(directiveEntry("u1", "engine", 1, "n2"))
+	if err := audit.PersistLedgerForOwner(context.Background(), c, ir, irGVK, ledger); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	r.APIReader = failingGetReader{}
+
+	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n2" {
+		t.Fatalf("map: got %v want only instance 1 → [n2] (cache-pruned view)", got)
+	}
+
+	after, err := audit.LoadLedgerForOwner(context.Background(), c, ir)
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 0) != 1 {
+		t.Errorf("persist must be skipped on live re-load failure (prune retries next pass): %+v", after.Entries)
 	}
 }
 

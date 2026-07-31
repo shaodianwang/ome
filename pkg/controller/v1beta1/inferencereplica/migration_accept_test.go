@@ -499,3 +499,44 @@ func TestConsumeMigrationRequests_StaleParentSnapshot_DeletionStillLands(t *test
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), freshIR)).To(gomega.Succeed())
 	g.Expect(freshIR.Status.Migrations).To(gomega.HaveLen(1))
 }
+
+// The mailbox consumer must load the parent-owned ledger via the live
+// reader: a cache-lagged snapshot misses terminal rows written by
+// sibling IRs, resurrecting a completed migration as fresh work. The
+// terminal row here exists ONLY behind APIReader, so dedup happens iff
+// the live reader is the load source.
+func TestConsumeMigrationRequests_LedgerLoadedViaLiveReader(t *testing.T) {
+	g := gomega.NewWithT(t)
+	key := audit.MigrationRequestAnnotationPrefix + "uuid-1"
+	ir := baselineIR("llama-engine", "default", 1)
+	parent := migrationParent(map[string]string{key: validMigrationRequestJSON("engine", 0)}, false)
+	r, c, _, ir, parent := newConsumeFixture(t, ir, parent)
+
+	ledger := &audit.Ledger{Entries: []audit.Entry{{
+		RequestUUID: "uuid-1",
+		Component:   "engine",
+		Phase:       audit.PhaseCompleted,
+		StartedAt:   migrationTestNow.Add(-time.Hour).UTC().Format(time.RFC3339),
+		CompletedAt: migrationTestNow.Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+		Outcome:     "migrated",
+	}}}
+	raw, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatalf("marshal ledger: %v", err)
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: audit.ConfigMapNameForOwner(parent), Namespace: "default"},
+		Data:       map[string]string{audit.LedgerKey: string(raw)},
+	}
+	r.APIReader = fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cm).Build()
+
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(requeue).To(gomega.BeFalse())
+
+	fresh := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh)).To(gomega.Succeed())
+	g.Expect(fresh.Status.Migrations).To(gomega.BeEmpty(),
+		"terminal UUID visible only through the live reader must dedup, not resurrect")
+	g.Expect(migrationAnnotationsOf(t, c, parent)).To(gomega.BeEmpty())
+}

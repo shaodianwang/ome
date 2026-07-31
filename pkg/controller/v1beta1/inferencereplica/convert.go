@@ -849,7 +849,9 @@ func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
 // workload.ReconcileInput.RemoveInstance callback. Drops the (idx)
 // InstanceStatus, persists, and (on a real removal) forgets the
 // expectation entry so a later index reuse doesn't inherit stale
-// counters. NotFound on Get or Update is treated as success.
+// counters. The expectations bucket keys on Key.OwnerName — the parent
+// ISVC name (buildKey), not the IR name — so Forget must use the same.
+// NotFound on Get or Update is treated as success.
 func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
 	key := client.ObjectKeyFromObject(ir)
 	return func(ctx context.Context, idx int32) (bool, error) {
@@ -892,7 +894,7 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 			if cache == nil {
 				cache = workload.DefaultExpectations
 			}
-			cache.Forget(ir.Namespace, ir.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), idx)
+			cache.Forget(ir.Namespace, ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), idx)
 		}
 		return hadEntry, nil
 	}
