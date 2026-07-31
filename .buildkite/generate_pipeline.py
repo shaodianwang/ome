@@ -129,6 +129,26 @@ def _gh_status(key: str, indent: int = 12) -> str:
     )
 
 
+def _auto_retry(limit: int = 2, indent: int = 12) -> str:
+    """Bounded automatic retry for a network-heavy step.
+
+    The image build (Go module fetch from proxy.golang.org, then an ECR push)
+    and the mirror (crane registry copy + cross-account ECR auth) fail on
+    transient network blips — e.g. an HTTP/2 `INTERNAL_ERROR` stream reset from
+    proxy.golang.org mid-download, which sank build 2445's ome-manager build. A
+    real Dockerfile/compile error still fails once the retries are spent, so
+    this masks nothing; it only absorbs flakes, and the bound keeps a genuinely
+    broken build from looping.
+    """
+    pad = " " * indent
+    return (
+        f"{pad}retry:\n"
+        f"{pad}  automatic:\n"
+        f'{pad}    - exit_status: "*"\n'
+        f"{pad}      limit: {limit}"
+    )
+
+
 def _tw_docker_plugin(
     image: str,
     indent: int = 6,
@@ -514,6 +534,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
             key: "build-{label}"
 {_gh_status(f"build-{label}")}
             depends_on: "test"
+{_auto_retry()}
             agents:
               queue: "{BUILD_QUEUE}"
             env:
@@ -556,6 +577,7 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
             key: "mirror-{label}"
 {_gh_status(f"mirror-{label}")}
             depends_on: "build-{label}"
+{_auto_retry()}
             # ECR credentials on TW: the agent resolves these Buildkite
             # cluster secrets into the job env, propagate-environment
             # carries them into the container, and _ecr_login.sh consumes
