@@ -209,6 +209,28 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
 	}
 
+	// Branch on placement mode. Each mode owns its own reconcile: Single keeps one
+	// winner (sticky race + loser sweep); All keeps every home that admits. Split
+	// is not yet implemented — hold Pending rather than silently run it as Single,
+	// so an operator never mistakes an un-split placement for a split one.
+	switch mode := placementMode(isvc); mode {
+	case v1beta1.PlacementModeSingle:
+		return r.reconcileSingle(ctx, isvc, candidates)
+	case v1beta1.PlacementModeAll:
+		return r.reconcileAll(ctx, isvc, candidates)
+	default:
+		r.Log.Info("placement mode not supported by this build; holding Pending",
+			"mode", mode, "isvc", isvc.Namespace+"/"+isvc.Name)
+		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
+	}
+}
+
+// reconcileSingle implements PlacementModeSingle: fan out to the candidates, race
+// on Kueue admission, keep the first fully-admitted cluster (lexical tie-break),
+// sweep the losers, and hold that winner sticky across polls — re-racing only if
+// it is lost (derived deleted, or admission lost past the grace window). This is
+// the default mode and the original OEP-0018 behavior.
+func (r *Reconciler) reconcileSingle(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) (ctrl.Result, error) {
 	// Sticky winner: keep the current winner while its derived ISVC still
 	// exists and it remains a candidate. Otherwise fall through to re-race.
 	if winner := winnerCluster(isvc); winner != "" && slices.Contains(candidates, winner) {
@@ -364,6 +386,80 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	return r.writePlacement(ctx, isvc, placedResult(winner, wd, isvc))
+}
+
+// placementMode returns the ISVC's placement cardinality, defaulting to Single
+// when spec.placement is unset or its mode is empty (the legacy/annotation path).
+func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
+	if p := isvc.Spec.Placement; p != nil && p.Mode != "" {
+		return p.Mode
+	}
+	return v1beta1.PlacementModeSingle
+}
+
+// reconcileAll implements PlacementModeAll: run the ISVC on EVERY candidate that
+// admits and keep them all. There is no single winner and no loser sweep — a
+// candidate that has not admitted yet is retained and keeps trying (capacity may
+// free up), and a home that later loses admission simply drops out of the served
+// set while the others continue. All is best-effort: the placement is Placed
+// once at least one home is admitted, and stays Racing only while every home is
+// still gated; it never fails just because some candidate cannot admit.
+//
+// There is deliberately no sticky-winner / re-race path here: those protect the
+// single-home invariant, which All does not have. Each home is independent.
+func (r *Reconciler) reconcileAll(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) (ctrl.Result, error) {
+	placed, err := r.fanOut(ctx, isvc, candidates)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(placed) == 0 {
+		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
+	}
+
+	cands := make([]v1beta1.CandidatePlacement, 0, len(placed))
+	admitted := 0
+	for _, c := range placed {
+		derived, ok, err := r.getDerived(ctx, c, isvc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ok {
+			continue
+		}
+		cl, ok := r.Clusters.ClientFor(c)
+		if !ok {
+			continue
+		}
+		statuses, err := componentIRStatuses(ctx, cl, derived)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if AllComponentsAdmitted(derived, statuses) {
+			admitted++
+			cands = append(cands, v1beta1.CandidatePlacement{
+				Cluster: c, Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: endpointFor(derived),
+			})
+			continue
+		}
+		cands = append(cands, v1beta1.CandidatePlacement{Cluster: c, Phase: v1beta1.CandidatePhasePlaced})
+	}
+
+	phase := v1beta1.PlacementPhaseRacing
+	if admitted > 0 {
+		phase = v1beta1.PlacementPhasePlaced
+	}
+	// No top-level winner cluster/URL in All: the per-home endpoints in
+	// candidates[] are the source of truth (Cluster/Endpoint stay empty).
+	res, err := r.writePlacement(ctx, isvc, placementResult{phase: phase, candidates: cands})
+	// Re-poll at the normal cadence while ANY home is still gated. All admits
+	// homes independently and at different times, so a home that admits AFTER the
+	// first must be observed without waiting for the long steady-state backstop —
+	// even once the placement is Placed on the earlier home(s). Once every home is
+	// admitted, writePlacement's backstop requeue stands.
+	if err == nil && admitted < len(cands) {
+		res.RequeueAfter = r.requeue()
+	}
+	return res, err
 }
 
 // fanOut ensures the derived ISVC exists on each connected candidate. A

@@ -1218,3 +1218,145 @@ func TestReconcile_FanOutBoundsStuckClusterAndProceeds(t *testing.T) {
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 }
+
+// srcISVCMode builds a source ISVC that drives placement through the structured
+// spec.placement field with the given mode + requirement selector.
+func srcISVCMode(mode v1beta1.PlacementMode, requirements string) *v1beta1.InferenceService {
+	i := srcISVC("")
+	i.Annotations = nil
+	i.Spec.Placement = &v1beta1.PlacementSpec{Mode: mode, Requirements: requirements}
+	return i
+}
+
+// workerWithGatedDerived returns a worker whose derived ISVC exists but whose
+// engine IR reports no admitted instance — a home that fanned out but is still
+// gated behind Kueue admission.
+func workerWithGatedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	engineIR := irWithInstances(v1beta1.EngineComponent, false) // present, NOT admitted
+	return fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+}
+
+func candidatesByCluster(cs []v1beta1.CandidatePlacement) map[string]v1beta1.CandidatePlacement {
+	m := map[string]v1beta1.CandidatePlacement{}
+	for _, c := range cs {
+		m[c.Cluster] = c
+	}
+	return m
+}
+
+// TestReconcile_AllModeKeepsEveryAdmittedHome: mode All places on every candidate
+// that admits, keeps them all (no sweep, no single winner), and records each
+// home's own endpoint.
+func TestReconcile_AllModeKeepsEveryAdmittedHome(t *testing.T) {
+	s := testScheme(t)
+	wa := workerWithAdmittedURL(t, s, "svc.a.example")
+	wb := workerWithAdmittedURL(t, s, "svc.b.example")
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCMode(v1beta1.PlacementModeAll, "gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.True(t, hasDerived(t, wa), "home a kept (no sweep)")
+	assert.True(t, hasDerived(t, wb), "home b kept (no sweep)")
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	assert.Empty(t, p.Cluster, "All has no single winner cluster")
+	require.Len(t, p.Candidates, 2)
+	by := candidatesByCluster(p.Candidates)
+	require.Contains(t, by, "a")
+	require.Contains(t, by, "b")
+	assert.Equal(t, v1beta1.CandidatePhaseAdmitted, by["a"].Phase)
+	require.NotNil(t, by["a"].Endpoint)
+	assert.Equal(t, "svc.a.example", by["a"].Endpoint.Host)
+	assert.Equal(t, v1beta1.CandidatePhaseAdmitted, by["b"].Phase)
+	require.NotNil(t, by["b"].Endpoint)
+	assert.Equal(t, "svc.b.example", by["b"].Endpoint.Host)
+}
+
+// TestReconcile_AllModePartialAdmitStaysPlaced: one home admitted, one still
+// gated -> Placed (>=1 admitted), neither swept, gated home has no endpoint yet.
+func TestReconcile_AllModePartialAdmitStaysPlaced(t *testing.T) {
+	s := testScheme(t)
+	wa := workerWithAdmittedURL(t, s, "svc.a.example") // admitted
+	wb := workerWithGatedDerived(t, s)                 // present but gated
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCMode(v1beta1.PlacementModeAll, "gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.True(t, hasDerived(t, wa))
+	assert.True(t, hasDerived(t, wb), "gated home is NOT swept")
+	// A home still gated must keep the placement re-polling (not fall to the long
+	// steady-state backstop) so a home that admits later is observed promptly.
+	assert.Positive(t, res.RequeueAfter, "re-polls while a home is still gated")
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase, ">=1 admitted -> Placed")
+	by := candidatesByCluster(p.Candidates)
+	assert.Equal(t, v1beta1.CandidatePhaseAdmitted, by["a"].Phase)
+	assert.Equal(t, v1beta1.CandidatePhasePlaced, by["b"].Phase)
+	assert.Nil(t, by["b"].Endpoint, "gated home has no endpoint yet")
+}
+
+// TestReconcile_AllModeRacingWhileAllGated: no home admitted yet -> Racing, both
+// kept, fast requeue.
+func TestReconcile_AllModeRacingWhileAllGated(t *testing.T) {
+	s := testScheme(t)
+	wa, wb := emptyWorker(s), emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCMode(v1beta1.PlacementModeAll, "gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.True(t, hasDerived(t, wa))
+	assert.True(t, hasDerived(t, wb))
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
+	assert.Empty(t, p.Cluster)
+	assert.Len(t, p.Candidates, 2)
+	assert.Positive(t, res.RequeueAfter, "racing re-polls fast")
+}
+
+// TestReconcile_UnsupportedModeHoldsPending: Split (not yet implemented) is held
+// Pending, not silently run as Single — nothing is fanned out.
+func TestReconcile_UnsupportedModeHoldsPending(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCMode(v1beta1.PlacementModeSplit, "gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.False(t, hasDerived(t, wa), "unsupported mode fans out to nothing")
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePending, p.Phase)
+}
