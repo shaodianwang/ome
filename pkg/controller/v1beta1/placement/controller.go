@@ -742,7 +742,7 @@ func placedResult(winner string, derived, isvc *v1beta1.InferenceService) placem
 	}
 	return placementResult{
 		winner: winner, phase: v1beta1.PlacementPhasePlaced,
-		candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
+		candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: u}},
 		url:        u,
 	}
 }

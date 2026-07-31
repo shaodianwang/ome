@@ -30508,6 +30508,8 @@ spec:
                         properties:
                           cluster:
                             type: string
+                          endpoint:
+                            type: string
                           phase:
                             enum:
                               - Placed

@@ -729,10 +729,18 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 							Format:      "",
 						},
 					},
+					"endpoint": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Endpoint is this candidate's own externally-addressable URL, mirrored from its derived InferenceService's status.url once admitted AND addressable. In Single mode only the winner carries one and the top-level PlacementStatus.Endpoint is authoritative; in All/Split mode every serving home carries its own, and this list is the source of truth an external LB/DNS consumes to route across homes. Empty until the home is addressable.",
+							Ref:         ref("knative.dev/pkg/apis.URL"),
+						},
+					},
 				},
 				Required: []string{"cluster"},
 			},
 		},
+		Dependencies: []string{
+			"knative.dev/pkg/apis.URL"},
 	}
 }
 

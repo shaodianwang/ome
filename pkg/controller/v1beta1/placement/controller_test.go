@@ -558,6 +558,13 @@ func TestReconcile_PublishesEndpointWhenAdmitted(t *testing.T) {
 	u := cpStatusURL(t, cp)
 	require.NotNil(t, u)
 	assert.Equal(t, "svc.prod.b.example", u.Host)
+
+	// The winner's per-candidate Endpoint is populated too (the per-home model
+	// All/Split build on; in Single the top-level Endpoint stays authoritative).
+	require.Len(t, p.Candidates, 1)
+	assert.Equal(t, "b", p.Candidates[0].Cluster)
+	require.NotNil(t, p.Candidates[0].Endpoint)
+	assert.Equal(t, "svc.prod.b.example", p.Candidates[0].Endpoint.Host)
 }
 
 func TestReconcile_PlacedButNoEndpointYet(t *testing.T) {
