@@ -5,7 +5,7 @@
   "properties": {
     "scheduler": {
       "type": "object",
-      "required": ["name", "replicaCount", "leaderElect", "omeControllerIntegration", "deploymentStrategy", "plugin", "nodeResourcesFit", "metrics", "probes", "podDisruptionBudget"],
+      "required": ["name", "replicaCount", "leaderElect", "omeControllerIntegration", "deploymentStrategy", "plugin", "omeGangPack", "nodeResourcesFit", "metrics", "probes", "podDisruptionBudget"],
       "properties": {
         "name": {
           "type": "string",
@@ -39,14 +39,22 @@
         },
         "plugin": {
           "type": "object",
-          "required": ["topologyKey", "podGroupTopologyKeyAnnotation", "unsupportedPlacementGroupLabel", "defaultPermitTimeoutSeconds", "podGroupSyncTimeoutSeconds", "gcIntervalSeconds"],
+          "required": ["topologyKey", "podGroupTopologyKeyAnnotation", "unsupportedPlacementGroupLabel", "defaultPermitTimeoutSeconds", "podGroupSyncTimeoutSeconds", "gcIntervalSeconds", "standaloneDomainPacking"],
           "properties": {
             "topologyKey": {"type": "string"},
             "podGroupTopologyKeyAnnotation": {"type": "string", "minLength": 1},
             "unsupportedPlacementGroupLabel": {"type": "string"},
             "defaultPermitTimeoutSeconds": {"type": "integer", "minimum": 1},
             "podGroupSyncTimeoutSeconds": {"type": "integer", "minimum": 1},
-            "gcIntervalSeconds": {"type": "integer", "minimum": 1}
+            "gcIntervalSeconds": {"type": "integer", "minimum": 1},
+            "standaloneDomainPacking": {"type": "boolean"}
+          }
+        },
+        "omeGangPack": {
+          "type": "object",
+          "required": ["scoreWeight"],
+          "properties": {
+            "scoreWeight": {"type": "integer", "minimum": 1, "maximum": 1000000}
           }
         },
         "nodeResourcesFit": {

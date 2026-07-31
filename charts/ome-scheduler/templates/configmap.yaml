@@ -40,6 +40,11 @@ data:
             enabled:
               - name: NodeResourcesFit
                 weight: {{ .Values.scheduler.nodeResourcesFit.scoreWeight }}
+              # Domain-level bin-packing for standalone pods. OMEGangPack is
+              # already wired via multiPoint; this explicit entry only sets its
+              # Score weight (multiPoint does not re-add it).
+              - name: OMEGangPack
+                weight: {{ .Values.scheduler.omeGangPack.scoreWeight }}
             {{- if .Values.scheduler.disablePodTopologySpreadScore }}
             disabled:
               # Soft topology spreading directly conflicts with OEP-0022's
@@ -58,6 +63,7 @@ data:
               defaultPermitTimeoutSeconds: {{ .Values.scheduler.plugin.defaultPermitTimeoutSeconds }}
               podGroupSyncTimeoutSeconds: {{ .Values.scheduler.plugin.podGroupSyncTimeoutSeconds }}
               gcIntervalSeconds: {{ .Values.scheduler.plugin.gcIntervalSeconds }}
+              standaloneDomainPacking: {{ .Values.scheduler.plugin.standaloneDomainPacking }}
           - name: NodeResourcesFit
             args:
               scoringStrategy:

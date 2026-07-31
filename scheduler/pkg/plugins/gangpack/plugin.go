@@ -39,6 +39,10 @@ type GangPack struct {
 	// unsupportedPlacementGroupLabel optionally names a producer's partner-gang
 	// label. Until multi-gang reservations exist, its presence fails closed.
 	unsupportedPlacementGroupLabel string
+	// standaloneDomainPacking enables the domain-level bin-packing Score for
+	// unpinned (non-gang) whole-node pods. Gang members are unaffected (their
+	// domain is already pinned). See score.go.
+	standaloneDomainPacking bool
 	// pins records, per placement group, the domain its gangs are committed to.
 	pins *placement.Pins
 	// pgReader resolves a pod's PodGroup facts (minMember + declared topology
@@ -98,6 +102,7 @@ func New(ctx context.Context, obj runtime.Object, h framework.Handle) (framework
 		topologyKey:                    args.TopologyKey,
 		podGroupTopologyKeyAnnotation:  args.PodGroupTopologyKeyAnnotation,
 		unsupportedPlacementGroupLabel: args.UnsupportedPlacementGroupLabel,
+		standaloneDomainPacking:        args.standaloneDomainPackingEnabled(),
 		pins:                           placement.New(),
 		pgReader:                       reader,
 		podLister:                      podLister,

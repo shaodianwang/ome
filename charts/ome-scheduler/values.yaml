@@ -72,6 +72,17 @@ scheduler:
     podGroupSyncTimeoutSeconds: 30
     # Pin/reservation reconciliation cadence.
     gcIntervalSeconds: 60
+    # Steer standalone (non-gang) whole-node pods toward already-busy domains, so
+    # partly-filled slices fill before empty ones open and whole slices stay free
+    # for multi-host gangs. Only takes effect when topologyKey above is set (e.g.
+    # cloud.google.com/gke-tpu-partition-2x2x2-id on a TPU pool).
+    standaloneDomainPacking: true
+
+  # Domain-level packing score for standalone pods (OMEGangPack.Score). Weight it
+  # at/above nodeResourcesFit so the partition-level signal wins the tie that
+  # node-level MostAllocated cannot break (all empty whole-node candidates tie).
+  omeGangPack:
+    scoreWeight: 10
 
   nodeResourcesFit:
     # Node-level packing complements OMEGangPack's domain-level packing.

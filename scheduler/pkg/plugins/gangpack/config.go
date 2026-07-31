@@ -20,6 +20,16 @@ type Args struct {
 	DefaultPermitTimeoutSeconds    *int64 `json:"defaultPermitTimeoutSeconds,omitempty"`
 	PodGroupSyncTimeoutSeconds     *int64 `json:"podGroupSyncTimeoutSeconds,omitempty"`
 	GCIntervalSeconds              *int64 `json:"gcIntervalSeconds,omitempty"`
+	// StandaloneDomainPacking enables the domain-level bin-packing Score for
+	// unpinned (non-gang) whole-node pods. Defaults to true when unset, and only
+	// takes effect when a pool-wide TopologyKey is configured.
+	StandaloneDomainPacking *bool `json:"standaloneDomainPacking,omitempty"`
+}
+
+// standaloneDomainPackingEnabled reports the effective toggle: on unless the
+// operator explicitly disables it.
+func (a Args) standaloneDomainPackingEnabled() bool {
+	return a.StandaloneDomainPacking == nil || *a.StandaloneDomainPacking
 }
 
 func decodeArgs(obj runtime.Object) (Args, error) {
