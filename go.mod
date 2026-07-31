@@ -26,7 +26,6 @@ require (
 	golang.org/x/sync v0.22.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
 	google.golang.org/protobuf v1.36.11
-	istio.io/api v1.19.4
 	istio.io/client-go v1.19.4
 	k8s.io/api v0.33.13
 	k8s.io/apiextensions-apiserver v0.32.13
@@ -43,6 +42,8 @@ require (
 	sigs.k8s.io/yaml v1.4.0
 	volcano.sh/apis v1.10.0
 )
+
+require istio.io/api v1.19.4 // indirect
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
