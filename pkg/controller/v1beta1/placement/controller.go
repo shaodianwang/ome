@@ -925,13 +925,14 @@ func placementEligibleIndexExtractor(obj client.Object) []string {
 	return []string{placementEligibleIndexValue}
 }
 
-// declaresPlacementRequirement reports whether the ISVC carries any of the
-// annotations that make it eligible for cross-cluster fan-out. Kept in sync with
-// requirementSelector's annotation set (the source of truth for what counts as a
-// requirement).
+// declaresPlacementRequirement reports whether the ISVC is eligible for
+// cross-cluster fan-out — it declares a requirement or cluster selector via
+// spec.placement or the legacy annotations. Uses placementInputs so it stays in
+// lockstep with requirementSelector (the source of truth for what counts as a
+// requirement); a divergence would index ISVCs the matcher ignores, or vice versa.
 func declaresPlacementRequirement(isvc *v1beta1.InferenceService) bool {
-	return isvc.Annotations[AcceleratorRequirementsAnnotation] != "" ||
-		isvc.Annotations[ClusterSelectorAnnotation] != ""
+	requirements, clusterSelector := placementInputs(isvc)
+	return requirements != "" || clusterSelector != ""
 }
 
 // registerPlacementEligibleIndex installs placementEligibleIndexField on the
