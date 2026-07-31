@@ -96,8 +96,12 @@ func TestISVCRenderHook_InjectsPeerEnvForCoordinatedComponent(t *testing.T) {
 			t.Errorf("container %q: OME_DECODER_ENDPOINT = %q, want llama-decoder.prod.svc.cluster.local",
 				ctr.Name, got)
 		}
-		if got := envValue(ctr.Env, "OME_DECODER_REVISION_ENDPOINT"); got != "llama-decoder-rev-rev-abc123.prod.svc.cluster.local" {
-			t.Errorf("container %q: OME_DECODER_REVISION_ENDPOINT = %q, want llama-decoder-rev-rev-abc123.prod.svc.cluster.local",
+		// The peer's revision hash is NOT the rendered pod's own hash (each
+		// Component hashes its own template), so the hook must not stamp a
+		// per-revision peer endpoint from the local hash — that DNS name
+		// (llama-decoder-rev-<engineHash>) never exists.
+		if got := envValue(ctr.Env, "OME_DECODER_REVISION_ENDPOINT"); got != "" {
+			t.Errorf("container %q: OME_DECODER_REVISION_ENDPOINT = %q, want it absent (peer hash unknown at render time)",
 				ctr.Name, got)
 		}
 		// The engine never names itself as a peer.
@@ -120,10 +124,8 @@ func TestISVCRenderHook_NilForNonCoordinatedISVC(t *testing.T) {
 	}
 }
 
-// TestISVCRenderHook_RevisionAgnosticWhenNoHash confirms that when the
-// renderer supplies an empty revision hash, only the generic peer
-// endpoint is injected (no per-revision form), matching InjectPeerEnv's
-// contract.
+// TestISVCRenderHook_RevisionAgnosticWhenNoHash confirms the empty-hash
+// render path also injects only the generic peer endpoint.
 func TestISVCRenderHook_RevisionAgnosticWhenNoHash(t *testing.T) {
 	hook := ISVCRenderHook(coordinatedISVC())
 	pod := renderedPod(v1beta1.EngineComponent)
@@ -134,7 +136,7 @@ func TestISVCRenderHook_RevisionAgnosticWhenNoHash(t *testing.T) {
 		t.Errorf("generic endpoint missing/wrong: %q", got)
 	}
 	if containsEnvNamed(env, "OME_DECODER_REVISION_ENDPOINT") {
-		t.Error("revision endpoint should be omitted when the renderer supplies no revision hash")
+		t.Error("revision endpoint should never be injected by the hook")
 	}
 }
 

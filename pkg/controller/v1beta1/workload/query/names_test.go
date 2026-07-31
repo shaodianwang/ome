@@ -88,3 +88,35 @@ func TestHeadlessServiceName_Bounded(t *testing.T) {
 		t.Errorf("headless name %d chars, want <= %d", len(name), max)
 	}
 }
+
+// TestPodGroupName_Bounded covers the label-value 63-char guard on the
+// PodGroup name: the same string is stamped on every member pod as the
+// LabelPodGroup value, so an overflowing name makes the apiserver reject
+// the pod writes and the reconciler hot-loops.
+func TestPodGroupName_Bounded(t *testing.T) {
+	const max = validation.LabelValueMaxLength // 63
+
+	// Short names pass through unchanged and keep the pivotable
+	// <isvc>-<component>-<idx> shape.
+	if got, want := PodGroupName("llama", workload.ComponentEngine, 3), "llama-engine-3"; got != want {
+		t.Errorf("short PodGroup name = %q, want %q", got, want)
+	}
+
+	longIsvc := strings.Repeat("x", 70)
+	b1 := PodGroupName(longIsvc, workload.ComponentEngine, 12)
+	b2 := PodGroupName(longIsvc, workload.ComponentEngine, 12)
+	if len(b1) > max {
+		t.Errorf("bounded PodGroup name %d chars, want <= %d", len(b1), max)
+	}
+	if b1 != b2 {
+		t.Errorf("PodGroupName not deterministic: %q != %q", b1, b2)
+	}
+	if errs := validation.IsValidLabelValue(b1); len(errs) > 0 {
+		t.Errorf("bounded PodGroup name %q is not a valid label value: %v", b1, errs)
+	}
+	// Distinct instances of the same long owner stay distinct (the kept
+	// tail includes the index).
+	if other := PodGroupName(longIsvc, workload.ComponentEngine, 13); other == b1 {
+		t.Errorf("distinct instance indices produced identical bounded names: %q", b1)
+	}
+}

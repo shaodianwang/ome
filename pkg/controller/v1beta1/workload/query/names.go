@@ -80,12 +80,16 @@ func InstanceSubdomain(isvc string, component workload.ComponentType, instanceId
 }
 
 // PodGroupName returns the deterministic name of the scheduler-plugins
-// PodGroup that gates one multi-pod Instance — <isvc>-<component>-<idx>.
-// Matches the InstanceSubdomain shape on purpose: operators inspecting
-// `kubectl get pg <name>` can pivot directly to
+// PodGroup that gates one multi-pod Instance — <isvc>-<component>-<idx>,
+// bounded to the 63-char label-value limit because the same string is
+// stamped on every member pod as the LabelPodGroup value. Names within
+// the limit match the InstanceSubdomain shape on purpose: operators
+// inspecting `kubectl get pg <name>` can pivot directly to
 // `kubectl get pods -l <subdomain>` without re-deriving the prefix.
 // Single-pod Instances do NOT get a PodGroup; callers must check
 // inst.TotalPods() > 1 before invoking the builder.
 func PodGroupName(isvc string, component workload.ComponentType, instanceIdx int32) string {
-	return fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx)
+	return constants.TruncateNameWithMaxLength(
+		fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx),
+		validation.LabelValueMaxLength)
 }

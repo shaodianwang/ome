@@ -85,7 +85,7 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 	if isvc.Spec.Rollout == nil || len(isvc.Spec.Rollout.Groups) == 0 {
 		return nil
 	}
-	return func(pod *corev1.Pod, _ string, _ int32, revisionHash string) {
+	return func(pod *corev1.Pod, _ string, _ int32, _ string) {
 		// component is recoverable from the pod's component label
 		// (constants.OMEComponentLabel, whose value is "component" — NOT
 		// "ome.io/component"; the latter never matches the stamped key and
@@ -98,11 +98,11 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 		if len(peers) == 0 {
 			return
 		}
-		var hashFn func(v1beta1.ComponentType) string
-		if revisionHash != "" {
-			hashFn = func(_ v1beta1.ComponentType) string { return revisionHash }
-		}
-		coordination.InjectPeerEnv(pod, isvc.Name, isvc.Namespace, peers, hashFn)
+		// Peer revision hashes are unknown at render time: each Component
+		// hashes its own template, so the rendered pod's hash never names a
+		// peer's per-revision Service. A nil hash fn injects only the
+		// revision-agnostic endpoints instead of dead per-revision DNS.
+		coordination.InjectPeerEnv(pod, isvc.Name, isvc.Namespace, peers, nil)
 	}
 }
 
