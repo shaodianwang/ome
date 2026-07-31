@@ -240,12 +240,25 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 	err = g.client.Get(ctx, types.NamespacedName{Name: httpRoute.Name, Namespace: isvc.Namespace}, existing)
 	if err != nil {
 		if apierr.IsNotFound(err) {
-			if err := g.client.Create(ctx, httpRoute); err != nil {
-				return false, fmt.Errorf("failed to create %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
+			createErr := g.client.Create(ctx, httpRoute)
+			if createErr != nil && !apierr.IsAlreadyExists(createErr) {
+				return false, fmt.Errorf("failed to create %s HttpRoute %s: %w", componentType, httpRoute.Name, createErr)
 			}
-		} else {
-			return false, err
+			// A route created this pass (or one the cache-backed client
+			// cannot see yet: AlreadyExists on a NotFound Get means the
+			// informer lags the server) has no verified gateway status,
+			// so it must not count toward IngressReady=True this pass.
+			// The HTTPRoute watch re-enqueues the ISVC once the route is
+			// observed, and readiness is decided from its real status then.
+			isvc.Status.SetCondition(v1beta1.IngressReady, &knapis.Condition{
+				Type:    v1beta1.IngressReady,
+				Status:  corev1.ConditionFalse,
+				Reason:  HTTPRouteParentStatusNotAvailable,
+				Message: fmt.Sprintf("%s HTTPRoute awaiting gateway programming", componentType),
+			})
+			return false, nil
 		}
+		return false, err
 	} else {
 		// Set ResourceVersion which is required for update operation.
 		httpRoute.ResourceVersion = existing.ResourceVersion
@@ -316,14 +329,14 @@ func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v
 			Namespace: isvc.Namespace,
 		}, httpRoute); err != nil {
 			if apierr.IsNotFound(err) {
-				// Per-component HTTPRoute was correctly skipped by
-				// reconcileComponentHTTPRoute when the component wasn't
-				// Ready (Builder returned nil). The create-path already
-				// set IngressReady=False/ComponentNotReady; nothing to
-				// do here. Keep iterating so any other component with an
-				// existing HTTPRoute still has its status checked, and
-				// let the next reconcile pick up after the component
-				// becomes Ready and the HTTPRoute materializes.
+				// NotFound here means reconcileComponentHTTPRoute either
+				// skipped the route (component not Ready) or created it so
+				// recently the cache has not observed it yet — and in both
+				// cases it already set IngressReady=False and reported
+				// not-ready, so this pass cannot conclude True. Keep
+				// iterating so any component with an existing HTTPRoute
+				// still has its status checked; the HTTPRoute watch
+				// re-enqueues once the route materializes.
 				continue
 			}
 			return false, err

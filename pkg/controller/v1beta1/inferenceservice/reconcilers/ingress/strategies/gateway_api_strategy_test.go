@@ -16,6 +16,7 @@ import (
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -313,8 +314,10 @@ func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute(t *testing.T) {
 			isvc:          createTestInferenceServiceGateway("test-isvc", "default"),
 			componentType: "engine",
 			existingRoute: &gatewayapiv1.HTTPRoute{
+				// Engine routes are named "<isvc>-engine"; the name must
+				// match for the update path to be exercised.
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-isvc",
+					Name:      "test-isvc-engine",
 					Namespace: "default",
 				},
 			},
@@ -350,7 +353,14 @@ func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				assert.True(t, ready, "route creation/update succeeded so the component slot is ready")
+				if tt.expectedCreate {
+					assert.False(t, ready, "a just-created route has no verified gateway status and must not count as ready")
+					cond := tt.isvc.Status.GetCondition(v1beta1.IngressReady)
+					require.NotNil(t, cond)
+					assert.Equal(t, corev1.ConditionFalse, cond.Status)
+				} else {
+					assert.True(t, ready, "an existing route defers readiness to the status check")
+				}
 			}
 		})
 	}
@@ -574,6 +584,105 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated(t *testin
 	assert.Equal(t, corev1.ConditionFalse, condition.Status,
 		"pre-existing IngressReady=False set by reconcileComponentHTTPRoute must be preserved")
 	assert.Equal(t, "ComponentNotReady", condition.Reason)
+}
+
+// TestGatewayAPIStrategy_Reconcile_CreatePassInformerLagNotReady pins the
+// create-pass informer-lag race: routes Created this pass are typically not
+// visible to the cache-backed client yet, so checkHTTPRouteStatuses sees
+// NotFound for them. That NotFound must not let IngressReady conclude True
+// on the very pass that created un-programmed routes — readiness is decided
+// on a later pass, once the watch observes the route and its real status.
+func TestGatewayAPIStrategy_Reconcile_CreatePassInformerLagNotReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, gatewayapiv1.Install(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	isvc := createTestInferenceServiceGateway("test-isvc", "default")
+	setComponentStatusReadyGateway(isvc)
+
+	// Simulate informer lag: HTTPRoutes created during this pass stay
+	// invisible to subsequent Gets, exactly like a cache that has not
+	// caught up with the apiserver.
+	createdRoutes := map[string]bool{}
+	fakeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(isvc).
+		WithStatusSubresource(&gatewayapiv1.HTTPRoute{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*gatewayapiv1.HTTPRoute); ok {
+					createdRoutes[obj.GetName()] = true
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*gatewayapiv1.HTTPRoute); ok && createdRoutes[key.Name] {
+					return apierr.NewNotFound(gatewayapiv1.Resource("httproutes"), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
+	require.NoError(t, strategy.Reconcile(context.Background(), isvc))
+
+	// Routes were created on the server ...
+	routes := &gatewayapiv1.HTTPRouteList{}
+	require.NoError(t, fakeClient.List(context.Background(), routes, client.InNamespace("default")))
+	assert.Len(t, routes.Items, 2, "engine + toplevel routes are created on the server")
+
+	// ... but IngressReady must not be True until they are observed with
+	// real gateway status.
+	cond := isvc.Status.GetCondition(v1beta1.IngressReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, corev1.ConditionFalse, cond.Status,
+		"a route created this pass must not count toward IngressReady=True")
+	assert.Equal(t, HTTPRouteParentStatusNotAvailable, cond.Reason)
+}
+
+// TestGatewayAPIStrategy_Reconcile_AlreadyExistsCacheLagNotReady pins the
+// sibling lag shape: the route already exists on the server while the
+// cache still reports NotFound, so the strategy's Create races into
+// AlreadyExists. That is a routine cache-lag outcome, not a failure — the
+// pass must report not-ready (no error) and let the watch-driven requeue
+// re-check once the cache observes the route.
+func TestGatewayAPIStrategy_Reconcile_AlreadyExistsCacheLagNotReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, gatewayapiv1.Install(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	isvc := createTestInferenceServiceGateway("test-isvc", "default")
+	setComponentStatusReadyGateway(isvc)
+
+	// Routes exist server-side (seeded), but every HTTPRoute Get returns
+	// NotFound — a cache that lags a Create from a previous pass.
+	fakeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(isvc,
+			createReadyHTTPRoute("test-isvc-engine", "default"),
+			createReadyHTTPRoute("test-isvc", "default")).
+		WithStatusSubresource(&gatewayapiv1.HTTPRoute{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*gatewayapiv1.HTTPRoute); ok {
+					return apierr.NewNotFound(gatewayapiv1.Resource("httproutes"), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
+	require.NoError(t, strategy.Reconcile(context.Background(), isvc),
+		"AlreadyExists from a cache-lagged Create is not an error")
+
+	cond := isvc.Status.GetCondition(v1beta1.IngressReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, corev1.ConditionFalse, cond.Status,
+		"an unobserved route must not count toward IngressReady=True")
 }
 
 // gatewayStrategyWithConfig builds a GatewayAPIStrategy over an explicit
