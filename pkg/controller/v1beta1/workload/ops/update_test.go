@@ -344,6 +344,140 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 	}
 }
 
+// TestPodImagesMatch_InjectedSidecarIgnored pins the container-subset
+// compare: live containers absent from the target spec (istio/linkerd
+// style injections) are not OMENative-owned and must not block the
+// match — pre-fix they failed podImagesMatch and podRuntimeImagesMatch
+// forever, livelocking the in-place update with the pod held drained.
+// A TARGET container missing from the pod still fails both.
+func TestPodImagesMatch_InjectedSidecarIgnored(t *testing.T) {
+	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v2"}}}
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "main", Image: "llama:v2"},
+			{Name: "istio-proxy", Image: "istio/proxyv2:1.20"},
+		}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "main", Image: "llama:v2"},
+			{Name: "istio-proxy", Image: "istio/proxyv2:1.20"},
+		}},
+	}
+	if !podImagesMatch(pod, target) {
+		t.Errorf("podImagesMatch: injected sidecar must be ignored")
+	}
+	if !podRuntimeImagesMatch(pod, target) {
+		t.Errorf("podRuntimeImagesMatch: injected sidecar status must be ignored")
+	}
+	stale := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v3"}}}
+	if podImagesMatch(pod, stale) {
+		t.Errorf("podImagesMatch: diverged target image must still mismatch")
+	}
+	foreign := &corev1.PodSpec{Containers: []corev1.Container{{Name: "other", Image: "x:v1"}}}
+	if podImagesMatch(pod, foreign) {
+		t.Errorf("podImagesMatch: target container missing from pod must mismatch")
+	}
+	if podRuntimeImagesMatch(pod, foreign) {
+		t.Errorf("podRuntimeImagesMatch: target container without a status must mismatch")
+	}
+}
+
+// TestPatchPodImages_ReportsIssued pins the issued-return contract: a
+// no-diff patch must report issued=false (the caller only requeues for
+// a kubelet roll when a patch actually went out), a real diff true.
+func TestPatchPodImages_ReportsIssued(t *testing.T) {
+	isvc, _ := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	pod := legacyPodAtIncarnation(isvc, 0, 1, true, true)
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "llama:v1"}}
+	c := legacyNewFakeClient(t, pod)
+
+	issued, err := patchPodImages(context.Background(), c, pod, &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
+	})
+	if err != nil {
+		t.Fatalf("patchPodImages (no diff): %v", err)
+	}
+	if issued {
+		t.Errorf("issued: got true want false when nothing needs patching")
+	}
+
+	issued, err = patchPodImages(context.Background(), c, pod, &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "llama:v2"}},
+	})
+	if err != nil {
+		t.Fatalf("patchPodImages (diff): %v", err)
+	}
+	if !issued {
+		t.Errorf("issued: got false want true for a real image diff")
+	}
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got.Spec.Containers[0].Image != "llama:v2" {
+		t.Errorf("pod image: got %q want llama:v2", got.Spec.Containers[0].Image)
+	}
+}
+
+// TestUpdate_InPlace_InjectedSidecar_Converges is the end-to-end
+// livelock regression: a pod already on the target image but carrying
+// a webhook-injected sidecar (spec + status) absent from the target
+// must converge to Ready — pre-fix every pass re-declared an image
+// mismatch, patched nothing, and requeued forever with the pod
+// drained.
+func TestUpdate_InPlace_InjectedSidecar_Converges(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationUpdate, Step: updateStepInPlace,
+		},
+	}
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
+			},
+		},
+	}
+	target := legacyTargetSpecImage("llama:v2")
+	pod := legacyPodAtIncarnation(isvc, 0, 1, true, false)
+	pod.Spec.Containers = []corev1.Container{
+		{Name: "main", Image: "llama:v2"},
+		{Name: "istio-proxy", Image: "istio/proxyv2:1.20"},
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "main", Image: "llama:v2"},
+		{Name: "istio-proxy", Image: "istio/proxyv2:1.20"},
+	}
+	c := legacyNewFakeClient(t, isvc, ir, pod)
+	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("llama:v1"))
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
+		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+
+	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected done=true: pod is on the target image; the sidecar must not block convergence")
+	}
+	got := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), got)
+	if !podreadiness.IsServing(got) {
+		t.Errorf("serving must flip True after convergence")
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceReady || s.RunningRevision != tcr.Name {
+		t.Errorf("status: got (phase=%q, rev=%q) want (Ready, %q)", s.Phase, s.RunningRevision, tcr.Name)
+	}
+}
+
 // TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff pins
 // the chooser's "fall through" path: a non-image-only diff under
 // InPlaceIfPossible routes to recreate (bumps Incarnation, etc.)

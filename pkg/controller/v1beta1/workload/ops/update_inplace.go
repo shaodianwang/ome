@@ -130,10 +130,13 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 			pod = fresh
 		}
 		if needsImagePatch {
-			if err := patchPodImages(ctx, deps.Client, pod, targetSpec); err != nil {
-				return false, fmt.Errorf("patch images (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			issued, perr := patchPodImages(ctx, deps.Client, pod, targetSpec)
+			if perr != nil {
+				return false, fmt.Errorf("patch images (instance=%d, pod=%s): %w", inst.Index, pod.Name, perr)
 			}
-			patched = true
+			if issued {
+				patched = true
+			}
 		}
 		if err := patchPodAnnotations(ctx, deps.Client, pod, previousAnnotations, targetAnnotations); err != nil {
 			return false, fmt.Errorf("patch annotations (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)

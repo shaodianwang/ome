@@ -49,6 +49,9 @@ type migFixture struct {
 	// clk, when set, is wired into both Deps and ReconcileInput so
 	// deadline comparisons are deterministic (expiry tests).
 	clk clock.Clock
+	// forceDelete, when set, arms the stuck-Terminating escalation on
+	// the ReconcileInput (mirrors the adapter's config plumbing).
+	forceDelete *workload.ForceDeletePolicy
 }
 
 // deps builds the fixture's workload.Deps (clock included when set).
@@ -169,6 +172,7 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.RemoveInstance = legacyRemoveInstance(f.c, f.isvc, f.component)
 	in.DesiredSpec.GangSchedulingAvailable = f.gangSched
 	in.Clock = f.clk
+	in.ForceDelete = f.forceDelete
 	in.ObservedState.Migrations = append([]workload.MigrationRecord(nil), f.records...)
 	in.MutateMigration = func(_ context.Context, uuid string, mutate func(*workload.MigrationRecord) bool) error {
 		for i := range f.records {
@@ -1014,4 +1018,122 @@ func findInstanceStatusOnIRForFixture(t *testing.T, f *migFixture, idx int32) *v
 		}
 	}
 	return nil
+}
+
+// TestStampMigrationStatus_SourceSlotMissing_NotResurrected pins the
+// fresh-empty-slot guard on the SOURCE side of the pair stamp: writing
+// the Migrating stamp for an index whose InstanceStatus is gone must
+// not append a phantom slot (the append path seeds Phase==""). The
+// surge side legitimately seeds its slot and must keep doing so.
+func TestStampMigrationStatus_SourceSlotMissing_NotResurrected(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	in := f.input(t)
+
+	if err := patchInstanceStatusMigrating(context.Background(), in, 7, 8, "uuid-guard", time.Minute); err != nil {
+		t.Fatalf("patchInstanceStatusMigrating: %v", err)
+	}
+	if s := findInstanceStatusOnIRForFixture(t, f, 7); s != nil {
+		t.Fatalf("source stamp resurrected a removed slot: %+v", s)
+	}
+
+	if err := patchInstanceStatusMigrationSurge(context.Background(), in, 8, 7, "uuid-guard", time.Minute); err != nil {
+		t.Fatalf("patchInstanceStatusMigrationSurge: %v", err)
+	}
+	s := findInstanceStatusOnIRForFixture(t, f, 8)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceCreating {
+		t.Fatalf("surge stamp must still seed its slot; got %+v", s)
+	}
+}
+
+// TestMigrate_GangResume_SurgeSlotUnstamped_RequeuesBeforePods pins the
+// PodGroup-before-pods ordering on RESUME: crash window after the
+// record's SurgeInstance write but before the pair stamps. The resume
+// pass re-ensures the stamps and must requeue — EnsurePodGroups ran
+// this pass without the surge index in the plan, so creating the surge
+// gang's pods in the same pass would beat their PodGroup and park the
+// gang at the coscheduler.
+func TestMigrate_GangResume_SurgeSlotUnstamped_RequeuesBeforePods(t *testing.T) {
+	f := newGangMigFixture(t)
+	const uuid = "mig-gang-resume"
+	rec := mkMigRecord(uuid, 0, "node-a")
+	si := int32(1)
+	rec.SurgeInstance = &si
+	rec.Phase = workload.MigrationPhaseSurgePending
+	f.records = []workload.MigrationRecord{rec}
+
+	done, accepted := f.pass(t, uuid)
+	if done || !accepted {
+		t.Fatalf("resume pass: got done=%v accepted=%v, want in-flight", done, accepted)
+	}
+	if s := findInstanceStatusOnIRForFixture(t, f, 1); s == nil {
+		t.Fatalf("resume pass must re-ensure the surge stamp")
+	}
+	surgePods, err := query.LiveListPodsForInstance(context.Background(), f.c, f.isvc.Namespace, f.isvc.Name, f.component, 1)
+	if err != nil {
+		t.Fatalf("list surge pods: %v", err)
+	}
+	if len(surgePods) != 0 {
+		t.Fatalf("surge pods created in the same pass as the re-ensured stamp: got %d, want 0 (requeue first)", len(surgePods))
+	}
+
+	// The next pass observes the stamped slot and creates the gang.
+	done, accepted = f.pass(t, uuid)
+	if done || !accepted {
+		t.Fatalf("post-requeue pass: got done=%v accepted=%v, want in-flight", done, accepted)
+	}
+	surgePods, err = query.LiveListPodsForInstance(context.Background(), f.c, f.isvc.Namespace, f.isvc.Name, f.component, 1)
+	if err != nil {
+		t.Fatalf("re-list surge pods: %v", err)
+	}
+	if len(surgePods) == 0 {
+		t.Fatalf("surge gang must be created on the pass after the requeue")
+	}
+}
+
+// TestMigrate_SourceStuckTerminating_EscalationRuns pins the exit path
+// for the migration's primary use case: the drained source pod wedges
+// Terminating (here finalizer-pinned) and the drive tail must run the
+// stuck-teardown escalation instead of silently requeuing forever.
+// Finalizer-pinned evidence is report-only, so the observable is the
+// once-per-UID ForceDelete ledger marker.
+func TestMigrate_SourceStuckTerminating_EscalationRuns(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	f.forceDelete = fdPolicy()
+	const uuid = "mig-stuck-term"
+	f.records = []workload.MigrationRecord{
+		mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(30*time.Minute)),
+	}
+	driveToDrainingDrainIncomplete(t, f, uuid)
+	f.react(t) // drain settles — the tail is one delete away
+
+	srcPodName := query.PodName(f.isvc.Name, f.component, 0, "default", 0)
+	srcPod := &corev1.Pod{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: srcPodName}, srcPod); err != nil {
+		t.Fatalf("get source pod: %v", err)
+	}
+	srcPod.Finalizers = append(srcPod.Finalizers, "test.ome.io/block")
+	if err := f.c.Update(context.Background(), srcPod); err != nil {
+		t.Fatalf("pin source pod: %v", err)
+	}
+	if err := f.c.Delete(context.Background(), srcPod); err != nil {
+		t.Fatalf("delete source pod: %v", err)
+	}
+	// Past the pod's own deletion deadline plus the policy's slack.
+	clk.Step(10 * time.Minute)
+
+	done, accepted := f.pass(t, uuid)
+	if done || !accepted {
+		t.Fatalf("stuck pass: got done=%v accepted=%v, want in-flight", done, accepted)
+	}
+
+	found := false
+	for _, e := range fdLedgerEntries(t, f.c, f.isvc) {
+		if e.Reason == audit.ReasonForceDelete && e.Outcome == audit.OutcomeForceDeleteFinalizerReport {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Migrate's delete tail must run the stuck-Terminating escalation (no ForceDelete report ledger row)")
+	}
 }

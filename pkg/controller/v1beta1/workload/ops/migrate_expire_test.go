@@ -586,6 +586,168 @@ func TestMigrateExpiry_DrainingIncomplete_Expired(t *testing.T) {
 	}
 }
 
+// TestMigrateExpiry_SourceStuckTerminating_Expires pins the
+// record-level exit for a wedged source on a ForceDeletePolicy
+// cluster: past the Deadline with the source pod Terminating beyond
+// its deletion deadline + OverdueSlack, the Draining carve-out must
+// NOT defer — the drive tail skips Terminating pods, so completion is
+// unreachable and the record expires terminal instead of parking
+// non-terminal forever.
+func TestMigrateExpiry_SourceStuckTerminating_Expires(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	f.forceDelete = &workload.ForceDeletePolicy{
+		OverdueSlack:             5 * time.Minute,
+		NodeUnreachableThreshold: time.Minute,
+	}
+	const uuid = "mig-stuckdrain"
+	f.records = []workload.MigrationRecord{
+		mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(30*time.Minute)),
+	}
+	driveToDrainingDrainIncomplete(t, f, uuid)
+	// Settle the drain — without the wedge this state would be driven
+	// to Completed (see the DrainingComplete test).
+	f.react(t)
+
+	// The source pod wedges Terminating (finalizer-pinned so the fake
+	// client keeps the object, as a dead node's kubelet would).
+	srcPodName := query.PodName(f.isvc.Name, f.component, 0, "default", 0)
+	srcPod := &corev1.Pod{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: srcPodName}, srcPod); err != nil {
+		t.Fatalf("get source pod: %v", err)
+	}
+	srcPod.Finalizers = append(srcPod.Finalizers, "test.ome.io/block")
+	if err := f.c.Update(context.Background(), srcPod); err != nil {
+		t.Fatalf("pin source pod: %v", err)
+	}
+	if err := f.c.Delete(context.Background(), srcPod); err != nil {
+		t.Fatalf("delete source pod: %v", err)
+	}
+
+	clk.Step(31 * time.Minute)
+	if n := f.expire(t); n != 1 {
+		t.Fatalf("stuck-Terminating source must expire, not defer: got %d expiries", n)
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseFailed || rec.CompletedAt == nil {
+		t.Fatalf("record must close Failed; got %+v", *rec)
+	}
+}
+
+// TestMigrateExpiry_SourceOvershootWithinSlack_NotExpired pins the
+// wedge heuristic's slack: a Draining record with a fully Ready surge
+// whose source pod merely GRAZES its deletion deadline (routine on
+// loaded nodes with large-grace pods) must NOT expire. The configured
+// ForceDeletePolicy's OverdueSlack is the wedge window; only
+// overshooting BEYOND it expires.
+func TestMigrateExpiry_SourceOvershootWithinSlack_NotExpired(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	f.forceDelete = &workload.ForceDeletePolicy{
+		OverdueSlack:             5 * time.Minute,
+		NodeUnreachableThreshold: time.Minute,
+	}
+	const uuid = "mig-graze"
+	f.records = []workload.MigrationRecord{
+		mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(time.Minute)),
+	}
+	driveToDrainingDrainIncomplete(t, f, uuid)
+	// Settle the drain: surge Ready + in rotation, source out — one
+	// idempotent drive tail from Completed.
+	f.react(t)
+
+	// The source pod goes Terminating right at the tail
+	// (finalizer-pinned so the fake client keeps it past its deadline).
+	srcPodName := query.PodName(f.isvc.Name, f.component, 0, "default", 0)
+	srcPod := &corev1.Pod{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: srcPodName}, srcPod); err != nil {
+		t.Fatalf("get source pod: %v", err)
+	}
+	srcPod.Finalizers = append(srcPod.Finalizers, "test.ome.io/block")
+	if err := f.c.Update(context.Background(), srcPod); err != nil {
+		t.Fatalf("pin source pod: %v", err)
+	}
+	if err := f.c.Delete(context.Background(), srcPod); err != nil {
+		t.Fatalf("delete source pod: %v", err)
+	}
+
+	// Past the record Deadline AND ~2m past the pod's own deletion
+	// deadline — one overshot pass, within the 5m slack: the Ready
+	// tail defers to the drive.
+	clk.Step(2 * time.Minute)
+	if n := f.expire(t); n != 0 {
+		t.Fatalf("overshoot within slack with a Ready surge must defer, not expire: got %d", n)
+	}
+	if rec := f.record(t, uuid); rec.Phase.Terminal() {
+		t.Fatalf("record must stay non-terminal within slack; got %+v", *rec)
+	}
+
+	// Beyond the slack the pod is genuinely wedged: expire terminal.
+	clk.Step(10 * time.Minute)
+	if n := f.expire(t); n != 1 {
+		t.Fatalf("overshoot beyond slack must expire: got %d", n)
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseFailed || rec.CompletedAt == nil {
+		t.Fatalf("record must close Failed beyond slack; got %+v", *rec)
+	}
+}
+
+// TestMigrateExpiry_SourceWedgedUnconfigured_Parks pins the wedge
+// check's authority gate: with NO ForceDeletePolicy configured, a
+// Draining record with a Ready serving surge and a source pod wedged
+// Terminating arbitrarily far past its deletion deadline must DEFER,
+// not expire — expiring would tear down the serving surge and stamp
+// the source Failed with its stable pod name still occupied by the
+// wedged object, with no escalation configured to ever clear it. The
+// record parks non-terminal and the surge keeps serving.
+func TestMigrateExpiry_SourceWedgedUnconfigured_Parks(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	const uuid = "mig-wedge-nopolicy"
+	f.records = []workload.MigrationRecord{
+		mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(time.Minute)),
+	}
+	driveToDrainingDrainIncomplete(t, f, uuid)
+	// Settle the drain: surge Ready + in rotation, source drained out.
+	f.react(t)
+
+	// The source pod wedges Terminating (finalizer-pinned so the fake
+	// client keeps the object, as a dead node's kubelet would).
+	srcPodName := query.PodName(f.isvc.Name, f.component, 0, "default", 0)
+	srcPod := &corev1.Pod{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: srcPodName}, srcPod); err != nil {
+		t.Fatalf("get source pod: %v", err)
+	}
+	srcPod.Finalizers = append(srcPod.Finalizers, "test.ome.io/block")
+	if err := f.c.Update(context.Background(), srcPod); err != nil {
+		t.Fatalf("pin source pod: %v", err)
+	}
+	if err := f.c.Delete(context.Background(), srcPod); err != nil {
+		t.Fatalf("delete source pod: %v", err)
+	}
+
+	// Far past both the record Deadline and any per-pod grace window.
+	clk.Step(6 * time.Hour)
+	if n := f.expire(t); n != 0 {
+		t.Fatalf("unconfigured wedged source must park, not expire: got %d expiries", n)
+	}
+	if rec := f.record(t, uuid); rec.Phase.Terminal() {
+		t.Fatalf("record must stay non-terminal without a ForceDeletePolicy; got %+v", *rec)
+	}
+	// The serving surge is untouched: pod still present and its status
+	// slot still pinned to this migration.
+	surgePodName := query.PodName(f.isvc.Name, f.component, 1, "default", 0)
+	surgePod := &corev1.Pod{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: surgePodName}, surgePod); err != nil {
+		t.Fatalf("serving surge pod must survive: %v", err)
+	}
+	surge := findInstanceStatusOnIRForFixture(t, f, 1)
+	if surge == nil || surge.Operation == nil || surge.Operation.RequestUUID != uuid {
+		t.Fatalf("surge must stay pinned to the migration; got %+v", surge)
+	}
+}
+
 // TestMigrateExpiry_DrainingComplete_DrivenToCompleted pins the
 // Draining precedence rule's drive side: past the Deadline but with
 // the source fully drained AND the surge fully runtime-ready,

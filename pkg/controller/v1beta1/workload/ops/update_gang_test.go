@@ -2,12 +2,15 @@ package ops
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -254,6 +257,138 @@ func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	if prune := (*blockCalls)[1]; prune.rev != "p414-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
 		t.Errorf("prune call: got (rev=%q, disposition=%v) want (p414-engine-goodrev, Remove)", prune.rev, prune.disposition)
 	}
+}
+
+// drainRecorderEvents empties a FakeRecorder's channel.
+func drainRecorderEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// TestGangSurge_PromoteEmitsCompletedEvent pins the completion edge's
+// event reason: the promote pass must emit RecreateUpdateCompleted —
+// pre-fix it re-emitted RecreateUpdateStarted, so reason-filtered
+// monitoring never saw gang rollouts finish.
+func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
+	legacyResetExpectations(t)
+	const isvcName, ns = "p298", "omenative-eval"
+	surgeIdx := int32(2)
+	mkReadyPod := func(runner string) *corev1.Pod {
+		pod := gangSurgePod(isvcName, ns, surgeIdx, runner, "newrev")
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+		}
+		return pod
+	}
+	c := legacyNewFakeClient(t, mkReadyPod("leader"), mkReadyPod("worker")) // no source pods — promote pass
+
+	src := &workload.InstanceStatus{
+		Index:           0,
+		Phase:           workload.InstancePhaseUpdating,
+		RunningRevision: "p298-engine-oldrev",
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			Step:           updateStepSurge,
+			SurgeIndex:     &surgeIdx,
+			TargetRevision: "p298-engine-newrev",
+		},
+	}
+	var removed []int32
+	input := gangAbandonInput(isvcName, ns, src, &removed)
+	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{*src}
+	input.EventTarget = legacyMinimalISVC(isvcName, ns, 1)
+	rec := record.NewFakeRecorder(16)
+	deps := legacyTestDeps(c)
+	deps.Recorder = rec
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "p298-engine-newrev"}}
+
+	done, err := gangSurgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], target)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected done=true (promote pass)")
+	}
+	events := drainRecorderEvents(rec)
+	completed, started := 0, 0
+	for _, e := range events {
+		if strings.Contains(e, string(workload.EventReasonRecreateUpdateCompleted)) {
+			completed++
+		}
+		if strings.Contains(e, string(workload.EventReasonRecreateUpdateStarted)) {
+			started++
+		}
+	}
+	if completed != 1 || started != 0 {
+		t.Errorf("promote events: got completed=%d started=%d want (1, 0); events=%v", completed, started, events)
+	}
+}
+
+// TestAbandonFailedGangSurge_EventReasons pins the abandon edge's event
+// identity: a failed abandon is a Warning with the dedicated
+// GangSurgeAbandoned reason (never the Started reason), a supersede
+// abandon a Normal with the same reason.
+func TestAbandonFailedGangSurge_EventReasons(t *testing.T) {
+	run := func(t *testing.T, failedTargetRev, wantPrefix string) []string {
+		t.Helper()
+		legacyResetExpectations(t)
+		const isvcName, ns = "p378", "omenative-eval"
+		c := legacyNewFakeClient(t) // surge pods already gone — reset pass
+		surgeIdx := int32(2)
+		src := &workload.InstanceStatus{
+			Index:           0,
+			Phase:           workload.InstancePhaseFailed,
+			RunningRevision: "p378-engine-goodrev",
+			Operation: &workload.InstanceOperation{
+				Type:       workload.InstanceOperationUpdate,
+				Step:       updateStepSurge,
+				SurgeIndex: &surgeIdx,
+			},
+		}
+		var removed []int32
+		input := gangAbandonInput(isvcName, ns, src, &removed)
+		input.EventTarget = legacyMinimalISVC(isvcName, ns, 1)
+		recordRetryBlockCalls(&input, nil)
+		rec := record.NewFakeRecorder(16)
+		deps := legacyTestDeps(c)
+		deps.Recorder = rec
+		plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+
+		if _, err := abandonFailedGangSurge(context.Background(), deps, input, plan, 0, surgeIdx,
+			src.RunningRevision, failedTargetRev, "pod stuck"); err != nil {
+			t.Fatalf("abandonFailedGangSurge: %v", err)
+		}
+		events := drainRecorderEvents(rec)
+		matched := 0
+		for _, e := range events {
+			if strings.Contains(e, string(workload.EventReasonRecreateUpdateStarted)) {
+				t.Errorf("abandon must not emit the Started reason; events=%v", events)
+			}
+			if strings.HasPrefix(e, wantPrefix+" "+string(eventReasonGangSurgeAbandoned)) {
+				matched++
+			}
+		}
+		if matched != 1 {
+			t.Errorf("abandon events: got %d %q GangSurgeAbandoned, want 1; events=%v", matched, wantPrefix, events)
+		}
+		return events
+	}
+
+	t.Run("failed abandon warns", func(t *testing.T) {
+		run(t, "p378-engine-badrev", corev1.EventTypeWarning)
+	})
+	t.Run("supersede abandon is normal", func(t *testing.T) {
+		run(t, "", corev1.EventTypeNormal)
+	})
 }
 
 // TestGangSurge_InheritsExcludedNodes pins the exclusion-memory contract

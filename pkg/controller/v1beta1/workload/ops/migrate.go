@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
@@ -152,6 +153,11 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// stamps here closes the window without ever resurrecting a
 		// source status the completion tail already removed.
 		if !workload.MigrationPhaseAtOrPast(entry.Phase, workload.MigrationPhaseSurgeReady) {
+			// A surge slot absent from this pass's ObservedState means
+			// EnsurePodGroups ran without the surge index — treat the
+			// re-ensured stamp like a fresh one so a gang surge requeues
+			// below and gets its PodGroup before its pods render.
+			freshStamp = findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx) == nil
 			if err := patchInstanceStatusMigrating(ctx, input, sourceIdx, surgeIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
 				return false, accepted, fmt.Errorf("Migrate: ensure source stamp (instance=%d): %w", sourceIdx, err)
 			}
@@ -464,6 +470,22 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	}
 
 	if len(sourcePods) > 0 {
+		// Stuck-Terminating escalation BEFORE the expectations gate — a
+		// source pod wedged Terminating on a dead node (the reason the
+		// migration was requested) never emits the watch DELETE that
+		// satisfies its expectation, and the delete loop below skips
+		// Terminating pods, so without this the migration can never
+		// reach a terminal phase. Same ordering + advisory-error
+		// semantics as Delete's escalation.
+		for _, pod := range sourcePods {
+			if pod.DeletionTimestamp == nil {
+				continue
+			}
+			if escErr := escalateStuckTerminating(ctx, deps, input, pod, sourceIdx); escErr != nil {
+				logf.FromContext(ctx).V(1).Info("stuck-Terminating escalation deferred",
+					"pod", pod.Name, "error", escErr.Error())
+			}
+		}
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, sourceIdx) {
 			return false, accepted, nil
 		}
@@ -593,12 +615,26 @@ func advanceMigrationPhase(ctx context.Context, input workload.ReconcileInput, u
 // legitimately span nodes. Either way an unscheduled pod defers so the next
 // reconcile re-validates once scheduling settles.
 func validateFromNode(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, fromNode string) (string, bool, error) {
-	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
+	listed, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
 		return "", false, fmt.Errorf("list source pods: %w", err)
 	}
-	if len(pods) == 0 {
+	if len(listed) == 0 {
 		return "source instance has no live pods", false, nil
+	}
+	// Terminating pods are seconds from gone (recreate churn leaves the
+	// old pod Terminating beside its replacement) — validating against
+	// them would permanently fail a legitimate request. All-Terminating
+	// is transient (replacements pending): defer, don't reject.
+	pods := make([]*corev1.Pod, 0, len(listed))
+	for _, pod := range listed {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		pods = append(pods, pod)
+	}
+	if len(pods) == 0 {
+		return "", true, nil
 	}
 
 	if isMultiPodInstance(plan, sourceIdx) {
@@ -769,6 +805,12 @@ func stampMigrationStatus(ctx context.Context, input workload.ReconcileInput, id
 		idSuffix = "-surge"
 	}
 	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+		if role == migrationRoleSource && s.Phase == "" {
+			// Fresh-empty slot from the append path: the source status
+			// was removed out from under us — don't resurrect it. The
+			// surge role legitimately seeds a fresh slot.
+			return false
+		}
 		if s.Phase == wantPhase &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationMigrate &&
 			s.Operation.RequestUUID == uuid {

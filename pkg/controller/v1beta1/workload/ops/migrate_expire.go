@@ -216,6 +216,11 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 // (dead surge pod, ready-but-never-in-rotation, not Available) must
 // expire, not defer — a weaker check here would park the record
 // non-terminal past its deadline forever.
+//
+// One deliberate exception: a source pod wedged Terminating with NO
+// ForceDeletePolicy configured defers (see the wedge check below) —
+// the record parks non-terminal rather than failing a migration whose
+// surge is serving.
 func migrationTailReady(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx, surgeIdx int32) (bool, error) {
 	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, surgeIdx)
 	if err != nil {
@@ -232,6 +237,21 @@ func migrationTailReady(ctx context.Context, deps workload.Deps, input workload.
 		return false, fmt.Errorf("list source pods: %w", err)
 	}
 	for _, pod := range sourcePods {
+		// A source pod wedged past its own deletion deadline (dead
+		// node / kubelet gone) means the drive tail — which skips
+		// Terminating pods — can never finish. Expiring here tears
+		// down a serving surge, so it takes operator authority: only
+		// a configured ForceDeletePolicy — whose escalation normally
+		// force-deletes the wedged pod and lets the drive complete
+		// first, leaving expiry for genuinely uncompletable wedges —
+		// and only past its OverdueSlack beyond the pod's deletion
+		// deadline (merely grazing it is routine on loaded nodes with
+		// large-grace pods). Unconfigured, the record parks
+		// non-terminal and the surge keeps serving.
+		if input.ForceDelete != nil && pod.DeletionTimestamp != nil &&
+			input.Now().After(pod.DeletionTimestamp.Add(input.ForceDelete.OverdueSlack)) {
+			return false, nil
+		}
 		serviceName := drainServiceForPod(input, plan, pod)
 		if serviceName == "" {
 			continue

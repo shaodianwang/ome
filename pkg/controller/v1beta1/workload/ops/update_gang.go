@@ -20,6 +20,13 @@ func gangSurgeDrainKey(sourceIdx int32) string {
 	return "gang-surge-source-" + strconv.Itoa(int(sourceIdx))
 }
 
+// eventReasonGangSurgeAbandoned fires when an in-flight gang surge is
+// torn down before promotion — a Failed abandon (Warning) or a
+// supersede redirect toward a newer target (Normal). Distinct from the
+// Started/Completed pair so reason-filtered monitoring can tell an
+// abandoned rollout from a finished one.
+const eventReasonGangSurgeAbandoned workload.EventReason = "GangSurgeAbandoned"
+
 // gangSurgeUpdate performs a SurgeThenDrain rollout for a multi-pod
 // (gang) Instance by surging a whole replacement gang at a freshly
 // allocated instance index, then draining the source gang once the
@@ -295,7 +302,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	if _, rerr := input.RemoveInstance(ctx, sourceIdx); rerr != nil {
 		return false, fmt.Errorf("remove source InstanceStatus (instance=%d): %w", sourceIdx, rerr)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateCompleted,
 		"OMENative %s gang surge complete: instance %d promoted to revision %s",
 		instanceKey(comp, sourceIdx), surgeIdx, surgeTargetName)
 	return true, nil
@@ -375,8 +382,14 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, sourceIdx, sourceRunningRev); err != nil {
 		return false, fmt.Errorf("reset failed gang surge source (instance=%d): %w", sourceIdx, err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
-		"OMENative %s abandoned failed gang surge (surge-index=%d); resetting to revision %s for a fresh rollout",
-		instanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
+	if failedTargetRev != "" {
+		recordWarning(deps.Recorder, eventTarget(input), eventReasonGangSurgeAbandoned,
+			"OMENative %s abandoned failed gang surge (surge-index=%d); resetting to revision %s for a fresh rollout",
+			instanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
+	} else {
+		recordNormal(deps.Recorder, eventTarget(input), eventReasonGangSurgeAbandoned,
+			"OMENative %s abandoned superseded gang surge (surge-index=%d); resetting to revision %s for a fresh rollout",
+			instanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
+	}
 	return false, nil
 }

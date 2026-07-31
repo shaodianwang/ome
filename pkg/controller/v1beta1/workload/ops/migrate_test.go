@@ -8,6 +8,7 @@ package ops
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,6 +132,47 @@ func TestValidateFromNode_NoLivePodsRejects(t *testing.T) {
 	}
 	if mismatch == "" {
 		t.Errorf("expected mismatch reason for no-live-pods")
+	}
+}
+
+// vfnTerminatingPod is vfnPod pinned Terminating (finalizer so the
+// fake client stores the DeletionTimestamp) under a distinct name.
+func vfnTerminatingPod(name, nodeName string) *corev1.Pod {
+	pod := vfnPod(nodeName)
+	pod.Name = name
+	dt := metav1.NewTime(time.Now())
+	pod.DeletionTimestamp = &dt
+	pod.Finalizers = []string{"test.ome.io/block"}
+	return pod
+}
+
+func TestValidateFromNode_TerminatingPodIgnored(t *testing.T) {
+	// Recreate churn leaves the old pod Terminating on another node
+	// beside the live replacement — only the live pod decides. Counting
+	// the Terminating pod would reject with "span multiple nodes".
+	deps, input, plan := vfnFixture(t, vfnPod("node5"), vfnTerminatingPod("llama-70b-engine-0-default-0-prev", "node7"))
+	mismatch, defer_, err := validateFromNode(context.Background(), deps, input, plan, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if defer_ || mismatch != "" {
+		t.Errorf("Terminating pod must be ignored; got mismatch=%q defer=%v", mismatch, defer_)
+	}
+}
+
+func TestValidateFromNode_AllTerminatingDefers(t *testing.T) {
+	// Every pod Terminating is transient (replacements pending) —
+	// defer, never a permanent rejection.
+	deps, input, plan := vfnFixture(t, vfnTerminatingPod("llama-70b-engine-0-default-0", "node5"))
+	mismatch, defer_, err := validateFromNode(context.Background(), deps, input, plan, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if !defer_ {
+		t.Errorf("all-Terminating source must defer; got mismatch=%q defer=%v", mismatch, defer_)
+	}
+	if mismatch != "" {
+		t.Errorf("defer must not carry a rejection reason; got %q", mismatch)
 	}
 }
 

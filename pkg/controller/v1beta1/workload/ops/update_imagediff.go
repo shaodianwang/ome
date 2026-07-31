@@ -40,32 +40,41 @@ func podRuntimeImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	if pod == nil || target == nil {
 		return false
 	}
-	want := make(map[string]string, len(target.Containers))
-	for _, c := range target.Containers {
-		want[c.Name] = canonicalImage(c.Image)
-	}
+	got := make(map[string]string, len(pod.Status.ContainerStatuses))
 	for _, cs := range pod.Status.ContainerStatuses {
-		if want[cs.Name] != canonicalImage(cs.Image) {
+		got[cs.Name] = canonicalImage(cs.Image)
+	}
+	// Every target container needs a matching status before declaring
+	// done. Statuses for containers absent from target (webhook-injected
+	// sidecars) are not OMENative-owned and are ignored — comparing them
+	// would block convergence forever.
+	for _, c := range target.Containers {
+		img, ok := got[c.Name]
+		if !ok || img != canonicalImage(c.Image) {
 			return false
 		}
 	}
-	// Need a status for every target container before declaring done.
-	return len(pod.Status.ContainerStatuses) >= len(target.Containers)
+	return true
 }
 
-// podImagesMatch returns true when every container in pod has the same
-// .Image as the same-named container in target. Pod containers absent
-// from target fail the match.
+// podImagesMatch returns true when every container in target has a
+// same-named pod container with the same .Image. Pod containers absent
+// from target (webhook-injected sidecars) are not OMENative-owned and
+// are ignored — failing on them would leave the in-place update
+// declaring "patch needed" forever while patchPodImages has nothing to
+// patch. Target containers absent from the pod fail the match (the pod
+// can never converge to that spec in place).
 func podImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	if pod == nil || target == nil {
 		return false
 	}
-	want := make(map[string]string, len(target.Containers))
-	for _, c := range target.Containers {
-		want[c.Name] = c.Image
-	}
+	got := make(map[string]string, len(pod.Spec.Containers))
 	for _, c := range pod.Spec.Containers {
-		if want[c.Name] != c.Image {
+		got[c.Name] = c.Image
+	}
+	for _, c := range target.Containers {
+		img, ok := got[c.Name]
+		if !ok || img != c.Image {
 			return false
 		}
 	}
@@ -76,9 +85,11 @@ func podImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 // Strategic-merge keys by container name so the patch leaves other
 // containers and apiserver-defaulted fields untouched; a plain Update
 // would conflict with any other controller writing to the same RV.
-func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, target *corev1.PodSpec) error {
+// Returns whether a patch was actually issued so callers only requeue
+// for a kubelet roll when one is coming.
+func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, target *corev1.PodSpec) (bool, error) {
 	if pod == nil || target == nil {
-		return fmt.Errorf("patchPodImages: nil pod or target")
+		return false, fmt.Errorf("patchPodImages: nil pod or target")
 	}
 	wantByName := make(map[string]string, len(target.Containers))
 	for _, t := range target.Containers {
@@ -98,18 +109,18 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 		})
 	}
 	if len(containersPatch) == 0 {
-		return nil
+		return false, nil
 	}
 	raw, err := json.Marshal(map[string]any{
 		"spec": map[string]any{"containers": containersPatch},
 	})
 	if err != nil {
-		return fmt.Errorf("marshal image patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return false, fmt.Errorf("marshal image patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
-		return fmt.Errorf("patch pod %s/%s images: %w", pod.Namespace, pod.Name, err)
+		return false, fmt.Errorf("patch pod %s/%s images: %w", pod.Namespace, pod.Name, err)
 	}
-	return nil
+	return true, nil
 }
 
 // patchPodRevisionHashLabel strategic-merge-patches the pod's
