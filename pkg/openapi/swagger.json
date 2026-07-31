@@ -2115,6 +2115,10 @@
           "description": "Model defines the model to be used for inference, referencing either a BaseModel or a custom model. This allows models to be managed independently of the serving configuration.",
           "$ref": "#/definitions/v1beta1.ModelRef"
         },
+        "placement": {
+          "description": "Placement declares how the multi-cluster control plane selects and orders the workload clusters this InferenceService is placed onto. When nil, the control plane falls back to the ome.io/accelerator-requirements and ome.io/cluster-selector annotations (unchanged legacy behavior). Only consulted on the control-plane cluster; ignored in single-cluster deployments. Alpha (OEP-0018.3); the API may change without notice.",
+          "$ref": "#/definitions/v1beta1.PlacementSpec"
+        },
         "rollout": {
           "description": "Rollout is the single home for rollout configuration on this InferenceService: an ordered list of rollout groups, each polymorphic in its progression (canary | blueGreen | rollingUpdate). Sequencing is the group list order; a group's Components roll together.",
           "$ref": "#/definitions/v1beta1.RolloutSpec"
@@ -3406,6 +3410,24 @@
           "description": "Name is the name of the parent InferenceService.",
           "type": "string",
           "default": ""
+        }
+      }
+    },
+    "v1beta1.PlacementSpec": {
+      "description": "PlacementSpec declares how the control plane selects the workload clusters an InferenceService is placed onto, and how many of them serve it. It subsumes the legacy ome.io/accelerator-requirements and ome.io/cluster-selector annotations in a typed, schema-validated form; when this field is nil the control plane still honors those annotations for backward compatibility.",
+      "type": "object",
+      "properties": {
+        "clusterSelector": {
+          "description": "ClusterSelector is an optional operator-imposed routing overlay (label-selector string) AND-ed onto Requirements to further narrow candidates (e.g. \"provider=cw\"). Structured equivalent of the ome.io/cluster-selector annotation.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Mode is the placement cardinality: Single (one cluster), All (every candidate), or Split (replicas distributed across clusters). Defaults to Single. All and Split are rejected by admission on a control plane whose build does not yet implement them.",
+          "type": "string"
+        },
+        "requirements": {
+          "description": "Requirements is the intrinsic capability selector a candidate workload cluster MUST satisfy, expressed as a Kubernetes label-selector string matched against WorkloadCluster labels (e.g. \"accelerator in (gb300, tpu7x)\"). It is the structured equivalent of the ome.io/accelerator-requirements annotation. Empty means no intrinsic requirement.",
+          "type": "string"
         }
       }
     },

@@ -25545,6 +25545,20 @@ spec:
                   required:
                     - name
                   type: object
+                placement:
+                  properties:
+                    clusterSelector:
+                      type: string
+                    mode:
+                      default: Single
+                      enum:
+                        - Single
+                        - All
+                        - Split
+                      type: string
+                    requirements:
+                      type: string
+                  type: object
                 rollout:
                   properties:
                     groups:
