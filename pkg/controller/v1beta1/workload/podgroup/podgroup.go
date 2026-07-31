@@ -146,10 +146,10 @@ func clampScheduleTimeoutSeconds(in int32) int32 {
 // looking at the parent Service can pivot to the gang via the same keys.
 func podGroupLabels(isvcName string, component workload.ComponentType, instanceIdx int32) map[string]string {
 	return map[string]string{
-		"ome.io/inferenceservice": isvcName,
-		"ome.io/component":        string(component),
-		query.LabelManagedBy:      query.ManagedByOMENative,
-		query.LabelInstanceIdx:    fmt.Sprintf("%d", instanceIdx),
+		constants.InferenceServicePodLabelKey: isvcName,
+		constants.OMEComponentLabel:           string(component),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelInstanceIdx:                fmt.Sprintf("%d", instanceIdx),
 	}
 }
 
@@ -206,21 +206,21 @@ func EnsurePodGroupForPodsWithReader(ctx context.Context, c client.Client, reade
 	// version, so a stale cached Get cannot suppress a topology correction.
 	existing := &schedulingv1alpha1.PodGroup{}
 	getErr := reader.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		// Surface the read failure directly: falling through would run the
+		// topology proof without the existing annotation and misreport a
+		// transient Get error as an unprovable-topology error.
+		return "", fmt.Errorf("EnsurePodGroup: get %s/%s: %w", desired.Namespace, desired.Name, getErr)
+	}
 	if len(pods) > 0 {
 		if err := reconcileDesiredTopologyWithLivePods(desired, existing, getErr == nil, ownerName, plan.Component, inst.Index, pods); err != nil {
 			return "", fmt.Errorf("EnsurePodGroup: reconcile live topology: %w", err)
 		}
 	}
-	switch {
-	case getErr == nil:
+	if getErr == nil {
 		if podGroupMatches(existing, desired) {
 			return desired.Annotations[query.AnnotationTopologyKey], nil
 		}
-	case !apierrors.IsNotFound(getErr):
-		return "", fmt.Errorf("EnsurePodGroup: get %s/%s: %w", desired.Namespace, desired.Name, getErr)
-	}
-
-	if getErr == nil {
 		target := existing.DeepCopy()
 		target.Labels = desired.Labels
 		target.OwnerReferences = desired.OwnerReferences

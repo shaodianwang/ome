@@ -2,6 +2,7 @@ package podgroup
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,12 +140,13 @@ func TestBuildPodGroup_Shape(t *testing.T) {
 		t.Errorf("ScheduleTimeoutSeconds: got %d want 600 (clamped from 900)", *pg.Spec.ScheduleTimeoutSeconds)
 	}
 
-	// Labels: Component-scoped trio + instance-index for fan-out grep.
+	// Labels: same keys the pod renderer / headless Service selector use,
+	// so the Service/pods <-> gang pivot actually matches.
 	wantLabels := map[string]string{
-		"ome.io/inferenceservice": "llama-engine",
-		"ome.io/component":        "engine",
-		query.LabelManagedBy:      query.ManagedByOMENative,
-		query.LabelInstanceIdx:    "0",
+		constants.InferenceServicePodLabelKey: "llama-engine",
+		constants.OMEComponentLabel:           "engine",
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelInstanceIdx:                "0",
 	}
 	if diff := cmp.Diff(wantLabels, pg.Labels); diff != "" {
 		t.Errorf("Labels (-want +got):\n%s", diff)
@@ -374,7 +376,7 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 	if got.Spec.ScheduleTimeoutSeconds == nil || *got.Spec.ScheduleTimeoutSeconds != 180 {
 		t.Errorf("ScheduleTimeoutSeconds: want 180 (3m), got %v", got.Spec.ScheduleTimeoutSeconds)
 	}
-	if got.Labels["ome.io/component"] != "engine" {
+	if got.Labels[constants.OMEComponentLabel] != "engine" {
 		t.Errorf("Labels: want engine label set, got %#v", got.Labels)
 	}
 	if _, hasStale := got.Labels["stale"]; hasStale {
@@ -445,6 +447,82 @@ func TestEnsurePodGroup_TopologyAnnotationDriftTriggersUpdate(t *testing.T) {
 	}
 	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey || got.Annotations["example.com/preserve"] != "yes" {
 		t.Errorf("annotations after topology drift correction: got %#v", got.Annotations)
+	}
+}
+
+// TestEnsurePodGroup_HealsLegacyComponentLabelKey — PodGroups stamped
+// with the old "ome.io/component" key (which never matched the
+// renderer's constants.OMEComponentLabel selector) must be rewritten to
+// the canonical keys on the next ensure.
+func TestEnsurePodGroup_HealsLegacyComponentLabelKey(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 3 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	legacy, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	legacy.Labels = map[string]string{
+		constants.InferenceServicePodLabelKey: "llama",
+		"ome.io/component":                    "engine",
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelInstanceIdx:                "0",
+	}
+	c := newPodGroupClient(t, isvc, legacy)
+
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
+		t.Fatalf("EnsurePodGroup: %v", err)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(legacy), got); err != nil {
+		t.Fatalf("get PodGroup: %v", err)
+	}
+	if got.Labels[constants.OMEComponentLabel] != "engine" {
+		t.Errorf("component label not healed to %q: got %#v", constants.OMEComponentLabel, got.Labels)
+	}
+	if _, stale := got.Labels["ome.io/component"]; stale {
+		t.Errorf("legacy ome.io/component key not removed: got %#v", got.Labels)
+	}
+}
+
+// TestEnsurePodGroup_TransientGetErrorSurfaces — a non-NotFound Get
+// failure must be returned as the read error, not fall through to the
+// live-pod topology proof and masquerade as an unprovable-topology
+// ("no PodGroup annotation") error.
+func TestEnsurePodGroup_TransientGetErrorSurfaces(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	base := newPodGroupClient(t, isvc)
+	boom := apierrors.NewServiceUnavailable("apiserver overloaded")
+	failing := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isPG := obj.(*schedulingv1alpha1.PodGroup); isPG {
+				return boom
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	plan := core.ComponentPlan{
+		Component:            workload.ComponentEngine,
+		InstanceReadyTimeout: 3 * time.Minute,
+		TopologyKey:          "network.example.com/fabric-domain",
+	}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	// A live pod with no provable OME-generated topology: before the
+	// early return this combination produced the misleading
+	// "cannot prove active topology ... no PodGroup annotation" error.
+	pods := []*corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelRunner: "worker"}},
+	}}
+
+	_, err := EnsurePodGroupForPods(context.Background(), failing, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst, pods)
+	if err == nil {
+		t.Fatal("expected error from failing Get")
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Errorf("expected the transient Get error to surface, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "cannot prove active topology") {
+		t.Errorf("Get error masked as a topology-proof error: %v", err)
 	}
 }
 
