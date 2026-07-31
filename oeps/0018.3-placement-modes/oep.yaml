@@ -1,0 +1,33 @@
+title: "Placement Modes: Single, All, and Split"
+oep-number: "0018.3"
+authors:
+  - "@yan9fan"
+status: provisional
+creation-date: 2026-07-30
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0018: 0018 places an InferenceService on EXACTLY ONE workload
+# cluster (fan out, race, keep the first to admit, sweep the losers). That single
+# cardinality is hard-coded into the reconciler. This OEP makes cardinality a
+# CHOICE via `spec.placement.mode`:
+#   - Single : one cluster serves (today's behavior, OEP-0018).
+#   - All    : every candidate cluster serves; each autoscales locally (NEW).
+#   - Split  : replicas distributed fractionally across clusters (OEP-0018.1).
+# All and Split both require a per-candidate endpoint model that a single
+# status.url cannot express; this OEP defines that shared status/endpoint change.
+see-also:
+  - "/oeps/0018-multi-cluster-placement"   # Single mode = this OEP's baseline
+  - "/oeps/0018.1-multicluster-scaleout"   # Split mode = fractional admission, specified there
+  - "/oeps/0018.2-multi-cluster-performance" # endpoint publisher that All/Split extend
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
