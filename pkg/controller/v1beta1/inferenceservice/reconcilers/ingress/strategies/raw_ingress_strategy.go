@@ -146,11 +146,11 @@ func (k *KubernetesIngressStrategy) createRawURL(isvc *v1beta1.InferenceService)
 
 func (k *KubernetesIngressStrategy) getRawServiceHost(isvc *v1beta1.InferenceService) string {
 	if isvc.Spec.Router != nil {
-		routerName := isvc.Name + "-router"
-		return routerName + "." + isvc.Namespace + ".svc.cluster.local"
+		return constants.RouterServiceName(isvc.Name) + "." + isvc.Namespace + ".svc.cluster.local"
 	}
-	engineName := isvc.Name
-	return engineName + "." + isvc.Namespace + ".svc.cluster.local"
+	// Engine Service is named "<isvc>-engine" (constants.EngineServiceName) —
+	// the same name GetTargetServicePort resolves the port from.
+	return constants.EngineServiceName(isvc.Name) + "." + isvc.Namespace + ".svc.cluster.local"
 }
 
 func (k *KubernetesIngressStrategy) semanticIngressEquals(desired, existing *netv1.Ingress) bool {

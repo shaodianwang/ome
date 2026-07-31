@@ -2,6 +2,8 @@ package inferenceservice
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	policyv1 "k8s.io/api/policy/v1"
@@ -18,13 +20,16 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	knapis "knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	omeTesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
@@ -895,5 +900,158 @@ func TestMergeRuntimeSpecs(t *testing.T) {
 				g.Expect(tt.isvc.Spec.Decoder.Containers[0].Image).To(gomega.Equal(tt.expectedDecoderImg))
 			}
 		})
+	}
+}
+
+// TestSetOverlaysReadyConditionPreservesConditionSet guards against the
+// pre-fix behavior where setOverlaysReadyCondition raw-replaced the whole
+// conditions slice (wiping every other condition) and restamped
+// LastTransitionTime each pass, forcing a status write per reconcile.
+func TestSetOverlaysReadyConditionPreservesConditionSet(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "overlay-isvc", Namespace: "default"},
+		Spec: v1beta1.InferenceServiceSpec{
+			Model: &v1beta1.ModelRef{
+				Name:     "base-model",
+				Overlays: []v1beta1.ModelOverlayRef{{Name: "ov1"}},
+			},
+		},
+	}
+	isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{
+		Type:   v1beta1.EngineReady,
+		Status: v1.ConditionTrue,
+	})
+
+	overlays := []isvcutils.ResolvedOverlay{{
+		Ref:        v1beta1.ModelOverlayRef{Name: "ov1"},
+		SkipReason: "overlay ov1 not found",
+	}}
+	setOverlaysReadyCondition(isvc, overlays)
+
+	g.Expect(isvc.Status.GetCondition(v1beta1.EngineReady)).NotTo(gomega.BeNil(),
+		"pre-existing conditions must survive the overlay condition write")
+	cond := isvc.Status.GetCondition(v1beta1.OverlaysReady)
+	g.Expect(cond).NotTo(gomega.BeNil())
+	g.Expect(cond.Status).To(gomega.Equal(v1.ConditionFalse))
+	firstTransition := cond.LastTransitionTime
+
+	setOverlaysReadyCondition(isvc, overlays)
+
+	g.Expect(isvc.Status.GetCondition(v1beta1.EngineReady)).NotTo(gomega.BeNil())
+	again := isvc.Status.GetCondition(v1beta1.OverlaysReady)
+	g.Expect(again.LastTransitionTime).To(gomega.Equal(firstTransition),
+		"an unchanged condition must not churn LastTransitionTime")
+}
+
+// TestIsvcsReferencingRuntimeWakesUnresolvedAutoSelect covers the runtime
+// fan-out for auto-select ISVCs: an ISVC with no spec.runtime that is parked
+// on RuntimeReady=False has no name reference to index on, so runtime
+// create/update events must wake it through the unresolved index — otherwise
+// creating a compatible runtime later never revives it.
+func TestIsvcsReferencingRuntimeWakesUnresolvedAutoSelect(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	named := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "named", Namespace: "ns1"},
+		Spec:       v1beta1.InferenceServiceSpec{Runtime: &v1beta1.ServingRuntimeRef{Name: "rt-a"}},
+	}
+	otherNamed := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-named", Namespace: "ns1"},
+		Spec:       v1beta1.InferenceServiceSpec{Runtime: &v1beta1.ServingRuntimeRef{Name: "rt-b"}},
+	}
+	autoStuck := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-stuck", Namespace: "ns1"},
+		Spec:       v1beta1.InferenceServiceSpec{Model: &v1beta1.ModelRef{Name: "m"}},
+	}
+	autoStuck.Status.SetCondition(v1beta1.RuntimeReady, &knapis.Condition{
+		Type: v1beta1.RuntimeReady, Status: v1.ConditionFalse, Reason: "RuntimeNotFound",
+	})
+	autoStuckOtherNs := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-stuck-2", Namespace: "ns2"},
+		Spec:       v1beta1.InferenceServiceSpec{Model: &v1beta1.ModelRef{Name: "m"}},
+	}
+	autoStuckOtherNs.Status.SetCondition(v1beta1.RuntimeReady, &knapis.Condition{
+		Type: v1beta1.RuntimeReady, Status: v1.ConditionFalse, Reason: "RuntimeNotFound",
+	})
+	autoHealthy := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-healthy", Namespace: "ns1"},
+		Spec:       v1beta1.InferenceServiceSpec{Model: &v1beta1.ModelRef{Name: "m"}},
+	}
+
+	c := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(named, otherNamed, autoStuck, autoStuckOtherNs, autoHealthy).
+		WithIndex(&v1beta1.InferenceService{}, isvcRuntimeNameIndexField, isvcRuntimeNameIndexExtractor).
+		WithIndex(&v1beta1.InferenceService{}, isvcRuntimeUnresolvedIndexField, isvcRuntimeUnresolvedIndexExtractor).
+		Build()
+
+	r := &InferenceServiceReconciler{Client: c, Log: ctrl.Log.WithName("test")}
+
+	requestKeys := func(reqs []reconcile.Request) []string {
+		keys := make([]string, 0, len(reqs))
+		for _, req := range reqs {
+			keys = append(keys, fmt.Sprintf("%s/%s", req.Namespace, req.Name))
+		}
+		return keys
+	}
+
+	// Cluster-scoped runtime: wakes the named referencer plus every
+	// unresolved auto-select ISVC in any namespace — not healthy ones.
+	reqs := r.isvcsReferencingRuntime(context.TODO(), &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "rt-a"},
+	})
+	g.Expect(requestKeys(reqs)).To(gomega.ConsistOf("ns1/named", "ns1/auto-stuck", "ns2/auto-stuck-2"))
+
+	// Namespaced runtime: same-namespace matches only.
+	reqs = r.isvcsReferencingRuntime(context.TODO(), &v1beta1.ServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "rt-a", Namespace: "ns1"},
+	})
+	g.Expect(requestKeys(reqs)).To(gomega.ConsistOf("ns1/named", "ns1/auto-stuck"))
+}
+
+// TestMarkRuntimeUnresolvedEventPreservesPercent pins the Recorder.Event
+// fix: an error message containing '%' must land in the event verbatim, not
+// be mangled by printf-format interpretation (e.g. "%!o(MISSING)").
+func TestMarkRuntimeUnresolvedEventPreservesPercent(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "pct-isvc", Namespace: "default"},
+		Spec: v1beta1.InferenceServiceSpec{
+			Model:  &v1beta1.ModelRef{Name: "m"},
+			Engine: &v1beta1.EngineSpec{},
+		},
+	}
+	c := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(isvc).
+		WithStatusSubresource(isvc).
+		Build()
+	rec := record.NewFakeRecorder(10)
+	r := &InferenceServiceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Log:      ctrl.Log.WithName("test"),
+		Recorder: rec,
+	}
+
+	cause := errors.New("no runtime supports quantization fp8 (50% of formats matched)")
+	_, err := r.markRuntimeUnresolved(isvc, constants.RawDeployment, "m", cause)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	select {
+	case ev := <-rec.Events:
+		g.Expect(ev).To(gomega.ContainSubstring("50% of formats matched"))
+		g.Expect(ev).NotTo(gomega.ContainSubstring("MISSING"))
+	default:
+		t.Fatal("expected a RuntimeNotFound event")
 	}
 }

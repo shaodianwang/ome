@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -290,7 +291,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	baseModel, baseModelMeta, baseModelStatus, err := isvcutils.ReconcileBaseModelWithStatus(r.Client, isvc)
 	if err != nil {
 		r.Log.Error(err, "Failed to reconcile base model", "Name", isvc.Name)
-		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "ModelReconcileError", err.Error())
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "ModelReconcileError", err.Error())
 		return reconcile.Result{}, err
 	}
 	// Lean path: no spec.model. Operator must specify spec.runtime
@@ -306,7 +307,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				"model", isvc.Spec.Model.Name,
 				"namespace", isvc.Namespace,
 				"message", message)
-			r.Recorder.Eventf(isvc, v1.EventTypeNormal, "ModelNotReady", message)
+			r.Recorder.Event(isvc, v1.EventTypeNormal, "ModelNotReady", message)
 			return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}
@@ -317,7 +318,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	resolvedOverlays, err := isvcutils.ResolveOverlays(r.Client, isvc)
 	if err != nil {
 		r.Log.Error(err, "Failed to resolve overlays", "isvc", isvc.Name)
-		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "OverlayResolveError", err.Error())
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "OverlayResolveError", err.Error())
 		return reconcile.Result{}, err
 	}
 	isvc.Status.MountedOverlays = components.MountedOverlaySummary(resolvedOverlays)
@@ -345,7 +346,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			pin, perr := r.resolvePinnedRuntime(ctx, isvc)
 			if perr != nil {
 				r.Log.Error(perr, "Pin resolution failed", "runtime", rtName)
-				r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimePinError", perr.Error())
+				r.Recorder.Event(isvc, v1.EventTypeWarning, "RuntimePinError", perr.Error())
 				return reconcile.Result{}, perr
 			}
 			if pin.skipChildren {
@@ -395,7 +396,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return r.markRuntimeUnresolved(isvc, deploymentMode, rtName, err)
 			}
 			r.Log.Error(err, "Failed to get runtime spec", "runtime", rtName)
-			r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeFetchError", err.Error())
+			r.Recorder.Event(isvc, v1.EventTypeWarning, "RuntimeFetchError", err.Error())
 			return reconcile.Result{}, err
 		}
 		r.clearRuntimeUnresolved(isvc)
@@ -424,7 +425,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// guard for direct client writes that bypass admission.
 		err := fmt.Errorf("InferenceService must specify spec.runtime when spec.model is omitted")
 		r.Log.Error(err, "Cannot reconcile", "Name", isvc.Name)
-		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeSelectionError", err.Error())
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "RuntimeSelectionError", err.Error())
 		return reconcile.Result{}, err
 	}
 
@@ -432,7 +433,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	mergedEngine, mergedDecoder, mergedRouter, err := isvcutils.MergeRuntimeSpecs(isvc, rt, r.Log)
 	if err != nil {
 		r.Log.Error(err, "Failed to merge specs", "Name", isvc.Name)
-		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "MergeSpecsError", err.Error())
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "MergeSpecsError", err.Error())
 		return reconcile.Result{}, err
 	}
 
@@ -456,7 +457,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	engineDeploymentMode, decoderDeploymentMode, routerDeploymentMode, err := isvcutils.DetermineDeploymentModes(mergedEngine, mergedDecoder, mergedRouter, rt, isvc.Spec.DeploymentMode)
 	if err != nil {
 		r.Log.Error(err, "Failed to determine deployment modes", "Name", isvc.Name)
-		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "DeploymentModeError", err.Error())
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "DeploymentModeError", err.Error())
 		return reconcile.Result{}, err
 	}
 
@@ -679,7 +680,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			r.Log.Error(err, "Failed to reconcile traffic policy",
 				"namespace", isvc.Namespace, "inferenceService", isvc.Name,
 				"translator", r.TrafficReconciler.TranslatorName())
-			r.Recorder.Eventf(isvc, v1.EventTypeWarning, "TrafficReconcileError", err.Error())
+			r.Recorder.Event(isvc, v1.EventTypeWarning, "TrafficReconcileError", err.Error())
 			// Surface the status even on error so operators see the
 			// TranslationFailed reason without waiting for the next
 			// successful reconcile.
@@ -841,7 +842,7 @@ func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.Infer
 func (r *InferenceServiceReconciler) markRuntimeUnresolved(isvc *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, runtimeRef string, cause error) (reconcile.Result, error) {
 	r.Log.Info("Runtime not found; awaiting runtime creation (ISVC left unchanged)",
 		"runtime", runtimeRef, "InferenceService", isvc.Name)
-	r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeNotFound", cause.Error())
+	r.Recorder.Event(isvc, v1.EventTypeWarning, "RuntimeNotFound", cause.Error())
 	isvc.Status.SetCondition(v1beta1.RuntimeReady, &knapis.Condition{
 		Type:    v1beta1.RuntimeReady,
 		Status:  v1.ConditionFalse,
@@ -952,10 +953,10 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 	isReady := inferenceServiceReadiness(desiredService.Status)
 	if wasReady && !isReady {
 		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, string(InferenceServiceNotReadyState),
-			fmt.Sprintf("InferenceService [%v] is no longer Ready", desiredService.GetName()))
+			"InferenceService [%v] is no longer Ready", desiredService.GetName())
 	} else if !wasReady && isReady {
 		r.Recorder.Eventf(desiredService, v1.EventTypeNormal, string(InferenceServiceReadyState),
-			fmt.Sprintf("InferenceService [%v] is Ready", desiredService.GetName()))
+			"InferenceService [%v] is Ready", desiredService.GetName())
 	}
 	return nil
 }
@@ -1167,6 +1168,25 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Log.Info("The InferenceService controller won't watch scheduling.x-k8s.io/v1alpha1/PodGroup resources because the CRD is not available; OMENative multi-pod Instances will degrade to non-gang scheduling.")
 	}
 
+	// Gateway-API HTTPRoutes are owned by the ISVC, and IngressReady gates
+	// on the route's parent (Gateway) programming status. Watch them so a
+	// gateway flipping a route to programmed re-reconciles the ISVC —
+	// otherwise IngressReady=False would persist until an unrelated event.
+	// Scheme registration is conditional on EnableGatewayAPI (see
+	// cmd/manager), so gate on both the scheme and the CRD being present.
+	const httpRouteKind = "HTTPRoute"
+	if mgr.GetScheme().Recognizes(gatewayapiv1.SchemeGroupVersion.WithKind(httpRouteKind)) {
+		httpRouteFound, err := utils.IsCrdAvailable(r.ClientConfig, gatewayapiv1.SchemeGroupVersion.String(), httpRouteKind)
+		if err != nil {
+			return err
+		}
+		if httpRouteFound {
+			ctrlBuilder = ctrlBuilder.Owns(&gatewayapiv1.HTTPRoute{})
+		} else {
+			r.Log.Info("The InferenceService controller won't watch gateway.networking.k8s.io/v1/HTTPRoute resources because the CRD is not available.")
+		}
+	}
+
 	// Register an Owns() watch on the backend policy resource type
 	// the active translator emits, so changes to the policy re-enqueue
 	// the owning InferenceService. The noop translator returns nil, in
@@ -1227,13 +1247,44 @@ func isvcRuntimeNameIndexExtractor(obj client.Object) []string {
 	return []string{isvc.Spec.Runtime.Name}
 }
 
-// registerISVCRuntimeNameIndex installs isvcRuntimeNameIndexField on the
+// isvcRuntimeUnresolvedIndexField indexes auto-select ISVCs (no
+// spec.runtime.name) currently stuck with RuntimeReady=False. The name
+// index above cannot cover them — they reference no runtime by name — so
+// without this index a runtime created AFTER the ISVC never re-triggers
+// its reconcile and markRuntimeUnresolved becomes an absorbing state.
+// Internal index identifier, like isvcRuntimeNameIndexField.
+const isvcRuntimeUnresolvedIndexField = "status.runtimeUnresolved"
+
+// isvcRuntimeUnresolvedIndexValue is the single bucket value for
+// isvcRuntimeUnresolvedIndexField (membership index, not a lookup key).
+const isvcRuntimeUnresolvedIndexValue = "true"
+
+func isvcRuntimeUnresolvedIndexExtractor(obj client.Object) []string {
+	isvc, ok := obj.(*v1beta1.InferenceService)
+	if !ok {
+		return nil
+	}
+	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
+		// Named references fan out via the name index.
+		return nil
+	}
+	cond := isvc.Status.GetCondition(v1beta1.RuntimeReady)
+	if cond == nil || cond.Status != v1.ConditionFalse {
+		return nil
+	}
+	return []string{isvcRuntimeUnresolvedIndexValue}
+}
+
+// registerISVCRuntimeNameIndex installs the runtime fan-out indexes on the
 // supplied indexer (mgr.GetFieldIndexer()). Call once during manager
 // setup, before Start, so isvcsReferencingRuntime resolves
-// referencing ISVCs through the index instead of scanning every cached
+// referencing ISVCs through the indexes instead of scanning every cached
 // InferenceService.
 func registerISVCRuntimeNameIndex(ctx context.Context, indexer client.FieldIndexer) error {
-	return indexer.IndexField(ctx, &v1beta1.InferenceService{}, isvcRuntimeNameIndexField, isvcRuntimeNameIndexExtractor)
+	if err := indexer.IndexField(ctx, &v1beta1.InferenceService{}, isvcRuntimeNameIndexField, isvcRuntimeNameIndexExtractor); err != nil {
+		return err
+	}
+	return indexer.IndexField(ctx, &v1beta1.InferenceService{}, isvcRuntimeUnresolvedIndexField, isvcRuntimeUnresolvedIndexExtractor)
 }
 
 // isvcsReferencingRuntime returns reconcile requests for EVERY ISVC whose
@@ -1277,6 +1328,24 @@ func (r *InferenceServiceReconciler) isvcsReferencingRuntime(ctx context.Context
 		}
 		// Namespaced SR only matches same-namespace ISVCs; a cluster-scoped
 		// runtime (empty namespace) matches ISVCs in any namespace.
+		if runtimeNamespace != "" && isvc.Namespace != runtimeNamespace {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: isvc.Namespace, Name: isvc.Name,
+		}})
+	}
+
+	// Also wake auto-select ISVCs parked on RuntimeReady=False: the new or
+	// edited runtime may be the compatible one they are waiting for, and no
+	// name reference exists to fan them out through the index above.
+	var unresolved v1beta1.InferenceServiceList
+	if err := r.List(ctx, &unresolved, client.MatchingFields{isvcRuntimeUnresolvedIndexField: isvcRuntimeUnresolvedIndexValue}); err != nil {
+		r.Log.Error(err, "fan-out runtime event: list unresolved InferenceServices failed")
+		return reqs
+	}
+	for i := range unresolved.Items {
+		isvc := &unresolved.Items[i]
 		if runtimeNamespace != "" && isvc.Namespace != runtimeNamespace {
 			continue
 		}
@@ -1328,8 +1397,7 @@ func setOverlaysReadyCondition(isvc *v1beta1.InferenceService, overlays []isvcut
 		return
 	}
 	cond := knapis.Condition{
-		Type:               v1beta1.OverlaysReady,
-		LastTransitionTime: knapis.VolatileTime{Inner: metav1.Now()},
+		Type: v1beta1.OverlaysReady,
 	}
 	skipped := components.SkippedOverlayReasons(overlays)
 	if len(skipped) == 0 {
@@ -1340,7 +1408,10 @@ func setOverlaysReadyCondition(isvc *v1beta1.InferenceService, overlays []isvcut
 		cond.Reason = "OverlaysSkipped"
 		cond.Message = strings.Join(skipped, "; ")
 	}
-	isvc.Status.SetConditions(knapis.Conditions{cond})
+	// Route through the condition manager: a raw SetConditions here would
+	// replace the whole conditions slice and restamp transition times every
+	// pass, forcing a status write per reconcile.
+	isvc.Status.SetCondition(v1beta1.OverlaysReady, &cond)
 }
 
 // buildComponentDeps returns the component dependencies for one

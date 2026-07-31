@@ -67,23 +67,37 @@ func (g *GatewayAPIStrategy) GetName() string {
 
 func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	if !g.ingressConfig.DisableIngressCreation {
+		// Track readiness across the pass: each reconcile/check below sets
+		// IngressReady=False itself when it finds a problem, and True is
+		// only stamped at the end when nothing did — an unconditional True
+		// here would overwrite those False conditions every pass.
+		ingressReady := true
+
 		// Reconcile component HTTPRoutes
-		if err := g.reconcileComponentHTTPRoute(ctx, isvc, builders.EngineComponent); err != nil {
+		ready, err := g.reconcileComponentHTTPRoute(ctx, isvc, builders.EngineComponent)
+		if err != nil {
 			return err
 		}
+		ingressReady = ingressReady && ready
 		if isvc.Spec.Router != nil {
-			if err := g.reconcileComponentHTTPRoute(ctx, isvc, builders.RouterComponent); err != nil {
+			ready, err = g.reconcileComponentHTTPRoute(ctx, isvc, builders.RouterComponent)
+			if err != nil {
 				return err
 			}
+			ingressReady = ingressReady && ready
 		}
 		if isvc.Spec.Decoder != nil {
-			if err := g.reconcileComponentHTTPRoute(ctx, isvc, builders.DecoderComponent); err != nil {
+			ready, err = g.reconcileComponentHTTPRoute(ctx, isvc, builders.DecoderComponent)
+			if err != nil {
 				return err
 			}
+			ingressReady = ingressReady && ready
 		}
-		if err := g.reconcileComponentHTTPRoute(ctx, isvc, builders.TopLevelComponent); err != nil {
+		ready, err = g.reconcileComponentHTTPRoute(ctx, isvc, builders.TopLevelComponent)
+		if err != nil {
 			return err
 		}
+		ingressReady = ingressReady && ready
 
 		// The default BTP (ConsistentHash on configured headers) is
 		// emitted here only when the operator has NOT declared any
@@ -98,21 +112,26 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 		}
 
 		// Check HTTPRoute and (optionally) BackendTrafficPolicy statuses
-		if err := g.checkHTTPRouteStatuses(ctx, isvc); err != nil {
+		routesProgrammed, err := g.checkHTTPRouteStatuses(ctx, isvc)
+		if err != nil {
 			return err
 		}
+		ingressReady = ingressReady && routesProgrammed
 
 		if ownsBackendTrafficPolicy {
-			if err := g.checkBackendTrafficPolicyStatus(ctx, isvc); err != nil {
+			policyAccepted, err := g.checkBackendTrafficPolicyStatus(ctx, isvc)
+			if err != nil {
 				return err
 			}
+			ingressReady = ingressReady && policyAccepted
 		}
 
-		// If we are here, then all the HTTPRoutes are ready, Mark ingress as ready
-		isvc.Status.SetCondition(v1beta1.IngressReady, &knapis.Condition{
-			Type:   v1beta1.IngressReady,
-			Status: corev1.ConditionTrue,
-		})
+		if ingressReady {
+			isvc.Status.SetCondition(v1beta1.IngressReady, &knapis.Condition{
+				Type:   v1beta1.IngressReady,
+				Status: corev1.ConditionTrue,
+			})
+		}
 	} else {
 		// Ingress creation is disabled. We set it to true as the isvc condition depends on it.
 		isvc.Status.SetCondition(v1beta1.IngressReady, &knapis.Condition{
@@ -172,11 +191,14 @@ func (g *GatewayAPIStrategy) setStatusEndpoints(isvc *v1beta1.InferenceService) 
 	return nil
 }
 
-func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService, componentType string) error {
+// reconcileComponentHTTPRoute ensures the component's HTTPRoute exists and
+// matches the desired spec. It returns ready=false (with IngressReady=False
+// already set on the ISVC) when the component is not yet ready for a route.
+func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService, componentType string) (bool, error) {
 	// Use builder to create the HTTPRoute
 	desired, err := g.httpRouteBuilder.BuildHTTPRoute(ctx, isvc, componentType)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if desired == nil {
 		// Set ingress condition to indicate component not ready
@@ -187,12 +209,12 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 			Message: fmt.Sprintf("%s component not ready for HTTPRoute creation", componentType),
 		})
 		klog.V(1).InfoS("Builder returned nil HTTPRoute; component not ready", "isvc", isvc.Name, "component", componentType)
-		return nil
+		return false, nil
 	}
 
 	httpRoute, ok := desired.(*gatewayapiv1.HTTPRoute)
 	if !ok {
-		return fmt.Errorf("builder returned unexpected type %T, expected *gatewayapiv1.HTTPRoute", desired)
+		return false, fmt.Errorf("builder returned unexpected type %T, expected *gatewayapiv1.HTTPRoute", desired)
 	}
 	if httpRoute == nil {
 		// Defensive: BuildHTTPRoute now returns interface-nil for not-ready
@@ -207,11 +229,11 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 			Message: fmt.Sprintf("%s component not ready for HTTPRoute creation", componentType),
 		})
 		klog.V(1).InfoS("Builder returned typed-nil HTTPRoute; component not ready", "isvc", isvc.Name, "component", componentType)
-		return nil
+		return false, nil
 	}
 
 	if err := controllerutil.SetControllerReference(isvc, httpRoute, g.scheme); err != nil {
-		return fmt.Errorf("failed to set controller reference for %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
+		return false, fmt.Errorf("failed to set controller reference for %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
 	}
 
 	existing := &gatewayapiv1.HTTPRoute{}
@@ -219,25 +241,25 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 	if err != nil {
 		if apierr.IsNotFound(err) {
 			if err := g.client.Create(ctx, httpRoute); err != nil {
-				return fmt.Errorf("failed to create %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
+				return false, fmt.Errorf("failed to create %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
 			}
 		} else {
-			return err
+			return false, err
 		}
 	} else {
 		// Set ResourceVersion which is required for update operation.
 		httpRoute.ResourceVersion = existing.ResourceVersion
 		// Do a dry-run update to avoid diffs generated by default values.
 		if err := g.client.Update(ctx, httpRoute, client.DryRunAll); err != nil {
-			return fmt.Errorf("failed to perform dry-run update for %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
+			return false, fmt.Errorf("failed to perform dry-run update for %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
 		}
 		if !g.semanticHttpRouteEquals(httpRoute, existing) {
 			if err := g.client.Update(ctx, httpRoute); err != nil {
-				return fmt.Errorf("failed to update %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
+				return false, fmt.Errorf("failed to update %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
 			}
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func (g *GatewayAPIStrategy) reconcileBackendTrafficPolicy(ctx context.Context, isvc *v1beta1.InferenceService) error {
@@ -267,7 +289,9 @@ func (g *GatewayAPIStrategy) reconcileBackendTrafficPolicy(ctx context.Context, 
 	return nil
 }
 
-func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v1beta1.InferenceService) error {
+// checkHTTPRouteStatuses returns ready=false (with IngressReady=False set)
+// when any existing HTTPRoute has not been programmed by its gateway yet.
+func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v1beta1.InferenceService) (bool, error) {
 	// The engine HTTPRoute is always emitted as "<isvc>-engine" (distinct
 	// from the top-level "<isvc>"); these lookups must match the
 	// builder-produced names.
@@ -302,7 +326,7 @@ func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v
 				// becomes Ready and the HTTPRoute materializes.
 				continue
 			}
-			return err
+			return false, err
 		}
 
 		if ready, reason, message := g.isHTTPRouteReady(httpRoute.Status); !ready {
@@ -313,29 +337,31 @@ func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v
 				Reason:  *reason,
 				Message: fmt.Sprintf("%s %s", componentType, *message),
 			})
-			return nil
+			return false, nil
 		}
 	}
-	return nil
+	return true, nil
 }
 
-func (g *GatewayAPIStrategy) checkBackendTrafficPolicyStatus(ctx context.Context, isvc *v1beta1.InferenceService) error {
+// checkBackendTrafficPolicyStatus returns ready=false (with
+// IngressReady=False set) when the default BTP reports a False condition.
+func (g *GatewayAPIStrategy) checkBackendTrafficPolicyStatus(ctx context.Context, isvc *v1beta1.InferenceService) (bool, error) {
 	policy := &unstructured.Unstructured{}
 	policy.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
 	if err := g.client.Get(ctx, types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, policy); err != nil {
 		if apierr.IsNotFound(err) {
-			return nil
+			return true, nil
 		}
-		return err
+		return false, err
 	}
 
 	status, ok := policy.Object["status"].(map[string]interface{})
 	if !ok {
-		return nil
+		return true, nil
 	}
 	conditions, ok := status["conditions"].([]interface{})
 	if !ok {
-		return nil
+		return true, nil
 	}
 	for _, c := range conditions {
 		cond, ok := c.(map[string]interface{})
@@ -351,10 +377,10 @@ func (g *GatewayAPIStrategy) checkBackendTrafficPolicyStatus(ctx context.Context
 				Reason:  reason,
 				Message: fmt.Sprintf("BackendTrafficPolicy: %s", message),
 			})
-			return nil
+			return false, nil
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func (g *GatewayAPIStrategy) getRawServiceHost(isvc *v1beta1.InferenceService) string {

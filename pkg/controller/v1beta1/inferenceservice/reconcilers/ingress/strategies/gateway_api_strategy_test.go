@@ -42,7 +42,10 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 		expectedHTTPRoutesCount int
 	}{
 		{
-			name: "successful reconcile with predictor only",
+			// Routes are created this pass but the gateway has not programmed
+			// them yet (no parent status) — IngressReady must stay False, not
+			// be overwritten to True.
+			name: "fresh routes pending gateway programming",
 			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
 			ingressConfig: &controllerconfig.IngressConfig{
 				EnableGatewayAPI:       true,
@@ -53,11 +56,11 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 				DisableIngressCreation: false,
 			},
 			expectedError:           false,
-			expectedIngressReady:    corev1.ConditionTrue,
+			expectedIngressReady:    corev1.ConditionFalse,
 			expectedHTTPRoutesCount: 2, // engine + toplevel
 		},
 		{
-			name: "successful reconcile with router",
+			name: "fresh routes with router pending gateway programming",
 			isvc: createTestInferenceServiceWithRouterGateway("test-isvc", "default"),
 			ingressConfig: &controllerconfig.IngressConfig{
 				EnableGatewayAPI:       true,
@@ -68,11 +71,11 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 				DisableIngressCreation: false,
 			},
 			expectedError:           false,
-			expectedIngressReady:    corev1.ConditionTrue,
+			expectedIngressReady:    corev1.ConditionFalse,
 			expectedHTTPRoutesCount: 3, // engine + router + toplevel
 		},
 		{
-			name: "successful reconcile with decoder",
+			name: "fresh routes with decoder pending gateway programming",
 			isvc: createTestInferenceServiceWithDecoderGateway("test-isvc", "default"),
 			ingressConfig: &controllerconfig.IngressConfig{
 				EnableGatewayAPI:       true,
@@ -83,8 +86,27 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 				DisableIngressCreation: false,
 			},
 			expectedError:           false,
-			expectedIngressReady:    corev1.ConditionTrue,
+			expectedIngressReady:    corev1.ConditionFalse,
 			expectedHTTPRoutesCount: 3, // engine + decoder + toplevel
+		},
+		{
+			name: "routes already programmed by the gateway",
+			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
+			ingressConfig: &controllerconfig.IngressConfig{
+				EnableGatewayAPI:       true,
+				IngressDomain:          "example.com",
+				OmeIngressGateway:      "istio-system/gateway",
+				DomainTemplate:         "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
+				UrlScheme:              "https",
+				DisableIngressCreation: false,
+			},
+			existingHTTPRoutes: []client.Object{
+				createReadyHTTPRoute("test-isvc-engine", "default"), // engine
+				createReadyHTTPRoute("test-isvc", "default"),        // toplevel
+			},
+			expectedError:           false,
+			expectedIngressReady:    corev1.ConditionTrue,
+			expectedHTTPRoutesCount: 2,
 		},
 		{
 			name: "ingress creation disabled",
@@ -102,7 +124,7 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 			expectedHTTPRoutesCount: 0,
 		},
 		{
-			name: "cluster local visibility",
+			name: "cluster local visibility pending gateway programming",
 			isvc: createTestInferenceServiceWithClusterLocal("test-isvc", "default"),
 			ingressConfig: &controllerconfig.IngressConfig{
 				EnableGatewayAPI:       true,
@@ -113,7 +135,7 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 				DisableIngressCreation: false,
 			},
 			expectedError:           false,
-			expectedIngressReady:    corev1.ConditionTrue,
+			expectedIngressReady:    corev1.ConditionFalse,
 			expectedHTTPRoutesCount: 1,
 		},
 	}
@@ -131,9 +153,12 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 			objs := []client.Object{tt.isvc}
 			objs = append(objs, tt.existingHTTPRoutes...)
 
+			// Status subresource so spec updates don't clobber seeded
+			// route programming status (matches apiserver semantics).
 			fakeClient := fakeclient.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(objs...).
+				WithStatusSubresource(&gatewayapiv1.HTTPRoute{}).
 				Build()
 
 			// Use the proper constructor to create the strategy with builder
@@ -319,12 +344,13 @@ func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute(t *testing.T) {
 
 			strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
 
-			err := strategy.(*GatewayAPIStrategy).reconcileComponentHTTPRoute(context.Background(), tt.isvc, tt.componentType)
+			ready, err := strategy.(*GatewayAPIStrategy).reconcileComponentHTTPRoute(context.Background(), tt.isvc, tt.componentType)
 
 			if tt.expectedError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+				assert.True(t, ready, "route creation/update succeeded so the component slot is ready")
 			}
 		})
 	}
@@ -410,16 +436,18 @@ func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute_TypedNilBuilderDoesNotPa
 	// The pre-fix behavior was a panic at SetControllerReference. Wrap in a
 	// recover() check to give a precise diagnostic if the defense regresses.
 	var err error
+	var ready bool
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				t.Fatalf("reconcileComponentHTTPRoute panicked on a typed-nil HTTPRoute (this is the bug we are guarding against): %v", r)
 			}
 		}()
-		err = strategy.reconcileComponentHTTPRoute(context.Background(), isvc, builders.DecoderComponent)
+		ready, err = strategy.reconcileComponentHTTPRoute(context.Background(), isvc, builders.DecoderComponent)
 	}()
 
 	require.NoError(t, err, "strategy must return nil error (not a panic and not a real failure) when builder hands it a typed-nil HTTPRoute")
+	assert.False(t, ready, "a typed-nil route means the component is not ready")
 
 	cond := isvc.Status.GetCondition(v1beta1.IngressReady)
 	require.NotNil(t, cond, "IngressReady condition must be set by the typed-nil guard")
@@ -475,12 +503,18 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 
 			strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
 
-			err := strategy.(*GatewayAPIStrategy).checkHTTPRouteStatuses(context.Background(), tt.isvc)
+			ready, err := strategy.(*GatewayAPIStrategy).checkHTTPRouteStatuses(context.Background(), tt.isvc)
 
 			if tt.expectedError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedCondition == corev1.ConditionTrue, ready)
+				if tt.expectedCondition == corev1.ConditionFalse {
+					condition := tt.isvc.Status.GetCondition(v1beta1.IngressReady)
+					require.NotNil(t, condition)
+					assert.Equal(t, corev1.ConditionFalse, condition.Status)
+				}
 			}
 		})
 	}
@@ -529,8 +563,9 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated(t *testin
 
 	strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
 
-	err := strategy.(*GatewayAPIStrategy).checkHTTPRouteStatuses(context.Background(), isvc)
+	ready, err := strategy.(*GatewayAPIStrategy).checkHTTPRouteStatuses(context.Background(), isvc)
 	assert.NoError(t, err, "checkHTTPRouteStatuses must tolerate NotFound and not return an error")
+	assert.True(t, ready, "absent routes are the create-path's signal, not the status-check's")
 
 	// The pre-seeded condition from the create-path is preserved
 	// (status-check did not touch it).
@@ -839,7 +874,20 @@ func createReadyHTTPRoute(name, namespace string) *gatewayapiv1.HTTPRoute {
 			Name:      name,
 			Namespace: namespace,
 		},
-		// Simplified without detailed status
+		Status: gatewayapiv1.HTTPRouteStatus{
+			RouteStatus: gatewayapiv1.RouteStatus{
+				Parents: []gatewayapiv1.RouteParentStatus{{
+					ParentRef:      gatewayapiv1.ParentReference{Name: "gateway"},
+					ControllerName: "test.controller/gateway",
+					Conditions: []metav1.Condition{{
+						Type:               string(gatewayapiv1.RouteConditionAccepted),
+						Status:             metav1.ConditionTrue,
+						Reason:             string(gatewayapiv1.RouteReasonAccepted),
+						LastTransitionTime: metav1.Now(),
+					}},
+				}},
+			},
+		},
 	}
 }
 
@@ -849,7 +897,21 @@ func createNotReadyHTTPRoute(name, namespace string) *gatewayapiv1.HTTPRoute {
 			Name:      name,
 			Namespace: namespace,
 		},
-		// Simplified without detailed status
+		Status: gatewayapiv1.HTTPRouteStatus{
+			RouteStatus: gatewayapiv1.RouteStatus{
+				Parents: []gatewayapiv1.RouteParentStatus{{
+					ParentRef:      gatewayapiv1.ParentReference{Name: "gateway"},
+					ControllerName: "test.controller/gateway",
+					Conditions: []metav1.Condition{{
+						Type:               string(gatewayapiv1.RouteConditionAccepted),
+						Status:             metav1.ConditionFalse,
+						Reason:             string(gatewayapiv1.RouteReasonNotAllowedByListeners),
+						Message:            "route not accepted",
+						LastTransitionTime: metav1.Now(),
+					}},
+				}},
+			},
+		},
 	}
 }
 
@@ -1002,8 +1064,9 @@ func TestGatewayAPIStrategy_CheckBackendTrafficPolicyStatus(t *testing.T) {
 
 			strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
 
-			err := strategy.(*GatewayAPIStrategy).checkBackendTrafficPolicyStatus(context.Background(), tt.isvc)
+			ready, err := strategy.(*GatewayAPIStrategy).checkBackendTrafficPolicyStatus(context.Background(), tt.isvc)
 			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedCondition != corev1.ConditionFalse, ready)
 
 			if tt.expectedCondition == corev1.ConditionFalse {
 				condition := tt.isvc.Status.GetCondition(v1beta1.IngressReady)
