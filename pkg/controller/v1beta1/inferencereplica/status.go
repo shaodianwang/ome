@@ -344,6 +344,19 @@ func (r *Reconciler) reconcileHeldDeadlines(ctx context.Context, ir *v1beta1.Inf
 			}
 		}
 	}
+	// A gang-surge source's attempt pods live in its Operation.SurgeIndex
+	// bucket: while they queue for admission, the source's deadline must
+	// park too, or it expires during a legitimate wait.
+	for i := range ir.Status.InstanceStatuses {
+		s := &ir.Status.InstanceStatuses[i]
+		op := s.Operation
+		if op == nil || op.Type != v1beta1.InstanceOperationUpdate || op.SurgeIndex == nil {
+			continue
+		}
+		if held[*op.SurgeIndex] {
+			held[s.Index] = true
+		}
+	}
 	if paused {
 		for i := range ir.Status.InstanceStatuses {
 			held[ir.Status.InstanceStatuses[i].Index] = true

@@ -39,14 +39,17 @@ import (
 //     Pending gang, a run-then-crash loop the kubelet never parks in a
 //     terminal waiting reason — fails once its Operation.Deadline
 //     (StartedAt + InstanceReadyTimeout, stamped by the per-op writers)
-//     elapses. Migrate Operations are excluded: a migration's timeout
-//     authority is the owner's status.migrations record, consumed by the
-//     dispatcher's migration-expiry pass — stamping either side Failed
-//     here would mark a healthy serving source Failed while the record
-//     keeps driving the pair. Instances whose pods are held by an
-//     admission scheduling gate (e.g. Kueue) are also excluded: the
+//     elapses. Instances whose blamed pods (own bucket, plus the
+//     SurgeIndex bucket for a gang-surge source) are held by an
+//     admission scheduling gate (e.g. Kueue) are excluded: the
 //     deadline-parking step (ReconcileGatedDeadlines) owns their clock,
 //     and a queued wait must not count against the timeout.
+//
+// BOTH paths skip Instances carrying a Migrate Operation (either pair
+// side): a migration's timeout authority is the owner's
+// status.migrations record, consumed by the dispatcher's
+// migration-expiry pass — stamping here would mark a healthy serving
+// source Failed while the record keeps driving the pair.
 //
 // FAILED-WHILE-SERVING GUARD: an Instance whose blamed pod set is fully
 // healthy — every live (non-deleting) pod ContainersReady AND in the
@@ -99,6 +102,13 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		if s.Phase == InstancePhaseFailed {
 			continue
 		}
+		// Migrate pairs are owned by the status.migrations record — the
+		// migration-expiry pass consumes their deadline. Neither the
+		// stuck-pod fast path nor the deadline backstop may stamp either
+		// side: a stuck surge pod would fail the healthy serving source.
+		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
+			continue
+		}
 		ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
 		if ev.StuckPod == nil && !ev.DeadlinePassed {
 			continue
@@ -140,16 +150,14 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		if !ev.DeadlinePassed {
 			continue
 		}
-		// Migrate pairs are owned by the status.migrations record — the
-		// migration-expiry pass consumes their deadline, never this
-		// backstop.
-		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
-			continue
-		}
 		// Admission-gated pods are queued, not stuck: the parking step
 		// zeroes their deadline; a gate-enter observed before the park
-		// lands must not expire either.
+		// lands must not expire either. A gang-surge source's attempt
+		// pods live in its SurgeIndex bucket, so check that bucket too.
 		if anyPodAdmissionGated(byIdx[s.Index]) {
+			continue
+		}
+		if s.Operation != nil && s.Operation.SurgeIndex != nil && anyPodAdmissionGated(byIdx[*s.Operation.SurgeIndex]) {
 			continue
 		}
 		op := s.Operation

@@ -662,20 +662,6 @@ func TestAggregateAndWriteStatus_ConflictSurfacesAsConflict(t *testing.T) {
 		"a terminal status conflict must remain recognizable so the caller can requeue instead of logging ERROR")
 }
 
-// withIRStuckPodGracePeriod is a helper for tests that called the old
-// shared package-level stuck-pod grace period. Now that the grace is
-// supplied per-reconcile via config, tests that call Reconcile() will
-// get whatever the test environment's config resolves to (absent config
-// → grace=0 → fast escalation disabled). This no-op helper exists to
-// preserve test names/structure while the grace is config-driven.
-// Direct aggregateAndWriteStatus callers supply the grace explicitly.
-func withIRStuckPodGracePeriod(t *testing.T, d time.Duration) {
-	t.Helper()
-	// No-op: tests that call Reconcile() observe the grace the reconciler
-	// resolves from the config cache. Tests that call aggregateAndWriteStatus
-	// directly supply the grace as a parameter.
-}
-
 // TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed pins the
 // end-to-end fast-escalation path: a SurgeThenDrain surge pod stuck in
 // ImagePullBackOff past the config-driven stuck-pod grace
@@ -698,7 +684,6 @@ func withIRStuckPodGracePeriod(t *testing.T, d time.Duration) {
 // stuck-pod evidence.
 func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 	g := gomega.NewWithT(t)
-	withIRStuckPodGracePeriod(t, 1*time.Millisecond)
 
 	ir := baselineIR("llama-engine", "prod", 1)
 	// Mid-surge state: Instance Phase=Updating with an in-flight Surge
@@ -781,8 +766,6 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 // TestSurgeUpdate_ImagePullBackOff_WithinGrace_NoEscalation.
 func TestAggregateStatus_StuckPodWithinGrace_NoEscalation(t *testing.T) {
 	g := gomega.NewWithT(t)
-	// Generous grace so the 5-second-old pod stays inside the window.
-	withIRStuckPodGracePeriod(t, 60*time.Second)
 
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
@@ -806,7 +789,10 @@ func TestAggregateStatus_StuckPodWithinGrace_NoEscalation(t *testing.T) {
 	surgePod.Status.ContainerStatuses = []corev1.ContainerStatus{
 		{Name: "ome-container", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
 	}
-	r, c := newReconciler(t, ir, oldPod, surgePod)
+	// Generous explicit grace so the 5-second-old pod stays inside the
+	// window with fast escalation ACTIVE (a zero grace would disable the
+	// fast path entirely and make this test vacuous).
+	r, c := newReconcilerWithGrace(t, 60*time.Second, ir, oldPod, surgePod)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})
@@ -833,10 +819,6 @@ func TestAggregateStatus_StuckPodWithinGrace_NoEscalation(t *testing.T) {
 // inert and a never-Ready gang sits at Phase=Updating indefinitely.
 func TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed(t *testing.T) {
 	g := gomega.NewWithT(t)
-	// Generous stuck-pod grace so the fast path can't fire — the ONLY
-	// thing that can fail this Instance is the deadline backstop under
-	// test.
-	withIRStuckPodGracePeriod(t, 60*time.Second)
 
 	ir := baselineIR("llama-engine", "prod", 1)
 	// Create-stuck Instance: Phase=Creating with an in-flight Create
@@ -866,7 +848,10 @@ func TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed(t *testing.T)
 	// stays out of it.
 	pendingPod := podForIR(ir, 0, "default", 0, false /*ready*/, false /*serving*/)
 
-	r, c := newReconciler(t, ir, pendingPod)
+	// Generous stuck-pod grace so the fast path can't fire — the ONLY
+	// thing that can fail this Instance is the deadline backstop under
+	// test.
+	r, c := newReconcilerWithGrace(t, 60*time.Second, ir, pendingPod)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})
@@ -904,7 +889,6 @@ func TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed(t *testing.T)
 // this, every Kueue-gated OME workload would die at InstanceReadyTimeout.
 func TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated(t *testing.T) {
 	g := gomega.NewWithT(t)
-	withIRStuckPodGracePeriod(t, 60*time.Second)
 
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
@@ -926,7 +910,10 @@ func TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated(t *testing.T)
 	gatedPod := podForIR(ir, 0, "default", 0, false /*ready*/, false /*serving*/)
 	gatedPod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}}
 
-	r, c := newReconciler(t, ir, gatedPod)
+	// Explicit generous grace: fast escalation is active but the gated
+	// pod carries no stuck evidence, so only the deadline backstop could
+	// fail it — and the gate exemption must stop that.
+	r, c := newReconcilerWithGrace(t, 60*time.Second, ir, gatedPod)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})
@@ -947,13 +934,69 @@ func TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated(t *testing.T)
 			"a gated Instance's deadline must be parked (zeroed) so it never expires while queued")
 }
 
+// TestReconcileHeldDeadlines_GangSurgeSourceParked pins the surge-pair
+// parking rule: while a gang-surge attempt's pods (living in the
+// source's Operation.SurgeIndex bucket) queue for admission, BOTH the
+// target marker's deadline (own bucket gated) and the SOURCE's deadline
+// must park. Without the source-side park, only the target waits — the
+// source's clock keeps running and expires during a legitimate queue
+// wait, tearing down the queued gang.
+func TestReconcileHeldDeadlines_GangSurgeSourceParked(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	surgeIdx := int32(1)
+	future := metav1.NewTime(time.Now().Add(30 * time.Minute))
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:       0,
+			Incarnation: 1,
+			Phase:       v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{
+				Type:       v1beta1.InstanceOperationUpdate,
+				Step:       "Surge",
+				SurgeIndex: &surgeIdx,
+				Deadline:   future,
+			},
+		},
+		{
+			Index:       1,
+			Incarnation: 1,
+			Phase:       v1beta1.OMENativeInstanceCreating,
+			Operation: &v1beta1.InstanceOperation{
+				Type:     v1beta1.InstanceOperationUpdate,
+				Step:     workload.UpdateStepGangSurgeTarget,
+				Deadline: future,
+			},
+		},
+	}
+	sourcePod := podForIR(ir, 0, "default", 0, true, true)
+	gatedPod := podForIR(ir, 1, "default", 0, false, false)
+	gatedPod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}}
+
+	r, c := newReconciler(t, ir, sourcePod, gatedPod)
+	byIndex := map[int32][]*corev1.Pod{0: {sourcePod}, 1: {gatedPod}}
+	g.Expect(r.reconcileHeldDeadlines(context.Background(), ir, byIndex, false, 30*time.Minute)).To(gomega.Succeed())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(2))
+	g.Expect(got.Status.InstanceStatuses[0].Operation.Deadline.IsZero()).
+		To(gomega.BeTrue(),
+			"gang-surge SOURCE deadline must park while its SurgeIndex bucket is admission-gated")
+	g.Expect(got.Status.InstanceStatuses[1].Operation.Deadline.IsZero()).
+		To(gomega.BeTrue(),
+			"gang-surge target deadline must park while its own pods are admission-gated")
+}
+
 // TestAggregateStatus_PausedInstance_DeadlineParkedAndRearmed verifies that
 // pausing an in-flight operation is a real circuit breaker: neither terminal
 // pod state nor an elapsed deadline may fail it while paused, and unpausing
 // restarts the timeout window instead of expiring the old deadline.
 func TestAggregateStatus_PausedInstance_DeadlineParkedAndRearmed(t *testing.T) {
 	g := gomega.NewWithT(t)
-	withIRStuckPodGracePeriod(t, time.Millisecond)
 
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Spec.Paused = true
@@ -1013,7 +1056,6 @@ func TestAggregateStatus_PausedInstance_DeadlineParkedAndRearmed(t *testing.T) {
 // the future must NOT be escalated by the deadline backstop.
 func TestAggregateStatus_DeadlineFuture_NoEscalation(t *testing.T) {
 	g := gomega.NewWithT(t)
-	withIRStuckPodGracePeriod(t, 60*time.Second)
 
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
@@ -1031,7 +1073,9 @@ func TestAggregateStatus_DeadlineFuture_NoEscalation(t *testing.T) {
 	}
 	pendingPod := podForIR(ir, 0, "default", 0, false, false)
 
-	r, c := newReconciler(t, ir, pendingPod)
+	// Explicit generous grace: fast escalation active, but the pending
+	// pod has no stuck evidence — only the (future) deadline could fire.
+	r, c := newReconcilerWithGrace(t, 60*time.Second, ir, pendingPod)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})

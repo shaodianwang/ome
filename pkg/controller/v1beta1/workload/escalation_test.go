@@ -402,6 +402,136 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 	}
 }
 
+// TestEscalation_MigratePair_StuckSurgePod_NotStamped pins the
+// migration-authority contract on the FAST path: a migration surge pod
+// stuck in a terminal waiting state past the stuck-pod grace must NOT
+// stamp either pair side Failed. podsForStuckCheck blames a Migrate
+// pair through own-plus-sibling pods, so without the exclusion the
+// stuck surge pod fails the healthy still-serving source — and a
+// Failed source drops out of migrationSourceIndices, letting the plan
+// allocate a phantom index. The migration record's expiry pass owns
+// migration failure.
+func TestEscalation_MigratePair_StuckSurgePod_NotStamped(t *testing.T) {
+	now := time.Now()
+	surgeIdx := int32(1)
+	sourceIdx := int32(0)
+	future := metav1.NewTime(now.Add(30 * time.Minute))
+	insts := []workload.InstanceStatus{
+		{
+			Index:    0,
+			Phase:    workload.InstancePhaseMigrating,
+			PodCount: 1,
+			Operation: &workload.InstanceOperation{
+				Type:        workload.InstanceOperationMigrate,
+				Step:        "CreateSurge",
+				RequestUUID: "mig-1",
+				SurgeIndex:  &surgeIdx,
+				Deadline:    future,
+			},
+		},
+		{
+			Index: 1,
+			Phase: workload.InstancePhaseCreating,
+			Operation: &workload.InstanceOperation{
+				Type:        workload.InstanceOperationMigrate,
+				Step:        "CreateSurge",
+				RequestUUID: "mig-1",
+				SurgeIndex:  &sourceIdx,
+				Deadline:    future,
+			},
+		},
+	}
+	input, rec := escalationFixture(insts)
+	input.StuckPodGrace = time.Second
+
+	stuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-1-default-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			}},
+		},
+	}
+
+	if err := runEscalationPass(t, workload.Deps{}, input,
+		workload.ComponentPlan{Instances: []workload.InstancePlan{
+			{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		}},
+		map[int32][]*corev1.Pod{
+			0: {servingPod("engine-0-default-0")},
+			1: {stuck},
+		}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	if got := rec.store[0]; got.Phase != workload.InstancePhaseMigrating || got.Operation == nil {
+		t.Errorf("migration source must be untouched by the stuck-pod fast path; got phase=%q op=%+v", got.Phase, got.Operation)
+	}
+	if got := rec.store[1]; got.Phase != workload.InstancePhaseCreating || got.Operation == nil {
+		t.Errorf("migration surge must be untouched by the stuck-pod fast path; got phase=%q op=%+v", got.Phase, got.Operation)
+	}
+	if len(rec.warns) != 0 {
+		t.Errorf("WarnInstanceFailed: got %v want none (Migrate pairs are record-owned)", rec.warns)
+	}
+}
+
+// TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped pins
+// the gate exemption across the surge pair: a gang-surge SOURCE's
+// attempt pods live in its Operation.SurgeIndex bucket, so while they
+// queue for admission the source's elapsed deadline must not expire —
+// failing it would tear down the queued gang (losing queue position)
+// and RetryBlock a healthy target revision.
+func TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped(t *testing.T) {
+	now := time.Now()
+	surgeIdx := int32(2)
+	insts := []workload.InstanceStatus{{
+		Index:    0,
+		Phase:    workload.InstancePhaseUpdating,
+		PodCount: 1,
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			Step:           "Surge",
+			TargetRevision: "own-engine-newhash",
+			SurgeIndex:     &surgeIdx,
+			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
+		},
+	}}
+	input, rec := escalationFixture(insts)
+
+	gated := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-2-default-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+		},
+		Spec: corev1.PodSpec{
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}},
+		},
+	}
+
+	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		map[int32][]*corev1.Pod{
+			0: {servingPod("engine-0-default-0")},
+			2: {gated},
+		}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	if rec.store[0].Phase != workload.InstancePhaseUpdating {
+		t.Errorf("Phase: got %q want Updating (queued attempt pods must park the source's deadline, not expire it)", rec.store[0].Phase)
+	}
+	if len(rec.warns) != 0 {
+		t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
+	}
+	if len(rec.blocks) != 0 {
+		t.Errorf("RetryBlock: got %v want none", rec.blocks)
+	}
+}
+
 // TestEscalation_AdmissionGatedInstance_DeadlineSkipped pins the gated
 // skip: an Instance whose pod is still held by an admission scheduling
 // gate is queued, not stuck — an elapsed deadline observed before the
