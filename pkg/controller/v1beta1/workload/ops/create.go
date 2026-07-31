@@ -223,7 +223,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		if podreadiness.IsServing(pod) {
 			continue
 		}
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
 			return false, 0, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

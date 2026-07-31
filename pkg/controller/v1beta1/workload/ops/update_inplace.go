@@ -53,7 +53,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 			if !podreadiness.IsServing(pod) {
 				continue
 			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -122,7 +122,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 				return false, fmt.Errorf("re-read pod for serving recheck (instance=%d, pod=%s): %w", inst.Index, pod.Name, gerr)
 			}
 			if podreadiness.IsServing(fresh) {
-				if err := podreadiness.MarkPodNotServing(ctx, deps.Client, fresh, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+				if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), fresh, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 					return false, fmt.Errorf("re-mark not serving (instance=%d, pod=%s): %w", inst.Index, fresh.Name, err)
 				}
 				return false, nil
@@ -170,7 +170,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		if podreadiness.IsServing(pod) {
 			continue
 		}
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

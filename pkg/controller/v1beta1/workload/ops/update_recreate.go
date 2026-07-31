@@ -75,7 +75,7 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 			if !podreadiness.IsServing(pod) {
 				continue
 			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod, podreadiness.WriterUpdateRecreateDrain, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateRecreateDrain, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -160,7 +160,7 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 		}
 		// Lifecycle key on fresh pods; the Update-recreate-drain key only
 		// lived on the now-deleted old pods.
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

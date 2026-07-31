@@ -407,7 +407,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if podreadiness.IsServing(pod) {
 			continue
 		}
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
 			return false, accepted, fmt.Errorf("Migrate: serving=True on surge pod %s: %w", pod.Name, err)
 		}
 	}
@@ -433,7 +433,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			continue
 		}
 		// Migrate-source-drain key; cleared by pod deletion at the end.
-		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod, podreadiness.WriterMigrateSourceDrain, requestUUID); err != nil {
+		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterMigrateSourceDrain, requestUUID); err != nil {
 			return false, accepted, fmt.Errorf("Migrate: serving=False on source pod %s: %w", pod.Name, err)
 		}
 	}

@@ -264,15 +264,17 @@ func migrationTailReady(ctx context.Context, deps workload.Deps, input workload.
 // advanced) reads Ready while every pod carries serving=False —
 // permanently out of the routed Service and invisible to the
 // availability counters. A Failed-observed source is un-drained too,
-// so a later recovery serves. MarkPodServing is idempotent (no-op
-// when the key is absent).
+// so a later recovery serves. The removal is idempotent (no-op when
+// the key is absent) and tolerates deleted pods — this is a drain-hold
+// release, not a promotion: the hold dies with the pod, and nothing
+// downstream assumes the pod is in rotation.
 func restoreSourceFromObservation(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, uuid string) error {
 	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
 		return fmt.Errorf("list source pods: %w", err)
 	}
 	for _, pod := range sourcePods {
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterMigrateSourceDrain, uuid); err != nil {
+		if err := podreadiness.RemoveNotReadyKeyIgnoreNotFound(ctx, deps.Client, deps.Reader(), pod, podreadiness.Message{UserAgent: podreadiness.WriterMigrateSourceDrain, Key: uuid}); err != nil {
 			return fmt.Errorf("remove source-drain key from pod %s: %w", pod.Name, err)
 		}
 	}

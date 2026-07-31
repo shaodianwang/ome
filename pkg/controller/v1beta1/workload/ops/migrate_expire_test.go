@@ -251,7 +251,7 @@ func TestMigrateExpiry_SourcePodsDead_SourceFailed(t *testing.T) {
 	}
 	// A drain key that landed before the pod died: a Failed-observed
 	// source must be un-drained too, so a later recovery serves.
-	if err := podreadiness.MarkPodNotServing(context.Background(), f.c, srcPod, podreadiness.WriterMigrateSourceDrain, uuid); err != nil {
+	if err := podreadiness.MarkPodNotServing(context.Background(), f.c, f.c, srcPod, podreadiness.WriterMigrateSourceDrain, uuid); err != nil {
 		t.Fatalf("seed drain key: %v", err)
 	}
 

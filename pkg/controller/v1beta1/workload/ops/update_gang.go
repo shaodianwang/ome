@@ -219,7 +219,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		if podreadiness.IsServing(pod) {
 			continue
 		}
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("serving=True on surge pod %s: %w", pod.Name, err)
 		}
 	}
@@ -257,7 +257,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 			if !podreadiness.IsServing(pod) {
 				continue
 			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod,
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
 				podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx)); err != nil {
 				return false, fmt.Errorf("drain source gang pod %s: %w", pod.Name, err)
 			}

@@ -17,8 +17,14 @@
 //
 // All writes use Status().Patch with strategic merge on the condition
 // list (patch-merge-key=type), so kubelet's concurrent writes to
-// PodScheduled / ContainersReady / PodReady are preserved. All
-// writes are wrapped in retry.RetryOnConflict.
+// PodScheduled / ContainersReady / PodReady are preserved. Every patch
+// pins metadata.resourceVersion from the read it was computed against,
+// so a stale base 409s instead of silently overwriting another
+// writer's hold; retry.RetryOnConflict re-reads and re-applies. The
+// in-loop re-read goes through the caller-supplied live reader (the
+// AuthoritativeReader role): a watch-backed cache lagging the
+// controller's own preceding status patch would re-serve the stale
+// resourceVersion on every retry and the loop could never converge.
 //
 // # Gang readiness equivalence (multi-pod)
 //
@@ -58,6 +64,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -84,6 +91,10 @@ type Message struct {
 // Patches only the single condition slot so kubelet's concurrent
 // status writes are preserved; wrapped in retry.RetryOnConflict.
 //
+// reader is the live reader the RV-pinned patch base is read through
+// (nil falls back to c, acceptable only when c does not lag the API
+// server — e.g. tests).
+//
 // Self-healing branch: when the message list already contains msg but
 // Status is True we still issue a patch to flip Status back to False.
 // This resyncs a divergent shape — stale {UserAgent, Key} entries left
@@ -94,13 +105,16 @@ type Message struct {
 // and the Instance hangs at Phase=Updating forever. With this branch,
 // the first Add after a controller restart resyncs Status to match
 // the message-list reality.
-func AddNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg Message) error {
+func AddNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message) error {
 	if pod == nil {
 		return fmt.Errorf("AddNotReadyKey: nil pod")
 	}
+	if reader == nil {
+		reader = c
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &corev1.Pod{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
 			return fmt.Errorf("re-read pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 		cond := findCondition(fresh, ConditionType)
@@ -110,7 +124,10 @@ func AddNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg M
 			base = cond.Message
 			existingStatus = cond.Status
 		}
-		changed, list := addMessage(base, msg)
+		changed, list, err := addMessage(base, msg)
+		if err != nil {
+			return fmt.Errorf("pod %s/%s: %w", fresh.Namespace, fresh.Name, err)
+		}
 		if !changed && existingStatus == corev1.ConditionFalse {
 			// Nothing to do — key already in the list AND Status is
 			// already False (writer slot already held; everything
@@ -132,15 +149,44 @@ func AddNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg M
 // exist yet — fresh pod case), sets Status=True. Otherwise keeps
 // Status=False with the shrunken list.
 //
-// Wrapped in retry.RetryOnConflict; patches only the single
-// condition slot.
-func RemoveNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg Message) error {
+// A pod that no longer exists is an ERROR (NotFound). This is the
+// promote-to-serving contract: callers flip a pod into rotation and
+// then act on that promotion (e.g. drain its predecessor in the same
+// pass), so a silently-vanished pod must abort the caller before it
+// removes the only serving replica. Drain-hold release paths, where
+// the hold genuinely dies with the pod, use
+// RemoveNotReadyKeyIgnoreNotFound instead.
+//
+// reader is the live reader the RV-pinned patch base is read through
+// (nil falls back to c). Wrapped in retry.RetryOnConflict; patches
+// only the single condition slot.
+func RemoveNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message) error {
+	return removeNotReadyKey(ctx, c, reader, pod, msg, false)
+}
+
+// RemoveNotReadyKeyIgnoreNotFound is RemoveNotReadyKey for drain-hold
+// release: a pod that no longer exists is a no-op (nil) because the
+// hold dies with the pod. Never use it on a promote-to-serving path —
+// tolerating NotFound there turns "replacement is in rotation" into
+// "replacement may be gone" and lets the caller drain its predecessor
+// with nothing serving.
+func RemoveNotReadyKeyIgnoreNotFound(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message) error {
+	return removeNotReadyKey(ctx, c, reader, pod, msg, true)
+}
+
+func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message, ignoreNotFound bool) error {
 	if pod == nil {
 		return fmt.Errorf("RemoveNotReadyKey: nil pod")
 	}
+	if reader == nil {
+		reader = c
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &corev1.Pod{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
+			if ignoreNotFound && apierrors.IsNotFound(err) {
+				return nil
+			}
 			return fmt.Errorf("re-read pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 		cond := findCondition(fresh, ConditionType)
@@ -155,7 +201,10 @@ func RemoveNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, ms
 				LastTransitionTime: metav1.Now(),
 			})
 		}
-		changed, list := removeMessage(cond.Message, msg)
+		changed, list, err := removeMessage(cond.Message, msg)
+		if err != nil {
+			return fmt.Errorf("pod %s/%s: %w", fresh.Namespace, fresh.Name, err)
+		}
 		if !changed && cond.Status == corev1.ConditionTrue {
 			// Key wasn't in the list AND condition already True.
 			// Nothing to do.
@@ -192,7 +241,10 @@ func ContainsNotReadyKey(pod *corev1.Pod, msg Message) bool {
 	if cond == nil || cond.Status == corev1.ConditionTrue || cond.Message == "" {
 		return false
 	}
-	list := parseList(cond.Message)
+	list, err := parseList(cond.Message)
+	if err != nil {
+		return false
+	}
 	for _, m := range list {
 		if m == msg {
 			return true
@@ -259,9 +311,11 @@ func IsPodReady(pod *corev1.Pod) bool {
 // for Service rotation.
 //
 // Idempotent: removing a key that isn't present is a no-op (no patch
-// issued) when the condition is already Status=True.
-func MarkPodServing(ctx context.Context, c client.Client, pod *corev1.Pod, userAgent, key string) error {
-	return RemoveNotReadyKey(ctx, c, pod, Message{UserAgent: userAgent, Key: key})
+// issued) when the condition is already Status=True. A deleted pod is
+// an error (see RemoveNotReadyKey): success means the pod IS in
+// rotation, so promote-then-drain callers may safely act on it.
+func MarkPodServing(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, userAgent, key string) error {
+	return RemoveNotReadyKey(ctx, c, reader, pod, Message{UserAgent: userAgent, Key: key})
 }
 
 // MarkPodNotServing adds the {userAgent, key} entry to the
@@ -270,8 +324,8 @@ func MarkPodServing(ctx context.Context, c client.Client, pod *corev1.Pod, userA
 // kube-proxy's standard PodReady gate machinery.
 //
 // Idempotent: re-adding the same key is a no-op.
-func MarkPodNotServing(ctx context.Context, c client.Client, pod *corev1.Pod, userAgent, key string) error {
-	return AddNotReadyKey(ctx, c, pod, Message{UserAgent: userAgent, Key: key})
+func MarkPodNotServing(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, userAgent, key string) error {
+	return AddNotReadyKey(ctx, c, reader, pod, Message{UserAgent: userAgent, Key: key})
 }
 
 // Writer userAgents used across the OMENative ops. Centralized here so
@@ -338,6 +392,11 @@ const KeyLifecycleInstanceReady = "InstanceReady"
 // "message" field into the patch payload (even when empty) makes
 // strategic-merge clear the stale list so the next writer cycle
 // starts from a clean slate.
+//
+// The patch pins pod's resourceVersion (the fresh read the new list
+// was computed from) so a stale base gets a 409 instead of silently
+// dropping a concurrent writer's entry; the callers' RetryOnConflict
+// then re-reads and recomputes.
 func patchCondition(ctx context.Context, c client.Client, pod *corev1.Pod, cond corev1.PodCondition) error {
 	condMap := map[string]any{
 		"type":               string(cond.Type),
@@ -347,6 +406,9 @@ func patchCondition(ctx context.Context, c client.Client, pod *corev1.Pod, cond 
 		"lastTransitionTime": cond.LastTransitionTime,
 	}
 	patch := map[string]any{
+		"metadata": map[string]any{
+			"resourceVersion": pod.ResourceVersion,
+		},
 		"status": map[string]any{
 			"conditions": []any{condMap},
 		},
@@ -379,21 +441,27 @@ func findCondition(pod *corev1.Pod, condType corev1.PodConditionType) *corev1.Po
 // addMessage appends msg to the list parsed from base (an empty
 // string is treated as an empty list). Returns changed=false if msg
 // is already in the list.
-func addMessage(base string, msg Message) (bool, messageList) {
-	list := parseList(base)
+func addMessage(base string, msg Message) (bool, messageList, error) {
+	list, err := parseList(base)
+	if err != nil {
+		return false, nil, err
+	}
 	for _, m := range list {
 		if m == msg {
-			return false, list
+			return false, list, nil
 		}
 	}
 	list = append(list, msg)
-	return true, list
+	return true, list, nil
 }
 
 // removeMessage drops msg from the list parsed from base. Returns
 // changed=false if msg isn't in the list.
-func removeMessage(base string, msg Message) (bool, messageList) {
-	list := parseList(base)
+func removeMessage(base string, msg Message) (bool, messageList, error) {
+	list, err := parseList(base)
+	if err != nil {
+		return false, nil, err
+	}
 	var out messageList
 	var removed bool
 	for _, m := range list {
@@ -403,21 +471,23 @@ func removeMessage(base string, msg Message) (bool, messageList) {
 		}
 		out = append(out, m)
 	}
-	return removed, out
+	return removed, out, nil
 }
 
-// parseList safely decodes a message list from its JSON serialization.
-// An empty or malformed string yields nil — the helpers treat that as
-// "no writers hold the gate."
-func parseList(raw string) messageList {
+// parseList decodes a message list from its JSON serialization. An
+// empty string yields nil ("no writers hold the gate"). A malformed
+// string is an error, NOT an empty list — treating corruption as
+// "no writers" would let RemoveNotReadyKey flip Status=True and
+// release every other writer's drain hold with zero signal.
+func parseList(raw string) (messageList, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	var list messageList
 	if err := json.Unmarshal([]byte(raw), &list); err != nil {
-		return nil
+		return nil, fmt.Errorf("malformed %s writer list %q: %w", ConditionType, raw, err)
 	}
-	return list
+	return list, nil
 }
 
 // messageList is a sortable slice of Messages. Stored in a stable

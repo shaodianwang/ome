@@ -180,7 +180,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			if !podreadiness.IsServing(pod) {
 				continue
 			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod, podreadiness.WriterRestartDrain, restartDrainKey(inst.Index, newInc)); err != nil {
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterRestartDrain, restartDrainKey(inst.Index, newInc)); err != nil {
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -275,7 +275,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		}
 		// Lifecycle key on fresh pods; the Restart-drain key only lived
 		// on the now-deleted OLD pods.
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}
