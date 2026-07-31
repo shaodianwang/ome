@@ -18,32 +18,39 @@ import (
 )
 
 // Target is the resolved publication intent for one InferenceService: the global
-// host to program and the winning cluster's ingress endpoint that host must
-// resolve to. Built by the reconciler from status.placement and the Config; the
-// EndpointPublisher backend translates it into its own resource(s).
+// host to program and the one-or-more serving homes it must resolve to. Built by
+// the reconciler from status.placement and the Config; the EndpointPublisher
+// backend translates it into its own resource(s). Single mode yields exactly one
+// Home; All/Split yield one per serving cluster.
 type Target struct {
 	// GlobalHost is the externally-addressable hostname the publisher programs
 	// (e.g. "my-svc.global.example"). Rendered from Config + the ISVC, never a
 	// baked-in literal.
 	GlobalHost string
 
-	// Cluster is the WorkloadCluster that currently wins the placement race
-	// (status.placement.cluster). Informational for the backend (labels,
-	// logging); the route itself targets BackendHost.
-	Cluster string
+	// Homes are the serving clusters the global host resolves to, one per admitted
+	// home. In Single there is exactly one; in All/Split there is one per cluster
+	// currently serving. Never empty when the reconciler decides to publish.
+	Homes []Home
+}
 
-	// BackendHost is the winning cluster's ingress hostname that the global host
-	// must resolve to — the host of status.placement.endpoint. A bare hostname
-	// (no scheme/port); the backend supplies the port from Config.
+// Home is one serving cluster the global host load-balances across.
+type Home struct {
+	// Cluster is the WorkloadCluster serving this home (labels/logging).
+	Cluster string
+	// BackendHost is that cluster's ingress hostname the global host resolves to —
+	// the host of the home's status endpoint. A bare hostname (no scheme/port);
+	// the backend supplies the port from Config.
 	BackendHost string
 }
 
-// EndpointPublisher programs a single global-traffic backend so the global host
-// of a multi-cluster InferenceService points at the winning cluster's ingress,
-// repoints it on re-placement, and tears it down when the service is no longer
-// placed. Implementations are backend-specific (Gateway API HTTPRoute today;
-// DNS/GSLB later) and MUST be idempotent: Publish for an unchanged Target is a
-// no-op, and Unpublish for an already-clean service is a no-op.
+// EndpointPublisher programs the global-traffic backend(s) so the global host of
+// a multi-cluster InferenceService points at every serving home (one in Single;
+// several, load-balanced, in All/Split), adjusts the set as homes come and go,
+// and tears it all down when the service is no longer placed. Implementations
+// are backend-specific (Gateway API HTTPRoute today; DNS/GSLB later) and MUST be
+// idempotent: Publish for an unchanged Target is a no-op, and Unpublish for an
+// already-clean service is a no-op.
 type EndpointPublisher interface {
 	// Publish ensures the backend routes target.GlobalHost to
 	// target.BackendHost for isvc, creating or repointing as needed.

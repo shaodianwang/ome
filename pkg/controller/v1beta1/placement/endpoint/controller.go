@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"sort"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -81,7 +82,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 	r.Log.Info("endpoint published", "isvc", req.String(), "backend", r.Publisher.Name(),
-		"globalHost", target.GlobalHost, "cluster", target.Cluster, "backendHost", target.BackendHost)
+		"globalHost", target.GlobalHost, "homes", len(target.Homes))
 	return ctrl.Result{}, nil
 }
 
@@ -99,18 +100,36 @@ func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService) (Target, bool
 		return Target{}, false, nil
 	}
 	pl := isvc.Status.Placement
-	if pl == nil || pl.Phase != v1beta1.PlacementPhasePlaced || pl.Cluster == "" {
+	if pl == nil || pl.Phase != v1beta1.PlacementPhasePlaced {
 		return Target{}, false, nil
 	}
-	if pl.Endpoint == nil || pl.Endpoint.Host == "" {
-		// Winner declared but not yet addressable — nothing concrete to point at.
+	homes := homesFromPlacement(pl)
+	if len(homes) == 0 {
+		// Placed but no home is addressable yet — nothing concrete to point at.
 		return Target{}, false, nil
 	}
-	return Target{
-		GlobalHost:  host,
-		Cluster:     pl.Cluster,
-		BackendHost: pl.Endpoint.Host,
-	}, true, nil
+	return Target{GlobalHost: host, Homes: homes}, true, nil
+}
+
+// homesFromPlacement extracts the serving homes — admitted candidates that
+// report an addressable endpoint — from a placement status, sorted by cluster
+// for a deterministic route. This is the uniform source for both Single (one
+// winner candidate) and All/Split (one per serving cluster). It falls back to
+// the top-level cluster/endpoint for a status that predates per-candidate
+// endpoints, so a legacy Single placement still publishes.
+func homesFromPlacement(pl *v1beta1.PlacementStatus) []Home {
+	var homes []Home
+	for i := range pl.Candidates {
+		c := &pl.Candidates[i]
+		if c.Phase == v1beta1.CandidatePhaseAdmitted && c.Endpoint != nil && c.Endpoint.Host != "" {
+			homes = append(homes, Home{Cluster: c.Cluster, BackendHost: c.Endpoint.Host})
+		}
+	}
+	if len(homes) == 0 && pl.Cluster != "" && pl.Endpoint != nil && pl.Endpoint.Host != "" {
+		homes = append(homes, Home{Cluster: pl.Cluster, BackendHost: pl.Endpoint.Host})
+	}
+	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
+	return homes
 }
 
 func (r *Reconciler) reconcileUnpublish(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {

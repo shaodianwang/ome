@@ -43,33 +43,40 @@ func baseConfig() Config {
 	}
 }
 
+// oneHome builds a single-home Target (Single mode shape).
+func oneHome(globalHost, cluster, backendHost string) Target {
+	return Target{GlobalHost: globalHost, Homes: []Home{{Cluster: cluster, BackendHost: backendHost}}}
+}
+
 func TestBuildExternalNameService(t *testing.T) {
 	p := NewGatewayAPIPublisher(nil, baseConfig())
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
+	isvc := testISVC()
+	home := Home{Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
-	svc := p.buildExternalNameService(testISVC(), target)
+	svc := p.buildExternalNameService(isvc, serviceName(isvc, "cluster-a"), home)
 
-	assert.Equal(t, "svc-global", svc.Name)
+	assert.Equal(t, "svc-global-cluster-a", svc.Name, "per-home Service name carries the cluster")
 	assert.Equal(t, "prod", svc.Namespace, "namespace falls back to the ISVC namespace")
 	assert.Equal(t, corev1.ServiceTypeExternalName, svc.Spec.Type)
-	assert.Equal(t, "svc.prod.cw.example", svc.Spec.ExternalName, "ExternalName aliases the winner ingress host")
+	assert.Equal(t, "svc.prod.cw.example", svc.Spec.ExternalName, "ExternalName aliases the home ingress host")
 	require.Len(t, svc.Spec.Ports, 1)
 	assert.Equal(t, int32(8080), svc.Spec.Ports[0].Port)
 	assert.Equal(t, ManagedByValue, svc.Labels[ManagedByLabel])
 	assert.Equal(t, "cluster-a", svc.Labels[PlacementClusterLabel])
+	assert.Equal(t, "svc", svc.Labels[PlacementEndpointISVCLabel], "per-ISVC grouping label for GC/teardown")
 	assert.Equal(t, "platform", svc.Labels["team"], "operator labels are merged in")
 }
 
-func TestBuildHTTPRoute(t *testing.T) {
+func TestBuildHTTPRoute_SingleHome(t *testing.T) {
 	p := NewGatewayAPIPublisher(nil, baseConfig())
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
-	route := p.buildHTTPRoute(testISVC(), target)
+	route := p.buildHTTPRoute(testISVC(), oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cw.example"))
 
 	assert.Equal(t, "svc-global", route.Name)
 	assert.Equal(t, "prod", route.Namespace)
 	require.Len(t, route.Spec.Hostnames, 1)
 	assert.Equal(t, gatewayapiv1.Hostname("svc.prod.global.example"), route.Spec.Hostnames[0])
+	assert.Equal(t, "svc", route.Labels[PlacementEndpointISVCLabel])
 
 	require.Len(t, route.Spec.ParentRefs, 1)
 	pr := route.Spec.ParentRefs[0]
@@ -82,25 +89,47 @@ func TestBuildHTTPRoute(t *testing.T) {
 	require.Len(t, route.Spec.Rules, 1)
 	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
 	br := route.Spec.Rules[0].BackendRefs[0]
-	assert.Equal(t, gatewayapiv1.ObjectName("svc-global"), br.Name, "route forwards to the ExternalName Service")
+	assert.Equal(t, gatewayapiv1.ObjectName("svc-global-cluster-a"), br.Name, "route forwards to the home's ExternalName Service")
 	require.NotNil(t, br.Kind)
 	assert.Equal(t, constants.ServiceKind, string(*br.Kind))
 	require.NotNil(t, br.Port)
 	assert.Equal(t, gatewayapiv1.PortNumber(8080), *br.Port)
+	require.NotNil(t, br.Weight)
+	assert.Equal(t, int32(1), *br.Weight)
 
 	require.Len(t, route.Spec.Rules[0].Matches, 1)
 	require.NotNil(t, route.Spec.Rules[0].Matches[0].Path)
 	assert.Equal(t, "/", *route.Spec.Rules[0].Matches[0].Path.Value)
 }
 
+func TestBuildHTTPRoute_MultiHomeEqualWeightSorted(t *testing.T) {
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	// Homes passed out of order; the route's backendRefs must be sorted by cluster.
+	target := Target{GlobalHost: "h", Homes: []Home{
+		{Cluster: "cluster-b", BackendHost: "b.example"},
+		{Cluster: "cluster-a", BackendHost: "a.example"},
+	}}
+
+	route := p.buildHTTPRoute(testISVC(), target)
+
+	refs := route.Spec.Rules[0].BackendRefs
+	require.Len(t, refs, 2, "one backendRef per home")
+	assert.Equal(t, gatewayapiv1.ObjectName("svc-global-cluster-a"), refs[0].Name)
+	assert.Equal(t, gatewayapiv1.ObjectName("svc-global-cluster-b"), refs[1].Name)
+	require.NotNil(t, refs[0].Weight)
+	require.NotNil(t, refs[1].Weight)
+	assert.Equal(t, int32(1), *refs[0].Weight, "equal weight across homes")
+	assert.Equal(t, int32(1), *refs[1].Weight)
+}
+
 func TestBuildResources_RouteNamespaceOverride(t *testing.T) {
 	cfg := baseConfig()
 	cfg.RouteNamespace = "ome-gateways"
 	p := NewGatewayAPIPublisher(nil, cfg)
-	target := Target{GlobalHost: "h", Cluster: "c", BackendHost: "b"}
+	isvc := testISVC()
 
-	svc := p.buildExternalNameService(testISVC(), target)
-	route := p.buildHTTPRoute(testISVC(), target)
+	svc := p.buildExternalNameService(isvc, serviceName(isvc, "c"), Home{Cluster: "c", BackendHost: "b"})
+	route := p.buildHTTPRoute(isvc, oneHome("h", "c", "b"))
 
 	assert.Equal(t, "ome-gateways", svc.Namespace)
 	assert.Equal(t, "ome-gateways", route.Namespace)
@@ -114,7 +143,7 @@ func TestBuildHTTPRoute_BareGatewayName(t *testing.T) {
 	cfg.GlobalGateway = "global-gw" // no namespace
 	p := NewGatewayAPIPublisher(nil, cfg)
 
-	route := p.buildHTTPRoute(testISVC(), Target{GlobalHost: "h", BackendHost: "b"})
+	route := p.buildHTTPRoute(testISVC(), oneHome("h", "c", "b"))
 
 	pr := route.Spec.ParentRefs[0]
 	require.NotNil(t, pr.Namespace)
@@ -122,22 +151,46 @@ func TestBuildHTTPRoute_BareGatewayName(t *testing.T) {
 	assert.Equal(t, "global-gw", string(pr.Name))
 }
 
-func TestPublish_CreatesBothResources(t *testing.T) {
+func TestPublish_SingleHomeCreatesResources(t *testing.T) {
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
 
-	require.NoError(t, p.Publish(context.Background(), isvc, target))
+	require.NoError(t, p.Publish(context.Background(), isvc, oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cw.example")))
 
 	svc := &corev1.Service{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, svc))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, svc))
 	assert.Equal(t, "svc.prod.cw.example", svc.Spec.ExternalName)
 
 	route := &gatewayapiv1.HTTPRoute{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
 	assert.Equal(t, gatewayapiv1.Hostname("svc.prod.global.example"), route.Spec.Hostnames[0])
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+}
+
+func TestPublish_MultiHomeCreatesPerHomeServices(t *testing.T) {
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	p := NewGatewayAPIPublisher(c, baseConfig())
+	isvc := testISVC()
+	target := Target{GlobalHost: "svc.prod.global.example", Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example"},
+		{Cluster: "cluster-b", BackendHost: "b.example"},
+	}}
+
+	require.NoError(t, p.Publish(context.Background(), isvc, target))
+
+	a := &corev1.Service{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, a))
+	assert.Equal(t, "a.example", a.Spec.ExternalName)
+	b := &corev1.Service{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-b", Namespace: "prod"}, b))
+	assert.Equal(t, "b.example", b.Spec.ExternalName)
+
+	route := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 2, "route load-balances across both homes")
 }
 
 func TestPublish_Idempotent(t *testing.T) {
@@ -145,58 +198,80 @@ func TestPublish_Idempotent(t *testing.T) {
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
-	target := Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}
+	target := oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cw.example")
 
 	require.NoError(t, p.Publish(context.Background(), isvc, target))
 	route := &gatewayapiv1.HTTPRoute{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
 	rvBefore := route.ResourceVersion
 
-	// Second identical publish must not churn the object (no spurious update).
 	require.NoError(t, p.Publish(context.Background(), isvc, target))
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
 	assert.Equal(t, rvBefore, route.ResourceVersion, "identical re-publish must be a no-op")
 }
 
-func TestPublish_RepointOnReplacement(t *testing.T) {
+func TestPublish_HomeLeavesGCsStaleService(t *testing.T) {
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
 
-	// Initial placement on cluster A.
-	require.NoError(t, p.Publish(context.Background(), isvc,
-		Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}))
+	// Two homes, then one leaves.
+	require.NoError(t, p.Publish(context.Background(), isvc, Target{GlobalHost: "h", Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example"},
+		{Cluster: "cluster-b", BackendHost: "b.example"},
+	}}))
+	require.NoError(t, p.Publish(context.Background(), isvc, oneHome("h", "cluster-a", "a.example")))
 
-	// Re-placement onto cluster B: same global host, new backend host + cluster.
-	require.NoError(t, p.Publish(context.Background(), isvc,
-		Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-b", BackendHost: "svc.prod.gcp.example"}))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, &corev1.Service{}),
+		"surviving home's Service kept")
+	err := c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-b", Namespace: "prod"}, &corev1.Service{})
+	assert.True(t, apierrors.IsNotFound(err), "departed home's Service garbage-collected")
 
-	svc := &corev1.Service{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, svc))
-	assert.Equal(t, "svc.prod.gcp.example", svc.Spec.ExternalName, "ExternalName repointed to the new winner")
-	assert.Equal(t, "cluster-b", svc.Labels[PlacementClusterLabel], "cluster label repointed")
-
-	// The HTTPRoute name/host are stable; the backendRef still names the same
-	// (stable) ExternalName Service, so the route did not need a backend swap.
 	route := &gatewayapiv1.HTTPRoute{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
-	assert.Equal(t, gatewayapiv1.ObjectName("svc-global"), route.Spec.Rules[0].BackendRefs[0].Name)
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 1, "route drops the departed home's backendRef")
 }
 
-func TestUnpublish_DeletesBoth(t *testing.T) {
+func TestPublish_WinnerMovesClustersInSingle(t *testing.T) {
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
-	require.NoError(t, p.Publish(context.Background(), isvc,
-		Target{GlobalHost: "svc.prod.global.example", Cluster: "cluster-a", BackendHost: "svc.prod.cw.example"}))
+
+	require.NoError(t, p.Publish(context.Background(), isvc, oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cw.example")))
+	// Single re-placement onto a different cluster: old home's Service is GC'd, new one created.
+	require.NoError(t, p.Publish(context.Background(), isvc, oneHome("svc.prod.global.example", "cluster-b", "svc.prod.gcp.example")))
+
+	err := c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, &corev1.Service{})
+	assert.True(t, apierrors.IsNotFound(err), "old winner's Service GC'd")
+	b := &corev1.Service{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-b", Namespace: "prod"}, b))
+	assert.Equal(t, "svc.prod.gcp.example", b.Spec.ExternalName)
+
+	route := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, gatewayapiv1.ObjectName("svc-global-cluster-b"), route.Spec.Rules[0].BackendRefs[0].Name)
+}
+
+func TestUnpublish_DeletesRouteAndAllServices(t *testing.T) {
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	p := NewGatewayAPIPublisher(c, baseConfig())
+	isvc := testISVC()
+	require.NoError(t, p.Publish(context.Background(), isvc, Target{GlobalHost: "h", Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example"},
+		{Cluster: "cluster-b", BackendHost: "b.example"},
+	}}))
 
 	require.NoError(t, p.Unpublish(context.Background(), isvc))
 
-	err := c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, &corev1.Service{})
-	assert.True(t, apierrors.IsNotFound(err), "ExternalName Service deleted")
-	err = c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, &gatewayapiv1.HTTPRoute{})
+	for _, name := range []string{"svc-global-cluster-a", "svc-global-cluster-b"} {
+		err := c.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "prod"}, &corev1.Service{})
+		assert.True(t, apierrors.IsNotFound(err), "%s deleted", name)
+	}
+	err := c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, &gatewayapiv1.HTTPRoute{})
 	assert.True(t, apierrors.IsNotFound(err), "HTTPRoute deleted")
 }
 
@@ -204,6 +279,5 @@ func TestUnpublish_MissingIsNoOp(t *testing.T) {
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
-	// Nothing was ever published; Unpublish must not error.
 	require.NoError(t, p.Unpublish(context.Background(), testISVC()))
 }

@@ -71,7 +71,7 @@ func TestReconcile_PlacedPublishesAndFinalizes(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
 	assert.Equal(t, gatewayapiv1.Hostname("svc.prod.global.example"), route.Spec.Hostnames[0])
 	svc := &corev1.Service{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, svc))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, svc))
 	assert.Equal(t, "svc.prod.cw.example", svc.Spec.ExternalName)
 
 	// Finalizer added so teardown can run before the ISVC is removed.
@@ -94,9 +94,12 @@ func TestReconcile_RepointsOnReplacement(t *testing.T) {
 	reconcile(t, r)
 
 	svc := &corev1.Service{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, svc))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-b", Namespace: "prod"}, svc))
 	assert.Equal(t, "svc.prod.gcp.example", svc.Spec.ExternalName, "ExternalName repointed to new winner")
 	assert.Equal(t, "cluster-b", svc.Labels[PlacementClusterLabel])
+	// The old winner's per-home Service is garbage-collected.
+	errOld := c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, &corev1.Service{})
+	assert.True(t, apierrors.IsNotFound(errOld), "old winner's Service GC'd on re-home")
 }
 
 func TestReconcile_UnplacedTearsDownAndDropsFinalizer(t *testing.T) {
@@ -165,7 +168,7 @@ func TestReconcile_DeletionTearsDown(t *testing.T) {
 
 	reconcile(t, r)
 
-	err := c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, &corev1.Service{})
+	err := c.Get(context.Background(), types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}, &corev1.Service{})
 	assert.True(t, apierrors.IsNotFound(err), "backend Service deleted on ISVC deletion")
 	// Finalizer removed -> the fake client now actually deletes the ISVC.
 	err = c.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "prod"}, &v1beta1.InferenceService{})
@@ -202,12 +205,48 @@ func TestResolveTarget(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		assert.Equal(t, "svc.prod.global.example", tgt.GlobalHost)
-		assert.Equal(t, "cw", tgt.Cluster)
-		assert.Equal(t, "h.example", tgt.BackendHost)
+		require.Len(t, tgt.Homes, 1)
+		assert.Equal(t, "cw", tgt.Homes[0].Cluster)
+		assert.Equal(t, "h.example", tgt.Homes[0].BackendHost)
 	})
 
 	t.Run("nil placement -> not ok", func(t *testing.T) {
 		_, ok, err := r.resolveTarget(&v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"}})
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("All: admitted candidates -> one home each, sorted", func(t *testing.T) {
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+			Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
+				Phase: v1beta1.PlacementPhasePlaced, // no top-level winner in All
+				Candidates: []v1beta1.CandidatePlacement{
+					{Cluster: "workload-2", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("b.example")},
+					{Cluster: "workload-1", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("a.example")},
+					{Cluster: "workload-3", Phase: v1beta1.CandidatePhasePlaced}, // gated: not a home
+				},
+			}},
+		}
+		tgt, ok, err := r.resolveTarget(isvc)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Len(t, tgt.Homes, 2, "only admitted+addressable candidates are homes")
+		assert.Equal(t, "workload-1", tgt.Homes[0].Cluster, "sorted by cluster")
+		assert.Equal(t, "a.example", tgt.Homes[0].BackendHost)
+		assert.Equal(t, "workload-2", tgt.Homes[1].Cluster)
+		assert.Equal(t, "b.example", tgt.Homes[1].BackendHost)
+	})
+
+	t.Run("placed but no addressable home -> not ok", func(t *testing.T) {
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+			Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
+				Phase:      v1beta1.PlacementPhasePlaced,
+				Candidates: []v1beta1.CandidatePlacement{{Cluster: "workload-1", Phase: v1beta1.CandidatePhasePlaced}},
+			}},
+		}
+		_, ok, err := r.resolveTarget(isvc)
 		require.NoError(t, err)
 		assert.False(t, ok)
 	})
