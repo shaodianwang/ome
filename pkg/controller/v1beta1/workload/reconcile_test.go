@@ -700,32 +700,30 @@ func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
 	}
 }
 
-// TestHeldByPartition pins the RollingUpdate.Partition canary predicate that the
-// reconcile loop uses to skip held Instances: an Instance is held on the old
-// revision iff its index is below a positive Partition. A nil RollingUpdate,
-// nil Partition, or Partition<=0 holds nothing; surge Instances allocated above
-// the replica count (index >= replicas >= Partition) are never held.
+// TestHeldByPartition pins the RollingUpdate.Partition count predicate:
+// a hold candidate is held iff its rank in the candidate order is below
+// a positive Partition (PartitionHeldIndices owns candidate membership).
+// A nil RollingUpdate, nil Partition, or Partition<=0 holds nothing.
 func TestHeldByPartition(t *testing.T) {
 	part := func(n int32) *workload.RollingUpdate { return &workload.RollingUpdate{Partition: &n} }
 	cases := []struct {
-		name  string
-		ru    *workload.RollingUpdate
-		index int32
-		held  bool
+		name string
+		ru   *workload.RollingUpdate
+		rank int32
+		held bool
 	}{
 		{"nil RollingUpdate", nil, 0, false},
 		{"nil Partition", &workload.RollingUpdate{}, 0, false},
 		{"Partition=0 holds nothing", part(0), 0, false},
-		{"Partition=2 holds index 0", part(2), 0, true},
-		{"Partition=2 holds index 1", part(2), 1, true},
-		{"Partition=2 rolls index 2", part(2), 2, false},
-		{"Partition=2 rolls index 3", part(2), 3, false},
-		{"surge index above replicas never held", part(2), 4, false},
+		{"Partition=2 holds rank 0", part(2), 0, true},
+		{"Partition=2 holds rank 1", part(2), 1, true},
+		{"Partition=2 rolls rank 2", part(2), 2, false},
+		{"Partition=2 rolls rank 3", part(2), 3, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := workload.HeldByPartition(tc.ru, tc.index); got != tc.held {
-				t.Errorf("HeldByPartition(index=%d) = %v, want %v", tc.index, got, tc.held)
+			if got := workload.HeldByPartition(tc.ru, tc.rank); got != tc.held {
+				t.Errorf("HeldByPartition(rank=%d) = %v, want %v", tc.rank, got, tc.held)
 			}
 		})
 	}

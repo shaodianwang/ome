@@ -72,12 +72,20 @@ func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.
 
 // surgeFreeIndex reports whether the Instance at idx has NO in-flight
 // surge state — i.e. its ObservedState entry is absent (never created)
-// or still Phase=Creating. Updating / Migrating carry an in-flight surge
-// (stale ActiveOrdinal / RunningRevision hazard); Ready-but-degraded is
-// Restart/Recreate territory. Such indices are excluded.
+// or mid-Create (Phase=Creating with no operation, or a Create one).
+// Updating / Migrating carry an in-flight surge (stale ActiveOrdinal /
+// RunningRevision hazard); Ready-but-degraded is Restart/Recreate
+// territory. A Creating entry carrying an Update or Migrate operation
+// is a surge TARGET marker owned by another index's op — overwriting it
+// with a Create stamp unpins the in-flight replacement gang from the
+// plan and scale-down deletes it mid-surge. All excluded.
 func surgeFreeIndex(observed []workload.InstanceStatus, idx int32) bool {
 	s := findInstanceStatus(observed, idx)
-	return s == nil || s.Phase == workload.InstancePhaseCreating
+	if s == nil {
+		return true
+	}
+	return s.Phase == workload.InstancePhaseCreating &&
+		(s.Operation == nil || s.Operation.Type == workload.InstanceOperationCreate)
 }
 
 // createFiltered is Create restricted to the Instance indices for which

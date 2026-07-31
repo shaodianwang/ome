@@ -313,6 +313,15 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 	// shot (mass outage at scale).
 	var inFlightUnavail int32
 	var inFlightSurge int32
+	// gateUnavail is the coordination gate's within-pass delta: fresh
+	// starts that pull a SERVING pod from rotation this wake-up. It
+	// diverges from inFlightUnavail (the per-Component, op-based
+	// counter) on CoordGateExempt starts — a Failed zero-serving
+	// Instance's recreate takes nothing additional offline, and its
+	// outage is already inside the gate's serving-based count, so
+	// charging it here would over-project every later consult in the
+	// same pass.
+	var gateUnavail int32
 	isSurgeStrategy := sel.Strategy == UpdateStrategySurgeThenDrain
 	// Same memoized cached read Plan selected from — the pods handed to
 	// the Update op match the selection's evidence.
@@ -351,11 +360,16 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 					}
 				}
 			}
-			if input.UpdateGate != nil {
+			if input.UpdateGate != nil && !item.CoordGateExempt {
 				// Pass in-flight counters so the gate can project
 				// against the post-this-pass shape. Independent
 				// layer from the per-Component check above.
-				if allowed, _ := input.UpdateGate(sel.Strategy, inFlightSurge, inFlightUnavail); !allowed {
+				// CoordGateExempt starts skip the consult: the gate
+				// already counts their outage in its serving-based
+				// unavailability, so gating their own recreate is a
+				// double count that starves the recovery (see
+				// UpdateItem.CoordGateExempt).
+				if allowed, _ := input.UpdateGate(sel.Strategy, inFlightSurge, gateUnavail); !allowed {
 					anyGated = true
 					continue
 				}
@@ -373,6 +387,9 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 				inFlightSurge++
 			} else {
 				inFlightUnavail++
+				if !item.CoordGateExempt {
+					gateUnavail++
+				}
 			}
 		}
 		if !done {
@@ -517,25 +534,4 @@ func findObservedInstanceStatus(observed []InstanceStatus, idx int32) *InstanceS
 		}
 	}
 	return nil
-}
-
-// skipAsHeld reports whether this pass should hold (skip) the Instance at index
-// because the canary RollingUpdate.Partition pins it to the old revision. A held
-// Instance that is ALREADY mid-surge (Phase == InstancePhaseUpdating) is NOT
-// skipped — it must finish.
-//
-// Why the exception: a canary stamps its partition dynamically (StampStepPartition,
-// from status.Canary). On the first post-bump reconcile an Instance can begin a
-// surge before it becomes held, then become held a step later. If we then skipped
-// it, its surge pod would strand — held Instances never run surgeUpdate, so the pod
-// is never promoted to serving (ome.io/serving stays unset → never Ready) AND it
-// permanently consumes the maxSurge budget, budget-blocking the real roll on the
-// non-held Instances → deadlock. Letting the in-flight surge finish promotes+drains
-// it and frees the budget; the only cost is that Instance rolls one step early.
-// Static partition-mode never reaches this (the partition predates any roll).
-func skipAsHeld(ru *RollingUpdate, index int32, observed *InstanceStatus) bool {
-	if !HeldByPartition(ru, index) {
-		return false
-	}
-	return observed == nil || observed.Phase != InstancePhaseUpdating
 }

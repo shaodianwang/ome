@@ -47,13 +47,15 @@ func surgeISVCMultiInstance(name, ns string, incarnation int64) (*v1beta1.Infere
 	return isvc, ir
 }
 
-// readRV returns the ResourceVersion stamped on the persisted ISVC.
-// Used by idempotency tests to confirm a re-invocation didn't bump RV.
+// readRV returns the ResourceVersion of the persisted InferenceReplica —
+// the object every instance-status write in these tests lands on. Used
+// by idempotency tests to confirm a re-invocation didn't bump RV.
 func readRV(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) string {
 	t.Helper()
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("re-read ISVC: %v", err)
+	fresh := &v1beta1.InferenceReplica{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: legacyIRName(isvc, workload.ComponentEngine)}
+	if err := c.Get(context.Background(), key, fresh); err != nil {
+		t.Fatalf("re-read IR: %v", err)
 	}
 	return fresh.ResourceVersion
 }

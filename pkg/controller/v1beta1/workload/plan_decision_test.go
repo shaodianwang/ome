@@ -489,12 +489,222 @@ func TestPlan_Update_HeldByPartition(t *testing.T) {
 		t.Errorf("update items = %+v, want index 1 only (index 0 held)", ua.Update.Items)
 	}
 
-	// A held Instance ALREADY mid-surge is selected so it can finish.
+	// An Instance ALREADY mid-surge is never a hold candidate — it is
+	// selected so it can finish (a held mid-surge Instance would strand
+	// its surge pod and pin the surge budget). The hold falls to the
+	// next old-revision Instance, preserving the Partition count: index
+	// 1 is held instead, so exactly one Instance stays on the old
+	// revision when the roll settles.
 	in.ObservedState.InstanceStatuses[0].Phase = workload.InstancePhaseUpdating
 	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
 	ua = findAction(d, workload.ActionUpdate)
-	if ua == nil || len(ua.Update.Items) != 2 || ua.Update.Items[0].Instance.Index != 0 {
-		t.Errorf("mid-surge held Instance must stay selected; got %+v", ua)
+	if ua == nil || len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 0 {
+		t.Errorf("mid-surge Instance must stay selected and the hold must fall to index 1; got %+v", ua)
+	}
+}
+
+// TestPlan_Update_PartitionHoldsCountOnSparseIndices asserts the
+// partition hold on a SPARSE index set (migration / lowest-unused
+// surge allocation leave gaps): Partition counts Instances to hold —
+// the lowest-indexed old-revision Instances — not raw index values.
+// With old-revision indices {1,2} and Partition=1, exactly the lowest
+// (index 1) is held; raw-index comparison would hold nothing and roll
+// both.
+func TestPlan_Update_PartitionHoldsCountOnSparseIndices(t *testing.T) {
+	target := updateTarget()
+	partition := int32(1)
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  2,
+		Instances: []workload.InstancePlan{
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: workload.UpdateStrategy{
+			Type:          workload.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &workload.RollingUpdate{Partition: &partition},
+		},
+	}
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil {
+		t.Fatalf("expected an Update action, got %v", actionKinds(d))
+	}
+	if len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 2 {
+		t.Errorf("update items = %+v, want index 2 only (index 1 held as rank 0)", ua.Update.Items)
+	}
+
+	// Partition == replicas holds the whole steady set: no update items.
+	partition = 2
+	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	if findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("Partition=replicas must hold every steady Instance, got %v", actionKinds(d))
+	}
+}
+
+// TestPlan_Update_PartitionHoldSurvivesGangSurgeReindex asserts the
+// hold is keyed to revision membership, not index position. Gang surge
+// allocates the lowest unused index for its replacement, so a roll of
+// {1,2} with Partition=1 promotes the target-revision replacement at
+// index 0 — BELOW the held Instance at index 1. A positional hold
+// would let the replacement steal the held slot and un-hold index 1,
+// rolling it too: 100% blast radius under Partition=1 and the staged
+// shape (Partition Instances Ready on the old revision) permanently
+// unreachable. The on-target Instance is past holding; index 1 must
+// stay held.
+func TestPlan_Update_PartitionHoldSurvivesGangSurgeReindex(t *testing.T) {
+	target := updateTarget()
+	partition := int32(1)
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		// The promoted gang-surge replacement: landed at the freed
+		// lowest index, already on the target revision.
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: target.Name},
+		// The canary hold: still on the old revision.
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  2,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: workload.UpdateStrategy{
+			Type:          workload.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &workload.RollingUpdate{Partition: &partition},
+		},
+	}
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	if ua := findAction(d, workload.ActionUpdate); ua != nil {
+		t.Errorf("index 1 must stay held after the replacement re-indexed below it; got update items %+v", ua.Update.Items)
+	}
+}
+
+// TestPlan_Update_StartingFresh_FailedByOperationType asserts the
+// Failed-phase budget exemption is scoped to a preserved UPDATE
+// operation — the only shape CurrentUnavailableInFlight charges as
+// in-flight. Failed with a non-Update operation (e.g. an expired
+// Restart) is not charged, so it must start fresh (budget-gated).
+func TestPlan_Update_StartingFresh_FailedByOperationType(t *testing.T) {
+	target := updateTarget()
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: "Drain"}},
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: "Drain"}},
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  2,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil {
+		t.Fatalf("expected an Update action, got %v", actionKinds(d))
+	}
+	items := ua.Update.Items
+	if len(items) != 2 ||
+		items[0].Instance.Index != 0 || !items[0].StartingFresh ||
+		items[1].Instance.Index != 1 || items[1].StartingFresh {
+		t.Errorf("update items = %+v, want [{0 fresh (Failed+Restart)} {1 continuation (Failed+Update)}]", items)
+	}
+}
+
+// TestPlan_Update_CoordGateExempt_FailedZeroServing asserts the
+// coordination-gate exemption selection on a non-surge strategy: a
+// Failed Instance with zero serving pods starts fresh but skips the
+// gate consult (its outage is already inside the gate's serving-based
+// unavailability count), while a Failed Instance still contributing
+// serving pods keeps the consult (its recreate takes real capacity
+// offline).
+func TestPlan_Update_CoordGateExempt_FailedZeroServing(t *testing.T) {
+	target := updateTarget()
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: "Drain"}},
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			PodCount: 1, ServingPodCount: 1},
+		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev",
+			PodCount: 1, ServingPodCount: 1},
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  3,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategyRecreatePod},
+	}
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil {
+		t.Fatalf("expected an Update action, got %v", actionKinds(d))
+	}
+	items := ua.Update.Items
+	if len(items) != 3 {
+		t.Fatalf("update items = %+v, want 3", items)
+	}
+	if !items[0].StartingFresh || !items[0].CoordGateExempt {
+		t.Errorf("item 0 (Failed+Restart, zero serving) = %+v, want fresh + gate-exempt", items[0])
+	}
+	if !items[1].StartingFresh || items[1].CoordGateExempt {
+		t.Errorf("item 1 (Failed but serving) = %+v, want fresh + gate-consulted", items[1])
+	}
+	if !items[2].StartingFresh || items[2].CoordGateExempt {
+		t.Errorf("item 2 (healthy) = %+v, want fresh + gate-consulted", items[2])
+	}
+}
+
+// TestPlan_Update_CoordGateExempt_SurgeKeepsConsult asserts the
+// exemption never applies under SurgeThenDrain: the surge-side gates
+// count surge pods, not serving loss, and a Failed Instance's
+// recreate-via-surge genuinely adds one.
+func TestPlan_Update_CoordGateExempt_SurgeKeepsConsult(t *testing.T) {
+	target := updateTarget()
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: "Drain"}},
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  1,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+	}
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil {
+		t.Fatalf("expected an Update action, got %v", actionKinds(d))
+	}
+	if len(ua.Update.Items) != 1 || ua.Update.Items[0].CoordGateExempt {
+		t.Errorf("update items = %+v, want one gate-consulted item", ua.Update.Items)
 	}
 }
 

@@ -955,3 +955,84 @@ func TestCreateFreshIndices_NoOpWhenOnlyIndexUpdating(t *testing.T) {
 		t.Fatalf("CreateFreshIndices must not create/duplicate anything for a pure rollout; got %d pods", len(pods.Items))
 	}
 }
+
+// CreateFreshIndices must not treat a surge TARGET marker as a
+// surge-free index: the replacement-gang slot is Phase=Creating but
+// carries the owning op (Update for a gang surge, Migrate for a
+// migration surge). Overwriting the marker with a Create stamp unpins
+// the index from the plan and scale-down churn-deletes the in-flight
+// replacement. With index 1 absent (genuine scale-up) and index 2 a
+// marker, only index 1 may be reconciled.
+func TestCreateFreshIndices_PreservesSurgeTargetMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opType workload.InstanceOperationType
+		step   string
+	}{
+		{name: "gang surge target", opType: workload.InstanceOperationUpdate, step: workload.UpdateStepGangSurgeTarget},
+		{name: "migration surge target", opType: workload.InstanceOperationMigrate, step: "CreateSurge"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := minimalISVC("llama-70b", "prod", 3)
+			markerOp := &v1beta1.InstanceOperation{
+				ID:   "op-marker",
+				Type: v1beta1.InstanceOperationType(tc.opType),
+				Step: tc.step,
+			}
+			ir := seedInstanceStatuses(isvc,
+				v1beta1.OMENativeInstanceStatus{
+					Index: 0, Incarnation: 1,
+					Phase:           v1beta1.OMENativeInstanceUpdating,
+					RunningRevision: "llama-70b-engine-priorrev",
+				},
+				v1beta1.OMENativeInstanceStatus{
+					Index: 2, Incarnation: 1,
+					Phase:     v1beta1.OMENativeInstanceCreating,
+					Operation: markerOp,
+				},
+			)
+			pod0 := podForInstance(isvc, 0, true, true)
+			c := newFakeClient(t, isvc, ir, pod0)
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			// buildTestInput doesn't project Operation; the predicate under
+			// test reads it from ObservedState, so mirror the marker there.
+			for i := range input.ObservedState.InstanceStatuses {
+				if input.ObservedState.InstanceStatuses[i].Index == 2 {
+					input.ObservedState.InstanceStatuses[i].Operation = &workload.InstanceOperation{
+						ID: "op-marker", Type: tc.opType, Step: tc.step,
+					}
+				}
+			}
+			plan := buildPlanSinglePodEngine(3)
+			target := &appsv1.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+			}
+
+			if _, err := ops.CreateFreshIndices(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
+				t.Fatalf("CreateFreshIndices: %v", err)
+			}
+
+			pods := &corev1.PodList{}
+			if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+				t.Fatalf("list pods: %v", err)
+			}
+			got := map[string]bool{}
+			for _, p := range pods.Items {
+				got[p.Name] = true
+			}
+			if !got["llama-70b-engine-1-default-0"] {
+				t.Errorf("fresh index 1 pod must be created; got %v", got)
+			}
+			if got["llama-70b-engine-2-default-0"] {
+				t.Errorf("marker index 2 must not be materialized by the fresh pass; got %v", got)
+			}
+			s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 2)
+			if s == nil || s.Operation == nil ||
+				s.Operation.Type != v1beta1.InstanceOperationType(tc.opType) ||
+				s.Operation.Step != tc.step {
+				t.Errorf("surge target marker must be preserved; got %+v", s)
+			}
+		})
+	}
+}

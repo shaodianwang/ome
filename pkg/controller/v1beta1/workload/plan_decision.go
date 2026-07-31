@@ -61,11 +61,27 @@ type UpdateItem struct {
 	// continuing an in-flight one, so it is subject to the
 	// per-Component budget and the coordination UpdateGate before the
 	// op runs, and it charges the within-pass counters once dispatched.
-	// An Instance mid-operation (Operation set) that escalated to
-	// Phase=Failed is a CONTINUATION of that in-flight surge/drain:
-	// its in-flight pod already counts against the budget, so charging
+	// An Instance whose in-flight UPDATE escalated to Phase=Failed
+	// (Update operation preserved for retry) is a CONTINUATION of that
+	// surge/drain: its in-flight pod already counts against the budget
+	// (CurrentUnavailableInFlight charges Failed+Update), so charging
 	// it again would project over budget and gate the recovery forever.
+	// Failed with any OTHER preserved operation is not budget-charged
+	// as in-flight and starts fresh — the exemption and the charge must
+	// cover the same set, or unbudgeted recreates skew the gate.
 	StartingFresh bool
+	// CoordGateExempt: this fresh start skips the coordination
+	// UpdateGate consult (the per-Component budget still applies). Set
+	// for a Failed Instance with zero serving pods on a non-surge
+	// strategy: the gate's unavailability accounting is serving-based
+	// (desired - ServingReplicas), so the Instance's outage is already
+	// inside the gate's current count — charging its own recreate +1 on
+	// top projects over budget on every pass and starves the recovery
+	// (nothing else can raise ServingReplicas; the denied recreate IS
+	// the recovery). Surge strategies keep the consult: their gates
+	// count surge pods, not serving loss, and the recreate genuinely
+	// adds one.
+	CoordGateExempt bool
 }
 
 // UpdateSelection carries the update pass's per-Instance selections
@@ -268,14 +284,15 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 	if lerr != nil {
 		return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, lerr)
 	}
+	heldIndices := PartitionHeldIndices(rollingUpdate, input.ObservedState.InstanceStatuses, plan.Instances, target.Name)
 	var retryBlockWait time.Duration
 	for _, inst := range plan.Instances {
-		// RollingUpdate.Partition (canary): normally hold Instances with index
-		// < Partition on the old revision (skip their update). skipAsHeld carves
-		// out the one exception — a held Instance ALREADY mid-surge must finish,
-		// not strand its surge pod (see skipAsHeld for the deadlock it avoids).
-		if skipAsHeld(rollingUpdate, inst.Index,
-			findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
+		// RollingUpdate.Partition (canary): hold the selected Instances
+		// on their current revision — skip their update. Membership is
+		// keyed to revision, not index position, and Instances already
+		// converging to target are never held (they must finish); see
+		// PartitionHeldIndices for the full candidacy rule.
+		if heldIndices[inst.Index] {
 			continue
 		}
 		dec := workloadops.EvaluateUpdateTrigger(input, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
@@ -293,8 +310,11 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 		}
 		s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
 		startingFresh := s == nil ||
-			(s.Phase != InstancePhaseUpdating && !(s.Phase == InstancePhaseFailed && s.Operation != nil))
-		sel.Items = append(sel.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh})
+			(s.Phase != InstancePhaseUpdating &&
+				!(s.Phase == InstancePhaseFailed && s.Operation != nil && s.Operation.Type == InstanceOperationUpdate))
+		gateExempt := startingFresh && strategy != UpdateStrategySurgeThenDrain &&
+			s != nil && s.Phase == InstancePhaseFailed && s.ServingPodCount == 0
+		sel.Items = append(sel.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt})
 	}
 	return sel, retryBlockWait, nil
 }

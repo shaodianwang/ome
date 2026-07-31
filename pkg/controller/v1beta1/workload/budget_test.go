@@ -143,12 +143,28 @@ func TestPerComponentMaxUnavailableBudget_Integer(t *testing.T) {
 }
 
 // TestPerComponentMaxUnavailableBudget_Percent mirrors the surge
-// percent case for the unavailability budget.
+// percent case for the unavailability budget. The non-exact rows pin
+// the ceil rounding — a floor regression would return 1 for 33% of 6
+// and 0 for 1% of 1.
 func TestPerComponentMaxUnavailableBudget_Percent(t *testing.T) {
-	ru := &workload.RollingUpdate{MaxUnavailable: intOrStringStr("25%")}
-	got := workload.PerComponentMaxUnavailableBudget(ru, 4)
-	if got != 1 {
-		t.Errorf("25%% on 4 replicas: got %d, want 1", got)
+	for _, tc := range []struct {
+		name     string
+		pct      string
+		replicas int32
+		want     int32
+	}{
+		{name: "25% on 4 replicas → 1 (exact)", pct: "25%", replicas: 4, want: 1},
+		{name: "33% on 6 replicas → 2 (ceil of 1.98)", pct: "33%", replicas: 6, want: 2},
+		{name: "1% on 1 replica → 1 (ceil of 0.01)", pct: "1%", replicas: 1, want: 1},
+		{name: "0% on N replicas → 0", pct: "0%", replicas: 10, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ru := &workload.RollingUpdate{MaxUnavailable: intOrStringStr(tc.pct)}
+			got := workload.PerComponentMaxUnavailableBudget(ru, tc.replicas)
+			if got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -557,6 +573,108 @@ func TestReconcile_FailedUpdateHoldsMaxUnavailableBudget(t *testing.T) {
 	}
 	if !result.Requeue && result.RequeueAfter == 0 {
 		t.Errorf("dispatcher must Requeue when Instance is gated; got %+v", result)
+	}
+}
+
+// TestReconcile_FailedRestart_RecreateBypassesCoordGate is the
+// coordination-gate starvation regression. A Failed Instance with a
+// preserved Restart operation and zero serving pods (restart-deadline
+// expiry after node loss) starts fresh, and the coordination gate's
+// unavailability accounting is serving-based — the dead Instance is
+// already inside currentUnavailable. Consulting the gate for its own
+// recreate projects current+1 over a MaxUnavailable=1 group budget on
+// every pass: the recreate is denied forever at the gate requeue
+// interval and nothing else can raise ServingReplicas, because the
+// denied recreate IS the recovery. The recreate must skip the gate
+// consult (its outage is already charged) while the per-Component
+// budget still applies, and the gate delta seen by later consults in
+// the same pass must not be inflated by the exempt start.
+func TestReconcile_FailedRestart_RecreateBypassesCoordGate(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.DesiredSpec.Replicas = 2
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		// Index 0: restart escalated to Failed with the Restart
+		// operation preserved; its pod is gone (zero serving).
+		{
+			Index: 0, Incarnation: 2,
+			Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationRestart, Step: "Drain",
+			},
+		},
+		// Index 1: Ready and serving on the old revision.
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev",
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1},
+	}
+	mutatedIndices := map[int32]int{}
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+		mutatedIndices[idx]++
+		for i := range in.ObservedState.InstanceStatuses {
+			if in.ObservedState.InstanceStatuses[i].Index == idx {
+				_ = fn(&in.ObservedState.InstanceStatuses[i])
+				break
+			}
+		}
+		return nil
+	}
+	// Mirror coordination.CheckUnavailability's serving-based
+	// accounting for a MaxUnavailable=1 group: desired=2, serving=1
+	// (index 0 is dead), so ANY consulted start projects
+	// 1 + delta + 1 = 2 > 1 and is denied — the double count under
+	// test.
+	var gateDeltas []int32
+	in.UpdateGate = func(_ workload.UpdateStrategyType, _, inFlightUnavail int32) (bool, string) {
+		gateDeltas = append(gateDeltas, inFlightUnavail)
+		const desired, serving, budget = 2, 1, 1
+		if desired-serving+inFlightUnavail+1 > budget {
+			return false, "unavailable budget exhausted"
+		}
+		return true, "within unavailable budget"
+	}
+
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  2,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 2, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: workload.UpdateStrategy{
+			Type: workload.UpdateStrategyRecreatePod,
+			RollingUpdate: &workload.RollingUpdate{
+				// Per-Component layer stays live for the fresh start:
+				// index 0 is not in the prior in-flight anchor
+				// (Failed+Restart is not budget-charged), so
+				// projected 0+1 = 1 fits and the recreate proceeds.
+				MaxUnavailable: intOrStringInt(1),
+			},
+		},
+	}
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	_, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Logf("Reconcile op error (expected against empty fake client): %v", err)
+	}
+
+	// Load-bearing: the dead Instance's recreate was admitted — the
+	// always-over-budget gate must not have been consulted for it.
+	if mutatedIndices[0] == 0 {
+		t.Errorf("Failed+Restart recreate must bypass the coordination gate consult; index 0 never started (mutations=%v, gate deltas=%v)", mutatedIndices, gateDeltas)
+	}
+	// Any consult that did happen (index 1) must see delta 0: the
+	// exempt start takes no serving pod offline, so charging it would
+	// re-introduce the double count against healthy peers.
+	for _, d := range gateDeltas {
+		if d != 0 {
+			t.Errorf("gate consult saw in-flight unavail delta %d, want 0 (exempt start must not be charged); deltas=%v", d, gateDeltas)
+		}
 	}
 }
 

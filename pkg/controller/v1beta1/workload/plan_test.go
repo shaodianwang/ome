@@ -448,30 +448,117 @@ func TestAllocateSurgeIndex(t *testing.T) {
 	}
 }
 
-// TestSkipAsHeld guards the canary surge-stranding fix: a held Instance that is
-// already mid-surge must NOT be skipped (it has to finish, else its surge pod
-// strands — never promoted to serving — and permanently consumes the maxSurge
-// budget, deadlocking the roll). Every other held Instance is skipped.
-func TestSkipAsHeld(t *testing.T) {
+// TestPartitionHeldIndices pins the canary hold-membership rule: the
+// lowest-indexed `Partition` Instances observed OFF the target revision
+// are held; Instances converging to target (mid-update, preserved
+// Update op — including gang-surge target markers), transient migration
+// surges, and unobserved Instances are never hold candidates. Holding a
+// mid-surge Instance would strand its surge pod (never promoted to
+// serving) and permanently consume the maxSurge budget, deadlocking the
+// roll — the hold falls to the next-lowest old-revision Instance
+// instead.
+func TestPartitionHeldIndices(t *testing.T) {
 	p := func(v int32) *int32 { return &v }
-	held := &RollingUpdate{Partition: p(2)} // holds Instances with index 0,1
+	planFor := func(indices ...int32) []InstancePlan {
+		out := make([]InstancePlan, 0, len(indices))
+		for _, idx := range indices {
+			out = append(out, InstancePlan{Index: idx})
+		}
+		return out
+	}
+	const target = "owner-engine-target"
 	cases := []struct {
-		name string
-		ru   *RollingUpdate
-		idx  int32
-		obs  *InstanceStatus
-		want bool
+		name     string
+		ru       *RollingUpdate
+		observed []InstanceStatus
+		planned  []InstancePlan
+		want     map[int32]bool
 	}{
-		{"nil rollingUpdate → never held", nil, 0, nil, false},
-		{"index >= partition → not held, rolls normally", held, 2, nil, false},
-		{"held + no observed status → skip", held, 0, nil, true},
-		{"held + not updating → skip", held, 1, &InstanceStatus{}, true},
-		{"held + mid-surge → must finish, do NOT skip", held, 0, &InstanceStatus{Phase: InstancePhaseUpdating}, false},
+		{
+			name:    "nil rollingUpdate holds nothing",
+			ru:      nil,
+			planned: planFor(0, 1),
+			observed: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseReady, RunningRevision: "old"},
+				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+			},
+			want: map[int32]bool{},
+		},
+		{
+			name:    "lowest old-revision Instances held, count = Partition",
+			ru:      &RollingUpdate{Partition: p(2)},
+			planned: planFor(0, 1, 2),
+			observed: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseReady, RunningRevision: "old"},
+				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+				{Index: 2, Phase: InstancePhaseReady, RunningRevision: "old"},
+			},
+			want: map[int32]bool{0: true, 1: true},
+		},
+		{
+			name:    "on-target Instance is past holding; hold keys to revision, not position",
+			ru:      &RollingUpdate{Partition: p(1)},
+			planned: planFor(0, 1),
+			observed: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseReady, RunningRevision: target},
+				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+			},
+			want: map[int32]bool{1: true},
+		},
+		{
+			name:    "mid-update Instance must finish — hold falls to next old-revision Instance",
+			ru:      &RollingUpdate{Partition: p(1)},
+			planned: planFor(0, 1),
+			observed: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: "old",
+					Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge"}},
+				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+			},
+			want: map[int32]bool{1: true},
+		},
+		{
+			name:    "Failed Update continuation and gang-surge target marker are never held",
+			ru:      &RollingUpdate{Partition: p(2)},
+			planned: planFor(0, 1, 2),
+			observed: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseCreating, RunningRevision: "",
+					Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}},
+				{Index: 1, Phase: InstancePhaseFailed, RunningRevision: "old",
+					Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Drain"}},
+				{Index: 2, Phase: InstancePhaseReady, RunningRevision: "old"},
+			},
+			want: map[int32]bool{2: true},
+		},
+		{
+			name:    "migration surge target excluded; Migrating source stays a candidate",
+			ru:      &RollingUpdate{Partition: p(1)},
+			planned: planFor(1, 5),
+			observed: []InstanceStatus{
+				{Index: 1, Phase: InstancePhaseMigrating, RunningRevision: "old",
+					Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+				{Index: 5, Phase: InstancePhaseCreating, RunningRevision: "",
+					Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+			},
+			want: map[int32]bool{1: true},
+		},
+		{
+			name:     "unobserved planned Instances are not candidates",
+			ru:       &RollingUpdate{Partition: p(2)},
+			planned:  planFor(0, 1),
+			observed: []InstanceStatus{{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"}},
+			want:     map[int32]bool{1: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := skipAsHeld(tc.ru, tc.idx, tc.obs); got != tc.want {
-				t.Errorf("skipAsHeld = %v, want %v", got, tc.want)
+			got := PartitionHeldIndices(tc.ru, tc.observed, tc.planned, target)
+			if len(got) != len(tc.want) {
+				t.Fatalf("held = %v, want %v", got, tc.want)
+			}
+			for idx := range tc.want {
+				if !got[idx] {
+					t.Errorf("held = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}

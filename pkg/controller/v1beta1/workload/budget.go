@@ -33,6 +33,9 @@
 package workload
 
 import (
+	"sort"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -75,16 +78,83 @@ func PerComponentMaxUnavailableBudget(ru *RollingUpdate, replicas int32) int32 {
 	return utils.ScaledCountFromIntOrString(ru.MaxUnavailable, replicas, true)
 }
 
-// HeldByPartition reports whether the Instance at `index` is held on the old
-// revision by RollingUpdate.Partition (the StatefulSet-style canary): Instances
-// with index < Partition are held. A nil RollingUpdate, nil Partition, or
-// Partition <= 0 holds nothing. Surge Instances are allocated above the replica
-// count, so their index >= replicas >= Partition and they are never held.
-func HeldByPartition(ru *RollingUpdate, index int32) bool {
+// HeldByPartition reports whether the hold candidate at `rank` (its
+// position in PartitionHeldIndices' ascending candidate order) is held
+// by RollingUpdate.Partition (the StatefulSet-style canary): the first
+// `Partition` candidates are held. A nil RollingUpdate, nil Partition,
+// or Partition <= 0 holds nothing.
+func HeldByPartition(ru *RollingUpdate, rank int32) bool {
 	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
 		return false
 	}
-	return index < *ru.Partition
+	return rank < *ru.Partition
+}
+
+// PartitionHeldIndices returns the set of Instance indices
+// RollingUpdate.Partition holds on their current revision this pass.
+// Partition counts Instances to hold, not index values — migration and
+// lowest-unused surge allocation leave sparse index sets (e.g. {1,2}
+// for replicas=2), so a raw index<Partition compare holds the wrong
+// count. The hold is keyed to revision membership, not position in the
+// index set: gang surge places TARGET-revision replacements at freed
+// (often lower) indices, so a positional hold would let a replacement
+// steal a held slot mid-roll and un-hold a still-old Instance — ending
+// the roll with zero old-revision Instances and the desired staged
+// shape (ReachedDesiredShape) permanently unsatisfiable.
+//
+// Hold candidates are planned Instances observed OFF the target
+// revision (unset RunningRevision included — ReachedDesiredShape
+// counts those as held too, and the two must agree on membership).
+// Excluded from candidacy, so they are never held:
+//   - unobserved Instances (nothing running to hold);
+//   - Instances already converging to target — Phase=Updating and any
+//     preserved Update operation (gang-surge target markers, Failed
+//     continuations). An in-flight update must finish: holding it
+//     strands its surge pod, which is never promoted to serving and
+//     permanently consumes the surge budget, deadlocking the roll on
+//     the non-held Instances. The hold falls to the next-lowest old-
+//     revision Instance instead, preserving the count;
+//   - transient migration surge Instances (Op.Type=Migrate on a
+//     non-Migrating phase) — the pair's source carries the steady
+//     capacity.
+//
+// The lowest-indexed `Partition` candidates are held.
+func PartitionHeldIndices(ru *RollingUpdate, observed []InstanceStatus, planned []InstancePlan, targetRevName string) map[int32]bool {
+	held := make(map[int32]bool)
+	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
+		return held
+	}
+	tgt := query.RevisionFromName(targetRevName)
+	candidates := make([]int32, 0, len(planned))
+	for _, inst := range planned {
+		s := findObservedInstanceStatus(observed, inst.Index)
+		if s == nil {
+			continue
+		}
+		if query.RevisionFromName(s.RunningRevision).Same(tgt) {
+			continue
+		}
+		if s.Phase == InstancePhaseUpdating {
+			continue
+		}
+		if s.Operation != nil {
+			if s.Operation.Type == InstanceOperationUpdate {
+				continue
+			}
+			if s.Operation.Type == InstanceOperationMigrate && s.Phase != InstancePhaseMigrating {
+				continue
+			}
+		}
+		candidates = append(candidates, inst.Index)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i] < candidates[j] })
+	for i, idx := range candidates {
+		if !HeldByPartition(ru, int32(i)) {
+			break
+		}
+		held[idx] = true
+	}
+	return held
 }
 
 // CurrentSurgeInFlight counts InstanceStatuses participating in an
