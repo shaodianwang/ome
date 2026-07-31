@@ -370,6 +370,55 @@ func TestCreateRawDeployment(t *testing.T) {
 	}
 }
 
+func TestCreateRawDeploymentDoesNotShareLabels(t *testing.T) {
+	componentMeta := metav1.ObjectMeta{
+		Name:      "test-isvc",
+		Namespace: "default",
+		Labels: map[string]string{
+			"existing": "label",
+		},
+		Annotations: map[string]string{
+			constants.DedicatedAICluster: "dac-queue",
+		},
+	}
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "test-container"}},
+	}
+
+	deployment := createRawDeployment(componentMeta, &v1beta1.ComponentExtensionSpec{}, podSpec)
+
+	// Pod template carries the stamped labels.
+	assert.Equal(t, constants.GetRawServiceLabel(componentMeta.Name), deployment.Spec.Template.Labels["app"])
+	assert.Equal(t, "dac-queue", deployment.Spec.Template.Labels[constants.VolcanoQueueName])
+
+	// Pod-only labels must not leak into the caller's metadata or the
+	// Deployment's object-level metadata.
+	assert.NotContains(t, componentMeta.Labels, "app")
+	assert.NotContains(t, componentMeta.Labels, constants.VolcanoQueueName)
+	assert.NotContains(t, deployment.Labels, "app")
+	assert.NotContains(t, deployment.Labels, constants.VolcanoQueueName)
+
+	// Mutating the deployment's labels must not touch the caller's map.
+	deployment.Labels["mutated"] = "true"
+	assert.NotContains(t, componentMeta.Labels, "mutated")
+}
+
+func TestCreateRawDeploymentNilLabels(t *testing.T) {
+	componentMeta := metav1.ObjectMeta{
+		Name:      "test-isvc",
+		Namespace: "default",
+	}
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "test-container"}},
+	}
+
+	deployment := createRawDeployment(componentMeta, &v1beta1.ComponentExtensionSpec{}, podSpec)
+
+	assert.Equal(t, constants.GetRawServiceLabel(componentMeta.Name), deployment.Spec.Template.Labels["app"])
+	assert.Nil(t, componentMeta.Labels)
+	assert.Nil(t, deployment.Labels)
+}
+
 func TestNewDeploymentReconciler(t *testing.T) {
 	// Setup test scheme
 	scheme := runtime.NewScheme()
@@ -455,8 +504,9 @@ func TestCheckDeploymentExist(t *testing.T) {
 
 	// 2. Test case: Deployment exists but needs updates (should return CheckResultUpdate)
 	t.Run("Deployment exists but needs updates", func(t *testing.T) {
-		// Create an existing deployment with different specs
-		existingDeployment := createRawDeployment(componentMeta, componentExt, podSpec)
+		// Build the existing deployment from a copy so mutating it below does
+		// not also mutate the reconciler's desired spec.
+		existingDeployment := createRawDeployment(componentMeta, componentExt, podSpec.DeepCopy())
 		// Modify it to be different
 		existingDeployment.Spec.Template.Spec.Containers[0].Image = "different-image:latest"
 
@@ -469,10 +519,7 @@ func TestCheckDeploymentExist(t *testing.T) {
 		// Call checkDeploymentExist
 		result, deployObj, err := reconciler.checkDeploymentExist()
 		assert.NoError(t, err)
-		// Debug the values
-		t.Logf("Expected: %d, Actual: %d", constants.CheckResultUpdate, result)
-		// Use the actual value instead of the constant for now
-		assert.Equal(t, constants.CheckResultType(2), result)
+		assert.Equal(t, constants.CheckResultUpdate, result)
 		assert.NotNil(t, deployObj)
 		assert.Equal(t, existingDeployment.Name, deployObj.Name)
 	})

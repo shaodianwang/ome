@@ -47,13 +47,19 @@ func createRawDeployment(componentMeta metav1.ObjectMeta,
 	componentExt *v1beta1.ComponentExtensionSpec,
 	podSpec *corev1.PodSpec) *appsv1.Deployment {
 
-	podMetadata := componentMeta
+	// Deep-copy the metadata so pod-template label stamping cannot leak into
+	// the caller's maps or the Deployment's own object-level metadata.
+	deploymentMeta := *componentMeta.DeepCopy()
+	podMetadata := *componentMeta.DeepCopy()
+	if podMetadata.Labels == nil {
+		podMetadata.Labels = map[string]string{}
+	}
 	podMetadata.Labels["app"] = constants.TruncateNameWithMaxLength(componentMeta.Name, 63)
 	utils.SetPodLabelsFromAnnotations(&podMetadata)
 	setDefaultPodSpec(podSpec)
 
 	deployment := &appsv1.Deployment{
-		ObjectMeta: componentMeta,
+		ObjectMeta: deploymentMeta,
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
