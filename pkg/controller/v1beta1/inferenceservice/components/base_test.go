@@ -332,6 +332,119 @@ func TestProcessBaseLabels(t *testing.T) {
 	g.Expect(labels).To(gomega.HaveKeyWithValue(constants.BaseModelVendorLabelKey, "meta"))
 }
 
+// TestProcessBaseAnnotationsFTStrategy pins the fine-tuned strategy
+// annotation contract: a string strategy is stamped; an absent or
+// non-string strategy is a loud error (never a silent nil annotations
+// map, never a type-assertion panic).
+func TestProcessBaseAnnotationsFTStrategy(t *testing.T) {
+	mkFields := func(hyperParameters string) *BaseComponentFields {
+		return &BaseComponentFields{
+			FineTunedServing: true,
+			FineTunedWeights: []*v1beta1.FineTunedWeight{{
+				ObjectMeta: metav1.ObjectMeta{Name: "ftw-1"},
+				Spec: v1beta1.FineTunedWeightSpec{
+					HyperParameters: runtime.RawExtension{Raw: []byte(hyperParameters)},
+				},
+			}},
+			Log: logr.Discard(),
+		}
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+	}
+
+	tests := []struct {
+		name            string
+		hyperParameters string
+		wantErr         bool
+		wantStrategy    string
+	}{
+		{
+			name:            "string strategy stamped",
+			hyperParameters: `{"strategy":"tfew"}`,
+			wantStrategy:    "tfew",
+		},
+		{
+			name:            "absent strategy is an error, not silent success",
+			hyperParameters: `{"other":"x"}`,
+			wantErr:         true,
+		},
+		{
+			name:            "non-string strategy is an error, not a panic",
+			hyperParameters: `{"strategy":42}`,
+			wantErr:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			var annotations map[string]string
+			var err error
+			g.Expect(func() {
+				annotations, err = ProcessBaseAnnotations(mkFields(tt.hyperParameters), isvc, map[string]string{})
+			}).NotTo(gomega.Panic())
+			if tt.wantErr {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(annotations).To(gomega.BeNil())
+			} else {
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				g.Expect(annotations).To(gomega.HaveKeyWithValue(constants.FineTunedWeightFTStrategyKey, tt.wantStrategy))
+			}
+		})
+	}
+}
+
+// TestProcessBaseLabelsNonStringStrategy verifies a non-string strategy
+// hyper-parameter is a returned error rather than a reconcile panic.
+func TestProcessBaseLabelsNonStringStrategy(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	b := &BaseComponentFields{
+		FineTunedServing: true,
+		FineTunedWeights: []*v1beta1.FineTunedWeight{{
+			ObjectMeta: metav1.ObjectMeta{Name: "ftw-1"},
+			Spec: v1beta1.FineTunedWeightSpec{
+				HyperParameters: runtime.RawExtension{Raw: []byte(`{"strategy":{"nested":true}}`)},
+			},
+		}},
+		Log: logr.Discard(),
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+	}
+
+	var err error
+	g.Expect(func() {
+		_, err = ProcessBaseLabels(b, isvc, v1beta1.EngineComponent, nil)
+	}).NotTo(gomega.Panic())
+	g.Expect(err).To(gomega.HaveOccurred())
+}
+
+// TestProcessComponentLabelsDoesNotMutateISVCLabels guards the copy
+// semantics: the per-Component label build must never write through to
+// the live ISVC label map.
+func TestProcessComponentLabelsDoesNotMutateISVCLabels(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	b := &BaseComponentFields{
+		RuntimeName: "test-runtime",
+		Log:         logr.Discard(),
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+			Labels:    map[string]string{"user-label": "user-value"},
+		},
+	}
+
+	labels, err := ProcessComponentLabels(b, isvc, v1beta1.EngineComponent, nil)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(labels).To(gomega.HaveKeyWithValue("user-label", "user-value"))
+	g.Expect(labels).To(gomega.HaveKey(constants.OMEComponentLabel))
+	g.Expect(isvc.Labels).To(gomega.Equal(map[string]string{"user-label": "user-value"}),
+		"component label stamping must not leak into isvc.Labels")
+}
+
 // TestUpdateComponentStatusLeanModel verifies that UpdateComponentStatus does
 // NOT touch isvc.Status.ModelStatus when spec.model is nil — the "lean"
 // runtime-only ISVC shape supported by the webhook. Prior to the fix, the

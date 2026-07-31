@@ -28,14 +28,14 @@ type ServingSidecarInjector struct {
 	RealmDomainComponent string `json:"realmDomainComponent"`
 }
 
-func newServingSidecarInjector(configMap *v1.ConfigMap) *ServingSidecarInjector {
+func newServingSidecarInjector(configMap *v1.ConfigMap) (*ServingSidecarInjector, error) {
 	servingSidecarInjector := &ServingSidecarInjector{}
 	if servingSidecarConfigVal, ok := configMap.Data[servingSidecarConfigMapKeyName]; ok {
 		if err := json.Unmarshal([]byte(servingSidecarConfigVal), servingSidecarInjector); err != nil {
-			panic(fmt.Errorf("unable to unmarshal %v json string: %w", servingSidecarConfigMapKeyName, err))
+			return nil, fmt.Errorf("unable to unmarshal %v json string: %w", servingSidecarConfigMapKeyName, err)
 		}
 	}
-	return servingSidecarInjector
+	return servingSidecarInjector, nil
 }
 
 // InjectServingSidecar injects the serving sidecar container into the

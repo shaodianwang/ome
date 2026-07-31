@@ -75,13 +75,16 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Denied(err.Error())
 	}
 
+	// Spec-only checks run outside the loop so they still apply when the
+	// namespace has no other runtimes.
+	if err := validation.ValidateModelFormatPrioritySame(&servingRuntime.Spec); err != nil {
+		return admission.Denied(fmt.Sprintf(PriorityIsNotSameServingRuntimeError, err.Error(), servingRuntime.Name))
+	}
+	if err := validateServingRuntimeAnnotations(&servingRuntime.Spec); err != nil {
+		return admission.Denied(ChainsawInjectAnnotationNotAllowError)
+	}
+
 	for i := range existing.Items {
-		if err := validation.ValidateModelFormatPrioritySame(&servingRuntime.Spec); err != nil {
-			return admission.Denied(fmt.Sprintf(PriorityIsNotSameServingRuntimeError, err.Error(), servingRuntime.Name))
-		}
-		if err := validateServingRuntimeAnnotations(&servingRuntime.Spec); err != nil {
-			return admission.Denied(ChainsawInjectAnnotationNotAllowError)
-		}
 		if err := validateServingRuntimePriority(&servingRuntime.Spec, &existing.Items[i].Spec, servingRuntime.Name, existing.Items[i].Name); err != nil {
 			return admission.Denied(fmt.Sprintf(InvalidPriorityServingRuntimeError, err.Error(), existing.Items[i].Name, servingRuntime.Name, servingRuntime.Namespace))
 		}
@@ -118,13 +121,16 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 		return admission.Denied(err.Error())
 	}
 
+	// Spec-only checks run outside the loop so they still apply when no
+	// other ClusterServingRuntimes exist.
+	if err := validation.ValidateModelFormatPrioritySame(&clusterServingRuntime.Spec); err != nil {
+		return admission.Denied(fmt.Sprintf(PriorityIsNotSameClusterServingRuntimeError, err.Error(), clusterServingRuntime.Name))
+	}
+	if err := validateServingRuntimeAnnotations(&clusterServingRuntime.Spec); err != nil {
+		return admission.Denied(ChainsawInjectAnnotationNotAllowError)
+	}
+
 	for i := range existing.Items {
-		if err := validation.ValidateModelFormatPrioritySame(&clusterServingRuntime.Spec); err != nil {
-			return admission.Denied(fmt.Sprintf(PriorityIsNotSameClusterServingRuntimeError, err.Error(), clusterServingRuntime.Name))
-		}
-		if err := validateServingRuntimeAnnotations(&clusterServingRuntime.Spec); err != nil {
-			return admission.Denied(ChainsawInjectAnnotationNotAllowError)
-		}
 		// Pass the existing CSR's name from the loop as
 		// existingRuntimeName so the `existingRuntimeName ==
 		// newRuntimeName` early-exit in validateServingRuntimePriority

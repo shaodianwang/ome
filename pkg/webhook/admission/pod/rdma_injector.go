@@ -280,7 +280,17 @@ func (ri *RDMAInjector) injectContainerConfig(container *v1.Container, profile R
 		keys = append(keys, name)
 	}
 	sort.Strings(keys)
+	// Existing env vars are authoritative: skip profile entries already
+	// present so operator overrides survive and webhook reinvocation
+	// doesn't stack duplicates.
+	existingEnv := make(map[string]struct{}, len(container.Env))
+	for _, env := range container.Env {
+		existingEnv[env.Name] = struct{}{}
+	}
 	for _, name := range keys {
+		if _, ok := existingEnv[name]; ok {
+			continue
+		}
 		container.Env = append(container.Env, v1.EnvVar{
 			Name:  name,
 			Value: profile.EnvVars[name],
@@ -295,7 +305,11 @@ func (ri *RDMAInjector) injectContainerConfig(container *v1.Container, profile R
 
 	// Security context merge: preserve the operator's choices, add what
 	// the profile demands. Existing capabilities and Privileged are
-	// authoritative; only nil entries are filled.
+	// authoritative; only nil entries are filled. Profiles without a
+	// securityContext (attachment-only) leave the container untouched.
+	if profile.SecurityContext == nil {
+		return
+	}
 	if container.SecurityContext == nil {
 		container.SecurityContext = profile.SecurityContext.DeepCopy()
 		return

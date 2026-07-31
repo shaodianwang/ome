@@ -31,15 +31,15 @@ type FineTunedAdapterInjector struct {
 	client              client.Client
 }
 
-func newFineTunedAdapterInjector(configMap *v1.ConfigMap, client client.Client) *FineTunedAdapterInjector {
+func newFineTunedAdapterInjector(configMap *v1.ConfigMap, client client.Client) (*FineTunedAdapterInjector, error) {
 	fineTunedAdapterInjector := &FineTunedAdapterInjector{}
 	if fineTunedAdapterConfigVal, ok := configMap.Data[fineTunedAdapterConfigMapKeyName]; ok {
 		if err := json.Unmarshal([]byte(fineTunedAdapterConfigVal), fineTunedAdapterInjector); err != nil {
-			panic(fmt.Errorf("unable to unmarshal %v json string: %w", fineTunedAdapterConfigMapKeyName, err))
+			return nil, fmt.Errorf("unable to unmarshal %v json string: %w", fineTunedAdapterConfigMapKeyName, err)
 		}
 	}
 	fineTunedAdapterInjector.client = client
-	return fineTunedAdapterInjector
+	return fineTunedAdapterInjector, nil
 }
 
 // InjectFineTunedAdapter injects the fine-tuned weight init container
@@ -64,7 +64,10 @@ func (fa *FineTunedAdapterInjector) injectFineTunedAdapter(pod *v1.Pod) error {
 		return err
 	}
 
-	fineTunedWeightUri, _ := fa.getFineTunedWeightUri(pod)
+	fineTunedWeightUri, err := fa.getFineTunedWeightUri(pod)
+	if err != nil {
+		return fmt.Errorf("failed to resolve fine-tuned weight URI for %s: %w", fa.fineTunedWeightName, err)
+	}
 	initEnvs, err := fa.getModelInitEnvs(pod, fineTunedWeightUri)
 	if err != nil {
 		return err
@@ -120,6 +123,9 @@ func (fa *FineTunedAdapterInjector) getFineTunedWeightUri(pod *v1.Pod) (*storage
 	fineTunedWeight, err := isvcutils.GetFineTunedWeight(fa.client, fa.fineTunedWeightName)
 	if err != nil {
 		return nil, err
+	}
+	if fineTunedWeight.Spec.Storage == nil || fineTunedWeight.Spec.Storage.StorageUri == nil {
+		return nil, fmt.Errorf("fine-tuned weight %s has no storage URI", fa.fineTunedWeightName)
 	}
 	osUri, err := storage.ParseOCIStorageURI(*fineTunedWeight.Spec.Storage.StorageUri)
 	if err != nil {

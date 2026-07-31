@@ -168,3 +168,41 @@ func TestKnownPresetNames_Sorted(t *testing.T) {
 	g := gomega.NewWithT(t)
 	g.Expect(knownPresetNames()).To(gomega.Equal([]string{"sglang-pd"}))
 }
+
+// TestMutator_PreservesUnknownFields verifies the patch never removes
+// spec fields this build's Go types don't know about (e.g. a newer CRD
+// schema during version skew): the patch base is the decoded object, so
+// decode-dropped fields stay out of the diff.
+func TestMutator_PreservesUnknownFields(t *testing.T) {
+	g := gomega.NewWithT(t)
+	sr := &v1beta1.ServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "rt-future", Namespace: "ns",
+			Annotations: map[string]string{constants.RuntimeEngineAnnotationKey: "sglang-pd"},
+		},
+	}
+	var doc map[string]any
+	g.Expect(json.Unmarshal(encodeSR(t, sr), &doc)).To(gomega.Succeed())
+	doc["spec"].(map[string]any)["futureField"] = "keep-me"
+	raw, err := json.Marshal(doc)
+	g.Expect(err).To(gomega.BeNil())
+
+	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Object: runtime.RawExtension{Raw: raw}}}
+	m := &ServingRuntimeMutator{Decoder: newDecoder(t)}
+	resp := m.Handle(context.Background(), req)
+	g.Expect(resp.Allowed).To(gomega.BeTrue())
+	g.Expect(resp.Patches).NotTo(gomega.BeEmpty())
+
+	patchJSON, err := json.Marshal(resp.Patches)
+	g.Expect(err).To(gomega.BeNil())
+	patch, err := jsonpatch.DecodePatch(patchJSON)
+	g.Expect(err).To(gomega.BeNil())
+	out, err := patch.Apply(raw)
+	g.Expect(err).To(gomega.BeNil())
+
+	var patchedDoc map[string]any
+	g.Expect(json.Unmarshal(out, &patchedDoc)).To(gomega.Succeed())
+	g.Expect(patchedDoc["spec"].(map[string]any)).To(gomega.HaveKeyWithValue("futureField", "keep-me"))
+	// The preset merge itself must still land.
+	g.Expect(patchedDoc["spec"].(map[string]any)).To(gomega.HaveKey("engineConfig"))
+}

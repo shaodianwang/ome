@@ -36,7 +36,7 @@ func (mutator *Mutator) Handle(ctx context.Context, req admission.Request) admis
 		return admission.ValidationResponse(true, "")
 	}
 
-	configMap, err := mutator.Clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(),
+	configMap, err := mutator.Clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(ctx,
 		constants.InferenceServiceConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		log.Error(err, "Failed to find config map", "name", constants.InferenceServiceConfigMapName)
@@ -77,9 +77,15 @@ func (mutator *Mutator) mutate(pod *v1.Pod, configMap *v1.ConfigMap) error {
 		return err
 	}
 
-	fineTunedAdapterInjector := newFineTunedAdapterInjector(configMap, mutator.Client)
+	fineTunedAdapterInjector, err := newFineTunedAdapterInjector(configMap, mutator.Client)
+	if err != nil {
+		return err
+	}
 
-	servingSidecarInjector := newServingSidecarInjector(configMap)
+	servingSidecarInjector, err := newServingSidecarInjector(configMap)
+	if err != nil {
+		return err
+	}
 
 	rdmaInjector := NewRDMAInjector()
 	shmInjector := NewShmInjector()

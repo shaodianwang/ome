@@ -49,8 +49,12 @@ func (m *ServingRuntimeMutator) Handle(_ context.Context, req admission.Request)
 	if merged == nil {
 		return admission.Allowed("no engine preset annotation")
 	}
+	original, errResp := marshalForPatch(sr)
+	if errResp != nil {
+		return *errResp
+	}
 	sr.Spec = *merged
-	return patchResponse(req, sr)
+	return patchResponse(original, sr)
 }
 
 type ClusterServingRuntimeMutator struct {
@@ -70,8 +74,12 @@ func (m *ClusterServingRuntimeMutator) Handle(_ context.Context, req admission.R
 	if merged == nil {
 		return admission.Allowed("no engine preset annotation")
 	}
+	original, errResp := marshalForPatch(csr)
+	if errResp != nil {
+		return *errResp
+	}
 	csr.Spec = *merged
-	return patchResponse(req, csr)
+	return patchResponse(original, csr)
 }
 
 // applyPreset returns (merged, nil) on success, (nil, &resp) on
@@ -102,7 +110,30 @@ func applyPreset(annotations map[string]string, spec *v1beta1.ServingRuntimeSpec
 	return merged, nil
 }
 
-func patchResponse(req admission.Request, obj any) admission.Response {
+// marshalForPatch serializes the decoded (pre-mutation) object as the
+// patch base. Diffing against the decoded object, not the raw request,
+// keeps fields this build's API types don't know out of the patch — a
+// raw-based diff would emit remove ops that destroy them.
+func marshalForPatch(obj any) ([]byte, *admission.Response) {
+	out, err := json.Marshal(obj)
+	if err != nil {
+		log.Error(err, "marshal runtime for patch base")
+		resp := admission.Errored(http.StatusInternalServerError, err)
+		return nil, &resp
+	}
+	// ServingRuntimePodSpec.Containers (embedded) lacks omitempty, so
+	// a nil slice marshals as "null". CRD validation rejects null
+	// arrays; strip them so base and target are symmetric.
+	out, err = runtimeinheritance.StripJSONNulls(out)
+	if err != nil {
+		log.Error(err, "strip nulls from runtime patch base")
+		resp := admission.Errored(http.StatusInternalServerError, err)
+		return nil, &resp
+	}
+	return out, nil
+}
+
+func patchResponse(original []byte, obj any) admission.Response {
 	out, err := json.Marshal(obj)
 	if err != nil {
 		log.Error(err, "marshal mutated runtime")
@@ -116,7 +147,7 @@ func patchResponse(req admission.Request, obj any) admission.Response {
 		log.Error(err, "strip nulls from mutated runtime")
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-	return admission.PatchResponseFromRaw(req.AdmissionRequest.Object.Raw, out)
+	return admission.PatchResponseFromRaw(original, out)
 }
 
 func knownPresetNames() []string {
