@@ -2,6 +2,7 @@ package canary
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -10,13 +11,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
+
+// mustSecondaryReady calls secondaryCapacityReady and fails the test on a read
+// error, so gate assertions stay one-liners.
+func mustSecondaryReady(t *testing.T, ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, primary v1beta1.ComponentType) bool {
+	t.Helper()
+	ok, err := secondaryCapacityReady(ctx, reads, isvc, perRev, readyPerRev, primary)
+	if err != nil {
+		t.Fatalf("secondaryCapacityReady error: %v", err)
+	}
+	return ok
+}
 
 // ir builds an InferenceReplica whose UpdateRevision names the per-Component
 // canary target (so canaryTargetHash resolves the right per-Component hash).
@@ -46,7 +60,7 @@ func TestSecondaryCapacityReady(t *testing.T) {
 	eng := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "e1"}, Spec: v1beta1.InferenceServiceSpec{Rollout: engPlan}}
 	eng.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	engRead := fake.NewClientBuilder().WithScheme(canaryScheme(t)).Build()
-	if !secondaryCapacityReady(ctx, engRead, eng,
+	if !mustSecondaryReady(t, ctx, engRead, eng,
 		map[v1beta1.ComponentType]map[string]int32{v1beta1.EngineComponent: {"eng": 1}},
 		map[v1beta1.ComponentType]map[string]int32{v1beta1.EngineComponent: {"eng": 1}},
 		v1beta1.EngineComponent) {
@@ -77,14 +91,14 @@ func TestSecondaryCapacityReady(t *testing.T) {
 		v1beta1.RouterComponent: {"rtr": 2},
 		v1beta1.EngineComponent: {"eng": 1, "engOld": 3},
 	}
-	if secondaryCapacityReady(ctx, pdReads, mkPD(), below, below, v1beta1.RouterComponent) {
+	if mustSecondaryReady(t, ctx, pdReads, mkPD(), below, below, v1beta1.RouterComponent) {
 		t.Fatal("engine secondary below its step newCount → not ready")
 	}
 	at := map[v1beta1.ComponentType]map[string]int32{
 		v1beta1.RouterComponent: {"rtr": 2},
 		v1beta1.EngineComponent: {"eng": 2, "engOld": 2},
 	}
-	if !secondaryCapacityReady(ctx, pdReads, mkPD(), at, at, v1beta1.RouterComponent) {
+	if !mustSecondaryReady(t, ctx, pdReads, mkPD(), at, at, v1beta1.RouterComponent) {
 		t.Fatal("engine secondary at its step newCount → ready")
 	}
 }
@@ -124,7 +138,7 @@ func TestSecondaryCapacityReady_PerComponentHashes(t *testing.T) {
 		v1beta1.EngineComponent:  {"73e1335d": 2, "engOld": 2},
 		v1beta1.DecoderComponent: {"f8f90d6d": 2, "decOld": 2},
 	}
-	if !secondaryCapacityReady(ctx, reads, pd, ready, ready, v1beta1.RouterComponent) {
+	if !mustSecondaryReady(t, ctx, reads, pd, ready, ready, v1beta1.RouterComponent) {
 		t.Fatal("secondaries at their own per-Component canary capacity → must be ready (was stuck Pending on the primary's hash)")
 	}
 
@@ -134,7 +148,7 @@ func TestSecondaryCapacityReady_PerComponentHashes(t *testing.T) {
 		v1beta1.EngineComponent:  {"73e1335d": 1, "engOld": 3},
 		v1beta1.DecoderComponent: {"f8f90d6d": 2, "decOld": 2},
 	}
-	if secondaryCapacityReady(ctx, reads, pd, short, short, v1beta1.RouterComponent) {
+	if mustSecondaryReady(t, ctx, reads, pd, short, short, v1beta1.RouterComponent) {
 		t.Fatal("engine secondary below its own step newCount → not ready")
 	}
 }
@@ -173,7 +187,7 @@ func TestSecondaryCapacityReady_UnbumpedSecondary(t *testing.T) {
 		v1beta1.EngineComponent:  {"engStable": 4},
 		v1beta1.DecoderComponent: {"decStable": 4},
 	}
-	if !secondaryCapacityReady(ctx, reads, pd, pods, pods, v1beta1.RouterComponent) {
+	if !mustSecondaryReady(t, ctx, reads, pd, pods, pods, v1beta1.RouterComponent) {
 		t.Fatal("unbumped secondaries have no canary revision to stage → must be ready (was stuck Pending forever)")
 	}
 }
@@ -395,6 +409,47 @@ func TestDispatch_PDRouterRollbackTargetsStable(t *testing.T) {
 			t.Fatalf("%s rollback target must be its stable revision %q (not the canary no-op), got %q",
 				comp, want, *got.Spec.Pacing.RollbackToRevision)
 		}
+	}
+}
+
+// TestRollbackSignal_TransientReadKeepsTarget pins that a transient IR read
+// failure inside the rollback path surfaces as an error instead of being read
+// as "no canary target" — which resolved an empty rejected hash, computed no
+// stable revision, and CLEARED Pacing.RollbackToRevision mid-rollback, letting
+// the rollout resume toward the rejected revision.
+func TestRollbackSignal_TransientReadKeepsTarget(t *testing.T) {
+	ns := "default"
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1"}}
+	rbIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine"}}
+	rbIR.Status.UpdateRevision = "d1-engine-newhash"
+	hold := "d1-engine-stable0"
+	rbIR.Spec.Pacing = &v1beta1.InferenceReplicaPacing{RollbackToRevision: &hold}
+
+	irGets := 0
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(isvc, rbIR,
+		canaryControllerRevision(ns, "d1", "engine", "stable0", 1),
+		canaryControllerRevision(ns, "d1", "engine", "newhash", 2),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*v1beta1.InferenceReplica); ok {
+				irGets++
+				if irGets == 2 { // the canaryTargetHash re-Get inside the rollback path
+					return errors.New("transient apiserver blip")
+				}
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+
+	if err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, true); err == nil {
+		t.Fatal("a transient IR read during a rollback hold must surface an error, not be swallowed")
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "d1-engine"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Pacing == nil || got.Spec.Pacing.RollbackToRevision == nil || *got.Spec.Pacing.RollbackToRevision != hold {
+		t.Fatalf("RollbackToRevision must survive a transient read, got pacing=%+v", got.Spec.Pacing)
 	}
 }
 

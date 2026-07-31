@@ -186,6 +186,16 @@ func TestStampStepPartition(t *testing.T) {
 	if ext2.Lifecycle != nil {
 		t.Fatal("no canary must not stamp lifecycle")
 	}
+
+	// Negative CurrentStep (status is an unvalidated subresource, an external
+	// write can go below 0) must clamp to step 0, not panic indexing plan.Steps.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CurrentStep: -1}
+	ext3 := &v1beta1.ComponentExtensionSpec{MinReplicas: &n, MaxReplicas: 4}
+	StampStepPartition(isvc, v1beta1.EngineComponent, ext3)
+	ru3 := ext3.Lifecycle.UpdateStrategy.RollingUpdate
+	if ru3 == nil || ru3.Partition == nil || *ru3.Partition != 2 {
+		t.Fatalf("negative step must clamp to step-0 partition 2, got %+v", ru3)
+	}
 }
 
 func TestRecordDispatch_StepCounterAndEvent(t *testing.T) {

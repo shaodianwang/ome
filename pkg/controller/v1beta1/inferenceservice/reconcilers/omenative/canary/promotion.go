@@ -2,9 +2,12 @@ package canary
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -222,11 +225,15 @@ func toStatusMetricResults(mrs []analysis.MetricResult, now time.Time) []v1beta1
 
 // advanceStep moves to the next step: increment the index, stamp the entry time
 // (Auto timing measures from here), and consume the promote annotation so it is
-// not re-applied to the next step.
-func advanceStep(isvc *v1beta1.InferenceService, now time.Time) {
-	cs := isvc.Status.Canary
+// not re-applied to the next step. Consumption fails the advance (retried next
+// pass) rather than advancing on an unconsumed promote.
+func advanceStep(ctx context.Context, in ReconcileInputs) error {
+	if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutPromoteAnnotation); err != nil {
+		return err
+	}
+	cs := in.ISVC.Status.Canary
 	cs.CurrentStep++
-	cs.StepEnteredTime = &metav1.Time{Time: now}
+	cs.StepEnteredTime = &metav1.Time{Time: in.Now}
 	// Reset the per-step analysis budget + sampling state: the failure budget is
 	// scoped to each step (each traffic level gets its own tolerance), and the
 	// next step samples fresh.
@@ -234,5 +241,26 @@ func advanceStep(isvc *v1beta1.InferenceService, now time.Time) {
 	cs.LastEvaluationTime = nil
 	cs.LastConclusiveEvaluationTime = nil
 	cs.MetricResults = nil
-	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
+	return nil
+}
+
+// consumeAnnotation removes an operator command annotation, persisting the
+// removal to the apiserver (metadata merge patch) before the in-memory delete.
+// The controller only writes the status subresource, so an in-memory delete
+// alone would leave the annotation live and re-consumed on every later pass —
+// one ome.io/rollout-promote would advance every subsequent step. The patch
+// targets a copy so the server response cannot clobber in-flight status
+// mutations on the working object. A nil client consumes in-memory only.
+func consumeAnnotation(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, key string) error {
+	if _, ok := isvc.Annotations[key]; !ok {
+		return nil
+	}
+	if c != nil {
+		patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, key))
+		if err := c.Patch(ctx, isvc.DeepCopy(), client.RawPatch(ktypes.MergePatchType, patch)); err != nil {
+			return fmt.Errorf("consume annotation %s: %w", key, err)
+		}
+	}
+	delete(isvc.Annotations, key)
+	return nil
 }

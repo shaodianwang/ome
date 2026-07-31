@@ -9,7 +9,9 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func i32(v int32) *int32 { return &v }
@@ -309,6 +311,12 @@ func TestReconcile_CapacityGateFailsAfterTimeout(t *testing.T) {
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
 	in := baseInputs(isvc, map[string]int32{"new": 0}) // canary pods never come up
 
+	in.Now = time.Unix(1000, 0) // enter the capacity wait (anchors the timeout)
+	Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("entering the capacity wait → Pending, got %q", phaseOf(isvc))
+	}
+
 	in.Now = time.Unix(1000, 0).Add(5 * time.Minute) // before the 15m default
 	Reconcile(context.Background(), in)
 	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
@@ -330,19 +338,177 @@ func TestReconcile_CapacityGateFailsAfterTimeout(t *testing.T) {
 
 // TestReconcile_DoneSentinelRestartsOnNewTarget pins the other half of the
 // done-sentinel branch: a finished canary that sees a NEW target hash restarts
-// the plan from step 0 against the new revision (a subsequent spec bump).
+// the plan from step 0 against the new revision (a subsequent spec bump),
+// carrying NONE of the finished canary's analysis state.
 func TestReconcile_DoneSentinelRestartsOnNewTarget(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	// Finished canary on the previous target (done sentinel: CurrentStep == 2).
-	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "old-canary", CurrentStep: 2, ObservedTrafficWeight: 100}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:    "old-canary",
+		CurrentStep:           2,
+		ObservedTrafficWeight: 100,
+		AnalysisFailedChecks:  2,
+		LastEvaluationTime:    &metav1.Time{Time: time.Unix(900, 0)},
+		MetricResults:         []v1beta1.AnalysisMetricResult{{Name: "err", Passed: false}},
+	}
 	in := baseInputs(isvc, map[string]int32{"v3": 0}) // new target v3, its pods not up yet
 	in.CanaryRevisionHash = "v3"
 	res, _ := Reconcile(context.Background(), in)
 	if !res.Active {
 		t.Fatalf("a new target after completion must restart the canary (Active), got %+v", res)
 	}
-	if isvc.Status.Canary.CurrentStep != 0 || isvc.Status.Canary.CanaryRevisionHash != "v3" {
-		t.Fatalf("restart should reset to step 0 + the new hash, got %+v", isvc.Status.Canary)
+	cs := isvc.Status.Canary
+	if cs.CurrentStep != 0 || cs.CanaryRevisionHash != "v3" {
+		t.Fatalf("restart should reset to step 0 + the new hash, got %+v", cs)
+	}
+	if cs.AnalysisFailedChecks != 0 || cs.LastEvaluationTime != nil || cs.MetricResults != nil {
+		t.Fatalf("restart must not carry the prior canary's analysis state, got %+v", cs)
+	}
+}
+
+// TestReconcile_RetargetResetsAnalysisState pins the mid-rollout retarget: a new
+// target revision restarts the plan with a FULL status reset. Carrying the prior
+// canary's failure budget / metric results over would let a stale
+// AnalysisFailedChecks roll back the new (healthy) revision on its first breach.
+func TestReconcile_RetargetResetsAnalysisState(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	t0 := time.Unix(100000, 0)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:           "new",
+		CurrentStep:                  0,
+		ObservedTrafficWeight:        50, // traffic shifted → retarget (not the step-0 re-sync)
+		StepEnteredTime:              &metav1.Time{Time: t0.Add(-time.Hour)},
+		AnalysisFailedChecks:         2,
+		LastEvaluationTime:           &metav1.Time{Time: t0.Add(-time.Minute)},
+		LastConclusiveEvaluationTime: &metav1.Time{Time: t0.Add(-time.Minute)},
+		MetricResults:                []v1beta1.AnalysisMetricResult{{Name: "err", Passed: false}},
+	}
+	in := baseInputs(isvc, map[string]int32{"v3": 0, "new": 2, "old": 2})
+	in.CanaryRevisionHash = "v3"
+	in.Now = t0
+	Reconcile(context.Background(), in)
+	cs := isvc.Status.Canary
+	if cs.CanaryRevisionHash != "v3" || cs.CurrentStep != 0 || cs.ObservedTrafficWeight != 0 {
+		t.Fatalf("retarget must restart at step 0 toward v3, got %+v", cs)
+	}
+	if cs.AnalysisFailedChecks != 0 || cs.LastEvaluationTime != nil || cs.LastConclusiveEvaluationTime != nil || cs.MetricResults != nil {
+		t.Fatalf("retarget must not carry prior-canary analysis state, got %+v", cs)
+	}
+}
+
+// TestReconcile_PromoteConsumptionPersisted pins that consuming the promote
+// annotation is durable: the controller persists only the status subresource,
+// so without an explicit metadata patch the annotation survives on the
+// apiserver and one promote advances EVERY subsequent step of the canary.
+func TestReconcile_PromoteConsumptionPersisted(t *testing.T) {
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 25, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+	isvc := canaryISVC(steps, nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Client = c
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("promote should advance one step, got %d", isvc.Status.Canary.CurrentStep)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutPromoteAnnotation]; still {
+		t.Fatal("promote consumption must be persisted to the apiserver, not just in-memory")
+	}
+	// A fresh pass over the reloaded (apiserver) annotations must hold at step 1.
+	isvc.Annotations = stored.Annotations
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("one promote must advance one step only, got %d", isvc.Status.Canary.CurrentStep)
+	}
+}
+
+// TestReconcile_RollbackConsumptionPersistedOnRearm pins the rollback-annotation
+// half of durable consumption: a re-arm toward a new target must remove
+// ome.io/rollout-rollback on the apiserver — left in place, the reloaded
+// annotation marks the fresh canary rolled back on its first pass.
+func TestReconcile_RollbackConsumptionPersistedOnRearm(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", RolledBackRevisionHash: "new", AnalysisFailedChecks: 3}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"old": 4})
+	in.Client = c
+	in.CanaryRevisionHash = "v3"
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	cs := isvc.Status.Canary
+	if cs.CanaryRevisionHash != "v3" || cs.RolledBackRevisionHash != "" || cs.AnalysisFailedChecks != 0 {
+		t.Fatalf("re-arm must fully reset toward v3, got %+v", cs)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutRollbackAnnotation]; still {
+		t.Fatal("rollback consumption must be persisted to the apiserver, not just in-memory")
+	}
+}
+
+// TestReconcile_CapacityDipAfterLongBakeIsNotFailed pins the capacity-gate
+// anchor: the ready-timeout measures the CURRENT capacity wait, not time since
+// step entry. A step that has been serving (baking) longer than the timeout
+// must re-enter Pending on a capacity dip — not park a healthy canary Failed
+// on the first pass.
+func TestReconcile_CapacityDipAfterLongBakeIsNotFailed(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	t0 := time.Unix(100000, 0)
+	// Step 0 has been serving (Paused) for 20 min — past the 15 min default timeout.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:    "new",
+		CurrentStep:           0,
+		ObservedTrafficWeight: 50,
+		StepEnteredTime:       &metav1.Time{Time: t0.Add(-20 * time.Minute)},
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhasePaused)
+
+	in := baseInputs(isvc, map[string]int32{"new": 0, "old": 2}) // canary pods just dipped
+	in.Now = t0
+	Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("capacity dip after a long bake → Pending (fresh wait), got %q", phaseOf(isvc))
+	}
+	// Still down a full ready-timeout after the dip → Failed.
+	in.Now = t0.Add(16 * time.Minute)
+	Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("capacity still down a full timeout after the dip → Failed, got %q", phaseOf(isvc))
+	}
+}
+
+// TestReconcile_NegativeStepClamped guards the unvalidated status subresource:
+// an externally-written negative CurrentStep must clamp to 0, not panic the
+// reconcile indexing plan.Steps.
+func TestReconcile_NegativeStepClamped(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: -3}
+	res, err := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 0}))
+	if err != nil || res == nil {
+		t.Fatalf("negative step must not panic: res=%+v err=%v", res, err)
+	}
+	if isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("negative step should clamp to 0, got %d", isvc.Status.Canary.CurrentStep)
 	}
 }
 
@@ -354,6 +520,8 @@ func TestReconcile_ReadyTimeoutAnnotationOverride(t *testing.T) {
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
 	in := baseInputs(isvc, map[string]int32{"new": 0}) // canary pods never come up
 
+	in.Now = time.Unix(1000, 0) // enter the capacity wait (anchors the timeout)
+	Reconcile(context.Background(), in)
 	in.Now = time.Unix(1000, 0).Add(90 * time.Second) // < 2m
 	Reconcile(context.Background(), in)
 	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
@@ -452,16 +620,17 @@ func TestReconcile_AnalysisFailedIsSticky(t *testing.T) {
 
 // TestReconcile_CapacityGateFailedIsSticky pins the same parked-terminal contract
 // for the capacity-gate Failed path: a step whose canary pods never become Ready
-// escalates to Failed after the ready-timeout and then STAYS Failed. The capacity
-// gate anchors on StepEnteredTime and never re-stamps it (it returns before the
-// intermediate-step anchor), so this path was already sticky — this guards that
-// the sticky-Failed hold preserves that (same slow heartbeat, no re-stamp, no
+// escalates to Failed after the ready-timeout and then STAYS Failed. While held
+// Failed the hold returns before the Pending anchor, so StepEnteredTime is never
+// re-stamped — this guards the sticky hold (same slow heartbeat, no re-stamp, no
 // re-arm) rather than regressing it.
 func TestReconcile_CapacityGateFailedIsSticky(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
 	in := baseInputs(isvc, map[string]int32{"new": 0}) // canary pods never come up
 
+	in.Now = time.Unix(1000, 0) // enter the capacity wait (anchors the timeout)
+	Reconcile(context.Background(), in)
 	in.Now = time.Unix(1000, 0).Add(16 * time.Minute) // past the 15m default
 	Reconcile(context.Background(), in)
 	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {

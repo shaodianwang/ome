@@ -32,7 +32,11 @@ const defaultReadyTimeout = 15 * time.Minute
 // controller). DesiredReplicas is the component's desired replica count. Now is
 // the reconcile clock (injectable for tests).
 type ReconcileInputs struct {
-	Client             client.Client
+	Client client.Client
+	// Reader is the live API reader for one-off reads of types the manager does
+	// not watch (the analysis auth Secret): reading those through the cached
+	// Client would spin up a cluster-wide informer for the type.
+	Reader             client.Reader
 	ISVC               *v1beta1.InferenceService
 	Component          v1beta1.ComponentType
 	CanaryRevisionHash string
@@ -98,6 +102,11 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	plan := g.Canary
 
 	cs := in.ISVC.Status.Canary
+	// Status is an unvalidated subresource: clamp a negative step (an external
+	// write) before it can index plan.Steps.
+	if cs != nil && cs.CurrentStep < 0 {
+		cs.CurrentStep = 0
+	}
 
 	// Rollback (ome.io/rollout-rollback): abandon the canary and return the
 	// component to the stable revision, then HOLD there rejecting the rolled-back
@@ -115,12 +124,10 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			// revision and the rejected revision itself.
 			stableHash := otherRevision(in.PerRevisionPods, cs.RolledBackRevisionHash)
 			if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.RolledBackRevisionHash && in.CanaryRevisionHash != stableHash {
-				*cs = v1beta1.CanaryStatus{
-					CanaryRevisionHash: in.CanaryRevisionHash,
-					CurrentStep:        0,
-					StepEnteredTime:    &metav1.Time{Time: in.Now},
+				if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutRollbackAnnotation); err != nil {
+					return nil, err
 				}
-				delete(in.ISVC.Annotations, constants.RolloutRollbackAnnotation)
+				resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
 				// fall through: start a fresh canary toward the new target.
 			} else {
 				return reconcileRollback(in, cs), nil
@@ -145,11 +152,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if cs != nil && in.ISVC.Status.Components[in.Component].RolloutPhase == v1beta1.RolloutPhaseFailed {
 		stableHash := otherRevision(in.PerRevisionPods, cs.CanaryRevisionHash)
 		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash && in.CanaryRevisionHash != stableHash {
-			*cs = v1beta1.CanaryStatus{
-				CanaryRevisionHash: in.CanaryRevisionHash,
-				CurrentStep:        0,
-				StepEnteredTime:    &metav1.Time{Time: in.Now},
-			}
+			resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
 			// fall through: start a fresh canary toward the new target.
 		} else {
 			return &Result{Active: true, RequeueAfter: failedRequeue}, nil
@@ -164,10 +167,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// appears, in which case start a fresh canary.
 	if cs != nil && int(cs.CurrentStep) >= len(plan.Steps) {
 		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash {
-			cs.CurrentStep = 0
-			cs.CanaryRevisionHash = in.CanaryRevisionHash
-			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
-			cs.ObservedTrafficWeight = 0
+			resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
 		} else {
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
 			return &Result{Active: false}, nil
@@ -183,10 +183,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if cs != nil && int(cs.CurrentStep) < len(plan.Steps) &&
 		in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash &&
 		(cs.CurrentStep > 0 || cs.ObservedTrafficWeight > 0) {
-		cs.CurrentStep = 0
-		cs.CanaryRevisionHash = in.CanaryRevisionHash
-		cs.StepEnteredTime = &metav1.Time{Time: in.Now}
-		cs.ObservedTrafficWeight = 0
+		resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
 	}
 
 	// Initialize the state machine on first sight of a NEW canary. Don't start
@@ -229,6 +226,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// ready-timeout, escalate to Failed instead of polling Pending forever — the
 	// stable revision keeps serving since no traffic has shifted.
 	if in.PerRevisionPods[in.CanaryRevisionHash] < newCount || !in.SecondaryCapacityReady {
+		// Anchor the ready-timeout to the start of THIS capacity wait: re-stamp
+		// StepEnteredTime on entering Pending. Anchoring on the untouched step
+		// entry would let a long bake (analysis / pause) eat the whole budget and
+		// park a healthy canary Failed the moment capacity dips mid-step. Mirrors
+		// the serving-entry re-stamps below.
+		if in.ISVC.Status.Components[in.Component].RolloutPhase != v1beta1.RolloutPhasePending {
+			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
+		}
 		if capacityGateExpired(cs, readyTimeoutOrDefault(in.ISVC), in.Now) {
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseFailed)
 			return &Result{Active: true, Partition: partition, RequeueAfter: failedRequeue}, nil
@@ -307,8 +312,21 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			// fall through to advance.
 		}
 	}
-	advanceStep(in.ISVC, in.Now)
+	if err := advanceStep(ctx, in); err != nil {
+		return nil, err
+	}
 	return &Result{Active: true, Stepped: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
+}
+
+// resetCanaryStatus re-arms the state machine at step 0 toward a new target,
+// dropping ALL prior-canary state (analysis failure budget, sampling
+// timestamps, metric results, rollback hold, observed traffic) — carrying any
+// of it over would let a stale failure budget roll back the new revision.
+func resetCanaryStatus(cs *v1beta1.CanaryStatus, hash string, now time.Time) {
+	*cs = v1beta1.CanaryStatus{
+		CanaryRevisionHash: hash,
+		StepEnteredTime:    &metav1.Time{Time: now},
+	}
 }
 
 // reconcileRollback drives the component back to the stable revision and holds
@@ -355,9 +373,10 @@ func readyTimeoutOrDefault(isvc *v1beta1.InferenceService) time.Duration {
 }
 
 // capacityGateExpired reports whether the current step has waited on capacity
-// past the timeout. A nil status / missing step-entered time / non-positive
-// timeout is never treated as expired, so a transient nil cannot wrongly fail a
-// rollout.
+// past the timeout, measured from StepEnteredTime — re-stamped when the wait
+// begins (on entering Pending), so the budget covers only the capacity wait. A
+// nil status / missing step-entered time / non-positive timeout is never
+// treated as expired, so a transient nil cannot wrongly fail a rollout.
 func capacityGateExpired(cs *v1beta1.CanaryStatus, timeout time.Duration, now time.Time) bool {
 	if cs == nil || cs.StepEnteredTime == nil || timeout <= 0 {
 		return false

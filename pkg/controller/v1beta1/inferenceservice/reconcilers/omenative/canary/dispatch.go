@@ -73,7 +73,10 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	}
 	pods := perRev[primary]
 
-	canaryHash := canaryTargetHash(ctx, d.Reader, d.ISVC, primary)
+	canaryHash, err := canaryTargetHash(ctx, d.Reader, d.ISVC, primary)
+	if err != nil {
+		return 0, err
+	}
 
 	// Ensure the per-revision Services the canary references, for EVERY Component
 	// in the canary group — not just the primary. The downstream weighted-route
@@ -119,15 +122,20 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		now = time.Now()
 	}
 
+	secondaryReady, err := secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary)
+	if err != nil {
+		return 0, err
+	}
 	res, err := Reconcile(ctx, ReconcileInputs{
 		Client:                   d.Client,
+		Reader:                   d.Reader,
 		ISVC:                     d.ISVC,
 		Component:                primary,
 		CanaryRevisionHash:       canaryHash,
 		StableRevisionHash:       otherRevision(pods, canaryHash),
 		DesiredReplicas:          componentReplicas(d.ISVC, primary),
 		PerRevisionPods:          readyRev[primary],
-		SecondaryCapacityReady:   secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary),
+		SecondaryCapacityReady:   secondaryReady,
 		Now:                      now,
 		Sampler:                  samplerOrNil(d.Sampler),
 		Prometheus:               canaryPrometheus(d.ISVC),
@@ -188,7 +196,11 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 		// hashes are per-Component, so the primary's rejected hash never names a
 		// secondary's revision). canaryTargetHash reads the IR's UpdateRevision,
 		// which keeps naming the canary (spec) target throughout the rollback.
-		stable, err := stableRevisionName(ctx, reads, isvc, comp, canaryTargetHash(ctx, reads, isvc, comp))
+		rejected, err := canaryTargetHash(ctx, reads, isvc, comp)
+		if err != nil {
+			return err
+		}
+		stable, err := stableRevisionName(ctx, reads, isvc, comp, rejected)
 		if err != nil {
 			return err
 		}
@@ -305,15 +317,18 @@ func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 // readyPerRev must be the READY (serving) per-revision counts — not total — so a
 // secondary's pods that merely exist don't satisfy the gate prematurely. perRev
 // (total) is used only to detect whether a secondary has a roll in progress.
-func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, primary v1beta1.ComponentType) bool {
+func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, primary v1beta1.ComponentType) (bool, error) {
 	g := isvc.Spec.GetCanaryGroup()
 	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
-		return true
+		return true, nil
 	}
 	plan := g.Canary
 	idx := int32(0)
 	if isvc.Status.Canary != nil {
 		idx = isvc.Status.Canary.CurrentStep
+	}
+	if idx < 0 {
+		idx = 0
 	}
 	if int(idx) >= len(plan.Steps) {
 		idx = int32(len(plan.Steps) - 1)
@@ -323,7 +338,10 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 		if c == primary {
 			continue
 		}
-		secHash := canaryTargetHash(ctx, reads, isvc, c)
+		secHash, err := canaryTargetHash(ctx, reads, isvc, c)
+		if err != nil {
+			return false, err
+		}
 		// No canary revision distinct from the stable one → the secondary was not
 		// bumped; nothing to stage, so don't block. otherRevision is empty when the
 		// secondary has a single revision present (its canary hash == the only one).
@@ -331,10 +349,10 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 			continue
 		}
 		if readyPerRev[c][secHash] < resolveStepNewCount(step, componentReplicas(isvc, c)) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // canaryTargetHash returns the revision hash the canary is rolling toward for a
@@ -347,20 +365,28 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 // gate on an empty pod bucket. Falls back to the ISVC lifecycle aggregate for
 // the legacy path, where no IR exists and the in-reconcile status aggregation
 // has already run by the time the canary dispatches.
-func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) string {
+//
+// Only a NotFound IR reads as "no IR" (legacy fallback). Any other Get error
+// must surface: swallowing a transient read into an empty hash would, during a
+// rollback hold, clear RollbackToRevision and resume the rollout toward the
+// rejected revision.
+func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (string, error) {
 	if reads != nil {
 		ir := &v1beta1.InferenceReplica{}
 		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, c)}
-		if err := reads.Get(ctx, key, ir); err == nil {
+		switch err := reads.Get(ctx, key, ir); {
+		case err == nil:
 			if name := ir.Status.UpdateRevision; name != "" {
-				return query.RevisionFromName(name).Hash()
+				return query.RevisionFromName(name).Hash(), nil
 			}
 			if name := ir.Status.CurrentRevision; name != "" {
-				return query.RevisionFromName(name).Hash()
+				return query.RevisionFromName(name).Hash(), nil
 			}
+		case !apierrors.IsNotFound(err):
+			return "", err
 		}
 	}
-	return coordination.LatestRevisionHash(ctx, reads, isvc, c)
+	return coordination.LatestRevisionHash(ctx, reads, isvc, c), nil
 }
 
 // primaryComponent is the externally-routed Component the canary group drives its

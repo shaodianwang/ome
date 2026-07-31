@@ -35,7 +35,7 @@ func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.Roll
 		// spec-owned map to another goroutine, breaking the snapshot invariant.
 		headers = maps.Clone(src.Headers)
 		if src.AuthRef != nil {
-			t, err := resolveBearerToken(ctx, in.Client, in.ISVC.Namespace, src.AuthRef)
+			t, err := resolveBearerToken(ctx, in.Reader, in.ISVC.Namespace, src.AuthRef)
 			if err != nil {
 				return SampleRequest{}, fmt.Errorf("resolve bearer token: %w", err)
 			}
@@ -70,11 +70,12 @@ func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.Roll
 }
 
 // resolveBearerToken reads the token value from the referenced Secret key in the
-// ISVC namespace. SecretKeySelector is namespace-local by design — analysis auth
-// never crosses namespaces.
-func resolveBearerToken(ctx context.Context, c client.Client, namespace string, ref *corev1.SecretKeySelector) (string, error) {
+// ISVC namespace, through the live API reader — a cached-client Get would start
+// a cluster-wide Secret informer on first use. SecretKeySelector is
+// namespace-local by design — analysis auth never crosses namespaces.
+func resolveBearerToken(ctx context.Context, c client.Reader, namespace string, ref *corev1.SecretKeySelector) (string, error) {
 	if c == nil {
-		return "", fmt.Errorf("no client to read secret %q", ref.Name)
+		return "", fmt.Errorf("no reader to read secret %q", ref.Name)
 	}
 	sec := &corev1.Secret{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, sec); err != nil {

@@ -42,6 +42,11 @@ func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	if isvc.Status.Canary != nil {
 		idx = isvc.Status.Canary.CurrentStep
 	}
+	// Status is an unvalidated subresource: clamp a negative step (an external
+	// write) before it can index plan.Steps.
+	if idx < 0 {
+		idx = 0
+	}
 	// Done sentinel (CurrentStep past the last step): the canary finished — hold
 	// NOTHING, the component runs entirely on the canary revision (partition 0).
 	// Don't clamp to the final step and recompute: if that step's Capacity were
