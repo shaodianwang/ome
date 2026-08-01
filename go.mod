@@ -12,7 +12,7 @@ require (
 	github.com/kedacore/keda/v2 v2.12.1
 	github.com/onsi/ginkgo/v2 v2.29.0
 	github.com/onsi/gomega v1.42.1
-	github.com/oracle/oci-go-sdk/v65 v65.121.1
+	github.com/oracle/oci-go-sdk/v65 v65.122.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.79.2
 	github.com/prometheus/client_golang v1.24.1
