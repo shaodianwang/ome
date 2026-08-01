@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"net"
 	"sort"
 
 	"github.com/go-logr/logr"
@@ -122,14 +123,26 @@ func homesFromPlacement(pl *v1beta1.PlacementStatus) []Home {
 	for i := range pl.Candidates {
 		c := &pl.Candidates[i]
 		if c.Phase == v1beta1.CandidatePhaseAdmitted && c.Endpoint != nil && c.Endpoint.Host != "" {
-			homes = append(homes, Home{Cluster: c.Cluster, BackendHost: c.Endpoint.Host})
+			homes = append(homes, Home{Cluster: c.Cluster, BackendHost: hostOnly(c.Endpoint.Host)})
 		}
 	}
 	if len(homes) == 0 && pl.Cluster != "" && pl.Endpoint != nil && pl.Endpoint.Host != "" {
-		homes = append(homes, Home{Cluster: pl.Cluster, BackendHost: pl.Endpoint.Host})
+		homes = append(homes, Home{Cluster: pl.Cluster, BackendHost: hostOnly(pl.Endpoint.Host)})
 	}
 	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
 	return homes
+}
+
+// hostOnly strips a port from an endpoint host. A URL's Host is "host:port"
+// when the endpoint carries an explicit port (e.g.
+// "svc.ns.svc.cluster.local:8000"), but the backend ExternalName Service takes a
+// BARE hostname — the port is supplied separately from Config.BackendPort — so a
+// host:port here makes the Service spec.externalName fail RFC-1123 validation.
+func hostOnly(h string) string {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return h
 }
 
 func (r *Reconciler) reconcileUnpublish(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {

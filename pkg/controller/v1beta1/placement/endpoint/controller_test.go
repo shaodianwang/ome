@@ -250,6 +250,26 @@ func TestResolveTarget(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, ok)
 	})
+
+	t.Run("endpoint host with a port -> port stripped for the backend", func(t *testing.T) {
+		// A URL Host is "host:port" when the endpoint carries a port; the backend
+		// ExternalName Service needs a BARE host (port comes from Config.BackendPort).
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+			Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
+				Phase: v1beta1.PlacementPhasePlaced,
+				Candidates: []v1beta1.CandidatePlacement{
+					{Cluster: "cw", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("svc.inf-prod.svc.cluster.local:8000")},
+				},
+			}},
+		}
+		tgt, ok, err := r.resolveTarget(isvc)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Len(t, tgt.Homes, 1)
+		assert.Equal(t, "svc.inf-prod.svc.cluster.local", tgt.Homes[0].BackendHost,
+			"port stripped so spec.externalName stays RFC-1123 valid")
+	})
 }
 
 func TestPlacementPublishChange(t *testing.T) {
