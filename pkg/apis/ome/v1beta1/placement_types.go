@@ -54,4 +54,45 @@ type PlacementSpec struct {
 	// ome.io/cluster-selector annotation.
 	// +optional
 	ClusterSelector string `json:"clusterSelector,omitempty"`
+
+	// Split tunes Split mode (distributing replicas across clusters). Only
+	// consulted when Mode is Split; ignored otherwise. Nil means Split defaults:
+	// distribute the engine's minReplicas, packed onto the fewest clusters.
+	// +optional
+	Split *SplitSpec `json:"split,omitempty"`
+}
+
+// SplitSpec tunes how Split mode distributes replicas across candidate clusters.
+// All fields are optional and degrade to the documented default — no in-code
+// magic values.
+type SplitSpec struct {
+	// Replicas is the fleet-wide desired replica count to distribute across homes.
+	// Unset falls back to the engine component's minReplicas (the guaranteed
+	// floor) — the count OME actually guarantees running and thus the one worth
+	// spreading. maxReplicas is deliberately NOT used (it is an autoscaling
+	// ceiling that stays a per-home local concern).
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Spread selects the apportionment policy. False (default) is Packed: fan out
+	// in preference order and fill the fewest clusters the fleet's quota forces
+	// (better locality, fewer endpoint backends). True is Balanced: apportion
+	// ~evenly (ceil(N/candidates)) so replicas spread across more clusters
+	// (blast-radius resilience over locality).
+	// +optional
+	Spread bool `json:"spread,omitempty"`
+
+	// MaxReplicasPerCluster caps how many replicas one cluster may hold. It bounds
+	// the over-request the fractional fan-out makes, and — combined with Spread —
+	// is the lever that forces the fill to move on before a cluster is full
+	// (deliberate spread without reading capacity). Zero means no cap.
+	// +optional
+	MaxReplicasPerCluster int32 `json:"maxReplicasPerCluster,omitempty"`
+
+	// MinReplicasPerCluster is the anti-sliver floor: a home that admits fewer
+	// than this is dropped and its replicas returned to the deficit, so the
+	// placement does not keep a home serving a tiny, uneconomical fraction. Zero
+	// keeps any home that admitted >=1.
+	// +optional
+	MinReplicasPerCluster int32 `json:"minReplicasPerCluster,omitempty"`
 }

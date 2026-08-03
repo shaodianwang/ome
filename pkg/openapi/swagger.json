@@ -354,6 +354,11 @@
         "cluster"
       ],
       "properties": {
+        "admittedReplicas": {
+          "description": "AdmittedReplicas is how many replicas this home's Kueue has admitted (only meaningful in Split, where a home serves a fraction of the desired count). It drives global accounting — the control plane sums it across homes to decide whether the desired count is met. Zero/unset outside Split.",
+          "type": "integer",
+          "format": "int32"
+        },
         "cluster": {
           "description": "Cluster is the WorkloadCluster name.",
           "type": "string",
@@ -366,6 +371,11 @@
         "phase": {
           "description": "Phase is the candidate's state.",
           "type": "string"
+        },
+        "readyReplicas": {
+          "description": "ReadyReplicas is how many of this home's replicas are serving traffic. In Split it is the weight an external LB uses to split traffic across homes (traffic follows where the replicas actually landed). Zero/unset outside Split.",
+          "type": "integer",
+          "format": "int32"
         }
       }
     },
@@ -3432,6 +3442,10 @@
         "requirements": {
           "description": "Requirements is the intrinsic capability selector a candidate workload cluster MUST satisfy, expressed as a Kubernetes label-selector string matched against WorkloadCluster labels (e.g. \"accelerator in (gb300, tpu7x)\"). It is the structured equivalent of the ome.io/accelerator-requirements annotation. Empty means no intrinsic requirement.",
           "type": "string"
+        },
+        "split": {
+          "description": "Split tunes Split mode (distributing replicas across clusters). Only consulted when Mode is Split; ignored otherwise. Nil means Split defaults: distribute the engine's minReplicas, packed onto the fewest clusters.",
+          "$ref": "#/definitions/v1beta1.SplitSpec"
         }
       }
     },
@@ -5060,6 +5074,31 @@
             "default": ""
           },
           "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
+    "v1beta1.SplitSpec": {
+      "description": "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented default — no in-code magic values.",
+      "type": "object",
+      "properties": {
+        "maxReplicasPerCluster": {
+          "description": "MaxReplicasPerCluster caps how many replicas one cluster may hold. It bounds the over-request the fractional fan-out makes, and — combined with Spread — is the lever that forces the fill to move on before a cluster is full (deliberate spread without reading capacity). Zero means no cap.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "minReplicasPerCluster": {
+          "description": "MinReplicasPerCluster is the anti-sliver floor: a home that admits fewer than this is dropped and its replicas returned to the deficit, so the placement does not keep a home serving a tiny, uneconomical fraction. Zero keeps any home that admitted \u003e=1.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "replicas": {
+          "description": "Replicas is the fleet-wide desired replica count to distribute across homes. Unset falls back to the engine component's minReplicas (the guaranteed floor) — the count OME actually guarantees running and thus the one worth spreading. maxReplicas is deliberately NOT used (it is an autoscaling ceiling that stays a per-home local concern).",
+          "type": "integer",
+          "format": "int32"
+        },
+        "spread": {
+          "description": "Spread selects the apportionment policy. False (default) is Packed: fan out in preference order and fill the fewest clusters the fleet's quota forces (better locality, fewer endpoint backends). True is Balanced: apportion ~evenly (ceil(N/candidates)) so replicas spread across more clusters (blast-radius resilience over locality).",
+          "type": "boolean"
         }
       }
     },

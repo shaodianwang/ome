@@ -113,6 +113,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":              schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":             schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":           schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec":                      schema_pkg_apis_ome_v1beta1_SplitSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                    schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":           schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":               schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
@@ -733,6 +734,20 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 						SchemaProps: spec.SchemaProps{
 							Description: "Endpoint is this candidate's own externally-addressable URL, mirrored from its derived InferenceService's status.url once admitted AND addressable. In Single mode only the winner carries one and the top-level PlacementStatus.Endpoint is authoritative; in All/Split mode every serving home carries its own, and this list is the source of truth an external LB/DNS consumes to route across homes. Empty until the home is addressable.",
 							Ref:         ref("knative.dev/pkg/apis.URL"),
+						},
+					},
+					"admittedReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AdmittedReplicas is how many replicas this home's Kueue has admitted (only meaningful in Split, where a home serves a fraction of the desired count). It drives global accounting — the control plane sums it across homes to decide whether the desired count is met. Zero/unset outside Split.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"readyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadyReplicas is how many of this home's replicas are serving traffic. In Split it is the weight an external LB uses to split traffic across homes (traffic follows where the replicas actually landed). Zero/unset outside Split.",
+							Type:        []string{"integer"},
+							Format:      "int32",
 						},
 					},
 				},
@@ -6067,9 +6082,17 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 							Format:      "",
 						},
 					},
+					"split": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Split tunes Split mode (distributing replicas across clusters). Only consulted when Mode is Split; ignored otherwise. Nil means Split defaults: distribute the engine's minReplicas, packed onto the fewest clusters.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec"),
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec"},
 	}
 }
 
@@ -8984,6 +9007,47 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref common.ReferenceCallba
 		},
 		Dependencies: []string{
 			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_SplitSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented default — no in-code magic values.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"replicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Replicas is the fleet-wide desired replica count to distribute across homes. Unset falls back to the engine component's minReplicas (the guaranteed floor) — the count OME actually guarantees running and thus the one worth spreading. maxReplicas is deliberately NOT used (it is an autoscaling ceiling that stays a per-home local concern).",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"spread": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Spread selects the apportionment policy. False (default) is Packed: fan out in preference order and fill the fewest clusters the fleet's quota forces (better locality, fewer endpoint backends). True is Balanced: apportion ~evenly (ceil(N/candidates)) so replicas spread across more clusters (blast-radius resilience over locality).",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"maxReplicasPerCluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxReplicasPerCluster caps how many replicas one cluster may hold. It bounds the over-request the fractional fan-out makes, and — combined with Spread — is the lever that forces the fill to move on before a cluster is full (deliberate spread without reading capacity). Zero means no cap.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"minReplicasPerCluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MinReplicasPerCluster is the anti-sliver floor: a home that admits fewer than this is dropped and its replicas returned to the deficit, so the placement does not keep a home serving a tiny, uneconomical fraction. Zero keeps any home that admitted >=1.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 

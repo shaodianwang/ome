@@ -510,4 +510,18 @@ type CandidatePlacement struct {
 	// LB/DNS consumes to route across homes. Empty until the home is addressable.
 	// +optional
 	Endpoint *apis.URL `json:"endpoint,omitempty"`
+
+	// AdmittedReplicas is how many replicas this home's Kueue has admitted (only
+	// meaningful in Split, where a home serves a fraction of the desired count).
+	// It drives global accounting — the control plane sums it across homes to
+	// decide whether the desired count is met. Zero/unset outside Split.
+	// +optional
+	AdmittedReplicas int32 `json:"admittedReplicas,omitempty"`
+
+	// ReadyReplicas is how many of this home's replicas are serving traffic. In
+	// Split it is the weight an external LB uses to split traffic across homes
+	// (traffic follows where the replicas actually landed). Zero/unset outside
+	// Split.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }

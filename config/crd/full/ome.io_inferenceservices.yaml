@@ -25558,6 +25558,20 @@ spec:
                       type: string
                     requirements:
                       type: string
+                    split:
+                      properties:
+                        maxReplicasPerCluster:
+                          format: int32
+                          type: integer
+                        minReplicasPerCluster:
+                          format: int32
+                          type: integer
+                        replicas:
+                          format: int32
+                          type: integer
+                        spread:
+                          type: boolean
+                      type: object
                   type: object
                 rollout:
                   properties:
@@ -30506,6 +30520,9 @@ spec:
                     candidates:
                       items:
                         properties:
+                          admittedReplicas:
+                            format: int32
+                            type: integer
                           cluster:
                             type: string
                           endpoint:
@@ -30515,6 +30532,9 @@ spec:
                               - Placed
                               - Admitted
                             type: string
+                          readyReplicas:
+                            format: int32
+                            type: integer
                         required:
                           - cluster
                         type: object
