@@ -79,6 +79,35 @@ def run_one(case_id):
     return case_id, proc.returncode, time.time() - t0
 
 
+def parked_debt_rows(cases):
+    """(case, kind, ref, desc) for every notimpl=1 / infeasible=1 case in the
+    sweep — the XFAIL debt ledger. notimpl refs the linked GitHub issue (the
+    header's issue=, enforced by run.py --validate-only); infeasible refs the
+    case's line-2 '# reason:' comment."""
+    rows = []
+    for c in cases:
+        matches = sorted((HERE / "isvcs").glob(f"**/{c}.yaml"))
+        if not matches:
+            continue
+        lines = matches[0].read_text().splitlines()
+        fields = case_header_fields(c)
+        if fields.get("notimpl") == "1":
+            kind = "notimpl"
+            ref = f"#{fields['issue']}" if fields.get("issue") else "NO ISSUE"
+        elif fields.get("infeasible") == "1":
+            kind = "infeasible"
+            m = re.match(r"^\s*#\s*reason:\s*(.+)", lines[1]) if len(lines) > 1 else None
+            ref = m.group(1).strip() if m else "(no reason comment)"
+        else:
+            continue
+        # One-line description = the header minus its trailing k=v block.
+        toks = lines[0].lstrip("#").strip().split()
+        while toks and "=" in toks[-1] and not toks[-1].startswith("("):
+            toks.pop()
+        rows.append((c, kind, ref, " ".join(toks)))
+    return rows
+
+
 def latest_tsv(case_id):
     # This run's TSVs live under results/<RUN_TS>/<feature>/<topo>/.
     files = glob.glob(str(HERE / "results" / RUN_TS / "**" / f"{case_id}-*.tsv"), recursive=True)
@@ -132,6 +161,16 @@ def summarize(cases):
         emit("\nNON-PASS:")
         for r in fails:
             emit(f"  {r[0]}  {r[1]}  {r[6]}")
+    # Parked-debt ledger: printed even when every such case XFAIL-passes — an
+    # XFAIL is tracked debt, not a green light. Silent XFAILs are how the
+    # p412-p415 recover wedge shipped to prod (#899).
+    debt = parked_debt_rows(cases)
+    if debt:
+        verdicts = {r[0]: r[1] for r in rows}
+        emit("\nPARKED DEBT (%d case(s) marked notimpl/infeasible in this sweep):" % len(debt))
+        emit("{:<5} {:<11} {:<13} {}".format("case", "kind", "verdict", "issue/reason — description"))
+        for case, kind, ref, desc in debt:
+            emit("{:<5} {:<11} {:<13} {} — {}".format(case, kind, verdicts.get(case, "?"), ref, desc))
     sumdir = HERE / "results" / RUN_TS
     sumdir.mkdir(parents=True, exist_ok=True)
     (sumdir / "summary.txt").write_text("\n".join(out_lines) + "\n")

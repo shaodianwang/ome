@@ -1367,6 +1367,10 @@ HDR_VALIDATORS = {
     "topo": lambda v: v in {"engine", "pd", "engine-mn", "pd-mn"},
     "infeasible": lambda v: v == 1,
     "notimpl": lambda v: v == 1,
+    # GitHub issue number a notimpl=1 case is parked on. REQUIRED with notimpl:
+    # an XFAIL with no tracked issue is invisible debt (the p412-p415 recover
+    # cases XFAIL'd the exact wedge that later fired in prod — #899).
+    "issue": lambda v: isinstance(v, int) and v > 0,
     "floor_hard": lambda v: v == 1,   # assert the instantaneous floor min (no debounce)
     "floor_soft": lambda v: v == 1,   # opt out of the (default-hard) capacity floor
     "order_soft": lambda v: v == 1,   # opt out of surge-before-drain (a fault, e.g.
@@ -1433,6 +1437,17 @@ def validate_case_file(path):
         second = text.splitlines()[1] if len(text.splitlines()) > 1 else ""
         if not re.match(r"^\s*#\s*reason:\s*\S", second):
             errs.append(f"{path}:2: inv_off={fields['inv_off']} requires an adjacent '# reason: <why>' comment on line 2")
+    if fields.get("notimpl") and "issue" not in fields:
+        # A notimpl XFAIL is parked debt on a KNOWN BUG — it must link the
+        # tracking issue or the debt is invisible until it fires in prod (#899).
+        errs.append(f"{path}:1: notimpl=1 requires issue=<github issue number> — an XFAIL without a tracked issue is invisible debt")
+    if fields.get("infeasible"):
+        # Infeasible-by-design must name WHY the config is unsatisfiable, on
+        # the line adjacent to the header, so the rationale travels with the
+        # case and can be re-audited when gate semantics change.
+        second = text.splitlines()[1] if len(text.splitlines()) > 1 else ""
+        if not re.match(r"^\s*#\s*reason:\s*\S", second):
+            errs.append(f"{path}:2: infeasible=1 requires an adjacent '# reason: <why unsatisfiable>' comment on line 2")
     mode = fields.get("mode", "rollout")
     if mode == "scaledown" and not any(k in fields for k in ("to_e", "to_d", "to_r")):
         errs.append(f"{path}:1: mode=scaledown needs a to_e/to_d/to_r target")
@@ -1794,6 +1809,24 @@ def _write_fail(case_id, desc, hdr, state, msg):
     return 0
 
 
+def soften_expected_fail(hdr, verdict, checks):
+    """FAIL → XFAIL for parked cases. A notimpl XFAIL carries its linked issue
+    in the verdict itself (e.g. 'XFAIL (known bug: #899)') so every sweep
+    summary line names the tracked bug; infeasible stays a plain XFAIL — its
+    by-design rationale lives on the case's line-2 '# reason:' comment and in
+    batch.py's PARKED DEBT table."""
+    if verdict != "FAIL":
+        return verdict
+    if hdr.get("notimpl"):
+        ref = f"#{hdr['issue']}" if hdr.get("issue") else "UNLINKED"
+        checks.append(f"  ⓘ marked notimpl (known bug: {ref}) — expected to fail until the tracked issue is fixed; recorded XFAIL, not a regression")
+        return f"XFAIL (known bug: {ref})"
+    if hdr.get("infeasible"):
+        checks.append("  ⓘ marked infeasible — an unsatisfiable config (expected); recorded XFAIL, not a regression")
+        return "XFAIL"
+    return verdict
+
+
 def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     """Common finalize: infeasible-soften, print, cleanup, write_result."""
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
@@ -1801,11 +1834,7 @@ def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     agg = aggregate(ctx["pod_state"], ctx["old_hashes"], ctx["modes"], ctx["pods_per_inst"])
     final = {c: agg.get(c, (0, 0, 0))[0] for c in COMPS}
     new_final = {c: agg.get(c, (0, 0, 0))[2] for c in COMPS}
-    if (hdr.get("infeasible") or hdr.get("notimpl")) and verdict == "FAIL":
-        why = ("a known unimplemented controller feature" if hdr.get("notimpl")
-               else "an unsatisfiable config")
-        checks.append(f"  ⓘ marked {'notimpl' if hdr.get('notimpl') else 'infeasible'} — {why} (expected); recorded XFAIL, not a regression")
-        verdict = "XFAIL"
+    verdict = soften_expected_fail(hdr, verdict, checks)
     # Invariants + fault apparatus run AFTER the softening (same rationale as
     # teardown_check below): a status lie or a broken fault apparatus is never
     # an expected failure, so they re-harden an XFAIL back to FAIL/INFRA-FAIL.
@@ -3914,11 +3943,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             checks.append(f"  ✗ survivor instability: {sum(recreated.values())} pod(s) at surviving indices RECREATED (new UID) instead of untouched ({rd}) — scale needlessly recreated survivors")
         else:
             checks.append("  ✓ survivor stability: every surviving instance (index < min(start,target)) kept its original pods (only the tail changed)")
-    if (hdr.get("infeasible") or hdr.get("notimpl")) and verdict == "FAIL":
-        why = ("a known unimplemented controller feature" if hdr.get("notimpl")
-               else "an unsatisfiable config")
-        checks.append(f"  ⓘ marked {'notimpl' if hdr.get('notimpl') else 'infeasible'} — {why} (expected); recorded XFAIL, not a regression")
-        verdict = "XFAIL"
+    verdict = soften_expected_fail(hdr, verdict, checks)
     # Check F: continuous invariants + fault apparatus — AFTER the softening
     # (same rationale as teardown_check): a status lie or a broken apparatus is
     # never an expected failure, so they re-harden an XFAIL.
@@ -4683,19 +4708,16 @@ def run_case(case_id):
         if rev_svcs:
             print(f"  [per-revision svcs] {rev_svcs}")
 
-    # Infeasible-config softening: cases the header marks `infeasible=1`
-    # are intentionally unsatisfiable (e.g. RatioBalanced band at small N,
-    # or maxUnavailable=0 with no surge). A FAIL there is the gate CORRECTLY
-    # refusing to roll — expected, not a controller bug — so record it as
-    # XFAIL rather than red. A surprise PASS (config turned out feasible /
-    # controller improved) is left as PASS. The softening is WHOLESALE on
-    # verdict==FAIL — a peak/isolation/gang FAIL on an infeasible case is
-    # softened too; only the checks that run after this point (continuous
+    # Parked-case softening: cases the header marks `infeasible=1` are
+    # intentionally unsatisfiable (e.g. RatioBalanced band at small N,
+    # or maxUnavailable=0 with no surge) — a FAIL there is the gate CORRECTLY
+    # refusing to roll; `notimpl=1` cases are parked on a linked known bug.
+    # Either way record XFAIL rather than red. A surprise PASS (config turned
+    # out feasible / controller improved) is left as PASS. The softening is
+    # WHOLESALE on verdict==FAIL — a peak/isolation/gang FAIL on a parked case
+    # is softened too; only the checks that run after this point (continuous
     # invariants, fault apparatus, teardown) deliberately stay hard.
-    if hdr.get("infeasible") and verdict == "FAIL":
-        checks.append("  ⓘ marked infeasible — this FAIL is the coordination gate correctly "
-                      "refusing an unsatisfiable config (expected); not a controller bug")
-        verdict = "XFAIL"
+    verdict = soften_expected_fail(hdr, verdict, checks)
 
     # Check 11: continuous invariants + fault apparatus — AFTER the softening
     # (same rationale as teardown_check): a status lie or a broken apparatus is

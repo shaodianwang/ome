@@ -1,4 +1,5 @@
 # p90: PD MN e+d leader+1w N=2 RatioBalanced InPlaceIfPossible (gang in-place->recreate under coord) [in-place->recreate drain-first under RatioBalanced: band unsatisfiable] infeasible=1  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=3 topo=pd-mn
+# reason: in-place strategies bypass the ratio gate (RatioGateBypassed), so the gang fallback-recreate roll proceeds but sustains a 2:1 band deviation the harness band monitor flags
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p90 }

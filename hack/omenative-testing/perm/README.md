@@ -93,7 +93,10 @@ or generating cases; the generators run it themselves on exit.
 
 Each case is a single ISVC YAML; **line 1 is a `key=value` header** carrying the
 description, replica counts (`Ne/Nd/Nr`), peak ceilings (`ceil_e/ceil_d/ceil_r`),
-`topo=`, and optional `infeasible=1` (see verdicts).
+`topo=`, and the optional parked-debt flags (see verdicts): `infeasible=1`
+(requires a `# reason: <why unsatisfiable>` comment on line 2) and `notimpl=1`
+(requires `issue=<github issue number>` — an XFAIL with no tracked issue is
+invisible debt; validate-only rejects both omissions).
 
 ## How a case runs (`run.py`)
 
@@ -261,7 +264,8 @@ shared by its subprocesses, so a run's results land together under
 |----------------|-----------------------------------------------------------------|
 | `PASS`         | peak ≤ ceiling for every Component, converged back to N in budget, and coordination behaved (see below) |
 | `FAIL`         | a ceiling was exceeded, it didn't converge, or coordination misbehaved |
-| `XFAIL`        | a `FAIL` on a case tagged `infeasible=1` (a known-unsatisfiable shape — e.g. a RatioBalanced band narrower than one pod under a drain-first strategy); softened so it doesn't mask real regressions |
+| `XFAIL`        | a `FAIL` on a case tagged `infeasible=1` (a known-unsatisfiable shape — e.g. a RatioBalanced band narrower than one pod under a drain-first strategy; the line-2 `# reason:` comment names why); softened so it doesn't mask real regressions |
+| `XFAIL (known bug: #N)` | a `FAIL` on a case tagged `notimpl=1 issue=N` — parked on a tracked known bug; the verdict carries the issue so no sweep summary hides the debt. `batch.py` additionally prints a `PARKED DEBT` table listing every notimpl/infeasible case in the sweep, even when they all XFAIL |
 | `INIT_TIMEOUT` | never reached initial Ready (often capacity/contention, not a controller bug) |
 | `APPLY_FAIL`   | `kubectl apply` rejected the ISVC                                |
 

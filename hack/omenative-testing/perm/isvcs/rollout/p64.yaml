@@ -1,4 +1,5 @@
 # p64: PD RatioBalanced asymmetric BOTH-RecreatePod e=4 d=2 tol=25 — drain-first on unequal 2:1 (band + drain interplay) [recreate drain-first under RatioBalanced: band unsatisfiable] infeasible=1  Ne=8 Nd=2 Nr=2 ceil_e=8 ceil_d=2 ceil_r=3 topo=pd
+# reason: draining 1 of 2 decoder pods projects 8:1 against the 4:1 anchor — past even the tiebreaker's 2x band, so the gate keeps it an honest deadlock (coordination/ratio.go documents this exact 4:2 shape); engine rolls, decoder never can
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p64 }

@@ -49,14 +49,18 @@ def _block(c):
     return "\n".join(s)
 
 
-def emit(cid, desc, comps, coord=None):
+def emit(cid, desc, comps, coord=None, reason=None):
     by = {c["name"]: c for c in comps}
     N = {k: by.get(k, {}).get("N", 0) for k in ("engine", "decoder", "router")}
     ce = {k: (_ceil(by[k]) if k in by else 0) for k in ("engine", "decoder", "router")}
     topo = "pd-mn" if "decoder" in by else "engine-mn"   # categorization tag run.py keys on
+    if "infeasible=1" in desc and not reason:
+        sys.exit(f"{cid}: infeasible=1 requires a reason (validate rejects it without a line-2 '# reason:')")
     lines = [f"# {cid}: {desc}  Ne={N['engine']} Nd={N['decoder']} Nr={N['router']} "
-             f"ceil_e={ce['engine']} ceil_d={ce['decoder']} ceil_r={ce['router']} topo={topo}",
-             "apiVersion: ome.io/v1beta1", "kind: InferenceService",
+             f"ceil_e={ce['engine']} ceil_d={ce['decoder']} ceil_r={ce['router']} topo={topo}"]
+    if reason:   # line 2, adjacent to the header — run.py --validate-only enforces this for infeasible=1
+        lines.append(f"# reason: {reason}")
+    lines += ["apiVersion: ome.io/v1beta1", "kind: InferenceService",
              f"metadata: {{ name: {cid} }}", "spec:",
              "  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }",
              f"  runtime: {{ apiGroup: ome.io, kind: ClusterServingRuntime, name: {RT}, autoSync: true }}"]
@@ -146,7 +150,9 @@ COMBOS = [
      dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=PC)),
     ("p76", "PD MN e+d leader+1w N=2 RatioBalanced RecreatePod (gang drain both) [recreate drain-first under RatioBalanced: band unsatisfiable] infeasible=1",
      [C("engine", 2, 2, 1, "RecreatePod", 0, 1), C("decoder", 2, 2, 1, "RecreatePod", 0, 1), RTR],
-     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB)),
+     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB),
+     "gang RecreatePod drains a whole 2-pod gang = a 50% capacity step at N=2; tol=25 band "
+     "(and its one-pod tiebreaker) cannot admit it, so the ratio gate correctly refuses to start"),
     ("p77", "PD MN e+d leader+1w N=2 Sequential RecreatePod",
      [C("engine", 2, 2, 1, "RecreatePod", 0, 1), C("decoder", 2, 2, 1, "RecreatePod", 0, 1), RTR],
      dict(policy="Sequential", members=["decoder", "engine"], order=["decoder", "engine"])),
@@ -220,7 +226,9 @@ COMBOS = [
     # InPlaceOnly recreates for gangs rather than erroring.
     ("p90", "PD MN e+d leader+1w N=2 RatioBalanced InPlaceIfPossible (gang in-place->recreate under coord) [in-place->recreate drain-first under RatioBalanced: band unsatisfiable] infeasible=1",
      [C("engine", 2, 2, 1, "InPlaceIfPossible", 0, 1), C("decoder", 2, 2, 1, "InPlaceIfPossible", 0, 1), RTR],
-     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB)),
+     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB),
+     "in-place strategies bypass the ratio gate (RatioGateBypassed), so the gang fallback-recreate "
+     "roll proceeds but sustains a 2:1 band deviation the harness band monitor flags"),
     ("p91", "MN engine leader+1w N=2 InPlaceOnly (strict in-place gang -> recreate, must not error)",
      [C("engine", 2, 2, 1, "InPlaceOnly", 0, 1)], None),
 
@@ -250,8 +258,9 @@ if __name__ == "__main__":
     for cid, *_ in COMBOS:
         if 1 <= int(cid[1:]) <= 65:
             sys.exit(f"{cid} would overwrite the static hand-written p01-p65 rollout set")
-    for cid, desc, comps, coord in COMBOS:
-        emit(cid, desc, comps, coord)
+    for entry in COMBOS:
+        cid, desc, comps, coord = entry[:4]
+        emit(cid, desc, comps, coord, reason=entry[4] if len(entry) > 4 else None)
     ids = [cid for cid, *_ in COMBOS]
     lo = min(int(c[1:]) for c in ids)
     hi = max(int(c[1:]) for c in ids)

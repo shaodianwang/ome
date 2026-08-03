@@ -1,4 +1,5 @@
 # p76: PD MN e+d leader+1w N=2 RatioBalanced RecreatePod (gang drain both) [recreate drain-first under RatioBalanced: band unsatisfiable] infeasible=1  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=3 topo=pd-mn
+# reason: gang RecreatePod drains a whole 2-pod gang = a 50% capacity step at N=2; tol=25 band (and its one-pod tiebreaker) cannot admit it, so the ratio gate correctly refuses to start
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p76 }
