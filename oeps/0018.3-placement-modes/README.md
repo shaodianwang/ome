@@ -134,12 +134,47 @@ so "one backend per home" is a publisher change, not a new mechanism. Extending
 `CandidatePlacement` (already cluster-keyed, already populated during the race)
 avoids a second, drift-prone cluster-keyed list.
 
-`Split` binds to the OEP-0018.1 fractional algorithm (distribute `minReplicas`
-across candidates; each Kueue admits what fits; keep every cluster with ≥1; sum
-admitted until the floor is met; weight the endpoint by ready replicas; enforce
-the gang-boundary invariant). It splits the guaranteed floor, not `maxReplicas` —
-see open questions. This OEP contributes only the `mode` binding and the shared
-status/endpoint model.
+`Split` binds to the OEP-0018.1 fractional algorithm (distribute the desired
+replica count across candidates; each Kueue admits what fits; keep every cluster
+with ≥1; sum admitted until the count is met; weight the endpoint by ready
+replicas; enforce the gang-boundary invariant). This OEP contributes the `mode`
+binding, the shared status/endpoint model, and two decisions that 0018.1 left
+open — pinned here before implementation:
+
+**Decision 1 — the desired count is `minReplicas`, not a `spec.replicas`.**
+0018.1's algorithm is written against "desired N (spec.replicas)", but OME's
+`ComponentExtensionSpec` has no fixed `replicas` field — only `minReplicas`
+(guaranteed floor) and `maxReplicas` (autoscaling ceiling). Split distributes
+**`minReplicas`**: it is the count OME actually guarantees is running, so it is
+the one worth spreading across clusters. `maxReplicas` is an autoscaling ceiling
+reached only under load — splitting it would reserve capacity that may never be
+used and could never guarantee each home hits its share; it stays a *per-home
+local* ceiling (a home autoscales up from its assigned share on local demand). A
+fixed count is `minReplicas == maxReplicas`. An optional
+`spec.placement.split.replicas` override may name a count other than the engine
+floor; unset falls back to `minReplicas`.
+
+**Decision 2 — default apportionment is `Packed` (colocate), not `Balanced`.**
+0018.1's fan-out parameterizes apportionment as `Balanced` (`ceil(N/|C|)` across
+all candidates) vs `Packed` (fill fewer clusters). We default to **`Packed`**:
+fan out in preference order, each cluster admits what its Kueue lets fit, spill
+only the remainder to the next candidate, and stop once summed admitted ≥ the
+desired count — so the service lands on the *fewest* clusters the fleet's quota
+forces. Rationale: fewer homes → fewer endpoint backends, less cross-cluster
+traffic-split, better locality; and it is the honest fit for the no-capacity-read
+model (ask → see what admits → spill). This is emergent, not a central packer
+(0018.1's rejected non-goal) — OME still reads no capacity. Spread is an explicit
+opt-in via `spec.placement.split.{spread,maxReplicasPerCluster}`: a per-cluster
+cap forces the fill to move on before a cluster is full, which is how deliberate
+spread is achieved *without* reading capacity. Blast-radius note: `Packed`
+concentrates a service on fewer clusters, so a cluster loss removes a larger
+share — operators who want resilience over locality set the spread cap.
+
+Everything else — the apportion→observe→account→trim/re-apportion loop, the
+over-request-and-admit-what-fits mechanism, the gang-boundary invariant, and the
+convergence contract (summed admitted converges to ≥ the desired count; transient
+overshoot is trimmed, gated-first) — is OEP-0018.1's to specify; this OEP does
+not restate it.
 
 ## Anticipated objections
 
