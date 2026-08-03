@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1902,4 +1903,48 @@ func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.C
 func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32, insts ...v1beta1.OMENativeInstanceStatus) (bool, string) {
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{component: insts})
 	return ResolveGateContext(context.Background(), client, isvc, component).CheckSurge(inFlightDelta)
+}
+
+// The fail-closed trio: a transient IR read error (anything but
+// NotFound) must DENY, not read as "no observation yet" — the gates'
+// whole job is to hold disruption when the cluster view is unreliable.
+// Missing-IR (NotFound) keeps the first-reconcile allow semantics; that
+// path is pinned by the existing NoObservation tests.
+
+func TestCheckRatio_ReadErrorFailsClosed(t *testing.T) {
+	isvc := mkPDFixture(nil)
+	reader := &failingIRClient{Client: fakeClientForISVC(isvc)}
+	allowed, reason := ResolveGateContext(context.Background(), reader, isvc, v1beta1.EngineComponent).CheckRatio(0, -1)
+	if allowed {
+		t.Fatalf("ratio gate must fail closed on IR read error: %s", reason)
+	}
+	if !strings.Contains(reason, "failing closed") {
+		t.Errorf("denial reason should mark the degraded read: %s", reason)
+	}
+}
+
+func TestCheckUnavailability_ReadErrorFailsClosed(t *testing.T) {
+	mu := intstr.FromInt32(2)
+	isvc := mkUnavailFixture(&mu)
+	reader := &failingIRClient{Client: fakeClientForISVC(isvc)}
+	allowed, reason := ResolveGateContext(context.Background(), reader, isvc, v1beta1.EngineComponent).CheckUnavailability(0)
+	if allowed {
+		t.Fatalf("unavailability gate must fail closed on IR read error: %s", reason)
+	}
+	if !strings.Contains(reason, "failing closed") {
+		t.Errorf("denial reason should mark the degraded read: %s", reason)
+	}
+}
+
+func TestCheckSurge_ReadErrorFailsClosed(t *testing.T) {
+	ms := intstr.FromInt32(2)
+	isvc := mkSurgeFixture(&ms)
+	reader := &failingIRClient{Client: fakeClientForISVC(isvc)}
+	allowed, reason := ResolveGateContext(context.Background(), reader, isvc, v1beta1.EngineComponent).CheckSurge(0)
+	if allowed {
+		t.Fatalf("surge gate must fail closed on IR read error: %s", reason)
+	}
+	if !strings.Contains(reason, "failing closed") {
+		t.Errorf("denial reason should mark the degraded read: %s", reason)
+	}
 }

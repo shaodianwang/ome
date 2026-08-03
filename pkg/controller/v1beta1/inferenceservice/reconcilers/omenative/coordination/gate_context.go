@@ -44,13 +44,14 @@ type GateContext struct {
 	// is true. Empty otherwise.
 	ShortReason string
 
-	// Ctx provides the context for reading authoritative IR status. Nil
-	// when the gate should fall back to reading from ISVC.Status.Components
-	// (pre-IR-migration path or test scenarios).
+	// Ctx provides the context for reading authoritative IR status.
 	Ctx context.Context
 
-	// Reads is the client.Reader for fetching InferenceReplica objects. Nil
-	// when Ctx is nil.
+	// Reads is the client.Reader for fetching InferenceReplica objects.
+	// A nil reader degrades to "no observation yet" (gates allow — same
+	// as a missing IR); a non-nil reader whose reads FAIL makes the
+	// gates fail closed (deny with a retryable reason). There is no
+	// fallback to the ISVC's copied LifecycleStatus.
 	Reads client.Reader
 }
 
@@ -66,9 +67,9 @@ type GateContext struct {
 // dispatcher calls this once per per-Instance tick so the
 // ResolveGroups + MembershipFor work doesn't run 4 times per dispatch.
 //
-// ctx and reads are optional (may be nil). When provided, the gate methods
-// will read authoritative InferenceReplica status; when nil, they fall back
-// to reading from isvc.Status.Components.
+// The gate methods read authoritative InferenceReplica status via ctx and
+// reads. A nil reads degrades every read to "no observation yet" (see the
+// GateContext.Reads doc); it does not fall back to isvc.Status.Components.
 func ResolveGateContext(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) GateContext {
 	if isvc == nil {
 		return GateContext{

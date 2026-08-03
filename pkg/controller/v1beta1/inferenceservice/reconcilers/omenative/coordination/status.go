@@ -70,7 +70,10 @@ func ratioStateToAPI(r *RatioState) *v1beta1.RolloutCoordinationRatio {
 // previously-observed RolloutCoordinationStatus. The merge preserves
 // LastTransitionTime when Phase didn't change, since the status is
 // supposed to reflect when the phase last *transitioned*, not when
-// the controller last looked at it.
+// the controller last looked at it. Prior groups are carried through
+// untouched; pruning entries absent from the full fresh set is the
+// caller's job (mergeAndPersistGroupStatuses), which sees every
+// declared group at once.
 func MergeGroupStatus(prev *v1beta1.RolloutCoordinationStatus, next v1beta1.RolloutCoordinationGroupStatus) *v1beta1.RolloutCoordinationStatus {
 	out := &v1beta1.RolloutCoordinationStatus{}
 	if prev != nil {

@@ -456,9 +456,8 @@ func TestRollbackSignal_TransientReadKeepsTarget(t *testing.T) {
 // TestDispatch_EnsuresPerRevisionServicesForSecondary pins that a multi-Component
 // canary ensures per-revision Services for EVERY group Component, not just the
 // primary. coordination skips canary-owned Components, so the canary engine is
-// their sole producer; ensuring only the primary's left the secondary's
-// peer-discovery revision endpoint (OME_<SECONDARY>_REVISION_ENDPOINT) pointing
-// at a Service nothing created.
+// their sole producer; ensuring only the primary's would leave the secondary's
+// per-revision Service missing for the weighted-route consumer.
 func TestDispatch_EnsuresPerRevisionServicesForSecondary(t *testing.T) {
 	ns := "default"
 	n4 := 4

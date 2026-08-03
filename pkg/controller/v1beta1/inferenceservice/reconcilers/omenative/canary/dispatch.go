@@ -80,19 +80,18 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 
 	// Ensure the per-revision Services the canary references, for EVERY Component
 	// in the canary group — not just the primary. The downstream weighted-route
-	// consumer and the peer-discovery revision endpoints (OME_<PEER>_REVISION_ENDPOINT)
-	// reference these by name, and coordination skips canary-owned Components, so
-	// the canary engine is their sole producer; ensuring only the primary's left a
-	// secondary's revision endpoint dangling. Mirrors coordination's per-Component
-	// ensure+GC loop.
+	// consumer references these by name, and coordination skips canary-owned
+	// Components, so the canary engine is their sole producer; ensuring only the
+	// primary's would leave a secondary's per-revision Service dangling. Mirrors
+	// coordination's per-Component ensure+GC loop.
 	for _, comp := range configuredComponents(d.ISVC) {
 		// Ensure runs EVERY reconcile — it is the self-heal path. A
 		// per-revision Service deleted out-of-band must be recreated even
 		// when the live revision-hash set is unchanged; EnsurePerRevisionServices
 		// uses CreateOrUpdate, whose Gets are cache-served and cheap, and
 		// recreates a missing Service. Gating ensure on revision-set
-		// convergence would strand the weighted-route consumer (and the
-		// peer OME_<PEER>_REVISION_ENDPOINT) on a dead backend.
+		// convergence would strand the weighted-route consumer on a
+		// dead backend.
 		multiPod := isvcutils.IsMultiPodComponent(d.ISVC, comp)
 		for hash := range perRev[comp] {
 			if hash == "" {

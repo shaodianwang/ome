@@ -2,7 +2,9 @@ package coordination
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -626,6 +628,9 @@ func testReconcilerISVC() *v1beta1.InferenceService {
 	}
 }
 
+// buildPod returns a Running+Ready pod (the realistic steady state):
+// the traffic writer weighs only READY pods, so a status-less fixture
+// would carry zero weight.
 func buildPod(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, idx int) runtime.Object {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -636,6 +641,12 @@ func buildPod(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, r
 				constants.OMEComponentLabel:           string(component),
 				query.LabelManagedBy:                  query.ManagedByOMENative,
 				query.LabelRevisionHash:               revisionHash,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 			},
 		},
 	}
@@ -936,7 +947,10 @@ func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T
 		},
 	}
 	c := testClient(engineIR, decoderIR)
-	obs := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseFailed {
 		t.Errorf("BlueGreen with any Failed Component must report Failed; got %q", tr.Phase)
@@ -997,7 +1011,10 @@ func TestBuildRatioState_DefersSnapshotWhenStatusEmpty(t *testing.T) {
 	// IR summary is nil.
 	isvcEmpty := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"}}
 	emptyClient := testClient()
-	obsEmpty := buildGroupObservation(context.Background(), emptyClient, isvcEmpty, g, map[v1beta1.ComponentType]map[string]int32{})
+	obsEmpty, err := buildGroupObservation(context.Background(), emptyClient, isvcEmpty, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
 	stateEmpty := buildRatioState(isvcEmpty, g, obsEmpty, map[v1beta1.ComponentType]map[string]int32{})
 
 	if len(stateEmpty.Original) != 0 {
@@ -1016,7 +1033,10 @@ func TestBuildRatioState_DefersSnapshotWhenStatusEmpty(t *testing.T) {
 		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
 	}
 	popClient := testClient(engineIR, decoderIR)
-	obsPopulated := buildGroupObservation(context.Background(), popClient, isvcPopulated, g, map[v1beta1.ComponentType]map[string]int32{})
+	obsPopulated, err := buildGroupObservation(context.Background(), popClient, isvcPopulated, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
 	statePopulated := buildRatioState(isvcPopulated, g, obsPopulated, map[v1beta1.ComponentType]map[string]int32{})
 
 	if statePopulated.Original[v1beta1.EngineComponent] != 4 {
@@ -1049,7 +1069,10 @@ func TestBuildRatioState_PartiallyPopulatedStatusDefersSnapshot(t *testing.T) {
 		Status:     v1beta1.InferenceReplicaStatus{Replicas: 4},
 	}
 	c := testClient(engineIR)
-	obs := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
 	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
 	if len(state.Original) != 0 {
 		t.Fatalf("partially populated status MUST defer snapshot; got Original=%v", state.Original)
@@ -1098,7 +1121,10 @@ func TestBuildRatioState_PreservesAlreadyRecordedAnchor(t *testing.T) {
 		Status:     v1beta1.InferenceReplicaStatus{Replicas: 1},
 	}
 	c := testClient(engineIR, decoderIR)
-	obs := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
 	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
 	if state.Original[v1beta1.EngineComponent] != 4 {
 		t.Errorf("anchor preservation: engine Original got %d want 4 (the snapshot from rollout start, NOT the current 2)", state.Original[v1beta1.EngineComponent])
@@ -1226,7 +1252,183 @@ func buildReadyPod(isvc *v1beta1.InferenceService, component v1beta1.ComponentTy
 		p.Status.Phase = corev1.PodRunning
 		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	} else {
-		p.Status.Phase = corev1.PodPending
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending}
 	}
 	return p
+}
+
+// failingIRClient wraps a client.Client and fails every InferenceReplica
+// Get with a non-NotFound error, modeling a flaky apiserver / cache read.
+// Everything else (pods, Services) passes through.
+type failingIRClient struct {
+	client.Client
+}
+
+func (c *failingIRClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*v1beta1.InferenceReplica); ok {
+		return errors.New("simulated apiserver failure")
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// TestReconcile_IRReadErrorFailsReconcile pins the fail-closed contract:
+// an IR read error must fail the coordination reconcile (retry next
+// pass), not degrade to a zero-valued observation that fakes an Idle
+// group and rewrites traffic with a fabricated latest hash.
+func TestReconcile_IRReadErrorFailsReconcile(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Rollout = singleEngineGroup()
+	pods := []runtime.Object{buildPod(isvc, v1beta1.EngineComponent, "hash1", 0)}
+	c := &failingIRClient{Client: testClient(pods...)}
+	_, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	})
+	if err == nil {
+		t.Fatal("IR read error must fail the reconcile, not silently degrade")
+	}
+	if !strings.Contains(err.Error(), "simulated apiserver failure") {
+		t.Errorf("error should carry the underlying read failure: %v", err)
+	}
+}
+
+// TestReconcile_TrafficWeighsOnlyReadyPods: a revision whose only pod is
+// Pending (e.g. ImagePullBackOff) must not receive a traffic percent —
+// its per-revision Service has zero endpoints. Its Service must still be
+// ensured (total map) so it is routable the moment the pod flips Ready.
+func TestReconcile_TrafficWeighsOnlyReadyPods(t *testing.T) {
+	isvc := testOMENativeISVC()
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
+		buildReadyPod(isvc, v1beta1.EngineComponent, "hash2", 1, false),
+	}
+	c := testClient(pods...)
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	traffic := isvc.Status.Components[v1beta1.EngineComponent].Traffic
+	if len(traffic) != 1 {
+		t.Fatalf("only the ready revision may carry weight; got %+v", traffic)
+	}
+	if want := PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1"); traffic[0].RevisionName != want || traffic[0].Percent != 100 {
+		t.Errorf("ready revision must hold 100%%: got %+v want %s@100", traffic[0], want)
+	}
+	// The pending revision's Service is still ensured from the total map.
+	svc := &corev1.Service{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash2")}
+	if err := c.Get(context.Background(), key, svc); err != nil {
+		t.Errorf("pending revision's per-revision Service must still exist: %v", err)
+	}
+}
+
+// TestMergeAndPersistGroupStatuses_PrunesRemovedGroups: a group renamed
+// or removed from spec.rollout must not leave its stale status entry
+// behind; surviving groups keep their LastTransitionTime when the phase
+// didn't change.
+func TestMergeAndPersistGroupStatuses_PrunesRemovedGroups(t *testing.T) {
+	then := metav1.NewTime(time.Now().Add(-time.Hour))
+	isvc := &v1beta1.InferenceService{
+		Status: v1beta1.InferenceServiceStatus{
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{
+					{Name: "0", Phase: v1beta1.CoordinationPhaseIdle, LastTransitionTime: &then},
+					{Name: "legacy", Phase: v1beta1.CoordinationPhaseSurging, LastTransitionTime: &then},
+				},
+			},
+		},
+	}
+	now := metav1.Now()
+	mergeAndPersistGroupStatuses(isvc, []v1beta1.RolloutCoordinationGroupStatus{
+		{Name: "0", Phase: v1beta1.CoordinationPhaseIdle, LastTransitionTime: &now},
+	})
+	groups := isvc.Status.RolloutCoordination.Groups
+	if len(groups) != 1 || groups[0].Name != "0" {
+		t.Fatalf("undeclared group must be pruned; got %+v", groups)
+	}
+	if !groups[0].LastTransitionTime.Equal(&then) {
+		t.Errorf("unchanged phase must preserve LastTransitionTime; got %v want %v", groups[0].LastTransitionTime, then)
+	}
+}
+
+// TestEmitPhaseEvents_OnlyOnTransition pins the spam guard: a settled
+// group must not re-emit GroupCompleted every reconcile (that burns the
+// per-object EventCorrelator budget and can suppress real Warnings).
+func TestEmitPhaseEvents_OnlyOnTransition(t *testing.T) {
+	isvc := testReconcilerISVC()
+	g := ResolvedGroup{Name: "0"}
+	idle := GroupTransition{Phase: v1beta1.CoordinationPhaseIdle, Message: "settled"}
+
+	rec := record.NewFakeRecorder(10)
+	emitPhaseEvents(rec, isvc, g, idle, v1beta1.CoordinationPhaseIdle, "")
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("unchanged Idle phase must not emit; got %v", got)
+	}
+
+	emitPhaseEvents(rec, isvc, g, idle, "", "")
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("first observation at rest must not emit GroupCompleted; got %v", got)
+	}
+
+	emitPhaseEvents(rec, isvc, g, idle, v1beta1.CoordinationPhaseSurging, "")
+	got := drainEvents(rec)
+	if len(got) != 1 || !strings.Contains(got[0], EventReasonGroupCompleted) {
+		t.Errorf("Surging→Idle transition must emit GroupCompleted once; got %v", got)
+	}
+
+	surging := GroupTransition{Phase: v1beta1.CoordinationPhaseSurging, Message: "rolling"}
+	emitPhaseEvents(rec, isvc, g, surging, "", "")
+	got = drainEvents(rec)
+	if len(got) != 1 || !strings.Contains(got[0], EventReasonGroupSurging) {
+		t.Errorf("first observation mid-roll must emit GroupSurging; got %v", got)
+	}
+}
+
+// TestEmitPhaseEvents_AwaitingGatedOnCompositeTransition: the soak
+// window holds the base Phase at Idle while only CompositePhase
+// advances, so the Awaiting event is guarded on the composite
+// transition, not the base one.
+func TestEmitPhaseEvents_AwaitingGatedOnCompositeTransition(t *testing.T) {
+	isvc := testReconcilerISVC()
+	g := ResolvedGroup{Name: "0"}
+	tr := GroupTransition{
+		Phase:          v1beta1.CoordinationPhaseIdle,
+		CompositePhase: v1beta1.CompositePhaseSequentialAwaiting,
+		Message:        "soaking",
+	}
+
+	rec := record.NewFakeRecorder(10)
+	emitPhaseEvents(rec, isvc, g, tr, v1beta1.CoordinationPhaseIdle, v1beta1.CompositePhaseSequentialAwaiting)
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("unchanged composite must not re-emit Awaiting; got %v", got)
+	}
+
+	emitPhaseEvents(rec, isvc, g, tr, v1beta1.CoordinationPhaseIdle, "decoder.Surging")
+	got := drainEvents(rec)
+	if len(got) != 1 || !strings.Contains(got[0], EventReasonSequentialAwaitingNext) {
+		t.Errorf("composite transition into Awaiting must emit once; got %v", got)
+	}
+}
+
+// TestReconcile_SteadyStateEmitsNoGroupEvents drives the real entry
+// point twice over a settled single-revision group: neither pass may
+// emit a group phase event.
+func TestReconcile_SteadyStateEmitsNoGroupEvents(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Rollout = singleEngineGroup()
+	pods := []runtime.Object{buildPod(isvc, v1beta1.EngineComponent, "hash1", 0)}
+	c := testClient(pods...)
+	rec := record.NewFakeRecorder(10)
+	for pass := 0; pass < 2; pass++ {
+		if _, err := Reconcile(context.Background(), ReconcileInputs{
+			ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+		}); err != nil {
+			t.Fatalf("pass %d: unexpected error: %v", pass, err)
+		}
+		for _, e := range drainEvents(rec) {
+			if strings.Contains(e, EventReasonGroupCompleted) {
+				t.Errorf("pass %d: settled group must not emit GroupCompleted: %v", pass, e)
+			}
+		}
+	}
 }

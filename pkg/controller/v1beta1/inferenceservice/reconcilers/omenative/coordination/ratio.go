@@ -541,8 +541,15 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 		}
 		state.Original[c] = orig
 
-		// Read from authoritative IR status.
-		summary, _ := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, isvc.Namespace, isvc.Name, c)
+		// Read from authoritative IR status. A read error is NOT "no
+		// observation yet": deny and let the caller requeue, otherwise a
+		// transient apiserver blip feeds a phantom zero-serving peer into
+		// EvaluateSurge and disables the ratio band exactly when the
+		// cluster is unhealthy.
+		summary, err := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, isvc.Namespace, isvc.Name, c)
+		if err != nil {
+			return false, fmt.Sprintf("cannot read %s IR status, failing closed: %v", c, err)
+		}
 
 		if summary != nil {
 			state.Current[c] = summary.Replicas
@@ -635,8 +642,14 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 		return true, ctx.ShortReason
 	}
 
-	// Read from authoritative IR status.
-	summary, _ := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, ctx.ISVC.Namespace, ctx.ISVC.Name, ctx.Component)
+	// Read from authoritative IR status. Only a genuinely missing IR is
+	// "no observation yet" (allow); a read error fails closed so a
+	// transient apiserver blip can't disable the unavailability budget
+	// and authorize a mass drain.
+	summary, err := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, ctx.ISVC.Namespace, ctx.ISVC.Name, ctx.Component)
+	if err != nil {
+		return false, fmt.Sprintf("cannot read %s IR status, failing closed: %v", ctx.Component, err)
+	}
 
 	if summary == nil {
 		return true, "no observation yet"
@@ -695,8 +708,14 @@ func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason str
 		return true, ctx.ShortReason
 	}
 
-	// Read from authoritative IR status.
-	summary, _ := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, ctx.ISVC.Namespace, ctx.ISVC.Name, ctx.Component)
+	// Read from authoritative IR status. Only a genuinely missing IR is
+	// "no observation yet" (allow); a read error fails closed so a
+	// transient apiserver blip can't erase the in-flight surge count and
+	// blow the surge budget.
+	summary, err := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, ctx.ISVC.Namespace, ctx.ISVC.Name, ctx.Component)
+	if err != nil {
+		return false, fmt.Sprintf("cannot read %s IR status, failing closed: %v", ctx.Component, err)
+	}
 
 	if summary == nil {
 		return true, "no observation yet"

@@ -2,10 +2,13 @@ package irprojector
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -45,5 +48,27 @@ func TestComponentIRStatus_NilReaderReturnsNil(t *testing.T) {
 	got, err := ComponentIRStatus(context.Background(), nil, "ns", "svc", v1beta1.EngineComponent)
 	if err != nil || got != nil {
 		t.Fatalf("nil reader must return (nil, nil); got (%+v, %v)", got, err)
+	}
+}
+
+// erroringReader fails every Get with a non-NotFound error.
+type erroringReader struct {
+	client.Reader
+}
+
+func (erroringReader) Get(_ context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	return errors.New("simulated apiserver failure")
+}
+
+func TestComponentIRStatus_ReadErrorPropagatesWrapped(t *testing.T) {
+	// Only NotFound maps to (nil, nil). Any other read failure must
+	// surface as a wrapped error so gate callers can fail closed instead
+	// of mistaking a flaky read for "no observation yet".
+	got, err := ComponentIRStatus(context.Background(), erroringReader{}, "ns", "svc", v1beta1.EngineComponent)
+	if err == nil || got != nil {
+		t.Fatalf("read error must propagate with nil status; got (%+v, %v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "get InferenceReplica ns/") || !strings.Contains(err.Error(), "simulated apiserver failure") {
+		t.Errorf("error should wrap the IR key and cause: %v", err)
 	}
 }

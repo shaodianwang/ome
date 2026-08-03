@@ -15,12 +15,11 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// conditionAvailable is the Component-level condition type stamped by
-// the OMENative status reconciler when AvailableReplicas==Replicas.
-// Duplicated as a local const to avoid importing the OMENative status
-// package (which would pull the entire pod/conditions write path into
-// the coordination layer's import graph).
-const conditionAvailable = "Available"
+// conditionReady is the IR-level condition type stamped by the
+// InferenceReplica status writer (inferencereplica.InferenceReplicaConditionReady).
+// Duplicated as a local const because the inferencereplica package
+// imports coordination — importing it back here would be a cycle.
+const conditionReady = "Ready"
 
 // CheckSequentialGate is the consumer side of Sequential coordination.
 // The OMENative ops dispatcher calls it before kicking off a fresh
@@ -85,8 +84,13 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 
 	// Compute per-Component RolloutInFlight observations from authoritative
 	// IR status — mirrors buildComponentObservation's revision-hash check
-	// but on the much smaller subset the gate needs.
-	observations := observeSequentialComponentsForGate(ctx.Ctx, ctx.Reads, isvc, group.Components)
+	// but on the much smaller subset the gate needs. A read error fails
+	// closed: fabricating a zero-valued observation for the rolling peer
+	// would admit a second Component and break at-most-one-rolling.
+	observations, err := observeSequentialComponentsForGate(ctx.Ctx, ctx.Reads, isvc, group.Components)
+	if err != nil {
+		return false, fmt.Sprintf("cannot read Sequential group IR status, failing closed: %v", err)
+	}
 	active, hasActive := activeSequentialComponent(group.Order, observations)
 	if !hasActive {
 		// No Component in flight at all — the group is idle (the
@@ -107,18 +111,21 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 	// mirrors that on the dispatcher side so the per-Instance Update
 	// doesn't fire while the operator's soak is still elapsing.
 	//
-	// Timestamp source: read the previous Component's Available
-	// condition's LastTransitionTime. The Available condition flips to
-	// True the moment AvailableReplicas==Replicas — exactly when the
-	// previous Component finished its rollout. The group's
-	// LastTransitionTime is the wrong source: it only updates when the
-	// base Phase changes, and Sequential's soak window holds the group
-	// at Phase=Idle (CompositePhase=Sequential.AwaitingNextComponent),
+	// Timestamp source: read the previous Component's IR Ready
+	// condition's LastTransitionTime. Ready sits at Unknown
+	// (RolloutInProgress) while the previous Component rolls and flips
+	// to True on convergence — exactly when its rollout finished. The
+	// group's LastTransitionTime is the wrong source: it only updates
+	// when the base Phase changes, and Sequential's soak window holds
+	// the group at Phase=Idle (CompositePhase=Sequential.AwaitingNextComponent),
 	// so LastTransitionTime points back at the pre-rollout Idle and
 	// time.Since(entered) is always past soakDuration.
 	if group.Soak > 0 {
 		if prev := previousCompletedComponentForGate(group.Order, observations, component); prev != "" {
-			completed := previousComponentReadyAt(ctx.Ctx, ctx.Reads, isvc, prev)
+			completed, err := previousComponentReadyAt(ctx.Ctx, ctx.Reads, isvc, prev)
+			if err != nil {
+				return false, fmt.Sprintf("cannot read %s IR status for soak, failing closed: %v", prev, err)
+			}
 			if !completed.IsZero() {
 				elapsed := time.Since(completed)
 				if elapsed < group.Soak {
@@ -168,7 +175,7 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 // that Component (its pods' RunningRevision already matches target.Name)
 // and the gate is never consulted. Once AggregateAndWriteStatus runs
 // and bumps ObservedGeneration, the noise clears.
-func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) map[v1beta1.ComponentType]ComponentObservation {
+func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]ComponentObservation, error) {
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
 		// Static spec partition, resolved the same way as
@@ -177,7 +184,10 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 		// release a converged staged Component here (#838).
 		partition := staticPartitionFor(isvc, c)
 		obs := ComponentObservation{Component: c, Partition: partition}
-		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		summary, err := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		if err != nil {
+			return nil, err
+		}
 		if summary != nil {
 			cur := query.RevisionFromName(summary.CurrentRevision)
 			tgt := query.RevisionFromName(summary.UpdateRevision)
@@ -210,7 +220,7 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 		}
 		out[c] = obs
 	}
-	return out
+	return out, nil
 }
 
 // previousCompletedComponentForGate is the order-aware "what came
@@ -240,18 +250,21 @@ func previousCompletedComponentForGate(order []v1beta1.ComponentType, observatio
 	return ""
 }
 
-// previousComponentReadyAt returns the moment the named Component
-// became Available (every Instance Ready) — read from the Component's
-// `Available` condition's LastTransitionTime. This is the wall-clock
-// anchor the Sequential soak gate compares `time.Since(...)` against.
+// previousComponentReadyAt returns the moment the named Component's
+// rollout completed — read from its IR `Ready` condition's
+// LastTransitionTime. Ready sits at Unknown (RolloutInProgress) while
+// the Component rolls and transitions to True on convergence, so the
+// timestamp anchors the wall-clock the Sequential soak gate compares
+// `time.Since(...)` against.
 //
 // Returns the zero time when:
-//   - The Component has no OMENative status block yet (first reconcile
+//   - The Component has no IR / no Ready condition yet (first reconcile
 //     before the status writer has run).
-//   - The Available condition has not been written yet, OR is currently
-//     False (the previous Component never finished a rollout, so there
-//     is no completion timestamp to honor — the gate's caller treats
-//     this as "no soak clock, allow").
+//   - The Ready condition is not currently True (the previous Component
+//     never finished a rollout, so there is no completion timestamp to
+//     honor — the gate's caller treats this as "no soak clock, allow").
+//
+// Returns a non-nil error when the IR read fails — callers fail closed.
 //
 // Why not `RolloutCoordinationGroupStatus.LastTransitionTime`?
 // `LastTransitionTime` is updated only when the group's base Phase
@@ -260,22 +273,25 @@ func previousCompletedComponentForGate(order []v1beta1.ComponentType, observatio
 // Phase stays constant, so LastTransitionTime keeps pointing at the
 // initial pre-rollout Idle. `time.Since(LastTransitionTime)` is always
 // well past `soak`, the gate never fires, and the soak window is a
-// no-op. The Available condition tracks the actual rollout-completion
+// no-op. The Ready condition tracks the actual rollout-completion
 // moment because `apimeta.SetStatusCondition` only updates
-// LastTransitionTime on real status transitions (False→True).
-func previousComponentReadyAt(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, prev v1beta1.ComponentType) time.Time {
-	summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, prev)
+// LastTransitionTime on real status transitions (Unknown→True).
+func previousComponentReadyAt(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, prev v1beta1.ComponentType) (time.Time, error) {
+	summary, err := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, prev)
+	if err != nil {
+		return time.Time{}, err
+	}
 	if summary == nil {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	for _, cond := range summary.Conditions {
-		if cond.Type != conditionAvailable {
+		if cond.Type != conditionReady {
 			continue
 		}
 		if cond.Status != metav1.ConditionTrue {
-			return time.Time{}
+			return time.Time{}, nil
 		}
-		return cond.LastTransitionTime.Time
+		return cond.LastTransitionTime.Time, nil
 	}
-	return time.Time{}
+	return time.Time{}, nil
 }

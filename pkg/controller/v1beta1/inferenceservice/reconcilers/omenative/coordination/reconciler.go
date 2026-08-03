@@ -171,7 +171,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 	// Cached client carries the OMENative Pod field index — useIndex=true takes
 	// the index fast path instead of scanning the whole informer store per Component.
-	perRevisionPods, _, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
+	perRevisionPods, perRevisionReadyPods, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
 	}
@@ -226,17 +226,26 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 	}
 
-	// Write per-Component Traffic[] from observed pod distribution
+	// Write per-Component Traffic[] from the READY pod distribution
 	// (producer-side contract feeding the HTTPRoute weighted-
-	// backendRef consumer).
-	updateTrafficStatus(ctx, in.Client, in.ISVC, componentsTouched, perRevisionPods, in.TrafficWeightDeadbandPercent)
+	// backendRef consumer). Ready, not total: a revision whose pods are
+	// all Pending/ImagePullBackOff cannot take traffic, and weighting it
+	// points the HTTPRoute at a zero-endpoint Service. Service ensure/GC
+	// above stays on the total map so a not-yet-ready revision's Service
+	// exists before its first pod flips Ready.
+	if err := updateTrafficStatus(ctx, in.Client, in.ISVC, componentsTouched, perRevisionReadyPods, in.TrafficWeightDeadbandPercent); err != nil {
+		return nil, fmt.Errorf("update traffic status: %w", err)
+	}
 
 	// Drive the per-group state machine.
 	for _, g := range groups {
 		if err := ValidateGroupShape(g); err != nil {
 			return nil, fmt.Errorf("invalid coordination group shape: %w", err)
 		}
-		obs := buildGroupObservation(ctx, in.Client, in.ISVC, g, perRevisionPods)
+		obs, err := buildGroupObservation(ctx, in.Client, in.ISVC, g, perRevisionPods)
+		if err != nil {
+			return nil, fmt.Errorf("build observation for group %s: %w", g.Name, err)
+		}
 		// Snapshot Original on first observation, then preserve it
 		// across reconciles via the previously-written ObservedRatio.
 		// Always refresh Current + NewPods from the live observation.
@@ -248,7 +257,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		groupStatus := BuildGroupStatus(g, tr, ratio, now)
 
 		// Record observability for this group.
-		prevPhase := previousGroupPhase(in.ISVC, g.Name)
+		prevPhase, prevComposite := previousGroupPhases(in.ISVC, g.Name)
 		RecordGroupPhase(in.ISVC.Namespace, in.ISVC.Name, g.Name, string(tr.Phase))
 		// Steady-state breadcrumb (no transition): V(1) so operators
 		// can `grep group=foo` without drowning the log under normal
@@ -312,7 +321,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			}
 		}
 
-		emitPhaseEvents(in.Recorder, in.ISVC, g, tr)
+		emitPhaseEvents(in.Recorder, in.ISVC, g, tr, prevPhase, prevComposite)
 		emitSequentialDeferredEvent(in.Recorder, in.ISVC, g, obs, previousActiveComponent(in.ISVC, g.Name))
 
 		result.GroupStatuses = append(result.GroupStatuses, groupStatus)
@@ -432,9 +441,6 @@ func podReadyAndServing(pod *corev1.Pod) bool {
 	return false
 }
 
-// updateTrafficStatus writes Status.Components.<c>.Traffic[] from
-// observed per-revision pod counts. Idempotent; no-op writes are
-// skipped to avoid bouncing the apiserver.
 // dropCanaryOwned removes Components driven by a canary group from comps. Those
 // Components belong to the canary engine (canary.Dispatch), which owns their
 // per-revision Services and traffic status; coordination must not touch them.
@@ -460,12 +466,16 @@ func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceServi
 	return out
 }
 
-func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionPods map[v1beta1.ComponentType]map[string]int32, deadbandPercent int32) {
+// updateTrafficStatus writes Status.Components.<c>.Traffic[] from
+// observed per-revision READY pod counts (a pod that isn't serving must
+// not pull a traffic share toward its zero-endpoint Service). Idempotent;
+// no-op writes are skipped to avoid bouncing the apiserver.
+func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionReadyPods map[v1beta1.ComponentType]map[string]int32, deadbandPercent int32) error {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	for _, c := range components {
-		hashes := perRevisionPods[c]
+		hashes := perRevisionReadyPods[c]
 		if len(hashes) == 0 {
 			continue
 		}
@@ -473,7 +483,10 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		for _, n := range hashes {
 			total += n
 		}
-		latestHash := latestRevisionHash(ctx, reads, isvc.Namespace, isvc.Name, c)
+		latestHash, err := latestRevisionHashChecked(ctx, reads, isvc.Namespace, isvc.Name, c)
+		if err != nil {
+			return err
+		}
 		weights := ComputeWeightsFromPods(hashes, total, latestHash)
 		traffic := BuildTrafficTargets(isvc.Name, c, weights)
 		// Only write when something changed.
@@ -501,34 +514,56 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		}
 		isvc.Status.Components[c] = cs
 	}
+	return nil
 }
 
-// latestRevisionHash returns the ControllerRevision hash this
-// Component is converging toward. Read from authoritative IR
-// status UpdateRevision; falls back to CurrentRevision.
+// latestRevisionHash preserves the error-swallowing shape consumed by
+// the exported LatestRevisionHash shim (canary executor). Coordination's
+// own traffic writer uses latestRevisionHashChecked so a read error
+// fails the reconcile instead of fabricating an empty latest hash.
 func latestRevisionHash(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) string {
-	summary, _ := irprojector.ComponentIRStatus(ctx, reads, namespace, isvcName, c)
+	hash, _ := latestRevisionHashChecked(ctx, reads, namespace, isvcName, c)
+	return hash
+}
+
+// latestRevisionHashChecked returns the ControllerRevision hash this
+// Component is converging toward. Read from authoritative IR
+// status UpdateRevision; falls back to CurrentRevision. A read error
+// propagates — writing traffic with a fabricated empty latest hash
+// would flip LatestRevision flags on the HTTPRoute consumer.
+func latestRevisionHashChecked(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) (string, error) {
+	summary, err := irprojector.ComponentIRStatus(ctx, reads, namespace, isvcName, c)
+	if err != nil {
+		return "", err
+	}
 	if summary == nil {
-		return ""
+		return "", nil
 	}
 	if name := summary.UpdateRevision; name != "" {
-		return query.RevisionFromName(name).Hash()
+		return query.RevisionFromName(name).Hash(), nil
 	}
 	if name := summary.CurrentRevision; name != "" {
-		return query.RevisionFromName(name).Hash()
+		return query.RevisionFromName(name).Hash(), nil
 	}
-	return ""
+	return "", nil
 }
 
 // buildGroupObservation builds the GroupObservation the state machine
-// consumes from observed pod counts + authoritative IR status.
-func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]map[string]int32) GroupObservation {
+// consumes from observed pod counts + authoritative IR status. A read
+// error propagates instead of degrading to a zero-valued observation —
+// feeding fabricated zeros into the state machine would fake an Idle
+// group (and reset its LastTransitionTime soak anchor) during an
+// apiserver blip.
+func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]map[string]int32) (GroupObservation, error) {
 	obs := GroupObservation{
 		Group:      g,
 		Components: make(map[v1beta1.ComponentType]ComponentObservation, len(g.Components)),
 	}
 	for _, c := range g.Components {
-		summary, _ := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		summary, err := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		if err != nil {
+			return GroupObservation{}, err
+		}
 		// ResolveGroups excludes canary groups, so every Component here is
 		// coordination-owned and reads its static spec partition. Canary-owned
 		// Components never reach this loop (they leave Partition 0, driven by
@@ -539,7 +574,7 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
 		obs.PausedGlobal = true
 	}
-	return obs
+	return obs, nil
 }
 
 // buildComponentObservation aggregates one Component's observation from
@@ -792,21 +827,21 @@ func existingOriginalReplicas(isvc *v1beta1.InferenceService, groupName string) 
 	return nil
 }
 
-// previousGroupPhase returns the Phase observed for `groupName` in the
-// most recent reconcile (read from the ISVC's existing status). Empty
-// when no prior observation exists — caller treats that as "no
-// transition" so the very first reconcile doesn't synthesize a
-// spurious from="" → to=Idle transition increment.
-func previousGroupPhase(isvc *v1beta1.InferenceService, groupName string) v1beta1.CoordinationPhase {
+// previousGroupPhases returns the Phase and CompositePhase observed for
+// `groupName` in the most recent reconcile (read from the ISVC's
+// existing status). Empty when no prior observation exists — callers
+// treat that as "no transition" so the very first reconcile doesn't
+// synthesize a spurious from="" → to=Idle transition increment.
+func previousGroupPhases(isvc *v1beta1.InferenceService, groupName string) (v1beta1.CoordinationPhase, string) {
 	if isvc.Status.RolloutCoordination == nil {
-		return ""
+		return "", ""
 	}
 	for _, gs := range isvc.Status.RolloutCoordination.Groups {
 		if gs.Name == groupName {
-			return gs.Phase
+			return gs.Phase, gs.CompositePhase
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // previousActiveComponent returns the CurrentComponent observed for
@@ -889,29 +924,40 @@ func hasMixedPairing(g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]
 }
 
 // emitPhaseEvents fires K8s events on phase transitions for the
-// observer to understand what the coordination layer is doing.
-// Stateless — the same event may fire multiple times across
-// reconciles if the phase doesn't change. Callers can dedupe via
-// the recorder's standard event aggregation.
-func emitPhaseEvents(recorder record.EventRecorder, isvc *v1beta1.InferenceService, g ResolvedGroup, tr GroupTransition) {
+// observer to understand what the coordination layer is doing. Gated on
+// the prev != next transition (mirroring the RecordGroupTransition
+// guard): an unguarded emit repeats GroupCompleted every reconcile of
+// every settled ISVC forever, burning the per-object EventCorrelator
+// spam budget and risking suppression of real Warnings.
+//
+// The first-ever observation (prevPhase == "") emits for active phases
+// but not for Idle — a freshly-observed group at rest never completed
+// anything. The Sequential.Awaiting composite event is guarded on the
+// COMPOSITE transition separately: the soak window holds the base Phase
+// at Idle while only CompositePhase advances.
+func emitPhaseEvents(recorder record.EventRecorder, isvc *v1beta1.InferenceService, g ResolvedGroup, tr GroupTransition, prevPhase v1beta1.CoordinationPhase, prevComposite string) {
 	if recorder == nil {
 		return
 	}
-	switch tr.Phase {
-	case v1beta1.CoordinationPhaseSurging:
-		recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonGroupSurging,
-			"coordination group %s surging: %s", g.Name, tr.Message)
-	case v1beta1.CoordinationPhaseShifting:
-		recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonGroupShifting,
-			"coordination group %s shifting: %s", g.Name, tr.Message)
-	case v1beta1.CoordinationPhaseFailed:
-		recorder.Eventf(isvc, corev1.EventTypeWarning, EventReasonGroupFailed,
-			"coordination group %s failed: %s", g.Name, tr.Message)
-	case v1beta1.CoordinationPhaseIdle:
-		recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonGroupCompleted,
-			"coordination group %s idle: %s", g.Name, tr.Message)
+	if string(prevPhase) != string(tr.Phase) {
+		switch tr.Phase {
+		case v1beta1.CoordinationPhaseSurging:
+			recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonGroupSurging,
+				"coordination group %s surging: %s", g.Name, tr.Message)
+		case v1beta1.CoordinationPhaseShifting:
+			recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonGroupShifting,
+				"coordination group %s shifting: %s", g.Name, tr.Message)
+		case v1beta1.CoordinationPhaseFailed:
+			recorder.Eventf(isvc, corev1.EventTypeWarning, EventReasonGroupFailed,
+				"coordination group %s failed: %s", g.Name, tr.Message)
+		case v1beta1.CoordinationPhaseIdle:
+			if prevPhase != "" {
+				recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonGroupCompleted,
+					"coordination group %s idle: %s", g.Name, tr.Message)
+			}
+		}
 	}
-	if tr.CompositePhase == v1beta1.CompositePhaseSequentialAwaiting {
+	if tr.CompositePhase == v1beta1.CompositePhaseSequentialAwaiting && prevComposite != tr.CompositePhase {
 		recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonSequentialAwaitingNext,
 			"sequential group %s awaiting next Component: %s", g.Name, tr.Message)
 	}
@@ -976,7 +1022,10 @@ func emitSequentialDeferredEvent(recorder record.EventRecorder, isvc *v1beta1.In
 
 // mergeAndPersistGroupStatuses installs the freshly-computed group
 // statuses into ISVC.Status.RolloutCoordination. Preserves transition
-// timestamps when the phase didn't change.
+// timestamps when the phase didn't change, and prunes group entries no
+// longer present in the freshly-computed set — a group renamed or
+// removed from spec.rollout would otherwise leave its stale status
+// entry (and stale RolloutCoordinationReady input) behind forever.
 func mergeAndPersistGroupStatuses(isvc *v1beta1.InferenceService, fresh []v1beta1.RolloutCoordinationGroupStatus) {
 	if len(fresh) == 0 {
 		// No coordination-style groups: reconcile the stale status away rather
@@ -986,14 +1035,21 @@ func mergeAndPersistGroupStatuses(isvc *v1beta1.InferenceService, fresh []v1beta
 		return
 	}
 	merged := isvc.Status.RolloutCoordination
+	declared := make(map[string]struct{}, len(fresh))
 	for _, g := range fresh {
+		declared[g.Name] = struct{}{}
 		merged = MergeGroupStatus(merged, g)
 	}
-	// Stable order by group name for deterministic status writes.
-	if merged != nil {
-		sort.SliceStable(merged.Groups, func(i, j int) bool {
-			return merged.Groups[i].Name < merged.Groups[j].Name
-		})
+	kept := merged.Groups[:0]
+	for _, g := range merged.Groups {
+		if _, ok := declared[g.Name]; ok {
+			kept = append(kept, g)
+		}
 	}
+	merged.Groups = kept
+	// Stable order by group name for deterministic status writes.
+	sort.SliceStable(merged.Groups, func(i, j int) bool {
+		return merged.Groups[i].Name < merged.Groups[j].Name
+	})
 	isvc.Status.RolloutCoordination = merged
 }

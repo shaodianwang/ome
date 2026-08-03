@@ -11,22 +11,20 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// PeerEndpointEnv is the set of generation-scoped peer-discovery env
-// vars OMENative stamps on every pod for one peer Component. Two
-// vars are emitted per peer:
+// PeerEndpointEnv is the set of peer-discovery env vars OMENative can
+// stamp on a pod for one peer Component:
 //
 //   - OME_<PEER>_ENDPOINT carries the generic, revision-agnostic
-//     Service DNS name. Used by runtimes in Independent or
-//     RollingUpdate groups where cross-revision peer calls are
-//     allowed.
+//     Service DNS name. Always emitted; this is the var runtimes
+//     consume for cross-Component serving calls.
 //   - OME_<PEER>_REVISION_ENDPOINT carries the per-revision Service
-//     DNS name, scoped to the pod's own revision. Used by runtimes
-//     in BlueGreen groups where only same-revision peer calls are
-//     allowed.
+//     DNS name. Emitted only when the caller supplies a revision hash
+//     for the peer. No production caller does: a peer's revision hash
+//     is unknowable at render time (each Component hashes its own
+//     template), so pods carry only the generic form.
 //
-// The runtime selects which one to honor based on its own config; both
-// are always populated. Env vars are read-once at pod startup which
-// matches the LLM-runtime pattern.
+// Env vars are read-once at pod startup which matches the LLM-runtime
+// pattern.
 type PeerEndpointEnv struct {
 	// Peer is the peer Component these vars target.
 	Peer v1beta1.ComponentType
@@ -39,18 +37,21 @@ type PeerEndpointEnv struct {
 	GenericValue string
 
 	// RevisionName is the OME_<PEER>_REVISION_ENDPOINT env var name.
+	// Only meaningful when a peer revision hash was supplied.
 	RevisionName string
 
-	// RevisionValue is the DNS name pointing at the per-revision
-	// Service for this pod's revision
-	// (`<isvc>-<peer>-rev-<revision-hash>`).
+	// RevisionValue is the DNS name pointing at the peer's
+	// per-revision Service (`<isvc>-<peer>-rev-<revision-hash>`).
+	// Only meaningful when a peer revision hash was supplied.
 	RevisionValue string
 }
 
 // BuildPeerEndpointEnv computes the env vars OMENative injects into a
-// pod for one peer Component. The peer's revision-hash is the pod's
-// own revision — peer pods talk to peers in their own revision when
-// the runtime honors the per-revision form.
+// pod for one peer Component. podRevisionHash, when non-empty, must be
+// a revision hash of the PEER — each Component hashes its own
+// template, so the rendered pod's own hash never names a peer
+// revision. Callers without a peer hash pass "" and get only the
+// generic form (InjectPeerEnv skips the revision pair).
 //
 // isvc + namespace identify the InferenceService; the function does
 // not do I/O.
@@ -87,10 +88,11 @@ func revisionPeerDNS(isvc string, peer v1beta1.ComponentType, revisionHash, name
 // with the same Name are replaced — coordination's values are
 // authoritative.
 //
-// If revisionHashFor is nil, the function emits only the generic env
-// var (the revision-aware form requires a known revision hash for
-// each peer; in single-revision steady state callers may either pass
-// the steady revision hash or skip the per-revision form).
+// If revisionHashFor is nil — the production wiring, since a peer's
+// revision hash is unknowable at render time — only the generic env
+// var is emitted. A non-nil revisionHashFor must return a revision
+// hash of the PEER it is called with (or "" to skip that peer's
+// revision form).
 //
 // The peers slice should be deduplicated and stable in order;
 // callers typically pass coordination.ServingPeers(...).
