@@ -332,17 +332,35 @@ func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 // it against MaxSurge; the SurgeIndex pointer is what distinguishes a
 // gang surge (new index) from a single-pod surge (ActiveOrdinal toggle,
 // SurgeIndex nil).
+//
+// Marker-liveness invariant: a GangSurgeTarget marker is pinned only
+// while some source instance carries a SurgeIndex operation referencing
+// it. The marker's lifecycle is owned by its source's gangSurgeUpdate;
+// once no source op points at it (the source promoted, was reset, or
+// was re-adopted after a corrective edit) the marker is an ORPHAN —
+// pinning it would leak a dead replacement gang forever. Unpinned, it
+// falls out of the plan as a scale-down extra and the Delete pipeline
+// reaps its pods and clears the slot.
 func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
+	referenced := map[int32]struct{}{}
 	for _, s := range instances {
 		if s.Operation == nil || s.Operation.Type != InstanceOperationUpdate {
 			continue
 		}
 		if s.Operation.SurgeIndex != nil { // source
 			out[s.Index] = struct{}{}
+			referenced[*s.Operation.SurgeIndex] = struct{}{}
 		}
-		if s.Operation.Step == UpdateStepGangSurgeTarget { // target
-			out[s.Index] = struct{}{}
+	}
+	for _, s := range instances {
+		if s.Operation == nil || s.Operation.Type != InstanceOperationUpdate {
+			continue
+		}
+		if s.Operation.Step == UpdateStepGangSurgeTarget { // target (marker)
+			if _, live := referenced[s.Index]; live {
+				out[s.Index] = struct{}{}
+			}
 		}
 	}
 	return out

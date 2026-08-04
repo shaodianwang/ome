@@ -310,6 +310,46 @@ func TestComputeTransition_RollingUpdateFailed(t *testing.T) {
 	}
 }
 
+// TestComputeTransition_FailedExitsOnRecovery pins the terminal-state
+// exit: the group Phase is a pure rollup
+// of per-Component state, so once a corrective edit reconciles the
+// failed Component back to health (Failed cleared, nothing rolling),
+// the very next transition leaves Failed — no group-level latch, no
+// operator action. Asserted per policy over the same recovered
+// observation.
+func TestComputeTransition_FailedExitsOnRecovery(t *testing.T) {
+	for _, policy := range []v1beta1.CoordinationPolicy{
+		v1beta1.CoordinationPolicyIndependent,
+		v1beta1.CoordinationPolicyBlueGreen,
+		v1beta1.CoordinationPolicyRollingUpdate,
+		v1beta1.CoordinationPolicySequential,
+	} {
+		t.Run(string(policy), func(t *testing.T) {
+			g := ResolvedGroup{
+				Name:       "0",
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Order:      []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Policy:     policy,
+			}
+			obs := idleObs(g)
+			engine := obs.Components[v1beta1.EngineComponent]
+			engine.Failed = true
+			obs.Components[v1beta1.EngineComponent] = engine
+			if tr := ComputeTransition(obs); tr.Phase != v1beta1.CoordinationPhaseFailed {
+				t.Fatalf("failed component: got %q want Failed", tr.Phase)
+			}
+
+			// The corrective edit reconciled: Failed cleared, no rollout
+			// in flight. The rollup must settle at Idle immediately.
+			engine.Failed = false
+			obs.Components[v1beta1.EngineComponent] = engine
+			if tr := ComputeTransition(obs); tr.Phase != v1beta1.CoordinationPhaseIdle {
+				t.Errorf("recovered component: got %q want Idle (Failed must exit on rollup)", tr.Phase)
+			}
+		})
+	}
+}
+
 func TestComputeTransition_SequentialActiveComponent(t *testing.T) {
 	g := ResolvedGroup{
 		Name:       "0",

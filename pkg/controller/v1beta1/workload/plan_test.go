@@ -374,6 +374,39 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 	}
 }
 
+func TestInstancePlanIndices_OrphanGangSurgeMarkerUnpinned(t *testing.T) {
+	// Marker-liveness invariant: a GangSurgeTarget marker whose
+	// source no longer carries a SurgeIndex operation referencing it is
+	// an orphan — it must FALL OUT of the plan so the scale-down pass
+	// reaps the dead replacement gang, instead of leaking it forever.
+	// Shape: the corrective roll-back re-adopted the source back to
+	// Ready (operation cleared) while the crashed surge gang's marker
+	// is still present.
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
+		{Index: 1, Phase: InstancePhaseFailed,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}},
+	}
+	got := instancePlanIndices(instances, 1)
+	if len(got) != 1 || got[0] != 0 {
+		t.Errorf("orphan marker must be unpinned (plan {0}, marker 1 becomes a scale-down extra); got %v", got)
+	}
+
+	// Liveness counter-case: the SAME marker stays pinned while its
+	// source op references it — a mid-flight healthy surge is untouched.
+	k := int32(1)
+	instances[0] = InstanceStatus{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
+		Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}}
+	got = instancePlanIndices(instances, 1)
+	hit := map[int32]bool{}
+	for _, idx := range got {
+		hit[idx] = true
+	}
+	if !hit[0] || !hit[1] {
+		t.Errorf("live surge pair must stay pinned; got %v", got)
+	}
+}
+
 func TestInstancePlanIndices_DoesNotDropRolledInstanceForLowerIndex(t *testing.T) {
 	// Gang-surge DOUBLE-ROLL regression (multinode RatioBalanced). Mid the
 	// second rotation, a window exists where:

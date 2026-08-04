@@ -93,7 +93,11 @@ const (
 	// target's), so it is a drain leftover from a prior failed attempt, not
 	// this attempt's failure. Nothing is mutated: recording a block would
 	// poison the freshly-retargeted corrective revision and wedge recovery
-	// (#837); the update pass drains the leftover and drives the current surge.
+	// . Cleanup of the leftover is owned by the surge reclassify
+	// (ops/update_surge.go reclassifyByRevisionHash: non-target pods route
+	// to drain) when a rollout is in flight, and by Plan's wreckage scan
+	// (UpdateItem.CleanupOnly → ops.CleanupWreckage) when no revision diff
+	// exists to trigger one.
 	DispositionSkippedSuperseded
 )
 
@@ -158,10 +162,12 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		// failure to the freshly-stamped Operation.TargetRevision (now C) would
 		// record a RetryBlock against C — the good revision — and the update
 		// trigger would then deny C forever, wedging recovery. Skip only when
-		// the cause pod is on a KNOWN, DIFFERENT revision than the target; the
-		// update pass drains the leftover and drives the current surge. Inert
-		// when the pod carries no revision-hash label (zero), so the ordinary
-		// same-revision failure path is unchanged.
+		// the cause pod is on a KNOWN, DIFFERENT revision than the target;
+		// the leftover's cleanup is owned by the surge reclassify (in-flight
+		// rollouts) or Plan's wreckage scan (zero revision distance) — see
+		// DispositionSkippedSuperseded. Inert when the pod carries no
+		// revision-hash label (zero), so the ordinary same-revision failure
+		// path is unchanged.
 		podRev := query.RevisionFromPod(pod)
 		tgtRev := query.RevisionFromName(targetRev)
 		if !podRev.IsZero() && !tgtRev.IsZero() && !podRev.Same(tgtRev) {

@@ -82,6 +82,15 @@ type UpdateItem struct {
 	// count surge pods, not serving loss, and the recreate genuinely
 	// adds one.
 	CoordGateExempt bool
+	// CleanupOnly: the update trigger declined (zero revision distance —
+	// the corrective roll-back — or a third-party-revision leftover) but
+	// the instance carries superseded-revision wreckage
+	// (ops.EvaluateWreckage). Execute routes the item into
+	// ops.CleanupWreckage — abandon toward the current desired state —
+	// instead of the Update op. Never budget-charged and never gated:
+	// cleanup only removes dead pods and frees capacity, so gating it
+	// would re-wedge the recovery the cleanup exists to unblock.
+	CleanupOnly bool
 }
 
 // UpdateSelection carries the update pass's per-Instance selections
@@ -305,6 +314,15 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 			// earliest re-evaluation time across Instances.
 			if dec.RetryAfter > 0 && (retryBlockWait == 0 || dec.RetryAfter < retryBlockWait) {
 				retryBlockWait = dec.RetryAfter
+			}
+			// Wreckage scan: the trigger is revision-diff-keyed, so an
+			// instance at zero revision distance (corrective roll-back)
+			// or carrying third-party-revision debris never dispatches —
+			// yet its superseded-revision wreckage must still be
+			// abandoned toward the current desired state. Pure snapshot
+			// read; the effect runs in Execute (ops.CleanupWreckage).
+			if s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); workloadops.EvaluateWreckage(s, target, updateByInstance[inst.Index]) {
+				sel.Items = append(sel.Items, UpdateItem{Instance: inst, CleanupOnly: true})
 			}
 			continue
 		}

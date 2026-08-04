@@ -1,4 +1,4 @@
-# p412: runtime-rev engine recover-after-failed-rollout (KNOWN BUG: wedges today) mode=runtimerev rt=ome-coordtest-rt-p412 expect=recover notimpl=1 issue=899 Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+# p412: runtime-rev engine recover-after-failed-rollout mode=runtimerev rt=ome-coordtest-rt-p412 expect=recover Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
 # Test ClusterServingRuntime — CPU-only, nginx, artificial 15s startup delay.
 # The sleep is the critical part: without it nginx is Ready in ~150ms and the
 # pod sampler misses every transition.

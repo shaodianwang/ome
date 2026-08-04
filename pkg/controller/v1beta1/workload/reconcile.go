@@ -336,6 +336,21 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 			}
 			continue
 		}
+		if item.CleanupOnly {
+			// Superseded-revision wreckage: abandon toward the current
+			// desired state. Never budget-charged and never gated —
+			// cleanup only deletes dead pods / resets a stranded
+			// continuation, freeing capacity rather than consuming it.
+			done, cerr := workloadops.CleanupWreckage(ctx, deps, input, plan, item.Instance, target, updateByInstance[item.Instance.Index])
+			if cerr != nil {
+				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: cleanup wreckage (instance=%d): %w", item.Instance.Index, cerr)
+			}
+			if !done {
+				anyUpdating = true
+				anyUpdateRan = true
+			}
+			continue
+		}
 		if item.StartingFresh {
 			// Per-Component within-Component cap. Independent from
 			// the coordination-group cap below: each is its own

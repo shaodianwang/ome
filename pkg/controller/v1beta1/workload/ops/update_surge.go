@@ -157,14 +157,12 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// naturally after this surge promotes, because detectUpdateTrigger
 	// observes RunningRevision != target.Name.
 	surgeTargetName := target.Name
-	var runningRevName string
 	// instanceFailed: this surge already escalated to Phase=Failed (e.g. its pod
 	// hit ImagePullBackOff on a bad revision). Recovery drops the pin below and
 	// drains the failed pod so a corrective target can re-surge — otherwise the
 	// surge stays pinned to the bad revision and the Instance is wedged forever.
 	instanceFailed := false
 	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil {
-		runningRevName = s.RunningRevision
 		instanceFailed = s.Phase == workload.InstancePhaseFailed
 		if !instanceFailed && s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 			isSurgeUpdateStep(s.Operation.Step) &&
@@ -176,16 +174,15 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		}
 	}
 	surgeTargetRev := query.RevisionFromName(surgeTargetName)
-	runningRev := query.RevisionFromName(runningRevName)
 
-	// Re-route any pod stranded at the surge ordinal but labeled with
-	// the just-promoted RunningRevision through the drain path —
-	// otherwise the ordinal partition above treats it as a valid
-	// surge and Phase 3 promotes RunningRevision to the in-flight
-	// target while the actual pod is on the prior rev. See
-	// reclassifyByRevisionHash's header for the X-2 recovery path this
-	// guards.
-	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetRev, runningRev, instanceFailed)
+	// Re-route any pod stranded at the surge ordinal whose revision-hash
+	// label is NOT the pinned target through the drain path — leftovers
+	// from a previous cycle's promote, or a dead pod from an exhausted
+	// attempt toward a superseded revision. Without the recheck the
+	// ordinal partition treats such a pod as the valid surge and either
+	// promotes the wrong revision (X-2) or waits forever on a pod that
+	// can never become Ready. See reclassifyByRevisionHash.
+	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetRev)
 
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
 	// already there. Idempotent on the second pass. Writes
@@ -215,10 +212,9 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// by a pod the reclassify just moved into the drain set. That's
 	// the recovery path where a stale-rev pod lives at the surge slot
 	// — the Create would AlreadyExists against it, leaving the stale
-	// pod in place forever. Falling through to Phase 2 drains both the
-	// alternate-slot canonical and the stale pod; the NEXT reconcile
-	// pass enters Phase 1 with an empty surge slot and creates the
-	// correct-rev pod.
+	// pod in place forever. The stale-slot branch below evicts it; the
+	// NEXT reconcile pass enters Phase 1 with an empty surge slot and
+	// creates the correct-rev pod.
 	staleAtSurgeSlot := false
 	for _, pod := range oldPods {
 		if ord, ok := query.PodOrdinalFromLabels(pod); ok && ord == newOrdinal {
@@ -240,50 +236,23 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		}
 		return false, nil
 	}
-	// If the surge slot is occupied by a stale pod (no valid surge
-	// alive yet), let Phase 2 drain ALL old pods (including the
-	// stale at the surge slot) and a subsequent reconcile re-create
-	// the surge pod with the correct rev.
+	// Stale-slot eviction: the surge ordinal holds a wrong-revision pod
+	// and no valid surge is alive. Delete ONLY the pod(s) at the surge
+	// slot — the same direct eviction the superseded-surge redirect
+	// applies to a not-yet-promoted surge pod — and leave the canonical
+	// pod at the old ordinal serving untouched. Draining the source here
+	// would take the instance's only healthy pod out of rotation before
+	// a replacement exists (a per-instance outage for the whole recovery
+	// window); the real drain happens in Phase 2, after the correct-rev
+	// surge pod is Ready and in rotation.
 	if staleAtSurgeSlot && len(surgePods) == 0 {
-		// Mark the surge step transition once so surge-budget
-		// accounting matches the in-flight phase even
-		// while the surge pod is absent. Idempotent.
-		if err := patchInstanceStatusSurgeStepDrain(ctx, input, inst.Index); err != nil {
-			return false, fmt.Errorf("transition surge step to drain (instance=%d): %w", inst.Index, err)
-		}
-		for _, pod := range oldPods {
-			if !podreadiness.IsServing(pod) {
-				continue
-			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal)); err != nil {
-				return false, fmt.Errorf("mark old not serving for stale-slot recovery (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-			}
-		}
-		// Live drain check identical to the canonical Phase 2 path.
-		for _, pod := range oldPods {
-			serviceName := drainServiceForPod(input, plan, pod)
-			if serviceName == "" {
-				continue
-			}
-			drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
-			if err != nil {
-				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-			}
-			if !drained {
-				return false, nil
-			}
-		}
-		settled, err := waitForSurgeDrainSettle(ctx, input, plan, inst.Index)
-		if err != nil {
-			return false, err
-		}
-		if !settled {
-			return false, nil
-		}
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
 		for _, pod := range oldPods {
+			if ord, ok := query.PodOrdinalFromLabels(pod); !ok || ord != newOrdinal {
+				continue
+			}
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
@@ -435,79 +404,43 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 	return
 }
 
-// reclassifyByRevisionHash promotes any pod incorrectly bucketed as a
-// surge candidate into the drain set when its revision-hash label
-// matches the just-promoted RunningRevision — i.e., it is left over
-// from the previous surge cycle, not the in-flight one. The ordinal
-// partition is load-bearing for the no-downtime invariant (the surge
-// slot is the ALTERNATE ordinal), but it can mis-classify in the
-// multi-bump recovery path:
+// reclassifyByRevisionHash moves any pod bucketed as a surge candidate
+// into the drain set unless its revision-hash label matches the PINNED
+// surge target. The ordinal partition is load-bearing for the
+// no-downtime invariant (the surge slot is the ALTERNATE ordinal), but
+// it classifies by slot alone, and the surge slot can hold a pod on the
+// wrong revision:
 //
-//   - Bump v1 → v2: surge cycle stamps Op{TargetRev=v2}, creates v2 at
-//     ord=1, drains v1 at ord=0, promotes — RunningRev=v2,
-//     ActiveOrdinal=1.
-//   - Bump v2 → v3 arrives while a fresh reconcile is pending. The
-//     dispatcher's NEXT pass sees RunningRev=v2 != target=v3 and fires
-//     a fresh surge cycle. surgeUpdate computes oldOrdinal=1,
-//     newOrdinal=0, partitions [v2@ord=1, v3-surge-just-created@ord=0]
-//     correctly — v2 in old, v3 in surge.
+//   - a leftover from the previous cycle's promote (labeled with the
+//     just-promoted RunningRevision) — keeping it as the "valid surge"
+//     would let Phase 3 promote RunningRevision to the pinned target
+//     while the actual pod runs a prior rev (the X-2 corruption mode);
+//   - a dead pod from an exhausted attempt toward a superseded revision
+//     (labeled with a rev that is neither RunningRevision nor the
+//     current target) — keeping it parks the rollout forever on
+//     AllPodsRuntimeReady of a pod that can never become Ready, and
+//     both escalation paths skip it as superseded.
 //
-// But there are recovery scenarios where the surge slot holds a pod
-// labeled with the PRIOR running revision (e.g., a re-entry from a
-// previous surge cycle that did not cleanly delete its alternate-slot
-// peer, or a controller restart that lost the in-flight bookkeeping
-// and re-derived state from observed pod labels). Without this
-// recheck the ordinal partition would treat the stale pod as the
-// "valid surge" — Phase 3 would promote RunningRevision to the
-// pinned target while the actual pod is on a prior rev: a straggler
-// on the previous revision labeled post-promote as the new one.
-//
-// The recheck is narrow: a pod is reclassified into the drain set
-// ONLY when its revision-hash label matches the just-promoted
-// runningRev (i.e., it is leftover from the previous cycle's
-// promote). Pods with arbitrary other labels are kept in the surge
-// bucket so existing test fixtures (which stamp a generic
-// testRevisionHash regardless of target) and legacy pods (label
-// missing) continue to round-trip. The recheck is a no-op when
-// runningRev is empty (first-ever surge cycle, no prior promote to
-// inherit from) or matches targetHash (no rev difference, the surge
-// is already valid).
-// failedRecover (true only for an Instance escalated to Phase=Failed) widens the
-// reclassification: in addition to the just-promoted rev, ANY surge pod not on the
-// current target is treated as stale and drained. That evicts a failed surge pod
-// stuck on a bad revision so a corrective target can re-surge — without it, the
-// failed pod stays in the surge bucket forever (arbitrary-rev pods are otherwise
-// kept on purpose) and the Instance is wedged. No effect on non-failed surges.
-func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, target, runningRev query.RevisionID, failedRecover bool) (newSurge, newDrain []*corev1.Pod) {
-	if !failedRecover && (runningRev.Hash() == "" || runningRev.Same(target)) {
-		return surge, drainPods
-	}
+// Keep-in-surge is therefore exactly: the label matches the pinned
+// target. A missing/empty label falls back to the ordinal
+// classification so legacy pods aren't churned (partition tests pin
+// this). Production pods always carry the hash createMissingPods
+// stamped from the pinned target, so a mid-flight healthy surge always
+// matches and is untouched.
+func reclassifyByRevisionHash(surge, drainPods []*corev1.Pod, target query.RevisionID) (newSurge, newDrain []*corev1.Pod) {
 	newSurge = surge[:0]
 	newDrain = drainPods
 	for _, pod := range surge {
 		hash, ok := pod.Labels[query.LabelRevisionHash]
 		if !ok || hash == "" {
-			// No label — fall back to the ordinal classification so
-			// legacy pods aren't churned. partition tests pin this.
 			newSurge = append(newSurge, pod)
 			continue
 		}
-		podRev := query.RevisionFromPod(pod)
-		if podRev.Same(runningRev) || (failedRecover && !podRev.Same(target)) {
-			// Stale: pod is labeled with the just-promoted rev but is
-			// sitting at the surge ordinal. Drain + delete so the
-			// next reconcile's Phase 1 re-creates with the
-			// in-flight target rev. Any pod whose rev is neither the
-			// prior promote nor the in-flight target (e.g., test
-			// fixtures with a synthetic label) stays in the surge
-			// bucket on purpose — production callers always stamp
-			// rev-hash from createMissingPods's surgeTargetHash
-			// argument, so a non-matching rev outside the prior /
-			// current pair shouldn't happen and shouldn't be punished.
-			newDrain = append(newDrain, pod)
+		if query.RevisionFromPod(pod).Same(target) {
+			newSurge = append(newSurge, pod)
 			continue
 		}
-		newSurge = append(newSurge, pod)
+		newDrain = append(newDrain, pod)
 	}
 	return
 }

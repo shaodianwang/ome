@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // Plan is the pure decision layer: the tests below assert the Decision
@@ -741,6 +742,125 @@ func TestPlan_Update_AdoptRevision(t *testing.T) {
 	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {pod}}))
 	if findAction(d, workload.ActionUpdate) != nil {
 		t.Errorf("unproven pods must not be adopted, got %v", actionKinds(d))
+	}
+}
+
+// TestPlan_Update_CleanupOnly_RollBackWreckage asserts the wreckage
+// scan: an instance the revision-diff trigger declines (target
+// == RunningRevision, the corrective roll-back) but that carries a
+// live pod on a THIRD revision is selected CleanupOnly — never
+// StartingFresh, so it is neither budget-charged nor gated. The same
+// instance with only running-revision pods selects nothing.
+func TestPlan_Update_CleanupOnly_RollBackWreckage(t *testing.T) {
+	target := updateTarget()
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: target.Name},
+	}
+	plan := minimalPlan()
+
+	runningPod := enginePod("llama-70b", "prod", 0)
+	runningPod.Labels[query.LabelRevisionHash] = query.RevisionFromName(target.Name).Hash()
+	alienPod := enginePod("llama-70b", "prod", 0)
+	alienPod.Name += "-alien"
+	alienPod.Labels[query.LabelRevisionHash] = "deadrev1"
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {runningPod, alienPod}}))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil {
+		t.Fatalf("expected an Update action carrying the cleanup, got %v", actionKinds(d))
+	}
+	if len(ua.Update.Items) != 1 || !ua.Update.Items[0].CleanupOnly ||
+		ua.Update.Items[0].StartingFresh || ua.Update.Items[0].Instance.Index != 0 {
+		t.Errorf("update items = %+v, want a single CleanupOnly (non-fresh) item for index 0", ua.Update.Items)
+	}
+
+	// No alien pod → nothing to clean, no Update action.
+	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {runningPod}}))
+	if findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("no wreckage must select no update items, got %v", actionKinds(d))
+	}
+
+	// Gang shape: a Failed source whose preserved gang-surge operation
+	// targets a superseded revision is wreckage even with no alien pod
+	// in its own bucket — the abandon continuation must dispatch.
+	k := int32(1)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseFailed, RunningRevision: target.Name,
+			Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k,
+				TargetRevision: "llama-70b-engine-deadrev1",
+			}},
+	}
+	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {runningPod}}))
+	ua = findAction(d, workload.ActionUpdate)
+	if ua == nil || len(ua.Update.Items) != 1 || !ua.Update.Items[0].CleanupOnly {
+		t.Fatalf("expected a CleanupOnly item for the stranded gang continuation, got %v", actionKinds(d))
+	}
+}
+
+// TestPlan_LiveSurgeUntouchedByCleanup pins the mid-flight safety of
+// the wreckage-cleanup machinery: a LIVE (non-Failed) gang surge with its
+// marker correctly pinned — source Op.SurgeIndex referencing the
+// marker, surge pods on the pinned revision — is selected as a normal
+// update continuation, never CleanupOnly, and the marker is neither
+// scale-downed nor selected. Holds both while the surge target IS the
+// roll target and after the target moved on mid-surge (the superseded
+// redirect owns that, not the wreckage scan).
+func TestPlan_LiveSurgeUntouchedByCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		liveTarget *appsv1.ControllerRevision
+	}{
+		{name: "surge toward the current target", liveTarget: updateTarget()},
+		{name: "target moved on mid-surge", liveTarget: &appsv1.ControllerRevision{
+			ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newerrev", Namespace: "prod"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinned := updateTarget()
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			k := int32(1)
+			in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating,
+					RunningRevision: "llama-70b-engine-priorrev",
+					Operation: &workload.InstanceOperation{
+						Type: workload.InstanceOperationUpdate, Step: "Surge",
+						SurgeIndex: &k, TargetRevision: pinned.Name,
+					}},
+				{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseCreating,
+					Operation: &workload.InstanceOperation{
+						Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepGangSurgeTarget,
+						TargetRevision: pinned.Name,
+					}},
+			}
+			plan, err := workload.BuildPlan(workload.ComponentEngine, in.DesiredSpec, in.ObservedState)
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+
+			sourcePod := enginePod("llama-70b", "prod", 0)
+			surgePod := enginePod("llama-70b", "prod", 1)
+			surgePod.Labels[query.LabelRevisionHash] = query.RevisionFromName(pinned.Name).Hash()
+
+			d := planTargetOrFail(t, in, plan, tc.liveTarget, planSnapshot(in, map[int32][]*corev1.Pod{0: {sourcePod}, 1: {surgePod}}))
+			if sd := findAction(d, workload.ActionScaleDown); sd != nil {
+				t.Fatalf("a live surge pair must not be scale-downed, got extras %v", sd.Extras)
+			}
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil {
+				t.Fatalf("expected the in-flight surge continuation, got %v", actionKinds(d))
+			}
+			if len(ua.Update.Items) != 1 {
+				t.Fatalf("update items = %+v, want exactly the source continuation", ua.Update.Items)
+			}
+			item := ua.Update.Items[0]
+			if item.Instance.Index != 0 || item.CleanupOnly || item.StartingFresh || item.AdoptRevision {
+				t.Errorf("live surge source must be a plain continuation, got %+v", item)
+			}
+		})
 	}
 }
 

@@ -68,6 +68,19 @@ func TestISVCReconcileTriggerPredicate_DropsStatusOnlyUpdate(t *testing.T) {
 			},
 			wantPass: true,
 		},
+		{
+			// Deleting an ISVC that carries the controller finalizer is an
+			// UPDATE (deletionTimestamp set), not a Delete event. Dropping
+			// it stalls finalizer teardown until an unrelated event wakes
+			// the reconciler.
+			name: "deletionTimestamp set (finalizer-held delete) → passes",
+			mutate: func(o *v1beta1.InferenceService) {
+				now := metav1.Now()
+				o.DeletionTimestamp = &now
+				o.Finalizers = []string{"ome.io/finalizer"}
+			},
+			wantPass: true,
+		},
 	}
 
 	for _, tc := range cases {

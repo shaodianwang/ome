@@ -33,6 +33,12 @@ const (
 	// manually.
 	EventReasonFoundOrphan EventReason = "FoundOrphan"
 
+	// EventReasonSupersededWreckageCleaned fires when the corrective-
+	// edit cleanup deletes pods keyed to a superseded revision — debris
+	// a failed rollout left behind that no revision-diff trigger could
+	// reach.
+	EventReasonSupersededWreckageCleaned EventReason = "SupersededWreckageCleaned"
+
 	// EventReasonAutoMigrationTriggered fires when the deadline
 	// disposition records a relocation directive (terminal AutoRecover
 	// ledger entry) for a stuck Instance — its rebuild will be steered

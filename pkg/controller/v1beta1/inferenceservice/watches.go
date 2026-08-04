@@ -65,12 +65,22 @@ func ownedStatusIgnoringPredicate() predicate.Predicate {
 
 // metaOrSpecChanged reports whether an old→new object transition touched
 // .metadata.generation (a proxy for spec changes on a CRD/built-in with a
-// status subresource), labels, or annotations. Status-only writes leave all
-// three untouched (generation only bumps on spec changes; the apiserver does
-// not advance generation for status subresource writes), so they return false
-// and are dropped.
+// status subresource), .metadata.deletionTimestamp, labels, or annotations.
+// Status-only writes leave all of these untouched (generation only bumps on
+// spec changes; the apiserver does not advance generation for status
+// subresource writes), so they return false and are dropped.
+//
+// The deletionTimestamp check is load-bearing: deleting an object that
+// carries a finalizer surfaces as an UPDATE event (deletionTimestamp set),
+// not a Delete event — the Delete event only fires when the object is
+// actually removed, after every finalizer drops. Without the check the
+// reconciler never learns the deletion started and finalizer processing
+// stalls until some unrelated event happens to wake it.
 func metaOrSpecChanged(oldObj, newObj client.Object) bool {
 	if oldObj.GetGeneration() != newObj.GetGeneration() {
+		return true
+	}
+	if (oldObj.GetDeletionTimestamp() == nil) != (newObj.GetDeletionTimestamp() == nil) {
 		return true
 	}
 	if !reflect.DeepEqual(oldObj.GetLabels(), newObj.GetLabels()) {

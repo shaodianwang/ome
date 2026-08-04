@@ -433,9 +433,12 @@ func independentTransition(obs GroupObservation) GroupTransition {
 // Surging until the previous Component is back at Idle on its new
 // revision.
 func sequentialTransition(obs GroupObservation) GroupTransition {
-	// Failure block: if any earlier Component in the Order is in
-	// Failed, the group enters Sequential.Failed and stays there until
-	// the operator reverts the failed Component's spec.
+	// Failure block: while any Component in the Order is Failed, the
+	// group reports Sequential.Failed. The phase is a pure rollup of
+	// per-Component state — it exits as soon as a corrective spec edit
+	// (roll-forward to a fixed revision or roll-back to the prior one)
+	// reconciles the failed Component back to health; no group-level
+	// state is latched.
 	for _, c := range obs.Group.Order {
 		comp, ok := obs.Components[c]
 		if !ok {

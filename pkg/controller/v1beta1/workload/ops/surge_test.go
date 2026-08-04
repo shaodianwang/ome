@@ -431,9 +431,10 @@ func TestExpectedPodNamesForInstance_MultiPodPreservesAllOrdinals(t *testing.T) 
 	}
 }
 
-// TestReclassifyByRevisionHash_KeepsValidSurge pins the recheck's
-// no-op contract: a surge pod labeled with the in-flight target (or
-// unrelated label) must NOT be moved into the drain bucket.
+// TestReclassifyByRevisionHash_KeepsValidSurge pins the keep-in-surge
+// contract: a pod labeled with the pinned target, or carrying no
+// revision-hash label at all (legacy — ordinal classification wins),
+// stays in the surge bucket.
 func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 	mk := func(rev string) *corev1.Pod {
 		return &corev1.Pod{
@@ -443,38 +444,24 @@ func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 		}
 	}
 	validSurge := mk("rev3")
-	unrelated := mk("synthetic")
 	missingLabel := &corev1.Pod{}
 
-	// runningRev=rev2, targetHash=rev3 — the normal mid-cycle state.
 	surge, drain := reclassifyByRevisionHash(
-		[]*corev1.Pod{validSurge, unrelated, missingLabel},
-		nil, query.RevisionFromHash("rev3"), query.RevisionFromHash("rev2"),
-		false,
+		[]*corev1.Pod{validSurge, missingLabel},
+		nil, query.RevisionFromHash("rev3"),
 	)
 	if len(drain) != 0 {
-		t.Errorf("drain bucket should be empty (no stale labels); got %d", len(drain))
+		t.Errorf("drain bucket should be empty (target-labeled + unlabeled); got %d", len(drain))
 	}
-	if len(surge) != 3 {
-		t.Errorf("surge bucket should keep all three pods; got %d", len(surge))
-	}
-
-	// runningRev="" (first-ever surge) — recheck is a no-op even with
-	// a fully mismatched label.
-	mismatched := mk("anything")
-	surge2, drain2 := reclassifyByRevisionHash(
-		[]*corev1.Pod{mismatched}, nil, query.RevisionFromHash("rev3"), query.RevisionFromHash(""), false,
-	)
-	if len(drain2) != 0 || len(surge2) != 1 {
-		t.Errorf("empty runningRev should leave buckets untouched; surge=%d drain=%d",
-			len(surge2), len(drain2))
+	if len(surge) != 2 {
+		t.Errorf("surge bucket should keep both pods; got %d", len(surge))
 	}
 }
 
-// TestReclassifyByRevisionHash_DrainsStaleByRunningRev pins the
-// recheck's primary purpose: a pod labeled with the just-promoted
-// RunningRevision but sitting in the surge bucket MUST be moved to
-// drain so Phase 2 deletes it.
+// TestReclassifyByRevisionHash_DrainsStaleByRunningRev pins the X-2
+// recovery: a pod labeled with the just-promoted RunningRevision but
+// sitting in the surge bucket MUST be moved to drain so Phase 2
+// deletes it instead of Phase 3 promoting the wrong revision.
 func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 	mk := func(rev string) *corev1.Pod {
 		return &corev1.Pod{
@@ -488,8 +475,7 @@ func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 
 	surge, drain := reclassifyByRevisionHash(
 		[]*corev1.Pod{staleRev2, validRev3},
-		[]*corev1.Pod{}, query.RevisionFromHash("rev3"), query.RevisionFromHash("rev2"),
-		false,
+		[]*corev1.Pod{}, query.RevisionFromHash("rev3"),
 	)
 	if len(drain) != 1 || drain[0] != staleRev2 {
 		t.Errorf("drain bucket should contain the rev2-labeled stale pod; got %d entries", len(drain))
@@ -499,29 +485,24 @@ func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 	}
 }
 
-// TestReclassifyByRevisionHash_FailedRecoverDrainsBadRev: for a Failed Instance
-// (failedRecover=true), a surge pod on a revision that is neither the just-promoted
-// rev nor the current target — the failed rollout's bad rev — must be drained so a
-// corrective target can re-surge. Non-failed surges keep such pods (unchanged).
-func TestReclassifyByRevisionHash_FailedRecoverDrainsBadRev(t *testing.T) {
+// TestReclassifyByRevisionHash_DrainsAlienRev pins the corrective-
+// recovery contract: a surge pod on a revision that matches NEITHER the
+// running rev NOR the pinned target — the dead pod an exhausted attempt
+// toward a superseded revision left at the surge ordinal — is drained,
+// never kept as the in-flight surge. Only a target-labeled pod is kept.
+func TestReclassifyByRevisionHash_DrainsAlienRev(t *testing.T) {
 	mk := func(rev string) *corev1.Pod {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{query.LabelRevisionHash: rev}}}
 	}
-	// Non-failed: a bad-rev pod (≠ target, ≠ runningRev) stays in surge.
-	surge, drain := reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, query.RevisionFromHash("revGOOD"), query.RevisionFromHash("revOLD"), false)
-	if len(drain) != 0 || len(surge) != 1 {
-		t.Fatalf("non-failed: bad-rev pod must stay in surge; surge=%d drain=%d", len(surge), len(drain))
-	}
-	// Failed-recover: the bad-rev pod is drained.
-	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, query.RevisionFromHash("revGOOD"), query.RevisionFromHash("revOLD"), true)
+	surge, drain := reclassifyByRevisionHash([]*corev1.Pod{mk("revBAD")}, nil, query.RevisionFromHash("revGOOD"))
 	if len(drain) != 1 || len(surge) != 0 {
-		t.Fatalf("failed-recover: bad-rev pod must drain; surge=%d drain=%d", len(surge), len(drain))
+		t.Fatalf("alien-rev pod must drain; surge=%d drain=%d", len(surge), len(drain))
 	}
-	// Failed-recover: a pod already on the target is not churned.
-	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revGOOD")}, nil, query.RevisionFromHash("revGOOD"), query.RevisionFromHash("revOLD"), true)
+	// A pod already on the target is not churned.
+	surge, drain = reclassifyByRevisionHash([]*corev1.Pod{mk("revGOOD")}, nil, query.RevisionFromHash("revGOOD"))
 	if len(drain) != 0 || len(surge) != 1 {
-		t.Fatalf("failed-recover: target-rev pod must stay in surge; surge=%d drain=%d", len(surge), len(drain))
+		t.Fatalf("target-rev pod must stay in surge; surge=%d drain=%d", len(surge), len(drain))
 	}
 }
 
@@ -956,10 +937,14 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 }
 
 // TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained pins the X-2 follow-up
-// invariant for the fix-shape-A drain path. When a pod labeled with the
-// just-promoted RunningRevision survives at the surge ordinal, the
-// rev-hash recheck must route it through drain + delete; Phase 3 must
-// NOT promote on it.
+// invariant for the stale-slot eviction path. When a pod labeled with
+// the just-promoted RunningRevision survives at the surge ordinal, the
+// rev-hash recheck must route it out of the surge bucket and the
+// stale-slot branch must delete it — and ONLY it: the canonical pod at
+// the old ordinal keeps serving until the real Phase 2 drain, after
+// the correct-rev surge pod is Ready (cleanup never pulls the
+// healthy source out of rotation). Phase 3 must NOT promote on the
+// stale pod.
 func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
@@ -989,15 +974,23 @@ func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 
 	rev3 := makeCR(t, c, isvc, "llama-70b-engine-rev-rev3hash")
 
-	// Pass 1: drain + delete the stale + canonical pods.
+	// Pass 1: evict the stale pod at the surge slot; leave the canonical.
 	if _, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], rev3, []*corev1.Pod{canonical, stale}); err != nil {
 		t.Fatalf("pass 1: %v", err)
 	}
 	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 
-	// Both pods should be deleted by Phase 2's drain.
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(canonical), &corev1.Pod{}); err == nil {
-		t.Errorf("canonical pod should be deleted, but still exists")
+	// Only the stale pod at the surge slot is deleted; the canonical pod
+	// keeps serving until the real Phase 2 drain.
+	freshCanonical := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(canonical), freshCanonical); err != nil {
+		t.Errorf("canonical pod must survive the stale-slot eviction: %v", err)
+	} else {
+		for _, cond := range freshCanonical.Status.Conditions {
+			if cond.Type == query.ServingConditionType && cond.Status != corev1.ConditionTrue {
+				t.Errorf("canonical pod's serving gate was flipped by the stale-slot eviction: %+v", cond)
+			}
+		}
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &corev1.Pod{}); err == nil {
 		t.Errorf("stale pod at surge slot should be deleted, but still exists")
@@ -1124,6 +1117,13 @@ func TestSurgeUpdate_Phase3PromotesAndAdvancesActiveOrdinal(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+	// The surge pod carries the pinned target's rev-hash, exactly as
+	// createMissingPods stamps it — reclassifyByRevisionHash keeps only
+	// target-labeled pods in the surge bucket.
+	surgePod.Labels[query.LabelRevisionHash] = query.RevisionFromName(tcr.Name).Hash()
+	if err := c.Update(context.Background(), surgePod); err != nil {
+		t.Fatalf("restamp surge pod rev-hash: %v", err)
+	}
 	// Status reflects mid-surge state at Step=Drain.
 	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, tcr.Name, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("pre-stamp surge: %v", err)
