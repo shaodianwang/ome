@@ -270,6 +270,25 @@ func TestResolveTarget(t *testing.T) {
 		assert.Equal(t, "svc.inf-prod.svc.cluster.local", tgt.Homes[0].BackendHost,
 			"port stripped so spec.externalName stays RFC-1123 valid")
 	})
+
+	t.Run("Split: per-home ready replicas become home weights", func(t *testing.T) {
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+			Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
+				Phase: v1beta1.PlacementPhasePlaced,
+				Candidates: []v1beta1.CandidatePlacement{
+					{Cluster: "a", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("a.example"), ReadyReplicas: 5},
+					{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("b.example"), ReadyReplicas: 2},
+				},
+			}},
+		}
+		tgt, ok, err := r.resolveTarget(isvc)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Len(t, tgt.Homes, 2)
+		assert.Equal(t, int32(5), tgt.Homes[0].Weight, "home a weight = its ready replicas")
+		assert.Equal(t, int32(2), tgt.Homes[1].Weight, "home b weight = its ready replicas")
+	})
 }
 
 func TestPlacementPublishChange(t *testing.T) {

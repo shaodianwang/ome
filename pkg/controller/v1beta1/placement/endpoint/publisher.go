@@ -42,6 +42,12 @@ type Home struct {
 	// the host of the home's status endpoint. A bare hostname (no scheme/port);
 	// the backend supplies the port from Config.
 	BackendHost string
+	// Weight is the home's relative traffic share — its ready replicas in Split,
+	// so traffic follows where replicas actually landed. Zero in Single/All (and
+	// for a Split home with no ready replicas yet); the publisher equal-weights
+	// all homes when every weight is zero, so an unweighted placement routes
+	// evenly rather than dropping to no-traffic.
+	Weight int32
 }
 
 // EndpointPublisher programs the global-traffic backend(s) so the global host of

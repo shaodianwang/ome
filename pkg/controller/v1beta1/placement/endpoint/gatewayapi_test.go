@@ -281,3 +281,34 @@ func TestUnpublish_MissingIsNoOp(t *testing.T) {
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	require.NoError(t, p.Unpublish(context.Background(), testISVC()))
 }
+
+func TestBuildHTTPRoute_WeightedByReadyReplicas(t *testing.T) {
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	// Split: each home carries its ready-replica count -> proportional weights.
+	target := Target{GlobalHost: "h", Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example", Weight: 3},
+		{Cluster: "cluster-b", BackendHost: "b.example", Weight: 1},
+	}}
+
+	refs := p.buildHTTPRoute(testISVC(), target).Spec.Rules[0].BackendRefs
+	require.Len(t, refs, 2)
+	require.NotNil(t, refs[0].Weight)
+	require.NotNil(t, refs[1].Weight)
+	assert.Equal(t, int32(3), *refs[0].Weight, "cluster-a (sorted first) weighted by its ready replicas")
+	assert.Equal(t, int32(1), *refs[1].Weight, "cluster-b weighted by its ready replicas")
+}
+
+func TestBuildHTTPRoute_UnweightedFallsBackToEqual(t *testing.T) {
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	// No weights (Single/All, or a Split placement before any home is ready):
+	// every weight is 0, so fall back to equal (1) rather than black-holing.
+	target := Target{GlobalHost: "h", Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example"},
+		{Cluster: "cluster-b", BackendHost: "b.example"},
+	}}
+
+	refs := p.buildHTTPRoute(testISVC(), target).Spec.Rules[0].BackendRefs
+	require.Len(t, refs, 2)
+	assert.Equal(t, int32(1), *refs[0].Weight)
+	assert.Equal(t, int32(1), *refs[1].Weight)
+}

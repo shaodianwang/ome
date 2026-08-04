@@ -123,7 +123,7 @@ func homesFromPlacement(pl *v1beta1.PlacementStatus) []Home {
 	for i := range pl.Candidates {
 		c := &pl.Candidates[i]
 		if c.Phase == v1beta1.CandidatePhaseAdmitted && c.Endpoint != nil && c.Endpoint.Host != "" {
-			homes = append(homes, Home{Cluster: c.Cluster, BackendHost: hostOnly(c.Endpoint.Host)})
+			homes = append(homes, Home{Cluster: c.Cluster, BackendHost: hostOnly(c.Endpoint.Host), Weight: c.ReadyReplicas})
 		}
 	}
 	if len(homes) == 0 && pl.Cluster != "" && pl.Endpoint != nil && pl.Endpoint.Host != "" {
