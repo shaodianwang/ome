@@ -119,33 +119,80 @@ CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler"]
 # ---------------------------------------------------------------------------
 
 
+def _yaml_block(obj, indent: int = 0) -> str:
+    """Serialize a dict/list/scalar to an indented YAML *block* fragment.
+
+    Lets pipeline snippets be written as plain Python data instead of
+    hand-aligned f-strings — easier to read and write, and impossible to
+    misalign. Stdlib only (no PyYAML): scalars go through json.dumps, which
+    quotes/escapes correctly and stays valid YAML (YAML is a JSON superset).
+    Dict/list values render as nested blocks; empty ones render inline ({} / []).
+    """
+    pad = " " * indent
+    if isinstance(obj, dict):
+        lines = []
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)) and v:
+                lines.append(f"{pad}{k}:")
+                lines.append(_yaml_block(v, indent + 2))
+            else:
+                lines.append(f"{pad}{k}: {json.dumps(v)}")
+        return "\n".join(lines)
+    if isinstance(obj, list):
+        lines = []
+        for item in obj:
+            if isinstance(item, (dict, list)) and item:
+                sub = _yaml_block(item, indent + 2).split("\n")
+                # First child line carries the "- " marker; the rest stay aligned.
+                lines.append(f"{pad}- " + sub[0][indent + 2:])
+                lines.extend(sub[1:])
+            else:
+                lines.append(f"{pad}- {json.dumps(item)}")
+        return "\n".join(lines)
+    return f"{pad}{json.dumps(obj)}"
+
+
 def _gh_status(key: str, indent: int = 12) -> str:
     """Per-step GitHub commit status block; without it BuildKite publishes only the pipeline rollup."""
-    pad = " " * indent
-    return (
-        f"{pad}notify:\n"
-        f"{pad}  - github_commit_status:\n"
-        f'{pad}      context: "{key}"'
-    )
+    return _yaml_block({"notify": [{"github_commit_status": {"context": key}}]}, indent)
+
+
+def _retry(automatic: list, indent: int = 12) -> str:
+    """The general, reusable `retry.automatic` builder: pass a list of condition
+    dicts (plain data), e.g. [{"exit_status": 125, "limit": 2},
+    {"signal_reason": "agent_stop", "limit": 2}]. _auto_retry / _infra_retry are
+    the named presets below; call _retry directly for any other retry policy.
+    """
+    return _yaml_block({"retry": {"automatic": automatic}}, indent)
 
 
 def _auto_retry(limit: int = 2, indent: int = 12) -> str:
-    """Bounded automatic retry for a network-heavy step.
-
-    The image build (Go module fetch from proxy.golang.org, then an ECR push)
-    and the mirror (crane registry copy + cross-account ECR auth) fail on
-    transient network blips — e.g. an HTTP/2 `INTERNAL_ERROR` stream reset from
-    proxy.golang.org mid-download, which sank build 2445's ome-manager build. A
-    real Dockerfile/compile error still fails once the retries are spent, so
-    this masks nothing; it only absorbs flakes, and the bound keeps a genuinely
-    broken build from looping.
+    """Preset: retry on ANY non-zero exit — for the network-heavy image build
+    (Go module fetch from proxy.golang.org, then ECR push) and mirror (crane
+    copy + cross-account auth) steps, which flake on transient blips (e.g. the
+    HTTP/2 INTERNAL_ERROR that sank build 2445). A real Dockerfile/compile error
+    still fails once the retries are spent, so it masks nothing, and the bound
+    stops a genuinely broken build from looping.
     """
-    pad = " " * indent
-    return (
-        f"{pad}retry:\n"
-        f"{pad}  automatic:\n"
-        f'{pad}    - exit_status: "*"\n'
-        f"{pad}      limit: {limit}"
+    return _retry([{"exit_status": "*", "limit": limit}], indent)
+
+
+def _infra_retry(limit: int = 2, indent: int = 12) -> str:
+    """Preset: retry ONLY on infrastructure failure — the TW dind daemon dying
+    (exit_status 125: docker.sock gone mid-run, or the pre-command docker
+    health-repair hook failing before the step runs) or the agent being lost
+    (signal_reason agent_stop). It never matches exit 1, so a real test/lint/
+    -race failure still blocks merge — safe on merge gates precisely because it
+    cannot match a code failure. Seen on build 2523 (scheduler-test: dind
+    vanished during `go mod download`) and 2548 (helm-lint: pre-command docker
+    health failed before the lint ran).
+    """
+    return _retry(
+        [
+            {"exit_status": 125, "limit": limit},
+            {"signal_reason": "agent_stop", "limit": limit},
+        ],
+        indent,
     )
 
 
@@ -336,6 +383,7 @@ def ci_steps() -> str:
           - label: ":golangci-lint: Lint"
             key: "lint"
 {_gh_status("lint")}
+{_infra_retry()}
             command: |
               make ci-lint
             agents:
@@ -346,6 +394,7 @@ def ci_steps() -> str:
           - label: ":golang: Vet"
             key: "vet"
 {_gh_status("vet")}
+{_infra_retry()}
             command: |
               make vet
             agents:
@@ -356,6 +405,7 @@ def ci_steps() -> str:
           - label: ":test_tube: Unit Tests + Coverage"
             key: "test"
 {_gh_status("test")}
+{_infra_retry()}
             command: |
               sh .buildkite/run_tests.sh
             agents:
@@ -366,6 +416,7 @@ def ci_steps() -> str:
           - label: ":test_tube: Integration Tests"
             key: "integration-test"
 {_gh_status("integration-test")}
+{_infra_retry()}
             # No depends_on: integration tests share no state with unit
             # tests (each step bootstraps its own envtest + xet under a
             # fresh container) so they run in parallel with everything
@@ -437,6 +488,7 @@ def ci_steps() -> str:
           - label: ":test_tube: Scheduler Module"
             key: "scheduler-test"
 {_gh_status("scheduler-test")}
+{_infra_retry()}
             # ome-scheduler (scheduler/go.mod) is a separate Go module, so
             # the root pipeline's `go test ./...` never reaches it. This is
             # the only step that builds + tests the OMEGangPack plugin, its
@@ -455,6 +507,7 @@ def ci_steps() -> str:
           - label: ":rust: MUSE Rust Checks"
             key: "muse-rust-checks"
 {_gh_status("muse-rust-checks")}
+{_infra_retry()}
             command: |
               apt-get update
               apt-get install -y --no-install-recommends build-essential cmake perl pkg-config
@@ -469,6 +522,7 @@ def ci_steps() -> str:
           - label: ":helm: Helm Lint"
             key: "helm-lint"
 {_gh_status("helm-lint")}
+{_infra_retry()}
             command: |
               make helm-lint
             agents:
