@@ -1442,12 +1442,69 @@ func TestReconcile_SplitPackedFillsAcrossHomes(t *testing.T) {
 	assert.Equal(t, int32(1), by["b"].AdmittedReplicas)
 	assert.Equal(t, int32(1), by["b"].ReadyReplicas)
 
-	// Packed asks the first candidate for the whole floor; the apportioned count
-	// lands on that home's derived engine.
+	// Both homes are already admitted summing to the floor, so this is a TRIM
+	// pass: each home is pinned to its admitted count (no over-request / gated
+	// remainder), and the apportioned count lands on the derived engine.
 	da := &v1beta1.InferenceService{}
 	require.NoError(t, wa.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, da))
 	require.NotNil(t, da.Spec.Engine.MinReplicas)
-	assert.Equal(t, 3, *da.Spec.Engine.MinReplicas, "first home requested the full floor")
+	assert.Equal(t, 2, *da.Spec.Engine.MinReplicas, "home pinned to its admitted count")
+}
+
+// TestReconcile_SplitTrimsOverAdmission: two homes admit 4 and 2 but the floor
+// is 4 — TRIM keeps the preferred home full (4) and sheds the excess from the
+// least-preferred (b scaled to 0 / swept), converging the request sum to 4.
+func TestReconcile_SplitTrimsOverAdmission(t *testing.T) {
+	s := testScheme(t)
+	wa := workerWithReplicas(t, s, "svc.a.example", 4, 4)
+	wb := workerWithReplicas(t, s, "svc.b.example", 2, 2)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCSplit("gpu=gb300", 4),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	// a keeps the whole floor; b is trimmed away (target 0 -> derived swept).
+	da := &v1beta1.InferenceService{}
+	require.NoError(t, wa.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, da))
+	require.NotNil(t, da.Spec.Engine.MinReplicas)
+	assert.Equal(t, 4, *da.Spec.Engine.MinReplicas, "preferred home kept full")
+	assert.False(t, hasDerived(t, wb), "excess least-preferred home trimmed away")
+	by := candidatesByCluster(p.Candidates)
+	require.Contains(t, by, "a")
+	assert.NotContains(t, by, "b")
+}
+
+func TestSplitApportion(t *testing.T) {
+	cs := []string{"a", "b", "c"}
+	adm := func(a, b, c int32) map[string]int32 { return map[string]int32{"a": a, "b": b, "c": c} }
+
+	// FILL from empty: Packed over-requests the whole floor on the frontier;
+	// already-admitted replicas shrink what later clusters are asked for.
+	assert.Equal(t, map[string]int32{"a": 6, "b": 6, "c": 6}, splitApportion(cs, adm(0, 0, 0), 6, 0, false),
+		"all gated -> each candidate over-requested the deficit (trim converges later)")
+	assert.Equal(t, map[string]int32{"a": 6, "b": 2, "c": 2}, splitApportion(cs, adm(4, 0, 0), 6, 0, false),
+		"a holds 4 -> b/c asked for the remaining 2")
+
+	// TRIM: admitted >= floor -> pin preferred full, shed least-preferred.
+	assert.Equal(t, map[string]int32{"a": 4, "b": 0, "c": 0}, splitApportion(cs, adm(4, 2, 0), 4, 0, false),
+		"floor met by a -> b's excess trimmed to 0")
+	assert.Equal(t, map[string]int32{"a": 3, "b": 2, "c": 0}, splitApportion(cs, adm(3, 3, 3), 5, 0, false),
+		"pin a=3, b=2, shed c")
+
+	// maxPerCluster caps each request.
+	assert.Equal(t, map[string]int32{"a": 3, "b": 3, "c": 3}, splitApportion(cs, adm(0, 0, 0), 9, 3, false),
+		"cap forces the fill to spread across clusters")
+
+	// Balanced (spread): even share on every candidate.
+	assert.Equal(t, map[string]int32{"a": 2, "b": 2, "c": 2}, splitApportion(cs, adm(0, 0, 0), 6, 0, true))
 }
 
 // TestReconcile_SplitPackedSkipsUnneededCluster: N=2 met entirely by home a, so

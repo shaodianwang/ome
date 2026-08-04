@@ -493,73 +493,94 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 	}
 	scaleComp := splitScaleComponent(isvc)
 
-	remaining := desired
-	var admittedTotal int32
-	cands := make([]v1beta1.CandidatePlacement, 0, len(candidates))
+	// Phase 1 — observe each candidate's current derived: admitted + ready replica
+	// counts and the home endpoint. Observing BEFORE (re)apportioning is what lets
+	// the loop both fill a deficit and trim over-admission in the same pass. A
+	// disconnected candidate is not observable this pass; a sub-minPer sliver is
+	// counted as zero (dropped below).
+	type homeObs struct {
+		admitted, ready int32
+		endpoint        *apis.URL
+		present, sliver bool
+	}
+	obs := make(map[string]*homeObs, len(candidates))
+	admitted := make(map[string]int32, len(candidates))
 	for _, c := range candidates {
-		// Packed: request the whole remaining deficit on this cluster (over-request;
-		// Kueue admits what fits, the rest spills to the next). Balanced: request an
-		// even share on every candidate.
-		target := remaining
-		if spread {
-			target = ceilDiv(desired, int32(len(candidates)))
-		}
-		if maxPer > 0 && target > maxPer {
-			target = maxPer
-		}
-		if target <= 0 {
-			// Floor already met (Packed) — do not use this cluster; sweep any derived.
-			if err := r.deleteDerivedOn(ctx, c, isvc); err != nil {
-				r.Log.Error(err, "split: sweep unused cluster failed", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
-			}
-			continue
-		}
+		o := &homeObs{}
+		obs[c] = o
 		cl, ok := r.Clusters.ClientFor(c)
 		if !ok {
-			continue // disconnected this pass; the next poll re-attempts
-		}
-		if err := r.placeOnReplicasBounded(ctx, cl, isvc, target); err != nil {
-			r.Log.Error(err, "split: place failed on cluster", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
-			continue // per-cluster tolerated, like fanOut
+			continue // disconnected; retry next poll
 		}
 		derived, ok, err := r.getDerived(ctx, c, isvc)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !ok {
-			continue
+			continue // no derived yet
 		}
+		o.present = true
 		statuses, err := componentIRStatuses(ctx, cl, derived)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		adm := admittedReplicaCount(statuses[scaleComp])
-		if minPer > 0 && adm > 0 && adm < minPer {
-			// Sliver: admitted a nonzero count below the anti-sliver floor. Drop it
-			// and return those replicas to the deficit (record no home).
-			if err := r.deleteDerivedOn(ctx, c, isvc); err != nil {
-				r.Log.Error(err, "split: drop sliver failed", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
+		o.admitted = admittedReplicaCount(statuses[scaleComp])
+		if st := statuses[scaleComp]; st != nil {
+			o.ready = st.ReadyReplicas
+		}
+		o.endpoint = endpointFor(derived)
+		admitted[c] = o.admitted
+		if minPer > 0 && o.admitted > 0 && o.admitted < minPer {
+			// Sub-floor sliver: do not count it toward the floor; it is swept below.
+			o.sliver = true
+			admitted[c] = 0
+		}
+	}
+
+	// Phase 2 — apportion the desired count into a per-cluster target request.
+	targets := splitApportion(candidates, admitted, desired, maxPer, spread)
+
+	// Phase 3 — apply: request the target on kept clusters, sweep the rest, and
+	// record per-home status from the observed counts.
+	var admittedTotal int32
+	cands := make([]v1beta1.CandidatePlacement, 0, len(candidates))
+	for _, c := range candidates {
+		o := obs[c]
+		if o.sliver || targets[c] <= 0 {
+			// Sliver, or not needed (Packed floor met / trimmed away): sweep any derived.
+			if o.present {
+				if err := r.deleteDerivedOn(ctx, c, isvc); err != nil {
+					r.Log.Error(err, "split: sweep cluster failed", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
+				}
 			}
 			continue
 		}
-		if adm == 0 {
-			// Gated so far: keep the derived (still trying), record as a placed but
-			// not-yet-admitted candidate; it does not consume the deficit.
+		cl, ok := r.Clusters.ClientFor(c)
+		if !ok {
+			continue // disconnected; retry next poll
+		}
+		if err := r.placeOnReplicasBounded(ctx, cl, isvc, targets[c]); err != nil {
+			r.Log.Error(err, "split: place failed on cluster", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
+			continue // per-cluster tolerated, like fanOut
+		}
+		if o.admitted == 0 {
+			// Gated so far: keep trying; record a placed (not-yet-admitted) candidate.
 			cands = append(cands, v1beta1.CandidatePlacement{Cluster: c, Phase: v1beta1.CandidatePhasePlaced})
 			continue
 		}
-		var ready int32
-		if st := statuses[scaleComp]; st != nil {
-			ready = st.ReadyReplicas
+		// Count admitted toward the floor, capped by the target — a trimmed home is
+		// on its way down to target, so do not credit the excess it still shows.
+		counted := o.admitted
+		if counted > targets[c] {
+			counted = targets[c]
 		}
-		admittedTotal += adm
-		remaining -= adm
+		admittedTotal += counted
 		cands = append(cands, v1beta1.CandidatePlacement{
 			Cluster:          c,
 			Phase:            v1beta1.CandidatePhaseAdmitted,
-			Endpoint:         endpointFor(derived),
-			AdmittedReplicas: adm,
-			ReadyReplicas:    ready,
+			Endpoint:         o.endpoint,
+			AdmittedReplicas: o.admitted,
+			ReadyReplicas:    o.ready,
 		})
 	}
 
@@ -569,11 +590,72 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 	}
 	res, err := r.writePlacement(ctx, isvc, placementResult{phase: phase, candidates: cands})
 	if err == nil && admittedTotal < desired {
-		// Floor not yet met (some homes still gated, or capacity is filling in):
-		// keep re-polling at the normal cadence rather than the long backstop.
+		// Floor not yet met (homes still gated / capacity filling in): re-poll at
+		// the normal cadence rather than the long steady-state backstop.
 		res.RequeueAfter = r.requeue()
 	}
 	return res, err
+}
+
+// splitApportion computes each candidate's target replica REQUEST for Split.
+// admitted[c] is the replicas currently admitted on c (0 if none). A target of 0
+// means "do not use this cluster" (sweep). Preference order is the candidates
+// slice order. Two Packed regimes plus Balanced:
+//
+//   - TRIM (sum admitted >= desired): pin each cluster to min(admitted,
+//     remaining) in preference order — keep the preferred clusters full and shed
+//     the excess from the least-preferred, so requests sum to exactly desired and
+//     no gated remainder can push the admitted total any higher. This is what
+//     converges transient over-admission back down.
+//   - FILL (sum admitted < desired): over-request the remaining deficit on each
+//     cluster in preference order (Kueue admits what fits); already-admitted
+//     replicas close the deficit. Over-admission from gated remainders admitting
+//     later is cleaned up by TRIM on the next pass.
+//   - Balanced (spread): request an even ceil(desired/n) share on every candidate.
+func splitApportion(candidates []string, admitted map[string]int32, desired, maxPer int32, spread bool) map[string]int32 {
+	targets := make(map[string]int32, len(candidates))
+	capTo := func(v int32) int32 {
+		if maxPer > 0 && v > maxPer {
+			return maxPer
+		}
+		return v
+	}
+	if spread {
+		share := capTo(ceilDiv(desired, int32(len(candidates))))
+		for _, c := range candidates {
+			targets[c] = share
+		}
+		return targets
+	}
+	var total int32
+	for _, c := range candidates {
+		total += admitted[c]
+	}
+	remaining := desired
+	if total >= desired {
+		for _, c := range candidates { // TRIM
+			t := capTo(min32(admitted[c], remaining))
+			targets[c] = t
+			remaining -= t
+		}
+		return targets
+	}
+	for _, c := range candidates { // FILL
+		if remaining <= 0 {
+			targets[c] = 0
+			continue
+		}
+		targets[c] = capTo(remaining)
+		remaining -= admitted[c]
+	}
+	return targets
+}
+
+func min32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // splitDesiredReplicas is the Split desired replica count: spec.placement.split.
