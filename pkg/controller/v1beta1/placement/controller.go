@@ -218,6 +218,8 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.reconcileSingle(ctx, isvc, candidates)
 	case v1beta1.PlacementModeAll:
 		return r.reconcileAll(ctx, isvc, candidates)
+	case v1beta1.PlacementModeSplit:
+		return r.reconcileSplit(ctx, isvc, candidates)
 	default:
 		r.Log.Info("placement mode not supported by this build; holding Pending",
 			"mode", mode, "isvc", isvc.Namespace+"/"+isvc.Name)
@@ -462,6 +464,152 @@ func (r *Reconciler) reconcileAll(ctx context.Context, isvc *v1beta1.InferenceSe
 	return res, err
 }
 
+// reconcileSplit implements PlacementModeSplit: distribute the desired replica
+// count (spec.placement.split.replicas, else the engine floor minReplicas)
+// across candidate clusters. It requests a target on each, lets that cluster's
+// Kueue admit as many whole-gang replicas as fit, keeps every home that admits
+// >=1, and sums admitted until the floor is met. Packed by default — fill the
+// fewest clusters in preference order, spilling the remainder to the next;
+// Balanced (spec.placement.split.spread) apportions an even share across all
+// candidates. The endpoint weight follows each home's ready replicas.
+//
+// First cut (OEP-0018.3): a single ordered pass with no over-admission trim and
+// no deficit re-apportionment beyond that pass — it converges to >= floor
+// admitted, Packed, and accepts transient overshoot. OEP-0018.1's trim/
+// re-apportion sophistication is a follow-up. Like All, there is no sticky
+// winner or re-race: each home is independent.
+func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) (ctrl.Result, error) {
+	desired := splitDesiredReplicas(isvc)
+	if desired <= 0 {
+		// No floor declared — nothing to distribute.
+		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
+	}
+	// Split mode implies spec.placement is set; the split sub-block may be nil
+	// (defaults: distribute the floor, Packed, uncapped, no anti-sliver floor).
+	var maxPer, minPer int32
+	spread := false
+	if sp := isvc.Spec.Placement.Split; sp != nil {
+		maxPer, minPer, spread = sp.MaxReplicasPerCluster, sp.MinReplicasPerCluster, sp.Spread
+	}
+	scaleComp := splitScaleComponent(isvc)
+
+	remaining := desired
+	var admittedTotal int32
+	cands := make([]v1beta1.CandidatePlacement, 0, len(candidates))
+	for _, c := range candidates {
+		// Packed: request the whole remaining deficit on this cluster (over-request;
+		// Kueue admits what fits, the rest spills to the next). Balanced: request an
+		// even share on every candidate.
+		target := remaining
+		if spread {
+			target = ceilDiv(desired, int32(len(candidates)))
+		}
+		if maxPer > 0 && target > maxPer {
+			target = maxPer
+		}
+		if target <= 0 {
+			// Floor already met (Packed) — do not use this cluster; sweep any derived.
+			if err := r.deleteDerivedOn(ctx, c, isvc); err != nil {
+				r.Log.Error(err, "split: sweep unused cluster failed", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
+			}
+			continue
+		}
+		cl, ok := r.Clusters.ClientFor(c)
+		if !ok {
+			continue // disconnected this pass; the next poll re-attempts
+		}
+		if err := r.placeOnReplicasBounded(ctx, cl, isvc, target); err != nil {
+			r.Log.Error(err, "split: place failed on cluster", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
+			continue // per-cluster tolerated, like fanOut
+		}
+		derived, ok, err := r.getDerived(ctx, c, isvc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ok {
+			continue
+		}
+		statuses, err := componentIRStatuses(ctx, cl, derived)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		adm := admittedReplicaCount(statuses[scaleComp])
+		if minPer > 0 && adm > 0 && adm < minPer {
+			// Sliver: admitted a nonzero count below the anti-sliver floor. Drop it
+			// and return those replicas to the deficit (record no home).
+			if err := r.deleteDerivedOn(ctx, c, isvc); err != nil {
+				r.Log.Error(err, "split: drop sliver failed", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
+			}
+			continue
+		}
+		if adm == 0 {
+			// Gated so far: keep the derived (still trying), record as a placed but
+			// not-yet-admitted candidate; it does not consume the deficit.
+			cands = append(cands, v1beta1.CandidatePlacement{Cluster: c, Phase: v1beta1.CandidatePhasePlaced})
+			continue
+		}
+		var ready int32
+		if st := statuses[scaleComp]; st != nil {
+			ready = st.ReadyReplicas
+		}
+		admittedTotal += adm
+		remaining -= adm
+		cands = append(cands, v1beta1.CandidatePlacement{
+			Cluster:          c,
+			Phase:            v1beta1.CandidatePhaseAdmitted,
+			Endpoint:         endpointFor(derived),
+			AdmittedReplicas: adm,
+			ReadyReplicas:    ready,
+		})
+	}
+
+	phase := v1beta1.PlacementPhaseRacing
+	if admittedTotal > 0 {
+		phase = v1beta1.PlacementPhasePlaced
+	}
+	res, err := r.writePlacement(ctx, isvc, placementResult{phase: phase, candidates: cands})
+	if err == nil && admittedTotal < desired {
+		// Floor not yet met (some homes still gated, or capacity is filling in):
+		// keep re-polling at the normal cadence rather than the long backstop.
+		res.RequeueAfter = r.requeue()
+	}
+	return res, err
+}
+
+// splitDesiredReplicas is the Split desired replica count: spec.placement.split.
+// replicas when set, else the engine component's minReplicas (the guaranteed
+// floor). Zero when neither is declared.
+func splitDesiredReplicas(isvc *v1beta1.InferenceService) int32 {
+	if p := isvc.Spec.Placement; p != nil && p.Split != nil && p.Split.Replicas != nil {
+		return *p.Split.Replicas
+	}
+	if isvc.Spec.Engine != nil && isvc.Spec.Engine.MinReplicas != nil {
+		return int32(*isvc.Spec.Engine.MinReplicas)
+	}
+	return 0
+}
+
+// splitScaleComponent is the component whose admitted/ready replica counts drive
+// Split accounting and the endpoint weight: the Engine (a PD Decoder scales 1:1
+// with it). Falls back to the first declared component when there is no Engine.
+func splitScaleComponent(isvc *v1beta1.InferenceService) v1beta1.ComponentType {
+	if isvc.Spec.Engine != nil {
+		return v1beta1.EngineComponent
+	}
+	if cs := declaredComponents(isvc); len(cs) > 0 {
+		return cs[0]
+	}
+	return v1beta1.EngineComponent
+}
+
+// ceilDiv is integer ceiling division; b <= 0 returns a (no split).
+func ceilDiv(a, b int32) int32 {
+	if b <= 0 {
+		return a
+	}
+	return (a + b - 1) / b
+}
+
 // fanOut ensures the derived ISVC exists on each connected candidate. A
 // per-cluster failure does not abort the others — one bad cluster must not deny
 // the race to the healthy ones. Returns the clusters actually placed on; returns
@@ -512,6 +660,14 @@ func (r *Reconciler) placeOnBounded(ctx context.Context, cl client.Client, isvc 
 	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 	defer cancel()
 	return r.placeOn(cctx, cl, isvc)
+}
+
+// placeOnReplicasBounded runs placeOnReplicas under the per-cluster deadline
+// (Split's per-cluster apportioned apply).
+func (r *Reconciler) placeOnReplicasBounded(ctx context.Context, cl client.Client, isvc *v1beta1.InferenceService, replicas int32) error {
+	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
+	defer cancel()
+	return r.placeOnReplicas(cctx, cl, isvc, replicas)
 }
 
 // connectedSet snapshots the currently-connected cluster names as a set for O(1)
@@ -644,7 +800,20 @@ func (r *Reconciler) getWinnerDerived(ctx context.Context, cluster string, isvc 
 // replacing them wholesale — preserving worker-side reconciler state across the
 // poll-driven re-apply.
 func (r *Reconciler) placeOn(ctx context.Context, cl client.Client, src *v1beta1.InferenceService) error {
-	desired := DeriveISVC(src, r.ControlPlaneID)
+	return r.applyDerived(ctx, cl, src, DeriveISVC(src, r.ControlPlaneID))
+}
+
+// placeOnReplicas is placeOn with a Split per-cluster apportioned replica count
+// pinned onto the derived's scalable components before the apply.
+func (r *Reconciler) placeOnReplicas(ctx context.Context, cl client.Client, src *v1beta1.InferenceService, replicas int32) error {
+	d := DeriveISVC(src, r.ControlPlaneID)
+	setDerivedReplicas(d, replicas)
+	return r.applyDerived(ctx, cl, src, d)
+}
+
+// applyDerived create-or-updates the derived ISVC `desired` on the target
+// cluster.
+func (r *Reconciler) applyDerived(ctx context.Context, cl client.Client, src, desired *v1beta1.InferenceService) error {
 	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
 		// Origin-guard the apply, mirroring the origin guard on the delete path

@@ -2,6 +2,7 @@ package placement
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -70,6 +71,27 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.I
 	}
 
 	return d
+}
+
+// setDerivedReplicas pins the apportioned per-cluster replica count on a derived
+// ISVC's scalable components for Split mode: MinReplicas becomes the requested
+// count (Kueue admits as many as fit), and MaxReplicas is raised to at least
+// that so the request is honored while the home can still autoscale UP locally.
+// Applied to Engine and, when present, Decoder (a PD pair scales 1:1).
+func setDerivedReplicas(d *v1beta1.InferenceService, replicas int32) {
+	n := int(replicas)
+	apply := func(c *v1beta1.ComponentExtensionSpec) {
+		c.MinReplicas = ptr.To(n)
+		if c.MaxReplicas < n {
+			c.MaxReplicas = n
+		}
+	}
+	if d.Spec.Engine != nil {
+		apply(&d.Spec.Engine.ComponentExtensionSpec)
+	}
+	if d.Spec.Decoder != nil {
+		apply(&d.Spec.Decoder.ComponentExtensionSpec)
+	}
 }
 
 // stampQueue adds the Kueue queue-name label to a component's pod metadata.

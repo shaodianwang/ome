@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1359,4 +1360,140 @@ func TestReconcile_UnsupportedModeHoldsPending(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhasePending, p.Phase)
+}
+
+// srcISVCSplit builds a Split-mode source ISVC with the fleet-wide desired
+// replica count set via spec.placement.split.replicas.
+func srcISVCSplit(requirements string, replicas int32) *v1beta1.InferenceService {
+	i := srcISVC("")
+	i.Annotations = nil
+	i.Spec.Placement = &v1beta1.PlacementSpec{
+		Mode:         v1beta1.PlacementModeSplit,
+		Requirements: requirements,
+		Split:        &v1beta1.SplitSpec{Replicas: &replicas},
+	}
+	return i
+}
+
+// workerWithReplicas returns a worker whose derived engine IR reports `admitted`
+// admitted instances and `ready` ready replicas, with an addressable status.URL.
+// Models a home that Kueue admitted a fraction of the requested replicas.
+func workerWithReplicas(t *testing.T, s *runtime.Scheme, host string, admitted, ready int32) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
+	flags := make([]bool, admitted)
+	for i := range flags {
+		flags[i] = true
+	}
+	ir := irWithInstances(v1beta1.EngineComponent, flags...)
+	ir.Status.ReadyReplicas = ready
+	w := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, ir).Build()
+	cur := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
+	if cur.Status.URL == nil {
+		cur.Status = derived.Status
+		require.NoError(t, w.Status().Update(context.Background(), cur))
+	}
+	return w
+}
+
+func TestSplitDesiredReplicas(t *testing.T) {
+	// spec.placement.split.replicas wins.
+	assert.Equal(t, int32(4), splitDesiredReplicas(srcISVCSplit("gpu=gb300", 4)))
+	// Falls back to the engine floor when split.replicas is unset.
+	i := srcISVCMode(v1beta1.PlacementModeSplit, "gpu=gb300")
+	i.Spec.Engine.MinReplicas = ptr.To(3)
+	assert.Equal(t, int32(3), splitDesiredReplicas(i))
+	// Zero when neither is declared.
+	assert.Equal(t, int32(0), splitDesiredReplicas(srcISVCMode(v1beta1.PlacementModeSplit, "gpu=gb300")))
+}
+
+// TestReconcile_SplitPackedFillsAcrossHomes: N=3 packed across two homes that
+// admit 2 and 1 — both kept with per-home admitted/ready counts, and the
+// apportioned replica count is applied to each home's derived.
+func TestReconcile_SplitPackedFillsAcrossHomes(t *testing.T) {
+	s := testScheme(t)
+	wa := workerWithReplicas(t, s, "svc.a.example", 2, 2)
+	wb := workerWithReplicas(t, s, "svc.b.example", 1, 1)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCSplit("gpu=gb300", 3),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	assert.Empty(t, p.Cluster, "Split has no single winner cluster")
+	by := candidatesByCluster(p.Candidates)
+	require.Contains(t, by, "a")
+	require.Contains(t, by, "b")
+	assert.Equal(t, int32(2), by["a"].AdmittedReplicas)
+	assert.Equal(t, int32(2), by["a"].ReadyReplicas)
+	require.NotNil(t, by["a"].Endpoint)
+	assert.Equal(t, int32(1), by["b"].AdmittedReplicas)
+	assert.Equal(t, int32(1), by["b"].ReadyReplicas)
+
+	// Packed asks the first candidate for the whole floor; the apportioned count
+	// lands on that home's derived engine.
+	da := &v1beta1.InferenceService{}
+	require.NoError(t, wa.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, da))
+	require.NotNil(t, da.Spec.Engine.MinReplicas)
+	assert.Equal(t, 3, *da.Spec.Engine.MinReplicas, "first home requested the full floor")
+}
+
+// TestReconcile_SplitPackedSkipsUnneededCluster: N=2 met entirely by home a, so
+// candidate b is not used (no derived, not a home).
+func TestReconcile_SplitPackedSkipsUnneededCluster(t *testing.T) {
+	s := testScheme(t)
+	wa := workerWithReplicas(t, s, "svc.a.example", 2, 2)
+	wb := emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCSplit("gpu=gb300", 2),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	require.Len(t, p.Candidates, 1, "floor met by a; b not used")
+	assert.Equal(t, "a", p.Candidates[0].Cluster)
+	assert.Equal(t, int32(2), p.Candidates[0].AdmittedReplicas)
+	assert.False(t, hasDerived(t, wb), "unneeded cluster b is not placed on")
+}
+
+// TestReconcile_SplitRacingWhileAllGated: nothing admitted yet -> Racing, homes
+// retained as placed candidates, fast requeue.
+func TestReconcile_SplitRacingWhileAllGated(t *testing.T) {
+	s := testScheme(t)
+	wa, wb := emptyWorker(s), emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVCSplit("gpu=gb300", 2),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
+	assert.Positive(t, res.RequeueAfter, "keeps filling while the floor is unmet")
+	assert.True(t, hasDerived(t, wa))
+	assert.True(t, hasDerived(t, wb))
 }

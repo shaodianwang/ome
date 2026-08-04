@@ -63,6 +63,22 @@ func AllComponentsAdmitted(isvc *v1beta1.InferenceService, statuses map[v1beta1.
 	return true
 }
 
+// admittedReplicaCount returns how many instances in an IR status are admitted
+// (their pods cleared the Kueue gate) — the per-home admitted-replica count
+// Split accounts against the desired floor. Zero for a nil status.
+func admittedReplicaCount(st *v1beta1.InferenceReplicaStatus) int32 {
+	if st == nil {
+		return 0
+	}
+	var n int32
+	for i := range st.InstanceStatuses {
+		if st.InstanceStatuses[i].Admitted {
+			n++
+		}
+	}
+	return n
+}
+
 // componentHasAdmittedInstance reports whether an authoritative IR status has at
 // least one Instance that has left the Kueue admission gate. A nil status (IR
 // not found yet) reports false.
