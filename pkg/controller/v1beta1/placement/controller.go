@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -491,7 +492,7 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 	if sp := isvc.Spec.Placement.Split; sp != nil {
 		maxPer, minPer, spread = sp.MaxReplicasPerCluster, sp.MinReplicasPerCluster, sp.Spread
 	}
-	scaleComp := splitScaleComponent(isvc)
+	scaleComps := splitScaleComponents(isvc)
 
 	// Phase 1 — observe each candidate's current derived: admitted + ready replica
 	// counts and the home endpoint. Observing BEFORE (re)apportioning is what lets
@@ -524,10 +525,8 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		o.admitted = admittedReplicaCount(statuses[scaleComp])
-		if st := statuses[scaleComp]; st != nil {
-			o.ready = st.ReadyReplicas
-		}
+		o.admitted = splitAdmittedReplicas(scaleComps, statuses)
+		o.ready = splitReadyReplicas(scaleComps, statuses)
 		o.endpoint = endpointFor(derived)
 		admitted[c] = o.admitted
 		if minPer > 0 && o.admitted > 0 && o.admitted < minPer {
@@ -671,17 +670,61 @@ func splitDesiredReplicas(isvc *v1beta1.InferenceService) int32 {
 	return 0
 }
 
-// splitScaleComponent is the component whose admitted/ready replica counts drive
-// Split accounting and the endpoint weight: the Engine (a PD Decoder scales 1:1
-// with it). Falls back to the first declared component when there is no Engine.
-func splitScaleComponent(isvc *v1beta1.InferenceService) v1beta1.ComponentType {
+// splitScaleComponents are the replica-scaled components whose admitted/ready
+// counts define a Split home's replica count: Engine and, for a PD service, the
+// Decoder — a replica is the coordinated pair. Router is excluded (a shared
+// front-end, not per-replica). Falls back to the first declared component when
+// neither Engine nor Decoder is present (unusual for Split).
+func splitScaleComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
+	var cs []v1beta1.ComponentType
 	if isvc.Spec.Engine != nil {
-		return v1beta1.EngineComponent
+		cs = append(cs, v1beta1.EngineComponent)
 	}
-	if cs := declaredComponents(isvc); len(cs) > 0 {
-		return cs[0]
+	if isvc.Spec.Decoder != nil {
+		cs = append(cs, v1beta1.DecoderComponent)
 	}
-	return v1beta1.EngineComponent
+	if len(cs) == 0 {
+		if dc := declaredComponents(isvc); len(dc) > 0 {
+			cs = append(cs, dc[0])
+		}
+	}
+	return cs
+}
+
+// splitAdmittedReplicas is a home's admitted replica count: the MIN admitted
+// instances across the scaled components, since a PD replica is admitted only
+// when BOTH its engine and decoder instances are (an engine-only home is just
+// the engine count). Zero when no scaled component is declared.
+func splitAdmittedReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
+	if len(comps) == 0 {
+		return 0
+	}
+	mn := int32(math.MaxInt32)
+	for _, c := range comps {
+		if n := admittedReplicaCount(statuses[c]); n < mn {
+			mn = n
+		}
+	}
+	return mn
+}
+
+// splitReadyReplicas is a home's ready replica count (the endpoint weight): the
+// MIN ReadyReplicas across the scaled components, for the same pairing reason.
+func splitReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
+	if len(comps) == 0 {
+		return 0
+	}
+	mn := int32(math.MaxInt32)
+	for _, c := range comps {
+		var r int32
+		if st := statuses[c]; st != nil {
+			r = st.ReadyReplicas
+		}
+		if r < mn {
+			mn = r
+		}
+	}
+	return mn
 }
 
 // ceilDiv is integer ceiling division; b <= 0 returns a (no split).

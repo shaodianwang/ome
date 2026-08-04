@@ -1554,3 +1554,31 @@ func TestReconcile_SplitRacingWhileAllGated(t *testing.T) {
 	assert.True(t, hasDerived(t, wa))
 	assert.True(t, hasDerived(t, wb))
 }
+
+func TestSplitScaleComponentsAndAccounting(t *testing.T) {
+	// Engine-only ISVC -> just the engine.
+	eng := srcISVCSplit("gpu=gb300", 3)
+	assert.Equal(t, []v1beta1.ComponentType{v1beta1.EngineComponent}, splitScaleComponents(eng))
+
+	// PD ISVC (engine + decoder) -> both are scaled components.
+	pd := srcISVCSplit("gpu=gb300", 3)
+	pd.Spec.Decoder = &v1beta1.DecoderSpec{}
+	assert.Equal(t, []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, splitScaleComponents(pd))
+
+	// A PD replica is admitted only when BOTH components admit that instance, so
+	// the count is the MIN across components: 3 engine + 2 decoder = 2 pairs.
+	es := irWithInstances(v1beta1.EngineComponent, true, true, true).Status
+	es.ReadyReplicas = 3
+	ds := irWithInstances(v1beta1.DecoderComponent, true, true).Status
+	ds.ReadyReplicas = 1
+	statuses := map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus{
+		v1beta1.EngineComponent:  &es,
+		v1beta1.DecoderComponent: &ds,
+	}
+	comps := []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+	assert.Equal(t, int32(2), splitAdmittedReplicas(comps, statuses), "min admitted = complete pairs")
+	assert.Equal(t, int32(1), splitReadyReplicas(comps, statuses), "min ready across components")
+
+	// Engine-only accounting is just the engine's counts.
+	assert.Equal(t, int32(3), splitAdmittedReplicas([]v1beta1.ComponentType{v1beta1.EngineComponent}, statuses))
+}
