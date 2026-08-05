@@ -227,12 +227,11 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 	allWarnings = append(allWarnings, autoscalerWarnings...)
 
-	// Per-Component Autoscaler block shape validation (OEP-0013):
-	// class enum, required fields, IdleReplicaCount vs MinReplicas, plus
+	// Per-Component Autoscaler block shape validation: class enum,
+	// required fields, IdleReplicaCount vs MinReplicas, plus
 	// annotation/block conflict. The per-Component dispatch is shared
 	// with the ServingRuntime and InferenceReplica webhooks via
-	// validation.ValidateComponentsAutoscalers — see review §4 in
-	// .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+	// validation.ValidateComponentsAutoscalers.
 	if err := validation.ValidateComponentsAutoscalers(isvcAutoscalerChecks(isvc)); err != nil {
 		return allWarnings, err
 	}
@@ -249,15 +248,15 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	if err := validation.ValidateLeaderWorkerPairing(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-	// OEP-0007 Phase 3: forward-looking guard that the leader Runner stays
-	// at size=1 (today enforced structurally by LeaderSpec having no Size
-	// field; see ValidateLeaderSize).
+	// Forward-looking guard that the leader Runner stays at size=1
+	// (today enforced structurally by LeaderSpec having no Size field;
+	// see ValidateLeaderSize).
 	if err := validation.ValidateLeaderSize(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-	// OEP-0007 Phase 3: lean (no-model, no-runtime) multi-pod specs must
-	// declare both leader.runner.image and worker.runner.image — the
-	// controller has no way to fill them in without a runtime or model.
+	// Lean (no-model, no-runtime) multi-pod specs must declare both
+	// leader.runner.image and worker.runner.image — the controller has
+	// no way to fill them in without a runtime or model.
 	if err := validation.ValidateMultiPodLeanRunner(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}

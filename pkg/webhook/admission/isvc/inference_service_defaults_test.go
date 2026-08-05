@@ -163,7 +163,7 @@ func TestDeploymentModeDetection(t *testing.T) {
 		},
 		{
 			// A pre-existing annotation is preserved verbatim — even a
-			// legacy "MultiNode" value the defaulter no longer stamps.
+			// legacy "MultiNode" value the defaulter itself never stamps.
 			// This pins the upgrade-safety contract: admission does not
 			// rewrite or reject persisted annotations.
 			name: "existing deployment mode should not be overridden",
@@ -198,14 +198,13 @@ func TestDeploymentModeDetection(t *testing.T) {
 	}
 }
 
-// TestDefaultInferenceService_OMENativeBudgetViaAnnotationAndHeuristic pins the
-// fix for the fleet-wipe defaulter gap: a multi-node engine that resolves to
-// OMENative via the canonical top-level ome.io/deploymentMode annotation OR via
-// the leader+worker heuristic (no spec.deploymentMode, no per-component
-// annotation) must still get the rollout budget defaults. Before the fix,
-// componentResolvesToOMENative only saw the per-component annotation + spec
-// field, so the whole defaulter (including the 25% budgets) was skipped for
-// these shapes, leaving the rollout uncapped.
+// TestDefaultInferenceService_OMENativeBudgetViaAnnotationAndHeuristic pins
+// that a multi-node engine resolving to OMENative via the canonical top-level
+// ome.io/deploymentMode annotation OR via the leader+worker heuristic (no
+// spec.deploymentMode, no per-component annotation) still gets the rollout
+// budget defaults. If componentResolvesToOMENative saw only the per-component
+// annotation + spec field, the whole defaulter (including the 25% budgets)
+// would be skipped for these shapes, leaving the rollout uncapped.
 func TestDefaultInferenceService_OMENativeBudgetViaAnnotationAndHeuristic(t *testing.T) {
 	mnEngine := func() *v1beta1.EngineSpec {
 		return &v1beta1.EngineSpec{
@@ -404,8 +403,8 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		assert.True(t, *spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 
 		// Rollout budgets default to 25% so an unset RollingUpdate never
-		// resolves to the uncapped BudgetNoLimit (the fleet-wipe failure
-		// mode). Both surge and drain paths are paced.
+		// resolves to the uncapped BudgetNoLimit that would let a rollout
+		// drain a whole fleet at once. Both surge and drain paths are paced.
 		require.NotNil(t, spec.UpdateStrategy.RollingUpdate)
 		require.NotNil(t, spec.UpdateStrategy.RollingUpdate.MaxSurge)
 		assert.Equal(t, intstr.FromString("25%"), *spec.UpdateStrategy.RollingUpdate.MaxSurge)
@@ -712,7 +711,7 @@ func TestDefaultOMENativeComponent_SinglePodDefaults(t *testing.T) {
 		"single-pod must keep ReadyPolicy=None — no aggregation needed for one pod")
 	require.NotNil(t, ext.Lifecycle.UpdateStrategy)
 	assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, ext.Lifecycle.UpdateStrategy.Type,
-		"single-pod UpdateStrategy unchanged — Phase 3 must not regress this")
+		"single-pod UpdateStrategy must stay SurgeThenDrain")
 }
 
 // silence unused-helper lint if int32Ptr isn't referenced elsewhere

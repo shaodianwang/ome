@@ -90,8 +90,7 @@ var RDMAProfiles = map[string]RDMAProfile{
 			Privileged: &[]bool{true}[0],
 		},
 	},
-	// cks-gb-sglang: SGLang PD-serving env baseline (mirrored from the
-	// serving launcher's _pd_env_base).
+	// cks-gb-sglang: SGLang PD-serving env baseline.
 	// Volumes/mounts and securityContext match oci-roce so runtimes can
 	// swap profiles without touching the rest of the pod.
 	"cks-gb-sglang": {
@@ -141,7 +140,7 @@ var RDMAProfiles = map[string]RDMAProfile{
 }
 
 // cksGbRdmaNetworks is the canonical 16-attachment list for CKS GB200/GB300
-// (4 HCAs × 4 ports). Mirrors the cluster net-device layout helper (_cks_net_devices).
+// (4 HCAs × 4 ports), matching the node's net-device layout.
 var cksGbRdmaNetworks = func() []NetworkAttachment {
 	out := make([]NetworkAttachment, 0, 16)
 	for hca := 0; hca < 4; hca++ {

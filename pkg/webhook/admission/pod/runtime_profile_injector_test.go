@@ -194,7 +194,7 @@ func TestObservabilityInjector_UnknownProfile_Errors(t *testing.T) {
 }
 
 // =========================================================================
-// RDMA cks-gb-sglang profile (added to existing RDMAProfiles map)
+// RDMA cks-gb-sglang profile
 // =========================================================================
 
 func TestRDMAProfiles_cksGbSglang_HasExpectedShape(t *testing.T) {
@@ -212,9 +212,9 @@ func TestRDMAProfiles_cksGbSglang_HasExpectedShape(t *testing.T) {
 		_, has := p.EnvVars[k]
 		assert.True(t, has, "missing %q", k)
 	}
-	assert.Len(t, p.EnvVars, len(want), "extra env vars — match cluster_env.py:_pd_env_base or add to want list")
-	// Pin the absence of cargo-culted entries from earlier deepseek YAML
-	// so a re-add is a deliberate decision.
+	assert.Len(t, p.EnvVars, len(want), "extra env vars — add them to the want list deliberately")
+	// Pin the absence of env vars deliberately excluded from this
+	// profile so a re-add is a deliberate decision.
 	for _, k := range []string{
 		"PYTHONUNBUFFERED",
 		"GLOO_SOCKET_IFNAME",
@@ -224,7 +224,7 @@ func TestRDMAProfiles_cksGbSglang_HasExpectedShape(t *testing.T) {
 		"NVSHMEM_ENABLE_NIC_PE_MAPPING",
 	} {
 		_, has := p.EnvVars[k]
-		assert.False(t, has, "%q was dropped on purpose", k)
+		assert.False(t, has, "%q is excluded on purpose", k)
 	}
 	assert.Len(t, p.Volumes, 2)
 	assert.Len(t, p.VolumeMounts, 2)

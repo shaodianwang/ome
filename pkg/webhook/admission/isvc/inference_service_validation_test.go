@@ -1290,7 +1290,7 @@ func TestValidateInferenceService_ComprehensiveErrorPaths(t *testing.T) {
 			wantErr: true,
 			errMsg:  "at least one of spec.model or spec.runtime must be set",
 		},
-		// OEP-0014 Phase 2: explicit-pin admission validation.
+		// Explicit-pin admission validation.
 		{
 			name: "explicit revision pin with autoSync=false (cluster) passes",
 			isvc: &v1beta1.InferenceService{

@@ -370,7 +370,7 @@ func TestHandle(t *testing.T) {
 			wantAllowed: false,
 		},
 		// IR-side defense-in-depth on spec.autoscaler shape.
-		// Per Decision Q4 the IR webhook does NOT block external writes
+		// The IR webhook does NOT block external writes
 		// to spec.autoscaler (the /scale subresource only mutates
 		// spec.replicas), but any successful write must carry a
 		// shape-valid Autoscaler block.
@@ -465,13 +465,12 @@ func TestHandle(t *testing.T) {
 			},
 			wantAllowed: true,
 		},
-		// Review §6 (fourth bullet): immutability gate runs BEFORE the
-		// controller-write annotation gate. A misbehaving controller
-		// (stale ISVC cache) that stamps the annotation MUST NOT also be
-		// able to flip spec.parentRef.UID to the wrong parent or move
-		// the IR between Component slots. Pre-fix the annotation gate
-		// ran first, so an annotation-true + UID-rewrite payload slipped
-		// through; post-fix the immutability error wins.
+		// The immutability gate runs BEFORE the controller-write
+		// annotation gate. A misbehaving controller (stale ISVC cache)
+		// that stamps the annotation MUST NOT also be able to flip
+		// spec.parentRef.UID to the wrong parent or move the IR between
+		// Component slots: for an annotation-true + UID-rewrite payload
+		// the immutability error wins.
 		{
 			name: "update with annotation, same parentRef → allowed (baseline)",
 			req: func(t *testing.T) admission.Request {
@@ -480,7 +479,7 @@ func TestHandle(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
-			name: "update with annotation, different parentRef.Name → denied (regression: was allowed pre-fix)",
+			name: "update with annotation, different parentRef.Name → denied (immutability)",
 			req: func(t *testing.T) admission.Request {
 				return updateReq(t, baselineIR(wcw), withParent(baselineIR(wcw), "different-isvc"))
 			},
@@ -488,7 +487,7 @@ func TestHandle(t *testing.T) {
 			wantContains: []string{"spec.parentRef is immutable"},
 		},
 		{
-			name: "update with annotation, different component → denied (regression: was allowed pre-fix)",
+			name: "update with annotation, different component → denied (immutability)",
 			req: func(t *testing.T) admission.Request {
 				return updateReq(t, baselineIR(wcw),
 					withComponent(baselineIR(wcw), v1beta1.DecoderComponent))
@@ -513,7 +512,7 @@ func TestHandle(t *testing.T) {
 			wantAllowed:  false,
 			wantContains: []string{"spec.parentRef is immutable"},
 		},
-		// Review §6 (second bullet): Pacing.Partition must be <=
+		// Pacing.Partition must be <=
 		// effective Replicas. Over-Partition silently freezes the
 		// whole replica set forever (rollout engine treats Partition
 		// as a per-index threshold).

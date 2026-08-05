@@ -163,11 +163,11 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	// A mount that names an undeclared volume is accepted here but
 	// REJECTED by the kube-apiserver at pod-create time during reconcile
 	// ("spec.containers[0].volumeMounts[0].name: Not found: <name>"),
-	// which only ever surfaced as a buried InferenceReplica reconcile
-	// error in the manager log — there was NO signal at kubectl apply.
-	// This gate is defense-in-depth: it turns that silent failure into a
-	// clear admission rejection (and also catches plain volumeMount
-	// typos in a runtime's pod template).
+	// which surfaces only as a buried InferenceReplica reconcile error
+	// in the manager log — with no signal at kubectl apply. This gate is
+	// defense-in-depth: it turns that silent failure into a clear
+	// admission rejection (and also catches plain volumeMount typos in a
+	// runtime's pod template).
 	if err := validateIRRunnerVolumes(newObj); err != nil {
 		return admission.Denied(fmt.Sprintf(
 			"InferenceReplica %s/%s: %s",

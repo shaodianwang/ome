@@ -76,14 +76,13 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 	}
 
 	// resolvedMode is the effective deployment mode after the ObjectMeta
-	// resolution above. Components resolve OMENative from it — the canonical
-	// top-level ome.io/deploymentMode annotation (set explicitly by the
-	// operator or by the leader+worker heuristic) — falling back to
-	// spec.DeploymentMode. Without this the component defaulter only saw the
-	// per-component annotation + spec field, so a multi-node engine declared
-	// the normal way (top-level annotation, no spec.deploymentMode) skipped
-	// defaultOMENativeComponent entirely — including the rollout budget
-	// defaults, leaving it uncapped (fleet-wipe shape).
+	// resolution above: the canonical top-level ome.io/deploymentMode
+	// annotation (set explicitly by the operator or by the leader+worker
+	// heuristic), falling back to spec.DeploymentMode. Components must
+	// resolve OMENative from it so a multi-node engine declared the normal
+	// way (top-level annotation, no spec.deploymentMode) still receives
+	// defaultOMENativeComponent — including the rollout budget defaults
+	// that keep its rollouts capped.
 	resolvedMode := isvc.Spec.DeploymentMode
 	if m := isvc.ObjectMeta.Annotations[constants.DeploymentMode]; m != "" {
 		mm := constants.DeploymentModeType(m)
@@ -256,8 +255,7 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	// Default the per-Component rollout budgets so an unset RollingUpdate
 	// never resolves to the uncapped BudgetNoLimit. Without a cap the
 	// dispatcher can start every Instance's surge/drain in a single
-	// reconcile pass — the failure mode that collapsed a 64-replica fleet
-	// to one when a spec bump landed with no maxSurge/maxUnavailable set.
+	// reconcile pass, draining an entire fleet at once on a spec bump.
 	// 25% mirrors the upstream appsv1.Deployment RollingUpdate defaults and
 	// paces both the surge path (gated on MaxSurge) and the recreate path
 	// (gated on MaxUnavailable). Percent values scale with replica count at

@@ -92,8 +92,8 @@ func TestInjectFineTunedAdapter_MissingWeightReturnsError(t *testing.T) {
 }
 
 // TestInjectFineTunedAdapter_MissingStorageURIReturnsError covers the
-// FineTunedWeight-exists-but-has-no-storage-URI shape, which previously
-// dereferenced a nil pointer.
+// FineTunedWeight-exists-but-has-no-storage-URI shape, which must return
+// an error rather than dereference a nil pointer.
 func TestInjectFineTunedAdapter_MissingStorageURIReturnsError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	assert.NoError(t, v1beta1.AddToScheme(scheme))
