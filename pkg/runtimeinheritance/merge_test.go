@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// Each test mirrors one row of the merge contract table in OEP-0012:
+// Each test covers one case of the merge contract:
 //   scalar / map / named-list / plain-list / nested-struct.
 
 func TestMerge_NilHandling(t *testing.T) {
