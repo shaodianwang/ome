@@ -2,10 +2,10 @@ Upstream: https://github.com/prometheus-operator/prometheus-operator
 Version: v1 (monitoring.coreos.com)
 
 Hand-authored CRD stub sufficient for envtest-based integration tests
-of the InferenceService PodMonitor reconciler (added in PR #158). The
-stub preserves unknown fields (x-kubernetes-preserve-unknown-fields)
-on .spec and .status so the controller's typed PodMonitor writes
-succeed without modeling the full schema.
+of the InferenceService PodMonitor reconciler. The stub preserves
+unknown fields (x-kubernetes-preserve-unknown-fields) on .spec and
+.status so the controller's typed PodMonitor writes succeed without
+modeling the full schema.
 
 The prometheus-operator Go module
 (github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring)

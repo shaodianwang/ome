@@ -2,7 +2,7 @@ Upstream: https://github.com/envoyproxy/gateway
 Version: v1alpha1
 
 The CRDs in this directory are hand-authored stubs sufficient for
-envtest-based integration tests of the OEP-0011 traffic translator.
+envtest-based integration tests of the Envoy Gateway traffic translator.
 The stubs preserve unknown fields (x-kubernetes-preserve-unknown-fields)
 on .spec and .status so the translator's unstructured writes succeed
 without modeling the full BTP schema.

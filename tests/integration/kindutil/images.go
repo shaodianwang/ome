@@ -151,7 +151,7 @@ func buildArgsCacheKey(args map[string]string) string {
 // buildx would require users to install the buildx component, which not
 // every Docker install ships with (notably colima + docker.io upstream).
 // A caller-set DOCKER_BUILDKIT wins: daemons running the containerd image
-// store (e.g. the TW CI dind) reject the legacy builder, so CI exports
+// store (common in CI dind setups) reject the legacy builder, so CI exports
 // DOCKER_BUILDKIT=1.
 func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[string]string) error {
 	args := []string{"build", "-t", tag}
