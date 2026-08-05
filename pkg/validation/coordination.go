@@ -19,7 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// Admission rejection reasons. Operators and the test plan reference these by
+// Admission rejection reasons. Operators and tests reference these by
 // name, so they're exported constants.
 const (
 	ReasonDuplicateComponentInCoordinationGroups = "DuplicateComponentInCoordinationGroups"

@@ -157,8 +157,8 @@ func TestValidateCoordination_RatioBalancedWithBlueGreenAccepted(t *testing.T) {
 	}
 }
 
-// W-2 reproducer: maxSurge=0 AND maxUnavailable=0 (both explicit zero)
-// is unstartable — no surge, no drain.
+// maxSurge=0 AND maxUnavailable=0 (both explicit zero) is unstartable —
+// no surge, no drain — and must be rejected.
 func TestValidateCoordination_ZeroBudgetPacingRejected(t *testing.T) {
 	zero := intstr.FromInt(0)
 	spec := omeNativePDSpec()
@@ -219,8 +219,8 @@ func TestValidateCoordination_SoakOnSequenceAccepted(t *testing.T) {
 	}
 }
 
-// W-2 reproducer with string "0%" values — equivalent to literal 0
-// and must produce the same rejection.
+// String "0%" values are equivalent to literal 0 and must produce the
+// same zero-budget rejection.
 func TestValidateCoordination_ZeroBudgetPacingRejectedStringForm(t *testing.T) {
 	zeroPct := intstr.FromString("0%")
 	zeroInt := intstr.FromInt(0)

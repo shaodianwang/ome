@@ -418,7 +418,7 @@ func TestValidateAutoscalerConfig(t *testing.T) {
 
 // TestValidateLeaderWorkerPairing_ReasonConstants confirms the
 // Multi-node validation reason constants appear in the error strings the
-// validator emits. Operators and the M-E webhook test suite grep for
+// validator emits. Operators and the webhook test suites grep for
 // these exact tokens.
 func TestValidateLeaderWorkerPairing_ReasonConstants(t *testing.T) {
 	sizePtr := func(v int) *int { return &v }
@@ -667,16 +667,13 @@ func TestValidateMultiPodLeanRunner(t *testing.T) {
 }
 
 // TestValidateComponentAutoscaler is the table-driven coverage for
-// Webhook validation of the per-Component Autoscaler
-// block. The cases mirror the user-locked decisions in
-// .claude/specs/2026-05-29-oep-0013-wiring-plan/plan.md §5:
+// Webhook validation of the per-Component Autoscaler block. Two
+// invariants the cases pin:
 //
-//   - Q5: `none` and `external` are status-field twins — both accept
-//     here with no shape requirements.
-//   - Q6: no KEDA-installed check — KEDA always required, webhook
-//     does not probe.
-//
-// At least 8 cases per the plan slice 5 spec.
+//   - `none` and `external` are accepted with no shape requirements —
+//     both mean the controller does not manage scaling itself.
+//   - No KEDA-installed check — KEDA is always required for class=KEDA,
+//     and the webhook does not probe the cluster.
 func TestValidateComponentAutoscaler(t *testing.T) {
 	cpu80 := resource.MustParse("80")
 	validHPAMetrics := []autoscalingv2.MetricSpec{{
@@ -880,10 +877,9 @@ func TestValidateComponentAutoscaler(t *testing.T) {
 }
 
 // TestValidateAutoscaler covers the (autoscaler, minReplicas) core
-// signature added so callers without a parent ComponentExtensionSpec
-// (notably the InferenceReplica webhook) don't have to synthesize one
-// to fit the historical ValidateComponentAutoscaler shape. See review
-// §4 in .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+// signature that lets callers without a parent ComponentExtensionSpec
+// (notably the InferenceReplica webhook) validate without synthesizing
+// one to fit the ValidateComponentAutoscaler shape.
 //
 // The behaviour parity with ValidateComponentAutoscaler is covered by
 // TestValidateComponentAutoscaler above — this test asserts the cases
@@ -1074,10 +1070,9 @@ func TestValidateComponentsAutoscalers(t *testing.T) {
 
 // TestValidateAutoscalerAnnotationConflict covers the rule
 // that the legacy ome.io/autoscalerClass annotation cannot coexist
-// with a new per-Component Autoscaler block (Decision Q2 — the
-// per-Component Autoscaler block wins; this validator pre-empts the
+// with a per-Component Autoscaler block; the validator pre-empts the
 // confused "two sources of truth" state by forcing operators to pick
-// one).
+// one.
 func TestValidateAutoscalerAnnotationConflict(t *testing.T) {
 	hpaBlock := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
 

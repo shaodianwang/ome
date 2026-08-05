@@ -794,8 +794,7 @@ func ValidateLegacyAutoscalerFieldsRaw(rawObj []byte) error {
 		if field, ok := legacyAutoscalerFieldOn(c.body); ok {
 			return fmt.Errorf(
 				"%s: spec.%s.%s is no longer supported. "+
-					"Use spec.%s.autoscaler.%s instead "+
-					"(see oeps/0013-autoscaling/README.md for the migration).",
+					"Use spec.%s.autoscaler.%s instead.",
 				ReasonLegacyAutoscalerFieldsRejected,
 				c.name, field,
 				c.name, legacyAutoscalerReplacement(field),
