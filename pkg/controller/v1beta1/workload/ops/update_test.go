@@ -1058,7 +1058,7 @@ func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 // when its running revision differs from the current target (a corrective
 // edit moved the target mid-surge), the trigger must be suppressed — else
 // the marker is mis-driven as a fresh surge source and corrupts the
-// rollout (#837, gang route).
+// rollout (gang route).
 func TestDetectUpdateTrigger_GangSurgeTargetMarkerSuppressed(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -1325,12 +1325,11 @@ func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
 	}
 }
 
-// TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod is the primary
-// regression test for Bug #51. After an in-place pass, the pod's
-// metadata.annotations contains BOTH the previously-authored value
-// AND the new annotation added in the target spec. Pre-fix behavior
-// left the new annotation stuck on the ControllerRevision but never on
-// the pod.
+// TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod pins annotation
+// propagation: after an in-place pass, the pod's metadata.annotations
+// contains BOTH the previously-authored value AND the new annotation
+// added in the target spec. Without the propagation, the new annotation
+// would land on the ControllerRevision but never reach the pod.
 func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -1377,7 +1376,7 @@ func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 		t.Errorf("annotation 'a': got %q want \"1\" (preserved across in-place)", v)
 	}
 	if v := got.Annotations["b"]; v != "2" {
-		t.Errorf("annotation 'b': got %q want \"2\" — Bug #51 regressed: new spec annotation never reached pod", v)
+		t.Errorf("annotation 'b': got %q want \"2\" — new spec annotation never reached pod", v)
 	}
 	if v := got.Annotations["linkerd.io/inject"]; v != "enabled" {
 		t.Errorf("foreign annotation linkerd.io/inject: got %q want \"enabled\" (must NOT be clobbered by in-place patch)", v)
@@ -1385,7 +1384,7 @@ func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 }
 
 // TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec pins the
-// removal half of Bug #51's design choice. When the operator removes a
+// removal half of the annotation-propagation design choice. When the operator removes a
 // key from spec.{component}.annotations that the previous revision
 // authored, the in-place patch removes it from the pod too. The
 // scoping rule — "only delete keys the previous revision once

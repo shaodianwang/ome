@@ -1459,7 +1459,7 @@ func TestWouldExclusionsConflictWithNodeAffinity_MultiNode(t *testing.T) {
 // stamped a name. Render is the apply-time chokepoint that talks to the
 // apiserver; an empty container Name produces a Pod-create rejection
 // (`spec.containers[N].name: Required value`) that deadlocks OMENative
-// rollouts (see Bug #42).
+// rollouts.
 //
 // The precedence under test:
 //

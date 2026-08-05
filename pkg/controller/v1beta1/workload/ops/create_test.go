@@ -589,7 +589,7 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 // fresh Instance triggers a spurious recreate on its second pass (the
 // per-pod diff false-positives against post-Render mutations).
 //
-// Bug #58 guard: Create's promote only stamps RunningRevision=target.Name
+// Guard: Create's promote only stamps RunningRevision=target.Name
 // when the existing pods actually carry target's revision hash — see
 // existingPodsMatchTargetRevision. The test pod is given a rev-hash
 // label matching the target so the normal-flow promote fires.
@@ -626,8 +626,8 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	}
 }
 
-// TestCreate_PromoteSkipsRunningRevisionForOffTargetPods pins the bug
-// #58 (X-2 bump-during-bump) guard in Create.reconcileInstance:
+// TestCreate_PromoteSkipsRunningRevisionForOffTargetPods pins the
+// X-2 bump-during-bump guard in Create.reconcileInstance:
 // when existing pods are runtime-ready but carry a different revision
 // hash from target (e.g., they were created by an earlier surge cycle
 // pinned to a now-superseded target), the promote MUST NOT stamp

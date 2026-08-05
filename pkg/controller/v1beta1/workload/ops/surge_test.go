@@ -1312,8 +1312,7 @@ func gangInputWithRemove(isvc *v1beta1.InferenceService, c client.Client) worklo
 // corruption: status would claim v3 while the pods run v2, and
 // DetectUpdateTrigger's fast path (RunningRevision == target) would then
 // short-circuit forever — the rollout never re-fires to drive the pods to
-// v3, leaving them stranded on the intermediate revision (the harness's
-// "did not settle on one final rev (state=ROTATING)" failure). With the
+// v3, leaving them stranded on the intermediate revision. With the
 // running rev pinned to v2, the next reconcile sees RunningRevision=v2 !=
 // target=v3 and starts a fresh surge cycle toward v3 — convergence.
 func TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev(t *testing.T) {

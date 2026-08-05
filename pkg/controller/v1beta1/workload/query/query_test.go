@@ -441,13 +441,13 @@ func (r *probeCountingReader) List(ctx context.Context, list client.ObjectList, 
 	return r.Reader.List(ctx, list, opts...)
 }
 
-// TestListOMENativePodsByName_LiveReaderSkipsProbe pins issue #1: with
-// useIndex=false (the live-reader / index-less path), the helper goes
-// STRAIGHT to the label selector — exactly ONE PodList List, and ZERO
-// MatchingFields probes. The old code always issued a MatchingFields probe
-// first; on the live API reader that probe ALWAYS failed and forced a
-// second fallback List. Asserting one List + zero probes proves the doomed
-// probe is gone on the live path while the returned set is still correct.
+// TestListOMENativePodsByName_LiveReaderSkipsProbe pins the live-reader
+// contract: with useIndex=false (the live-reader / index-less path), the
+// helper goes STRAIGHT to the label selector — exactly ONE PodList List,
+// and ZERO MatchingFields probes. A MatchingFields probe against the live
+// API reader always fails and forces a second fallback List. Asserting one
+// List + zero probes proves the live path never attempts the doomed probe
+// while the returned set is still correct.
 func TestListOMENativePodsByName_LiveReaderSkipsProbe(t *testing.T) {
 	objs := []client.Object{
 		newDiscoverPodFor("eng-0", "isvc", workload.ComponentEngine),

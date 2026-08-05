@@ -20,16 +20,14 @@ type WorkloadDesiredSpec struct {
 	// MinReadySeconds is the minimum age (in seconds) for an Instance
 	// to count as Available after becoming Ready.
 	//
-	// LATENT BUG (see .claude/specs/2026-06-08-omenative-workload-code-review.md §3):
-	// this field is populated by the IR converter
+	// LATENT BUG: this field is populated by the IR converter
 	// (inferencereplica/convert.go, from IR spec.minReadySeconds) but is
 	// NEVER read by the rollout engine. Availability is computed from
 	// EndpointSlice membership, not a readiness-age gate, so IR
 	// spec.minReadySeconds is currently NOT honored. The
 	// AvailablePodCount doc in types.go ("ready for at least
-	// MinReadySeconds") is aspirational on this account.
-	// Decision 2026-06-08: documented, not wired (low impact — nothing
-	// sets these fields today).
+	// MinReadySeconds") is aspirational on this account. Documented
+	// rather than wired: nothing sets this field today.
 	MinReadySeconds int32
 
 	// Runners enumerates the Runner roles (default | leader | worker)
@@ -151,8 +149,7 @@ type WorkloadAggregateStatus struct {
 // WorkloadPacing is the projected rollout pacing.
 // Adapters compute it once per reconcile.
 //
-// LATENT BUG (see .claude/specs/2026-06-08-omenative-workload-code-review.md §3):
-// despite the "the reconciler reads" framing, NOTHING in the rollout
+// LATENT BUG: despite the "the reconciler reads" framing, NOTHING in the rollout
 // engine reads Partition / MaxUnavailable / Decisions. The IR converter
 // (inferencereplica/convert.go) populates Partition and MaxUnavailable
 // from IR spec.pacing, but pacing actually flows through
@@ -163,8 +160,7 @@ type WorkloadAggregateStatus struct {
 // inferencereplica/reconciler.go — only partition/maxUnavailable are
 // dead.) Decisions/PacingDecisions is likewise never constructed in
 // production.
-// Decision 2026-06-08: documented, not wired (low impact — nothing sets
-// these fields today).
+// Documented rather than wired: nothing sets these fields today.
 type WorkloadPacing struct {
 	// Partition holds back updates for Instances whose index is less
 	// than Partition. 0 (the default) updates all Instances. Used

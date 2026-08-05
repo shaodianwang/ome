@@ -567,7 +567,7 @@ func TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay(t *testing.T) {
 	}
 }
 
-// Invariant 10 (the incident regression): a Delete op wedged on a
+// Invariant 10: a Delete op wedged on a
 // Terminating pod whose node is gone escalates, the pod list empties,
 // RemoveInstance fires, and the op completes — while the control run
 // with the config absent stays wedged forever.

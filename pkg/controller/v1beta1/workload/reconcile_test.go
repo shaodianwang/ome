@@ -736,9 +736,9 @@ func TestHeldByPartition(t *testing.T) {
 // update in ONE pass. Seed 8 Ready Instances all on a prior revision and
 // the dispatcher starts a fresh surge on ALL 8 in a single reconcile.
 //
-// This is the pre-#619 fleet-dispatch shape with the webhook out of the
+// This is the raw fleet-dispatch shape with the webhook out of the
 // loop. The real-cluster guard against a mass single-pass dispatch is the
-// #619 25% default-budget defaulter, which stamps a non-nil RollingUpdate
+// webhook's 25% default-budget defaulter, which stamps a non-nil RollingUpdate
 // (percent MaxSurge/MaxUnavailable) so PerComponentMax*Budget != -1 and
 // the loop's projected-vs-budget check caps fresh starts per pass. When
 // that defaulter is bypassed (nil RollingUpdate here), the dispatcher is

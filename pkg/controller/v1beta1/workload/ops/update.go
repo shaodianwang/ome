@@ -385,7 +385,7 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 	// update target. Triggering it here mis-drives it as a fresh surge source
 	// (allocating a phantom surge index), which corrupts the rollout when a
 	// corrective edit moves the target while the marker still runs the old
-	// surge revision. Skip; the source owns the marker's lifecycle. (#837)
+	// surge revision. Skip; the source owns the marker's lifecycle.
 	if isGangSurgeTargetMarker(s) {
 		return UpdateTriggerDecision{}, false
 	}

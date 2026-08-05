@@ -10,9 +10,9 @@ import (
 )
 
 // TestPerRevisionServiceName_Bounded covers the DNS1035 63-char guard on
-// per-revision Service names. The headless variant of a long isvc name
-// previously produced a 66-char name that the apiserver rejected,
-// hot-looping OMENative coordination (seen in production).
+// per-revision Service names. Unbounded, the headless variant of a long
+// isvc name reaches 66 chars, which the apiserver rejects — hot-looping
+// OMENative coordination.
 func TestPerRevisionServiceName_Bounded(t *testing.T) {
 	const max = validation.DNS1035LabelMaxLength // 63
 

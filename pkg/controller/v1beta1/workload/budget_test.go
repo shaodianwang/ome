@@ -853,9 +853,10 @@ func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
 		if surgeIdx < steadyIndices {
 			t.Errorf("source %d stamped surge index %d which collides with steady index range [0,%d)", srcIdx, surgeIdx, steadyIndices)
 		}
-		// No two sources may share a surge index — the fleet-wipe collision.
+		// No two sources may share a surge index — a shared surge going
+		// Ready would release every sharing source at once.
 		if prev, dup := seen[surgeIdx]; dup {
-			t.Errorf("surge index %d claimed by BOTH source %d and source %d (shared-surge collision, the fleet-wipe bug)", surgeIdx, prev, srcIdx)
+			t.Errorf("surge index %d claimed by BOTH source %d and source %d (shared-surge collision)", surgeIdx, prev, srcIdx)
 		}
 		seen[surgeIdx] = srcIdx
 	}

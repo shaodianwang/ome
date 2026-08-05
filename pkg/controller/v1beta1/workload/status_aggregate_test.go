@@ -174,10 +174,10 @@ func TestPodStuckPullFailure(t *testing.T) {
 			wantStuck:  true,
 			wantReason: "ImagePullBackOff",
 		},
-		// Bug #52: CrashLoopBackOff is the steady-state for a container
+		// CrashLoopBackOff is the steady-state for a container
 		// that pulls cleanly but exits immediately. kubelet's restart
 		// backoff caps at ~5 min/attempt; without the carve-out the
-		// rollout sat at Phase=Updating until the 30-min Deadline fired.
+		// rollout would sit at Phase=Updating until the Deadline fired.
 		{
 			name: "past grace, CrashLoopBackOff: stuck",
 			pod: &corev1.Pod{

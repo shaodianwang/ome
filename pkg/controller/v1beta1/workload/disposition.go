@@ -156,7 +156,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 			// toward the owner's current rollout target.
 			targetRev = input.ObservedState.UpdateRevision
 		}
-		// Superseded-leftover guard (#837): a corrective edit retargets the
+		// Superseded-leftover guard: a corrective edit retargets the
 		// instance to a new revision C, but the prior failed attempt's bad pod
 		// (revision B) can linger in its drain window. Attributing that B pod's
 		// failure to the freshly-stamped Operation.TargetRevision (now C) would
@@ -244,7 +244,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 	// still-needed update and re-attempts (no pod actually replaced), and this
 	// path re-fires every ~reconcile. inst is the pre-disposition observation,
 	// so inst.LastFailure carries the prior reason; only warn when this is a
-	// NEW terminal reason. (#850)
+	// NEW terminal reason.
 	if input.WarnInstanceFailed != nil && !sameTerminalFailure(inst, shortReason) {
 		input.WarnInstanceFailed(inst.Index, "", fmt.Sprintf("%s: %s", reason, detail))
 	}
@@ -254,7 +254,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 // sameTerminalFailure reports whether the instance's prior LastFailure already
 // records this terminal reason, so a repeated disposition of the same
 // unresolved failure doesn't re-emit the operator warning + Warning event
-// every reconcile. (#850)
+// every reconcile.
 func sameTerminalFailure(inst InstanceStatus, reason string) bool {
 	return inst.LastFailure != nil && inst.LastFailure.Reason == reason
 }

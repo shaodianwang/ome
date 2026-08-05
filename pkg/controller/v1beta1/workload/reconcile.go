@@ -293,7 +293,7 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 	//   1. Create's Ready-promote stamps RunningRevision=target.Name
 	//      even when the existing pods carry a different revision
 	//      (the X-2 bump-during-bump corruption mode where status
-	//      says vN but pods are still on vN-1). Bug #58.
+	//      says vN but pods are still on vN-1).
 	//   2. Create's scale-up reads activeOrdinalForInstance from
 	//      stale ObservedState, sees a "missing" pod at the
 	//      pre-promote ordinal slot, and creates a duplicate

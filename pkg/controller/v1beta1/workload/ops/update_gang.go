@@ -190,7 +190,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		// Announce the surge gang's PodGroup before its pods. The top-level
 		// EnsurePodGroups pass keys off the plan, which only pins the surge
 		// index once its GangSurgeTarget status round-trips into ObservedState
-		// — a lag a gang-aware scheduler (mkube/coscheduler) turns into
+		// — a lag a gang-aware scheduler (e.g. coscheduler) turns into
 		// "PodGroup not found" on the freshly-created surge pods. Ensuring it
 		// here makes PodGroup-before-pods hold regardless of that timing. The
 		// callback is wired by the caller (gang package owns the podgroup dep,

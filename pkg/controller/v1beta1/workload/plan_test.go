@@ -464,7 +464,7 @@ func TestAllocateSurgeIndex(t *testing.T) {
 	if got := AllocateSurgeIndex(nil); got != 0 {
 		t.Errorf("empty: got %d want 0", got)
 	}
-	// Regression (shared-surgeIndex fleet-wipe): an in-flight surge slot
+	// Shared-surgeIndex regression: an in-flight surge slot
 	// recorded in Operation.SurgeIndex must be excluded even though no Instance
 	// with that Index exists yet. Without this, every Instance surging in one
 	// reconcile pass collides on the same lowest-free index, and when that single

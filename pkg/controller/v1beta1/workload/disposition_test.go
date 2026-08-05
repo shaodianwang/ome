@@ -13,7 +13,7 @@ package workload_test
 //     the recorded node by the render NotIn overlay.
 //   Branch 3 (terminal): Operation cleared + Phase=Failed, NO RetryBlock.
 //
-// Fixtures follow the #821 closure-recorder pattern (see
+// Fixtures follow the closure-recorder pattern (see
 // ops/update_retryblock_test.go retryWriterInput) with a fake clock and
 // a controller-runtime fake client for the audit-ledger branch.
 
@@ -265,8 +265,8 @@ func TestDispose_WorkloadCaused_CreateFallsBackToUpdateRevision(t *testing.T) {
 	}
 }
 
-// TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision is the
-// #837 regression: after a corrective edit retargets an instance to a new
+// TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision pins the
+// superseded-leftover guard: after a corrective edit retargets an instance to a new
 // revision, the prior failed attempt's bad pod can linger in its drain
 // window. Attributing that pod's failure to the freshly-stamped
 // Operation.TargetRevision would record a RetryBlock against the GOOD
@@ -1083,7 +1083,7 @@ func TestExpireOperations_GangCreateDisposed(t *testing.T) {
 // TestDispose_Terminal_SuppressesRepeatWarnForSameFailure: an instance stuck
 // oscillating on the SAME terminal reason (e.g. a same-target update whose
 // new-revision pod persistently CrashLoopBackOffs) must warn once, not on
-// every disposition. The warn is keyed on the prior LastFailure reason. (#850)
+// every disposition. The warn is keyed on the prior LastFailure reason.
 func TestDispose_Terminal_SuppressesRepeatWarnForSameFailure(t *testing.T) {
 	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)

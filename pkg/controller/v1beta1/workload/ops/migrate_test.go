@@ -332,8 +332,8 @@ func TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec(t *testing.T) {
 // coordination.BuildPerRevisionRoutingService), so a gang worker pod is never
 // a routing endpoint. drainServiceForPod must therefore return "" for a worker
 // so the Migrate surge in-rotation gate (and the source drain gate) skip it
-// instead of waiting forever on IsPodInRotation(worker) — the bug that wedged
-// every gang migration at ledger phase=Started. Leader + single-pod "default"
+// instead of waiting forever on IsPodInRotation(worker) — otherwise every
+// gang migration wedges at ledger phase=Started. Leader + single-pod "default"
 // pods stay routable.
 func TestDrainServiceForPod_GangWorkerNotRoutable(t *testing.T) {
 	input := workload.ReconcileInput{Key: workload.Key{OwnerName: "llama-70b", Component: workload.ComponentEngine}}
