@@ -1451,6 +1451,42 @@ func TestReconcile_SplitPackedFillsAcrossHomes(t *testing.T) {
 	assert.Equal(t, 2, *da.Spec.Engine.MinReplicas, "home pinned to its admitted count")
 }
 
+// TestReconcile_SplitMaxPerClusterCapsDerivedCeiling: maxReplicasPerCluster is
+// the hard per-cluster ceiling, so it clamps each home's derived MaxReplicas
+// DOWN from the declared engine.maxReplicas — the home may burst up to the cap
+// locally, never past it. Min stays the apportioned share (a=2, b=1 for floor 3).
+func TestReconcile_SplitMaxPerClusterCapsDerivedCeiling(t *testing.T) {
+	s := testScheme(t)
+	wa := workerWithReplicas(t, s, "svc.a.example", 2, 2)
+	wb := workerWithReplicas(t, s, "svc.b.example", 1, 1)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	src := srcISVCSplit("gpu=gb300", 3)
+	src.Spec.Engine.MaxReplicas = 9 // declared ceiling the cap must override
+	src.Spec.Placement.Split.MaxReplicasPerCluster = 2
+	r, cp := newPlacer(s, clusters, src,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	require.Equal(t, v1beta1.PlacementPhasePlaced, cpPlacement(t, cp).Phase)
+	get := func(w client.Client) *v1beta1.InferenceService {
+		d := &v1beta1.InferenceService{}
+		require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, d))
+		return d
+	}
+	da, db := get(wa), get(wb)
+	assert.Equal(t, 2, da.Spec.Engine.MaxReplicas, "home a ceiling clamped to the cap, not 9")
+	assert.Equal(t, 2, db.Spec.Engine.MaxReplicas, "home b ceiling clamped to the cap, not 9")
+	require.NotNil(t, da.Spec.Engine.MinReplicas)
+	require.NotNil(t, db.Spec.Engine.MinReplicas)
+	assert.Equal(t, 2, *da.Spec.Engine.MinReplicas, "a floor = its share")
+	assert.Equal(t, 1, *db.Spec.Engine.MinReplicas, "b floor = its share")
+}
+
 // TestReconcile_SplitTrimsOverAdmission: two homes admit 4 and 2 but the floor
 // is 4 — TRIM keeps the preferred home full (4) and sheds the excess from the
 // least-preferred (b scaled to 0 / swept), converging the request sum to 4.

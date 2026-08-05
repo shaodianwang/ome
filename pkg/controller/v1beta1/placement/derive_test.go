@@ -82,3 +82,40 @@ func TestDeriveISVC(t *testing.T) {
 	// source must not be mutated (deep copy).
 	assert.Nil(t, src.Spec.Engine.ComponentExtensionSpec.Labels, "source ISVC must be untouched")
 }
+
+func TestSetDerivedReplicas(t *testing.T) {
+	newISVC := func(engMax int, withDecoder bool) *v1beta1.InferenceService {
+		i := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{
+			Engine: &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MaxReplicas: engMax}},
+		}}
+		if withDecoder {
+			i.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MaxReplicas: engMax}}
+		}
+		return i
+	}
+
+	// maxPer > 0: the cap is the hard per-cluster ceiling on every scaled
+	// component — clamping the declared MaxReplicas DOWN — while Min is this
+	// home's apportioned share. A PD pair is capped 1:1.
+	d := newISVC(9, true)
+	setDerivedReplicas(d, 1, 2)
+	require.NotNil(t, d.Spec.Engine.MinReplicas)
+	assert.Equal(t, 1, *d.Spec.Engine.MinReplicas)
+	assert.Equal(t, 2, d.Spec.Engine.MaxReplicas, "cap clamps the ceiling down from 9")
+	require.NotNil(t, d.Spec.Decoder.MinReplicas)
+	assert.Equal(t, 1, *d.Spec.Decoder.MinReplicas)
+	assert.Equal(t, 2, d.Spec.Decoder.MaxReplicas, "decoder capped 1:1 with engine")
+
+	// maxPer <= 0 (no cap declared): the component's own MaxReplicas stands.
+	d = newISVC(5, false)
+	setDerivedReplicas(d, 2, 0)
+	assert.Equal(t, 2, *d.Spec.Engine.MinReplicas)
+	assert.Equal(t, 5, d.Spec.Engine.MaxReplicas, "uncapped -> declared ceiling preserved")
+
+	// maxPer <= 0 and the share exceeds the declared ceiling: raise Max to keep
+	// Max >= Min (the request must be honorable).
+	d = newISVC(1, false)
+	setDerivedReplicas(d, 3, 0)
+	assert.Equal(t, 3, *d.Spec.Engine.MinReplicas)
+	assert.Equal(t, 3, d.Spec.Engine.MaxReplicas, "uncapped -> Max raised to keep Max >= Min")
+}

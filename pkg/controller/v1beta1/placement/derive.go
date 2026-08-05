@@ -73,16 +73,23 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.I
 	return d
 }
 
-// setDerivedReplicas pins the apportioned per-cluster replica count on a derived
-// ISVC's scalable components for Split mode: MinReplicas becomes the requested
-// count (Kueue admits as many as fit), and MaxReplicas is raised to at least
-// that so the request is honored while the home can still autoscale UP locally.
-// Applied to Engine and, when present, Decoder (a PD pair scales 1:1).
-func setDerivedReplicas(d *v1beta1.InferenceService, replicas int32) {
+// setDerivedReplicas pins Split's apportioned replica band on a derived ISVC's
+// scalable components: MinReplicas becomes this home's share of the floor (Kueue
+// admits as many as fit), and MaxReplicas becomes the per-cluster ceiling so the
+// home can autoscale UP locally under load but no further. maxPer > 0 is the hard
+// ceiling from spec.placement.split.maxReplicasPerCluster; maxPer <= 0 means no
+// cap was declared, so the component's own MaxReplicas stands (only raised to
+// keep Max >= Min). The apportioned share is always <= maxPer (splitApportion
+// caps it), so Min <= Max holds. Applied to Engine and, when present, Decoder (a
+// PD pair scales 1:1).
+func setDerivedReplicas(d *v1beta1.InferenceService, replicas, maxPer int32) {
 	n := int(replicas)
 	apply := func(c *v1beta1.ComponentExtensionSpec) {
 		c.MinReplicas = ptr.To(n)
-		if c.MaxReplicas < n {
+		switch {
+		case maxPer > 0:
+			c.MaxReplicas = int(maxPer)
+		case c.MaxReplicas < n:
 			c.MaxReplicas = n
 		}
 	}

@@ -557,7 +557,7 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 		if !ok {
 			continue // disconnected; retry next poll
 		}
-		if err := r.placeOnReplicasBounded(ctx, cl, isvc, targets[c]); err != nil {
+		if err := r.placeOnReplicasBounded(ctx, cl, isvc, targets[c], maxPer); err != nil {
 			r.Log.Error(err, "split: place failed on cluster", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
 			continue // per-cluster tolerated, like fanOut
 		}
@@ -788,10 +788,10 @@ func (r *Reconciler) placeOnBounded(ctx context.Context, cl client.Client, isvc 
 
 // placeOnReplicasBounded runs placeOnReplicas under the per-cluster deadline
 // (Split's per-cluster apportioned apply).
-func (r *Reconciler) placeOnReplicasBounded(ctx context.Context, cl client.Client, isvc *v1beta1.InferenceService, replicas int32) error {
+func (r *Reconciler) placeOnReplicasBounded(ctx context.Context, cl client.Client, isvc *v1beta1.InferenceService, replicas, maxPer int32) error {
 	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 	defer cancel()
-	return r.placeOnReplicas(cctx, cl, isvc, replicas)
+	return r.placeOnReplicas(cctx, cl, isvc, replicas, maxPer)
 }
 
 // connectedSet snapshots the currently-connected cluster names as a set for O(1)
@@ -927,11 +927,12 @@ func (r *Reconciler) placeOn(ctx context.Context, cl client.Client, src *v1beta1
 	return r.applyDerived(ctx, cl, src, DeriveISVC(src, r.ControlPlaneID))
 }
 
-// placeOnReplicas is placeOn with a Split per-cluster apportioned replica count
-// pinned onto the derived's scalable components before the apply.
-func (r *Reconciler) placeOnReplicas(ctx context.Context, cl client.Client, src *v1beta1.InferenceService, replicas int32) error {
+// placeOnReplicas is placeOn with a Split per-cluster apportioned replica band
+// pinned onto the derived's scalable components before the apply: replicas is
+// this home's share (the floor), maxPer the per-cluster ceiling (0 = uncapped).
+func (r *Reconciler) placeOnReplicas(ctx context.Context, cl client.Client, src *v1beta1.InferenceService, replicas, maxPer int32) error {
 	d := DeriveISVC(src, r.ControlPlaneID)
-	setDerivedReplicas(d, replicas)
+	setDerivedReplicas(d, replicas, maxPer)
 	return r.applyDerived(ctx, cl, src, d)
 }
 
