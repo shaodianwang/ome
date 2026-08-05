@@ -59,8 +59,7 @@ func requirementSelector(isvc *v1beta1.InferenceService) (sel labels.Selector, h
 // ome.io/accelerator-requirements and ome.io/cluster-selector annotations. The
 // struct wins WHOLESALE when present (no per-field merge with the annotations),
 // so an ISVC that sets spec.placement is described entirely by it. When
-// spec.placement is nil the annotations remain authoritative — the unchanged
-// pre-OEP-0018.3 behavior.
+// spec.placement is nil the annotations remain authoritative.
 func placementInputs(isvc *v1beta1.InferenceService) (requirements, clusterSelector string) {
 	if p := isvc.Spec.Placement; p != nil {
 		return p.Requirements, p.ClusterSelector

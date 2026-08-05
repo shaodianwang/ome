@@ -49,7 +49,7 @@ func TestOrphanedDeriveds(t *testing.T) {
 	assert.Equal(t, "b", orphans[0].Name)
 }
 
-// Bug 5 (unit): with a control-plane id set, OrphanedDeriveds must never
+// With a control-plane id set, OrphanedDeriveds must never
 // classify a derived owned by ANOTHER control plane as an orphan, even when its
 // source UID is absent from this control plane's live set.
 func TestOrphanedDeriveds_ControlPlaneScoped(t *testing.T) {
@@ -92,9 +92,9 @@ func TestGCSweep_DeletesOrphansOnly(t *testing.T) {
 	require.NoError(t, worker.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "live"}, &v1beta1.InferenceService{}), "live kept")
 }
 
-// Bug 4: an empty control-plane ISVC list (transient/partial/suspect response,
-// or a genuinely-empty control plane) must NOT cause the sweep to reap every
-// derived. Pre-fix, an empty live set marked all deriveds as orphans.
+// An empty control-plane ISVC list (transient/partial/suspect response, or a
+// genuinely-empty control plane) must NOT cause the sweep to reap every
+// derived: an empty live set is treated as suspect, not authoritative.
 func TestGCSweep_EmptyLiveSet_NoDeletes(t *testing.T) {
 	s := testScheme(t)
 	// Control plane has NO ISVCs -> live set is empty.
@@ -115,9 +115,9 @@ func TestGCSweep_EmptyLiveSet_NoDeletes(t *testing.T) {
 	require.NoError(t, worker.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "b"}, &v1beta1.InferenceService{}), "b kept")
 }
 
-// Bug 5: two control planes sharing a workload cluster. Each GC, scoped by its
-// own ControlPlaneID, must reap ONLY its own orphans and never the other's
-// deriveds. Pre-fix (no scoping), cp-east would reap cp-west's live derived
+// Two control planes sharing a workload cluster: each GC, scoped by its own
+// ControlPlaneID, must reap ONLY its own orphans and never the other's
+// deriveds — without the scoping, cp-east would reap cp-west's live derived
 // because its source UID is not in cp-east's live set.
 func TestGCSweep_ControlPlaneScoped_DoesNotReapOthers(t *testing.T) {
 	s := testScheme(t)

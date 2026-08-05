@@ -232,7 +232,7 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 // on Kueue admission, keep the first fully-admitted cluster (lexical tie-break),
 // sweep the losers, and hold that winner sticky across polls — re-racing only if
 // it is lost (derived deleted, or admission lost past the grace window). This is
-// the default mode and the original OEP-0018 behavior.
+// the default mode.
 func (r *Reconciler) reconcileSingle(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) (ctrl.Result, error) {
 	// Sticky winner: keep the current winner while its derived ISVC still
 	// exists and it remains a candidate. Otherwise fall through to re-race.
@@ -474,11 +474,10 @@ func (r *Reconciler) reconcileAll(ctx context.Context, isvc *v1beta1.InferenceSe
 // Balanced (spec.placement.split.spread) apportions an even share across all
 // candidates. The endpoint weight follows each home's ready replicas.
 //
-// First cut (OEP-0018.3): a single ordered pass with no over-admission trim and
-// no deficit re-apportionment beyond that pass — it converges to >= floor
-// admitted, Packed, and accepts transient overshoot. OEP-0018.1's trim/
-// re-apportion sophistication is a follow-up. Like All, there is no sticky
-// winner or re-race: each home is independent.
+// Distribution is a single ordered pass with no over-admission trim and no
+// deficit re-apportionment beyond that pass — it converges to >= floor
+// admitted, Packed, and accepts transient overshoot. Like All, there is no
+// sticky winner or re-race: each home is independent.
 func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) (ctrl.Result, error) {
 	desired := splitDesiredReplicas(isvc)
 	if desired <= 0 {

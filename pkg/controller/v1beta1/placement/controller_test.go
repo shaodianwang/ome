@@ -758,11 +758,11 @@ func foreignDerived(originUID string) *v1beta1.InferenceService {
 	return o
 }
 
-// Bug #1 (cross-tenant DATA LOSS): the loser sweep must NOT delete a same-named
+// Cross-tenant data-loss guard: the loser sweep must NOT delete a same-named
 // ISVC on a connected NON-candidate cluster that this control plane did not
-// derive. Pre-fix deleteLosers iterated ALL connected clusters and
-// deleteDerivedOn deleted by identity, so a user's same-named ISVC on an
-// unrelated connected cluster was reaped.
+// derive. deleteLosers sweeps only candidate clusters and deleteDerivedOn is
+// origin-guarded, so a user's same-named ISVC on an unrelated connected
+// cluster survives.
 func TestReconcile_LoserSweepDoesNotTouchForeignISVCOnNonCandidate(t *testing.T) {
 	s := testScheme(t)
 	// "other" is connected but NOT a candidate (label does not match the
@@ -784,7 +784,7 @@ func TestReconcile_LoserSweepDoesNotTouchForeignISVCOnNonCandidate(t *testing.T)
 	assert.Equal(t, "b", cpPlacement(t, cp).Cluster)
 }
 
-// Bug #1 variant: even on a candidate (loser) cluster, an object derived from a
+// Even on a candidate (loser) cluster, an object derived from a
 // DIFFERENT source UID must survive the origin-guarded sweep.
 func TestReconcile_LoserSweepDoesNotDeleteOtherSourceDerived(t *testing.T) {
 	s := testScheme(t)

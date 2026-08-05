@@ -59,7 +59,7 @@ func TestMatchCandidates(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"cluster-b"}, got)
 
-	// HIGH-bug guard: an ISVC with NO requirement must NOT fan out to every
+	// Guard: an ISVC with NO requirement must NOT fan out to every
 	// Ready cluster — it matches NOTHING with reason NoRequirements.
 	got, reason, err = MatchCandidates(isvcReq("", ""), clusters)
 	assert.NoError(t, err)
@@ -96,7 +96,7 @@ func isvcPlacement(p *v1beta1.PlacementSpec) *v1beta1.InferenceService {
 }
 
 // TestMatchCandidates_PlacementSpec covers the structured-field path and its
-// precedence over the legacy annotations (the OEP-0018.3 selector bridge).
+// precedence over the legacy annotations.
 func TestMatchCandidates_PlacementSpec(t *testing.T) {
 	clusters := []v1beta1.WorkloadCluster{
 		wc("cluster-a", true, map[string]string{"gpu": "gb300", "provider": "prov-a"}),
