@@ -102,8 +102,8 @@ func (w *ClusterServingRuntimeWrapper) Container(c corev1.Container) *ClusterSer
 	return w
 }
 
-// EngineRunner sets spec.engineConfig.runner — the canonical place to
-// put the engine container per config/runtimes/srt/meta/*.yaml. The
+// EngineRunner sets spec.engineConfig.runner — the canonical place
+// runtime catalogs put a single-node engine container. The
 // ISVC's Engine spec is then a stub (`Engine(&v1beta1.EngineSpec{})`)
 // to opt into the engine component, and MergeRuntimeSpecs combines
 // the two. UpdateVolumeMounts in components/base.go only injects
@@ -127,9 +127,9 @@ func (w *ClusterServingRuntimeWrapper) EngineConfig(spec *v1beta1.EngineSpec) *C
 
 // EngineLeaderRunner sets spec.engineConfig.leader.runner — required
 // for multi-node engines because the leader has its own pod spec /
-// runner (independent of engineConfig.runner). The canonical
-// production pattern is config/runtimes/srt/deepseek-rdma-rt.yaml,
-// where the engine container lives at engineConfig.leader.runner.
+// runner (independent of engineConfig.runner). Multi-node runtime
+// catalogs canonically place the engine container at
+// engineConfig.leader.runner.
 func (w *ClusterServingRuntimeWrapper) EngineLeaderRunner(c corev1.Container) *ClusterServingRuntimeWrapper {
 	if w.Spec.EngineConfig == nil {
 		w.Spec.EngineConfig = &v1beta1.EngineSpec{}
