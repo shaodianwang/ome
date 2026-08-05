@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/gomega"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -26,6 +27,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -893,6 +895,104 @@ func TestEngineReconcilePodSpec_OMENativeWithLeader(t *testing.T) {
 	g.Expect(podSpec.Containers[0].Name).To(gomega.Equal("leader-container"),
 		"OMENative engine with Leader must source pod template from Leader.PodSpec, not engineSpec.PodSpec")
 	g.Expect(podSpec.Containers[0].Image).To(gomega.Equal("leader:latest"))
+}
+
+// TestEngineReconcilePodSpec_RuntimeSchedulerName renders engine pod
+// templates from specs merged out of a runtime whose schedulerName is
+// set only at the top level, and pins that every rendered corev1
+// PodSpec carries it. The gang machinery and the scheduler both read
+// the rendered specs — a name lost between the runtime and the
+// template silently lands the pods on the default scheduler.
+func TestEngineReconcilePodSpec_RuntimeSchedulerName(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	newEngineFromMerged := func(mergedEngine *v1beta1.EngineSpec, mode constants.DeploymentModeType) *Engine {
+		return NewEngine(
+			&ComponentDeps{
+				Client:    ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build(),
+				Clientset: fake.NewClientset(),
+				Scheme:    scheme,
+				Config:    &controllerconfig.InferenceServicesConfig{},
+			},
+			ComponentInputs{DeploymentMode: mode},
+			mergedEngine,
+		).(*Engine)
+	}
+
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+		Spec:       v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}},
+	}
+	objectMeta := &metav1.ObjectMeta{Name: "test-isvc-engine", Namespace: "default"}
+
+	multiPodRuntime := func(leaderSchedulerName string) *v1beta1.ServingRuntimeSpec {
+		return &v1beta1.ServingRuntimeSpec{
+			ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{SchedulerName: "custom-scheduler"},
+			EngineConfig: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{SchedulerName: leaderSchedulerName},
+					Runner:  &v1beta1.RunnerSpec{Container: v1.Container{Name: "ome-container", Image: "leader:latest"}},
+				},
+				Worker: &v1beta1.WorkerSpec{
+					Size: intPtr(2),
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "ome-container", Image: "worker:latest"}},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("rendered leader and worker templates carry the top-level name", func(t *testing.T) {
+		mergedEngine, _, _, err := isvcutils.MergeRuntimeSpecs(isvc.DeepCopy(), multiPodRuntime(""), logr.Discard())
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		engine := newEngineFromMerged(mergedEngine, constants.OMENative)
+
+		podSpec, err := engine.reconcilePodSpec(isvc, objectMeta)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(podSpec.SchedulerName).To(gomega.Equal("custom-scheduler"))
+
+		workerPodSpec, err := engine.reconcileWorkerPodSpec(isvc, objectMeta)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(workerPodSpec.SchedulerName).To(gomega.Equal("custom-scheduler"))
+	})
+
+	t.Run("leader-level name overrides the top-level name", func(t *testing.T) {
+		mergedEngine, _, _, err := isvcutils.MergeRuntimeSpecs(isvc.DeepCopy(), multiPodRuntime("leader-scheduler"), logr.Discard())
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		engine := newEngineFromMerged(mergedEngine, constants.OMENative)
+
+		podSpec, err := engine.reconcilePodSpec(isvc, objectMeta)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(podSpec.SchedulerName).To(gomega.Equal("leader-scheduler"))
+
+		workerPodSpec, err := engine.reconcileWorkerPodSpec(isvc, objectMeta)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(workerPodSpec.SchedulerName).To(gomega.Equal("custom-scheduler"),
+			"a worker level left unset must still fall back to the top-level name")
+	})
+
+	t.Run("rendered single-pod template carries the top-level name", func(t *testing.T) {
+		rt := &v1beta1.ServingRuntimeSpec{
+			ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{SchedulerName: "custom-scheduler"},
+			EngineConfig: &v1beta1.EngineSpec{
+				Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "ome-container", Image: "engine:latest"}},
+			},
+		}
+		mergedEngine, _, _, err := isvcutils.MergeRuntimeSpecs(isvc.DeepCopy(), rt, logr.Discard())
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		engine := newEngineFromMerged(mergedEngine, constants.RawDeployment)
+
+		podSpec, err := engine.reconcilePodSpec(isvc, objectMeta)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(podSpec.SchedulerName).To(gomega.Equal("custom-scheduler"))
+	})
 }
 
 // TestEngineDetermineEngineName_CtxCancellation pins that context
