@@ -6,7 +6,7 @@ import (
 )
 
 func TestTrafficAnnotations_Prefix(t *testing.T) {
-	// All OEP-0011 traffic annotation keys must live under the
+	// All traffic annotation keys must live under the
 	// ome.io/ namespace. The webhook's Did-you-mean detection relies
 	// on this prefix.
 	keys := []struct {
