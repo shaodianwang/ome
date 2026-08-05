@@ -504,9 +504,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	// apiserver path operators actually hit.
 	// =========================================================================
 
-	ginkgo.It("multi-node phase 3: rejects engine.worker.size=0 with leader set (WorkerSizeMustBePositive / M-E.1)", func() {
+	ginkgo.It("multi-node: rejects engine.worker.size=0 with leader set (WorkerSizeMustBePositive / M-E.1)", func() {
 		size := 0
-		isvc := v1beta1testing.MakeInferenceService("phase3-worker-size-zero", "isvc-webhook").
+		isvc := v1beta1testing.MakeInferenceService("mn-worker-size-zero", "isvc-webhook").
 			Runtime("any-runtime").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
@@ -518,8 +518,8 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("WorkerSizeMustBePositive"))
 	})
 
-	ginkgo.It("multi-node phase 3: rejects leader without worker (LeaderRequiresWorker / M-E.2)", func() {
-		isvc := v1beta1testing.MakeInferenceService("phase3-leader-only", "isvc-webhook").
+	ginkgo.It("multi-node: rejects leader without worker (LeaderRequiresWorker / M-E.2)", func() {
+		isvc := v1beta1testing.MakeInferenceService("mn-leader-only", "isvc-webhook").
 			Runtime("any-runtime").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
@@ -530,9 +530,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("LeaderRequiresWorker"))
 	})
 
-	ginkgo.It("multi-node phase 3: rejects worker without leader (WorkerRequiresLeader / M-E.3)", func() {
+	ginkgo.It("multi-node: rejects worker without leader (WorkerRequiresLeader / M-E.3)", func() {
 		size := 3
-		isvc := v1beta1testing.MakeInferenceService("phase3-worker-only", "isvc-webhook").
+		isvc := v1beta1testing.MakeInferenceService("mn-worker-only", "isvc-webhook").
 			Runtime("any-runtime").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
@@ -543,7 +543,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("WorkerRequiresLeader"))
 	})
 
-	ginkgo.It("multi-node phase 3: rejects Sequential coordination with multi-pod engine and no Order (SequentialMultiPodRequiresOrder)", func() {
+	ginkgo.It("multi-node: rejects Sequential coordination with multi-pod engine and no Order (SequentialMultiPodRequiresOrder)", func() {
 		// The Sequential coordination policy is removed. Cross-Component
 		// sequencing is now expressed as multiple single-Component groups in list
 		// order, so a "Sequential group without Order" is no longer expressible —
@@ -552,7 +552,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		ginkgo.Skip("Sequential policy removed; SequentialMultiPodRequiresOrder no longer applies")
 	})
 
-	ginkgo.It("multi-node phase 3: rejects lean multi-pod ISVC with no runner images (MultiPodLeanModelNeedsRunner)", func() {
+	ginkgo.It("multi-node: rejects lean multi-pod ISVC with no runner images (MultiPodLeanModelNeedsRunner)", func() {
 		// Lean = no spec.model + no spec.runtime. Lean single-pod is
 		// supported; lean multi-pod needs explicit leader.runner +
 		// worker.runner images because the controller has no defaulting
@@ -565,10 +565,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		// helper. The envtest spec below uses the closest reachable case:
 		// no runtime + no model → "at least one of spec.model or
 		// spec.runtime must be set" surfaces first (covered separately).
-		// The Phase-3 unit tests
-		// (TestValidateMultiPodLeanRunner in pkg/validation/) cover the
-		// validator directly.
-		isvc := v1beta1testing.MakeInferenceService("phase3-lean-mp-no-runner", "isvc-webhook").
+		// The unit tests (TestValidateMultiPodLeanRunner in
+		// pkg/validation/) cover the validator directly.
+		isvc := v1beta1testing.MakeInferenceService("mn-lean-mp-no-runner", "isvc-webhook").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
 				Leader:  &v1beta1.LeaderSpec{},
@@ -576,7 +575,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 			}).Obj()
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
-		// Either MultiPodLeanModelNeedsRunner (Phase-3 validator) or
+		// Either MultiPodLeanModelNeedsRunner or
 		// "at least one of spec.model or spec.runtime" (earlier in the
 		// pipeline) is acceptable — both reject the same bad spec.
 		Expect(err.Error()).To(SatisfyAny(
@@ -587,8 +586,8 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 
 	// Symmetric positive case so we know the multi-pod path doesn't
 	// false-positive when the spec is well-formed.
-	ginkgo.It("multi-node phase 3: accepts well-formed multi-pod ISVC with runtime and worker.size", func() {
-		cbm := v1beta1testing.MakeClusterBaseModel("phase3-ok-cbm").
+	ginkgo.It("multi-node: accepts well-formed multi-pod ISVC with runtime and worker.size", func() {
+		cbm := v1beta1testing.MakeClusterBaseModel("mn-ok-cbm").
 			StorageURI("oci://n/test/b/models/o/llama-7b").
 			ModelFormat("safetensors").
 			ModelArchitecture("LlamaForCausalLM").
@@ -597,7 +596,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
 
-		csr := v1beta1testing.MakeClusterServingRuntime("phase3-ok-runtime").
+		csr := v1beta1testing.MakeClusterServingRuntime("mn-ok-runtime").
 			SupportsModelFormat("safetensors", true, 10).
 			WithLastFormatArchitecture("LlamaForCausalLM").
 			Obj()
@@ -605,8 +604,8 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, csr) })
 
 		size := 3
-		isvc := v1beta1testing.MakeInferenceService("phase3-ok-mp", "isvc-webhook").
-			Model("phase3-ok-cbm").
+		isvc := v1beta1testing.MakeInferenceService("mn-ok-mp", "isvc-webhook").
+			Model("mn-ok-cbm").
 			DeploymentMode(constants.OMENative).
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
@@ -621,7 +620,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	})
 
 	// =========================================================================
-	// Webhook coordination validation gap fixes (W-1 / W-2). Runtime
+	// Coordination shape rules enforced at admission (W-1 / W-2). Runtime
 	// ValidateGroupShape in the coordination groups resolver already
 	// rejects these shapes; these specs assert the webhook also rejects
 	// them at admission time so operators see the conflict before the

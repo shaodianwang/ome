@@ -405,7 +405,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 
 	// W-21: BlueGreen with 1 Component is degenerate (no peer to gang
 	// with) but not explicitly rejected. Pins current behavior — if
-	// the OEP later tightens this, the test changes.
+	// validation later tightens this, the test changes.
 	ginkgo.It("W-21 accepts BlueGreen with 1 Component (degenerate)", func() {
 		isvc := v1beta1testing.MakeInferenceService("coord-w21", "isvc-webhook").
 			Model(coordCBMName).Runtime(coordCSRName).

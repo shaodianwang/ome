@@ -14,7 +14,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// mkProfileCSR builds a Part-B infra profile (disabled, marked
+// mkProfileCSR builds an infra profile (disabled, marked
 // runtime-profile=true). Engine/decoder/router gaps left for the child
 // to fill via the preset.
 func mkProfileCSR(name string, spec v1beta1.ServingRuntimeSpec) *v1beta1.ClusterServingRuntime {
@@ -53,7 +53,7 @@ func infraOnlyProfileSpec() v1beta1.ServingRuntimeSpec {
 	}
 }
 
-var _ = ginkgo.Describe("Runtime preset + Part B inheritance composition", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Runtime preset + inheritance composition", ginkgo.Ordered, func() {
 	var ns string
 
 	ginkgo.BeforeAll(func() {
@@ -114,7 +114,7 @@ var _ = ginkgo.Describe("Runtime preset + Part B inheritance composition", ginkg
 	})
 
 	ginkgo.It("collision: child's preset-injected engine image wins over profile's engine image", func() {
-		// Profile sets a custom engine image. Per OEP, profiles should
+		// Profile sets a custom engine image. Profiles are meant to
 		// be infra-only — but if one accidentally sets engine fields,
 		// the child's (preset-injected) value wins because child > parent
 		// in fill-only-nil merge.
@@ -217,7 +217,7 @@ var _ = ginkgo.Describe("Runtime preset + Part B inheritance composition", ginkg
 		// A profile carrying the engine annotation is unusual (profiles
 		// are meant to be infra-only) but valid — the webhook runs on
 		// every SR/CSR independently. The child then inherits the
-		// profile's engine bits via Part B.
+		// profile's engine bits via the inheritance resolver.
 		profileSpec := infraOnlyProfileSpec()
 		profile := &v1beta1.ClusterServingRuntime{
 			ObjectMeta: metav1.ObjectMeta{

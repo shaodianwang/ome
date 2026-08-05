@@ -75,7 +75,7 @@ var _ = ginkgo.Describe("ControllerRevision immutability webhook", ginkgo.Ordere
 	})
 
 	ginkgo.It("allows annotation-only Update on an OME-created revision", func() {
-		// Load-bearing for the Phase 3 GC controller: Mark adds the
+		// Load-bearing for the revision GC controller: Mark adds the
 		// ome.io/gc-eligible-since annotation via an Update. The webhook
 		// must NOT block this or GC stalls indefinitely.
 		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "rev-imm-")
@@ -139,6 +139,6 @@ var _ = ginkgo.Describe("ControllerRevision immutability webhook", ginkgo.Ordere
 		rev.Namespace = ns.Name
 		gomega.Expect(k8sClient.Create(suiteCtx, rev)).To(gomega.Succeed())
 		gomega.Expect(k8sClient.Delete(suiteCtx, rev)).To(gomega.Succeed(),
-			"GC controller (Phase 3) needs to be able to delete OME-owned revisions")
+			"the GC controller needs to be able to delete OME-owned revisions")
 	})
 })

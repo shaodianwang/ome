@@ -1,5 +1,5 @@
-# Test-only fixture: MutatingWebhookConfiguration for the OEP-0012
-# Part C engine-preset mutators (namespaced + cluster scope). envtest
+# Test-only fixture: MutatingWebhookConfiguration for the
+# engine-preset mutators (namespaced + cluster scope). envtest
 # patches caBundle + clientConfig.service → clientConfig.url at install.
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
