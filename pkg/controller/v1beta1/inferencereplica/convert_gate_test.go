@@ -14,7 +14,7 @@ import (
 
 // mkSequentialParent returns an ISVC named "llama" (the parent every
 // baselineIR points at) declaring a Sequential rollout over [decoder,
-// engine] in that order. In v2 (OEP-0017) Sequential is spelled as a run
+// engine] in that order. In the v2 rollout API Sequential is spelled as a run
 // of single-Component blueGreen groups, in list order; the controller's
 // collapseSequential folds them back into one Sequential group whose Order
 // is the list order (decoder→engine). Generation is 2; callers stamp
@@ -59,13 +59,12 @@ func setObservedGen(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen
 	isvc.Status.Components[c] = cs
 }
 
-// TestBuildReconcileInput_WiresSequentialGate is the regression guard for
-// the IR-managed coordination bug. The IR controller used to leave
-// ReconcileInput.UpdateGate nil, so the default (IR-managed) path skipped
-// CheckSequential entirely and both Components of a Sequential group
-// rolled concurrently (the playground caught this as "Sequential overlap:
-// engine started before decoder finished"). The gate must now be wired
-// AND deny the engine while the decoder (first in Order) is in flight.
+// TestBuildReconcileInput_WiresSequentialGate pins that the IR-managed
+// path wires ReconcileInput.UpdateGate: with the gate nil the dispatcher
+// skips CheckSequential entirely and both Components of a Sequential
+// group roll concurrently (the engine starts before the decoder
+// finishes). The gate must be wired AND deny the engine while the
+// decoder (first in Order) is in flight.
 func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 	g := gomega.NewWithT(t)
 	// Moment-of-bump: both Components lag isvc.Generation=2 ⇒ both in
@@ -237,10 +236,9 @@ func peerIR(component v1beta1.ComponentType, replicas, serving int32) *v1beta1.I
 //     already out of band) → engine correctly DENIED until the decoder
 //     catches up.
 //
-// Before the fix the gate reads the stale projection and lets the engine
-// outrun the decoder (the playground caught this as RatioBalanced
-// "[engine 2 : decoder 1] dev > tol" violations). The fix overlays each
-// peer's fresh IR status onto the gate's view, so the engine is held.
+// A gate reading the stale projection would let the engine outrun the
+// decoder past the RatioBalanced tolerance; the gate therefore overlays
+// each peer's fresh IR status onto its view, so the engine is held.
 func TestBuildReconcileInput_GateReadsFreshPeerStatus(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -308,8 +306,7 @@ func TestBuildReconcileInput_GateFreshPeerReleasesWhenBalanced(t *testing.T) {
 //
 //   - Reading the STALE projection: the decoder looks done, no Component
 //     is in flight, the gate reports "Sequential group idle" → the engine
-//     starts EARLY (the playground caught this as "engine started before
-//     decoder finished").
+//     starts EARLY (before the decoder finishes).
 //   - Reading the decoder's FRESH IR status: the decoder is in flight and
 //     is the active Sequential Component → the engine is correctly DENIED.
 func TestBuildReconcileInput_SequentialGateReadsFreshPeerStatus(t *testing.T) {
@@ -401,7 +398,7 @@ func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) 
 }
 
 // TestBuildReconcileInput_GateUsesFreshIRStatus pins the IR-path
-// gate-staleness fix (p44/p51): the gate must read the GATED Component's
+// gate-staleness guard: the gate must read the GATED Component's
 // counts from the IR's OWN fresh status, not the parent ISVC's lagged
 // projection. Here the IR's fresh status shows the engine already one pod
 // down (serving 3/4); a RatioBalanced drain (RecreatePod → -1) must be

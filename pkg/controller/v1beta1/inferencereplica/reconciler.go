@@ -6,7 +6,7 @@
 // Restart / Migrate / Delete) by handing a workload.ReconcileInput to
 // workload.Reconcile each pass. It does NOT own ISVC-shape
 // supporting resources (headless / per-revision Services, PodMonitor)
-// or coordination — those stay on the ISVC controller in this PR.
+// or coordination — those are owned by the ISVC controller.
 //
 // Status writer: this controller is the sole writer of
 // InferenceReplica.status. The ISVC controller is the sole writer of
@@ -451,7 +451,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		Recorder:     r.Recorder,
 		Expectations: r.Expectations,
 		Clock:        r.Clock,
-		// Wire OEP-0007.1 peer-env injection on the IR-managed (live) path.
+		// Wire peer-env injection on the IR-managed (live) path.
 		// ISVCRenderHook overlays OME_<PEER>_ENDPOINT / _REVISION_ENDPOINT
 		// onto each rendered pod so PD components (engine <-> decoder) can
 		// address each other by stable DNS. It returns nil when the parent

@@ -729,8 +729,8 @@ type recordedPodDelete struct {
 }
 
 // TestTeardown_ForceDeleteEscalation_UnwedgesDeadNodePod proves the
-// #826 pairing works under Teardown: a pod wedged Terminating on a
-// node whose Node object is gone, with lifecycle.forceDelete
+// dead-node force-delete pairing works under Teardown: a pod wedged
+// Terminating on a node whose Node object is gone, with lifecycle.forceDelete
 // configured, is grace-0 force-deleted during the teardown Delete
 // pass; the audit ledger lands on the IR (parent ISVC gone — ledger
 // owner falls back to the IR) and teardown completes.

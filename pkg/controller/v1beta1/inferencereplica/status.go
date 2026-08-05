@@ -39,7 +39,7 @@ const InferenceReplicaConditionReady = "Ready"
 // pod stuck in CrashLoopBackOff). It is deliberately NOT a dependent of the
 // Ready condition: old-revision pods keep serving during a failed surge
 // update, so a healthy IR/ISVC stays Ready=True while this flags the otherwise-
-// invisible wedge (rollout stuck at N/total) for operators + dashboards. (#850)
+// invisible wedge (rollout stuck at N/total) for operators + dashboards.
 const InferenceReplicaConditionRolloutStalled = "RolloutStalled"
 
 const (
@@ -69,7 +69,7 @@ const (
 	// rollingUpdate.partition — (replicas-partition) Instances on the target
 	// revision and `partition` held on the prior one, all Ready. Ready=True:
 	// a partitioned rollout is intentionally complete-and-holding, not
-	// "in progress". Distinct from AllInstancesReady (fully rolled). (#838)
+	// "in progress". Distinct from AllInstancesReady (fully rolled).
 	ReasonStaged = "Staged"
 	// ReasonInstanceFailed is stamped when at least one Instance has
 	// terminally failed (stuck-pod escalation, InstanceReadyTimeout).
@@ -111,9 +111,8 @@ const (
 // the observability fields (per-pod counters + Component-level
 // rollups). Without populating the per-Instance pod counters, the
 // downstream workload.CountReadyInstances / CountUpdatedInstances
-// would read zero ReadyPodCount everywhere — the round-2 recreate-
-// path bug where ReadyReplicas stuck at 0 even after the new pod
-// flipped containers-ready.
+// would read zero ReadyPodCount everywhere, leaving ReadyReplicas
+// stuck at 0 even after a recreated pod flips containers-ready.
 //
 // Reuses workload.ComputeComponentCounters directly — same shape, same
 // semantics as the ISVC adapter, so the dual-write window can
@@ -140,9 +139,9 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// This aggregator is observability-only COUNTING — the manager cache is
 	// scoped to OME pods, has the OMENative Pod field index registered, and
 	// watches EndpointSlices, so cache-served counts are both correct and
-	// cheap. Going live (r.APIReader) on every reconcile was the #1 hot-path
-	// cost: an uncached LIST per IR reconcile purely for counters, plus the
-	// doomed MatchingFields probe the live reader can't serve. r.APIReader
+	// cheap. Going live (r.APIReader) on every reconcile would be the dominant
+	// hot-path cost: an uncached LIST per IR reconcile purely for counters,
+	// plus a MatchingFields probe the live reader can't serve. r.APIReader
 	// stays reserved for the destructive/correctness-critical paths
 	// (drain/delete/recreate confirm) that genuinely need a live read.
 	pods, err := query.ListOMENativePodsByName(ctx, r.Client, ir.Namespace, ir.Spec.ParentRef.Name, component, true)
@@ -181,9 +180,9 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		// shape the omenative direct path uses (status_aggregate.go
 		// lines 83-93). Without this step the downstream
 		// workload.CountReadyInstances reads zero ReadyPodCount on every
-		// Instance — the recreate-path bug where the new pod is alive
-		// and ContainersReady but ReadyReplicas stuck at 0 because the
-		// IR aggregator never observed the pod's live state.
+		// Instance — leaving ReadyReplicas at 0 even when a recreated
+		// pod is alive and ContainersReady, because the aggregator
+		// never observed the pod's live state.
 		populateInstancePodCounters(fresh.Status.InstanceStatuses, byIndex, availableByPod)
 
 		insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
@@ -240,7 +239,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeReadyCondition(&fresh.Status, fresh.Spec.Pacing))
 		// Advisory RolloutStalled condition — surfaces a rollout wedged on
 		// failing Instances (e.g. new-rev CrashLoopBackOff) without affecting
-		// the Ready condition above (old-rev pods keep serving). (#850)
+		// the Ready condition above (old-rev pods keep serving).
 		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeRolloutStalledCondition(&fresh.Status))
 
 		// Skip the write when the recomputed status matches what's
@@ -519,7 +518,7 @@ func effectivePartition(pacing *v1beta1.InferenceReplicaPacing) int32 {
 // non-zero partition: (replicas-partition) Instances Ready on the target
 // revision and `partition` Instances held Ready on the prior one. Zero
 // partition (full rollout) is not staged — it converges via the normal
-// promotion path. (#838)
+// promotion path.
 func stagedAtPartition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.InferenceReplicaPacing) bool {
 	part := effectivePartition(pacing)
 	if part <= 0 {
@@ -604,7 +603,7 @@ func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, pacing *v1bet
 	case stagedAtPartition(status, pacing):
 		// Converged to a static partition: intentionally holding old-revision
 		// Instances, all Ready. Ready=True (not RolloutInProgress/Unknown) —
-		// the rollout is complete for the configured partition. (#838)
+		// the rollout is complete for the configured partition.
 		part := effectivePartition(pacing)
 		cond.Status = metav1.ConditionTrue
 		cond.Reason = ReasonStaged

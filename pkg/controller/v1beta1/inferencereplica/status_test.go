@@ -282,7 +282,7 @@ func TestAggregateStatus_ReadyCondition_UnknownDuringRollout(t *testing.T) {
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress))
 }
 
-// TestAggregateStatus_ReadyCondition_StagedAtPartition pins the #838
+// TestAggregateStatus_ReadyCondition_StagedAtPartition pins the
 // staged branch: a static rollingUpdate.partition holds Instances on the
 // prior revision by design (CurrentRevision != UpdateRevision forever), so
 // Ready must be True/Staged — NOT Unknown/RolloutInProgress.
@@ -670,7 +670,7 @@ func TestAggregateAndWriteStatus_ConflictSurfacesAsConflict(t *testing.T) {
 // InstanceReadyTimeout — so the parent ISVC's coordination layer sees
 // Component.Failed promptly rather than the group sitting at Surging.
 //
-// Setup mirrors the operator-reported real-cluster shape:
+// Setup mirrors a realistic mid-surge shape:
 //   - Instance idx=0 carries Phase=Updating with an in-flight
 //     Operation{Type=Update, Step=Surge} (the surge stamp the workload
 //     pipeline writes when starting SurgeThenDrain).
@@ -1093,7 +1093,7 @@ func TestAggregateStatus_DeadlineFuture_NoEscalation(t *testing.T) {
 // TestComputeRolloutStalledCondition pins the advisory RolloutStalled
 // condition: True only when a rollout is in flight AND an Instance carries a
 // terminal failure while not yet on the target; and it is a DISTINCT condition
-// type from Ready (advisory, not a Ready dependent). (#850)
+// type from Ready (advisory, not a Ready dependent).
 func TestComputeRolloutStalledCondition(t *testing.T) {
 	const target = "isvc-engine-5af56222"
 	const cur = "isvc-engine-0f41b090"
