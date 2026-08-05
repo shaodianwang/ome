@@ -58,7 +58,6 @@ func TestManager_Disconnect(t *testing.T) {
 // TestManager_ConnectFailureEvictsStaleClient: when the kubeconfig CHANGES and
 // the rebuild fails, the previously-cached client (for the now-stale config)
 // must be evicted, not left serving against rotated-away credentials.
-// PRE-FIX Connect returned early on build error and left the stale conn cached.
 func TestManager_ConnectFailureEvictsStaleClient(t *testing.T) {
 	var canceled []string
 	m := NewManager(runtime.NewScheme())
@@ -82,8 +81,8 @@ func TestManager_ConnectFailureEvictsStaleClient(t *testing.T) {
 	assert.Equal(t, []string{"good"}, canceled, "the stale client's watch context must be cancelled")
 }
 
-// TestManager_StartSetsBaseContext: Start records the long-lived context (Bug 3
-// — remote clients must derive from a manager-scoped ctx, not a request ctx) and
+// TestManager_StartSetsBaseContext: Start records the long-lived context —
+// remote clients must derive from a manager-scoped ctx, not a request ctx — and
 // disconnects everything when that context is cancelled.
 func TestManager_StartSetsBaseContext(t *testing.T) {
 	m, canceled := newTestManager()

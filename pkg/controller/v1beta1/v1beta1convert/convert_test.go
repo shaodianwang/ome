@@ -404,11 +404,11 @@ func TestInstanceStatusRoundtrip_NodesOccupiedDeepCopy(t *testing.T) {
 
 // --- UpdateStrategy.RollingUpdate conversion ----------------------------
 
-// TestUpdateStrategyToWorkload_RollingUpdate_IntOrString covers the Gap
-// 4 / Gap 5 widening: both MaxUnavailable and MaxSurge now flow through
-// the converter as *intstr.IntOrString, preserving integer and percent
-// shapes verbatim. The deep-copy guarantee remains — mutating either
-// pointer on the output must not bleed into the input.
+// TestUpdateStrategyToWorkload_RollingUpdate_IntOrString: both
+// MaxUnavailable and MaxSurge flow through the converter as
+// *intstr.IntOrString, preserving integer and percent shapes verbatim.
+// The deep-copy guarantee holds — mutating either pointer on the output
+// must not bleed into the input.
 func TestUpdateStrategyToWorkload_RollingUpdate_IntOrString(t *testing.T) {
 	partition := int32(3)
 	mu := intstr.FromString("25%")

@@ -174,8 +174,7 @@ func TestReconcile_ConnectsManagerWhenReachable(t *testing.T) {
 // TestReconcile_BackoffHoldsConnectionOnTransientProbeFailure: a previously
 // reachable+connected cluster whose /version probe fails once must NOT be torn
 // down — within the grace window the live client stays connected and Ready is
-// held True (reason ProbeFailedRetrying). PRE-FIX this flipped Ready=False and
-// Disconnected on the first failure.
+// held True (reason ProbeFailedRetrying).
 func TestReconcile_BackoffHoldsConnectionOnTransientProbeFailure(t *testing.T) {
 	s := scheme(t)
 	wc := wcWithSecret("c1")
