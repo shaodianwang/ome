@@ -8,20 +8,19 @@ type PlacementMode string
 const (
 	// PlacementModeSingle places the InferenceService on exactly one workload
 	// cluster (the winner of the fan-out race) and sweeps the rest. This is the
-	// default and the only mode wired end to end today (OEP-0018).
+	// default and the only mode wired end to end today.
 	PlacementModeSingle PlacementMode = "Single"
 
 	// PlacementModeAll places the InferenceService on every candidate cluster
 	// that admits it; none are swept and each autoscales locally against its own
 	// Kueue quota. The endpoint fans out across all serving homes. For
-	// redundancy / serve-everywhere. (OEP-0018.3.)
+	// redundancy / serve-everywhere.
 	PlacementModeAll PlacementMode = "All"
 
 	// PlacementModeSplit distributes the InferenceService's desired replicas
 	// fractionally across candidate clusters: each admits as many replicas as
 	// fit, every cluster that admits >=1 is kept, and the endpoint is weighted by
 	// each home's ready replicas. For scaling past a single cluster's capacity.
-	// (OEP-0018.1.)
 	PlacementModeSplit PlacementMode = "Split"
 )
 
@@ -50,7 +49,7 @@ type PlacementSpec struct {
 
 	// ClusterSelector is an optional operator-imposed routing overlay
 	// (label-selector string) AND-ed onto Requirements to further narrow
-	// candidates (e.g. "provider=cw"). Structured equivalent of the
+	// candidates (e.g. "provider=cloud-a"). Structured equivalent of the
 	// ome.io/cluster-selector annotation.
 	// +optional
 	ClusterSelector string `json:"clusterSelector,omitempty"`

@@ -85,7 +85,7 @@ type InferenceServiceSpec struct {
 	// control plane falls back to the ome.io/accelerator-requirements and
 	// ome.io/cluster-selector annotations (unchanged legacy behavior). Only
 	// consulted on the control-plane cluster; ignored in single-cluster
-	// deployments. Alpha (OEP-0018.3); the API may change without notice.
+	// deployments. Alpha; the API may change without notice.
 	// +optional
 	Placement *PlacementSpec `json:"placement,omitempty"`
 }

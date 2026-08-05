@@ -3857,7 +3857,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 					},
 					"placement": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Placement declares how the multi-cluster control plane selects and orders the workload clusters this InferenceService is placed onto. When nil, the control plane falls back to the ome.io/accelerator-requirements and ome.io/cluster-selector annotations (unchanged legacy behavior). Only consulted on the control-plane cluster; ignored in single-cluster deployments. Alpha (OEP-0018.3); the API may change without notice.",
+							Description: "Placement declares how the multi-cluster control plane selects and orders the workload clusters this InferenceService is placed onto. When nil, the control plane falls back to the ome.io/accelerator-requirements and ome.io/cluster-selector annotations (unchanged legacy behavior). Only consulted on the control-plane cluster; ignored in single-cluster deployments. Alpha; the API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec"),
 						},
 					},
@@ -6077,7 +6077,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 					},
 					"clusterSelector": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ClusterSelector is an optional operator-imposed routing overlay (label-selector string) AND-ed onto Requirements to further narrow candidates (e.g. \"provider=cw\"). Structured equivalent of the ome.io/cluster-selector annotation.",
+							Description: "ClusterSelector is an optional operator-imposed routing overlay (label-selector string) AND-ed onto Requirements to further narrow candidates (e.g. \"provider=cloud-a\"). Structured equivalent of the ome.io/cluster-selector annotation.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

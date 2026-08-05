@@ -284,7 +284,7 @@ const (
 	// partitioned target and is intentionally holding old-revision pods
 	// (static rollingUpdate.partition). A terminal RESTING phase, distinct
 	// from Idle ("no rollout / single revision"): the rollout is complete
-	// for the configured partition. (#838)
+	// for the configured partition.
 	CoordinationPhaseStaged CoordinationPhase = "Staged"
 
 	// CoordinationPhaseFailed indicates a permanent error during the
