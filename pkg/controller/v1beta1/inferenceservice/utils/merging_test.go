@@ -577,7 +577,7 @@ func TestMergeEngineSpecPreservesRuntimeServicePortAppProtocols(t *testing.T) {
 
 // TestMergeRuntimeContainers_NamePrecedence pins the three-step
 // container-name fallback walk MergeRuntimeContainers applies after the
-// strategic-merge patch. (Bug #42: an empty merged Name deadlocks
+// strategic-merge patch. (An empty merged Name deadlocks
 // OMENative rollouts at Pod create time with
 // `spec.containers[0].name: Required value`.)
 //

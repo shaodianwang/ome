@@ -123,7 +123,7 @@ func TestResolveGroups_RatioBalancedTolerancePropagates(t *testing.T) {
 func TestResolveGroups_MaintainRatioOnBlueGreen(t *testing.T) {
 	// maintainRatio guards the cross-Component replica ratio on ANY
 	// multi-Component group regardless of progression — blueGreen included (the
-	// OEP's canonical PD example pairs blueGreen with maintainRatio). resolveGroup
+	// canonical PD rollout pairs blueGreen with maintainRatio). resolveGroup
 	// must map it to RatioBalanced pacing, not silently drop it: the engine's
 	// CheckRatio gate keys on Pacing.Type==RatioBalanced, so dropping it here
 	// leaves the ratio guard the operator declared completely inert.

@@ -175,7 +175,7 @@ func TestComputeTransition_BlueGreenPaused(t *testing.T) {
 
 // TestComputeTransition_BlueGreenStaged verifies a BlueGreen group that
 // has converged to a static partition rests at Staged instead of
-// churning Shifting forever (#838). The component reached its desired
+// churning Shifting forever. The component reached its desired
 // staged shape (AtDesiredShape) with a partition intentionally holding
 // old-revision pods (TotalPods > NewRevisionPods by design).
 func TestComputeTransition_BlueGreenStaged(t *testing.T) {
@@ -199,7 +199,7 @@ func TestComputeTransition_BlueGreenStaged(t *testing.T) {
 
 // TestComputeTransition_RollingUpdateStaged is the RollingUpdate
 // companion: a rolling component converged to a static partition rests
-// at Staged instead of ScalingDown forever (#838).
+// at Staged instead of ScalingDown forever.
 func TestComputeTransition_RollingUpdateStaged(t *testing.T) {
 	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
 	obs := idleObs(g)
@@ -707,7 +707,7 @@ func TestComputeSurgeBudgetWithRatio_NewPodsBaselineWouldDeadlock(t *testing.T) 
 	}
 }
 
-// --- Sequential handoff on desired-shape convergence (#838) ---
+// --- Sequential handoff on desired-shape convergence ---
 
 // TestActiveSequentialComponent_SkipsAtDesiredShape verifies a leading
 // Component that reached its desired staged shape is treated as done for

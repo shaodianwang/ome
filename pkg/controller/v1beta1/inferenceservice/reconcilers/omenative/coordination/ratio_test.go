@@ -1524,13 +1524,13 @@ func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.
 	}
 }
 
-// Regression for the OMENative playground p226 / p227 verdict
-// "decoder peak 5 > ceiling 4".
+// Decoder surge-budget pins: a bumped SurgeThenDrain maxSurge=1 decoder
+// must peak at N+1, not be clamped to N.
 //
 // Shape (both cases): a PD [engine, decoder] coordination group, engine
 // maxSurge=50% (per-Component) and decoder SurgeThenDrain maxSurge=1, with
 // the group's pacing.maxSurge left unset → defaulted to "25%". Both
-// Components are bumped (the harness perturbs every group member), so each
+// Components are bumped in the same spec update, so each
 // rolls off its OWN revision and surges per its OWN budget — the documented
 // per-Component surge model ("each component paces on its OWN budget, no
 // cross-ratio"; a bumped SurgeThenDrain maxSurge=1 decoder surges to N+1=5).
@@ -1539,11 +1539,11 @@ func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.
 // lock that in at the gate level: the decoder is permitted EXACTLY ONE surge
 // (one extra pod alive → peak 5) and is gated from a SECOND (peak never
 // reaches 6). A future change that wrongly clamped the decoder to peak 4
-// (surge 0) — the mis-authored p226/p227 ceil_d=4 expectation — would make
+// (surge 0) would make
 // the "allowed" assertions fail; a change that let it surge twice would make
 // the "denied" assertions fail.
 
-// mkPDGroupSurge builds the p226/p227 group shape for the DECODER's surge
+// mkPDGroupSurge builds the group shape for the DECODER's surge
 // gate: a 2-member [engine, decoder] group with the given pacing, the group's
 // pacing.MaxSurge defaulted to "25%" (= budget 1 at N=4), and a 4:4
 // ObservedRatio anchor (needed by RatioBalanced; harmless for PerComponent).
@@ -1555,7 +1555,7 @@ func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFl
 		Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 		RollingUpdate: &v1beta1.GroupRollingUpdate{MaxSurge: &groupSurge},
 	}
-	// v2: RatioBalanced pacing is expressed as MaintainRatio on the
+	// RatioBalanced pacing is expressed as MaintainRatio on the
 	// rollingUpdate group; PerComponent is the absence of MaintainRatio.
 	if pacingType == v1beta1.CoordinationPacingRatioBalanced {
 		group.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: 25}
@@ -1601,10 +1601,10 @@ func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFl
 	}, decoderInstances
 }
 
-// TestDecoderSurgeBudget_P226_RatioBalanced pins the p226 shape: a bumped
+// TestDecoderSurgeBudget_RatioBalanced pins the shape: a bumped
 // SurgeThenDrain maxSurge=1 decoder under RatioBalanced pacing surges EXACTLY
 // once (peak N+1 = 5) and no more.
-func TestDecoderSurgeBudget_P226_RatioBalanced(t *testing.T) {
+func TestDecoderSurgeBudget_RatioBalanced(t *testing.T) {
 	// First surge: no decoder surge in flight → the gate stack (CheckRatio
 	// +1 projects 5:4 = 1.25, in band [0.75,1.25]; CheckSurge 0+0+1 <=
 	// budget 1) must ALLOW. This is the surge that takes the decoder to
@@ -1613,7 +1613,7 @@ func TestDecoderSurgeBudget_P226_RatioBalanced(t *testing.T) {
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
 	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
-		t.Fatalf("p226: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
+		t.Fatalf("RatioBalanced: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
 	}
 
 	// Second surge: one decoder Instance already surging → CheckSurge
@@ -1624,27 +1624,27 @@ func TestDecoderSurgeBudget_P226_RatioBalanced(t *testing.T) {
 	client = fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
 	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); allowed {
-		t.Fatalf("p226: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
+		t.Fatalf("RatioBalanced: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
 	}
 }
 
-// TestDecoderSurgeBudget_P227_PerComponent pins the p227 shape: identical to
-// p226 but PerComponent pacing (no cross-ratio gate). The decoder still
+// TestDecoderSurgeBudget_PerComponent pins the identical shape under
+// PerComponent pacing (no cross-ratio gate). The decoder still
 // surges exactly once to peak 5 — governed solely by the group MaxSurge
 // budget (defaulted "25%" = 1 at N=4).
-func TestDecoderSurgeBudget_P227_PerComponent(t *testing.T) {
+func TestDecoderSurgeBudget_PerComponent(t *testing.T) {
 	isvc, decInsts := mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 0)
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
 	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
-		t.Fatalf("p227: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
+		t.Fatalf("PerComponent: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
 	}
 
 	isvc, decInsts = mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 1)
 	client = fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
 	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); allowed {
-		t.Fatalf("p227: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
+		t.Fatalf("PerComponent: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
 	}
 }
 

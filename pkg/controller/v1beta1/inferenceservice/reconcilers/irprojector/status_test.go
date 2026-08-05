@@ -278,7 +278,7 @@ func TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields(t *testing.T) {
 // Ready rollup stays Unknown forever even though the subtree counters
 // are correct.
 //
-// Real-cluster symptom (round-2 testing): a PD-disagg-shaped single-engine
+// Real-cluster symptom: a PD-disagg-shaped single-engine
 // ISVC in OMENative mode had all subtree fields populated (replicas=1,
 // updatedReplicas=1, InstanceStatuses[0].Phase=Ready) and IngressReady=True
 // — but ISVC.Status.Conditions carried only IngressReady + Ready=Unknown.

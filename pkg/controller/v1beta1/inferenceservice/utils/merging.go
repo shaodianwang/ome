@@ -49,8 +49,8 @@ func MergeRuntimeContainers(runtimeContainer *v1.Container, predictorContainer *
 	// "ome-container" default. The final default prevents the apiserver
 	// "spec.containers[0].name: Required value" rejection when neither
 	// the ServingRuntime's runner nor the ISVC's runner sets a container
-	// name (the previous behavior left mergedContainer.Name="", which
-	// deadlocked OMENative rollouts at Pod create time; see Bug #42).
+	// name (an empty merged Name deadlocks OMENative rollouts at Pod
+	// create time).
 	if mergedContainer.Name == "" {
 		mergedContainer.Name = runtimeContainerName
 	}

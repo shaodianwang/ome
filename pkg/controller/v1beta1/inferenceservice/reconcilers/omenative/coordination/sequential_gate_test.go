@@ -564,8 +564,8 @@ func setStaticPartition(isvc *v1beta1.InferenceService, c v1beta1.ComponentType,
 // which copies only the Lifecycle fields off the ISVC — this seeds
 // Replicas + InstanceStatuses so ReachedDesiredShape (and thus
 // AtDesiredShape) is actually exercised. The absence of these fields is
-// exactly why TestCheckSequentialGate_MomentOfBump missed the #840
-// regression below.
+// exactly why TestCheckSequentialGate_MomentOfBump missed the
+// moment-of-bump overlap regression below.
 func seqReadyIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHash, runningHash string, replicas int32, observedGen int64) *v1beta1.InferenceReplica {
 	rev := func(h string) string { return isvcName + "-" + string(c) + "-" + h }
 	insts := make([]v1beta1.OMENativeInstanceStatus, replicas)
@@ -589,8 +589,8 @@ func seqReadyIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHas
 }
 
 // TestCheckSequentialGate_MomentOfBump_SteadyStateInstances is the
-// regression for the #840 overlap observed on use2-2 (p34: engine
-// started at t=0, 398s before decoder finished). At the moment of bump
+// regression for a Sequential overlap where the trailing Component
+// started rolling concurrently with the leader. At the moment of bump
 // every instance is still Ready on the OLD revision — the realistic
 // steady state — and the gen-skew window leaves UpdateRevision naming
 // the OLD CR.
@@ -632,8 +632,8 @@ func TestCheckSequentialGate_MomentOfBump_SteadyStateInstances(t *testing.T) {
 }
 
 // TestCheckSequentialGate_StagedPartitionReleasesNext guards the other
-// direction of the #840 fix: the revisionSkew guard must NOT suppress a
-// legitimately-known target. A partitioned leading Component (#838) holds
+// direction: the revisionSkew guard must NOT suppress a
+// legitimately-known target. A partitioned leading Component holds
 // old pods by design and keeps RolloutInFlight=true forever, but once its
 // status records the NEW target (genuine revisionSkew) AND it has
 // converged to its staged shape, AtDesiredShape must be computed and the
@@ -730,7 +730,7 @@ func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
 	}
 }
 
-// --- Sequential handoff on desired-shape convergence (#838) ---
+// --- Sequential handoff on desired-shape convergence ---
 
 // mkSequentialFixtureEngineFirst returns an ISVC with a Sequential run
 // [engine, decoder] (engine first in Order) and a static
@@ -792,7 +792,8 @@ func TestCheckSequentialGate_StagedLeaderHandsOffToNext(t *testing.T) {
 	// revisions still skew (CurrentRevision=OLD != UpdateRevision=NEW) so
 	// RolloutInFlight stays true — but AtDesiredShape releases it for
 	// handoff. Decoder is genuinely rolling. The gate must ALLOW decoder
-	// (pre-#838 it returned "Sequential waiting on engine" forever).
+	// (without the AtDesiredShape release the gate would return
+	// "Sequential waiting on engine" forever).
 	const name = "seq-isvc"
 	isvc := mkSequentialFixtureEngineFirst(name, 1)
 	client := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(

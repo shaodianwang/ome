@@ -151,7 +151,7 @@ func ComputeCoordinationReady(groups []v1beta1.RolloutCoordinationGroupStatus) *
 			failedGroups = append(failedGroups, g.Name)
 		case v1beta1.CoordinationPhaseIdle, v1beta1.CoordinationPhaseStaged, "":
 			// Staged is a terminal RESTING state (converged to a static
-			// partition, holding old pods by design) — ready, like Idle. (#838)
+			// partition, holding old pods by design) — ready, like Idle.
 			if g.Phase == "" {
 				anyPending = true
 			}

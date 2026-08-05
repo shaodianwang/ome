@@ -551,7 +551,7 @@ func kedaSOWithBareConditions(pausedStatus metav1.ConditionStatus) *kedav1.Scale
 }
 
 // TestWriteAutoscalerStatus_ScaledObjectMirror_SanitizesConditionsForCRD is
-// the regression guard for the TPU status-update wedge: KEDA conditions
+// the regression guard for the status-update wedge: KEDA conditions
 // mirrored onto the ISVC status must satisfy the ISVC CRD (non-empty reason,
 // non-zero lastTransitionTime) even though KEDA supplies neither for some.
 func TestWriteAutoscalerStatus_ScaledObjectMirror_SanitizesConditionsForCRD(t *testing.T) {

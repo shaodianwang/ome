@@ -499,7 +499,7 @@ func TestEnsureInferenceReplica_AlreadyExists_PropagatedAsUpdate(t *testing.T) {
 }
 
 // TestEnsureInferenceReplica_PropagatesComponentAnnotations pins the
-// A-2 real-cluster bug fix: spec.<component>.annotations bumps MUST
+// annotation-propagation contract: spec.<component>.annotations bumps MUST
 // land on every Runner.Template.ObjectMeta.Annotations so the workload
 // renderer stamps the new annotation on every emitted pod AND so the
 // revision hash flips and triggers the ControllerRevision / rollout

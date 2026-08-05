@@ -381,10 +381,8 @@ func TestServiceReconcilerAddsAppProtocolToExistingService(t *testing.T) {
 
 // TestServiceReconciler_OMENativeShape verifies the top-level
 // ServiceReconciler emits the per-Component stable Service the
-// OMENative dispatch path expects. After PR
-// `[Refactor] inferenceservice: unify per-Component stable Service
-// under top-level reconciler`, OMENative ISVCs route through this
-// same reconciler instead of the deleted omenative-side duplicate.
+// OMENative dispatch path expects. OMENative ISVCs route through this
+// same reconciler rather than an omenative-side duplicate.
 // This test pins the contract: given an OMENative-shape selector +
 // Component meta name, the reconciler emits a Service with the
 // expected Name, Namespace, Selector (including the

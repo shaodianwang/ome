@@ -181,7 +181,7 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 		// Static spec partition, resolved the same way as
 		// buildComponentObservation. Needed both to carry Partition and to
 		// compute AtDesiredShape below so activeSequentialComponent can
-		// release a converged staged Component here (#838).
+		// release a converged staged Component here.
 		partition := staticPartitionFor(isvc, c)
 		obs := ComponentObservation{Component: c, Partition: partition}
 		summary, err := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
@@ -211,7 +211,7 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 			// skew) AND AtDesiredShape=true (via stale target) at once, the
 			// active-selector found nothing active, and all Components
 			// started rolling at t=0 (overlap). Only trust AtDesiredShape
-			// once the target is genuinely known to differ. (#838 regression)
+			// once the target is genuinely known to differ.
 			if revisionSkew {
 				obs.AtDesiredShape = workload.ReachedDesiredShape(
 					v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),

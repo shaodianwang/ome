@@ -616,7 +616,7 @@ func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta
 	// Convergence: has the Component reached its desired staged shape —
 	// (Replicas-Partition) instances Ready on the target revision and
 	// Partition instances Ready on the prior revision? Partition=0 means
-	// this is the RolloutComplete predicate. (#838)
+	// this is the RolloutComplete predicate.
 	out.AtDesiredShape = workload.ReachedDesiredShape(
 		v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
 		summary.UpdateRevision, partition, summary.Replicas)

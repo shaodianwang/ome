@@ -183,7 +183,7 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 	}
 }
 
-func TestGatewayAPIStrategy_Reconcile_GateOnOEPIntent(t *testing.T) {
+func TestGatewayAPIStrategy_Reconcile_GateOnTrafficIntent(t *testing.T) {
 	// The default BackendTrafficPolicy created by this strategy and the
 	// per-ISVC BTP created by the traffic.Reconciler write the same
 	// resource name. To prevent the two loops from fighting, this

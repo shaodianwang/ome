@@ -64,7 +64,7 @@ type ComponentObservation struct {
 	// staged shape (workload.ReachedDesiredShape): (Replicas-Partition)
 	// instances Ready on the target revision and Partition instances Ready on
 	// the prior revision. The state machine rests (Staged) and Sequential
-	// hands off on this. (#838)
+	// hands off on this.
 	AtDesiredShape bool
 
 	// Failed is true when the Component's OMENative reconciler
@@ -234,7 +234,7 @@ func blueGreenTransition(obs GroupObservation) GroupTransition {
 
 	// Converged to a partitioned target: every component reached its desired
 	// staged shape and at least one intentionally holds old-revision pods.
-	// Rest at Staged instead of churning Shifting/ScalingDown forever (#838).
+	// Rest at Staged instead of churning Shifting/ScalingDown forever.
 	stagedAll, anyPartition := true, false
 	for _, c := range obs.Components {
 		if !c.AtDesiredShape {
@@ -336,7 +336,7 @@ func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 	}
 	// Converged to a partitioned target (see blueGreen): if every rolling
 	// component reached its desired staged shape and a partition holds old
-	// pods, rest at Staged rather than ScalingDown forever (#838).
+	// pods, rest at Staged rather than ScalingDown forever.
 	if !anySurging && !anyWaiting {
 		stagedAll, anyPartition := true, false
 		for _, c := range obs.Components {
@@ -537,7 +537,7 @@ func sequentialTransition(obs GroupObservation) GroupTransition {
 // has converged to its desired staged shape (AtDesiredShape). The latter
 // releases a partitioned Component that keeps RolloutInFlight=true forever
 // by design (old pods held by the partition): once it reaches its staged
-// shape it must not block the next Component (#838). The state machine
+// shape it must not block the next Component. The state machine
 // routes Sequential's "which Component is currently rolling" decision off
 // this; the dispatcher's CheckSequentialGate consumes the same helper
 // so the two surfaces never disagree on what's active. Returns ok=false
@@ -558,7 +558,7 @@ func activeSequentialComponent(order []v1beta1.ComponentType, components map[v1b
 // when its rollout is not in flight OR it has converged to its desired
 // staged shape (!RolloutInFlight || AtDesiredShape). The AtDesiredShape
 // clause advances the count past a partitioned leading Component that
-// holds old pods by design and never clears RolloutInFlight (#838). The
+// holds old pods by design and never clears RolloutInFlight. The
 // count drives Sequential's "which Component is next" decision.
 func completedSequentialComponents(obs GroupObservation) int {
 	count := 0

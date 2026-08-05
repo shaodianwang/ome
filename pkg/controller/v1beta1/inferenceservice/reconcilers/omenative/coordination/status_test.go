@@ -149,7 +149,7 @@ func TestComputeCoordinationReady_AllIdle(t *testing.T) {
 
 func TestComputeCoordinationReady_Staged(t *testing.T) {
 	// A group parked at a static partition (Staged) is a terminal resting
-	// state — ready, distinct Reason from Idle. (#838)
+	// state — ready, distinct Reason from Idle.
 	cond := ComputeCoordinationReady([]v1beta1.RolloutCoordinationGroupStatus{
 		{Name: "0", Phase: v1beta1.CoordinationPhaseStaged},
 	})
