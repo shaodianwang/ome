@@ -33,7 +33,7 @@ import (
 var ErrSourceUnparseable = errors.New("model cache source has unparseable layout")
 
 const (
-	// ProviderClusterCache is the provider label for Meta's cluster_cache
+	// ProviderClusterCache is the provider label for the cluster_cache
 	// implementation. Also the value operators set in the ome-config
 	// configmap's modelCache.provider field.
 	ProviderClusterCache = "cluster_cache"
