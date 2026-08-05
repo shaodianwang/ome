@@ -9,15 +9,16 @@ import (
 	schedutil "sigs.k8s.io/scheduler-plugins/test/util"
 )
 
-// TestGangAvoidsCordonedDomain is the deterministic reproduction of the field
-// wedge: a domain's nodes keep their accelerator capacity but become
-// unschedulable (cordoned) — as a drain or an autoscaler cordon does. The gang
-// must land in a schedulable domain, not pin the cordoned one.
+// TestGangAvoidsCordonedDomain covers the cordoned-domain wedge: a domain's
+// nodes keep their accelerator capacity but become unschedulable (cordoned) —
+// as a drain or an autoscaler cordon does. The gang must land in a schedulable
+// domain, not pin the cordoned one.
 //
-// Before the fix, freeByDomain counted the cordoned nodes as free, so Choose could
-// pin the cordoned domain; the framework's NodeUnschedulable Filter then rejected
-// every node in it, and the gang wedged there forever (pinStale kept the pin
-// because the domain still looked free) while the schedulable domain sat unused.
+// The guarded failure mode: if freeByDomain counted cordoned nodes as free,
+// Choose could pin the cordoned domain; the framework's NodeUnschedulable Filter
+// would then reject every node in it, and the gang would wedge there forever
+// (pinStale keeps the pin because the domain still looks free) while the
+// schedulable domain sat unused.
 //
 // Two domains, each 2 nodes; domain "a" is cordoned. A 2-member gang must bind in
 // domain "b". No autoscaler needed — cordoning is just spec.unschedulable.

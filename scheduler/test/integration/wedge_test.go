@@ -13,11 +13,11 @@ import (
 
 // TestBurstThenFreshGangConverges is the wedge convergence regression: fire a
 // burst of gangs at a perfectly-fitting fleet (one gang per domain, minMember 3,
-// whole-node — the field report's shape), let it settle, then create ONE brand-new
-// gang against a physically-empty spare domain. Both the burst and the fresh gang
-// must converge.
+// whole-node), let it settle, then create ONE brand-new gang against a
+// physically-empty spare domain. Both the burst and the fresh gang must
+// converge.
 //
-// The live wedge symptom this guards is a fresh gang getting PreFilter "no domain
+// The wedge symptom this guards is a fresh gang getting PreFilter "no domain
 // has room" while whole domains sit empty — the tell of a capacity reservation
 // leaked by a burst gang that pinned a domain but never fully placed there. If a
 // leak ever poisoned the shared reservation aggregate globally, the post-burst

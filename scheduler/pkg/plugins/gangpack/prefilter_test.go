@@ -184,9 +184,9 @@ func TestPinGangReplansOnFullDomain(t *testing.T) {
 
 // TestPinGangReplansOffCordonedDomain: a gang pinned to a domain whose nodes have
 // become unschedulable (cordoned) — capacity intact but the framework's Filter
-// would reject them — must re-plan onto a schedulable domain, not wedge there. This
-// is the field wedge: freeByDomain now excludes unschedulable nodes, so pinStale
-// sees the pinned domain as unusable and drops it.
+// would reject them — must re-plan onto a schedulable domain, not wedge there.
+// freeByDomain excludes unschedulable nodes, so pinStale sees the pinned domain
+// as unusable and drops it.
 func TestPinGangReplansOffCordonedDomain(t *testing.T) {
 	g := &GangPack{pins: placement.New()}
 	g.pins.Set("team/pf", "a") // pinned to a

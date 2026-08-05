@@ -14,7 +14,7 @@ import (
 
 // setNodeGPU updates a node's allocatable+capacity for gpuResource, mimicking a
 // node gaining or losing accelerator capacity (device-plugin registering, or a
-// drain). Used to reproduce the field trigger: a burst arriving while some domains
+// drain). Used to reproduce the trigger: a burst arriving while some domains
 // have no capacity, then capacity restored.
 func setNodeGPU(t *testing.T, tc *testContext, name string, gpus int64) {
 	t.Helper()
@@ -30,9 +30,9 @@ func setNodeGPU(t *testing.T, tc *testContext, name string, gpus int64) {
 	}
 }
 
-// TestBurstUnderPartialCapacityThenRestore reproduces the field wedge: a gang
-// burst arrives while only SOME domains have accelerator capacity (the rest at
-// zero — a device-plugin/informer lag on a real cluster). The gangs that fit place;
+// TestBurstUnderPartialCapacityThenRestore covers the partial-capacity wedge: a
+// gang burst arrives while only SOME domains have accelerator capacity (the rest
+// at zero — a device-plugin/informer lag on a real cluster). The gangs that fit place;
 // the rest wait as no-fit. Then the missing capacity is restored. Every gang must
 // converge — the empty domains are now usable and there are exactly enough for the
 // waiting gangs. A regression wedges the waiting gangs (pinned to a domain they
@@ -100,9 +100,9 @@ func TestBurstUnderPartialCapacityThenRestore(t *testing.T) {
 	placed := boundCount(tc, ns, "cc-p-")
 	t.Logf("after partial-capacity burst: %d/%d pods bound (expect ~%d = %d gangs)", placed, gangs*gangSize, half*gangSize, half)
 
-	// Restore capacity on the zeroed domains — in PARALLEL, matching the field
-	// event storm (many UpdateNodeAllocatable at once) that hits the scheduler
-	// while it is already churning on the no-fit backlog.
+	// Restore capacity on the zeroed domains — in PARALLEL, matching the event
+	// storm (many UpdateNodeAllocatable at once) that hits the scheduler while
+	// it is already churning on the no-fit backlog.
 	var rwg sync.WaitGroup
 	for d := half; d < domains; d++ {
 		for n := 0; n < gangSize; n++ {

@@ -528,9 +528,9 @@ func TestGangRecoversAfterSchedulerRestart(t *testing.T) {
 // TestSurplusPodJoinsCompletedGang: once a gang has met minMember and bound, a
 // further member (a pod beyond minMember, or one recreated into the running gang
 // by a controller) must still schedule — the gate counts the already-bound
-// siblings of the now-committed gang instead of wedging the newcomer. Before the
-// committed-gang bound-count, this pod waited out its timeout forever because it
-// saw zero waiting siblings.
+// siblings of the now-committed gang instead of wedging the newcomer. Without
+// the committed-gang bound-count, such a pod would wait out its timeout forever
+// because it sees zero waiting siblings.
 func TestSurplusPodJoinsCompletedGang(t *testing.T) {
 	tc := startScheduler(t, globalKubeConfig, gangPackOptions(t)...)
 	defer tc.teardown(t)

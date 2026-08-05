@@ -11,12 +11,12 @@ import (
 	schedutil "sigs.k8s.io/scheduler-plugins/test/util"
 )
 
-// TestGangMembersCreatedBeforePodGroupHold is the deterministic regression for the
-// PodGroup-cache-lag gap: when a gang's pods are created BEFORE (or concurrently
-// with) their PodGroup — the common case when a controller applies the whole
-// workload at once — the scheduler must not bind a lone member. Before the fix,
-// PreFilter Skipped an unresolvable-PodGroup pod, so it bound immediately with no
-// gate and no domain pin, breaking all-or-nothing. Now such a member is held and
+// TestGangMembersCreatedBeforePodGroupHold covers the PodGroup-cache-lag gap:
+// when a gang's pods are created BEFORE (or concurrently with) their PodGroup —
+// the common case when a controller applies the whole workload at once — the
+// scheduler must not bind a lone member. If PreFilter Skipped an
+// unresolvable-PodGroup pod, it would bind immediately with no gate and no
+// domain pin, breaking all-or-nothing; instead such a member is held and
 // requeues when the PodGroup appears.
 //
 // Two nodes in one domain, a 2-member gang. The pods are created first; they must
@@ -65,15 +65,15 @@ func TestGangMembersCreatedBeforePodGroupHold(t *testing.T) {
 	}
 }
 
-// TestConcurrentGangBurst reproduces the conditions that wedged the scheduler on a
-// live cluster: many gangs whose PodGroups and pods are all created at once, from
-// many goroutines, with the pods racing ahead of their PodGroups. This stresses
-// two paths the serial suite never exercises together — the PodGroup-cache-lag
-// hold/requeue, and the domain-contention race where a gang can pin a domain that
-// then fills. With the fixes in place, every gang must still converge: all members
-// bind, and each gang lands in exactly one domain. A regression (a wedged gang
-// with free capacity, or an over-committed domain) fails via the never-binds wait
-// or the single-domain assertion.
+// TestConcurrentGangBurst drives the burst shape that can wedge a scheduler:
+// many gangs whose PodGroups and pods are all created at once, from many
+// goroutines, with the pods racing ahead of their PodGroups. This stresses two
+// paths the serial suite never exercises together — the PodGroup-cache-lag
+// hold/requeue, and the domain-contention race where a gang can pin a domain
+// that then fills. Every gang must still converge: all members bind, and each
+// gang lands in exactly one domain. A regression (a wedged gang with free
+// capacity, or an over-committed domain) fails via the never-binds wait or the
+// single-domain assertion.
 //
 // Packed shape (one gang per domain, gang fills its domain) so correctness is
 // unambiguous, matching TestScaleManyGangsAcrossManyDomains.
