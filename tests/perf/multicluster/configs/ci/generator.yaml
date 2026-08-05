@@ -2,8 +2,8 @@
 #
 # Deliberately SMALL. Each member is a FULL in-process envtest apiserver+etcd,
 # so the dominant cost is the number of members plus the control plane (4 in
-# total here). On a constrained CI agent (an mks-cpu pod) that is already a lot
-# of apiservers in one process, so this keeps members at 3 and the source-ISVC
+# total here). On a constrained CI agent that is already a lot of
+# apiservers in one process, so this keeps members at 3 and the source-ISVC
 # count low so BOTH passes (funnel-on and funnel-off) boot and converge inside
 # the per-pass recorder window. Use configs/baseline/ for real scale numbers on
 # beefy/local hardware.

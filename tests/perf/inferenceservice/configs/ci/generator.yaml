@@ -1,8 +1,8 @@
 # CI scale scenario for the InferenceService performance harness.
 #
 # A deliberately SMALL scenario (30 InferenceServices) sized to converge inside
-# the recorder window on a constrained CI agent (an mks-cpu pod): the 300-ISVC
-# baseline only reached ~126/300 Ready in 10m there. This run still exercises the
+# the recorder window on a constrained CI agent: the 300-ISVC baseline only
+# reached ~126/300 Ready in 10m there. This run still exercises the
 # full create -> reconcile -> Ready path across three size classes and the
 # runtimeselector pool, and emits the same summary the checker validates — it
 # just measures fewer objects. Use configs/baseline/ for real scale numbers on
