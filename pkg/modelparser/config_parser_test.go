@@ -684,12 +684,9 @@ func TestParseModelConfigFromFiles_HFQuantConfigFallback(t *testing.T) {
 func TestParseModelConfigFromFiles_StandaloneHFQuantConfigWinsOverEmbedded(t *testing.T) {
 	// Standalone hf_quant_config.json + embedded quantization_config:
 	// standalone is the higher-priority signal (richer schema —
-	// group_size, kv_cache_quant_algo, etc.) and unifying spec.Quantization
-	// with the safetensors counting source prevents the NVFP4-count +
-	// FP8-spec asymmetry the unification fix closes.
-	//
-	// Earlier this test asserted the OPPOSITE invariant (embedded wins)
-	// — that was a documented bug, not a feature. Renamed for clarity.
+	// group_size, kv_cache_quant_algo, etc.), and unifying spec.Quantization
+	// with the safetensors counting source prevents NVFP4-count +
+	// FP8-spec asymmetry on models that ship both.
 	logger := zap.NewNop().Sugar()
 	parser := &ModelConfigParser{
 		logger:          logger,
@@ -751,8 +748,8 @@ func TestParseModelConfigFromFiles_EmbeddedQuantConfigDrivesParameterCount(t *te
 			}
 		}`)},
 		{Path: "model.safetensors", Data: safetensorsBytes},
-		// NO hf_quant_config.json — proves the embedded fallback path
-		// closes the gap from PR #75.
+		// NO hf_quant_config.json — the embedded quantization_config
+		// alone must drive the quant-aware counting path.
 	}
 
 	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
