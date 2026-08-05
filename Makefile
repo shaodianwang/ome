@@ -635,8 +635,12 @@ kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor,
 	echo "✅ Vendored Kueue CRDs to $(DEP_CRDS_DIR)/kueue/"
 
 .PHONY: integration-test
-integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tests
+integration-test: fmt vet manifests envtest dep-crds xet-build ## 🧪 Run integration tests
 	@echo "🧪 Running integration tests..."
+	@# xet-build is a prerequisite because the tests/ root suite builds
+	@# cmd/ome-agent, which links the xet staticlib via cgo
+	@# (-L pkg/xet/target/release); TEST_ENV puts that same path on
+	@# LD_LIBRARY_PATH/DYLD_LIBRARY_PATH so the built binary also loads.
 	@# Most test packages under tests/ are Ginkgo suites (per
 	@# .claude/integration-test-framework-design.md §7). Each Ginkgo
 	@# package has a single TestXxx(t) entry that calls util.RunSuite
