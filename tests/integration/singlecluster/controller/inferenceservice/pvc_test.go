@@ -75,7 +75,7 @@ var _ = ginkgo.Describe("InferenceService + PVC end-to-end", ginkgo.Ordered, fun
 		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
 
-		ginkgo.By("creating a runtime with engineConfig.runner — canonical pattern from config/runtimes/srt/meta/*.yaml; the ISVC's Engine is just a stub to opt in")
+		ginkgo.By("creating a runtime with engineConfig.runner — the canonical runtime pattern; the ISVC's Engine is just a stub to opt in")
 		csr := v1beta1testing.MakeClusterServingRuntime("isvc-pvc-runtime").
 			SupportsModelFormat("safetensors", true, 10).
 			WithLastFormatArchitecture("LlamaForCausalLM").

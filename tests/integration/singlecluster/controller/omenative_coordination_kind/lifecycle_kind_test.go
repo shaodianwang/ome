@@ -66,7 +66,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 	// because the single-pod alpha doesn't support scale-to-zero.
 	// Locked in here so a future fix (whether enforcing 0 or
 	// documenting the 0→1 promotion) is deliberate.
-	ginkgo.It("MinReplicas=0 currently creates 1 pod (defaulter promotes 0 → 1; OEP open question)", func() {
+	ginkgo.It("MinReplicas=0 currently creates 1 pod (defaulter promotes 0 → 1)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mr0-isvc"),
 			WithoutDecoder(),
 			WithEngineReplicas(0),

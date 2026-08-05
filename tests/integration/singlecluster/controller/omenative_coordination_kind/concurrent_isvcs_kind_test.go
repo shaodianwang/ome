@@ -14,7 +14,7 @@ import (
 // and their per-revision Service selectors don't cross-match across
 // ISVCs.
 //
-// Gap-list item #12. The reconciler's work queue handles per-ISVC
+// The reconciler's work queue handles per-ISVC
 // concurrency, and `watches` already pins that pod events from a
 // different ISVC don't enqueue this one. What's NOT pinned: a
 // per-revision Service emitted by one ISVC must NOT select pods owned

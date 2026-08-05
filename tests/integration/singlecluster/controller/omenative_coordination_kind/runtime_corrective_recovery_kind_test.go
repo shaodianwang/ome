@@ -98,7 +98,7 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-forward recovery", g
 	const (
 		name       = "rt-corr-fwd"
 		goodImage  = "fake-serving:v1"
-		badImage   = "ghcr.io/ome-projects/this-image-does-not-exist:rt899f"
+		badImage   = "ghcr.io/ome-projects/this-image-does-not-exist:rt-corr-fwd-bad"
 		fixedImage = "fake-serving:v2"
 	)
 
@@ -196,7 +196,7 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-back recovery", gink
 	const (
 		name      = "rt-corr-back"
 		goodImage = "fake-serving:v1"
-		badImage  = "ghcr.io/ome-projects/this-image-does-not-exist:rt899b"
+		badImage  = "ghcr.io/ome-projects/this-image-does-not-exist:rt-corr-back-bad"
 	)
 
 	var (
@@ -295,7 +295,7 @@ var _ = ginkgo.Describe("behavior - runtime corrective gang roll-back recovery",
 	const (
 		name      = "rt-corr-gback"
 		goodImage = "fake-serving:v1"
-		badImage  = "ghcr.io/ome-projects/this-image-does-not-exist:rt899g"
+		badImage  = "ghcr.io/ome-projects/this-image-does-not-exist:rt-corr-gang-bad"
 	)
 
 	var (

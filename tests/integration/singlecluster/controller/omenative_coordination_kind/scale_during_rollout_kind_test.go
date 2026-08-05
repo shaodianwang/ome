@@ -16,8 +16,9 @@ import (
 // update (a revision bump in flight), a concurrent scale-up of engine
 // MinReplicas 1 → 3 must materialize the brand-new gangs (indices 1,2)
 // immediately instead of serializing them behind instance-0's rollout.
-// On TPU instance-0's rollout is a 20-40 min cold-compile, so a stalled
-// scale-out is a real outage; the surge-free new indices legitimately
+// On accelerators with long cold-start compiles a rollout can take
+// tens of minutes, so a stalled scale-out is a real outage; the
+// surge-free new indices legitimately
 // bypass the dispatcher's skip-Create-while-updating gate (genuine
 // ActiveOrdinal=0, no RunningRevision to mis-stamp).
 //

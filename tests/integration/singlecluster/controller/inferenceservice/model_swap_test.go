@@ -23,8 +23,9 @@ import (
 // backend to another (e.g. a cluster_cache rollout) without rebuilding
 // the ISVC. The reconciler re-resolves the BaseModel reference on
 // every pass and emits the appropriate pod spec — Sharded gets
-// MODEL_CACHE_* env injection plus the manifold:// MODEL_PATH, PVC
-// gets a Volume + VolumeMount with MODEL_PATH=/opt/ml/model. The
+// MODEL_CACHE_* env injection plus MODEL_PATH set to the storage URI
+// verbatim, PVC gets a Volume + VolumeMount with
+// MODEL_PATH=/opt/ml/model. The
 // runtime selector + ValidateRuntime gate every transition; a swap
 // to a distribution the runtime doesn't support stalls the rollout.
 //
@@ -57,7 +58,7 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 		subPath := "models/llama-fwd"
 		makeBoundPVC(ns.Name, pvcName)
 
-		shardedURI := "manifold://test-bucket/tree/swap/sharded-fwd"
+		shardedURI := "oci://n/test/b/models/o/swap/sharded-fwd"
 		shardedCBM := makeShardedCBMReady("modelswap-fwd-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(shardedCBM))
 
@@ -85,7 +86,7 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 			Engine(&v1beta1.EngineSpec{}).Obj()
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 
-		ginkgo.By("Deployment reflects Sharded: MODEL_PATH=manifold://..., cache envs present, no PVC volume")
+		ginkgo.By("Deployment reflects Sharded: MODEL_PATH=storage URI, cache envs present, no PVC volume")
 		Eventually(func(g Gomega) {
 			pod := getISVCPodSpec(g, ns.Name)
 			assertModelPath(g, pod, shardedURI)
@@ -105,12 +106,12 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("PVC → Sharded: drops PVC volume, gains cache envs + manifold MODEL_PATH", func() {
+	ginkgo.It("PVC → Sharded: drops PVC volume, gains cache envs + storage-URI MODEL_PATH", func() {
 		pvcName := "modelswap-rev-pvc"
 		subPath := "models/llama-rev"
 		makeBoundPVC(ns.Name, pvcName)
 
-		shardedURI := "manifold://test-bucket/tree/swap/sharded-rev"
+		shardedURI := "oci://n/test/b/models/o/swap/sharded-rev"
 		shardedCBM := makeShardedCBMReady("modelswap-rev-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(shardedCBM))
 
@@ -144,7 +145,7 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 		ginkgo.By("patching ISVC to reference the Sharded CBM")
 		setISVCModel(isvc, shardedCBM.Name)
 
-		ginkgo.By("Deployment flips to Sharded: MODEL_PATH=manifold URI, cache envs present, PVC volume gone")
+		ginkgo.By("Deployment flips to Sharded: MODEL_PATH=storage URI, cache envs present, PVC volume gone")
 		Eventually(func(g Gomega) {
 			pod := getISVCPodSpec(g, ns.Name)
 			assertModelPath(g, pod, shardedURI)
@@ -158,7 +159,7 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 		subPath := "models/llama-stall"
 		makeBoundPVC(ns.Name, pvcName)
 
-		shardedURI := "manifold://test-bucket/tree/swap/sharded-stall"
+		shardedURI := "oci://n/test/b/models/o/swap/sharded-stall"
 		shardedCBM := makeShardedCBMReady("modelswap-stall-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(shardedCBM))
 
@@ -204,7 +205,7 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 		ginkgo.By("Deployment never picks up Sharded-shaped env / MODEL_PATH — the controller's ValidateRuntime error keeps the spec frozen")
 		Consistently(func(g Gomega) {
 			pod := getISVCPodSpec(g, ns.Name)
-			// MODEL_PATH must NOT have flipped to the manifold URI;
+			// MODEL_PATH must NOT have flipped to the Sharded URI;
 			// cache envs must NOT have appeared.
 			for _, c := range allContainers(pod) {
 				for _, e := range c.Env {
@@ -212,7 +213,7 @@ var _ = ginkgo.Describe("InferenceService model swap across distributions", gink
 						"cache provider env must not be injected — validation should have stopped the swap")
 					if e.Name == constants.ModelPathEnvVarKey {
 						g.Expect(e.Value).NotTo(Equal(shardedURI),
-							"MODEL_PATH must not flip to the manifold URI when validation rejects the swap")
+							"MODEL_PATH must not flip to the Sharded URI when validation rejects the swap")
 					}
 				}
 			}
@@ -277,8 +278,8 @@ func makeShardedCBMReady(name, storageURI string) *v1beta1.ClusterBaseModel {
 // dualDistributionRuntime builds a CSR with two supportedModelFormat
 // entries — one declaring modelCacheProviders=[cluster_cache] (gates
 // Sharded models) and one without (matches PVC / per-node delivery).
-// Mirrors the dual-entry shape we ship in
-// config/samples/avo-tier5-pd/cluster-serving-runtime.yaml.
+// Mirrors the dual-entry shape of the PD-disaggregated sample
+// ClusterServingRuntime in config/samples/.
 //
 // Framework name is forced to lowercase "transformers" to match what
 // the modelparser emits when the suite's fake mc client returns a

@@ -14,8 +14,8 @@ import (
 // mixed update strategies in a single coordination group:
 // engine InPlaceIfPossible + decoder SurgeThenDrain (default).
 //
-// Gap-list item #4. Every existing spec sets a single update strategy
-// per ISVC; the dispatcher's per-Component routing isn't pinned. Real
+// Every existing spec sets a single update strategy per ISVC; the
+// dispatcher's per-Component routing isn't otherwise pinned. Real
 // PD topologies often want engine in-place (KV-cache costly to rebuild)
 // AND decoder via surge (stateless, faster rollouts). The contract: an
 // image bump on a Component with InPlaceIfPossible must preserve pod

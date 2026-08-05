@@ -51,10 +51,10 @@ var _ = ginkgo.Describe("InferenceService PDDisaggregated", ginkgo.Ordered, func
 		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
 
-		// The canonical runtime pattern (config/runtimes/srt/meta/*-pd-rt.yaml)
-		// puts the engine container on .spec.engineConfig.runner and the
-		// decoder container on .spec.decoderConfig.runner. The runtime, not
-		// the ISVC, decides what images each component runs.
+		// The canonical PD runtime pattern puts the engine container on
+		// .spec.engineConfig.runner and the decoder container on
+		// .spec.decoderConfig.runner. The runtime, not the ISVC, decides
+		// what images each component runs.
 		csr := v1beta1testing.MakeClusterServingRuntime("pd-runtime").
 			SupportsModelFormat("safetensors", true, 10).
 			WithLastFormatArchitecture("LlamaForCausalLM").

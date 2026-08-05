@@ -100,9 +100,9 @@ var _ = ginkgo.Describe("BaseModel PVC spec auto-fill edges", ginkgo.Ordered, fu
 	})
 
 	ginkgo.It("agent supplies Quantization → controller propagates it to Spec.Quantization", func() {
-		// updateSpecWithConfig now has a Quantization branch (added in #82),
-		// so a Quantization value supplied by the agent flows through to
-		// the BaseModel spec the same way ModelType and ModelArchitecture do.
+		// updateSpecWithConfig has a Quantization branch, so a Quantization
+		// value supplied by the agent flows through to the BaseModel spec
+		// the same way ModelType and ModelArchitecture do.
 		ns := "pvc-autofill-quant"
 		makeNamespace(suiteCtx, k8sClient, ns)
 		makePVC(suiteCtx, k8sClient, "p", ns)

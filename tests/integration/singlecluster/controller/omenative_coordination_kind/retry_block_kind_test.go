@@ -15,12 +15,13 @@ import (
 
 // RetryBlock: same-target gang-surge failure containment.
 //
-// The incident driver: a failed same-target gang surge was abandoned, the
-// source reset to Ready, and the unchanged target re-triggered a fresh
-// surge every pass — an unbounded delete/recreate loop burning accelerator
-// capacity. The RetryBlock persists per-target-revision retry authority on
-// the IR so the loop is bounded: <= maxAttempts authorized waves, then
-// Held until a NEW revision is published.
+// The failure mode this bounds: a failed same-target gang surge is
+// abandoned, the source resets to Ready, and the unchanged target
+// re-triggers a fresh surge every pass — an unbounded delete/recreate
+// loop burning accelerator capacity. The RetryBlock persists
+// per-target-revision retry authority on the IR so the loop is bounded:
+// <= maxAttempts authorized waves, then Held until a NEW revision is
+// published.
 //
 // Coverage here is GANG surges (leader+worker): the RetryBlock writers are
 // wired on the abandonFailedGangSurge path, which clears the failed

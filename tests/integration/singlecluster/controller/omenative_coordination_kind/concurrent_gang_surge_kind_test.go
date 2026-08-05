@@ -20,8 +20,8 @@ import (
 // SAME reconcile pass, each replacement gang MUST claim a DISTINCT
 // instance-index. Without it, every sibling gang re-picks the
 // same lowest-free index from the start-of-pass snapshot; when that one
-// shared surge became Ready, the drain-on-ready path released ALL sharing
-// sources at once — the 64->1 fleet-wipe. gangSurgeUpdate now records each
+// shared surge becomes Ready, the drain-on-ready path releases ALL sharing
+// sources at once — a fleet-wipe. gangSurgeUpdate records each
 // claim on the source's Operation.SurgeIndex and AllocateSurgeIndex
 // excludes in-flight surge slots, so siblings fan out to 3,4,5,...
 //

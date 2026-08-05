@@ -13,7 +13,7 @@ import (
 // cancel a rollout mid-flight by reverting the trigger (the
 // operator panic-button workflow).
 //
-// Gap-list item #6. No existing KIND spec exercises the
+// No other KIND spec exercises the
 // bump-then-revert workflow. The contract: after a v1 → v2 rollout is
 // mid-flight, reverting the image back to v1 must drive the cluster
 // state machine BACK to v1 (not leave a v2 straggler), and the

@@ -82,7 +82,7 @@ var _ = ginkgo.Describe("IR-managed OMENative bad-image failure", ginkgo.Ordered
 			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
 			g.Expect(ir.Status.InstanceStatuses[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceFailed),
-					"IR aggregator must escalate Instance to Phase=Failed when surge pod stuck in ImagePullBackOff past grace (bug #52 IR-path)")
+					"IR aggregator must escalate Instance to Phase=Failed when surge pod stuck in ImagePullBackOff past grace")
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("verifying v1 capacity preserved — operator-reported 'no auto-rollback' principle")

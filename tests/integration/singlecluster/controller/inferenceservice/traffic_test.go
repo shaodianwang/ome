@@ -878,12 +878,12 @@ var _ = ginkgo.Describe("traffic reconciler", ginkgo.Ordered, func() {
 		assertTargetRefNames(got, "isvc-d4", "isvc-d4-engine", "isvc-d4-router", "isvc-d4-decoder")
 	})
 
-	ginkgo.It("D5: ComputeTargetHTTPRoutes builds the right set per Component flags (C1 regression)", func() {
+	ginkgo.It("D5: ComputeTargetHTTPRoutes builds the right set per Component flags (route-name collision regression)", func() {
 		// ComputeTargetHTTPRoutes is the helper the full ISVC
 		// reconciler uses to determine which HTTPRoute names to pass
-		// the traffic reconciler. Pre-OEP C1, engine and top-level
-		// collided (both isvc.Name); the helper must now produce
-		// "<isvc>-engine" distinct from "<isvc>" (top-level).
+		// the traffic reconciler. Engine and top-level route names
+		// must not collide: the helper must produce "<isvc>-engine"
+		// distinct from "<isvc>" (top-level).
 		isvc := isvcWith("isvc-d5", nil)
 
 		// Engine-only.

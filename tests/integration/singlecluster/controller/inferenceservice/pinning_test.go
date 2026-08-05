@@ -594,8 +594,8 @@ var _ = ginkgo.Describe("InferenceService pinning", ginkgo.Ordered, func() {
 			// drift, the controller proceeds and a NEW Deployment with the LIVE
 			// image appears. The "true self-heal from pin" behavior is a stronger
 			// guarantee that requires the drift-skip path to detect "Deployment
-			// missing" and force a rebuild from the pinned spec — this is the
-			// follow-up the OEP flags. For now, document the Phase-1 behavior
+			// missing" and force a rebuild from the pinned spec — Phase 1 does
+			// not implement that. For now, document the Phase-1 behavior
 			// by asserting drift remains True and no Deployment is rebuilt.
 			Consistently(func() bool {
 				deps := &appsv1.DeploymentList{}

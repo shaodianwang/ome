@@ -45,7 +45,7 @@ var _ = ginkgo.Describe("InferenceService overlays", ginkgo.Ordered, func() {
 		subPath := "models/llama-overlay"
 		makeBoundPVC(ns.Name, pvcName)
 
-		shardedURI := "manifold://test-bucket/tree/overlay/sharded-primary"
+		shardedURI := "oci://n/test/b/models/o/overlay/sharded-primary"
 		primary := makeShardedCBMReady("overlay-fwd-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 
@@ -107,7 +107,7 @@ var _ = ginkgo.Describe("InferenceService overlays", ginkgo.Ordered, func() {
 		Expect(k8sClient.Create(suiteCtx, primary)).To(Succeed())
 		ginkgo.DeferCleanup(deleteObj(primary))
 
-		shardedURI := "manifold://test-bucket/tree/overlay/sharded-overlay"
+		shardedURI := "oci://n/test/b/models/o/overlay/sharded-overlay"
 		overlay := makeShardedCBMReady("overlay-rev-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(overlay))
 
@@ -140,7 +140,7 @@ var _ = ginkgo.Describe("InferenceService overlays", ginkgo.Ordered, func() {
 	})
 
 	ginkgo.It("Disabled overlay is skipped: pod spec carries no overlay env / volume", func() {
-		shardedURI := "manifold://test-bucket/tree/overlay/skipped-primary"
+		shardedURI := "oci://n/test/b/models/o/overlay/skipped-primary"
 		primary := makeShardedCBMReady("overlay-skip-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 
@@ -278,7 +278,7 @@ var _ = ginkgo.Describe("InferenceService overlays — additional coverage", gin
 	})
 
 	ginkgo.It("no overlays declared: pod spec carries no OVERLAY_* envs or overlay volumes (regression guard)", func() {
-		shardedURI := "manifold://test-bucket/tree/noovl/primary"
+		shardedURI := "oci://n/test/b/models/o/noovl/primary"
 		primary := makeShardedCBMReady("noovl-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 
@@ -322,7 +322,7 @@ var _ = ginkgo.Describe("InferenceService overlays — additional coverage", gin
 		subPath := "models/multi"
 		makeBoundPVC(ns.Name, pvcName)
 
-		shardedURI := "manifold://test-bucket/tree/multi/primary"
+		shardedURI := "oci://n/test/b/models/o/multi/primary"
 		primary := makeShardedCBMReady("multi-sharded-primary", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 
@@ -334,7 +334,7 @@ var _ = ginkgo.Describe("InferenceService overlays — additional coverage", gin
 		Expect(k8sClient.Create(suiteCtx, pvcOv)).To(Succeed())
 		ginkgo.DeferCleanup(deleteObj(pvcOv))
 
-		shardedOverlayURI := "manifold://test-bucket/tree/multi/sharded-overlay"
+		shardedOverlayURI := "oci://n/test/b/models/o/multi/sharded-overlay"
 		shardedOv := makeShardedCBMReady("multi-sharded-overlay", shardedOverlayURI)
 		ginkgo.DeferCleanup(deleteObj(shardedOv))
 
@@ -379,7 +379,7 @@ var _ = ginkgo.Describe("InferenceService overlays — additional coverage", gin
 	})
 
 	ginkgo.It("PerNode (HostPath) overlay: HostPath volume + mount + env addressable", func() {
-		shardedURI := "manifold://test-bucket/tree/pernode/primary"
+		shardedURI := "oci://n/test/b/models/o/pernode/primary"
 		primary := makeShardedCBMReady("pernode-sharded-primary", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 
@@ -430,7 +430,7 @@ var _ = ginkgo.Describe("InferenceService overlays — additional coverage", gin
 	})
 
 	ginkgo.It("NotFound overlay: skipped with reason; primary unaffected", func() {
-		shardedURI := "manifold://test-bucket/tree/notfound/primary"
+		shardedURI := "oci://n/test/b/models/o/notfound/primary"
 		primary := makeShardedCBMReady("notfound-sharded", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 
@@ -474,7 +474,7 @@ var _ = ginkgo.Describe("InferenceService overlays — additional coverage", gin
 		subPath := "models/mutate"
 		makeBoundPVC(ns.Name, pvcName)
 
-		shardedURI := "manifold://test-bucket/tree/mutate/primary"
+		shardedURI := "oci://n/test/b/models/o/mutate/primary"
 		primary := makeShardedCBMReady("mutate-sharded-primary", shardedURI)
 		ginkgo.DeferCleanup(deleteObj(primary))
 

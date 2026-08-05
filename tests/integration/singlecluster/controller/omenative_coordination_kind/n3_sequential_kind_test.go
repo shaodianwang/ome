@@ -13,7 +13,7 @@ import (
 
 // Sequential coordination policy spanning N=3 Components.
 //
-// Gap-list item #7. The existing N=2 Sequential spec (sequential_kind)
+// The existing N=2 Sequential spec (sequential_kind)
 // asserts decoder → engine. The Sequential state machine has to chain a
 // second handoff when N=3: after Component A finishes, Component B
 // rolls; after B finishes, Component C rolls. The PD three-way suite
