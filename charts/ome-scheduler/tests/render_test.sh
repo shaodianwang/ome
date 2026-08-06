@@ -144,6 +144,42 @@ minimal="$("${helm_bin}" template ome-scheduler "${chart_dir}" \
 if grep -Fq 'kind: PodDisruptionBudget' <<<"${minimal}"; then
   fail "disabled PodDisruptionBudget was rendered"
 fi
-if grep -Fq 'name: ome-scheduler-metrics' <<<"${minimal}"; then
+# Anchored: the Service is named exactly `ome-scheduler-metrics`, and other
+# metrics resources share that prefix (e.g. the `-metrics-reader` ClusterRole),
+# so a substring match would report them as the disabled Service.
+if grep -Eq '^  name: ome-scheduler-metrics$' <<<"${minimal}"; then
   fail "disabled metrics Service was rendered"
 fi
+
+# Scraping the secure metrics port needs delegated authn/authz on the scheduler
+# side and a /metrics grant on the scraper side. Both ship by default; both must
+# be removable.
+assert_contains "name: system:auth-delegator"
+assert_contains "name: ome-scheduler-metrics-reader"
+assert_contains 'nonResourceURLs: ["/metrics"]'
+
+no_scrape_rbac="$("${helm_bin}" template ome-scheduler "${chart_dir}" \
+  --kube-version "${kube_version}" \
+  --namespace ome-system \
+  --set scheduler.metrics.authDelegation.enabled=false \
+  --set scheduler.metrics.reader.create=false)"
+if grep -Fq 'name: system:auth-delegator' <<<"${no_scrape_rbac}"; then
+  fail "disabled auth-delegator binding was rendered"
+fi
+if grep -Fq 'name: ome-scheduler-metrics-reader' <<<"${no_scrape_rbac}"; then
+  fail "disabled metrics-reader ClusterRole was rendered"
+fi
+
+# The reader role binds only to explicitly configured scrapers; the chart never
+# guesses an identity. With none configured exactly one object carries the name
+# (the ClusterRole); a binding would add a second.
+reader_objects="$(grep -cE '^  name: ome-scheduler-metrics-reader$' <<<"${rendered}" || true)"
+if [[ "${reader_objects}" != "1" ]]; then
+  fail "expected only the metrics-reader ClusterRole with no scraper configured, found ${reader_objects} objects"
+fi
+bound="$("${helm_bin}" template ome-scheduler "${chart_dir}" \
+  --kube-version "${kube_version}" \
+  --namespace ome-system \
+  --set-json 'scheduler.metrics.reader.serviceAccounts=[{"name":"collector","namespace":"telemetry"}]')"
+grep -Fq 'name: collector' <<<"${bound}" || fail "configured scraper was not bound"
+grep -Fq 'namespace: telemetry' <<<"${bound}" || fail "configured scraper namespace missing"

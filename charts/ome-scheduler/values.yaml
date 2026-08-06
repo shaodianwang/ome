@@ -100,9 +100,27 @@ scheduler:
   # DoNotSchedule constraints.
   disablePodTopologySpreadScore: true
 
+  # The scheduler serves /metrics on a secure port (HTTPS + delegated authn/authz),
+  # the same contract as kube-scheduler. Scraping it therefore needs three things,
+  # not just a port: the scheduler authorized to verify callers (authDelegation),
+  # the scraper authorized to read /metrics (reader), and the scraper pointed at
+  # the endpoint (podAnnotations below, or a PodMonitor/ServiceMonitor).
   metrics:
     bindAddress: 0.0.0.0
     securePort: 10259
+    # Lets the scheduler issue TokenReview/SubjectAccessReview to authorize
+    # scrape callers. Without it every /metrics request is rejected 401/403.
+    authDelegation:
+      enabled: true
+    reader:
+      # Create a ClusterRole granting `get` on the /metrics non-resource URL.
+      create: true
+      # Identities to bind that role to — the ServiceAccounts that scrape. Empty
+      # means the role is created but bound to nothing; the chart does not guess
+      # who scrapes in your environment.
+      serviceAccounts: []
+      #  - name: prometheus
+      #    namespace: monitoring
     service:
       enabled: true
       type: ClusterIP
@@ -159,5 +177,13 @@ scheduler:
         matchLabels:
           app.kubernetes.io/name: ome-scheduler
           app.kubernetes.io/component: scheduler
+  # Annotations on the scheduler pods. For annotation-based Prometheus discovery,
+  # the scheme must be https — the metrics port is TLS, so a plain-HTTP scrape
+  # fails. Left empty by default because discovery is environment-specific: many
+  # clusters use a PodMonitor/ServiceMonitor against the metrics Service instead.
   podAnnotations: {}
+  #  prometheus.io/scrape: "true"
+  #  prometheus.io/scheme: "https"
+  #  prometheus.io/port: "10259"
+  #  prometheus.io/path: "/metrics"
   imagePullSecrets: []
