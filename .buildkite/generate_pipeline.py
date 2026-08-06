@@ -71,8 +71,12 @@ BUILD_QUEUE = "tw-cpu-x86"
 GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-tpu-v7x")
 # Fan-out for the GKE KIND suite: N parallel pods, each running a disjoint
 # subset of the ~72 spec files (sharded by BUILDKITE_PARALLEL_JOB in
-# run_kind_tests_gke.sh). 8 → ~9 files/shard.
-GKE_KIND_PARALLELISM = int(os.environ.get("GKE_KIND_PARALLELISM", "8"))
+# run_kind_tests_gke.sh). 4 → ~18 files/shard. Each shard reserves ~5 CPU /
+# 14Gi across its two containers (see _gke_kind_step), so the fan-out is bounded
+# by what the shared queue's node pool can hold concurrently, not by the file
+# count — over-sharding leaves pods Pending and stalls the build. Raise once a
+# dedicated CPU queue with real capacity exists.
+GKE_KIND_PARALLELISM = int(os.environ.get("GKE_KIND_PARALLELISM", "4"))
 
 
 def _truthy(val: str) -> bool:
@@ -276,6 +280,13 @@ def _gke_kind_step() -> str:
     # container-0 runs the offline kind-ci image against a privileged dind
     # sidecar. The podSpecPatch is deeply nested, so build it as a dict and emit
     # it as JSON (a subset of YAML) rather than hand-indenting a block scalar.
+    #
+    # Resources are explicit on BOTH containers. Each shard boots a 3-node kind
+    # cluster (1 control-plane + 2 workers), so a BestEffort pod competing with
+    # sibling shards on one node starves the nested kubelets: multi-pod specs
+    # (gang surge, migration, cross-Component rollout) miss their Eventually
+    # deadlines while single-pod specs still pass. The dind sidecar hosts the
+    # node containers, so it carries the larger share.
     plugins = [
         {
             "kubernetes": {
@@ -287,6 +298,10 @@ def _gke_kind_step() -> str:
                             "env": [
                                 {"name": "DOCKER_HOST", "value": "tcp://localhost:2375"},
                             ],
+                            "resources": {
+                                "requests": {"cpu": "3", "memory": "8Gi", "ephemeral-storage": "8Gi"},
+                                "limits": {"cpu": "6", "memory": "12Gi", "ephemeral-storage": "16Gi"},
+                            },
                         },
                         {
                             "name": "dind",
@@ -296,6 +311,10 @@ def _gke_kind_step() -> str:
                             "volumeMounts": [
                                 {"name": "docker-graph", "mountPath": "/var/lib/docker"},
                             ],
+                            "resources": {
+                                "requests": {"cpu": "2", "memory": "6Gi", "ephemeral-storage": "16Gi"},
+                                "limits": {"cpu": "4", "memory": "8Gi", "ephemeral-storage": "24Gi"},
+                            },
                         },
                     ],
                     "volumes": [{"name": "docker-graph", "emptyDir": {}}],

@@ -69,6 +69,20 @@ for tar in "$IMAGES_DIR"/kindest-node.tar "$IMAGES_DIR"/fake-serving-build.tar \
   docker load -i "$tar"
 done
 
+# Raise the inotify ceilings on the Docker daemon's kernel before any cluster
+# exists. Each shard runs a 3-node cluster and every nested kubelet/containerd
+# holds watches and instances; at the distro defaults they exhaust silently —
+# kubelet stops seeing filesystem events, pods wedge short of Ready, and specs
+# fail as Eventually timeouts rather than a named error. Applied from a
+# privileged throwaway container because this container is unprivileged; busybox
+# is already loaded, so it costs no pull. Advisory: a daemon that refuses the
+# write still runs the suite, just closer to the ceiling.
+echo "--- raise inotify limits on the docker daemon ---"
+docker run --rm --privileged busybox sh -c '
+  sysctl -w fs.inotify.max_user_watches=1048576
+  sysctl -w fs.inotify.max_user_instances=8192
+' || echo "WARN: could not raise inotify limits; continuing at daemon defaults" >&2
+
 # kind uses the loaded node image (no pull) because KIND_NODE_IMAGE names it and
 # it is already present on the dind daemon.
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.32.2}"
