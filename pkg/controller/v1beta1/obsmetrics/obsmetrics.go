@@ -6,10 +6,11 @@
 // registered with the controller-runtime registry at package init so the
 // operator's /metrics endpoint surfaces them with no extra wiring.
 //
-// Cardinality is deliberately controlled: the histograms carry only a
-// component/result-style label (NOT per-isvc) so a 6000-pod, 10-cluster
-// fleet does not explode the series count. The status-update counter
-// keys on (controller, result) only.
+// Cardinality is deliberately controlled: metrics avoid pod-level labels.
+// The pod startup histogram carries the stable ISVC identity so operators
+// can compare startup latency across workloads. This assumes tens to low
+// hundreds of ISVCs per cluster; pod identities are excluded because fleets
+// may contain thousands of pods and pod names churn across rollouts.
 package obsmetrics
 
 import (
@@ -69,16 +70,15 @@ var (
 
 	// podCreateToReadySeconds records pod-create-to-ready latency for an
 	// Instance: the gap between the earliest pod's creation timestamp and
-	// the moment the Instance was first promoted to Ready. Labeled by
-	// component only (NOT per-isvc) to bound cardinality.
+	// the moment the Instance was first promoted to Ready.
 	podCreateToReadySeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "ome_omenative_pod_create_to_ready_seconds",
-			Help: "Wall-clock seconds from the earliest pod's creation to the Instance first reaching Ready, labeled by component.",
+			Help: "Wall-clock seconds from the earliest pod's creation to the Instance first reaching Ready, labeled by namespace, ISVC, and component.",
 			// Upstream Prometheus default buckets (see above).
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"component"},
+		[]string{"namespace", "isvc", "component"},
 	)
 )
 
@@ -112,11 +112,11 @@ func RecordRolloutPhaseDuration(phase string, seconds float64) {
 }
 
 // RecordPodCreateToReady observes pod-create-to-ready latency for an
-// Instance promotion. Non-positive durations and empty component labels
-// are dropped.
-func RecordPodCreateToReady(component string, seconds float64) {
-	if component == "" || seconds <= 0 {
+// Instance promotion. Non-positive durations and empty identity labels are
+// dropped.
+func RecordPodCreateToReady(namespace, isvc, component string, seconds float64) {
+	if namespace == "" || isvc == "" || component == "" || seconds <= 0 {
 		return
 	}
-	podCreateToReadySeconds.WithLabelValues(component).Observe(seconds)
+	podCreateToReadySeconds.WithLabelValues(namespace, isvc, component).Observe(seconds)
 }

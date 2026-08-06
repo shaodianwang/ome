@@ -129,9 +129,9 @@ func TestRecordRolloutPhaseDuration_NonPositiveDropped(t *testing.T) {
 }
 
 func TestRecordPodCreateToReady_Observes(t *testing.T) {
-	labels := prometheus.Labels{"component": "engine"}
+	labels := prometheus.Labels{"namespace": "prod", "isvc": "llama", "component": "engine"}
 	startCount, startSum := histogramFor("ome_omenative_pod_create_to_ready_seconds", labels)
-	RecordPodCreateToReady("engine", 10)
+	RecordPodCreateToReady("prod", "llama", "engine", 10)
 	cnt, sum := histogramFor("ome_omenative_pod_create_to_ready_seconds", labels)
 	if cnt-startCount != 1 {
 		t.Errorf("count delta: got %v want 1", cnt-startCount)
@@ -142,12 +142,32 @@ func TestRecordPodCreateToReady_Observes(t *testing.T) {
 }
 
 func TestRecordPodCreateToReady_NonPositiveDropped(t *testing.T) {
-	labels := prometheus.Labels{"component": "decoder"}
+	labels := prometheus.Labels{"namespace": "prod", "isvc": "llama", "component": "decoder"}
 	startCount, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", labels)
-	RecordPodCreateToReady("decoder", 0)
-	RecordPodCreateToReady("decoder", -3)
-	RecordPodCreateToReady("", 5)
+	RecordPodCreateToReady("prod", "llama", "decoder", 0)
+	RecordPodCreateToReady("prod", "llama", "decoder", -3)
+	RecordPodCreateToReady("", "llama", "decoder", 5)
+	RecordPodCreateToReady("prod", "", "decoder", 5)
+	RecordPodCreateToReady("prod", "llama", "", 5)
 	if cnt, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", labels); cnt != startCount {
 		t.Errorf("non-positive/empty must be dropped; count moved from %v to %v", startCount, cnt)
+	}
+}
+
+func TestRecordPodCreateToReady_ISVCLabelIsolated(t *testing.T) {
+	first := prometheus.Labels{"namespace": "prod", "isvc": "llama-a", "component": "engine"}
+	second := prometheus.Labels{"namespace": "prod", "isvc": "llama-b", "component": "engine"}
+	firstStart, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", first)
+	secondStart, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", second)
+
+	RecordPodCreateToReady("prod", "llama-a", "engine", 10)
+
+	firstEnd, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", first)
+	secondEnd, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", second)
+	if firstEnd-firstStart != 1 {
+		t.Errorf("first ISVC count delta: got %v want 1", firstEnd-firstStart)
+	}
+	if secondEnd != secondStart {
+		t.Errorf("first ISVC observation changed second ISVC count from %v to %v", secondStart, secondEnd)
 	}
 }

@@ -272,10 +272,10 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		// Pod-create-to-ready latency: gap between the earliest pod's
 		// creation timestamp and this first Ready promotion. Recorded
 		// only on the not-ready→ready edge so re-reconciles of an
-		// already-Ready Instance don't re-observe. Labeled by component
-		// (bounded), not per-isvc.
+		// already-Ready Instance don't re-observe.
 		if earliest := earliestPodCreation(existing); !earliest.IsZero() {
-			obsmetrics.RecordPodCreateToReady(string(input.Key.Component), time.Since(earliest).Seconds())
+			obsmetrics.RecordPodCreateToReady(input.Key.Namespace, input.Key.OwnerName,
+				string(input.Key.Component), time.Since(earliest).Seconds())
 		}
 	}
 	return true, 0, nil
