@@ -24,6 +24,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -431,6 +432,7 @@ func TestInferenceServiceReconcile(t *testing.T) {
 			// Create reconciler
 			reconciler := &InferenceServiceReconciler{
 				Client:          c,
+				APIReader:       c,
 				ClientConfig:    &rest.Config{},
 				Clientset:       clientset,
 				Log:             ctrl.Log.WithName("test"),
@@ -529,10 +531,11 @@ func TestUpdateStatusFlushesCoordinationWrites(t *testing.T) {
 		Build()
 
 	reconciler := &InferenceServiceReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Log:      ctrl.Log.WithName("test"),
-		Recorder: record.NewFakeRecorder(10),
+		Client:    c,
+		APIReader: c,
+		Scheme:    scheme,
+		Log:       ctrl.Log.WithName("test"),
+		Recorder:  record.NewFakeRecorder(10),
 	}
 
 	// Simulate what coordination.Reconcile mutates in-memory: per-
@@ -584,6 +587,112 @@ func TestUpdateStatusFlushesCoordinationWrites(t *testing.T) {
 	g.Expect(flushed.Status.RolloutCoordination.Groups).To(gomega.HaveLen(1))
 	g.Expect(flushed.Status.RolloutCoordination.Groups[0].Phase).
 		To(gomega.Equal(v1beta1.CoordinationPhaseIdle))
+}
+
+// TestUpdateStatusPersistsCanaryStepDespiteStaleCache reproduces the
+// manual-canary promote wedge. advanceStep first does a durable metadata
+// patch (consuming ome.io/rollout-promote) that bumps the ISVC
+// resourceVersion, then increments status.canary.currentStep in memory for
+// the same status flush. If updateStatus reads its optimistic-lock base
+// from the informer cache — which still holds the pre-patch
+// resourceVersion — the status write 409s, RetryOnConflict re-reads the
+// same stale cache and exhausts, and the step increment is lost while the
+// annotation is already gone. The rollout then wedges at Paused step 0.
+//
+// The retry base must come from the authoritative reader (APIReader), not
+// the cache, so the write lands on the live resourceVersion. This test
+// pins that contract. A fake-client-only test can't catch this: with no
+// cache/live resourceVersion skew there is no conflict.
+func TestUpdateStatusPersistsCanaryStepDespiteStaleCache(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	const canaryHash = "bbfb0fd4"
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+			Annotations: map[string]string{
+				constants.RolloutPromoteAnnotation: canaryHash,
+			},
+		},
+		Spec: v1beta1.InferenceServiceSpec{
+			Model:  &v1beta1.ModelRef{Name: "base-model", Kind: stringPtr("BaseModel")},
+			Engine: &v1beta1.EngineSpec{},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {},
+			},
+			Canary: &v1beta1.CanaryStatus{
+				CanaryRevisionHash: canaryHash,
+				CurrentStep:        0,
+			},
+		},
+	}
+
+	// live models the apiserver.
+	live := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(isvc).
+		WithStatusSubresource(isvc).
+		Build()
+	nn := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
+
+	// Snapshot the informer cache's view BEFORE the metadata patch: the
+	// promote annotation is still present at the pre-patch resourceVersion.
+	staleCache := &v1beta1.InferenceService{}
+	g.Expect(live.Get(context.TODO(), nn, staleCache)).NotTo(gomega.HaveOccurred())
+
+	// Simulate advanceStep's consumeAnnotation: a durable metadata write
+	// removing the promote annotation, which bumps the live resourceVersion
+	// past what the cache holds. Status (currentStep) is untouched here — it
+	// rides the in-memory desiredService below.
+	bumped := staleCache.DeepCopy()
+	delete(bumped.Annotations, constants.RolloutPromoteAnnotation)
+	g.Expect(live.Update(context.TODO(), bumped)).NotTo(gomega.HaveOccurred())
+
+	// r.Client models the cache: every Get returns the stale pre-patch
+	// snapshot. Status().Update passes through to live, which enforces
+	// optimistic concurrency against the bumped resourceVersion.
+	cached := interceptor.NewClient(live, interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+			out, ok := obj.(*v1beta1.InferenceService)
+			g.Expect(ok).To(gomega.BeTrue())
+			staleCache.DeepCopyInto(out)
+			return nil
+		},
+	})
+
+	reconciler := &InferenceServiceReconciler{
+		Client:    cached,
+		APIReader: live,
+		Scheme:    scheme,
+		Log:       ctrl.Log.WithName("test"),
+		Recorder:  record.NewFakeRecorder(10),
+	}
+
+	// desiredService is the in-memory ISVC after advanceStep: the promote
+	// annotation is gone and currentStep has advanced to 1.
+	desired := staleCache.DeepCopy()
+	delete(desired.Annotations, constants.RolloutPromoteAnnotation)
+	desired.Status.Canary.CurrentStep = 1
+
+	err := reconciler.updateStatus(desired, constants.OMENative)
+	g.Expect(err).NotTo(gomega.HaveOccurred(),
+		"status flush must not lose an optimistic-lock race to advanceStep's own annotation patch")
+
+	// The authoritative store must show the advanced step. Pre-fix, the
+	// retry base came from the stale cache, so the write 409'd and
+	// currentStep stayed 0 — the wedged-at-Paused-step-0 symptom.
+	persisted := &v1beta1.InferenceService{}
+	g.Expect(live.Get(context.TODO(), nn, persisted)).NotTo(gomega.HaveOccurred())
+	g.Expect(persisted.Status.Canary).NotTo(gomega.BeNil())
+	g.Expect(persisted.Status.Canary.CurrentStep).To(gomega.Equal(int32(1)),
+		"canary step advance must persist to the live apiserver despite the stale cache")
 }
 
 func TestDetermineDeploymentModes(t *testing.T) {
@@ -1037,10 +1146,11 @@ func TestMarkRuntimeUnresolvedEventPreservesPercent(t *testing.T) {
 		Build()
 	rec := record.NewFakeRecorder(10)
 	r := &InferenceServiceReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Log:      ctrl.Log.WithName("test"),
-		Recorder: rec,
+		Client:    c,
+		APIReader: c,
+		Scheme:    scheme,
+		Log:       ctrl.Log.WithName("test"),
+		Recorder:  rec,
 	}
 
 	cause := errors.New("no runtime supports quantization fp8 (50% of formats matched)")

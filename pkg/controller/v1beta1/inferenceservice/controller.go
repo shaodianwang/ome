@@ -904,15 +904,20 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 	// Status().Update wrapped in retry.RetryOnConflict because
 	// OMENative-driven status churn (drain / Mark / op transitions)
 	// reliably 409s the outer flush and would wedge the reconcile in a
-	// re-loop. On conflict: re-Get the live ISVC, copy desiredService
-	// status onto the fresh ResourceVersion, then re-merge
+	// re-loop. The retry base is read through APIReader (the live
+	// apiserver), NOT the informer cache: a metadata write earlier in the
+	// same reconcile — e.g. canary promote-annotation consumption — bumps
+	// the ResourceVersion before the cache observes it, so a cached re-Get
+	// would hand back a stale base and 409 every attempt, silently dropping
+	// this status write. On conflict: re-Get the live ISVC, copy
+	// desiredService status onto the fresh ResourceVersion, then re-merge
 	// ComponentStatus.Lifecycle from latest so any OMENative writes that
 	// landed between our snapshot and the re-Get (Incarnation bumps,
 	// Phase transitions, RunningRevision promotes) are preserved. The
 	// outer reconciler doesn't own that subtree.
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &v1beta1.InferenceService{}
-		if err := r.Get(context.TODO(), namespacedName, latest); err != nil {
+		if err := r.APIReader.Get(context.TODO(), namespacedName, latest); err != nil {
 			return err
 		}
 		preserved := preserveLifecycleStatus(latest.Status.Components)
