@@ -275,7 +275,15 @@ def _gke_kind_step() -> str:
     offline (GOPROXY=off, docker load from /images); only git checkout needs
     egress, which the queue's controller already provides.
     """
-    kindci = "168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/kind-ci:latest"
+    # Pin the workload image to THIS commit wherever that image exists. The
+    # baked module cache is built from the go.mod/go.sum of the commit that
+    # produced the image, so a floating tag can pair the suite with a cache
+    # that predates its dependencies — which GOPROXY=off turns into an
+    # unresolvable import. mirror-kind-ci publishes a short-SHA tag to prod
+    # alongside latest, but only on main, so other branches fall back (the
+    # runner's module-cache preflight reports the mismatch when it matters).
+    kindci_tag = COMMIT[:8] if BRANCH == "main" else "latest"
+    kindci = f"168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/kind-ci:{kindci_tag}"
     dind = "168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/library/docker:28-dind"
     # container-0 runs the offline kind-ci image against a privileged dind
     # sidecar. The podSpecPatch is deeply nested, so build it as a dict and emit
@@ -330,6 +338,12 @@ def _gke_kind_step() -> str:
         # parked TW integration-test-kind step) once it is. Paired with
         # GKE_KIND_ENABLED so enabling doesn't immediately gate merges.
         f"    soft_fail: true\n"
+        # Wait for the prod-ECR mirror: the step pulls kind-ci:latest, whose
+        # baked module cache is built from the go.mod/go.sum of the commit that
+        # produced it. Without this the step can start before the mirror lands
+        # and pull the previous image, which fails under GOPROXY=off on any
+        # commit that changed dependencies.
+        f'    depends_on: "mirror-kind-ci"\n'
         f"    parallelism: {GKE_KIND_PARALLELISM}\n"
         f"    agents:\n"
         f'      queue: "{GKE_QUEUE}"\n'

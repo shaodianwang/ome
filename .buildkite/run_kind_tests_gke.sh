@@ -36,6 +36,35 @@ export GOFLAGS="${GOFLAGS:--mod=mod}"
 export GOPROXY=off
 export CARGO_NET_OFFLINE=true
 
+# Module-cache preflight. The kind-ci image bakes its module cache from the
+# go.mod/go.sum present when the IMAGE was built, so a commit that changes
+# dependencies needs a rebuilt image. With GOPROXY=off the mismatch otherwise
+# surfaces as "module lookup disabled by GOPROXY=off" from deep inside a package
+# build, minutes in and after a kind cluster has been booted. Check it here, in
+# seconds, and say what is actually wrong.
+#
+# Publishing kind-ci is main-only, so a PR that changes go.mod/go.sum cannot
+# have a matching image until it merges; that case is reported as a skip rather
+# than a failure, because no change to the branch can satisfy it.
+echo "--- preflight: baked module cache covers this commit's go.sum ---"
+if ! missing="$(go mod download all 2>&1)"; then
+  echo "$missing" >&2
+  echo "" >&2
+  echo "The kind-ci image's baked module cache does not cover this commit's" >&2
+  echo "dependencies. Rebuild + mirror kind-ci from a commit whose go.mod/go.sum" >&2
+  echo "match this one, then re-run." >&2
+  case "${BUILDKITE_BRANCH:-}" in
+    main) exit 1 ;;
+    *)
+      echo "" >&2
+      echo "SKIP: kind-ci publishes on main only, so this branch cannot have a" >&2
+      echo "  matching image yet. Coverage returns once the dependency change" >&2
+      echo "  merges and kind-ci is rebuilt." >&2
+      exit 0
+      ;;
+  esac
+fi
+
 cleanup_ome_clusters() {
   command -v kind >/dev/null 2>&1 || return 0
   kind get clusters 2>/dev/null | while read -r c; do
