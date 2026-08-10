@@ -174,9 +174,15 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ir := freshInferenceReplica(Default, ns.Name, name, v1beta1.EngineComponent)
-		v1Rev = ir.Status.CurrentRevision
-		Expect(v1Rev).NotTo(BeEmpty())
+		// CurrentRevision is promoted on a later reconcile than the one that
+		// flips the Instance to Ready, so poll for it: a bare read here races
+		// the promotion and observes the empty pre-promotion value.
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			v1Rev = ir.Status.CurrentRevision
+			g.Expect(v1Rev).NotTo(BeEmpty(),
+				"IR CurrentRevision must be promoted once the gang is Ready")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture the source gang UID set at Ready. Rebuilt per poll so a
 		// failed early attempt can't leave stale entries behind.

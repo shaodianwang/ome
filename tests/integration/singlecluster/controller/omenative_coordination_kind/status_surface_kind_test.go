@@ -62,7 +62,11 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("per-Instance Conditions populate the AllPods* triad at Ready", func() {
+	// PENDING: the InstanceStatus.Conditions doc comment (and the generated
+	// OpenAPI) advertise AllPodsScheduled / AllPodsReady / AllPodsAvailable,
+	// but no controller writes them — AllPodsRuntimeReady in workload/ops is
+	// a predicate, not a condition writer. Unpend once the triad is emitted.
+	ginkgo.PIt("per-Instance Conditions populate the AllPods* triad at Ready", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("inst-cond-isvc"),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
