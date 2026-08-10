@@ -128,12 +128,15 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	return Execute(ctx, deps, input, plan, target, snapshot, decision)
 }
 
-// Execute applies the Decision: the op-pass action loop, then the
-// escalation pass when Decision.Escalate allows it. Escalation runs on
-// every non-error action-loop return — including the in-flight
-// early-requeue returns — so a wedged surge or gang is escalated while
-// its op keeps requeueing; an op-pass error requeues with backoff and
-// the next reconcile escalates from fresh evidence.
+// Execute applies the Decision: the op-pass action loop, then — when
+// Decision.Escalate allows it — the escalation pass and the RetryBlock
+// supersede-prune. Escalation runs on every non-error action-loop
+// return — including the in-flight early-requeue returns — so a wedged
+// surge or gang is escalated while its op keeps requeueing; an op-pass
+// error requeues with backoff and the next reconcile escalates from
+// fresh evidence. The supersede-prune shares the Escalate gate (both
+// are end-of-pass bookkeeping suspended while paused, and Teardown
+// never reaches Execute).
 func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
 	res, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
 	if err != nil || !d.Escalate {
@@ -141,6 +144,9 @@ func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan Componen
 	}
 	if eerr := escalateFromEvidence(ctx, deps, input, plan, target, snapshot); eerr != nil {
 		return ctrl.Result{}, eerr
+	}
+	if perr := pruneSupersededRetryBlocks(ctx, input, target); perr != nil {
+		return ctrl.Result{}, perr
 	}
 	return res, nil
 }

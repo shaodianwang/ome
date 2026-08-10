@@ -18,6 +18,13 @@ func EscalateFromEvidenceForTest(ctx context.Context, deps Deps, input Reconcile
 	return escalateFromEvidence(ctx, deps, input, plan, target, snapshot)
 }
 
+// PruneSupersededRetryBlocksForTest invokes the RetryBlock
+// supersede-prune directly. target is the reconcile's roll target
+// ControllerRevision (nil is valid — no roll-target revision to keep).
+func PruneSupersededRetryBlocksForTest(ctx context.Context, input ReconcileInput, target *appsv1.ControllerRevision) error {
+	return pruneSupersededRetryBlocks(ctx, input, target)
+}
+
 // SnapshotWithPodsForTest returns a snapshot whose pod buckets are
 // pre-materialized for both read sources, so tests supply the bucketed
 // pods without a client.

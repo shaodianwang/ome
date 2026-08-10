@@ -67,6 +67,19 @@ const (
 	// through ReconcileInput.WarnRetryHeld.
 	EventReasonRetryHeld EventReason = "RetryHeld"
 
+	// EventReasonRetryBlockReleased fires when the operator release
+	// annotation (ome.io/release-held-revision) removes a Held
+	// RetryBlock — the manual exit from the terminal Held state. Names
+	// the released revision and that the removal was operator-requested.
+	EventReasonRetryBlockReleased EventReason = "RetryBlockReleased"
+
+	// EventReasonRetryBlockReleaseSkipped fires when the release
+	// annotation names no releasable block — no RetryBlock exists for
+	// the requested revision, or the matched block is not State=Held.
+	// The annotation is still consumed; the event explains why nothing
+	// changed.
+	EventReasonRetryBlockReleaseSkipped EventReason = "RetryBlockReleaseSkipped"
+
 	// EventReasonPodForceDeleted fires when the Delete op's escalation
 	// force-deletes (grace 0, UID-preconditioned) a Terminating pod
 	// overdue past its own deletion deadline on a node that provably

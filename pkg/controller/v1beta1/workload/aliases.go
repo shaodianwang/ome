@@ -124,6 +124,8 @@ const (
 	EventReasonAutoMigrationCapReached       = types.EventReasonAutoMigrationCapReached
 	EventReasonInstanceFailed                = types.EventReasonInstanceFailed
 	EventReasonRetryHeld                     = types.EventReasonRetryHeld
+	EventReasonRetryBlockReleased            = types.EventReasonRetryBlockReleased
+	EventReasonRetryBlockReleaseSkipped      = types.EventReasonRetryBlockReleaseSkipped
 	EventReasonPodForceDeleted               = types.EventReasonPodForceDeleted
 	EventReasonPodDeleteBlockedByFinalizer   = types.EventReasonPodDeleteBlockedByFinalizer
 	EventReasonMigrationRequestAccepted      = types.EventReasonMigrationRequestAccepted

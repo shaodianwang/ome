@@ -264,6 +264,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// failing the reconcile.
 	parent := r.resolveParent(ctx, ir)
 
+	// Operator release mailbox for Held RetryBlocks. Consumed before the
+	// workload input is built so this pass's ObservedState already
+	// excludes a just-released block.
+	if requeue, rerr := r.consumeReleaseHeldRequest(ctx, log, ir, parent); rerr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: consume release-held request: %w", rerr)
+	} else if requeue {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Resolve the same-target update retry policy ONCE per reconcile from
 	// the operator lifecycle config. nil (absent/invalid config) fails
 	// safe: the workload layer Holds on the first same-target failure.
