@@ -202,6 +202,16 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 				continue
 			}
 			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash, multiPod); err != nil {
+				// The namespace is being torn down (common during test
+				// teardown and any namespace-scoped delete): the create is
+				// forbidden and will never succeed, and the ISVC is going
+				// away with the namespace. Stop coordinating cleanly rather
+				// than logging an error and entering retry backoff.
+				if isNamespaceTerminating(err) {
+					logger.V(1).Info("namespace terminating; skipping per-revision service ensure",
+						"component", c, "revisionHash", hash)
+					return result, nil
+				}
 				return nil, fmt.Errorf("ensure per-revision service for %s/%s: %w", c, hash, err)
 			}
 			result.PerRevisionServicesEnsured++

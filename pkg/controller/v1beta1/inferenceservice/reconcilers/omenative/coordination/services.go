@@ -261,6 +261,14 @@ func ensureService(
 	return nil
 }
 
+// isNamespaceTerminating reports whether err is the apiserver's rejection of a
+// create because the target namespace is being deleted. Nothing new can be
+// created in a terminating namespace, and the ISVC is going away with it, so
+// coordination treats this as a benign stop rather than a retryable error.
+func isNamespaceTerminating(err error) bool {
+	return apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause)
+}
+
 // PerRevisionServicesConverged reports whether the per-revision Service
 // ensure + GC can be skipped this reconcile because the live revision-hash
 // set already matches the set last recorded on Status.Components.<c>.Traffic.
