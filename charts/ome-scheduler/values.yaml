@@ -126,6 +126,27 @@ scheduler:
       type: ClusterIP
       port: 10259
       annotations: {}
+    # Scrape via prometheus-operator's ServiceMonitor CRD, the mechanism the
+    # ome-resources chart already uses for the controller-manager. On a
+    # Prometheus-Operator stack this — not the pod annotations below — is what
+    # creates the scrape target. Off by default: it requires the CRD.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      # Extra labels merged onto the ServiceMonitor, e.g. to match the operator's
+      # serviceMonitorSelector.
+      additionalLabels: {}
+      # TLS for the HTTPS metrics port. The scheduler serves a self-signed cert by
+      # default, so verification is skipped unless a CA is supplied here.
+      tlsConfig: {}
+      #  ca:
+      #    secret:
+      #      name: scrape-ca
+      #      key: ca.crt
+      #  serverName: ome-scheduler-metrics.ome.svc
+      relabelings: []
+      metricRelabelings: []
 
   probes:
     liveness:
