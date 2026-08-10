@@ -370,7 +370,13 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 				originalCR, cs.Lifecycle.UpdateRevision)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("verify the new CR's controller OwnerReference points at the new ISVC's UID")
+		ginkgo.By("verify the new CR's owner chain resolves to the recreated ISVC")
+		// The IR-managed path makes the InferenceReplica the CR's
+		// controller-owner (the parent ISVC's UID is folded into the revision
+		// hash instead, so CR names stay identical across paths). Ownership is
+		// therefore transitive: CR -> IR -> ISVC. Walking the whole chain is
+		// what proves no foreign adoption — a CR left by the deleted ISVC
+		// hangs off that generation's IR, so any stale link fails here.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "recreate-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
@@ -380,16 +386,19 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: cs.Lifecycle.UpdateRevision,
 			}, cr)).To(Succeed())
-			var ownerUID string
-			for _, ref := range cr.OwnerReferences {
-				if ref.Controller != nil && *ref.Controller {
-					ownerUID = string(ref.UID)
-					break
-				}
-			}
-			g.Expect(ownerUID).To(Equal(newUID),
-				"new CR controller-owner UID must be the recreated ISVC's UID; got owner=%q, want %q",
-				ownerUID, newUID)
+
+			ir := freshInferenceReplica(g, ns.Name, "recreate-isvc", v1beta1.EngineComponent)
+			crOwner := metav1.GetControllerOf(cr)
+			g.Expect(crOwner).NotTo(BeNil(), "new CR must carry a controller OwnerReference")
+			g.Expect(string(crOwner.UID)).To(Equal(string(ir.UID)),
+				"new CR controller-owner must be the live engine InferenceReplica; got %q, want %q",
+				crOwner.UID, ir.UID)
+
+			irOwner := metav1.GetControllerOf(ir)
+			g.Expect(irOwner).NotTo(BeNil(), "IR must carry a controller OwnerReference")
+			g.Expect(string(irOwner.UID)).To(Equal(newUID),
+				"IR controller-owner must be the recreated ISVC's UID; got %q, want %q",
+				irOwner.UID, newUID)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

@@ -4,9 +4,9 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -25,13 +25,9 @@ import (
 // Invariants asserted:
 //   - instances 1,2 reach Ready WITHOUT waiting on instance-0's rollout
 //     to finish.
-//   - instance-0 is never duplicated (its index-0 pod identity stays a
-//     single live pod; no stray pod at a phantom ordinal).
+//   - instance-0 is never duplicated (exactly one live pod under index 0;
+//     no stray pod at a phantom ordinal).
 //   - the whole Component converges to 3 Ready instances on v2.
-//
-// NOTE: authored to match the existing KIND spec patterns but UNRUN —
-// this environment has no Docker, so `make test-kind` could not execute
-// it. Run locally before relying on it as a regression guard.
 var _ = ginkgo.Describe("permutation — scale-out new indices during in-flight rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -114,27 +110,38 @@ var _ = ginkgo.Describe("permutation — scale-out new indices during in-flight 
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Pod-level invariant: exactly 3 live engine pods (one per Ready
-		// instance) and instance-0's canonical index-0 pod is present.
+		// Pod-level invariant: exactly one live pod per instance index.
 		// A stale-ordinal DUPLICATE of instance-0 — one of the two
-		// corruption modes the surge-free bypass must avoid — would push
-		// the live count to 4.
+		// corruption modes the surge-free bypass must avoid — shows up as a
+		// second live pod under index 0, and pushes the total to 4.
+		//
+		// Assert per-index occupancy rather than a literal pod name: which
+		// of the two naming slots an instance occupies is surge state, not
+		// an invariant. SurgeThenDrain alternates the ordinal (the surge pod
+		// is created at 1-ActiveOrdinal and promotion moves ActiveOrdinal to
+		// it), so instance-0 legitimately settles at ordinal 1 after its
+		// roll while the fresh surge-free indices sit at ordinal 0.
 		Eventually(func(g Gomega) {
 			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "perm-scale-rollout")
 			g.Expect(err).NotTo(HaveOccurred())
-			alive := 0
+			live := []*corev1.Pod{}
 			for _, p := range snap.ByComponent[v1beta1.EngineComponent] {
 				if p.DeletionTimestamp != nil {
 					continue
 				}
-				alive++
+				live = append(live, p)
 			}
-			g.Expect(alive).To(Equal(3),
-				"expected exactly 3 alive engine pods post-converge, got %d (a 4th = stale-ordinal duplicate of instance-0)", alive)
-			pod0 := &corev1.Pod{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
-				Namespace: ns.Name, Name: "perm-scale-rollout-engine-0-default-0",
-			}, pod0)).To(Succeed())
+			g.Expect(live).To(HaveLen(3),
+				"expected exactly 3 alive engine pods post-converge, got %d (a 4th = stale-ordinal duplicate of instance-0)", len(live))
+			byIdx := query.BucketPodsByInstanceIdx(live)
+			for _, idx := range []int32{0, 1, 2} {
+				names := []string{}
+				for _, p := range byIdx[idx] {
+					names = append(names, p.Name)
+				}
+				g.Expect(names).To(HaveLen(1),
+					"instance %d must have exactly one live pod (two = stale-ordinal duplicate); got %v", idx, names)
+			}
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })
