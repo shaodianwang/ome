@@ -196,8 +196,8 @@ var (
 	// revision (full ControllerRevision name, or the bare revision hash)
 	// and the IR controller removes that block when it is State=Held.
 	// Mailbox semantics — the controller answers the request (release, or
-	// an explanatory no-op event) and deletes the annotation, so on-call
-	// can lift a Held revision with one `kubectl annotate` instead of a
+	// an explanatory no-op event) and deletes the annotation, so an
+	// operator can lift a Held revision with one `kubectl annotate` instead of a
 	// status-subresource patch.
 	ReleaseHeldRevisionAnnotationKey = OMEAPIGroupName + "/release-held-revision"
 )
