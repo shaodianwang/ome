@@ -20,6 +20,11 @@ data:
       resourceNamespace: {{ .Release.Namespace }}
     profiles:
       - schedulerName: {{ .Values.scheduler.name }}
+        {{- with .Values.scheduler.percentageOfNodesToScore }}
+        # Profile-scoped: only workloads that opt into this scheduler pay for the
+        # exhaustive feasibility scan that OMEGangPack's domain score needs.
+        percentageOfNodesToScore: {{ . }}
+        {{- end }}
         plugins:
           multiPoint:
             enabled:

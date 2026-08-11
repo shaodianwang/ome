@@ -50,6 +50,11 @@
             "standaloneDomainPacking": {"type": "boolean"}
           }
         },
+        "percentageOfNodesToScore": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100
+        },
         "omeGangPack": {
           "type": "object",
           "required": ["scoreWeight"],

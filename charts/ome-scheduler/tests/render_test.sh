@@ -41,6 +41,23 @@ assert_contains '              podGroupTopologyKeyAnnotation: "ome.io/topology-k
 assert_contains '              unsupportedPlacementGroupLabel: "ome.io/placement-group"'
 assert_contains '              podGroupSyncTimeoutSeconds: 30'
 assert_contains '              gcIntervalSeconds: 60'
+assert_contains '              standaloneDomainPacking: true'
+
+# Node sampling is profile-scoped and opt-in: absent by default (upstream's
+# adaptive band), rendered as a sibling of schedulerName when configured.
+assert_absent 'percentageOfNodesToScore'
+exhaustive="$("${helm_bin}" template ome-scheduler "${chart_dir}" \
+  --kube-version "${kube_version}" \
+  --set scheduler.percentageOfNodesToScore=100)"
+grep -Fq '        percentageOfNodesToScore: 100' <<<"${exhaustive}" \
+  || fail "configured percentageOfNodesToScore was not rendered into the profile"
+for invalid in 0 101; do
+  if "${helm_bin}" template ome-scheduler "${chart_dir}" \
+    --kube-version "${kube_version}" \
+    --set "scheduler.percentageOfNodesToScore=${invalid}" >/dev/null 2>&1; then
+    fail "out-of-range percentageOfNodesToScore ${invalid} unexpectedly passed values schema validation"
+  fi
+done
 
 # Production deployment surface.
 assert_contains 'kind: PodDisruptionBudget'

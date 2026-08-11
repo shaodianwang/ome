@@ -148,6 +148,9 @@ suite still uses the default scheduler and does not duplicate that coverage.
 | `scheduler.plugin.defaultPermitTimeoutSeconds` | `600` | Configured fallback for PodGroups without a timeout. |
 | `scheduler.plugin.podGroupSyncTimeoutSeconds` | `30` | Maximum initial PodGroup cache-sync wait. |
 | `scheduler.plugin.gcIntervalSeconds` | `60` | Pin and reservation reconciliation cadence. |
+| `scheduler.plugin.standaloneDomainPacking` | `true` | Pack standalone whole-node pods into partly-filled domains; inert until `topologyKey` is set. |
+| `scheduler.percentageOfNodesToScore` | unset | Profile-scoped feasibility-scan breadth. Unset keeps upstream's adaptive 5-50% sample; set `100` wherever `standaloneDomainPacking` is active so the domain score sees every free node. |
+| `scheduler.omeGangPack.scoreWeight` | `10` | Weight of the domain-packing score; keep at or above `nodeResourcesFit.scoreWeight`. |
 | `scheduler.nodeResourcesFit.*` | see values | `MostAllocated` score weight and resource weights. |
 | `scheduler.metrics.service.enabled` | `true` | Create the authenticated HTTPS metrics Service. |
 | `scheduler.podDisruptionBudget.*` | enabled / `1` | Keep one scheduler available; `minAvailable` must be lower than replicas. |
