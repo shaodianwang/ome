@@ -275,7 +275,7 @@ func TestWriteAutoscalerStatus_ScaledObjectMirror(t *testing.T) {
 				{
 					Type:    kedav1.ConditionReady,
 					Status:  metav1.ConditionTrue,
-					Reason:  kedav1.ScaledObjectConditionReadySucccesReason,
+					Reason:  kedav1.ScaledObjectConditionReadySuccessReason,
 					Message: kedav1.ScaledObjectConditionReadySuccessMessage,
 				},
 				{

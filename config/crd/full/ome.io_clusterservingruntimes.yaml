@@ -2071,6 +2071,9 @@ spec:
                                     formula:
                                       type: string
                                     metricType:
+                                      enum:
+                                        - AverageValue
+                                        - Value
                                       type: string
                                     target:
                                       type: string
@@ -2081,6 +2084,14 @@ spec:
                               type: integer
                             fallback:
                               properties:
+                                behavior:
+                                  default: static
+                                  enum:
+                                    - static
+                                    - currentReplicas
+                                    - currentReplicasIfHigher
+                                    - currentReplicasIfLower
+                                  type: string
                                 failureThreshold:
                                   format: int32
                                   type: integer
@@ -15510,6 +15521,9 @@ spec:
                                     formula:
                                       type: string
                                     metricType:
+                                      enum:
+                                        - AverageValue
+                                        - Value
                                       type: string
                                     target:
                                       type: string
@@ -15520,6 +15534,14 @@ spec:
                               type: integer
                             fallback:
                               properties:
+                                behavior:
+                                  default: static
+                                  enum:
+                                    - static
+                                    - currentReplicas
+                                    - currentReplicasIfHigher
+                                    - currentReplicasIfLower
+                                  type: string
                                 failureThreshold:
                                   format: int32
                                   type: integer
@@ -28981,6 +29003,9 @@ spec:
                                     formula:
                                       type: string
                                     metricType:
+                                      enum:
+                                        - AverageValue
+                                        - Value
                                       type: string
                                     target:
                                       type: string
@@ -28991,6 +29016,14 @@ spec:
                               type: integer
                             fallback:
                               properties:
+                                behavior:
+                                  default: static
+                                  enum:
+                                    - static
+                                    - currentReplicas
+                                    - currentReplicasIfHigher
+                                    - currentReplicasIfLower
+                                  type: string
                                 failureThreshold:
                                   format: int32
                                   type: integer
