@@ -20,7 +20,7 @@ func TestDeriveISVC(t *testing.T) {
 			Annotations: map[string]string{
 				LocalQueueAnnotation:                "serving-lq",
 				AcceleratorRequirementsAnnotation:   "gpu=gb300",
-				ClusterSelectorAnnotation:           "provider=cw",
+				ClusterSelectorAnnotation:           "provider=cloud-a",
 				constants.RolloutPromoteAnnotation:  "full",
 				constants.RolloutRollbackAnnotation: "true",
 				constants.NetworkVisibility:         "cluster-local", // an ingress override that SHOULD ride along

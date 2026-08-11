@@ -40,7 +40,7 @@ func TestPlacementRelevantClusterChange_ReadyFlip(t *testing.T) {
 // A label change can change which clusters a selector matches and MUST re-enqueue.
 func TestPlacementRelevantClusterChange_LabelChange(t *testing.T) {
 	old := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "region-a"})
-	updated := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "usw2"})
+	updated := wcWithReady(metav1.ConditionTrue, map[string]string{"region": "region-b"})
 	assert.True(t, placementRelevantClusterChange.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: updated}))
 }
 

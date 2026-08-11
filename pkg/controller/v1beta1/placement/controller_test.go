@@ -155,7 +155,7 @@ func cpStatusURL(t *testing.T, cp client.Client) *apis.URL {
 func TestReconcile_NoCandidate(t *testing.T) {
 	s := testScheme(t)
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}
-	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"), readyWC("cw", map[string]string{"gpu": "h100"}))
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"), readyWC("cloud-a", map[string]string{"gpu": "h100"}))
 	_, err := r.Reconcile(context.Background(), req())
 	require.NoError(t, err)
 	p := cpPlacement(t, cp)
@@ -1131,7 +1131,7 @@ func TestIsvcsForClusterChange_EnqueuesStatusReferencedClusterOnLabelLoss(t *tes
 // declaring ISVCs (and leaves the rest unindexed).
 func TestPlacementEligibleIndexExtractor(t *testing.T) {
 	withAccel := srcISVCNamed("a", map[string]string{AcceleratorRequirementsAnnotation: "gpu=gb300"})
-	withSelector := srcISVCNamed("b", map[string]string{ClusterSelectorAnnotation: "provider=cw"})
+	withSelector := srcISVCNamed("b", map[string]string{ClusterSelectorAnnotation: "provider=cloud-a"})
 	withNone := srcISVCNamed("c", nil)
 
 	assert.Equal(t, []string{placementEligibleIndexValue}, placementEligibleIndexExtractor(withAccel))

@@ -21,7 +21,7 @@ const (
 	AcceleratorRequirementsAnnotation = "ome.io/accelerator-requirements"
 
 	// ClusterSelectorAnnotation holds an optional extra label-selector string
-	// (e.g. "provider=cw") AND-ed onto the accelerator requirements to further
+	// (e.g. "provider=cloud-a") AND-ed onto the accelerator requirements to further
 	// narrow candidate clusters (operator-imposed routing). It does NOT, on its
 	// own, make an ISVC eligible for fleet-wide fan-out.
 	ClusterSelectorAnnotation = "ome.io/cluster-selector"
