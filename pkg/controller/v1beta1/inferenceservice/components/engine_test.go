@@ -1185,7 +1185,7 @@ func TestEngineReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 // TestEngineReconcileOMENativeSubresources_ExtraEndpoints pins that the
 // prometheus.ome.io/extra-endpoints annotation appends additional scrape
 // endpoints to the OMENative PodMonitor, after the default /metrics endpoint.
-// Mirrors the SMG HTTP-router pod: a "metrics" port scraped at /metrics plus an
+// Mirrors an HTTP-router pod: a "metrics" port scraped at /metrics plus an
 // "http" port whose /engine_metrics surface is declared via the annotation.
 func TestEngineReconcileOMENativeSubresources_ExtraEndpoints(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)

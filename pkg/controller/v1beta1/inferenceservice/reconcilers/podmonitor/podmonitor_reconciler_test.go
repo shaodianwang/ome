@@ -208,7 +208,7 @@ func TestPodMonitorReconciler_Create_RouterWithMetricsPort(t *testing.T) {
 	assert.Equal(t, 1, cc.createCalls)
 }
 
-// TestPodMonitorReconciler_Create_ExtraEndpoints mirrors the SMG HTTP-router
+// TestPodMonitorReconciler_Create_ExtraEndpoints mirrors an HTTP-router
 // pod: a "metrics" port scraped at /metrics plus a second "http" port whose
 // /engine_metrics surface is declared via the extra-endpoints annotation. The
 // built PodMonitor must carry the default endpoint first, then the extra.

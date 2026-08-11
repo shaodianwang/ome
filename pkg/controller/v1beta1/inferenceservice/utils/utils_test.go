@@ -1096,7 +1096,7 @@ func TestMergeEngineSpec(t *testing.T) {
 }
 
 // TestMergeRunnerName_RestoresFromRuntimeWhenISVCNameEmpty pins the
-// fix for real-cluster G-2: when a user patches only the runner image
+// fix: when a user patches only the runner image
 // (kubectl-defaulted zero values for unmentioned fields produce
 // `runner: {image: ..., name: "", resources: {}}` on the ISVC), the
 // merged runner MUST keep the runtime's container name. Otherwise the
