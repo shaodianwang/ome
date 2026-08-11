@@ -37,6 +37,6 @@ func TestDeleteScaledObjectIfExists_ToleratesAbsentKedaCRD(t *testing.T) {
 		Build()
 
 	require.NoError(t,
-		deleteScaledObjectIfExists(context.Background(), c, "inf-prod", "dummy-engine"),
+		deleteScaledObjectIfExists(context.Background(), c, "test-ns", "dummy-engine"),
 		"ScaledObject cleanup must be a no-op when the KEDA CRD is absent")
 }

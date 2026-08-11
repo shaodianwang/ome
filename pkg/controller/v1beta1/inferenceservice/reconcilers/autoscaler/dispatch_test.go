@@ -20,7 +20,7 @@ import (
 )
 
 // dispatchScheme registers autoscalingv2 + kedav1 so the fake client can
-// store both kinds. Mirrors the manager-startup scheme (Q6: KEDA is a
+// store both kinds. Mirrors the manager-startup scheme (KEDA is a
 // hard dependency; always registered).
 func dispatchScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -107,8 +107,8 @@ func kedaAutoscalerBlock() *v1beta1.KedaAutoscaler {
 // TestDispatchAutoscaler_Branches pins every Class branch — hpa, keda,
 // external, none — both in the "no pre-existing autoscaler" steady state
 // and with a pre-existing OME-managed sibling that must be deleted. This
-// is the load-bearing test for Q5 (none + external are status-field
-// twins, share dispatch) and Q7 (always-on; even when class=none we
+// is the load-bearing test for the twin rule (none + external are status-field
+// twins, share dispatch) and the always-on rule (even when class=none we
 // still run the reconcile to ensure no stale OME-managed object lingers).
 func TestDispatchAutoscaler_Branches(t *testing.T) {
 	const (
@@ -157,14 +157,14 @@ func TestDispatchAutoscaler_Branches(t *testing.T) {
 			wantSOExists:  true,
 		},
 		{
-			name:          "class=external, preexisting HPA → HPA deleted, no SO (Q5 twin)",
+			name:          "class=external, preexisting HPA → HPA deleted, no SO (twin)",
 			autoscaler:    &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal},
 			preExistHPA:   true,
 			wantHPAExists: false,
 			wantSOExists:  false,
 		},
 		{
-			name:          "class=external, preexisting SO → SO deleted, no HPA (Q5 twin)",
+			name:          "class=external, preexisting SO → SO deleted, no HPA (twin)",
 			autoscaler:    &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal},
 			preExistSO:    true,
 			wantHPAExists: false,
@@ -179,7 +179,7 @@ func TestDispatchAutoscaler_Branches(t *testing.T) {
 			wantSOExists:  false,
 		},
 		{
-			name:          "class=none, preexisting both → both deleted (Q5 twin behaves identically to external)",
+			name:          "class=none, preexisting both → both deleted (behaves identically to external)",
 			autoscaler:    &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone},
 			preExistHPA:   true,
 			preExistSO:    true,
