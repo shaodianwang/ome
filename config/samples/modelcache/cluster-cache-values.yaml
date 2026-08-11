@@ -1,7 +1,0 @@
-ome:
-  modelCache:
-    provider: cluster_cache
-    endpoint: http://cluster-cache.ome.svc.cluster.local:10090
-    options:
-      timeout: 5m
-      operation_retention: 10m
