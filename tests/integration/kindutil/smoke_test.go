@@ -15,7 +15,7 @@ import (
 )
 
 // TestKindSmoke is the foundation acceptance test for the kindutil
-// package. It validates the P1 acceptance criteria:
+// package. It validates the acceptance criteria:
 //
 //   - kindutil.RunKindSuite brings up a KIND cluster end-to-end
 //   - core API (namespaces, pods) responds against the cluster

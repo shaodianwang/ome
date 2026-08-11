@@ -38,9 +38,8 @@ import (
 // it stands up ONE envtest apiserver, wires the Kueue admission stack via
 // StartKueue, applies an admissible quota via ApplyKueueQuota, and asserts
 // a queue-labeled pod is GATED by the pod webhook then UNGATED once the
-// scheduler admits it — with no kubelet. This mirrors the (now-deleted)
-// kueuespike de-risking spike and exists so a Kueue bump that breaks the
-// wiring fails loudly here.
+// scheduler admits it — with no kubelet. It exists so a Kueue bump that
+// breaks the wiring fails loudly here.
 //
 // Run:
 //

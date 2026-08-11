@@ -67,7 +67,7 @@ func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config,
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil, fmt.Errorf("%w: docker CLI not on $PATH. "+
-			"Install Colima (`brew install colima docker && colima start --cpu 4 --memory 8`) or another runtime per kind-README.md §5.1",
+			"Install Colima (`brew install colima docker && colima start --cpu 4 --memory 8`) or another Docker-compatible runtime",
 			ErrDockerMissing)
 	}
 
@@ -226,7 +226,7 @@ var ErrKindMissing = errSentinel("kind binary not found on $PATH")
 
 // ErrDockerMissing is returned by EnsureCluster when the docker CLI
 // (or compatible client) isn't on $PATH. Container-runtime backends
-// vary on macOS — see kind-README.md §5.1.
+// vary on macOS.
 var ErrDockerMissing = errSentinel("docker CLI not found on $PATH")
 
 // errSentinel is a string-typed error so package-level errors satisfy

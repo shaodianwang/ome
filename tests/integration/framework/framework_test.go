@@ -58,13 +58,13 @@ var _ = ginkgo.Describe("Framework SetupClient + NewSuite", func() {
 		ginkgo.DeferCleanup(func() { _ = s.Fwk.Teardown() })
 
 		ginkgo.By("creating a core type — proves clientgo + corev1 schemes are wired")
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "p1-1b-smoke"}}
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "fw-smoke"}}
 		Expect(s.Client.Create(context.Background(), ns)).To(Succeed())
 
 		ginkgo.By("creating an OME type — proves v1beta1 scheme + envtest CRD install landed on the apiserver")
 		storageURI := "pvc://my-pvc/some/path"
 		bm := &v1beta1.BaseModel{
-			ObjectMeta: metav1.ObjectMeta{Name: "smoke", Namespace: "p1-1b-smoke"},
+			ObjectMeta: metav1.ObjectMeta{Name: "smoke", Namespace: "fw-smoke"},
 			Spec: v1beta1.BaseModelSpec{
 				Storage: &v1beta1.StorageSpec{StorageUri: &storageURI},
 			},
@@ -112,7 +112,7 @@ var _ = ginkgo.Describe("Framework StartManager / StopManager", func() {
 				Named("framework-test-namespace-counter").
 				For(&corev1.Namespace{}).
 				Complete(reconcile.Func(func(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-					if req.Name == "p1-1c-target" {
+					if req.Name == "fw-target" {
 						observed = true
 					}
 					return ctrl.Result{}, nil
@@ -122,7 +122,7 @@ var _ = ginkgo.Describe("Framework StartManager / StopManager", func() {
 		ginkgo.DeferCleanup(func() { _ = s.Fwk.StopManager(s.Ctx) })
 
 		Expect(s.Client.Create(s.Ctx, &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{Name: "p1-1c-target"},
+			ObjectMeta: metav1.ObjectMeta{Name: "fw-target"},
 		})).To(Succeed())
 
 		Eventually(func() bool { return observed }).WithTimeout(util.MediumTimeout).

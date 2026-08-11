@@ -15,7 +15,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-Kueue P1 smoke: prove the member-side admission chain end to end on a
+// Real-Kueue smoke: prove the member-side admission chain end to end on a
 // SINGLE member (member1), with no control-plane fan-out yet. This is the real
 // replacement for the sim-path admitDerivedOn fake — instead of writing
 // InstanceStatus.Admitted=true directly, we let the member's running managers
@@ -29,7 +29,7 @@ import (
 //	  → IR controller flips InstanceStatus.Admitted = true
 //
 // Skipped unless OME_MC_REALKUEUE=1 (members are bare otherwise).
-var _ = ginkgo.Describe("Real-Kueue member admission (P1 smoke)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Real-Kueue member admission (smoke)", ginkgo.Ordered, func() {
 	const queueCPURequest = "500m"
 
 	ginkgo.BeforeEach(func() {

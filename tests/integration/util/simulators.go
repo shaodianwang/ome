@@ -173,7 +173,7 @@ func (s *PodKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 	//
 	// Exception: an explicit long grace (>30s, above the standard
 	// pod-template default) signals a test that wants to observe the
-	// terminating window — e.g., DRAIN-1 asserting AvailableReplicas
+	// terminating window — e.g., a drain spec asserting AvailableReplicas
 	// excludes terminating pods. Skip the force-delete in that case so
 	// the EndpointSlice simulator gets a chance to publish
 	// Terminating=true and the status counter can react. The pod stays

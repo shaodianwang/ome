@@ -33,7 +33,7 @@ import (
 // the spec has wound down (e.g., during namespace teardown). Without this
 // guard, a sampler whose sampleFn was mid-call when stop() ran would still
 // complete the apiserver round-trip and assert against the post-teardown
-// state — see the 2026-05-30 sampler-goroutine-leak bug report.
+// state.
 func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval time.Duration, sampleFn func(g gomega.Gomega)) int {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -78,9 +78,7 @@ func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval tim
 // mid-apiserver-call cannot leak past the spec boundary. The previous
 // implementation timed out after 2*interval and returned to the caller,
 // leaving a live goroutine that would observe namespace-teardown state and
-// queue a gomega.Fail against whichever spec was active next — see the
-// 2026-05-30 sampler-goroutine-leak bug report attributing a
-// recreate_pod_kind serving-floor failure to a later InPlaceOnly spec.
+// queue a gomega.Fail against whichever spec was active next.
 //
 // Risk: a sampleFn that blocks forever (e.g., an apiserver call with no
 // timeout) will now hang Stop forever. Mitigation: pass a ctx that the

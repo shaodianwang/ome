@@ -45,9 +45,9 @@ var _ = ginkgo.AfterSuite(func() {
 
 var _ = ginkgo.Describe("util.CreateNamespaceFromPrefix", func() {
 	ginkgo.It("two consecutive calls produce different names with the same prefix", func() {
-		a, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "p1-2-uniq-")
+		a, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "ns-uniq-")
 		Expect(err).NotTo(HaveOccurred())
-		b, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "p1-2-uniq-")
+		b, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "ns-uniq-")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(a.Name).NotTo(Equal(b.Name), "GenerateName must produce unique names")
 
@@ -84,7 +84,7 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 var _ = ginkgo.Describe("util.DeleteNamespace", func() {
 
 	ginkgo.It("runs registered cleanups with the right namespace argument", func() {
-		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "p1-2-cleanup-")
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "ns-cleanup-")
 		Expect(err).NotTo(HaveOccurred())
 
 		var observed atomic.Value
@@ -101,10 +101,10 @@ var _ = ginkgo.Describe("util.DeleteNamespace", func() {
 	})
 
 	ginkgo.It("propagates a CleanupFunc error via errors.Is", func() {
-		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "p1-2-cleanuperr-")
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, suiteClient, "ns-cleanuperr-")
 		Expect(err).NotTo(HaveOccurred())
 
-		target := errors.New("p1-2-cleanuperr-injected")
+		target := errors.New("ns-cleanuperr-injected")
 		util.RegisterCleanup(func(ctx context.Context, c client.Client, namespace string) error {
 			if namespace == ns.Name {
 				return target

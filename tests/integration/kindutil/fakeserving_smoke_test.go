@@ -24,7 +24,7 @@ import (
 //     locally and reaches Ready (kubelet's ContainersReady)
 //  4. The pod's /healthz responds 200
 //
-// Together with TestKindSmoke this closes the P1 acceptance
+// Together with TestKindSmoke this closes the acceptance
 // criterion "fake-serving image builds + kind-loads successfully."
 //
 // Skipped automatically when docker isn't available so the test file

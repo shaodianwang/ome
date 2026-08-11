@@ -47,7 +47,7 @@ var _ = ginkgo.Describe("components.SetupBaseModel", func() {
 		Expect(s.Fwk.StartManager(s.Ctx, s.Cfg, mgrSetup)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = s.Fwk.StopManager(s.Ctx) })
 
-		ns, err := util.CreateNamespaceFromPrefix(s.Ctx, s.Client, "p1-4-")
+		ns, err := util.CreateNamespaceFromPrefix(s.Ctx, s.Client, "bm-")
 		Expect(err).NotTo(HaveOccurred())
 
 		bm := v1beta1testing.MakeBaseModel("llama-7b", ns.Name).
@@ -79,7 +79,7 @@ var _ = ginkgo.Describe("components.SetupBaseModel", func() {
 		Expect(s.Fwk.StartManager(s.Ctx, s.Cfg, mgrSetup)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = s.Fwk.StopManager(s.Ctx) })
 
-		ns, err := util.CreateNamespaceFromPrefix(s.Ctx, s.Client, "p1-4-noimage-")
+		ns, err := util.CreateNamespaceFromPrefix(s.Ctx, s.Client, "bm-noimage-")
 		Expect(err).NotTo(HaveOccurred())
 
 		ginkgo.By("pre-binding a PVC so the reconciler reaches the image-config check")
