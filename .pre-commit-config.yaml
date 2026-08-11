@@ -81,7 +81,7 @@ repos:
       - id: helm-template
         name: helm template
         description: Validate Helm chart rendering
-        entry: bash -c 'for chart in charts/*/; do helm template test "$chart" --debug || exit 1; done'
+        entry: bash -c 'for chart in charts/*/; do if [ -f "$chart/ci/pre-commit-values.yaml" ]; then helm template test "$chart" -f "$chart/ci/pre-commit-values.yaml" --debug || exit 1; else helm template test "$chart" --debug || exit 1; fi; done'
         language: system
         always_run: true
         pass_filenames: false

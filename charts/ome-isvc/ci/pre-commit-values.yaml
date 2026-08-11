@@ -1,0 +1,13 @@
+# Values for chart-render validation (pre-commit helm-template hook).
+# The chart deliberately requires tenants to set
+# deployments[].modelRef.name — default values refuse to render so a
+# bare install can't create an ISVC pointing at nothing. Rendering
+# checks therefore need a minimal valid deployment; everything else
+# uses chart defaults.
+deployments:
+  - name: render-check
+    servingMode: standalone
+    engine:
+      replicas: { min: 1, max: 1 }
+    modelRef:
+      name: render-check-model
