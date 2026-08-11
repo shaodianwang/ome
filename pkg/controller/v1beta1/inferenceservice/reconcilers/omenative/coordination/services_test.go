@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -9,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -33,7 +35,7 @@ func TestPerRevisionHeadlessServiceName(t *testing.T) {
 
 func TestBuildPerRevisionRoutingService_Properties(t *testing.T) {
 	isvc := testISVC()
-	svc, err := BuildPerRevisionRoutingService(isvc, v1beta1.EngineComponent, "hash1", false)
+	svc, err := BuildPerRevisionRoutingService(isvc, v1beta1.EngineComponent, "hash1", false, runnerPorts())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,7 +60,7 @@ func TestBuildPerRevisionRoutingService_Properties(t *testing.T) {
 
 func TestBuildPerRevisionRoutingService_MultiPodPinsRank0(t *testing.T) {
 	isvc := testISVC()
-	svc, err := BuildPerRevisionRoutingService(isvc, v1beta1.EngineComponent, "hash1", true)
+	svc, err := BuildPerRevisionRoutingService(isvc, v1beta1.EngineComponent, "hash1", true, runnerPorts())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,21 +105,102 @@ func TestBuildPerRevisionHeadlessService_Properties(t *testing.T) {
 }
 
 func TestBuildPerRevisionRoutingService_RejectsNilISVC(t *testing.T) {
-	if _, err := BuildPerRevisionRoutingService(nil, v1beta1.EngineComponent, "hash", false); err == nil {
+	if _, err := BuildPerRevisionRoutingService(nil, v1beta1.EngineComponent, "hash", false, runnerPorts()); err == nil {
 		t.Errorf("nil ISVC: want error")
 	}
 }
 
 func TestBuildPerRevisionRoutingService_RejectsEmptyHash(t *testing.T) {
-	if _, err := BuildPerRevisionRoutingService(testISVC(), v1beta1.EngineComponent, "", false); err == nil {
+	if _, err := BuildPerRevisionRoutingService(testISVC(), v1beta1.EngineComponent, "", false, runnerPorts()); err == nil {
 		t.Errorf("empty hash: want error")
+	}
+}
+
+// The routing Service must publish the port the runner actually listens on;
+// a Service on any other port black-holes traffic while its EndpointSlice
+// still reports ready.
+func TestBuildPerRevisionRoutingService_PublishesRunnerServingPort(t *testing.T) {
+	cases := []struct {
+		name         string
+		ports        []corev1.ContainerPort
+		wantName     string
+		wantPort     int32
+		wantTarget   intstr.IntOrString
+		wantProtocol corev1.Protocol
+	}{
+		{
+			name: "named http wins over the first declared port",
+			ports: []corev1.ContainerPort{
+				{Name: "dist", ContainerPort: 5000, Protocol: corev1.ProtocolTCP},
+				{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP},
+				{Name: "metrics", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
+			},
+			wantName:     "http",
+			wantPort:     8000,
+			wantTarget:   intstr.FromString("http"),
+			wantProtocol: corev1.ProtocolTCP,
+		},
+		{
+			name:         "no http name falls back to the first declared port",
+			ports:        []corev1.ContainerPort{{Name: "serve", ContainerPort: 30000}, {Name: "dist", ContainerPort: 5000}},
+			wantName:     "serve",
+			wantPort:     30000,
+			wantTarget:   intstr.FromString("serve"),
+			wantProtocol: corev1.ProtocolTCP,
+		},
+		{
+			name:         "unnamed port targets the number",
+			ports:        []corev1.ContainerPort{{ContainerPort: 8000}},
+			wantName:     "",
+			wantPort:     8000,
+			wantTarget:   intstr.FromInt32(8000),
+			wantProtocol: corev1.ProtocolTCP,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, err := BuildPerRevisionRoutingService(testISVC(), v1beta1.EngineComponent, "hash1", false, tc.ports)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(svc.Spec.Ports) != 1 {
+				t.Fatalf("Ports: got %d want 1 (%+v)", len(svc.Spec.Ports), svc.Spec.Ports)
+			}
+			got := svc.Spec.Ports[0]
+			if got.Name != tc.wantName {
+				t.Errorf("Ports[0].Name: got %q want %q", got.Name, tc.wantName)
+			}
+			if got.Port != tc.wantPort {
+				t.Errorf("Ports[0].Port: got %d want %d", got.Port, tc.wantPort)
+			}
+			if got.TargetPort != tc.wantTarget {
+				t.Errorf("Ports[0].TargetPort: got %v want %v", got.TargetPort, tc.wantTarget)
+			}
+			if got.Protocol != tc.wantProtocol {
+				t.Errorf("Ports[0].Protocol: got %q want %q", got.Protocol, tc.wantProtocol)
+			}
+		})
+	}
+}
+
+// A runner that declares no port yields no routing Service rather than one
+// published on an invented number.
+func TestBuildPerRevisionRoutingService_NoDeclaredPort(t *testing.T) {
+	for _, ports := range [][]corev1.ContainerPort{nil, {}} {
+		svc, err := BuildPerRevisionRoutingService(testISVC(), v1beta1.EngineComponent, "hash1", false, ports)
+		if !errors.Is(err, ErrNoServingPort) {
+			t.Errorf("ports=%v: got err %v want ErrNoServingPort", ports, err)
+		}
+		if svc != nil {
+			t.Errorf("ports=%v: got service %+v want nil", ports, svc)
+		}
 	}
 }
 
 func TestEnsurePerRevisionServices_Idempotent(t *testing.T) {
 	c := fakeClient()
 	isvc := testISVC()
-	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false)
+	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false, runnerPorts())
 	if err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
@@ -125,7 +208,7 @@ func TestEnsurePerRevisionServices_Idempotent(t *testing.T) {
 		t.Errorf("names: got %+v", out)
 	}
 	// Second call must not error and must not double-create.
-	out2, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false)
+	out2, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false, runnerPorts())
 	if err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
@@ -141,12 +224,19 @@ func TestEnsurePerRevisionServices_Idempotent(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: out.HeadlessName}, headless); err != nil {
 		t.Errorf("headless service missing: %v", err)
 	}
+	if len(routing.Spec.Ports) != 1 || routing.Spec.Ports[0].Port != 8000 {
+		t.Errorf("routing ports: got %+v want a single port 8000", routing.Spec.Ports)
+	}
+	// The headless variant carries no ports — peer DNS resolves pod IPs.
+	if len(headless.Spec.Ports) != 0 {
+		t.Errorf("headless ports: got %+v want none", headless.Spec.Ports)
+	}
 }
 
 func TestEnsurePerRevisionServices_MultiPodTightensRoutingOnly(t *testing.T) {
 	c := fakeClient()
 	isvc := testISVC()
-	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", true /* multiPod */)
+	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", true /* multiPod */, runnerPorts())
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -182,16 +272,40 @@ func TestEnsurePerRevisionServices_MultiPodTightensRoutingOnly(t *testing.T) {
 }
 
 func TestEnsurePerRevisionServices_NilClientErrors(t *testing.T) {
-	_, err := EnsurePerRevisionServices(context.Background(), nil, testISVC(), v1beta1.EngineComponent, "hash", false)
+	_, err := EnsurePerRevisionServices(context.Background(), nil, testISVC(), v1beta1.EngineComponent, "hash", false, runnerPorts())
 	if err == nil {
 		t.Errorf("nil client: want error")
+	}
+}
+
+// With no declared runner port the routing Service is skipped — no invented
+// port, no failed reconcile — while the headless Service (peer DNS for
+// distributed init, independent of the serving port) is still ensured.
+func TestEnsurePerRevisionServices_NoDeclaredPortSkipsRoutingKeepsHeadless(t *testing.T) {
+	c := fakeClient()
+	isvc := testISVC()
+	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false, nil)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if out.RoutingName != "" {
+		t.Errorf("RoutingName: got %q want empty (routing Service skipped)", out.RoutingName)
+	}
+	routing := &corev1.Service{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
+	if err := c.Get(context.Background(), key, routing); !apierrors.IsNotFound(err) {
+		t.Errorf("routing service must not be created: err=%v svc=%+v", err, routing)
+	}
+	headless := &corev1.Service{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: out.HeadlessName}, headless); err != nil {
+		t.Errorf("headless service missing: %v", err)
 	}
 }
 
 func TestGCPerRevisionServices_DeletesBoth(t *testing.T) {
 	c := fakeClient()
 	isvc := testISVC()
-	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false)
+	out, err := EnsurePerRevisionServices(context.Background(), c, isvc, v1beta1.EngineComponent, "hash1", false, runnerPorts())
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -258,6 +372,25 @@ func testISVC() *v1beta1.InferenceService {
 			Namespace: "prod",
 			UID:       types.UID("llama-70b-uid"),
 		},
+	}
+}
+
+// runnerPorts is the merged-runner container port set a typical serving
+// runtime declares: an `http` listener alongside a distributed-init port.
+func runnerPorts() []corev1.ContainerPort {
+	return []corev1.ContainerPort{
+		{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP},
+		{Name: "dist", ContainerPort: 5000, Protocol: corev1.ProtocolTCP},
+	}
+}
+
+// testComponentRunnerPorts mirrors what the controller threads in: the
+// merged runner ports of every Component the coordination layer may touch.
+func testComponentRunnerPorts() map[v1beta1.ComponentType][]corev1.ContainerPort {
+	return map[v1beta1.ComponentType][]corev1.ContainerPort{
+		v1beta1.EngineComponent:  runnerPorts(),
+		v1beta1.DecoderComponent: runnerPorts(),
+		v1beta1.RouterComponent:  runnerPorts(),
 	}
 }
 

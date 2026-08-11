@@ -49,6 +49,14 @@ type ReconcileInputs struct {
 	// Recorder emits K8s Events for coordination transitions.
 	Recorder record.EventRecorder
 
+	// ComponentRunnerPorts holds the container ports each Component's
+	// merged runner declares, keyed by Component. The per-revision routing
+	// Service publishes the serving port resolved from this set so it
+	// targets the port the pods actually listen on. A Component missing
+	// from the map gets a headless Service only — see
+	// EnsurePerRevisionServices.
+	ComponentRunnerPorts map[v1beta1.ComponentType][]corev1.ContainerPort
+
 	// Now is the wall-clock used for LastTransitionTime; callers may
 	// override for tests. Zero defaults to time.Now().
 	// Already an injected-time seam; kept as time.Time (single snapshot per pass).
@@ -201,7 +209,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			if hash == "" {
 				continue
 			}
-			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash, multiPod); err != nil {
+			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash, multiPod, in.ComponentRunnerPorts[c]); err != nil {
 				// The namespace is being torn down (common during test
 				// teardown and any namespace-scoped delete): the create is
 				// forbidden and will never succeed, and the ISVC is going

@@ -437,6 +437,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
+	// The merged runner container ports are the only resolved view of the
+	// port each Component listens on. OMENative's per-revision Service
+	// producers (coordination, canary) publish their routing Service on
+	// this port, so it must be captured here and threaded down.
+	componentRunnerPorts := isvcutils.MergedRunnerPorts(mergedEngine, mergedDecoder, mergedRouter)
+
 	// Canary: when spec.rollout.canary is set, stamp the current step's
 	// RollingUpdate.Partition onto each merged Component before the Component
 	// reconcilers run, so the standard spec→IR→plan→HeldByPartition path holds
@@ -594,6 +600,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Sampler:                  r.CanarySampler,
 			BundledPrometheusAddress: analysisConfig.BundledPrometheusAddress,
 			QueryTimeout:             analysisConfig.QueryTimeoutDuration(),
+			ComponentRunnerPorts:     componentRunnerPorts,
 		})
 		if err != nil {
 			log.Error(err, "Failed to reconcile canary rollout")
@@ -618,6 +625,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Reader:                       r.APIReader,
 		Recorder:                     r.Recorder,
 		TrafficWeightDeadbandPercent: coordinationConfig.TrafficWeightDeadbandPercent,
+		ComponentRunnerPorts:         componentRunnerPorts,
 	}); err != nil {
 		log.Error(err, "Failed to reconcile cross-Component coordination")
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile coordination")

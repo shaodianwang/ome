@@ -1706,6 +1706,54 @@ func TestDetermineEntrypointComponent(t *testing.T) {
 	}
 }
 
+func TestMergedRunnerPorts(t *testing.T) {
+	enginePorts := []v1.ContainerPort{
+		{Name: "http", ContainerPort: 8000},
+		{Name: "dist", ContainerPort: 5000},
+	}
+	routerPorts := []v1.ContainerPort{{Name: "http", ContainerPort: 30080}}
+
+	engine := &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Ports: enginePorts}}}
+	router := &v1beta1.RouterSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Ports: routerPorts}}}
+	// Decoder present but portless: omitted, so the caller sees "undeclared"
+	// rather than an empty-but-present entry it might read as authoritative.
+	decoder := &v1beta1.DecoderSpec{Runner: &v1beta1.RunnerSpec{}}
+
+	got := MergedRunnerPorts(engine, decoder, router)
+	assert.Equal(t, enginePorts, got[v1beta1.EngineComponent])
+	assert.Equal(t, routerPorts, got[v1beta1.RouterComponent])
+	assert.NotContains(t, got, v1beta1.DecoderComponent)
+
+	// Absent Components and portless Components contribute nothing.
+	assert.Empty(t, MergedRunnerPorts(nil, nil, nil))
+	assert.Empty(t, MergedRunnerPorts(&v1beta1.EngineSpec{}, nil, nil))
+}
+
+// The serving container's ports can be declared on the Component's own pod
+// container rather than on the runner; the pod renderer merges the two, so
+// port resolution must follow the same path.
+func TestMergedRunnerPorts_FallsBackToPodContainer(t *testing.T) {
+	podPorts := []v1.ContainerPort{{Name: "http", ContainerPort: 8080}}
+
+	t.Run("no runner uses the first container", func(t *testing.T) {
+		engine := &v1beta1.EngineSpec{PodSpec: v1beta1.PodSpec{
+			Containers: []v1.Container{{Name: "ome-container", Ports: podPorts}},
+		}}
+		assert.Equal(t, podPorts, MergedRunnerPorts(engine, nil, nil)[v1beta1.EngineComponent])
+	})
+
+	t.Run("portless runner uses the container it merges into", func(t *testing.T) {
+		engine := &v1beta1.EngineSpec{
+			Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "runner"}},
+			PodSpec: v1beta1.PodSpec{Containers: []v1.Container{
+				{Name: "sidecar", Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 9999}}},
+				{Name: "runner", Ports: podPorts},
+			}},
+		}
+		assert.Equal(t, podPorts, MergedRunnerPorts(engine, nil, nil)[v1beta1.EngineComponent])
+	})
+}
+
 func TestGetTargetServicePort(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = v1.AddToScheme(scheme)

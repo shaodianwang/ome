@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -62,10 +63,11 @@ func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	}
 	c := testClient(pods...)
 	r, err := Reconcile(context.Background(), ReconcileInputs{
-		ISVC:   isvc,
-		Client: c,
-		Reader: c,
-		Now:    time.Now(),
+		ISVC:                 isvc,
+		Client:               c,
+		Reader:               c,
+		Now:                  time.Now(),
+		ComponentRunnerPorts: testComponentRunnerPorts(),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -78,6 +80,34 @@ func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	key := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
 	if err := c.Get(context.Background(), key, svc); err != nil {
 		t.Errorf("per-revision Service missing: %v", err)
+	}
+	// The published port comes from the Component's merged runner, not from
+	// a builder-side default.
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 8000 {
+		t.Errorf("per-revision Service ports: got %+v want a single port 8000", svc.Spec.Ports)
+	}
+}
+
+// A Component whose merged runner declares no port gets no routing Service:
+// the reconcile still succeeds and the rest of the coordination pass runs.
+func TestReconcile_SkipsRoutingServiceWithoutRunnerPort(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Rollout = singleEngineGroup()
+	c := testClient(buildPod(isvc, v1beta1.EngineComponent, "hash1", 0))
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	svc := &corev1.Service{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
+	if err := c.Get(context.Background(), key, svc); !apierrors.IsNotFound(err) {
+		t.Errorf("routing Service must not be created without a declared port: err=%v svc=%+v", err, svc)
+	}
+	headless := &corev1.Service{}
+	hkey := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionHeadlessServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
+	if err := c.Get(context.Background(), hkey, headless); err != nil {
+		t.Errorf("headless Service should still be ensured: %v", err)
 	}
 }
 
@@ -180,7 +210,7 @@ func TestReconcile_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 	ctx := context.Background()
 
 	// First reconcile creates the per-revision Services for hash1.
-	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts()}); err != nil {
 		t.Fatalf("first reconcile: unexpected error: %v", err)
 	}
 	routingKey := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
@@ -199,7 +229,7 @@ func TestReconcile_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 
 	// Second reconcile: revision set is unchanged (converged), but the
 	// deleted Service must be recreated.
-	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts()}); err != nil {
 		t.Fatalf("second reconcile: unexpected error: %v", err)
 	}
 	if err := c.Get(ctx, routingKey, &corev1.Service{}); err != nil {
@@ -220,7 +250,7 @@ func TestReconcile_EnsuresServicesWhenRevisionSetDiverges(t *testing.T) {
 	}
 	c := testClient(pods...)
 	r, err := Reconcile(context.Background(), ReconcileInputs{
-		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts(),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1303,7 +1333,7 @@ func TestReconcile_TrafficWeighsOnlyReadyPods(t *testing.T) {
 	}
 	c := testClient(pods...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
-		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts(),
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

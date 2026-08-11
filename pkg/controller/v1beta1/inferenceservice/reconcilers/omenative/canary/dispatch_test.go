@@ -192,6 +192,18 @@ func TestSecondaryCapacityReady_UnbumpedSecondary(t *testing.T) {
 	}
 }
 
+// canaryRunnerPorts mirrors what the controller threads in: the merged
+// runner container ports of every Component a canary group may touch. The
+// per-revision routing Service publishes the `http` one.
+func canaryRunnerPorts() map[v1beta1.ComponentType][]corev1.ContainerPort {
+	ports := []corev1.ContainerPort{{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP}}
+	return map[v1beta1.ComponentType][]corev1.ContainerPort{
+		v1beta1.EngineComponent:  ports,
+		v1beta1.DecoderComponent: ports,
+		v1beta1.RouterComponent:  ports,
+	}
+}
+
 func canaryScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -283,7 +295,7 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
 	ctx := context.Background()
 
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
 		t.Fatalf("Dispatch error: %v", err)
 	}
 	// IR-sourced hash recorded.
@@ -306,7 +318,7 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	// Rollback: the executor records the rejected hash + Dispatch points the IR at
 	// the stable revision (Pacing.RollbackToRevision = IR CurrentRevision).
 	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
 		t.Fatalf("Dispatch (rollback) error: %v", err)
 	}
 	if isvc.Status.Canary == nil || isvc.Status.Canary.RolledBackRevisionHash != "newhash" {
@@ -383,7 +395,7 @@ func TestDispatch_PDRouterRollbackTargetsStable(t *testing.T) {
 	ctx := context.Background()
 
 	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
 		t.Fatalf("Dispatch (rollback) error: %v", err)
 	}
 	if got := isvc.Status.Components[v1beta1.RouterComponent].RolloutPhase; got != v1beta1.RolloutPhaseRollingBack {
@@ -479,7 +491,7 @@ func TestDispatch_EnsuresPerRevisionServicesForSecondary(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
 	ctx := context.Background()
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
 		t.Fatalf("Dispatch error: %v", err)
 	}
 	svc := &corev1.Service{}
@@ -521,7 +533,7 @@ func TestDispatch_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 	ctx := context.Background()
 
 	// First Dispatch ensures the per-revision Service.
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
 		t.Fatalf("first Dispatch error: %v", err)
 	}
 	key := types.NamespacedName{Namespace: ns, Name: coordination.PerRevisionServiceName("cv1", v1beta1.EngineComponent, "stable0")}
@@ -538,7 +550,7 @@ func TestDispatch_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 	}
 
 	// Second Dispatch: converged, but the deleted Service must be recreated.
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
 		t.Fatalf("second Dispatch error: %v", err)
 	}
 	if err := c.Get(ctx, key, &corev1.Service{}); err != nil {

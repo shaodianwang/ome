@@ -335,6 +335,13 @@ type coordFixture struct {
 	ISVC *v1beta1.InferenceService
 }
 
+// fakeServingPorts is the listener the fake-serving image opens. Every
+// fixture container declares it so the per-revision routing Service has a
+// real port to publish — an undeclared port yields no routing Service.
+func fakeServingPorts() []corev1.ContainerPort {
+	return []corev1.ContainerPort{{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP}}
+}
+
 // newCoordFixture builds the three objects required to drive a
 // coordination-aware OMENative ISVC through the reconcile loop. Does
 // NOT apply them to the apiserver — caller chains Create + DeferCleanup
@@ -395,6 +402,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 		PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 			Name:  "ome-container",
 			Image: o.engineImage,
+			Ports: fakeServingPorts(),
 		}}},
 	}
 	if o.engineTopologyKey != "" {
@@ -415,6 +423,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 				Name:  "ome-container",
 				Image: o.engineImage,
+				Ports: fakeServingPorts(),
 			}}},
 		}
 		engine.Worker = &v1beta1.WorkerSpec{
@@ -422,6 +431,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 				Name:  "ome-container",
 				Image: o.engineImage,
+				Ports: fakeServingPorts(),
 			}}},
 		}
 	}
@@ -462,6 +472,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 				Name:  "ome-container",
 				Image: o.decoderImage,
+				Ports: fakeServingPorts(),
 			}}},
 		}
 		if o.decoderWorkerSize > 0 {
@@ -470,6 +481,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 					Name:  "ome-container",
 					Image: o.decoderImage,
+					Ports: fakeServingPorts(),
 				}}},
 			}
 			decoder.Worker = &v1beta1.WorkerSpec{
@@ -477,6 +489,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 					Name:  "ome-container",
 					Image: o.decoderImage,
+					Ports: fakeServingPorts(),
 				}}},
 			}
 		}
@@ -505,6 +518,7 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
 				Name:  "ome-container",
 				Image: o.routerImage,
+				Ports: fakeServingPorts(),
 			}}},
 		}
 		if o.routerUpdateStrategy != "" {

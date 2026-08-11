@@ -94,6 +94,57 @@ func GetTargetServicePort(ctx context.Context, c client.Client, isvc *v1beta1.In
 	return port, nil
 }
 
+// MergedRunnerPorts collects the container ports each merged Component's
+// runner container declares, keyed by Component type. The merged specs —
+// runtime spec overlaid with the ISVC overrides — are the only resolved
+// view of the port a Component listens on, so builders that must target
+// that port read it from here rather than re-deriving it.
+//
+// A Component whose merged spec is absent, or whose runner container
+// declares no port, is omitted: the caller decides how to degrade rather
+// than receiving an invented port.
+func MergedRunnerPorts(engine *v1beta1.EngineSpec, decoder *v1beta1.DecoderSpec, router *v1beta1.RouterSpec) map[v1beta1.ComponentType][]corev1.ContainerPort {
+	out := make(map[v1beta1.ComponentType][]corev1.ContainerPort, 3)
+	if engine != nil {
+		if ports := runnerContainerPorts(engine.Runner, engine.Containers); len(ports) > 0 {
+			out[v1beta1.EngineComponent] = ports
+		}
+	}
+	if decoder != nil {
+		if ports := runnerContainerPorts(decoder.Runner, decoder.Containers); len(ports) > 0 {
+			out[v1beta1.DecoderComponent] = ports
+		}
+	}
+	if router != nil {
+		if ports := runnerContainerPorts(router.Runner, router.Containers); len(ports) > 0 {
+			out[v1beta1.RouterComponent] = ports
+		}
+	}
+	return out
+}
+
+// runnerContainerPorts returns the ports of the container that serves a
+// Component's traffic, resolved the way the pod renderer resolves it: the
+// Runner's own ports win, otherwise the ports of the pod container the
+// Runner merges into — the one sharing its name, or the first container
+// when the Runner is absent or unnamed.
+func runnerContainerPorts(runner *v1beta1.RunnerSpec, containers []corev1.Container) []corev1.ContainerPort {
+	if runner != nil && len(runner.Container.Ports) > 0 {
+		return runner.Container.Ports
+	}
+	if len(containers) == 0 {
+		return nil
+	}
+	if runner != nil && runner.Container.Name != "" {
+		for i := range containers {
+			if containers[i].Name == runner.Container.Name {
+				return containers[i].Ports
+			}
+		}
+	}
+	return containers[0].Ports
+}
+
 // ResolveServicePort returns the first port of the named Service, which is
 // the authoritative serving port a component exposes (Services are built
 // from the merged runner's containerPort before ingress runs). It falls

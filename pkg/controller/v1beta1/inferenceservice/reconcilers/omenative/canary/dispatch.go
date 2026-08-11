@@ -5,6 +5,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,6 +42,11 @@ type DispatchDeps struct {
 	// config (fetched per-reconcile by the controller), threaded to the sampler.
 	BundledPrometheusAddress string
 	QueryTimeout             time.Duration
+	// ComponentRunnerPorts holds the container ports each Component's merged
+	// runner declares, keyed by Component. The per-revision routing Service
+	// publishes the serving port resolved from this set so it targets the port
+	// the pods actually listen on. Mirrors coordination.ReconcileInputs.
+	ComponentRunnerPorts map[v1beta1.ComponentType][]corev1.ContainerPort
 }
 
 // Dispatch runs the canary step machine for an InferenceService, mutating
@@ -97,7 +103,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 			if hash == "" {
 				continue
 			}
-			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, multiPod); err != nil {
+			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, multiPod, d.ComponentRunnerPorts[comp]); err != nil {
 				return 0, err
 			}
 		}

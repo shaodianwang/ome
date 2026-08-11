@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -10,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -17,14 +19,21 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// perRevisionServicePort is the default port the per-revision routing
-// Service exposes when the Component spec doesn't pin one. 8080 is the
-// long-standing inferencing convention (kserve / kfserving / OME).
-// HTTPRoute backendRef consumers target this port. ClusterIP Service
-// validation requires at least one port; hard-coding 8080 keeps the
-// producer-side surface minimal until runtimes need a configurable
-// port from spec.Engine.Runner.Ports.
-const perRevisionServicePort int32 = 8080
+// servingPortName is the container-port NAME a runtime uses to mark its
+// customer-traffic listener. It is a Kubernetes naming convention, not a
+// behavioral value: it selects among the ports a runtime already declares
+// and never contributes a port number of its own. A runner that declares
+// no port under this name falls through to its first declared port.
+const servingPortName = "http"
+
+// ErrNoServingPort reports that a Component's merged runner declares no
+// container port, so no per-revision routing Service can be built. A
+// ClusterIP Service must publish at least one port, and publishing a port
+// the runner does not listen on produces a Service whose EndpointSlice
+// reads ready while every request is dropped — pod readiness is a property
+// of the pod, not of the published port. Callers skip the routing Service
+// instead of inventing a number.
+var ErrNoServingPort = errors.New("component runner declares no container port")
 
 // isvcGroupVersionKind identifies the InferenceService owner reference
 // on each per-revision Service. Declared locally so this subpackage
@@ -38,7 +47,9 @@ var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService
 type PerRevisionService struct {
 	// RoutingName is the ClusterIP Service name —
 	// `<isvc>-<component>-rev-<hash>`. Used as the backend target by
-	// the HTTPRoute weighted-backendRef consumer.
+	// the HTTPRoute weighted-backendRef consumer. Empty when
+	// EnsurePerRevisionServices skipped the routing Service because the
+	// Component's runner declares no container port.
 	RoutingName string
 
 	// HeadlessName is the headless Service name —
@@ -76,6 +87,11 @@ func PerRevisionServiceNames(isvcName string, component v1beta1.ComponentType, r
 // BuildPerRevisionRoutingService produces the ClusterIP per-revision
 // Service for one (component, revisionHash). Pure compute; idempotent.
 //
+// `runnerPorts` are the container ports the Component's merged runner
+// declares; the published port is resolved from them (see
+// perRevisionRoutingPorts). Returns ErrNoServingPort when the set is
+// empty — the Service is not buildable without a port the pods listen on.
+//
 // `multiPod` toggles the rank-0 filter on the routing selector:
 //   - false (single-pod) → broad selector. SurgeThenDrain alternates
 //     the pod-naming ordinal between 0 and 1; pinning ordinal=0 would
@@ -89,12 +105,16 @@ func PerRevisionServiceNames(isvcName string, component v1beta1.ComponentType, r
 // `pod-ordinal=0` key — Labels describe the Service itself for
 // catalog/UI purposes; the Selector is the filter that gates pod
 // membership.
-func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool) (*corev1.Service, error) {
+func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool, runnerPorts []corev1.ContainerPort) (*corev1.Service, error) {
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
 	}
 	if revisionHash == "" {
 		return nil, fmt.Errorf("empty revisionHash")
+	}
+	ports, err := perRevisionRoutingPorts(runnerPorts)
+	if err != nil {
+		return nil, err
 	}
 	labels := perRevisionServiceSelector(isvc.Name, component, revisionHash)
 	selector := labels
@@ -123,22 +143,62 @@ func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1
 			Type:                     corev1.ServiceTypeClusterIP,
 			Selector:                 selector,
 			PublishNotReadyAddresses: false,
-			Ports:                    perRevisionRoutingPorts(),
+			Ports:                    ports,
 		},
 	}, nil
 }
 
-// perRevisionRoutingPorts is the standard inferencing-port set.
-// ClusterIP Services require at least one port (k8s validation); the
-// headless variant accepts an empty list because peer DNS uses pod-IP
-// resolution. HTTPRoute backendRef consumers route to this port.
-func perRevisionRoutingPorts() []corev1.ServicePort {
+// perRevisionRoutingPorts maps a Component's merged runner container ports
+// onto the single ServicePort the routing Service publishes. HTTPRoute
+// backendRef consumers route to that port, so it must be the one the
+// runner listens on. Runtimes routinely declare several ports (serving,
+// distributed-init rendezvous, PD bootstrap, metrics); the customer-traffic
+// Service publishes only the serving one — the port named `http`, else the
+// first declared port.
+//
+// TargetPort follows the container port's NAME when it has one. Kubernetes
+// resolves a named targetPort per endpoint pod, so a revision whose pods
+// were rendered from an older spec still receives traffic on the port that
+// revision actually opened; a numeric targetPort would pin every revision
+// to the current spec's number. Unnamed ports fall back to the number.
+//
+// ClusterIP Services require at least one port (k8s validation), so an
+// empty runner-port set yields ErrNoServingPort. The headless variant
+// takes no ports at all — peer DNS resolves pod IPs directly.
+func perRevisionRoutingPorts(runnerPorts []corev1.ContainerPort) ([]corev1.ServicePort, error) {
+	serving, ok := servingContainerPort(runnerPorts)
+	if !ok {
+		return nil, ErrNoServingPort
+	}
+	protocol := serving.Protocol
+	if protocol == "" {
+		protocol = corev1.ProtocolTCP
+	}
+	target := intstr.FromInt32(serving.ContainerPort)
+	if serving.Name != "" {
+		target = intstr.FromString(serving.Name)
+	}
 	return []corev1.ServicePort{{
-		Name:       "http",
-		Port:       perRevisionServicePort,
-		TargetPort: intstr.FromInt32(perRevisionServicePort),
-		Protocol:   corev1.ProtocolTCP,
-	}}
+		Name:       serving.Name,
+		Port:       serving.ContainerPort,
+		TargetPort: target,
+		Protocol:   protocol,
+	}}, nil
+}
+
+// servingContainerPort picks the customer-traffic port out of a runner's
+// declared container ports: the one named `http`, else the first declared.
+// Reports false when nothing is declared.
+func servingContainerPort(ports []corev1.ContainerPort) (corev1.ContainerPort, bool) {
+	if len(ports) == 0 {
+		return corev1.ContainerPort{}, false
+	}
+	for _, p := range ports {
+		if p.Name == servingPortName {
+			return p, true
+		}
+	}
+	return ports[0], true
 }
 
 // BuildPerRevisionHeadlessService produces the headless per-revision
@@ -200,16 +260,31 @@ func perRevisionServiceSelector(isvcName string, component v1beta1.ComponentType
 // `multiPod` tightens the routing Service selector to rank-0 only;
 // the headless Service is unaffected (workers must stay discoverable
 // for peer DNS).
-func EnsurePerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool) (PerRevisionService, error) {
+//
+// `runnerPorts` are the Component's merged runner container ports. When
+// they are empty the routing Service is skipped and logged rather than
+// published on a guessed port: a routing Service on a port nothing listens
+// on is indistinguishable from a healthy one (its EndpointSlice still reads
+// ready) and silently drops every request. The headless Service is still
+// ensured — peer DNS for distributed init does not depend on the serving
+// port. The reconcile does not fail: coordination is a producer layer, and
+// one Component's missing port declaration must not wedge the rest of the
+// InferenceService.
+func EnsurePerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool, runnerPorts []corev1.ContainerPort) (PerRevisionService, error) {
 	out := PerRevisionServiceNames(isvc.Name, component, revisionHash)
 	if c == nil {
 		return out, fmt.Errorf("EnsurePerRevisionServices: nil client")
 	}
 
 	routingBuild := func(i *v1beta1.InferenceService, comp v1beta1.ComponentType, hash string) (*corev1.Service, error) {
-		return BuildPerRevisionRoutingService(i, comp, hash, multiPod)
+		return BuildPerRevisionRoutingService(i, comp, hash, multiPod, runnerPorts)
 	}
-	if err := ensureService(ctx, c, isvc, routingBuild, component, revisionHash, out.RoutingName, false); err != nil {
+	switch err := ensureService(ctx, c, isvc, routingBuild, component, revisionHash, out.RoutingName, false); {
+	case errors.Is(err, ErrNoServingPort):
+		out.RoutingName = ""
+		log.FromContext(ctx).Info("Skipping per-revision routing Service: component runner declares no container port",
+			"component", component, "revisionHash", revisionHash, "service", PerRevisionServiceName(isvc.Name, component, revisionHash))
+	case err != nil:
 		return out, err
 	}
 	if err := ensureService(ctx, c, isvc, BuildPerRevisionHeadlessService, component, revisionHash, out.HeadlessName, true); err != nil {
