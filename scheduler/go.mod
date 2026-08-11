@@ -3,7 +3,7 @@
 // k8s.io/kubernetes, which requires the staging `replace` block below. That block
 // would poison the root module's dependency graph (which pins k8s.io/* via
 // controller-runtime), so the scheduler lives in its own module. The k8s version
-// is pinned to match the fleet (k8s 1.35); the replace block is copied verbatim
+// is pinned to the target cluster minor (k8s 1.35); the replace block is copied verbatim
 // from the matching sigs.k8s.io/scheduler-plugins release (v0.35.4-devel).
 module github.com/ome-projects/ome/scheduler
 
