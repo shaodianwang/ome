@@ -206,8 +206,8 @@ func vfnGangPod(runner, nodeName string) *corev1.Pod {
 	return p
 }
 
-// TestValidateFromNode_GangSpanningNodesNotRejected is the regression
-// for harness case p117: a multi-node gang Instance's pods span nodes BY
+// TestValidateFromNode_GangSpanningNodesNotRejected is the regression:
+// a multi-node gang Instance's pods span nodes BY
 // DESIGN (leader + worker land on different nodes), so a migration whose
 // FromNode hosts one of them must NOT be rejected. The pre-fix code
 // rejected any source whose pods spanned nodes, wrongly failing every

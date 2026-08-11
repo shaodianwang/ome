@@ -91,8 +91,8 @@ func IsMultiPodInstance(inst workload.InstancePlan) bool {
 // renderer uses for each pod's pod-group label (render.go: isvcName =
 // key.OwnerName). It is deliberately NOT owner.GetName(): on the IR-managed
 // path the owner object is the InferenceReplica ("<isvc>-<component>"), whose
-// name would double the component (e.g. PodGroup "p66-engine-engine-0") and
-// never match the pods' "p66-engine-0" label → "PodGroup not found". owner is
+// name would double the component (e.g. PodGroup "svc-engine-engine-0") and
+// never match the pods' "svc-engine-0" label → "PodGroup not found". owner is
 // still used for the OwnerReference (GC) and namespace.
 func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, ownerName string, plan workload.ComponentPlan, inst workload.InstancePlan) (*schedulingv1alpha1.PodGroup, error) {
 	if owner == nil {

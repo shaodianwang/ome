@@ -703,7 +703,7 @@ func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
 	}
 }
 
-// Finding ⑥: gang RecreateInstance race.
+// Gang RecreateInstance race.
 //
 // A pod loss in an already-Ready Instance can be recovered two ways: the
 // Restart pass (whole-Instance drain+recreate — the RecreateInstance

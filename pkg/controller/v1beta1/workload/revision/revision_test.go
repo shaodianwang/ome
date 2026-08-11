@@ -130,7 +130,7 @@ func TestRevisionHash_DeterministicForSameInput(t *testing.T) {
 // rare flake; in practice json.Marshal sorts keys, so all 1000 calls
 // must agree.
 //
-// Pins the absence of A-2-shape orphan-hash drift in the revision
+// Pins the absence of orphan-hash drift in the revision
 // pipeline: a single bump of a pod-template annotation must produce
 // exactly ONE new ControllerRevision name, not a fresh name on every
 // reconcile.
@@ -177,7 +177,7 @@ func TestRevisionHash_DeterministicAcrossInvocations(t *testing.T) {
 			"ome.io/base-model-name":          "llama-7b",
 			"test.ome.io/rollout-trigger":     "2026-05-27T10:42:31.999999999Z",
 			"ome.io/ingress-disable-creation": "true",
-			"ome.io/storage-uri":              "oci://meta/llama-7b@v1",
+			"ome.io/storage-uri":              "oci://models/llama-7b@v1",
 			"ome.io/base-model-format":        "huggingface",
 		},
 	}

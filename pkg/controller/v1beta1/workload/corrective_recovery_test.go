@@ -516,7 +516,7 @@ func (h *recoveryHarness) settle(n int) {
 // the stale-slot eviction clears the surge ordinal, and the fresh surge
 // drives to the fixed revision. The serving source must
 // stay in rotation throughout: the recovery is SurgeThenDrain, so
-// capacity never drops to zero while the wreckage is cleaned (W1).
+// capacity never drops to zero while the wreckage is cleaned.
 func TestCorrectiveRecovery_SinglePod_RollForward(t *testing.T) {
 	h := newRecoveryHarness(t, false)
 	h.driveToReadyOnV1()

@@ -29,8 +29,7 @@ import (
 // owner-agnostic but the tests pin the ISVC adapter shape so the
 // PodGroup names + labels line up with the existing fixtures pre-
 // created in the multi-instance / scale-down scenarios). The
-// production-side gang.go itself contains no v1beta1 import — see the
-// audit grep in the slice-4g PR description.
+// production-side gang.go itself contains no v1beta1 import.
 
 // testOwnerGVK is what gang.EnsurePodGroups stamps onto every
 // PodGroup's OwnerReference. Tests construct it via the ISVC scheme

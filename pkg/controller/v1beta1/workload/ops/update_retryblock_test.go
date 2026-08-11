@@ -259,8 +259,7 @@ func TestDetectUpdate_NewRevisionPassesGate(t *testing.T) {
 // TestDetectUpdate_FailedContinuationPassesGate: Phase=Failed with an
 // in-flight Update Operation is a CONTINUATION (teardown/abandon of the
 // failed candidate) and must proceed regardless of the block — a Held
-// block must not freeze the candidate gang mid-teardown (review
-// finding B2). Mirrors the dispatcher's startingFresh carve-out.
+// block must not freeze the candidate gang mid-teardown. Mirrors the dispatcher's startingFresh carve-out.
 func TestDetectUpdate_FailedContinuationPassesGate(t *testing.T) {
 	t0 := time.Now()
 	input, plan, tcr, calls, c, _ := retryGateFixture(t, t0)

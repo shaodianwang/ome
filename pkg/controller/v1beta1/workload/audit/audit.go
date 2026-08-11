@@ -1,7 +1,7 @@
 // Package audit owns the per-owner migration ledger persisted as a
 // ConfigMap. The ledger lives outside the controller process so UUID
 // dedup, in-flight resume, and capacity gating survive controller
-// restarts and Alfred retries.
+// restarts and requester retries.
 //
 // Boundary: this package depends only on Kubernetes API machinery plus
 // the workload/types value types (for the MigrationRecord shape
@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	// MigrationRequestAnnotationPrefix is the canonical key prefix Alfred
-	// uses to write migration requests onto the InferenceService. The
+	// MigrationRequestAnnotationPrefix is the canonical key prefix a migration
+	// requester uses to write migration requests onto the InferenceService. The
 	// suffix is the request UUID and is what's recorded in the audit
 	// ledger for dedup.
 	MigrationRequestAnnotationPrefix = "ome.io/migration-request-v1-"
@@ -69,7 +69,7 @@ const (
 // should record this and reject the request rather than retrying.
 var ErrUnsupportedSchemaVersion = fmt.Errorf("UnsupportedSchemaVersion")
 
-// MigrationRequest is the JSON shape Alfred writes into the
+// MigrationRequest is the JSON shape a migration requester writes into the
 // ome.io/migration-request-v1-<uuid> annotation value. Fields match
 // the canonical request schema; unknown additive fields are silently
 // dropped by json.Unmarshal (the version-skew rule).
@@ -415,7 +415,7 @@ func hasControllerRefForOwner(obj metav1.Object, owner metav1.Object) bool {
 
 // NewStartedEntry constructs a freshly-Started ledger row from a
 // validated request. StartedAt prefers req.RequestedAt so duration
-// graphs (CompletedAt - StartedAt) reflect Alfred's accept-time rather
+// graphs (CompletedAt - StartedAt) reflect the requester's accept-time rather
 // than the controller's processing-time; falls back to now when the
 // request omits the field.
 func NewStartedEntry(req *MigrationRequest, uuid string, surgeIdx int32) Entry {
@@ -446,8 +446,8 @@ func NewTerminalEntry(prev Entry, phase, outcome string) Entry {
 	return out
 }
 
-// Migration capacity defaults. Cluster-wide caps that gate Alfred or
-// any other automated migration caller from flooding the controller's
+// Migration capacity defaults. Cluster-wide caps that gate any
+// automated migration caller from flooding the controller's
 // destructive-action pipeline with too much concurrent or hourly
 // EXECUTION churn — queued intent is never counted (the dispatcher
 // executes serially; a queued record holds no resources).

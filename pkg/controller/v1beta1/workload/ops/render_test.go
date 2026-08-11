@@ -304,8 +304,8 @@ func TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels(t *testi
 	plan, inst, runner := singlePodPlan()
 	meta := &metav1.ObjectMeta{
 		Annotations: map[string]string{
-			"k8s.v1.cni.cncf.io/networks": "[{\"name\":\"ibs0p0-macvlan\",\"namespace\":\"cw-multus\"}]",
-			"fb.metric.schema":            "sglang_metrics",
+			"k8s.v1.cni.cncf.io/networks": "[{\"name\":\"net0-macvlan\",\"namespace\":\"multus-system\"}]",
+			"metrics.example/schema":      "sglang_metrics",
 		},
 		Labels: map[string]string{
 			"team":                                "ml-infra",
@@ -319,8 +319,8 @@ func TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels(t *testi
 	if got := pod.Annotations["k8s.v1.cni.cncf.io/networks"]; got == "" {
 		t.Errorf("multus networks annotation missing: %+v", pod.Annotations)
 	}
-	if got := pod.Annotations["fb.metric.schema"]; got != "sglang_metrics" {
-		t.Errorf("fb.metric.schema annotation: got %q want %q", got, "sglang_metrics")
+	if got := pod.Annotations["metrics.example/schema"]; got != "sglang_metrics" {
+		t.Errorf("metrics.example/schema annotation: got %q want %q", got, "sglang_metrics")
 	}
 	if got := pod.Labels["team"]; got != "ml-infra" {
 		t.Errorf("user-declared label dropped: %+v", pod.Labels)

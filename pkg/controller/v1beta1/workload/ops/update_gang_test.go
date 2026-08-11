@@ -69,7 +69,7 @@ func gangAbandonInput(isvc, ns string, src *workload.InstanceStatus, removed *[]
 // does NOT yet drop the marker or reset the source.
 func TestAbandonFailedGangSurge_DeletesStalePodsFirst(t *testing.T) {
 	legacyResetExpectations(t)
-	const isvc, ns = "p414", "omenative-eval"
+	const isvc, ns = "gang-a", "test-ns"
 	leader := gangSurgePod(isvc, ns, 2, "leader", "badrev")
 	worker := gangSurgePod(isvc, ns, 2, "worker", "badrev")
 	c := legacyNewFakeClient(t, leader, worker)
@@ -77,14 +77,14 @@ func TestAbandonFailedGangSurge_DeletesStalePodsFirst(t *testing.T) {
 	src := &workload.InstanceStatus{
 		Index:           0,
 		Phase:           workload.InstancePhaseFailed,
-		RunningRevision: "p414-engine-goodrev",
+		RunningRevision: "gang-a-engine-goodrev",
 	}
 	var removed []int32
 	input := gangAbandonInput(isvc, ns, src, &removed)
 	blockCalls := recordRetryBlockCalls(&input, nil)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
-	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 2, src.RunningRevision, "p414-engine-badrev", "pod stuck")
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 2, src.RunningRevision, "gang-a-engine-badrev", "pod stuck")
 	if err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
@@ -139,15 +139,15 @@ func recordRetryBlockCalls(input *workload.ReconcileInput, existing []workload.R
 // failed Operation cleared — so the next reconcile fires a fresh surge.
 func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	legacyResetExpectations(t)
-	const isvc, ns = "p414", "omenative-eval"
+	const isvc, ns = "gang-a", "test-ns"
 	c := legacyNewFakeClient(t) // no surge pods — already deleted
 
 	surgeIdx := int32(2)
 	src := &workload.InstanceStatus{
 		Index:           0,
 		Phase:           workload.InstancePhaseFailed,
-		RunningRevision: "p414-engine-goodrev",
-		TargetRevision:  "p414-engine-badrev",
+		RunningRevision: "gang-a-engine-goodrev",
+		TargetRevision:  "gang-a-engine-badrev",
 		Operation: &workload.InstanceOperation{
 			Type:       workload.InstanceOperationUpdate,
 			Step:       updateStepSurge,
@@ -175,8 +175,8 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	if src.Operation != nil {
 		t.Errorf("source Operation: got %+v want nil (failed surge cleared)", src.Operation)
 	}
-	if src.RunningRevision != "p414-engine-goodrev" {
-		t.Errorf("source RunningRevision: got %q want p414-engine-goodrev (unchanged)", src.RunningRevision)
+	if src.RunningRevision != "gang-a-engine-goodrev" {
+		t.Errorf("source RunningRevision: got %q want gang-a-engine-goodrev (unchanged)", src.RunningRevision)
 	}
 	if src.TargetRevision != "" {
 		t.Errorf("source TargetRevision: got %q want cleared", src.TargetRevision)
@@ -187,11 +187,11 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	if len(*blockCalls) != 2 {
 		t.Fatalf("MutateRetryBlock calls: got %d want 2 (record failed target, prune old rev)", len(*blockCalls))
 	}
-	if rec := (*blockCalls)[0]; rec.rev != "p414-engine-badrev" || rec.disposition != workload.RetryBlockPersist {
-		t.Errorf("record call: got (rev=%q, disposition=%v) want (p414-engine-badrev, Persist)", rec.rev, rec.disposition)
+	if rec := (*blockCalls)[0]; rec.rev != "gang-a-engine-badrev" || rec.disposition != workload.RetryBlockPersist {
+		t.Errorf("record call: got (rev=%q, disposition=%v) want (gang-a-engine-badrev, Persist)", rec.rev, rec.disposition)
 	}
-	if prune := (*blockCalls)[1]; prune.rev != "p414-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
-		t.Errorf("prune call: got (rev=%q, disposition=%v) want (p414-engine-goodrev, Remove)", prune.rev, prune.disposition)
+	if prune := (*blockCalls)[1]; prune.rev != "gang-a-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
+		t.Errorf("prune call: got (rev=%q, disposition=%v) want (gang-a-engine-goodrev, Remove)", prune.rev, prune.disposition)
 	}
 }
 
@@ -202,7 +202,7 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 // pass that cleared the failed attempt's Operation.
 func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	legacyResetExpectations(t)
-	const isvc, ns = "p414", "omenative-eval"
+	const isvc, ns = "gang-a", "test-ns"
 	c := legacyNewFakeClient(t) // surge pods already deleted
 
 	t0 := time.Now()
@@ -210,15 +210,15 @@ func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	src := &workload.InstanceStatus{
 		Index:           0,
 		Phase:           workload.InstancePhaseFailed,
-		RunningRevision: "p414-engine-goodrev",
-		TargetRevision:  "p414-engine-badrev",
+		RunningRevision: "gang-a-engine-goodrev",
+		TargetRevision:  "gang-a-engine-badrev",
 		Operation: &workload.InstanceOperation{
 			Type:           workload.InstanceOperationUpdate,
 			Step:           updateStepSurge,
 			SurgeIndex:     &surgeIdx,
-			TargetRevision: "p414-engine-badrev",
+			TargetRevision: "gang-a-engine-badrev",
 		},
-		LastFailure: &workload.InstanceTermination{PodName: "p414-engine-2-leader-0", Reason: "ImagePullBackOff"},
+		LastFailure: &workload.InstanceTermination{PodName: "gang-a-engine-2-leader-0", Reason: "ImagePullBackOff"},
 	}
 	var removed []int32
 	input := gangAbandonInput(isvc, ns, src, &removed)
@@ -242,8 +242,8 @@ func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 		t.Fatalf("MutateRetryBlock calls: got %d want 2", len(*blockCalls))
 	}
 	rec := (*blockCalls)[0]
-	if rec.rev != "p414-engine-badrev" || rec.disposition != workload.RetryBlockPersist {
-		t.Fatalf("record call: got (rev=%q, disposition=%v) want (p414-engine-badrev, Persist)", rec.rev, rec.disposition)
+	if rec.rev != "gang-a-engine-badrev" || rec.disposition != workload.RetryBlockPersist {
+		t.Fatalf("record call: got (rev=%q, disposition=%v) want (gang-a-engine-badrev, Persist)", rec.rev, rec.disposition)
 	}
 	if rec.block.State != workload.RetryBlockBackoff || rec.block.AttemptsStarted != 1 {
 		t.Errorf("block: got (state=%q, attempts=%d) want (Backoff, 1)", rec.block.State, rec.block.AttemptsStarted)
@@ -251,11 +251,11 @@ func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	if rec.block.NextRetryAt == nil || !rec.block.NextRetryAt.Time.Equal(t0.Add(time.Minute)) {
 		t.Errorf("NextRetryAt: got %v want %v", rec.block.NextRetryAt, t0.Add(time.Minute))
 	}
-	if rec.block.Reason != "pod p414-engine-2-leader-0 stuck (ImagePullBackOff)" {
+	if rec.block.Reason != "pod gang-a-engine-2-leader-0 stuck (ImagePullBackOff)" {
 		t.Errorf("Reason: got %q want the LastFailure evidence", rec.block.Reason)
 	}
-	if prune := (*blockCalls)[1]; prune.rev != "p414-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
-		t.Errorf("prune call: got (rev=%q, disposition=%v) want (p414-engine-goodrev, Remove)", prune.rev, prune.disposition)
+	if prune := (*blockCalls)[1]; prune.rev != "gang-a-engine-goodrev" || prune.disposition != workload.RetryBlockRemove {
+		t.Errorf("prune call: got (rev=%q, disposition=%v) want (gang-a-engine-goodrev, Remove)", prune.rev, prune.disposition)
 	}
 }
 
@@ -278,7 +278,7 @@ func drainRecorderEvents(rec *record.FakeRecorder) []string {
 // monitoring never saw gang rollouts finish.
 func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
 	legacyResetExpectations(t)
-	const isvcName, ns = "p298", "omenative-eval"
+	const isvcName, ns = "gang-b", "test-ns"
 	surgeIdx := int32(2)
 	mkReadyPod := func(runner string) *corev1.Pod {
 		pod := gangSurgePod(isvcName, ns, surgeIdx, runner, "newrev")
@@ -293,12 +293,12 @@ func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
 	src := &workload.InstanceStatus{
 		Index:           0,
 		Phase:           workload.InstancePhaseUpdating,
-		RunningRevision: "p298-engine-oldrev",
+		RunningRevision: "gang-b-engine-oldrev",
 		Operation: &workload.InstanceOperation{
 			Type:           workload.InstanceOperationUpdate,
 			Step:           updateStepSurge,
 			SurgeIndex:     &surgeIdx,
-			TargetRevision: "p298-engine-newrev",
+			TargetRevision: "gang-b-engine-newrev",
 		},
 	}
 	var removed []int32
@@ -309,7 +309,7 @@ func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
 	deps := legacyTestDeps(c)
 	deps.Recorder = rec
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
-	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "p298-engine-newrev"}}
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "gang-b-engine-newrev"}}
 
 	done, err := gangSurgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], target)
 	if err != nil {
@@ -341,13 +341,13 @@ func TestAbandonFailedGangSurge_EventReasons(t *testing.T) {
 	run := func(t *testing.T, failedTargetRev, wantPrefix string) []string {
 		t.Helper()
 		legacyResetExpectations(t)
-		const isvcName, ns = "p378", "omenative-eval"
+		const isvcName, ns = "gang-c", "test-ns"
 		c := legacyNewFakeClient(t) // surge pods already gone — reset pass
 		surgeIdx := int32(2)
 		src := &workload.InstanceStatus{
 			Index:           0,
 			Phase:           workload.InstancePhaseFailed,
-			RunningRevision: "p378-engine-goodrev",
+			RunningRevision: "gang-c-engine-goodrev",
 			Operation: &workload.InstanceOperation{
 				Type:       workload.InstanceOperationUpdate,
 				Step:       updateStepSurge,
@@ -384,7 +384,7 @@ func TestAbandonFailedGangSurge_EventReasons(t *testing.T) {
 	}
 
 	t.Run("failed abandon warns", func(t *testing.T) {
-		run(t, "p378-engine-badrev", corev1.EventTypeWarning)
+		run(t, "gang-c-engine-badrev", corev1.EventTypeWarning)
 	})
 	t.Run("supersede abandon is normal", func(t *testing.T) {
 		run(t, "", corev1.EventTypeNormal)

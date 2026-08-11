@@ -61,12 +61,12 @@ func gangSchedClient(t *testing.T, initObjs ...client.Object) client.Client {
 // exists. The fix ensures the PodGroup inline before the create.
 func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc, _ := surgeISVCReady("p304", "prod", 1)
+	isvc, _ := surgeISVCReady("gang-a", "prod", 1)
 	plan := gangSurgePlan()
 	plan.TopologyKey = "network.example.com/fabric-domain"
 
-	v1Name := "p304-engine-rev-v1hash"
-	v2Name := "p304-engine-rev-v2hash"
+	v1Name := "gang-a-engine-rev-v1hash"
+	v2Name := "gang-a-engine-rev-v2hash"
 
 	// In-flight gang surge, BEFORE the surge pods are created: the source
 	// (idx=0) carries Op{Surge, SurgeIndex=1}; idx=1 carries the
@@ -104,7 +104,7 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 	}
 
 	// The surge pods exist...
-	surgePods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "p304", workload.ComponentEngine, 1)
+	surgePods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "gang-a", workload.ComponentEngine, 1)
 	if err != nil {
 		t.Fatalf("list surge gang pods: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 
 	// ...and the PodGroup they reference MUST exist (else the gang scheduler
 	// rejects them with "PodGroup not found").
-	wantPG := query.PodGroupName("p304", workload.ComponentEngine, 1)
+	wantPG := query.PodGroupName("gang-a", workload.ComponentEngine, 1)
 	pg := &schedulingv1alpha1.PodGroup{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: wantPG}, pg); err != nil {
 		t.Fatalf("surge gang PodGroup %q missing when its pods exist: %v", wantPG, err)
@@ -146,11 +146,11 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 // troughs skew the live RatioBalanced ratio.
 func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) {
 	legacyResetExpectations(t)
-	isvc, _ := surgeISVCReady("p72", "prod", 1)
+	isvc, _ := surgeISVCReady("gang-b", "prod", 1)
 	plan := gangSurgePlan()
 
-	v1Name := "p72-engine-rev-v1hash"
-	v2Name := "p72-engine-rev-v2hash"
+	v1Name := "gang-b-engine-rev-v1hash"
+	v2Name := "gang-b-engine-rev-v2hash"
 	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
 
 	c := gangSchedClient(t, isvc, ir)
@@ -184,7 +184,7 @@ func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) 
 	}
 
 	srcServing := func(when string) (present int, serving int) {
-		pods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "p72", workload.ComponentEngine, 0)
+		pods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "gang-b", workload.ComponentEngine, 0)
 		if err != nil {
 			t.Fatalf("list source pods (%s): %v", when, err)
 		}
@@ -206,7 +206,7 @@ func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) 
 	}
 
 	// Flip the replacement gang to PodReady (kubelet AND'd the serving gate).
-	replPods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "p72", workload.ComponentEngine, 1)
+	replPods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "gang-b", workload.ComponentEngine, 1)
 	if err != nil {
 		t.Fatalf("list replacement pods: %v", err)
 	}
