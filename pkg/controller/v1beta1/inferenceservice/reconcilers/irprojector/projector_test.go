@@ -529,7 +529,7 @@ func TestEnsureInferenceReplica_PropagatesComponentAnnotations(t *testing.T) {
 	// value to prove the projector pulls from p.ComponentExt directly —
 	// not just from a caller-side merge. The real dispatch site DOES
 	// merge them upstream (engine.go::processAnnotations), but the
-	// projector must remain self-contained for the A-2 scenario.
+	// projector must remain self-contained for this scenario.
 
 	_, err := EnsureInferenceReplica(context.Background(), p)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -554,7 +554,7 @@ func TestEnsureInferenceReplica_PropagatesComponentAnnotations(t *testing.T) {
 }
 
 // TestEnsureInferenceReplica_PropagatesComponentLabels pins the label
-// half of the A-2 fix: spec.<component>.labels MUST land on every
+// half of the fix: spec.<component>.labels MUST land on every
 // Runner.Template.ObjectMeta.Labels for pod affinity / NetworkPolicy
 // selectors / kubectl filtering. Same defensive-merge contract as
 // annotations.
@@ -693,7 +693,7 @@ func TestEnsureInferenceReplica_ComponentExt_OverridesObjectMetaOnCollision(t *t
 // pins the update path: a re-projection with a different
 // p.ComponentExt.Annotations value MUST land on the live IR's runner
 // template. Without this the second reconcile after an annotation bump
-// would leave the IR carrying the stale value — the exact A-2 failure
+// would leave the IR carrying the stale value — the exact failure
 // shape.
 func TestEnsureInferenceReplica_ComponentAnnotationUpdate_RepatchesTemplate(t *testing.T) {
 	g := gomega.NewWithT(t)
