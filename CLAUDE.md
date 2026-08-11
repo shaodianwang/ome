@@ -12,6 +12,14 @@ OME (Open Model Engine) is a Kubernetes operator for managing and serving Large 
 
 This is a **blocker, not a preference**: any change that introduces (or preserves) a hardcoded value like this must be called out explicitly and justified before it is accepted — do not add it silently. When you encounter an existing hardcode while working nearby, flag it. The fix pattern: add a config field (no in-code default) + supply the value via the chart/GitOps (e.g. the `sharedHostPrefix` field replacing the old hardcoded `"llm."` host prefix). This applies everywhere in the repo.
 
+## Upstreaming Boundaries (HARD BLOCKERS)
+
+This repo is periodically upstreamed to the public OME repo. Two rules keep internal information out of the public tree:
+
+**Internal-only folders — never ported upstream.** `.buildkite/`, `hack/`, `config/`, `oeps/`, `grafana/`, `muse/`, `dockerfiles/`, `.claude/`, and the internal-only charts under `charts/` (`ome-isvc`, `muse`, `ome-scheduler`). These may freely reference internal clusters, tools, and runbooks — nothing in them is ever copied upstream verbatim (upstream maintains its own equivalents where one is needed).
+
+**Upstreamable code must be leak-free.** Everything under `pkg/`, `cmd/`, `internal/`, and `scheduler/` flows upstream (now or in a future wave) and must never contain internal information — in code, comments, log/error strings, test fixtures, or testdata. That includes: internal hostnames/domains, cluster and environment names, internal service names, absolute local paths (`/Users/<name>`, `/home/<name>`), usernames, team/oncall names, ticket or diff numbers, and internal-only header/token names. Use neutral fixtures (`example.com`, generic service names) instead. Treat a violation like a hardcoded magic value: a review blocker to call out explicitly, not a nit. `tests/` is case-by-case (integration suites are ported selectively) — write new test fixtures leak-free by default.
+
 ## Code Comments
 
 Comments describe what the code **is** and **why** — never what *changed* or what's *coming*.
