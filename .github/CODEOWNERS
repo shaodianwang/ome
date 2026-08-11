@@ -4,4 +4,4 @@
 # Default owners for everything in the repo — the full maintainer set (all
 # prior committers), so every PR auto-requests review from the whole group.
 # A more specific pattern below would override this for its path.
-*       @slin1237 @CatherineSue @fanyang-real @jihuiyang @sladyn98 @yun-fan-wang @Huang-Wei
+*       @slin1237 @CatherineSue @fanyang-real @jihuiyang @sladyn98 @yun-fan-wang @Huang-Wei @shaodianwang
