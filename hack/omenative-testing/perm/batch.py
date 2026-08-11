@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""batch.py [--conc N] [cases...] — run many run.py cases with bounded concurrency.
+"""batch.py [--conc N] [--shard I/N] [--junit PATH] [cases...] — run many run.py cases with bounded concurrency.
 
 Defaults: cases = p01..p25 (the single-Component lifecycle set), conc = 8.
 Each case runs as its own `python3 run.py <case>` subprocess (own watcher),
@@ -11,6 +11,12 @@ Examples:
   python3 batch.py --conc 12             # p01..p25 @ conc 12
   python3 batch.py --conc 6 p26 p27 p28  # explicit cases
   python3 batch.py p26 p50               # subset @ default conc
+  python3 batch.py --shard 0/4           # CI: this shard's quarter of the set
+  python3 batch.py --junit /tmp/r.xml    # CI: machine-readable per-case results
+
+CI contract: exits nonzero when any case ends in a verdict that is neither PASS
+nor an XFAIL (parked debt). --shard partitions the case list round-robin so N
+agents cover it disjointly; --junit writes one testcase per case.
 """
 import concurrent.futures as cf
 import glob
@@ -20,6 +26,8 @@ import re
 import subprocess
 import sys
 import time
+import pathlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
@@ -202,19 +210,87 @@ def expand_cases(tokens):
     return out
 
 
+def is_green(verdict):
+    """A verdict CI should accept: a pass, or parked debt.
+
+    XFAIL covers both the infeasible-shape and known-bug forms ("XFAIL (known
+    bug: #N)"), which the summary already surfaces in its PARKED DEBT table.
+    Everything else — FAIL, INIT_TIMEOUT, APPLY_FAIL, INFRA-FAIL, or a verdict
+    that could not be read back ("?") — means the sweep did not validate the
+    case and is reported as a failure.
+    """
+    v = (verdict or "").strip()
+    return v == "PASS" or v.startswith("XFAIL")
+
+
+def apply_shard(cases, spec):
+    """Return this shard's slice of cases. spec is "I/N", 0-based I.
+
+    Round-robin by index rather than contiguous blocks, so the long-running
+    families (gangs, migration) spread across shards instead of landing in one.
+    """
+    try:
+        idx_s, total_s = spec.split("/", 1)
+        idx, total = int(idx_s), int(total_s)
+    except ValueError:
+        raise SystemExit(f"--shard expects I/N (0-based I), got {spec!r}")
+    if total < 1 or not (0 <= idx < total):
+        raise SystemExit(f"--shard I/N needs N>=1 and 0<=I<N, got {spec!r}")
+    picked = [c for n, c in enumerate(cases) if n % total == idx]
+    print(f"=== shard {idx}/{total}: {len(picked)} of {len(cases)} cases ===")
+    return picked
+
+
+def write_junit(path, results, elapsed):
+    """Emit a JUnit report so CI annotates per case instead of only the summary.
+
+    Parked debt (XFAIL) is recorded as skipped, not passed: it is tracked debt
+    and should read that way in the CI UI.
+    """
+    suite = ET.Element("testsuite", name="omenative-eval",
+                       tests=str(len(results)),
+                       failures=str(sum(1 for v in results.values() if not is_green(v))),
+                       skipped=str(sum(1 for v in results.values() if str(v).startswith("XFAIL"))),
+                       time=f"{elapsed:.1f}")
+    for case in sorted(results):
+        verdict = results[case]
+        tc = ET.SubElement(suite, "testcase", classname="omenative-eval",
+                           name=f"{case} ({case_category(case)})")
+        if str(verdict).startswith("XFAIL"):
+            ET.SubElement(tc, "skipped", message=str(verdict))
+        elif not is_green(verdict):
+            ET.SubElement(tc, "failure", message=str(verdict),
+                          type=str(verdict).split()[0] if verdict else "UNKNOWN")
+    out = pathlib.Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(suite).write(out, encoding="utf-8", xml_declaration=True)
+
+
 def main():
     argv = sys.argv[1:]
     conc = 8
+    shard = None
+    junit_path = None
     cases = []
     i = 0
     while i < len(argv):
         if argv[i] == "--conc":
             conc = int(argv[i + 1]); i += 2
+        elif argv[i] == "--shard":
+            shard = argv[i + 1]; i += 2
+        elif argv[i] == "--junit":
+            junit_path = argv[i + 1]; i += 2
         else:
             cases.append(argv[i]); i += 1
     cases = expand_cases(cases)
     if not cases:
         cases = [f"p{n:02d}" for n in range(1, 26)]   # p01..p25
+
+    if shard is not None:
+        cases = apply_shard(cases, shard)
+        if not cases:
+            print(f"=== shard {shard} has no cases assigned; nothing to run ===")
+            return 0
 
     # Quota isolation: a fault=quota case creates a NAMESPACE-wide ResourceQuota
     # sized from a live usage snapshot — run concurrently it both blocks other
@@ -299,6 +375,18 @@ def main():
                 subprocess.run(["kubectl", "uncordon", node], env=ENV)
             subprocess.run(["kubectl", "label", "node", node, "perm.test/cordoned-"], env=ENV)
 
+    if junit_path:
+        write_junit(junit_path, results, time.time() - t0)
+        print(f"=== junit: {junit_path} ===")
+
+    failed = sorted(c for c, v in results.items() if not is_green(v))
+    if failed:
+        print(f"\n=== FAILED {len(failed)}/{len(results)}: "
+              f"{', '.join(f'{c}={results[c]}' for c in failed)} ===")
+        return 1
+    print(f"\n=== all {len(results)} case(s) green ===")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
