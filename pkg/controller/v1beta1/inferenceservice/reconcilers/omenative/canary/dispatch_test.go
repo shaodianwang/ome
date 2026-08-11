@@ -502,11 +502,10 @@ func TestDispatch_EnsuresPerRevisionServicesForSecondary(t *testing.T) {
 }
 
 // TestDispatch_RecreatesDeletedServiceWhenConverged is the canary-side
-// regression test for the self-heal bug: a per-revision Service deleted
-// out-of-band must be recreated on the next Dispatch even when the live
-// revision-hash set matches the recorded Traffic set (converged). Pre-fix,
-// ensure was gated on PerRevisionServicesConverged, so the deleted Service
-// stayed gone and the weighted-route consumer routed to a dead backend.
+// self-heal regression test: a per-revision Service deleted out-of-band must
+// be recreated on the next Dispatch even when the live revision-hash set
+// already matches the recorded Traffic set. Ensure runs unconditionally so
+// the weighted-route consumer never routes to a dead backend.
 func TestDispatch_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 	ns := "default"
 	n1 := 1
@@ -518,8 +517,9 @@ func TestDispatch_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 			{Capacity: intstr.FromString("100%"), Traffic: 100},
 		}},
 	}}}
-	// Converged: a single revision present, recorded as the engine's Traffic set
-	// so PerRevisionServicesConverged returns true and the GC sweep is skipped.
+	// A single revision present, recorded as the engine's Traffic set — the
+	// live and recorded hash sets agree, which is the state the deleted
+	// Service must still be recreated in.
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {Traffic: []v1beta1.ComponentTrafficTarget{{
 			RevisionName: coordination.PerRevisionServiceName("cv1", v1beta1.EngineComponent, "stable0"),

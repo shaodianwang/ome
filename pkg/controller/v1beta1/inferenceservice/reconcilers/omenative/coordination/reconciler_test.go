@@ -169,28 +169,70 @@ func steadyEngineStatus(isvc *v1beta1.InferenceService, hash string) {
 // see TestReconcile_RecreatesDeletedServiceWhenConverged); its Gets are
 // cache-served and cheap. The cached-read switch is orthogonal: pods are
 // still observed via Client every pass.
-func TestReconcile_SkipsGCWhenRevisionSetConverged(t *testing.T) {
+// The orphan sweep must run even when the live revision-hash set already
+// matches Status.Components.<c>.Traffic. That state is reached one reconcile
+// BEFORE a drained pod disappears, because Traffic is written from READY pods
+// while the sweep is keyed on TOTAL pods: the pass on which the drained pod
+// finally leaves the total set is exactly the pass on which the two sets agree.
+// Gating the sweep on that agreement stranded the drained revision's Services
+// until some later rollout happened to sweep them.
+func TestReconcile_GCsOrphanWhenRevisionSetLooksConverged(t *testing.T) {
 	isvc := testOMENativeISVC()
+	// Post-drain steady state: Traffic records only hash1, and only hash1 has
+	// pods — the two sets agree.
 	steadyEngineStatus(isvc, "hash1")
-	// Live pod whose hash matches the recorded Traffic set -> converged.
-	pods := []runtime.Object{
+
+	orphanRouting := PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash0")
+	orphanHeadless := PerRevisionHeadlessServiceName(isvc.Name, v1beta1.EngineComponent, "hash0")
+	objs := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
+		// Left behind by the previous revision; no pod carries hash0.
+		perRevisionServiceFixture(isvc, v1beta1.EngineComponent, "hash0", orphanRouting),
+		perRevisionServiceFixture(isvc, v1beta1.EngineComponent, "hash0", orphanHeadless),
 	}
-	c := &listCountingClient{Client: testClient(pods...)}
+	c := &listCountingClient{Client: testClient(objs...)}
 	r, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Ensure still runs every reconcile (self-heal); the converged set has
-	// one live hash, so exactly that hash is ensured.
 	if r.PerRevisionServicesEnsured != 1 {
-		t.Errorf("converged revision set: ensure must still run (self-heal), got %d ensured want 1", r.PerRevisionServicesEnsured)
+		t.Errorf("ensure must still run for the live hash, got %d want 1", r.PerRevisionServicesEnsured)
 	}
-	// The GC orphan sweep (Service LIST) must be skipped when converged.
-	if c.serviceLists != 0 {
-		t.Errorf("converged revision set: GC Service LIST must be skipped, got %d LIST calls", c.serviceLists)
+	if c.serviceLists == 0 {
+		t.Error("orphan sweep must run: got 0 Service LIST calls")
+	}
+	for _, name := range []string{orphanRouting, orphanHeadless} {
+		err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: name}, &corev1.Service{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("orphan Service %s must be deleted, Get returned %v", name, err)
+		}
+	}
+}
+
+// perRevisionServiceFixture builds a per-revision Service carrying the labels
+// gcOrphanedPerRevisionServices selects on, so the sweep can find it.
+func perRevisionServiceFixture(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash, name string) runtime.Object {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: isvc.Namespace,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: isvc.Name,
+				constants.OMEComponentLabel:           string(component),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelRevisionHash:               revisionHash,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				constants.InferenceServicePodLabelKey: isvc.Name,
+				constants.OMEComponentLabel:           string(component),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelRevisionHash:               revisionHash,
+			},
+		},
 	}
 }
 

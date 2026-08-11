@@ -225,20 +225,19 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			result.PerRevisionServicesEnsured++
 		}
 
-		// GC — and only GC — may be skipped when converged. The orphan
-		// sweep is a heavier namespace Service LIST, and when the live
-		// revision-hash set matches the set last recorded on
-		// Status.Components.<c>.Traffic there is provably nothing to
-		// delete: a prior reconcile already GC'd every orphan for that
-		// set. Any divergence forces the full sweep.
-		if PerRevisionServicesConverged(in.ISVC.Name, c, perRevisionPods[c], in.ISVC.Status.Components[c].Traffic) {
-			continue
-		}
-
 		// Delete per-revision Service pairs whose revision-hash has no
 		// live pods. Safe because we Ensure only for hashes with pods —
 		// a hash with zero pods is genuinely past retention. Pods added
 		// between the list and the delete re-Ensure on the next reconcile.
+		//
+		// The sweep runs unconditionally. It cannot be gated on the live
+		// revision-hash set matching Status.Components.<c>.Traffic: the
+		// hash set here counts TOTAL pods while Traffic is written from
+		// READY pods, so a draining pod leaves Traffic one reconcile ahead.
+		// The pass on which the drained pod finally disappears is exactly
+		// the pass on which the two sets agree, so a gate would skip the
+		// only sweep that could collect that revision's Services. Cost is
+		// a cached-client List, not an apiserver round trip.
 		if err := gcOrphanedPerRevisionServices(ctx, in.Client, in.ISVC, c, perRevisionPods[c]); err != nil {
 			return nil, fmt.Errorf("gc per-revision services for %s: %w", c, err)
 		}

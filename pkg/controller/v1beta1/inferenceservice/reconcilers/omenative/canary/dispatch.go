@@ -107,16 +107,12 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 				return 0, err
 			}
 		}
-		// GC — and only GC — may be skipped when converged. The orphan
-		// sweep is a heavier namespace Service LIST; when the live
-		// revision-hash set matches the set recorded on
-		// Status.Components.<c>.Traffic there is nothing to delete.
-		// Mirrors coordination's gate. Secondaries (whose Traffic the
-		// canary never writes) always fall through, which is correct —
-		// they just don't get the steady-state GC skip.
-		if coordination.PerRevisionServicesConverged(d.ISVC.Name, comp, perRev[comp], d.ISVC.Status.Components[comp].Traffic) {
-			continue
-		}
+		// The orphan sweep runs unconditionally, mirroring coordination.
+		// Gating it on the live revision-hash set matching
+		// Status.Components.<c>.Traffic is unsound: perRev counts TOTAL
+		// pods while Traffic is written from READY pods, so the pass on
+		// which a drained pod disappears is exactly the pass on which the
+		// two sets agree — skipping it strands that revision's Services.
 		if err := coordination.GCOrphanedPerRevisionServices(ctx, d.Client, d.ISVC, comp, perRev[comp]); err != nil {
 			return 0, err
 		}
