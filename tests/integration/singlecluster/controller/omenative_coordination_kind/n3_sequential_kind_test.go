@@ -41,6 +41,7 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		// recreate takes one pod offline at a time.
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("seq-n3-kcg1"),
+			WithStartupDelay(10),
 			WithRouter(),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
 				Components: []v1beta1.ComponentType{
@@ -81,13 +82,19 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture the pre-bump revisions for each of the three Components.
-		preBump := freshISVC(Default, ns.Name, "seq-n3-kcg1")
-		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
-		Expect(v1RouterRev).NotTo(BeEmpty())
-		Expect(v1DecoderRev).NotTo(BeEmpty())
-		Expect(v1EngineRev).NotTo(BeEmpty())
+		// CurrentRevision is promoted on a later reconcile than the one that
+		// flips an Instance to Ready, so poll: a bare read here races the
+		// promotion and observes the empty pre-promotion value.
+		var v1RouterRev, v1DecoderRev, v1EngineRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "seq-n3-kcg1")
+			v1RouterRev = preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
+			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(v1RouterRev).NotTo(BeEmpty(), "router CurrentRevision must be promoted")
+			g.Expect(v1DecoderRev).NotTo(BeEmpty(), "decoder CurrentRevision must be promoted")
+			g.Expect(v1EngineRev).NotTo(BeEmpty(), "engine CurrentRevision must be promoted")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Sample all three CurrentRevisions across the rollout. The
 		// chained-handoff invariant produces two distinct windows we must

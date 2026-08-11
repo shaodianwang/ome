@@ -1,6 +1,8 @@
 package omenative_coordination_kind
 
 import (
+	"strconv"
+
 	"github.com/onsi/ginkgo/v2"
 	corev1 "k8s.io/api/core/v1"
 
@@ -102,6 +104,7 @@ type fixtureOptions struct {
 	// Engine knobs.
 	engineImage       string
 	engineMinReplicas int
+	startupDelaySec   int
 	engineAnnots      map[string]string
 	engineTopologyKey string
 	// engineWorkerSize > 0 promotes the engine to a multi-pod gang
@@ -150,6 +153,23 @@ func WithEngineImage(img string) FixtureOption {
 }
 
 // WithEngineReplicas sets engine.MinReplicas. Defaults to 1.
+// WithStartupDelay makes every container in the fixture sleep n seconds before
+// binding, via the fake-serving image's STARTUP_DELAY_SEC knob.
+//
+// For specs that assert on a TRANSIENT state — a two-entry Traffic[] window
+// mid-bump, one Component rolled while the next is still on the old revision, a
+// surge index that exists only until the source drains. fake-serving binds in
+// milliseconds, so those windows can open and close inside a single sampler
+// tick and the spec fails having never observed the state, even though the
+// rollout behaved. Stretching the Ready transition widens the window past the
+// poll interval.
+//
+// Costs wall-clock proportional to the delay on every pod the spec starts, so
+// it is opt-in per spec rather than a fixture default.
+func WithStartupDelay(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.startupDelaySec = n }
+}
+
 func WithEngineReplicas(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.engineMinReplicas = n }
 }
@@ -530,6 +550,9 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	}
 
 	isvc := wrapper.Obj()
+	if o.startupDelaySec > 0 {
+		applyStartupDelay(isvc, o.startupDelaySec)
+	}
 	if len(o.coordGroups) > 0 {
 		// Translate the operator-facing v1 coordination groups the specs
 		// author into v2 spec.rollout.groups[]. Independent groups
@@ -546,6 +569,43 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	}
 
 	return &coordFixture{CBM: cbm, CSR: csr, ISVC: isvc}
+}
+
+// applyStartupDelay stamps STARTUP_DELAY_SEC on every container the fixture
+// renders — each Component and, for multi-pod shapes, both the leader and the
+// worker pod specs, so a gang's members come up on the same clock.
+func applyStartupDelay(isvc *v1beta1.InferenceService, sec int) {
+	val := strconv.Itoa(sec)
+	stamp := func(ps *v1beta1.PodSpec) {
+		if ps == nil {
+			return
+		}
+		for i := range ps.Containers {
+			ps.Containers[i].Env = append(ps.Containers[i].Env,
+				corev1.EnvVar{Name: "STARTUP_DELAY_SEC", Value: val})
+		}
+	}
+	if e := isvc.Spec.Engine; e != nil {
+		stamp(&e.PodSpec)
+		if e.Leader != nil {
+			stamp(&e.Leader.PodSpec)
+		}
+		if e.Worker != nil {
+			stamp(&e.Worker.PodSpec)
+		}
+	}
+	if d := isvc.Spec.Decoder; d != nil {
+		stamp(&d.PodSpec)
+		if d.Leader != nil {
+			stamp(&d.Leader.PodSpec)
+		}
+		if d.Worker != nil {
+			stamp(&d.Worker.PodSpec)
+		}
+	}
+	if r := isvc.Spec.Router; r != nil {
+		stamp(&r.PodSpec)
+	}
 }
 
 // deferFixtureCleanup registers a single DeferCleanup that tears the coord

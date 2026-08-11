@@ -47,6 +47,7 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 	ginkgo.It("Sequential rolls components in declared order (decoder → engine)", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("seq-d2"),
+			WithStartupDelay(10),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
 				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 				Policy:     v1beta1.CoordinationPolicySequential,

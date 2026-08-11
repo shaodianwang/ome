@@ -36,6 +36,7 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 	ginkgo.It("Sequential N=3 with Order=[engine, decoder, router] chains in declared direction", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-seq-n3-ef"),
+			WithStartupDelay(10),
 			WithRouter(),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
 				Components: []v1beta1.ComponentType{

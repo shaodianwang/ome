@@ -79,6 +79,7 @@ var _ = ginkgo.Describe("TRAFFIC — Status.Components.<c>.Traffic[] producer", 
 		// ValidateGroupShape (requires >= 2 Components); using no group
 		// avoids that and still exercises the multi-revision producer.
 		fix := newCoordFixture(ns.Name, WithISVCName("traffic2"), WithoutDecoder(),
+			WithStartupDelay(10),
 			WithEngineReplicas(2),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
