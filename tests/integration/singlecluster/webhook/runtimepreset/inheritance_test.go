@@ -64,7 +64,7 @@ var _ = ginkgo.Describe("Runtime preset + inheritance composition", ginkgo.Order
 	})
 
 	ginkgo.It("CSR child with preset + CSR profile parent: resolver yields engine (preset) + infra (profile)", func() {
-		profile := mkProfileCSR("infra-cw-arm64", infraOnlyProfileSpec())
+		profile := mkProfileCSR("infra-edge-arm64", infraOnlyProfileSpec())
 		child := mkCSR("rt-csr-pd", map[string]string{
 			constants.RuntimeEngineAnnotationKey:      "sglang-pd",
 			constants.RuntimeInheritFromAnnotationKey: profile.Name,
@@ -78,7 +78,7 @@ var _ = ginkgo.Describe("Runtime preset + inheritance composition", ginkgo.Order
 
 		merged, chain, err := runtimeinheritance.ResolveClusterRuntime(suiteCtx, k8sClient, child.Name)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(chain).To(gomega.Equal([]string{"infra-cw-arm64", "rt-csr-pd"}))
+		gomega.Expect(chain).To(gomega.Equal([]string{"infra-edge-arm64", "rt-csr-pd"}))
 
 		// From the preset (filled on child at admission, kept on resolve).
 		gomega.Expect(merged.EngineConfig).NotTo(gomega.BeNil())

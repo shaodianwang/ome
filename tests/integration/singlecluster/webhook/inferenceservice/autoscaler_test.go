@@ -117,7 +117,7 @@ var _ = ginkgo.Describe("InferenceService webhook Autoscaler validation", func()
 	})
 
 	ginkgo.It("rejects ISVC with legacy autoscaler annotation AND Autoscaler block", func() {
-		// Q2: annotation + block must not coexist. The validator
+		// Annotation + block must not coexist. The validator
 		// returns the AutoscalerAnnotationConflict reason regardless
 		// of which Component carries the block.
 		isvc := v1beta1testing.MakeInferenceService("conflict-annotation-block", "isvc-webhook").
@@ -140,7 +140,7 @@ var _ = ginkgo.Describe("InferenceService webhook Autoscaler validation", func()
 	// makes it past the new webhook rules (the spec is otherwise
 	// malformed because the model doesn't exist; that's expected and
 	// proves the autoscaler rule is not what's rejecting these).
-	ginkgo.It("accepts class=external (Q5 status-field twin of none)", func() {
+	ginkgo.It("accepts class=external (status-field twin of none)", func() {
 		isvc := withAutoscaler("ok-external", &v1beta1.ComponentAutoscaler{
 			Class: v1beta1.AutoscalerExternal,
 		})
