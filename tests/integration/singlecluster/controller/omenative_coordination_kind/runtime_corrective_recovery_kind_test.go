@@ -119,7 +119,7 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-forward recovery", g
 
 		configureFastDisposition()
 
-		// Shared-runtime shape (p412): the RUNTIME supplies the engine
+		// Shared-runtime shape: the RUNTIME supplies the engine
 		// container image; the ISVC omits it, so a runtime edit is the
 		// rollout lever end to end (autoSync default true).
 		fix := newCoordFixture(ns.Name, WithISVCName(name), WithoutDecoder(), engineOnlyBlueGreenGroup())
@@ -313,7 +313,7 @@ var _ = ginkgo.Describe("behavior - runtime corrective gang roll-back recovery",
 
 		configureFastDisposition()
 
-		// Gang shape (harness case p415): leader + one
+		// Gang shape: leader + one
 		// worker per Instance, images supplied by the shared runtime's
 		// engineConfig.leader/worker runners.
 		fix := newCoordFixture(ns.Name, WithISVCName(name), WithoutDecoder(),

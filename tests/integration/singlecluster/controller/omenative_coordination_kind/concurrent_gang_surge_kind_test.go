@@ -25,10 +25,9 @@ import (
 // claim on the source's Operation.SurgeIndex and AllocateSurgeIndex
 // excludes in-flight surge slots, so siblings fan out to 3,4,5,...
 //
-// This is the CI-automated, 100ms-sampled complement to the perm harness'
-// distinct-alive-index assertion (which enforces the same invariant on a
-// real cluster). KIND runs in CI without accelerators, so it catches a
-// regression on every push instead of only during a manual perm run.
+// This is the CI-automated, 100ms-sampled distinct-alive-index guard.
+// KIND runs in CI without accelerators, so it catches a regression on
+// every push.
 //
 // Shape: engine multi-node (leader + worker.size=1 => 2 pods/gang),
 // minReplicas=maxReplicas=3, SurgeThenDrain, per-Component RollingUpdate
@@ -51,10 +50,6 @@ import (
 //   - (c) SERVING FLOOR: engine serving never craters — it stays at or
 //     above minReplicas throughout (surge-then-drain keeps the source
 //     serving until the replacement is in rotation).
-//
-// Do NOT run via `make test-kind` here — needs Docker/KIND. Authored to
-// match the sibling KIND spec conventions; run locally before relying on
-// it as a regression guard.
 var _ = ginkgo.Describe("concurrent gang surge — distinct index per gang", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

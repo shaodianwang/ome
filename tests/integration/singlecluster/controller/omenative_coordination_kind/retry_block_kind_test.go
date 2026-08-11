@@ -40,7 +40,7 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 		// revert to v1) so the release is a genuinely NEW revision driving a
 		// real gang surge out of Held — the wedge regression under test.
 		fixedImage = "fake-serving:v2"
-		badImage   = "ghcr.io/ome-projects/this-image-does-not-exist:p0a"
+		badImage   = "ghcr.io/ome-projects/this-image-does-not-exist:bad"
 		// gangSize: leader + 1 worker per Instance.
 		gangSize = 2
 	)

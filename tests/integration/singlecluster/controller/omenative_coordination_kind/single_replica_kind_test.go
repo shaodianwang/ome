@@ -11,7 +11,7 @@ import (
 
 // Behavior test I — single-replica safe default.
 //
-// Guards the E2E-1 deadlock: with MaxUnavailable=0 the rollout would
+// Guards the single-replica deadlock: with MaxUnavailable=0 the rollout would
 // deadlock at MinReplicas=1 because the gate refuses to take the only
 // pod offline. With the 25% default (which ceils to 1 at single-replica),
 // the default must work for 1-replica ISVCs without explicit pacing.
@@ -63,7 +63,7 @@ var _ = ginkgo.Describe("behavior — single-replica safe default", ginkgo.Order
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Rollout completes. THIS is the E2E-1 regression guard: with
+		// Rollout completes. THIS is the regression guard: with
 		// the old MaxUnavailable=0 default, this would deadlock.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "single-i")

@@ -142,7 +142,7 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 		// must keep the exact UIDs captured above: exhaustion is a
 		// bookkeeping transition on the IR, never a teardown of the
 		// healthy source.
-		const badImage2 = "ghcr.io/ome-projects/this-image-does-not-exist:p0a-held"
+		const badImage2 = "ghcr.io/ome-projects/this-image-does-not-exist:bad-held"
 
 		goodRev := freshInferenceReplica(Default, ns.Name, name, v1beta1.EngineComponent).Status.CurrentRevision
 		Expect(goodRev).NotTo(BeEmpty())

@@ -16,7 +16,7 @@ import (
 
 // MPR-1 — multi-pod rank-0 customer Service selector.
 //
-// Pins the Gap-3 fix from the PGDR-vs-OMENative analysis: for multi-pod
+// Pins the rank-0 selector fix: for multi-pod
 // Components (Worker.Size > 0) the per-Component STABLE Service must
 // publish ONLY the rank-0 (leader) pod's endpoint, even though the
 // headless Service still discovers all gang members for peer init.

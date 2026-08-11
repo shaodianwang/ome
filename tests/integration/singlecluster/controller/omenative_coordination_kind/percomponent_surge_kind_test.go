@@ -19,7 +19,7 @@ import (
 // minReplicas + maxSurge. With real SurgeThenDrain the
 // gate's CheckSurgeGate IS exercised here — verified by injecting a
 // deliberate gate bypass which makes both Instances surge in parallel
-// and pushes alive=4 (the round-2 E-1 bug report's symptom). See
+// and pushes alive=4 (the guarded symptom). See
 // percomponent_maxsurge_multiinstance_kind_test.go for the BlueGreen
 // + 3-Instance variants that stress the cross-Instance enforcement
 // path on the gate's deny side.

@@ -16,7 +16,7 @@ import (
 // PerComponent maxSurge=1 ceiling MUST be enforced
 // per-Component (across Instances), NOT per-Instance.
 //
-// Real-cluster testing showed that with a multi-Instance
+// With a multi-Instance
 // engine under SurgeThenDrain + PerComponent MaxSurge=1, the
 // per-Component surge budget could be violated by both Instances
 // surging in parallel — pod count would temporarily exceed
