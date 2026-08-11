@@ -22,6 +22,7 @@ spec:
         controller-tools.k8s.io: "1.0"
         logging-forward: enabled
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/ome-controller/configmap.yaml") . | sha256sum }}
         kubectl.kubernetes.io/default-container: manager
         prometheus.io/scrape: 'true'
         prometheus.io/path: '/metrics'
