@@ -46,7 +46,7 @@ const (
 	DefaultAnalysisMaxConcurrency = 8
 )
 
-var DefaultConsistentHashHeaders = []string{"x-routing-key", "X-SMG-Routing-Key"}
+var DefaultConsistentHashHeaders = []string{"x-routing-key"}
 
 type SecretConfig struct {
 	WriteToCommonNamespace bool   `json:"writeToCommonNamespace"`

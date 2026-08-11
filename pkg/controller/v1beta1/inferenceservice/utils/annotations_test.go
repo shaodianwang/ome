@@ -143,10 +143,10 @@ func TestResolveIngressConfig(t *testing.T) {
 	t.Run("consistent hash headers are preserved", func(t *testing.T) {
 		configWithHeaders := &controllerconfig.IngressConfig{
 			IngressDomain:         "svc.cluster.local",
-			ConsistentHashHeaders: []string{"x-routing-key", "X-SMG-Routing-Key"},
+			ConsistentHashHeaders: []string{"x-routing-key", "x-tenant-key"},
 		}
 		result := ResolveIngressConfig(configWithHeaders, map[string]string{})
-		assert.Equal(t, []string{"x-routing-key", "X-SMG-Routing-Key"}, result.ConsistentHashHeaders)
+		assert.Equal(t, []string{"x-routing-key", "x-tenant-key"}, result.ConsistentHashHeaders)
 	})
 
 	// Guards against the resolver silently dropping a field: set every field,

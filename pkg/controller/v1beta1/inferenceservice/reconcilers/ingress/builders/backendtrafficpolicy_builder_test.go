@@ -29,7 +29,7 @@ func TestBackendTrafficPolicyBuilder_Build(t *testing.T) {
 			headers:           controllerconfig.DefaultConsistentHashHeaders,
 			expectedName:      "test-isvc",
 			expectedNamespace: "playground",
-			expectedHeaders:   []string{"x-routing-key", "X-SMG-Routing-Key"},
+			expectedHeaders:   []string{"x-routing-key"},
 		},
 		{
 			name:              "non-PD deployment engine only uses default headers",
@@ -37,7 +37,7 @@ func TestBackendTrafficPolicyBuilder_Build(t *testing.T) {
 			headers:           controllerconfig.DefaultConsistentHashHeaders,
 			expectedName:      "test-engine",
 			expectedNamespace: "default",
-			expectedHeaders:   []string{"x-routing-key", "X-SMG-Routing-Key"},
+			expectedHeaders:   []string{"x-routing-key"},
 		},
 		{
 			name:              "custom consistent hash headers via config",

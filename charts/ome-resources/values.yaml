@@ -219,6 +219,11 @@ ome:
       # built-in default. Must be an RFC-1123 label (invalid values are rejected
       # at config-load). Empty => the primary endpoint carries no class.
       omeIngressGatewayClass: ""
+      # Request headers forming the consistent-hash key for generated backend
+      # traffic policies. Config-driven: the binary's built-in fallback is
+      # ["x-routing-key"] only; this chart value is the deployment's source
+      # of truth for any additional routing headers.
+      consistentHashHeaders: ["x-routing-key", "X-SMG-Routing-Key"]
       additionalIngressDomains: null
       pathTemplate: ""
       disableIngressCreation: true
