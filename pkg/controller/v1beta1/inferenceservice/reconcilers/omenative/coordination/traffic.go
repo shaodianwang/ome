@@ -153,10 +153,9 @@ func ComputeWeightsFromPods(perRevisionPods map[string]int32, total int32, lates
 // old comparison treated the flag as cosmetic and the no-op short-
 // circuit suppressed the write — leaving traffic[].LatestRevision stuck
 // at false even after the rollout converged at 100% on a single
-// revision. PD-disaggregated A-6 testing surfaced this as
-// engine.traffic[0] missing the flag while decoder/router (whose Status
-// arrived first in the IR controller's processing order on that
-// cluster) had it correctly set.
+// revision. This surfaced as engine.traffic[0] missing the flag while
+// decoder/router (whose Status arrived first in the IR controller's
+// processing order) had it correctly set.
 func TrafficDiffersMeaningfully(desired, observed []v1beta1.ComponentTrafficTarget) bool {
 	if len(desired) != len(observed) {
 		return true

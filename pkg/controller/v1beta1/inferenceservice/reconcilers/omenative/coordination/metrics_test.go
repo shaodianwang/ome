@@ -11,11 +11,9 @@ import (
 )
 
 // Pure-function unit tests for the six Prometheus collectors registered
-// at package init in metrics.go. Ported from the envtest sibling
-// (formerly tests/integration/.../coordination/metrics_test.go M-1..M-12)
-// — none of the assertions below depend on envtest, the OMENative
-// reconciler, or any cluster scaffolding, so they belong here as a
-// proper pkg-level suite.
+// at package init in metrics.go. None of the assertions below depend on
+// envtest, the OMENative reconciler, or any cluster scaffolding, so they
+// belong here as a proper pkg-level suite.
 //
 // Each test uses a unique isvc-label combo so increments don't bleed.
 

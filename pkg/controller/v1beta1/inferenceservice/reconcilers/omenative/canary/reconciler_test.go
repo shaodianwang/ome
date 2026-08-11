@@ -583,7 +583,7 @@ func TestReconcile_AnalysisFailedIsSticky(t *testing.T) {
 	// would PASS — under the oscillation bug the re-stamp + re-evaluate would flip
 	// this to Paused (or advance). Sticky Failed must hold without re-sampling and
 	// without re-stamping StepEnteredTime.
-	in.Now = t0.Add(13 * time.Minute) // ready-timeout + stall would fire again at 778s-style cadence
+	in.Now = t0.Add(13 * time.Minute) // ready-timeout + stall would fire again on their cadence
 	passing := &countingSample{outcome: analysis.Pass, at: in.Now}
 	in.Sampler = passing
 	res, _ = Reconcile(context.Background(), in)

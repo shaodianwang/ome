@@ -405,8 +405,8 @@ func TestCheckSequentialGate_SoakWithPriorReadyFalseBypasses(t *testing.T) {
 }
 
 func TestCheckSequentialGate_PostDecoderConvergence_AllowsEngine(t *testing.T) {
-	// End-to-end post-convergence reproduction of the dev-cluster stall
-	// (image bf0641b9, /tmp/policy-validate-v2.sh seq):
+	// End-to-end post-convergence reproduction of a sequential-rollout
+	// stall:
 	//
 	//   - decoder rolled first and completed (revisions converged, the
 	//     OMENative status reconciler promoted CurrentRevision and stamped
@@ -483,8 +483,8 @@ func TestCheckSequentialGate_SoakWindowRespected(t *testing.T) {
 }
 
 func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
-	// Reproduces the bug observed on the dev cluster (image fb0bb7e2,
-	// gap=0s between decoder/engine creationTimestamps when both spec
+	// Reproduces a same-instant bump (gap=0s between decoder/engine
+	// creationTimestamps when both spec
 	// annotations are bumped in the same operator action):
 	//
 	// At the moment of bump, isvc.Generation has incremented (N → N+1)

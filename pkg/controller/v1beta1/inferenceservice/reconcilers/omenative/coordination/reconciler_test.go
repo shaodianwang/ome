@@ -321,11 +321,11 @@ func TestReconcile_WritesTrafficStatus(t *testing.T) {
 }
 
 // TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents pins
-// the per-Component contract surfaced by PD-disaggregated A-6 testing:
+// the per-Component contract:
 // for an ISVC running engine + decoder + router (all OMENative, each on
 // a single ControllerRevision), every Component's traffic[0] must carry
 // the same canonical shape — LatestRevision=true, Percent=100, and the
-// per-revision Service name as RevisionName. The cluster repro showed
+// per-revision Service name as RevisionName. The repro showed
 // engine.traffic[0] missing the LatestRevision flag while
 // decoder.traffic[0] + router.traffic[0] had it set correctly — caused
 // by the no-op short-circuit in TrafficDiffersMeaningfully treating the
@@ -450,7 +450,7 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 			t.Errorf("%s: Percent=%d want 100", comp, cs.Traffic[0].Percent)
 		}
 		if !cs.Traffic[0].LatestRevision {
-			t.Errorf("%s: LatestRevision=false want true (regression: PD-disaggregated A-6 cluster bug)", comp)
+			t.Errorf("%s: LatestRevision=false want true (regression)", comp)
 		}
 	}
 }
@@ -519,7 +519,7 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 		t.Fatalf("second pass: Traffic missing or wrong len: %+v", cs2.Traffic)
 	}
 	if !cs2.Traffic[0].LatestRevision {
-		t.Errorf("second pass: LatestRevision did not flip to true (regression: A-6 engine traffic[].latestRevision stuck stale)")
+		t.Errorf("second pass: LatestRevision did not flip to true (regression: engine traffic[].latestRevision stuck stale)")
 	}
 }
 

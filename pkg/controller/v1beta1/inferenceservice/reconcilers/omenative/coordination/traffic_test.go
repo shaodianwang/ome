@@ -181,15 +181,14 @@ func TestTrafficDiffersMeaningfully_TagDriftIgnored(t *testing.T) {
 	}
 }
 
-// TestTrafficDiffersMeaningfully_LatestRevisionFlip pins the regression
-// from PD-disaggregated A-6 testing: when the engine's traffic[0] was
+// TestTrafficDiffersMeaningfully_LatestRevisionFlip pins the regression: when the engine's traffic[0] was
 // initially written with LatestRevision=false (because the IR Status had
 // not yet populated LifecycleStatus.UpdateRevision on the first
 // reconcile that observed pods), subsequent reconciles computed the
 // correct LatestRevision=true value but the no-op short-circuit treated
 // the flag as cosmetic and suppressed the write — leaving the engine
 // entry permanently stuck without the flag while decoder/router (which
-// won the IR-Status race on that cluster) had it set correctly.
+// won the IR-Status race) had it set correctly.
 //
 // The fix: a LatestRevision flip is meaningful drift (operator-visible
 // and consumed by downstream HTTPRoute reconcilers) and MUST trigger a
