@@ -69,7 +69,7 @@ type ModelCacheProvider string
 
 const (
 	// ModelCacheProviderClusterCache is the cluster_cache provider name used by
-	// the internal sharded cache integration.
+	// the sharded model-cache integration.
 	ModelCacheProviderClusterCache ModelCacheProvider = "cluster_cache"
 )
 
