@@ -571,7 +571,7 @@ func TestAggregateStatus_ReadyCondition_PersistedToInformerCache(t *testing.T) {
 // aggregateAndWriteStatus pass that recomputes the identical status must
 // perform ZERO Status().Update writes. Each IR status write re-triggers
 // this controller AND the irprojector rollup onto the parent ISVC, so at
-// ~6000 pods the prior unconditional write amplified idle reconciles into
+// scale the prior unconditional write amplified idle reconciles into
 // a write storm.
 //
 // Verified via ResourceVersion: the fake client bumps RV on every

@@ -125,8 +125,8 @@ func (c *selectivelyCachingClient) AddCacheEventHandler(ctx context.Context, obj
 	return inf.AddEventHandler(handler)
 }
 
-// podGroupKind is the GroupKind the remote cache must never hold: at 10 clusters
-// x ~6000 pods the Pod informer alone would dwarf everything the placer reads
+// podGroupKind is the GroupKind the remote cache must never hold: across many
+// large clusters the Pod informer alone would dwarf everything the placer reads
 // (aggregated derived-ISVC status, not remote Pods).
 var podGroupKind = corev1.SchemeGroupVersion.WithKind("Pod").GroupKind()
 

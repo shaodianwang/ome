@@ -125,11 +125,11 @@ func irNameFromDrainServiceName(name string) (string, bool) {
 // in shared namespaces doesn't wake the handler.
 //
 // On Update it ADDITIONALLY drops events that don't touch any field the
-// IR reconcile reacts to. At ~6000 pods/cluster the kubelet emits a
+// IR reconcile reacts to. At thousands of pods per cluster the kubelet emits a
 // continuous stream of status heartbeats (timestamps, observedGeneration,
 // resource metrics) whose only effect is bumping ResourceVersion;
-// forwarding those produced a self-sustaining reconcile flood after the
-// outage. ResourceVersionChangedPredicate can't help — RV always changes
+// forwarding those produces a self-sustaining reconcile flood.
+// ResourceVersionChangedPredicate can't help — RV always changes
 // — so podReconcileRelevantChanged does a real field comparison.
 // Create / Delete still always enqueue (they move the expectations
 // counter and must reach the handler).
