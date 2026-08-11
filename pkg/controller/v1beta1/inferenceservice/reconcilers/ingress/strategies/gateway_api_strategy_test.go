@@ -395,7 +395,7 @@ func (typedNilHTTPRouteBuilder) Endpoints(_ *v1beta1.InferenceService, _ string)
 // TestGatewayAPIStrategy_ReconcileComponentHTTPRoute_TypedNilBuilderDoesNotPanic
 // pins the layer-2 defense for the typed-nil-through-interface panic.
 //
-// Production trace (PD-disaggregated ISVC example-ns/sglang-example-nvfp4-pd-fallback):
+// Repro trace (PD-disaggregated ISVC example-ns/sglang-example-pd):
 //
 //	panic: runtime error: invalid memory address or nil pointer dereference
 //	  gateway_api_strategy.go:165
@@ -538,11 +538,11 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 // test asserts the downstream status-check tolerates the resulting absence
 // of HTTPRoutes by continuing past them rather than failing.
 //
-// Production trace (example-ns/sglang-example-nvfp4-pd-fallback):
+// Repro trace (example-ns/sglang-example-pd):
 //
 //	ERROR Reconciler error ...
 //	  error: "fails to reconcile ingress: HTTPRoute.gateway.networking.k8s.io
-//	         \"sglang-example-nvfp4-pd-fallback-engine\" not found"
+//	         \"sglang-example-pd-engine\" not found"
 func TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1beta1.AddToScheme(scheme))

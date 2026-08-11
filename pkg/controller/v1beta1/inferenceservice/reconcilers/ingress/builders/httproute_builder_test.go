@@ -869,7 +869,7 @@ func TestHTTPRouteBuilder_NamespaceIngressGateways(t *testing.T) {
 	newBuilder := func() *HTTPRouteBuilder {
 		b := createHTTPRouteBuilder()
 		b.ingressConfig.PerISVCSubdomain = true
-		b.ingressConfig.OmeIngressGateway = "envoy-gateway-system/meta-ai-int-gw"
+		b.ingressConfig.OmeIngressGateway = "envoy-gateway-system/tenant-int-gw"
 		b.ingressConfig.IngressDomain = "int.example.com"
 		b.ingressConfig.NamespaceIngressGateways = nsGateways
 		return b
@@ -901,7 +901,7 @@ func TestHTTPRouteBuilder_NamespaceIngressGateways(t *testing.T) {
 		route := buildTopLevel(t, newBuilder(), isvc)
 
 		require.Len(t, route.Spec.ParentRefs, 1, "cluster-default primary only")
-		assert.Equal(t, gatewayapiv1.ObjectName("meta-ai-int-gw"), route.Spec.ParentRefs[0].Name)
+		assert.Equal(t, gatewayapiv1.ObjectName("tenant-int-gw"), route.Spec.ParentRefs[0].Name)
 	})
 
 	t.Run("per-ISVC gateway annotation wins over namespace default", func(t *testing.T) {
