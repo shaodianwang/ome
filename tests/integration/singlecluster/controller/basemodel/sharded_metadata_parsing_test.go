@@ -137,7 +137,7 @@ var _ = ginkgo.Describe("Sharded BaseModel metadata parsing", ginkgo.Ordered, fu
 	})
 
 	ginkgo.It("user-set Spec.ModelType + ModelArchitecture preserved when parser would write different values (fill-only contract)", func() {
-		// Bucket G already covers the analogous contract for the
+		// Sibling specs already cover the analogous contract for the
 		// PVC/agent path (updateSpecWithConfig in controller.go:897).
 		// This spec covers the OTHER auto-fill code path — the sharded
 		// flow uses parser.ApplyModelMetadata, which is a totally

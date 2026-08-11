@@ -72,9 +72,8 @@ var _ = ginkgo.Describe("InferenceService lean path (runtime only, no model)", g
 	// just lied to operators inspecting status. Fix: skip the modelStatus
 	// writer entirely when spec.model is nil.
 	//
-	// Repro reference: bug report against image bf0641b applied a
-	// runtime-only ISVC and saw `status.modelStatus.transitionStatus =
-	// "InProgress"` stuck forever despite Ready=True.
+	// Repro: a runtime-only ISVC saw `status.modelStatus.transitionStatus
+	// = "InProgress"` stuck forever despite Ready=True.
 	ginkgo.It("ISVC without spec.model leaves status.modelStatus unset (no 'InProgress' lie)", func() {
 		csr := v1beta1testing.MakeClusterServingRuntime("lean-runtime-status").
 			SupportsModelFormat("safetensors", true, 10).
