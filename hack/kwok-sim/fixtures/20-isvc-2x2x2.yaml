@@ -1,0 +1,19 @@
+# One 2x2x2 slice: 1 leader + 1 worker = 2 pods = 2 nodes = 8 TPU chips.
+# Cube 2 holds eight such pools, so eight copies of this fit.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sim-2x2x2
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-2x2x2
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 1

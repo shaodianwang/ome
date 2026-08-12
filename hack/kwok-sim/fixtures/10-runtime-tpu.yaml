@@ -1,0 +1,97 @@
+# Multi-node TPU serving runtimes, one per slice topology.
+#
+# leader + worker on engineConfig is what puts the InferenceService into
+# OMENative mode: OME manages the gang's pods itself, so no LeaderWorkerSet CRD
+# is needed. Each pod claims a whole node's worth of TPU (google.com/tpu: 4 on
+# tpu7x-standard-4t), which is what makes pod count and node count line up.
+#
+# The image is never pulled — kwok fakes container status without a kubelet —
+# but it is a real reference so the manifests stay honest if this runs against
+# a live cluster. Probes are omitted for the same reason: nothing runs them.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: tpu7x-2x2x2
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  disabled: false
+  # Opt this runtime's pods into ome-scheduler (OEP-0022 OMEGangPack). The
+  # runtime's top-level schedulerName is back-filled onto engine, decoder and
+  # router, so every pod OME renders from it carries the pin. Nothing else
+  # claims those pods: if ome-scheduler is not running they stay Pending
+  # forever rather than falling back to the default scheduler.
+  #
+  # This file is the "plugin" topology mode as written. render-runtimes.sh
+  # derives the other modes from it — adding engineConfig.topologyKey, the
+  # worker affinity override, or dropping this pin. up.sh always applies it
+  # through that renderer, so edits here reach every mode.
+  schedulerName: ome-scheduler
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+  engineConfig:
+    nodeSelector:
+      cloud.google.com/gke-tpu-accelerator: tpu7x
+      cloud.google.com/gke-tpu-topology: 2x2x2
+    tolerations:
+      - { key: google.com/tpu, operator: Equal, value: present, effect: NoSchedule }
+    leader:
+      runner: &runner
+        name: ome-container
+        image: vllm/vllm-tpu:sim
+        command: ["/bin/sh", "-c", "sleep infinity"]
+        ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+        resources:
+          requests: { cpu: "8", memory: 32Gi, google.com/tpu: "4" }
+          limits:   { cpu: "8", memory: 32Gi, google.com/tpu: "4" }
+    worker:
+      runner: *runner
+---
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: tpu7x-4x4x4
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  disabled: false
+  # Opt this runtime's pods into ome-scheduler (OEP-0022 OMEGangPack). The
+  # runtime's top-level schedulerName is back-filled onto engine, decoder and
+  # router, so every pod OME renders from it carries the pin. Nothing else
+  # claims those pods: if ome-scheduler is not running they stay Pending
+  # forever rather than falling back to the default scheduler.
+  #
+  # This file is the "plugin" topology mode as written. render-runtimes.sh
+  # derives the other modes from it — adding engineConfig.topologyKey, the
+  # worker affinity override, or dropping this pin. up.sh always applies it
+  # through that renderer, so edits here reach every mode.
+  schedulerName: ome-scheduler
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+  engineConfig:
+    nodeSelector:
+      cloud.google.com/gke-tpu-accelerator: tpu7x
+      cloud.google.com/gke-tpu-topology: 4x4x4
+    tolerations:
+      - { key: google.com/tpu, operator: Equal, value: present, effect: NoSchedule }
+    leader:
+      runner: &runner4
+        name: ome-container
+        image: vllm/vllm-tpu:sim
+        command: ["/bin/sh", "-c", "sleep infinity"]
+        ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+        resources:
+          requests: { cpu: "8", memory: 32Gi, google.com/tpu: "4" }
+          limits:   { cpu: "8", memory: 32Gi, google.com/tpu: "4" }
+    worker:
+      runner: *runner4

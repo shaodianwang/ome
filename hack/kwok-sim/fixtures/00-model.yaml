@@ -1,0 +1,28 @@
+# A model that needs no bytes on disk.
+#
+# The URI is hf:// rather than pvc:// on purpose. A pvc:// model routes to the
+# PVC backend, which spawns an ome-agent metadata-extraction Job against a real
+# volume; a non-PVC model routes to the per-node backend, whose only requirement
+# is that candidate nodes carry
+#   models.ome.io/clusterbasemodel.<name>=Ready
+# — the label the model agent normally writes and gen-tpu-nodes.sh --model bakes
+# straight into the fake nodes. Nothing ever downloads: the model agent is not
+# installed, and the ISVC controller gates on model readiness only for sharded
+# models.
+#
+# Keep the name at or under 32 characters, the budget left for it inside the
+# 63-character label key.
+apiVersion: ome.io/v1beta1
+kind: ClusterBaseModel
+metadata:
+  name: demo-noop
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  modelArchitecture: TestArchitecture
+  modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+  modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+  modelParameterSize: "0"
+  modelType: test
+  storage:
+    storageUri: hf://kwok-sim/demo-noop

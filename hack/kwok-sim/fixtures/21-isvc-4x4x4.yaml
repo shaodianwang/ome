@@ -1,0 +1,19 @@
+# A whole cube: 1 leader + 15 workers = 16 pods = 16 nodes = 64 TPU chips,
+# which is exactly the 4x4x4 pool in cube 1.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sim-4x4x4
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 15
