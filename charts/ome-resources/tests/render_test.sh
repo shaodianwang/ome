@@ -10,6 +10,19 @@ fail() {
 }
 
 rendered="$("${helm_bin}" template ome-resources "${chart_dir}" --namespace ome)"
+controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --show-only templates/ome-controller/deployment.yaml)"
+grep -Fq 'helm.sh/chart: ome-resources-0.1.0' <<<"${controller}" ||
+  fail "controller chart version label was not rendered"
+grep -Fq 'app.kubernetes.io/version: "1.16.0"' <<<"${controller}" ||
+  fail "controller app version label was not rendered"
+model_agent="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set modelAgent.enabled=true \
+  --show-only templates/model-agent-daemonset/daemonset.yaml)"
+grep -Fq 'helm.sh/chart: ome-resources-0.1.0' <<<"${model_agent}" ||
+  fail "model agent chart version label was not rendered"
 grep -Fq 'sizeLimit: 8Gi' <<<"${rendered}" ||
   fail "default Prometheus storage sizeLimit is not 8Gi"
 grep -Fq -- '--storage.tsdb.retention.size=6GB' <<<"${rendered}" ||

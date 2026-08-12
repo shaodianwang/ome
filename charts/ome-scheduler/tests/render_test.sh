@@ -27,6 +27,9 @@ rendered="$("${helm_bin}" template ome-scheduler "${chart_dir}" \
   --kube-version "${kube_version}" \
   --namespace ome-system)"
 
+assert_contains 'helm.sh/chart: ome-scheduler-0.1.0'
+assert_contains 'app.kubernetes.io/version: "0.1.0"'
+
 # Embedded KubeSchedulerConfiguration contract. Helm cannot schema-check the
 # opaque ConfigMap string, so keep indentation-sensitive assertions for its
 # extension-point and plugin-argument structure.

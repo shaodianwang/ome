@@ -5,6 +5,7 @@ metadata:
   name: ome-controller-manager
   namespace: {{ .Release.Namespace }}
   labels:
+    {{- include "ome.labels" . | nindent 4 }}
     control-plane: ome-controller-manager
     controller-tools.k8s.io: "1.0"
   annotations:

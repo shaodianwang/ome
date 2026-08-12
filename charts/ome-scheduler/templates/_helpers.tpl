@@ -15,6 +15,13 @@ Parameters: values, repository, tag.
 {{- end -}}
 
 {{/*
+Chart name and version, suitable for use as a Kubernetes label value.
+*/}}
+{{- define "ome-scheduler.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
 Selector labels — minimal and stable across re-renders.
 */}}
 {{- define "ome-scheduler.selectorLabels" -}}
@@ -27,6 +34,8 @@ Full label set stamped on chart resources.
 */}}
 {{- define "ome-scheduler.labels" -}}
 {{ include "ome-scheduler.selectorLabels" . }}
+helm.sh/chart: {{ include "ome-scheduler.chart" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: ome
 {{- end -}}

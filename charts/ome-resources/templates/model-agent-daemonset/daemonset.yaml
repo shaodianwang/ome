@@ -4,6 +4,9 @@ kind: DaemonSet
 metadata:
   name: ome-model-agent-daemonset
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome.labels" . | nindent 4 }}
+    app.kubernetes.io/component: "ome-model-agent-daemonset"
 spec:
   updateStrategy:
     type: RollingUpdate
