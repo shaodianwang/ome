@@ -18,6 +18,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -127,18 +128,10 @@ func testPodLabels(isvc string, component workload.ComponentType, instanceIdx in
 // fake client's Status().Update so tests can assert on the persisted
 // ISVC.Status.
 func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component workload.ComponentType) workload.ReconcileInput {
-	var instances []workload.InstanceStatus
-	for _, s := range instanceStatusesOnIR(c, isvc, component) {
-		instances = append(instances, workload.InstanceStatus{
-			Index:           s.Index,
-			Incarnation:     s.Incarnation,
-			Phase:           workload.InstancePhase(s.Phase),
-			RunningRevision: s.RunningRevision,
-			TargetRevision:  s.TargetRevision,
-			ActiveOrdinal:   s.ActiveOrdinal,
-			LastFailure:     fromV1beta1Termination(s.LastFailure),
-		})
-	}
+	// Delegate to the production converter rather than re-listing fields:
+	// a field the reconciler reads but the helper forgets to copy is a
+	// silently-passing test.
+	instances := v1beta1convert.InstanceStatusSliceToWorkload(instanceStatusesOnIR(c, isvc, component))
 	return workload.ReconcileInput{
 		OwnerObject: isvc,
 		OwnerGVK:    v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
@@ -848,6 +841,73 @@ func TestCreate_RecreateInstance_StillMaterializesFreshInstance(t *testing.T) {
 	}
 	if len(pods.Items) != 2 {
 		t.Fatalf("RecreateInstance must still materialize a fresh gang Instance: got %d pod(s), want 2 (leader+worker)", len(pods.Items))
+	}
+}
+
+// seedMaterializedGang stamps a Create-owned gang Instance that was
+// already observed complete (PodCount == 2) at the given phase — the
+// production shape a drained node leaves behind.
+func seedMaterializedGang(isvc *v1beta1.InferenceService, phase v1beta1.OMENativeInstancePhase, podCount int32) *v1beta1.InferenceReplica {
+	return instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     2,
+		Phase:           phase,
+		PodCount:        podCount,
+		RunningRevision: "llama-70b-engine-" + testRevisionHash,
+		TargetRevision:  "llama-70b-engine-" + testRevisionHash,
+		Operation: &v1beta1.InstanceOperation{
+			ID: "create-0-1", Type: v1beta1.InstanceOperationCreate, Step: "CreatePods",
+		},
+	})
+}
+
+// A gang that lost a member while below Ready must reach Restart, not
+// Create's per-pod backfill: backfilling leaves the survivor at the old
+// incarnation, holding the domain the replacement needs.
+func TestCreate_RecreateInstance_DefersNonReadyPartialGang(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	ir := seedMaterializedGang(isvc, v1beta1.OMENativeInstanceCreating, 2)
+	leader := gangPod(isvc, 0, "leader", 0, 2, false /* ready */, false /* serving */)
+	c := newFakeClient(t, isvc, ir, leader)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanGangEngine(workload.RestartPolicyRecreateInstance)
+
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("Create must defer a non-Ready partial gang to Restart: got %d pod(s), want 1 (leader only)", len(pods.Items))
+	}
+}
+
+// The mirror case: an Instance whose pod set was never observed complete
+// is still being materialized, and Create must finish the job. Without
+// this the deference would strand every interrupted birth and scale-up.
+func TestCreate_RecreateInstance_MaterializesUnfinishedGang(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	ir := seedMaterializedGang(isvc, v1beta1.OMENativeInstanceCreating, 1)
+	leader := gangPod(isvc, 0, "leader", 0, 2, false /* ready */, false /* serving */)
+	c := newFakeClient(t, isvc, ir, leader)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanGangEngine(workload.RestartPolicyRecreateInstance)
+
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("Create must finish materializing a gang that was never complete: got %d pod(s), want 2", len(pods.Items))
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -457,5 +458,229 @@ func TestRestart_EmitsRichRestartTriggeredEvent(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a RestartTriggered event naming OOMKilled; got %v", events)
+	}
+}
+
+// Gang-member loss below Phase=Ready.
+//
+// Under RecreateInstance only Restart bumps the Incarnation, and only the
+// bump drains the survivors. A gang that loses a member before it reaches
+// Ready therefore has no owner: restart detection used to return on the
+// phase, and Create's backfill re-materializes the missing pod at the
+// unchanged Incarnation, leaving the survivors holding a topology domain
+// the replacement cannot enter. These cases pin the boundary between that
+// loss and an Instance that is merely slow to form.
+
+// gangLossRevision is the revision the wedged Instance is both running
+// and converging toward — the shape that leaves the update pass nothing
+// to adopt.
+const gangLossRevision = "engine-c4e45f68"
+
+// gangLossInput builds the ReconcileInput the detector reads: one
+// InstanceStatus for index 0 plus any retry blocks.
+func gangLossInput(s workload.InstanceStatus, blocks ...workload.RetryBlock) workload.ReconcileInput {
+	return workload.ReconcileInput{
+		ObservedState: workload.WorkloadObservedState{
+			InstanceStatuses: []workload.InstanceStatus{s},
+			RetryBlocks:      blocks,
+			UpdateRevision:   gangLossRevision,
+		},
+	}
+}
+
+// gangLossPods returns n placeholder pods. Only the count is read — the
+// predicate deliberately ignores readiness, container state and node
+// assignment.
+func gangLossPods(n int) []*corev1.Pod {
+	pods := make([]*corev1.Pod, 0, n)
+	for i := 0; i < n; i++ {
+		pods = append(pods, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("gang-pod-%d", i), Namespace: "prod",
+		}})
+	}
+	return pods
+}
+
+func TestDetectRestartTrigger_GangMemberLossBelowReady(t *testing.T) {
+	// The production shape: a Create-owned Instance at a frozen incarnation
+	// whose RunningRevision already equals its target.
+	createOwned := func(phase workload.InstancePhase, podCount int32) workload.InstanceStatus {
+		return workload.InstanceStatus{
+			Index:           0,
+			Incarnation:     74,
+			Phase:           phase,
+			PodCount:        podCount,
+			RunningRevision: gangLossRevision,
+			TargetRevision:  gangLossRevision,
+			Operation:       &workload.InstanceOperation{Type: workload.InstanceOperationCreate, Step: "CreatePods"},
+		}
+	}
+
+	cases := []struct {
+		name     string
+		status   workload.InstanceStatus
+		live     int
+		expected int32
+		policy   workload.RestartPolicy
+		blocks   []workload.RetryBlock
+		want     bool
+	}{{
+		// Both members present but never Ready — indistinguishable from a
+		// gang that simply takes hours to load weights. Must not fire.
+		name:   "materialized and complete is silent",
+		status: createOwned(workload.InstancePhaseCreating, 2),
+		live:   2, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name:   "materialized then partial fires",
+		status: createOwned(workload.InstancePhaseCreating, 2),
+		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: true,
+	}, {
+		// The deadline disposition parks a wedged Instance here with no
+		// Operation, and nothing else ever revisits it.
+		name: "failed with no operation fires",
+		status: workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseFailed, PodCount: 2,
+			RunningRevision: gangLossRevision, TargetRevision: gangLossRevision,
+		},
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: true,
+	}, {
+		// Create stamps the status before it renders any pod, so a bare
+		// count comparison is true at birth. The materialization term is
+		// what keeps Restart from thrashing against Create there.
+		name:   "birth is silent",
+		status: createOwned(workload.InstancePhaseCreating, 0),
+		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name:   "partially materialized is silent",
+		status: createOwned(workload.InstancePhaseCreating, 1),
+		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		// Nothing survives to strand a replacement; Create's fresh-start
+		// path owns this and honors the RetryBlock.
+		name:   "total loss stays with create",
+		status: createOwned(workload.InstancePhaseCreating, 2),
+		live:   0, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name:   "single-pod instance is out of scope",
+		status: createOwned(workload.InstancePhaseCreating, 1),
+		live:   0, expected: 1, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name: "update-owned churn is not loss",
+		status: workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseUpdating, PodCount: 2,
+			RunningRevision: gangLossRevision,
+			Operation:       &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: "Drain"},
+		},
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		// A spent Restart attempt must not re-arm itself.
+		name: "preserved restart operation does not loop",
+		status: workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseFailed, PodCount: 2,
+			RunningRevision: gangLossRevision,
+			Operation:       &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: "Drain"},
+		},
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name: "migrate-owned is suppressed",
+		status: workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseMigrating, PodCount: 2,
+			RunningRevision: gangLossRevision,
+		},
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name:   "deleting is teardown",
+		status: createOwned(workload.InstancePhaseDeleting, 2),
+		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name:   "other restart policies keep create's self-heal",
+		status: createOwned(workload.InstancePhaseCreating, 2),
+		live:   1, expected: 2, policy: workload.RestartPolicyNone,
+		want: false,
+	}, {
+		// Rebuilding would re-materialize a revision the disposition held.
+		name:   "held revision is not rebuilt",
+		status: createOwned(workload.InstancePhaseCreating, 2),
+		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		blocks: []workload.RetryBlock{{TargetRevision: gangLossRevision, State: workload.RetryBlockHeld}},
+		want:   false,
+	}, {
+		name:   "backoff on an unrelated revision does not block",
+		status: createOwned(workload.InstancePhaseCreating, 2),
+		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		blocks: []workload.RetryBlock{{TargetRevision: "other-revision", State: workload.RetryBlockHeld}},
+		want:   true,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := gangLossInput(tc.status, tc.blocks...)
+			plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: tc.policy}
+			inst := workload.InstancePlan{Index: 0, Incarnation: tc.status.Incarnation}
+			for i := int32(0); i < tc.expected; i++ {
+				inst.Runners = append(inst.Runners, workload.RunnerPlan{Name: fmt.Sprintf("r%d", i), Size: 1})
+			}
+
+			needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, gangLossPods(tc.live))
+			if needs != tc.want {
+				t.Fatalf("needsRestart = %v (reason %q), want %v", needs, reason, tc.want)
+			}
+			if needs && !strings.Contains(reason, "gang member lost") {
+				t.Errorf("reason must name the loss; got %q", reason)
+			}
+		})
+	}
+}
+
+// A slow gang must stay untouched no matter how long it has been forming:
+// the predicate reads no clock, so time cannot make it fire.
+func TestDetectRestartTrigger_SlowGangNeverRecycled(t *testing.T) {
+	status := workload.InstanceStatus{
+		Index: 0, Incarnation: 74, Phase: workload.InstancePhaseCreating, PodCount: 2,
+		RunningRevision: gangLossRevision, TargetRevision: gangLossRevision,
+		Operation: &workload.InstanceOperation{
+			Type: workload.InstanceOperationCreate, Step: "CreatePods",
+			StartedAt: metav1.NewTime(time.Now().Add(-72 * time.Hour)),
+			Deadline:  metav1.NewTime(time.Now().Add(-48 * time.Hour)),
+		},
+	}
+	input := gangLossInput(status)
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
+	inst := workload.InstancePlan{Index: 0, Incarnation: 74, Runners: []workload.RunnerPlan{
+		{Name: "leader", Size: 1}, {Name: "worker", Size: 1},
+	}}
+
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, gangLossPods(2)); needs {
+		t.Fatalf("a complete gang past its deadline must not restart; got reason %q", reason)
+	}
+}
+
+// A Migrating Instance whose Operation has not been stamped yet must
+// still be suppressed: Create consults the predicate directly, without
+// the trigger's isMigrateOwnedStatus check in front of it.
+func TestDetectRestartTrigger_MigratingPhaseWithoutOperation(t *testing.T) {
+	status := workload.InstanceStatus{
+		Index: 0, Incarnation: 74, Phase: workload.InstancePhaseMigrating, PodCount: 2,
+		RunningRevision: gangLossRevision,
+	}
+	input := gangLossInput(status)
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
+	inst := workload.InstancePlan{Index: 0, Incarnation: 74, Runners: []workload.RunnerPlan{
+		{Name: "leader", Size: 1}, {Name: "worker", Size: 1},
+	}}
+
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, gangLossPods(1)); needs {
+		t.Fatalf("a migrating Instance must not be recreated; got reason %q", reason)
 	}
 }

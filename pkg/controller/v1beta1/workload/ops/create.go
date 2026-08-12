@@ -181,20 +181,24 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 				}
 			}
 		}
-		// RecreateInstance owns partial-Instance recovery. When an Instance
-		// that already reached Ready loses a pod (some present, some missing),
-		// recreating only the missing pod here races the Restart pass — which
-		// drains and recreates the WHOLE Instance (the gang) per the policy
-		// contract. When this self-heal wins that race it also stamps
-		// Phase=Creating, which latches the outcome by making
-		// DetectRestartTrigger skip on every later pass — so RecreateInstance
-		// silently degrades to "recreate just the dead pod" (the leader and
-		// surviving workers keep their incarnation). Defer to Restart for an
-		// already-Ready Instance; fresh/empty Instances (initial create +
-		// scale-up) and partial Instances under other restart policies remain
-		// Create's responsibility.
+		// Create materializes an Instance; Restart repairs one that was
+		// already materialized. Under RecreateInstance the policy contract is
+		// that a partial Instance is drained and recreated WHOLE, so filling
+		// just the hole here would leave the survivors at their old
+		// incarnation — and holding whatever topology domain the gang was
+		// placed in, which the replacement then cannot enter.
+		//
+		// Both sides of the boundary read one predicate, so Create declines
+		// exactly the pod sets the restart trigger selects and neither a gap
+		// nor a race between them is representable. Fresh/empty Instances
+		// (initial create + scale-up), total loss, and partial Instances under
+		// other restart policies remain Create's responsibility.
 		if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
-			if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil && s.Phase == workload.InstancePhaseReady {
+			s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+			if s != nil && s.Phase == workload.InstancePhaseReady {
+				return false, 0, nil
+			}
+			if _, lost := instanceLostGangMember(input, plan, s, inst.TotalPods(), existing); lost {
 				return false, 0, nil
 			}
 		}

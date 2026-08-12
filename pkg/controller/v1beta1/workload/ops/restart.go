@@ -21,12 +21,21 @@ import (
 // lockstep.
 const RestartRequeueInterval = 5 * time.Second
 
-// DetectRestartTrigger fires when the Instance is mid-restart, or
-// when Phase=Ready and a pod is Failed / the live pod count is below
-// desired. Creating / Deleting are not interruptible — they finish
-// first. A Migrate-owned Instance is suppressed because Migrate's
-// source-pod deletion would otherwise trip the "pod count below
-// desired" trigger on the source.
+// DetectRestartTrigger fires when the Instance is mid-restart, when
+// Phase=Ready and a pod is Failed / the live pod count is below
+// desired, or when a materialized Instance has lost a gang member in
+// any phase (see instanceLostGangMember). A Migrate-owned Instance is
+// suppressed because Migrate's source-pod deletion would otherwise trip
+// the "pod count below desired" trigger on the source.
+//
+// Ownership: Create materializes an Instance, Restart repairs one that
+// was already materialized. Gating repair on Phase=Ready is right for a
+// single-pod Instance and backwards for a gang — a gang that loses a
+// member before it ever reaches Ready is the case that can never recover
+// on its own, because the recovery is gated on a Ready it can no longer
+// attain. Only Restart bumps the Incarnation, and only the bump drains
+// the surviving members, so any other pass that fills the gap leaves the
+// survivors pinned to a topology domain the replacement cannot enter.
 //
 // Returns (needsRestart, reason, err). When needsRestart is true the
 // reason lands on Operation.Reason on the first pass through Restart.
@@ -37,10 +46,10 @@ const RestartRequeueInterval = 5 * time.Second
 // reconcile instead of N — see that variant.
 func DetectRestartTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan) (bool, string, error) {
 	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-	// Only Phase=Ready reaches the pod-set comparison; every other state
-	// (absent, Migrate-owned, Restarting, or non-Ready) short-circuits in
-	// WithPods without inspecting pods, so the live List is wasted there.
-	if s == nil || isMigrateOwnedStatus(s) || s.Phase != workload.InstancePhaseReady {
+	// Restarting and the absent/Migrate-owned cases decide without reading
+	// pods at all, so the live List is wasted there. Every other phase can
+	// reach a pod-set comparison.
+	if s == nil || isMigrateOwnedStatus(s) || s.Phase == workload.InstancePhaseRestarting {
 		needs, reason := DetectRestartTriggerWithPods(input, plan, inst, nil)
 		return needs, reason, nil
 	}
@@ -70,11 +79,17 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 	if s.Phase == workload.InstancePhaseRestarting {
 		return true, ""
 	}
+	expected := inst.TotalPods()
 	if s.Phase != workload.InstancePhaseReady {
+		// Below Ready only gang-member loss triggers. Pod-level failure
+		// evidence stays Ready-gated: a container that dies while the
+		// Instance is still forming is the ordinary boot path.
+		if reason, lost := instanceLostGangMember(input, plan, s, expected, instancePods); lost {
+			return true, reason
+		}
 		return false, ""
 	}
 
-	expected := inst.TotalPods()
 	for _, pod := range instancePods {
 		if pod.Status.Phase == corev1.PodFailed {
 			// Build a richer reason from the failed pod's container
@@ -92,6 +107,96 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 		return true, fmt.Sprintf("pod count %d below desired %d", len(instancePods), expected)
 	}
 	return false, ""
+}
+
+// instanceLostGangMember reports whether a multi-pod Instance whose pod
+// set was once observed complete is now missing a member, and no other
+// operation owns its pod churn. Shared with Create's deference guard so
+// the two passes cannot disagree about who repairs a partial gang.
+//
+// The materialization term is what separates "lost a member" from "not
+// built yet": Create stamps the status before it renders any pod, so a
+// bare count comparison is trivially true at birth and at every
+// scale-up, and Restart would thrash against Create. Observed PodCount
+// is the durable record that the set was whole, and it is recomputed
+// from a live List on every reconcile.
+//
+// Requiring a survivor (len(pods) > 0) confines this to partial loss —
+// the shape where the survivors hold capacity the replacement needs.
+// Total loss stays with Create's fresh-start path, which already honors
+// the RetryBlock recorded against a bad revision. It also excludes
+// single-pod Instances without a policy check, since 0 < n < 1 is
+// unsatisfiable.
+//
+// Nothing here reads readiness, container state, deadlines or operation
+// age: a slow boot must not be expressible in the inputs, or a gang that
+// merely takes hours to load weights would be recycled underneath itself.
+func instanceLostGangMember(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
+	if s == nil || expected <= 0 {
+		return "", false
+	}
+	if plan.RestartPolicy != workload.RestartPolicyRecreateInstance {
+		return "", false
+	}
+	// Only the phases where Create or Restart owns the pod set. Updating,
+	// Migrating, Restarting and Deleting are mid-flight through another
+	// pass's own drain/recreate, and their transient pod sets are not loss.
+	switch s.Phase {
+	case workload.InstancePhaseEmpty, workload.InstancePhasePending,
+		workload.InstancePhaseCreating, workload.InstancePhaseFailed,
+		workload.InstancePhaseReady:
+	default:
+		return "", false
+	}
+	if isMigrateOwnedStatus(s) {
+		return "", false
+	}
+	// A preserved non-Create operation means that pass is still the owner
+	// even though the phase no longer says so — a spent Restart attempt
+	// parked at Failed must not re-arm itself.
+	if s.Operation != nil && s.Operation.Type != workload.InstanceOperationCreate {
+		return "", false
+	}
+	if s.PodCount < expected {
+		return "", false
+	}
+	live := 0
+	for _, pod := range pods {
+		if pod != nil {
+			live++
+		}
+	}
+	if live == 0 || int32(live) >= expected {
+		return "", false
+	}
+	if rebuildRetryBlockDenies(input, s) {
+		return "", false
+	}
+	return fmt.Sprintf("gang member lost: %d of %d pods present", live, expected), true
+}
+
+// rebuildRetryBlockDenies reports whether a RetryBlock forbids rebuilding
+// this Instance right now. Restart has no RetryBlock gate of its own
+// because a Ready Instance is by definition running a revision that
+// works; repairing a never-Ready one can re-materialize a revision the
+// disposition held, so it has to answer to the same authority Create does.
+func rebuildRetryBlockDenies(input workload.ReconcileInput, s *workload.InstanceStatus) bool {
+	rev := s.RunningRevision
+	if rev == "" {
+		rev = s.TargetRevision
+	}
+	if rev == "" {
+		rev = input.ObservedState.UpdateRevision
+	}
+	if rev == "" {
+		return false
+	}
+	b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
+	if b == nil {
+		return false
+	}
+	denied, _ := evaluateRetryBlockGate(b, input.Now(), anyInFlightCreateAttempt(input.ObservedState.InstanceStatuses))
+	return denied
 }
 
 // restartDrainKey identifies a Restart drain writer against one Instance
