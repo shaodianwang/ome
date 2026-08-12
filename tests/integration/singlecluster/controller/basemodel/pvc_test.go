@@ -274,12 +274,25 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			job := &batchv1.Job{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: jobName, Namespace: ns}, job)).To(Succeed())
-			job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
-				Type:    batchv1.JobFailed,
-				Status:  corev1.ConditionTrue,
-				Reason:  "BackoffLimitExceeded",
-				Message: "Job has reached the specified backoff limit",
-			})
+			// The apiserver rejects a finished Job whose status lacks a
+			// startTime, and rejects Failed=True unless the interim
+			// FailureTarget=True is set alongside it — mirror what
+			// kube-controller-manager writes on a real cluster.
+			now := metav1.Now()
+			job.Status.StartTime = &now
+			job.Status.Conditions = append(job.Status.Conditions,
+				batchv1.JobCondition{
+					Type:    batchv1.JobFailureTarget,
+					Status:  corev1.ConditionTrue,
+					Reason:  "BackoffLimitExceeded",
+					Message: "Job has reached the specified backoff limit",
+				},
+				batchv1.JobCondition{
+					Type:    batchv1.JobFailed,
+					Status:  corev1.ConditionTrue,
+					Reason:  "BackoffLimitExceeded",
+					Message: "Job has reached the specified backoff limit",
+				})
 			g.Expect(k8sClient.Status().Update(suiteCtx, job)).To(Succeed())
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 

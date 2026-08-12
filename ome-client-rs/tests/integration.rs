@@ -1,7 +1,7 @@
 //! Integration tests for the OME Rust client against a real kube-apiserver.
 //!
 //! Run with:
-//!   KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" \
+//!   KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)" \
 //!     cargo test -p ome-client --features runtime --test integration -- --nocapture
 //! or just `make rust-integration-test` from `ome-client-rs/`.
 //!

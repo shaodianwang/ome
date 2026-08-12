@@ -2,7 +2,7 @@
 //!
 //! Boots the `etcd` + `kube-apiserver` binaries from `KUBEBUILDER_ASSETS` (the
 //! same ones OME's Go suite uses — set it with
-//! `KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)"`), installs the
+//! `KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)"`), installs the
 //! OME CRDs via the bundled `kubectl`, and returns a connected `kube::Client`.
 //! No Docker; same tier as `make integration-test`. Processes are killed on drop.
 

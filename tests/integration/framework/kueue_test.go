@@ -43,7 +43,7 @@ import (
 //
 // Run:
 //
-//	export KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)"
+//	export KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)"
 //	go test ./tests/integration/framework/ -run TestStartKueue -v -timeout 5m
 //
 // It's a plain testing.T test (not part of the Ginkgo TestFramework

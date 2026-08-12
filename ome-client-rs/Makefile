@@ -11,6 +11,10 @@ CRD_DIR := ../config/crd/full
 SRC     := src
 SLIM    := hack/slim_crd.py
 
+# Kubernetes version of the envtest control-plane assets, read from the
+# repo-root single source of truth shared with the Go suites.
+ENVTEST_K8S_VERSION ?= $(strip $(shell cat ../.envtest-k8s-version))
+
 .PHONY: rust-client check build rust-test rust-integration-test
 rust-client: ## regenerate src/<crd>.rs from the OME CRD YAML
 	@tmp=$$(mktemp -d); \
@@ -38,7 +42,7 @@ build:
 # envtest assets (no Docker) — the same binaries OME's Go suite uses — install
 # the OME CRDs, and exercise the clientset/informer/lister against them.
 rust-integration-test: ## envtest-backed clientset/informer/lister round-trips
-	KUBEBUILDER_ASSETS="$$(cd .. && bin/setup-envtest use 1.30 -p path)" \
+	KUBEBUILDER_ASSETS="$$(cd .. && bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path)" \
 	  cargo test --features runtime --test integration -- --nocapture
 
 rust-test: ## crate unit tests (no apiserver needed)

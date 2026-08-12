@@ -57,8 +57,13 @@ CRD_OPTIONS ?= "crd:maxDescLen=0"
 # Self-signed CA configuration
 OME_ENABLE_SELF_SIGNED_CA ?= false
 
-# ENVTEST K8s version configuration
-ENVTEST_K8S_VERSION = 1.30
+# Kubernetes version of the envtest control-plane assets (kube-apiserver, etcd).
+# .envtest-k8s-version is the single source of truth: the .buildkite test steps,
+# ome-client-rs, and the scheduler module all read that same file.
+ENVTEST_K8S_VERSION ?= $(strip $(shell cat $(CURDIR)/.envtest-k8s-version))
+ifeq ($(ENVTEST_K8S_VERSION),)
+$(error cannot read .envtest-k8s-version)
+endif
 
 # Image configuration for success and error scenarios
 SUCCESS_200_ISVC_IMG ?= success-200-isvc

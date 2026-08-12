@@ -27,8 +27,9 @@ make xet-build
 make envtest
 
 # Same advertise-address shim as run_integration_tests.sh (mks-cpu IPv6).
-echo "--- setup-envtest use 1.30 ---"
-./bin/setup-envtest use 1.30 2>&1 | tee /tmp/envtest.log
+ENVTEST_K8S_VERSION="$(cat .envtest-k8s-version)"
+echo "--- setup-envtest use $ENVTEST_K8S_VERSION ---"
+./bin/setup-envtest use "$ENVTEST_K8S_VERSION" 2>&1 | tee /tmp/envtest.log
 ENVTEST_ASSETS="$(awk '/^Path:/ {print $2}' /tmp/envtest.log)"
 echo "envtest assets at: $ENVTEST_ASSETS"
 if [ -z "$ENVTEST_ASSETS" ] || [ ! -d "$ENVTEST_ASSETS" ]; then

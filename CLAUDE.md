@@ -58,8 +58,10 @@ a fresh cluster. Narrow with `GINKGO_FOCUS='regex'`.
 **Required env for direct `go test` calls** (save these as shell aliases — you will retype them constantly):
 
 ```sh
-# Controller tests + anything under tests/integration/ — needs envtest assets:
-export KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)"
+# Controller tests + anything under tests/integration/ — needs envtest assets.
+# .envtest-k8s-version at the repo root is the single source of truth for the
+# k8s version; every Makefile and CI step reads it.
+export KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)"
 
 # Anything that links the xet Rust staticlib (ome-agent, hf-download, etc.):
 export LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release
@@ -75,7 +77,7 @@ go test ./pkg/controller/v1beta1/inferenceservice/... -run TestReconcile -v
 ```
 
 Without the exports, prefix each invocation manually:
-`KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" go test ./pkg/runtimeselector/... -v`
+`KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)" go test ./pkg/runtimeselector/... -v`
 
 #### Integration Tests (detailed)
 
@@ -100,7 +102,7 @@ Each leaf directory is its own Ginkgo suite with a single `TestXxx(t)` entry tha
 
 ```sh
 make integration-test                               # full envtest suite
-KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" \
+KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)" \
   go test ./tests/integration/singlecluster/webhook/inferenceservice/... -v   # focused
 ```
 
@@ -261,12 +263,12 @@ OME builds work out-of-the-box on a fully-provisioned developer Mac, but several
     | sh -s -- -y --default-toolchain stable --profile minimal
   ```
 - **`make generate` writes to the Go env file** (`~/.config/go/env`) if you run it on a Makefile from before commit `[Misc] Makefile: avoid go env -w in make generate`. Update or rebase before reporting failures.
-- **IPv6 / mks-cpu sandboxes**: envtest's `kube-apiserver` auto-detects the pod's IPv6 external address, then refuses to start because it doesn't match the IPv4 service-cluster range. Wrap the binary with a shim pinning `--advertise-address=127.0.0.1`; see `.buildkite/run_tests.sh:42-58` for the canonical pattern.
+- **IPv6 / mks-cpu sandboxes**: envtest's `kube-apiserver` auto-detects the pod's IPv6 external address, then refuses to start because it doesn't match the IPv4 service-cluster range. Wrap the binary with a shim pinning `--advertise-address=127.0.0.1`; see `.buildkite/run_tests.sh` for the canonical pattern.
 - **envtest debugging**: `export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` to forward kube-apiserver/etcd output into test logs.
 - **xet-linked binaries / tests**: `export LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release` so the dynamic linker finds `libxet.{so,dylib}` (needed for `ome-agent` tests and any binary that links the Rust staticlib path).
 - **KUBEBUILDER_ASSETS one-liner**: rather than retyping the full `bin/setup-envtest` invocation for every `go test` call, save this as a shell alias / persistent env:
   ```sh
-  export KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)"
+  export KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)"
   ```
 
 ## OEP Convention

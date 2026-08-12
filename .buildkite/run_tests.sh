@@ -41,8 +41,9 @@ make envtest
 # the IPv6 host doesn't match the IPv4 service-cluster IP range envtest
 # passes (10.0.0.0/24). Wrap the binary with a shim that pins
 # --advertise-address to 127.0.0.1 so the auto-detection is skipped.
-echo "--- setup-envtest use 1.30 ---"
-./bin/setup-envtest use 1.30 2>&1 | tee /tmp/envtest.log
+ENVTEST_K8S_VERSION="$(cat .envtest-k8s-version)"
+echo "--- setup-envtest use $ENVTEST_K8S_VERSION ---"
+./bin/setup-envtest use "$ENVTEST_K8S_VERSION" 2>&1 | tee /tmp/envtest.log
 ENVTEST_ASSETS="$(awk '/^Path:/ {print $2}' /tmp/envtest.log)"
 echo "envtest assets at: $ENVTEST_ASSETS"
 if [ -z "$ENVTEST_ASSETS" ] || [ ! -d "$ENVTEST_ASSETS" ]; then

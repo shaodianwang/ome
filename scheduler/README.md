@@ -50,7 +50,7 @@ module at test time (not vendored — go.mod is the source of truth, matching OM
 dep-crds policy).
 
 ```sh
-export KUBEBUILDER_ASSETS="$(../bin/setup-envtest use 1.35 -p path)"   # envtest binaries
+export KUBEBUILDER_ASSETS="$(../bin/setup-envtest use "$(cat ../.envtest-k8s-version)" -p path)"
 go test ./test/integration/... -v
 ```
 
