@@ -132,3 +132,8 @@ require (
 )
 
 replace sigs.k8s.io/ome v1.0.0 => github.com/ome-projects/ome v1.0.0
+
+// keda/v2 requires a placeholder version of prometheus/prometheus that it
+// resolves with its own replace directive. Dependency replaces are ignored, so
+// the main module must repeat it or the module graph fails to resolve.
+replace github.com/prometheus/prometheus => github.com/prometheus/prometheus v0.54.0
