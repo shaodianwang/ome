@@ -6,7 +6,7 @@ push to ECR when BUILDKITE_BRANCH=main, so PR builds validate without
 publishing.
 
 Usage:
-    bash .buildkite/upload_pipeline.sh
+    python3 .buildkite/generate_pipeline.py | buildkite-agent pipeline upload
 
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
