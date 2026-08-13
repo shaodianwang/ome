@@ -27,7 +27,7 @@ PROD_CHART_REPO="oci://${PROD_ECR_REGISTRY}/msl_infra/ome-charts"
 
 TIMESTAMP="$(date -u +%Y%m%d%H%M)"
 SHORT_SHA="$(echo "${BUILDKITE_COMMIT:-HEAD}" | cut -c1-8)"
-CHART_VERSION="1.0.0-${TIMESTAMP}.${SHORT_SHA}"
+CHART_VERSION="1.0.0-${TIMESTAMP}.g${SHORT_SHA}"
 
 HELM_VERSION="${HELM_VERSION:-v3.16.2}"
 if ! command -v helm >/dev/null 2>&1; then
