@@ -157,7 +157,9 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	// separate reconcile would re-enter AggregateIRStatus). On a peer
 	// status-write conflict we re-Get the ISVC and re-stamp, but the
 	// condition itself is stable for this pass.
-	topCond := status.TopLevelComponentReadyFromLifecycle(component, desired, componentExtFor(isvc, component))
+	// ir.Spec.Replicas is the desired count the HPA/KEDA scale subresource writes;
+	// the availability floor scales against it, not the surge-inclusive live count.
+	topCond := status.TopLevelComponentReadyFromLifecycle(component, desired, componentExtFor(isvc, component), ir.Spec.Replicas)
 	isvcKey := client.ObjectKeyFromObject(isvc)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}

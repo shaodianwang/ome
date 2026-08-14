@@ -31,11 +31,14 @@ import (
 // visible. `ext` may be nil (e.g. a hand-crafted object bypassing the defaulter),
 // in which case the floor is strict (all Instances must serve).
 //
+// The floor scales against desiredReplicas (IR.spec.replicas), not the live
+// cs.Replicas, which includes rollout surge — see floorBasis.
+//
 // Lives in the neutral inferenceservice/status package — the single source of
 // truth for the Ready predicate that the IR-managed projector (irprojector
 // status.go) calls. The IR's own Ready condition derives the same way via
 // utils.AvailabilityFloor.
-func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1beta1.LifecycleStatus, ext *v1beta1.ComponentExtensionSpec) *apis.Condition {
+func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1beta1.LifecycleStatus, ext *v1beta1.ComponentExtensionSpec, desiredReplicas *int32) *apis.Condition {
 	var readyType apis.ConditionType
 	switch component {
 	case v1beta1.EngineComponent:
@@ -54,7 +57,7 @@ func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1
 		cond.Message = "Component has no desired Instances"
 		return cond
 	}
-	floor := utils.AvailabilityFloor(cs.Replicas, extMinAvailable(ext), extMaxUnavailable(ext), rolloutMaxUnavailable(ext))
+	floor := utils.AvailabilityFloor(floorBasis(cs.Replicas, desiredReplicas), extMinAvailable(ext), extMaxUnavailable(ext), rolloutMaxUnavailable(ext))
 	switch {
 	case cs.ReadyReplicas >= cs.Replicas:
 		cond.Status = corev1.ConditionTrue
@@ -70,6 +73,15 @@ func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1
 		cond.Message = fmt.Sprintf("%d/%d Instances serving, need %d", cs.ServingReplicas, cs.Replicas, floor)
 	}
 	return cond
+}
+
+// floorBasis is the desired Instance count the availability floor scales against,
+// nil/non-positive falls back to live count.
+func floorBasis(actual int32, desired *int32) int32 {
+	if desired == nil || *desired <= 0 || *desired >= actual {
+		return actual
+	}
+	return *desired
 }
 
 // extMinAvailable / extMaxUnavailable / rolloutMaxUnavailable pull the disruption
