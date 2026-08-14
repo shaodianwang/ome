@@ -44,7 +44,7 @@ require (
 )
 
 require (
-	github.com/expr-lang/expr v1.17.2 // indirect
+	github.com/expr-lang/expr v1.17.7 // indirect
 	istio.io/api v1.19.4 // indirect
 )
 
