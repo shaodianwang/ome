@@ -54,9 +54,18 @@ var _ = ginkgo.Describe("permutation — InPlaceOnly env-change rejects without 
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "perm-ru-iponly")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
-		Expect(v1EngineRev).NotTo(BeEmpty())
+		// CurrentRevision is promoted on a later reconcile than the one that
+		// reports ServingReplicas, so poll for it: a bare read here races the
+		// promotion and observes the empty pre-promotion value. The value is
+		// load-bearing — the Consistently below asserts the revision never
+		// moves off it — so an empty capture would make that check vacuous.
+		var v1EngineRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "perm-ru-iponly")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the env-change bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Inject an env-var change — this is exactly the diff
 		// chooseUpdateMode rejects for InPlaceOnly (env requires
