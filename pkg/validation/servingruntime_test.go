@@ -15,9 +15,14 @@ func TestValidateSupportedModelFormats(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "empty formats",
+			name:    "nil formats",
 			formats: nil,
-			wantErr: true,
+			wantErr: false,
+		},
+		{
+			name:    "empty formats",
+			formats: []v1beta1.SupportedModelFormat{},
+			wantErr: false,
 		},
 		{
 			name: "valid single format",

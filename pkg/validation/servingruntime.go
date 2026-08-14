@@ -11,9 +11,6 @@ const (
 )
 
 func ValidateSupportedModelFormats(formats []v1beta1.SupportedModelFormat) error {
-	if len(formats) == 0 {
-		return fmt.Errorf("spec.supportedModelFormats is required")
-	}
 	for i, f := range formats {
 		if f.ModelFormat == nil || f.ModelFormat.Name == "" {
 			return fmt.Errorf("spec.supportedModelFormats[%d]: modelFormat.name is required", i)
