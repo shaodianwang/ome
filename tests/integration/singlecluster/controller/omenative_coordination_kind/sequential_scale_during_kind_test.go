@@ -60,9 +60,19 @@ var _ = ginkgo.Describe("permutation — Sequential + scale-up during rollout", 
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "perm-seq-scaleup")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+		// CurrentRevision is promoted on a later reconcile than the one the wait
+		// above gates on, so poll for it: a bare read races the promotion and
+		// captures the empty pre-promotion value.
+		var v1EngineRev, v1DecoderRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "perm-seq-scaleup")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the bump")
+			g.Expect(v1DecoderRev).NotTo(BeEmpty(),
+				"decoder CurrentRevision must be promoted before the bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Combined update: scale engine 2 → 4 + bump both images. The
 		// Sequential gate must roll decoder first, then engine, and the

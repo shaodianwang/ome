@@ -63,8 +63,16 @@ var _ = ginkgo.Describe("behavior — PerComponent maxSurge upper bound", ginkgo
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "surge-e1")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		// CurrentRevision is promoted on a later reconcile than the one the wait
+		// above gates on, so poll for it: a bare read races the promotion and
+		// captures the empty pre-promotion value.
+		var v1EngineRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "surge-e1")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Sampler: alive(engine) must stay <= 3 throughout.
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {

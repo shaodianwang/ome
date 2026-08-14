@@ -91,9 +91,19 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 			}
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "perm-ru-inplace")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+		// CurrentRevision is promoted on a later reconcile than the one the wait
+		// above gates on, so poll for it: a bare read races the promotion and
+		// captures the empty pre-promotion value.
+		var v1EngineRev, v1DecoderRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "perm-ru-inplace")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the bump")
+			g.Expect(v1DecoderRev).NotTo(BeEmpty(),
+				"decoder CurrentRevision must be promoted before the bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Sampler: serving budget invariant across the rollout. Both
 		// Components must keep >= 1 of 2 pods serving (MaxUnavailable=1).

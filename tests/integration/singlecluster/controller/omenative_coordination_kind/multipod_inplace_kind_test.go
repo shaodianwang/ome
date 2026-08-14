@@ -62,8 +62,16 @@ var _ = ginkgo.Describe("permutation — multi-pod InPlaceIfPossible falls back 
 			g.Expect(snap.Alive(v1beta1.EngineComponent)).To(Equal(3))
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "perm-mp-ip")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		// CurrentRevision is promoted on a later reconcile than the one the wait
+		// above gates on, so poll for it: a bare read races the promotion and
+		// captures the empty pre-promotion value.
+		var v1EngineRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "perm-mp-ip")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		ir := freshInferenceReplica(Default, ns.Name, "perm-mp-ip", v1beta1.EngineComponent)
 		v1Incarnation := ir.Status.InstanceStatuses[0].Incarnation
 

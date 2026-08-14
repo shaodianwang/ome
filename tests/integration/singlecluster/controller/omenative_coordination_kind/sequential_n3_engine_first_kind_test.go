@@ -74,10 +74,22 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "perm-seq-n3-ef")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
-		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
+		// CurrentRevision is promoted on a later reconcile than the one the wait
+		// above gates on, so poll for it: a bare read races the promotion and
+		// captures the empty pre-promotion value.
+		var v1EngineRev, v1DecoderRev, v1RouterRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "perm-seq-n3-ef")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+			v1RouterRev = preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the bump")
+			g.Expect(v1DecoderRev).NotTo(BeEmpty(),
+				"decoder CurrentRevision must be promoted before the bump")
+			g.Expect(v1RouterRev).NotTo(BeEmpty(),
+				"router CurrentRevision must be promoted before the bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Sample handoff windows. Same pattern as the router-first N=3
 		// spec (n3_sequential_kind) but rotated for the engine-first

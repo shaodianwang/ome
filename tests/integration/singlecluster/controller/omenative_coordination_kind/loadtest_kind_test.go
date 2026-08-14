@@ -69,8 +69,16 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(5)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "load-h")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		// CurrentRevision is promoted on a later reconcile than the one the wait
+		// above gates on, so poll for it: a bare read races the promotion and
+		// captures the empty pre-promotion value.
+		var v1EngineRev string
+		Eventually(func(g Gomega) {
+			preBump := freshISVC(g, ns.Name, "load-h")
+			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(v1EngineRev).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the bump")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Sampler: serving floor on each side + ratio in band.
 		// Failure messages name the observed counts so a band violation
