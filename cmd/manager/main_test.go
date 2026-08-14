@@ -107,6 +107,45 @@ func TestDefaultOptions(t *testing.T) {
 	assert.False(t, opts.allowExecCredentials)
 	assert.Equal(t, "aws,gke-gcloud-auth-plugin,kubelogin", opts.execCredentialAllowedCmds)
 	assert.Equal(t, "", opts.placementControlPlaneID)
+	// No in-code default: the chart is the source of truth, and zero leaves
+	// controller-runtime's own default in place.
+	assert.Zero(t, opts.kubeAPIQPS)
+	assert.Zero(t, opts.kubeAPIBurst)
+}
+
+func TestGetOptionsKubeAPIRateLimits(t *testing.T) {
+	oldArgs := os.Args
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	}()
+
+	flag.CommandLine = flag.NewFlagSet("cmd", flag.ExitOnError)
+	os.Args = []string{"cmd", "--kube-api-qps=50", "--kube-api-burst=100"}
+
+	o := GetOptions()
+	assert.Equal(t, 50.0, o.kubeAPIQPS)
+	assert.Equal(t, 100, o.kubeAPIBurst)
+}
+
+func TestApplyKubeAPIRateLimits(t *testing.T) {
+	cfg := &rest.Config{}
+	applyKubeAPIRateLimits(cfg, 50, 100)
+	assert.EqualValues(t, 50, cfg.QPS)
+	assert.Equal(t, 100, cfg.Burst)
+
+	// Zero must not clobber a value already on the config — that would silently
+	// drop the caller below controller-runtime's default.
+	unset := &rest.Config{QPS: 20, Burst: 30}
+	applyKubeAPIRateLimits(unset, 0, 0)
+	assert.EqualValues(t, 20, unset.QPS)
+	assert.Equal(t, 30, unset.Burst)
+
+	// The two limits are independent.
+	qpsOnly := &rest.Config{QPS: 20, Burst: 30}
+	applyKubeAPIRateLimits(qpsOnly, 50, 0)
+	assert.EqualValues(t, 50, qpsOnly.QPS)
+	assert.Equal(t, 30, qpsOnly.Burst)
 }
 
 // TestGetOptionsMultiCluster asserts the five retained multi-cluster flags parse

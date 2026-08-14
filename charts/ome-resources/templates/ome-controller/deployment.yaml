@@ -74,6 +74,12 @@ spec:
         {{- if .Values.ome.controller.configCacheTTL }}
         - "--config-cache-ttl={{ .Values.ome.controller.configCacheTTL }}"
         {{- end }}
+        {{- if .Values.ome.controller.kubeAPIQPS }}
+        - "--kube-api-qps={{ .Values.ome.controller.kubeAPIQPS }}"
+        {{- end }}
+        {{- if .Values.ome.controller.kubeAPIBurst }}
+        - "--kube-api-burst={{ .Values.ome.controller.kubeAPIBurst }}"
+        {{- end }}
         {{- if .Values.ome.multicluster.enabled }}
         - "--enable-multicluster"
         {{- if .Values.ome.multicluster.role }}

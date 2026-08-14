@@ -135,6 +135,10 @@ type Options struct {
 	isvcMaxConcurrentReconciles int
 	irMaxConcurrentReconciles   int
 	enableInferenceReplicaCtrl  bool
+	// Client-side rate limit toward the local apiserver, shared by the manager's
+	// cache/client, the direct clientset, and the webhook handlers.
+	kubeAPIQPS   float64
+	kubeAPIBurst int
 	// Multi-cluster topology, identity, and security: these decide which
 	// controllers run and the manager's identity, so they are deploy-time flags.
 	// The tunables live in the inferenceservice-config ConfigMap
@@ -212,6 +216,15 @@ func GetOptions() Options {
 			"the chart supplies the value. Zero/unset falls back to controller-runtime's single-worker default.")
 	flag.BoolVar(&opts.enableInferenceReplicaCtrl, "enable-inferencereplica-controller", opts.enableInferenceReplicaCtrl,
 		"Run the InferenceReplica controller. Defaults true; flip to false to disable if the per-IR lifecycle code ships a regression.")
+	flag.Float64Var(&opts.kubeAPIQPS, "kube-api-qps", opts.kubeAPIQPS,
+		"Steady-state client-side request rate to the local apiserver, shared by the manager cache/client, the "+
+			"direct clientset, and the webhook handlers. No in-code default; the chart supplies the value. "+
+			"Zero/unset falls back to controller-runtime's default (20 QPS), which throttles reconcile throughput "+
+			"once several controllers run concurrently.")
+	flag.IntVar(&opts.kubeAPIBurst, "kube-api-burst", opts.kubeAPIBurst,
+		"Token-bucket burst over --kube-api-qps, absorbing the request spikes of a reconcile fan-out or an informer "+
+			"resync. No in-code default; the chart supplies the value. Zero/unset falls back to controller-runtime's "+
+			"default (30).")
 	flag.BoolVar(&opts.enableMultiCluster, "enable-multicluster", opts.enableMultiCluster,
 		"Enable the multi-cluster controllers (WorkloadCluster registry). Alpha; default off.")
 	flag.StringVar(&opts.multiClusterRole, "multicluster-role", opts.multiClusterRole,
@@ -240,6 +253,22 @@ func GetOptions() Options {
 	return opts
 }
 
+// applyKubeAPIRateLimits sets the client-side rate limit on the rest.Config used
+// for every connection to the local apiserver. It must run before the config is
+// handed to the clientset, the discovery probes, and the manager, since each
+// copies the limits at construction time.
+//
+// Zero leaves the value untouched so controller-runtime's default applies; the
+// two limits are independent, so supplying only one is honored.
+func applyKubeAPIRateLimits(cfg *rest.Config, qps float64, burst int) {
+	if qps > 0 {
+		cfg.QPS = float32(qps)
+	}
+	if burst > 0 {
+		cfg.Burst = burst
+	}
+}
+
 func main() {
 	options := GetOptions()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&options.zapOpts)))
@@ -249,6 +278,8 @@ func main() {
 	// Get a config to talk to the apiserver
 	setupLog.Info("Configuring API client connection")
 	cfg := ctrl.GetConfigOrDie()
+	applyKubeAPIRateLimits(cfg, options.kubeAPIQPS, options.kubeAPIBurst)
+	setupLog.Info("Configured API client rate limits", "qps", cfg.QPS, "burst", cfg.Burst)
 
 	// Setup clientset to directly talk to the api server
 	setupLog.Info("Creating Kubernetes client set")
