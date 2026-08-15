@@ -21,6 +21,7 @@ package inferencereplica
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,12 +143,13 @@ type Reconciler struct {
 // invalidate it. raw is the canonical serialized payload stored in
 // ControllerRevision.Data.Raw; it is treated as immutable once cached.
 type revisionHashEntry struct {
-	uid            types.UID
-	generation     int64
-	collisionCount int32
-	scopeUID       types.UID
-	hash           string
-	raw            []byte
+	uid                    types.UID
+	generation             int64
+	excludedAnnotationKeys string
+	collisionCount         int32
+	scopeUID               types.UID
+	hash                   string
+	raw                    []byte
 }
 
 // Reconcile loads the InferenceReplica, projects (Spec, Status) onto a
@@ -1066,39 +1068,30 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 	return target, nil
 }
 
-// revisionHash returns the revision (hash, raw) for the IR's rendered pod
-// template, reusing the memoized result when neither the generation, the
-// collision count, nor the scope UID has changed since the last compute.
-//
-// The rendered template (input.DesiredSpec.{PodSpec,WorkerPodSpec,
-// PodTemplateObjectMeta}) is a pure projection of the IR spec, so it only
-// changes on a spec edit (generation bump). collisionCount and scopeUID
-// are the remaining hash inputs folded by
-// revision.HashWithWorkerAndTopology, so they
-// complete the cache key. On a miss it recomputes via the same
-// canonical hash call used by the revision creation path,
-// so the (hash, raw) is byte-identical to the unmemoized path.
-//
-// raw is returned by reference (immutable once cached). EnsureController-
-// RevisionFromHash only reads it (Get short-circuit, bytes.Equal, and
-// Data.Raw assignment on Create), never mutates it.
+// revisionHash memoizes the canonical revision payload. Generation covers spec-derived inputs;
+// the excluded annotation list, collision count, and scope UID cover the remaining hash inputs.
+// Cached raw bytes are immutable and only read by revision creation.
 func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workload.ReconcileInput, collisionCount *int32, scopeUID types.UID) (string, []byte, error) {
 	cc := utils.DerefInt32(collisionCount)
 	cacheKey := client.ObjectKeyFromObject(ir)
+	excludedAnnotationKeys := ir.Annotations[constants.RevisionExcludedAnnotationKeysAnnotationKey]
 
 	r.revisionHashMu.Lock()
 	defer r.revisionHashMu.Unlock()
 	if entry, ok := r.revisionHashCache[cacheKey]; ok &&
 		entry.uid == ir.UID &&
 		entry.generation == ir.Generation &&
+		entry.excludedAnnotationKeys == excludedAnnotationKeys &&
 		entry.collisionCount == cc &&
 		entry.scopeUID == scopeUID {
 		return entry.hash, entry.raw, nil
 	}
 
+	// Hash a copy without inherited ISVC annotations while retaining them on rendered pods.
+	meta := stripExcludedAnnotations(input.DesiredSpec.PodTemplateObjectMeta, parseExcludedAnnotationKeys(ir))
 	hash, raw, err := revision.HashWithWorkerAndTopology(
 		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
-		input.DesiredSpec.PodTemplateObjectMeta,
+		meta,
 		input.DesiredSpec.TopologyKey,
 		collisionCount, scopeUID,
 	)
@@ -1109,14 +1102,51 @@ func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workload.R
 		r.revisionHashCache = make(map[types.NamespacedName]revisionHashEntry)
 	}
 	r.revisionHashCache[cacheKey] = revisionHashEntry{
-		uid:            ir.UID,
-		generation:     ir.Generation,
-		collisionCount: cc,
-		scopeUID:       scopeUID,
-		hash:           hash,
-		raw:            raw,
+		uid:                    ir.UID,
+		generation:             ir.Generation,
+		excludedAnnotationKeys: excludedAnnotationKeys,
+		collisionCount:         cc,
+		scopeUID:               scopeUID,
+		hash:                   hash,
+		raw:                    raw,
 	}
 	return hash, raw, nil
+}
+
+// parseExcludedAnnotationKeys returns inherited ISVC annotation keys omitted from revision hashing.
+func parseExcludedAnnotationKeys(ir *v1beta1.InferenceReplica) map[string]struct{} {
+	raw := ir.Annotations[constants.RevisionExcludedAnnotationKeysAnnotationKey]
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out[p] = struct{}{}
+		}
+	}
+	return out
+}
+
+// stripExcludedAnnotations returns metadata without excluded keys and never mutates the input.
+func stripExcludedAnnotations(meta *metav1.ObjectMeta, excluded map[string]struct{}) *metav1.ObjectMeta {
+	if meta == nil || len(excluded) == 0 || len(meta.Annotations) == 0 {
+		return meta
+	}
+	filtered := make(map[string]string, len(meta.Annotations))
+	for k, v := range meta.Annotations {
+		if _, drop := excluded[k]; drop {
+			continue
+		}
+		filtered[k] = v
+	}
+	if len(filtered) == len(meta.Annotations) {
+		return meta // nothing dropped
+	}
+	out := *meta
+	out.Annotations = filtered
+	return &out
 }
 
 // forgetRevisionHash evicts the memoized revision hash for a deleted IR so

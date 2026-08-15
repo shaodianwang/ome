@@ -251,6 +251,7 @@ const (
 // ControllerRevision name and drive a phantom rollout on a spec the user
 // never edited — e.g. an operator's `rollout-promote` would mint a new
 // revision and roll to it instead of the one being promoted.
+// Object-scoped annotations are filtered by the InferenceReplica reconciler before this call.
 func isLifecycleAnnotation(key string) bool {
 	if strings.HasPrefix(key, audit.MigrationRequestAnnotationPrefix) {
 		return true

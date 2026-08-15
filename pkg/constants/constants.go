@@ -191,15 +191,13 @@ var (
 	InferenceReplicaControllerWriteAnnotationKey = OMEAPIGroupName + "/controller-write"
 	InferenceReplicaControllerWriteAnnotationVal = "true"
 
-	// ReleaseHeldRevisionAnnotationKey is the operator escape hatch for a
-	// Held RetryBlock on an InferenceReplica: the value names the blocked
-	// revision (full ControllerRevision name, or the bare revision hash)
-	// and the IR controller removes that block when it is State=Held.
-	// Mailbox semantics — the controller answers the request (release, or
-	// an explanatory no-op event) and deletes the annotation, so an
-	// operator can lift a Held revision with one `kubectl annotate` instead of a
-	// status-subresource patch.
+	// ReleaseHeldRevisionAnnotationKey names a Held RetryBlock by full ControllerRevision
+	// name or bare hash. The controller consumes it after handling the release request.
 	ReleaseHeldRevisionAnnotationKey = OMEAPIGroupName + "/release-held-revision"
+
+	// RevisionExcludedAnnotationKeysAnnotationKey lists inherited ISVC annotation keys
+	// omitted from the pod-template revision hash; component annotations remain hash inputs.
+	RevisionExcludedAnnotationKeysAnnotationKey = OMEAPIGroupName + "/revision-excluded-annotation-keys"
 )
 
 // Label Constants

@@ -34,6 +34,8 @@ package irprojector
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -324,6 +326,14 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	}
 	ir.Annotations[constants.InferenceReplicaControllerWriteAnnotationKey] = constants.InferenceReplicaControllerWriteAnnotationVal
 
+	// Record inherited ISVC annotation keys so revision hashing can ignore object-only
+	// metadata without changing pod metadata propagation.
+	if excluded := objectScopedAnnotationKeys(p); len(excluded) > 0 {
+		ir.Annotations[constants.RevisionExcludedAnnotationKeysAnnotationKey] = strings.Join(excluded, ",")
+	} else {
+		delete(ir.Annotations, constants.RevisionExcludedAnnotationKeysAnnotationKey)
+	}
+
 	// Labels track the per-Component ObjectMeta the omenative path
 	// would have stamped on pods — copying them onto the IR itself
 	// gives kubectl-side filterability without changing the pod
@@ -503,6 +513,30 @@ func runnersFromParams(p Params) []v1beta1.Runner {
 		})
 	}
 	return out
+}
+
+// objectScopedAnnotationKeys returns sorted ISVC annotation keys that were not declared
+// on the component and therefore do not define pod revision identity.
+func objectScopedAnnotationKeys(p Params) []string {
+	if len(p.ISVC.Annotations) == 0 {
+		return nil
+	}
+	var declared map[string]string
+	if p.ComponentExt != nil {
+		declared = p.ComponentExt.Annotations
+	}
+	keys := make([]string, 0, len(p.ISVC.Annotations))
+	for k := range p.ISVC.Annotations {
+		if _, ok := declared[k]; ok {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // templateObjectMeta builds the PodTemplateSpec.ObjectMeta stamped on
