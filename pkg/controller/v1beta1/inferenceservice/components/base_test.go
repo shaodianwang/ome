@@ -192,6 +192,40 @@ func TestUpdatePodSpecNodeSelector(t *testing.T) {
 	}
 }
 
+func TestUpdatePodSpecNodeSelectorWithoutModel(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	b := &BaseComponentFields{
+		Runtime: &v1beta1.ServingRuntimeSpec{
+			ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{
+				NodeSelector: map[string]string{
+					"accelerator": "gpu",
+					"zone":        "runtime-zone",
+				},
+			},
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Engine: &v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{
+					NodeSelector: map[string]string{
+						"zone": "isvc-zone",
+					},
+				},
+			},
+		},
+	}
+	podSpec := &v1.PodSpec{}
+
+	UpdatePodSpecNodeSelector(b, isvc, podSpec, v1beta1.EngineComponent)
+
+	g.Expect(podSpec.NodeSelector).To(gomega.Equal(map[string]string{
+		"accelerator": "gpu",
+		"zone":        "isvc-zone",
+	}))
+}
+
 func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

@@ -263,10 +263,10 @@ func UpdateEnvVariables(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 
 }
 
-// UpdatePodSpecNodeSelector updates pod spec with node selector for model scheduling
+// UpdatePodSpecNodeSelector updates pod spec node selectors for scheduling.
 func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, componentType v1beta1.ComponentType) {
-	// Only add node selector if we have a base model
 	if b.BaseModel == nil || b.BaseModelMeta == nil {
+		applyMergedNodeSelector(b.Runtime, isvc, podSpec, componentType)
 		return
 	}
 
@@ -284,15 +284,7 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	if isPVCBaseModel(b) {
 		b.Log.V(2).Info("Skipping model node selector for PVC-backed BaseModel",
 			"inferenceService", isvc.Name, "namespace", isvc.Namespace)
-		mergedNodeSelector := isvcutils.MergeNodeSelector(b.Runtime, isvc, componentType)
-		if len(mergedNodeSelector) > 0 {
-			if podSpec.NodeSelector == nil {
-				podSpec.NodeSelector = make(map[string]string)
-			}
-			for k, v := range mergedNodeSelector {
-				podSpec.NodeSelector[k] = v
-			}
-		}
+		applyMergedNodeSelector(b.Runtime, isvc, podSpec, componentType)
 		return
 	}
 
@@ -306,8 +298,18 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 		isvcutils.AddNodeSelectorForModelReadyNode(podSpec, b.BaseModelMeta)
 	}
 
-	// Merge node selectors from runtime + ISVC (engine/decoder only).
-	mergedNodeSelector := isvcutils.MergeNodeSelector(b.Runtime, isvc, componentType)
+	applyMergedNodeSelector(b.Runtime, isvc, podSpec, componentType)
+
+	if !isShardedModel(b.BaseModel) {
+		b.Log.V(1).Info("Added preferred node affinity for model scheduling",
+			"modelName", b.BaseModelMeta.Name,
+			"namespace", b.BaseModelMeta.Namespace,
+			"inferenceService", isvc.Name)
+	}
+}
+
+func applyMergedNodeSelector(runtime *v1beta1.ServingRuntimeSpec, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, componentType v1beta1.ComponentType) {
+	mergedNodeSelector := isvcutils.MergeNodeSelector(runtime, isvc, componentType)
 	if len(mergedNodeSelector) > 0 {
 		if podSpec.NodeSelector == nil {
 			podSpec.NodeSelector = make(map[string]string)
@@ -315,13 +317,6 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 		for k, v := range mergedNodeSelector {
 			podSpec.NodeSelector[k] = v
 		}
-	}
-
-	if !isShardedModel(b.BaseModel) {
-		b.Log.V(1).Info("Added preferred node affinity for model scheduling",
-			"modelName", b.BaseModelMeta.Name,
-			"namespace", b.BaseModelMeta.Namespace,
-			"inferenceService", isvc.Name)
 	}
 }
 

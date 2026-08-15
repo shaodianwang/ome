@@ -2,6 +2,7 @@ package isvc
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -549,7 +550,7 @@ func TestInferenceService_OMENativeEngineDecoderCoupling(t *testing.T) {
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1beta1.InferenceServiceSpec{
-					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime", AutoSync: boolPtr(false)},
 					Engine: &v1beta1.EngineSpec{
 						ComponentExtensionSpec: annot(string(constants.OMENative)),
 						Runner:                 withRunner,
@@ -625,7 +626,7 @@ func TestInferenceService_LeaderWorkerPairing(t *testing.T) {
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1beta1.InferenceServiceSpec{
-					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime", AutoSync: boolPtr(false)},
 					Engine: &v1beta1.EngineSpec{
 						Runner: withRunner,
 						Leader: &v1beta1.LeaderSpec{},
@@ -808,6 +809,97 @@ func TestHasFullRunnerConfig(t *testing.T) {
 // =============================================================================
 // RUNTIME RESOLUTION TESTS
 // =============================================================================
+
+type runtimeLookupSpy struct {
+	runtimeselector.Selector
+	getRuntimeCalls int
+}
+
+func (s *runtimeLookupSpy) GetRuntime(_ context.Context, _, _ string) (*v1beta1.ServingRuntimeSpec, bool, error) {
+	s.getRuntimeCalls++
+	return nil, false, errors.New("runtime lookup must not be called")
+}
+
+func TestInferenceService_RuntimeOnlyRuntimeState(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1beta1.AddToScheme(scheme)
+
+	enabledRuntime := &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "enabled-runtime"},
+	}
+	disabledRuntime := &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "disabled-runtime"},
+		Spec: v1beta1.ServingRuntimeSpec{
+			Disabled: boolPtr(true),
+		},
+	}
+
+	tests := []struct {
+		name     string
+		objects  []client.Object
+		runtime  *v1beta1.ServingRuntimeRef
+		wantErr  string
+		noLookup bool
+	}{
+		{
+			name:    "enabled live-synced runtime is allowed",
+			objects: []client.Object{enabledRuntime},
+			runtime: &v1beta1.ServingRuntimeRef{Name: "enabled-runtime"},
+		},
+		{
+			name:    "disabled live-synced runtime is rejected",
+			objects: []client.Object{disabledRuntime},
+			runtime: &v1beta1.ServingRuntimeRef{Name: "disabled-runtime", AutoSync: boolPtr(true)},
+			wantErr: "disabled",
+		},
+		{
+			name:    "missing live-synced runtime is allowed",
+			runtime: &v1beta1.ServingRuntimeRef{Name: "missing-runtime"},
+		},
+		{
+			name:     "disabled source with autoSync false is allowed",
+			objects:  []client.Object{disabledRuntime},
+			runtime:  &v1beta1.ServingRuntimeRef{Name: "disabled-runtime", AutoSync: boolPtr(false)},
+			noLookup: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+			var selector runtimeselector.Selector = runtimeselector.New(fakeClient)
+			var lookupSpy *runtimeLookupSpy
+			if tt.noLookup {
+				lookupSpy = &runtimeLookupSpy{Selector: selector}
+				selector = lookupSpy
+			}
+			validator := &InferenceServiceValidator{
+				Client:          fakeClient,
+				RuntimeSelector: selector,
+			}
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "runtime-only", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: tt.runtime,
+					Engine:  &v1beta1.EngineSpec{},
+				},
+			}
+
+			_, err := validator.validateRuntimeAndModelResolution(context.Background(), isvc)
+			if tt.noLookup {
+				assert.Zero(t, lookupSpy.getRuntimeCalls)
+			}
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
 
 func TestInferenceService_RuntimeResolution(t *testing.T) {
 	// Create test models with different configurations
@@ -2764,7 +2856,7 @@ func migrationAnnISVC(annotations map[string]string, withDecoder bool) *v1beta1.
 			Annotations: annotations,
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+			Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime", AutoSync: boolPtr(false)},
 		},
 	}
 	if withDecoder {

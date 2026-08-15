@@ -55,6 +55,7 @@ import (
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
+	"github.com/ome-projects/ome/pkg/runtimerevision"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 )
@@ -330,6 +331,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	//   - runtime omitted  → auto-select from model; requires a model.
 	var rt *v1beta1.ServingRuntimeSpec
 	var rtName string
+	var rtIsCluster bool
 	userSpecifiedRuntime := false
 
 	switch {
@@ -353,6 +355,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return reconcile.Result{}, nil
 			}
 			rt = pin.spec
+			rtIsCluster = sourceKindFor(isvc.Spec.Runtime) == runtimerevision.KindClusterServingRuntime
 			break
 		}
 
@@ -384,7 +387,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				}
 			}
 		}
-		rtSpec, _, err := r.RuntimeSelector.GetRuntime(ctx, rtName, isvc.Namespace)
+		rtSpec, isCluster, err := r.RuntimeSelector.GetRuntime(ctx, rtName, isvc.Namespace)
 		if err != nil {
 			if runtimeselector.IsRuntimeNotFoundError(err) {
 				// A named-but-missing runtime is a permanent user-config error,
@@ -401,6 +404,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		r.clearRuntimeUnresolved(isvc)
 		rt = rtSpec
+		rtIsCluster = isCluster
 	case baseModel != nil:
 		selection, err := r.RuntimeSelector.SelectRuntime(ctx, baseModel, isvc)
 		if err != nil {
@@ -419,6 +423,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		r.clearRuntimeUnresolved(isvc)
 		rt = selection.Spec
 		rtName = selection.Name
+		rtIsCluster = selection.IsCluster
 		log.Info("Auto-selected runtime", "runtime", rtName, "model", isvc.Spec.Model.Name)
 	default:
 		// No model, no runtime — webhook should have caught this; defensive
@@ -426,6 +431,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		err := fmt.Errorf("InferenceService must specify spec.runtime when spec.model is omitted")
 		r.Log.Error(err, "Cannot reconcile", "Name", isvc.Name)
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "RuntimeSelectionError", err.Error())
+		return reconcile.Result{}, err
+	}
+
+	if err := validateResolvedRuntimeEnabled(rt, rtName, rtIsCluster); err != nil {
+		r.Log.Error(err, "Runtime validation failed", "runtime", rtName)
+		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeValidationError",
+			"Runtime %s failed validation: %v", rtName, err)
 		return reconcile.Result{}, err
 	}
 
@@ -784,6 +796,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func validateResolvedRuntimeEnabled(runtimeSpec *v1beta1.ServingRuntimeSpec, runtimeName string, isCluster bool) error {
+	if runtimeSpec != nil && runtimeSpec.IsDisabled() {
+		return &runtimeselector.RuntimeDisabledError{
+			RuntimeName: runtimeName,
+			IsCluster:   isCluster,
+		}
+	}
+	return nil
 }
 
 func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.InferenceService) (ctrl.Result, error) {

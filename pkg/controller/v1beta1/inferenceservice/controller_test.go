@@ -806,6 +806,63 @@ func determineEngineDeploymentMode(engineSpec *v1beta1.EngineSpec) constants.Dep
 	return constants.RawDeployment
 }
 
+func TestValidateResolvedRuntimeEnabled(t *testing.T) {
+	disabled := true
+	tests := []struct {
+		name        string
+		runtimeName string
+		runtimeSpec *v1beta1.ServingRuntimeSpec
+		isCluster   bool
+		wantErr     bool
+	}{
+		{
+			name:        "nil runtime spec",
+			runtimeName: "nil-runtime",
+		},
+		{
+			name:        "enabled runtime",
+			runtimeName: "enabled-runtime",
+			runtimeSpec: &v1beta1.ServingRuntimeSpec{},
+		},
+		{
+			name:        "disabled namespaced runtime",
+			runtimeName: "namespaced-runtime",
+			runtimeSpec: &v1beta1.ServingRuntimeSpec{Disabled: &disabled},
+			wantErr:     true,
+		},
+		{
+			name:        "disabled cluster runtime",
+			runtimeName: "cluster-runtime",
+			runtimeSpec: &v1beta1.ServingRuntimeSpec{Disabled: &disabled},
+			isCluster:   true,
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResolvedRuntimeEnabled(tt.runtimeSpec, tt.runtimeName, tt.isCluster)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("validateResolvedRuntimeEnabled() error = %v", err)
+				}
+				return
+			}
+
+			var disabledErr *runtimeselector.RuntimeDisabledError
+			if !errors.As(err, &disabledErr) {
+				t.Fatalf("validateResolvedRuntimeEnabled() error = %T, want *runtimeselector.RuntimeDisabledError", err)
+			}
+			if disabledErr.RuntimeName != tt.runtimeName {
+				t.Errorf("RuntimeName = %q, want %q", disabledErr.RuntimeName, tt.runtimeName)
+			}
+			if disabledErr.IsCluster != tt.isCluster {
+				t.Errorf("IsCluster = %t, want %t", disabledErr.IsCluster, tt.isCluster)
+			}
+		})
+	}
+}
+
 func TestEnsureIngressDisableAnnotation(t *testing.T) {
 	tests := []struct {
 		name                string

@@ -441,8 +441,8 @@ func (v *InferenceServiceValidator) validateOverlays(isvc *v1beta1.InferenceServ
 }
 
 // validateRuntimeAndModelResolution gates runtime/model resolution on
-// the Engine-architecture path. Lean specs (full runner config + no
-// model) short-circuit; everything else needs the runtime selector.
+// the Engine-architecture path. Runtime-only specs check live-synced
+// source availability without running model compatibility validation.
 func (v *InferenceServiceValidator) validateRuntimeAndModelResolution(ctx context.Context, isvc *v1beta1.InferenceService) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
@@ -453,7 +453,7 @@ func (v *InferenceServiceValidator) validateRuntimeAndModelResolution(ctx contex
 		if isvc.Spec.Runtime == nil && !hasFullRunnerConfig(isvc.Spec.Engine) {
 			return warnings, fmt.Errorf("model reference is required when runtime is not specified and engine does not have complete runner configuration")
 		}
-		return warnings, nil
+		return warnings, v.validateRuntimeOnlyAvailability(ctx, isvc)
 	}
 	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
 		return v.resolveModelAndRuntime(ctx, isvc, warnings)
@@ -462,6 +462,31 @@ func (v *InferenceServiceValidator) validateRuntimeAndModelResolution(ctx contex
 		return v.resolveModelAndRuntime(ctx, isvc, warnings)
 	}
 	return warnings, nil
+}
+
+func (v *InferenceServiceValidator) validateRuntimeOnlyAvailability(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	runtimeRef := isvc.Spec.Runtime
+	if runtimeRef == nil || runtimeRef.Name == "" {
+		return nil
+	}
+	if runtimeRef.AutoSync != nil && !*runtimeRef.AutoSync {
+		return nil
+	}
+
+	runtimeSpec, isCluster, err := v.RuntimeSelector.GetRuntime(ctx, runtimeRef.Name, isvc.Namespace)
+	if err != nil {
+		if runtimeselector.IsRuntimeNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	if runtimeSpec.IsDisabled() {
+		return &runtimeselector.RuntimeDisabledError{
+			RuntimeName: runtimeRef.Name,
+			IsCluster:   isCluster,
+		}
+	}
+	return nil
 }
 
 func (v *InferenceServiceValidator) resolveModelAndRuntime(ctx context.Context, isvc *v1beta1.InferenceService, warnings admission.Warnings) (admission.Warnings, error) {
