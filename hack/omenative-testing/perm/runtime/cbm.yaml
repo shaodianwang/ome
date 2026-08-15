@@ -13,7 +13,9 @@ spec:
   modelParameterSize: "0"
   modelType: test
   storage:
-    # PVC lives in the dedicated coordtest namespace; OME's CBM finalizer
-    # mounts read-only via a short-lived metadata-extraction Job to validate
-    # the BaseModel. The serving runtime is nginx and never reads the model.
-    storageUri: pvc://omenative-eval:ome-coordtest-noop-pvc/.
+    # A ClusterBaseModel is cluster-scoped, so the PVC's namespace has to be
+    # named here; runtime_fixtures.py substitutes $OME_TEST_NS, the namespace
+    # the cases run in. OME's CBM finalizer mounts the PVC read-only via a
+    # short-lived metadata-extraction Job to validate the BaseModel. The
+    # serving runtime is nginx and never reads the model.
+    storageUri: pvc://${OME_TEST_NS}:ome-coordtest-noop-pvc/.

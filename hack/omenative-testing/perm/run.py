@@ -65,6 +65,8 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
+import runtime_fixtures
+
 # Env-driven so the harness isn't pinned to one cluster (see batch.py).
 KUBECONFIG = os.environ.get("OME_TEST_KUBECONFIG") or os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kube/config")
 # Shared per-run stamp: all of a run's results live under results/<RUN_TS>/.
@@ -173,6 +175,18 @@ def kubectl(*args, env=None, **kw):
     if env:
         env_full.update(env)
     return subprocess.run(["kubectl", *args], capture_output=True, text=True, env=env_full, **kw)
+
+
+def apply_runtime_fixtures():
+    """Apply the runtime fixtures into NS, idempotently.
+
+    They are templates rather than literal YAML: the PVC, its seed Job and the
+    ClusterBaseModel's storageUri all have to name NS, because a pod cannot
+    mount a PVC from another namespace and the ISVC validator rejects a model
+    that points at one.
+    """
+    return kubectl("apply", "--validate=false", "-n", NS, "-f", "-", check=False,
+                   input=runtime_fixtures.render(kind=runtime_fixtures.kind_from_env()))
 
 
 def parse_header(path):
@@ -1733,7 +1747,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
     N = {"engine": Ne, "decoder": Nd, "router": Nr}
     configured = {c for c in COMPS if N[c] > 0}
-    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    apply_runtime_fixtures()
     r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
@@ -3664,7 +3678,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     print(f"  Scale: " + " ".join(f"{c} {N[c]}→{target[c]}" for c in sorted(configured))
           + f"   ceilings e≤{ce} d≤{cd} r≤{cr}")
 
-    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    apply_runtime_fixtures()
     r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
@@ -3984,7 +3998,7 @@ def run_reject_case(case_id, yaml_file, desc, hdr):
     dash = {"engine": "-", "decoder": "-", "router": "-"}
     want = hdr.get("reason")   # optional single-token substring the denial must contain
     print(f"\n=== {case_id} [expect=reject] ===\n{desc}")
-    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    apply_runtime_fixtures()
     r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     msg = (r.stderr.strip().splitlines() or [""])[-1]
     if r.returncode == 0:
@@ -4044,7 +4058,7 @@ def run_case(case_id):
     print(f"  Ceilings: engine peak ≤ {ce}, decoder peak ≤ {cd}, router peak ≤ {cr}")
 
     # Ensure runtime is applied (idempotent — silently OK if exists).
-    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    apply_runtime_fixtures()
 
     # Apply the ISVC. On rejection (bad manifest / webhook denial) RECORD an
     # APPLY_FAIL row — never silently drop the case (a missing result reads as

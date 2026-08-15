@@ -30,6 +30,8 @@ import pathlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import runtime_fixtures
+
 HERE = Path(__file__).parent.resolve()
 # Cluster + namespace come from the environment so the harness isn't pinned to one
 # developer's cluster: OME_TEST_KUBECONFIG (else the ambient KUBECONFIG, else
@@ -307,8 +309,12 @@ def main():
         print(f"    partition: {len(conc_cases)} concurrent, then {len(quota_cases)} fault=quota case(s) "
               f"SERIAL after the pool drains ({', '.join(quota_cases)}) — namespace-wide ResourceQuota isolation")
     # Apply runtime once up front so the N subprocesses don't race on it.
+    # The fixtures are templates — the PVC and the ClusterBaseModel's storageUri
+    # have to name NS, or the ISVC validator rejects every case.
     print("=== applying runtime (once) ===")
-    subprocess.run(["kubectl", "apply", "-f", str(HERE / "runtime")], env=ENV)
+    subprocess.run(["kubectl", "apply", "-n", NS, "-f", "-"], env=ENV,
+                   input=runtime_fixtures.render(kind=runtime_fixtures.kind_from_env()),
+                   text=True)
     print()
 
     t0 = time.time()

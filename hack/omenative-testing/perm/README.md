@@ -7,9 +7,22 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 `OME_TEST_NS` (default `sandbox`, where the runtime fixtures below are applied).
 
 > **Prerequisites:** a cluster with OME installed, and the runtime fixtures in
-> `runtime/` applied to `$OME_TEST_NS` (`kubectl apply -f runtime/` — the noop
-> ClusterServingRuntime/ClusterBaseModel + PVC/seed Job the cases reference).
-> `batch.py` applies them idempotently on each run.
+> `runtime/` applied to `$OME_TEST_NS` (the noop ClusterServingRuntime /
+> ClusterBaseModel + PVC/seed Job the cases reference). `batch.py` and `run.py`
+> apply them idempotently on each run, so this is only needed for a manual
+> apply:
+>
+> ```sh
+> python3 runtime_fixtures.py | kubectl apply -n "$OME_TEST_NS" -f -
+> ```
+>
+> The fixtures are **templates, not literal YAML** — `kubectl apply -f runtime/`
+> will not work. `runtime_fixtures.py` substitutes the namespace, storage class,
+> PVC access mode, node architecture and images. The namespace has to be
+> $OME_TEST_NS everywhere: a pod cannot mount a PVC from another namespace, and
+> the ISVC validator rejects a model that points at one. Add `--kind` (or set
+> `OME_EVAL_KIND=1`) to target a local KIND cluster; see
+> [`../deploy-ome-kind.sh`](../deploy-ome-kind.sh).
 >
 > **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
@@ -26,7 +39,8 @@ perm/
 ├── batch.py               — parallel fan-out over many cases (--conc, ranges)
 ├── gen_cases.py           — generator: feature cases (migration/restart/partition/scale/edge)
 ├── gen_mn.py              — generator: multi-node (gang) rollout cases → isvcs/rollout/
-├── runtime/
+├── runtime_fixtures.py    — renders runtime/ for a target cluster (ns, storage, arch, images)
+├── runtime/               — fixture TEMPLATES (see runtime_fixtures.py; not directly appliable)
 │   ├── csr.yaml            — single-pod ClusterServingRuntime (nginx + a startup sleep)
 │   ├── csr-multinode.yaml  — gang ClusterServingRuntime (leader + N workers, LeaderWorkerSet)
 │   ├── csr-metrics.yaml    — metrics-emitting ClusterServingRuntime (canary-analysis cases; Downward-API health)
@@ -57,8 +71,11 @@ is what proves a strategy respected its surge/unavailable budget.
 `csr-multinode.yaml` applies the same startup delay to the gang runtime (leader +
 workers), so multi-node cases catch their peaks too.
 
-The CBM points at a 1 Mi PVC in `sandbox`; the seed Job writes a minimal
-`config.json` so the CBM finalizer marks it Ready.
+The CBM points at a 1 Mi PVC in `$OME_TEST_NS`; the seed Job writes a minimal
+`config.json`, and OME's own metadata-extraction Job (built from the `omeAgent`
+image) then reads it and marks the CBM Ready. That extraction always runs for a
+PVC-backed model — there is no way to skip it — so the cases stay rejected until
+the agent image is pullable by the cluster.
 
 ## Case layout: feature = folder, topology = `topo=` tag
 

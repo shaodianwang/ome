@@ -23,10 +23,10 @@ spec:
       priority: 1
 
   engineConfig: &metricsRunner
-    nodeSelector: { kubernetes.io/arch: amd64 }
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
     runner:
       name:  ome-container
-      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/canary-metrics:latest
+      image: ${OME_EVAL_METRICS_IMAGE}
       env:
         - { name: TEST_STARTUP_DELAY, value: "15" }   # stretch Ready so the watcher catches peaks
         - { name: TEST_RPS,           value: "20" }

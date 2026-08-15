@@ -1,34 +1,39 @@
 # 1Mi PVC the ClusterBaseModel references, plus a one-shot Job that writes
 # a minimal config.json so OME's CBM finalizer thinks the model is valid.
 # Apply once per cluster (idempotent — re-apply is fine).
+#
+# The placeholders here are substituted by runtime_fixtures.py; this file is a
+# template, not directly appliable. The namespace must match $OME_TEST_NS:
+# pods cannot mount a PVC from another namespace, and the OME validating
+# webhook rejects an InferenceService whose model points at one that does.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: ome-coordtest-noop-pvc
-  namespace: omenative-eval
+  namespace: ${OME_TEST_NS}
   labels:
     ome-coordtest/managed: "true"
 spec:
-  accessModes: [ReadWriteMany]
+  accessModes: [${OME_EVAL_PVC_ACCESS_MODE}]
   resources:
     requests: { storage: 1Mi }
-  storageClassName: shared-vast
+  storageClassName: ${OME_EVAL_STORAGE_CLASS}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: ome-coordtest-noop-seed
-  namespace: omenative-eval
+  namespace: ${OME_TEST_NS}
   labels:
     ome-coordtest/managed: "true"
 spec:
   template:
     spec:
       restartPolicy: OnFailure
-      nodeSelector: { kubernetes.io/arch: amd64 }
+      nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
       containers:
         - name: seed
-          image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+          image: ${OME_EVAL_NGINX_IMAGE}
           command:
             - sh
             - -c

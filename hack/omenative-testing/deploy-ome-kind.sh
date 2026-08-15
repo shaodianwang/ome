@@ -17,10 +17,16 @@
 #   OME_IMAGE_TAG      tag for the built image     (default: kind-local)
 #   CERT_MANAGER_VERSION  cert-manager release to install (default below)
 #
-# The image is built locally and loaded into the cluster's nodes, never pushed.
-# global.hub is set empty so the chart renders a bare `ome-manager:<tag>` that
-# resolves to the loaded image; the tag must not be `latest`, or the kubelet's
-# default pull policy would try to fetch it from a registry.
+# Images are built locally and loaded into the cluster's nodes, never pushed.
+# global.hub is set empty so the chart renders bare `ome-manager:<tag>` /
+# `ome-agent:<tag>` references that resolve to the loaded images; the tag must
+# not be `latest`, or the kubelet's default pull policy would try to fetch it
+# from a registry.
+#
+# ome-agent is required, not optional: the ClusterBaseModel is PVC-backed, and
+# the PVC path always runs a metadata-extraction Job built from the omeAgent
+# image to validate the model. There is no annotation or flag that skips it, so
+# the model never leaves In_Transit without a pullable agent image.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -52,26 +58,40 @@ kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || {
   echo "FATAL: no KIND cluster named $CLUSTER (create it first)" >&2; exit 1; }
 
 KCTX="kind-${CLUSTER}"
-IMAGE="ome-manager:${TAG}"
+MANAGER_IMAGE="ome-manager:${TAG}"
+AGENT_IMAGE="ome-agent:${TAG}"
+RENDER="hack/omenative-testing/perm/runtime_fixtures.py"
+
+# `kind load docker-image` reads the image through `docker save`, which under
+# Docker's containerd image store emits a multi-platform index whose other
+# platforms' blobs are absent — containerd then rejects the import with
+# "content digest ... not found". Saving one explicit platform avoids it.
+NODE_PLATFORM="linux/$(docker info --format '{{.Architecture}}' 2>/dev/null \
+  | sed 's/^x86_64$/amd64/; s/^aarch64$/arm64/')"
+
+kind_load() {
+  local image="$1" archive
+  archive="$(mktemp -t kindload).tar"
+  docker save --platform "$NODE_PLATFORM" "$image" -o "$archive"
+  kind load image-archive "$archive" --name "$CLUSTER"
+  rm -f "$archive"
+}
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
-  echo "--- build ${IMAGE} ---"
-  docker build -f dockerfiles/manager.Dockerfile -t "$IMAGE" .
+  echo "--- build ${MANAGER_IMAGE} ---"
+  docker build -f dockerfiles/manager.Dockerfile -t "$MANAGER_IMAGE" .
+  # Compiles the Rust xet staticlib before the Go binary; slow on a cold cache.
+  echo "--- build ${AGENT_IMAGE} ---"
+  docker build -f dockerfiles/ome-agent.Dockerfile -t "$AGENT_IMAGE" .
 fi
 
-echo "--- load ${IMAGE} into ${CLUSTER} ---"
-kind load docker-image "$IMAGE" --name "$CLUSTER"
+echo "--- load images into ${CLUSTER} ---"
+kind_load "$MANAGER_IMAGE"
+kind_load "$AGENT_IMAGE"
 
-# Create both namespaces up front so nothing downstream depends on ordering.
-# The eval's cases land in $NS, but runtime/pvc-and-seed.yaml pins its own
-# namespace, so that one is created too rather than silently failing later.
-FIXTURE_NS="$(grep -m1 -E '^\s+namespace:' hack/omenative-testing/perm/runtime/pvc-and-seed.yaml | awk '{print $2}')"
-echo "--- create namespaces (${NS}, ${FIXTURE_NS}) ---"
-for n in "$NS" "$FIXTURE_NS"; do
-  [ -n "$n" ] || continue
-  kubectl --context "$KCTX" create namespace "$n" --dry-run=client -o yaml \
-    | kubectl --context "$KCTX" apply -f -
-done
+echo "--- create namespace ${NS} ---"
+kubectl --context "$KCTX" create namespace "$NS" --dry-run=client -o yaml \
+  | kubectl --context "$KCTX" apply -f -
 
 echo "--- install cert-manager ${CERT_MANAGER_VERSION} ---"
 kubectl --context "$KCTX" apply -f \
@@ -96,6 +116,7 @@ HELM_ARGS=(
   --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace
   --set global.hub=""
   --set ome.controller.tag="$TAG"
+  --set ome.omeAgent.tag="$TAG"
   --set modelAgent.enabled=false
   --set ome.controller.replicaCount=1
   --set ome.controller.resources.requests.cpu=500m
@@ -147,12 +168,59 @@ for _ in $(seq 60); do
   sleep 2
 done
 
+# cert-manager's cainjector owns .webhooks[*].clientConfig.caBundle by then, so
+# Helm's server-side apply reports a field-manager conflict on every webhook
+# configuration and the release fails. The injected bundle is the value we
+# want, and Helm re-asserting its placeholder over it would break admission —
+# --force-conflicts lets the apply proceed, after which cainjector rewrites it.
 echo "--- install controller (pass 2: converge) ---"
-helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" --wait --timeout 300s
+CONVERGE_ARGS=(--wait --timeout 300s)
+if helm upgrade --help 2>&1 | grep -q -- '--force-conflicts'; then
+  CONVERGE_ARGS+=(--force-conflicts)
+else
+  echo "WARNING: this helm has no --force-conflicts; pass 2 may fail on the" >&2
+  echo "         cainjector-owned caBundle field. Helm 3.17+ is required." >&2
+fi
+helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${CONVERGE_ARGS[@]}"
+
+# The fixtures are templates: the PVC, the seed Job and the ClusterBaseModel's
+# storageUri all have to name $NS, because a pod cannot mount a PVC from
+# another namespace and the ISVC validator rejects a model that points at one.
+echo "--- side-load the fixture images ---"
+while read -r image; do
+  [ -n "$image" ] || continue
+  if docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >/dev/null 2>&1; then
+    kind_load "$image"
+    echo "    loaded ${image}"
+  else
+    # canary-metrics lives in a private registry with no public equivalent.
+    echo "WARNING: cannot obtain ${image}; cases needing it will fail to start" >&2
+  fi
+done < <(python3 "$RENDER" --kind --images)
 
 echo "--- apply eval runtime fixtures into ${NS} ---"
-kubectl --context "$KCTX" -n "$NS" apply -f hack/omenative-testing/perm/runtime/
+OME_TEST_NS="$NS" python3 "$RENDER" --kind \
+  | kubectl --context "$KCTX" -n "$NS" apply -f -
+
+# The PVC path always runs a metadata-extraction Job, and the ISVC validator
+# rejects every case until the model it references reports Ready. Gate here
+# rather than let the first case fail with a confusing admission error.
+echo "--- wait for the ClusterBaseModel to become Ready ---"
+for _ in $(seq 60); do
+  state="$(kubectl --context "$KCTX" get clusterbasemodel ome-coordtest-noop \
+    -o jsonpath='{.status.state}' 2>/dev/null || true)"
+  [ "$state" = "Ready" ] && break
+  sleep 5
+done
+if [ "${state:-}" != "Ready" ]; then
+  echo "FATAL: ClusterBaseModel stuck in state '${state:-<none>}'" >&2
+  kubectl --context "$KCTX" get clusterbasemodel ome-coordtest-noop \
+    -o jsonpath='{.status.conditions[*].message}{"\n"}' >&2 || true
+  kubectl --context "$KCTX" -n "$NS" get pods >&2 || true
+  exit 1
+fi
+echo "ClusterBaseModel Ready"
 
 echo "--- OME deployed to ${CLUSTER}; run the eval with: ---"
 echo "    OME_TEST_KUBECONFIG=\$(kind get kubeconfig --name ${CLUSTER} > /tmp/kc && echo /tmp/kc) \\"
-echo "      python3 hack/omenative-testing/perm/batch.py --conc 4 p01-p05"
+echo "      OME_TEST_NS=${NS} python3 hack/omenative-testing/perm/batch.py --conc 4 p01-p05"
