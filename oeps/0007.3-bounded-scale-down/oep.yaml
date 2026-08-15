@@ -1,0 +1,42 @@
+title: "Bounded, gang-aware OMENative scale-down"
+oep-number: "0007.3"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-08-15
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# This proposal narrows and hardens the Delete path defined by OEP-0007. The
+# 0007.2 follow-up was merged into the 0007.1 document, so this proposal uses
+# 0007.3 rather than reusing that designation. It uses the InferenceReplica
+# scale target introduced by OEP-0013 and preserves the rollout ordering
+# defined by OEP-0017.
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"
+  - "/oeps/0007.1-omenative-coordinated-rollout"
+  - "/oeps/0013-autoscaling"
+  - "/oeps/0017-unified-rollout-v2"
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# An absent ConfigMap field disables pacing but retains batching and safety
+# ordering. No binary feature gate is required.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_omenative_scale_down_batch_pods
+  - ome_omenative_scale_down_active_pods
+  - ome_omenative_scale_down_deferred_instances
+  - ome_omenative_scale_down_instance_duration_seconds
+  - ome_omenative_scale_down_oversized_batch_total
