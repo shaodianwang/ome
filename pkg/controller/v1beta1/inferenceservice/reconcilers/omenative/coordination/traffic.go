@@ -6,6 +6,15 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
+// Traffic tags: the short, cosmetic identifiers the API documents for
+// ComponentTrafficTarget.Tag. Consumers do not route on them; they exist so an
+// operator reading status can tell the incoming revision from the outgoing one
+// without comparing hashes.
+const (
+	TrafficTagLatest = "latest"
+	TrafficTagPrev   = "prev"
+)
+
 // RevisionWeight is the (per-revision Service name, percent, tag) tuple
 // that the coordination layer materializes into one
 // ComponentTrafficTarget on Status.Components.<c>.Traffic[].
@@ -110,7 +119,8 @@ func NormalizeWeights(in []RevisionWeight) []RevisionWeight {
 // revision); a zero total returns nil.
 //
 // latestHash, when non-empty, tags the matching weight as
-// LatestRevision=true.
+// LatestRevision=true and carries the tag vocabulary: that weight gets
+// "latest" and every other weight "prev".
 func ComputeWeightsFromPods(perRevisionPods map[string]int32, total int32, latestHash string) []RevisionWeight {
 	if total <= 0 || len(perRevisionPods) == 0 {
 		return nil
@@ -121,9 +131,20 @@ func ComputeWeightsFromPods(perRevisionPods map[string]int32, total int32, lates
 			continue
 		}
 		pct := int32((int64(count) * 100) / int64(total))
+		// Tag stays empty when the caller could not resolve a latest hash:
+		// with nothing to compare against, every revision would read "prev",
+		// which is worse than saying nothing.
+		tag := ""
+		if latestHash != "" {
+			tag = TrafficTagPrev
+			if hash == latestHash {
+				tag = TrafficTagLatest
+			}
+		}
 		out = append(out, RevisionWeight{
 			RevisionHash:   hash,
 			Percent:        pct,
+			Tag:            tag,
 			LatestRevision: hash == latestHash,
 		})
 	}

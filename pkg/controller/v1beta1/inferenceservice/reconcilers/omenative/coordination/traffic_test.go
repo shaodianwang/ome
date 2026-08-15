@@ -120,6 +120,34 @@ func TestComputeWeightsFromPods_MultiRevisionApportions(t *testing.T) {
 	}
 }
 
+func TestComputeWeightsFromPods_TagsLatestAndPrev(t *testing.T) {
+	got := ComputeWeightsFromPods(map[string]int32{
+		"oldhash": 3,
+		"newhash": 1,
+	}, 4, "newhash")
+	tags := map[string]string{}
+	for _, w := range got {
+		tags[w.RevisionHash] = w.Tag
+	}
+	if tags["newhash"] != TrafficTagLatest {
+		t.Errorf("newhash Tag: got %q want %q", tags["newhash"], TrafficTagLatest)
+	}
+	if tags["oldhash"] != TrafficTagPrev {
+		t.Errorf("oldhash Tag: got %q want %q", tags["oldhash"], TrafficTagPrev)
+	}
+}
+
+// With no latest hash to compare against, every revision would read "prev",
+// which misleads more than an absent tag.
+func TestComputeWeightsFromPods_NoLatestHashLeavesTagEmpty(t *testing.T) {
+	got := ComputeWeightsFromPods(map[string]int32{"a": 1, "b": 1}, 2, "")
+	for _, w := range got {
+		if w.Tag != "" {
+			t.Errorf("%s Tag: got %q want empty when latestHash is unset", w.RevisionHash, w.Tag)
+		}
+	}
+}
+
 func TestComputeWeightsFromPods_ZeroTotalReturnsNil(t *testing.T) {
 	got := ComputeWeightsFromPods(map[string]int32{}, 0, "")
 	if got != nil {
