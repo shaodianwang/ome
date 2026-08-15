@@ -142,6 +142,10 @@ const (
 
 const fastUpdateRetryLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0}}`
 
+// The scoped stuck-pod grace drives RetryBlock's bad-image attempts through
+// the failure path without shortening InstanceReadyTimeout for unrelated specs.
+const fastUpdateRetryWithStuckPodGraceLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},"stuckPodGracePeriod":"60s"}`
+
 // Fast deadline-disposition tuning: the fast updateRetry policy above
 // plus a short stuck-pod grace (terminal kubelet waiting states escalate
 // in seconds, not the production minutes) and a small relocation budget
@@ -190,6 +194,12 @@ func configureLifecycleConfig(value string) {
 // configureFastUpdateRetry seeds the seconds-scale updateRetry policy.
 func configureFastUpdateRetry() {
 	configureLifecycleConfig(fastUpdateRetryLifecycleJSON)
+}
+
+// configureFastUpdateRetryWithStuckPodGrace seeds the seconds-scale updateRetry
+// policy and a scoped stuck-pod grace for RetryBlock's bad-image failure path.
+func configureFastUpdateRetryWithStuckPodGrace() {
+	configureLifecycleConfig(fastUpdateRetryWithStuckPodGraceLifecycleJSON)
 }
 
 // configureFastDisposition seeds the seconds-scale updateRetry policy

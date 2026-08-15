@@ -78,7 +78,7 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 		})
 
 		// Seconds-scale retry policy; restored (removed) after the container.
-		configureFastUpdateRetry()
+		configureFastUpdateRetryWithStuckPodGrace()
 
 		fix := newCoordFixture(ns.Name, WithISVCName(name),
 			WithoutDecoder(),
