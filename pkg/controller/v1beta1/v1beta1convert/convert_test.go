@@ -335,6 +335,7 @@ func TestInstanceStatusRoundtrip_AllFieldsPopulated(t *testing.T) {
 		ServingPodCount:   1,
 		AvailablePodCount: 1,
 		ScheduledPodCount: 2,
+		Admitted:          true,
 		NodesOccupied:     []string{"node-a", "node-b"},
 		Conditions: []metav1.Condition{
 			{

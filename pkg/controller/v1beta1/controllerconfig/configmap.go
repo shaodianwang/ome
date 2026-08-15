@@ -289,6 +289,13 @@ type LifecycleConfig struct {
 	// deadline, the fully supported default). When present, Deadline is
 	// REQUIRED and bounds how long the finalizer holds.
 	Teardown *TeardownConfig `json:"teardown,omitempty"`
+	// ScaleUpPodBatchSize bounds missing-Pod create selection in Pod units.
+	// An Instance (including a leader/worker gang) remains indivisible: all of
+	// its missing Pods are selected together and its durable Creating intent is
+	// committed before any corresponding Pod create is issued. The first
+	// eligible Instance may exceed a positive budget and proceeds alone. Nil
+	// preserves this field's unbounded compatibility behavior.
+	ScaleUpPodBatchSize *int32 `json:"scaleUpPodBatchSize,omitempty"`
 }
 
 // UpdateRetryConfig is the same-target update retry policy: a failed rollout
@@ -347,7 +354,7 @@ type TeardownConfig struct {
 // ToDeadline validates the config and converts Deadline to a
 // *time.Duration. A nil receiver (absent block) yields (nil, nil) —
 // unconfigured, no deadline, the finalizer holds strictly until clean
-// (fully supported). Empty, unparseable, or non-positive Deadline is an
+// (fully supported). Empty, unparsable, or non-positive Deadline is an
 // error; callers treat invalid config as unconfigured (no deadline).
 func (c *TeardownConfig) ToDeadline() (*time.Duration, error) {
 	if c == nil {
@@ -369,7 +376,7 @@ func (c *TeardownConfig) ToDeadline() (*time.Duration, error) {
 // ToPolicy validates the config and converts it to the workload-side
 // ForceDeletePolicy. A nil receiver (absent block) yields (nil, nil) —
 // unconfigured, the escalation is disabled. Any violation — either
-// field missing, unparseable, or non-positive — is an error; callers
+// field missing, unparsable, or non-positive — is an error; callers
 // treat an invalid policy as unconfigured (escalation OFF), never patch
 // it up with fallback numbers.
 func (c *ForceDeleteConfig) ToPolicy() (*workloadtypes.ForceDeletePolicy, error) {
@@ -457,9 +464,39 @@ func (c *AutoMigrateConfig) Validate() error {
 	return nil
 }
 
+// ToScaleUpPodBatchSize validates the configured missing-Pod batch size. A nil
+// LifecycleConfig or absent field means only this field uses its unbounded
+// compatibility behavior; it does not fabricate a default. Explicit zero or
+// negative values are invalid so manager startup can reject bad configuration.
+func (c *LifecycleConfig) ToScaleUpPodBatchSize() (*int32, error) {
+	if c == nil || c.ScaleUpPodBatchSize == nil {
+		return nil, nil
+	}
+	if *c.ScaleUpPodBatchSize <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.scaleUpPodBatchSize: must be > 0, got %d", *c.ScaleUpPodBatchSize)
+	}
+	size := *c.ScaleUpPodBatchSize
+	return &size, nil
+}
+
+// LoadScaleUpPodBatchSize reads and validates the process-scoped scale-up
+// budget from the operator ConfigMap. Callers keep the returned value for the
+// lifetime of the controller process.
+func LoadScaleUpPodBatchSize(clientset kubernetes.Interface) (*int32, error) {
+	lifecycleConfig, err := NewLifecycleConfig(clientset)
+	if err != nil {
+		return nil, fmt.Errorf("load lifecycle configuration: %w", err)
+	}
+	size, err := lifecycleConfig.ToScaleUpPodBatchSize()
+	if err != nil {
+		return nil, fmt.Errorf("validate lifecycle.scaleUpPodBatchSize: %w", err)
+	}
+	return size, nil
+}
+
 // NewLifecycleConfig loads the lifecycle block from the inferenceservice
-// ConfigMap. An absent "lifecycle" key yields (nil, nil) — unconfigured, the
-// caller fails safe.
+// ConfigMap. An absent "lifecycle" key yields (nil, nil); each caller applies
+// the compatibility or fail-safe semantics of the field it consumes.
 func NewLifecycleConfig(clientset kubernetes.Interface) (*LifecycleConfig, error) {
 	configMap, err := getInferenceServiceConfigMap(clientset)
 	if err != nil {
@@ -922,7 +959,7 @@ func parseCoordinationConfig(configMap *v1.ConfigMap) (*CoordinationConfig, erro
 }
 
 // QueryTimeoutDuration parses QueryTimeout, falling back to the known-good
-// DefaultAnalysisQueryTimeout when an operator wrote an unparseable or
+// DefaultAnalysisQueryTimeout when an operator wrote an unparsable or
 // non-positive value. The timeout MUST be positive: a zero/negative value would
 // leave a background analysis query unbounded, so a hung Prometheus could park a
 // sampler goroutine indefinitely.
@@ -931,7 +968,7 @@ func (c *CanaryAnalysisConfig) QueryTimeoutDuration() time.Duration {
 }
 
 // CacheTTLDuration parses CacheTTL, falling back to the known-good
-// DefaultAnalysisCacheTTL when an operator wrote an unparseable or non-positive
+// DefaultAnalysisCacheTTL when an operator wrote an unparsable or non-positive
 // value. The TTL MUST be positive: a zero/negative value disables cache eviction
 // (unbounded growth).
 func (c *CanaryAnalysisConfig) CacheTTLDuration() time.Duration {

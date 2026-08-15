@@ -2,6 +2,7 @@ package types
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -71,12 +72,29 @@ type ReconcileInput struct {
 	// status write: one fresh read, every mutation applied to its slot,
 	// one persist, retried on conflict as a whole. Only mutations whose
 	// Mutate reports a change are persisted; a batch with no changes
-	// writes nothing. Callers may batch only mutations with no ordering
-	// dependency on a later external effect in the same reconcile —
-	// write-ahead intent stamps stay on per-call MutateInstance.
+	// writes nothing. Write-ahead mutations may be batched only when the
+	// complete batch is persisted before any corresponding external effect.
 	//
 	// Optional: nil falls back to one MutateInstance call per mutation.
 	ApplyInstanceMutations func(ctx context.Context, muts []InstanceMutation) error
+
+	// ApplyInstanceMutationsWithRetryBlock atomically applies InstanceStatus
+	// mutations and an optional RetryBlock mutation in one owner-status write.
+	// The adapter re-reads once per conflict attempt, applies both mutation sets
+	// to that fresh snapshot, and persists either all reported changes or none.
+	// A nil mutateRetryBlock callback skips the RetryBlock mutation; an empty or
+	// all-no-op mutation set writes nothing.
+	//
+	// Optional: nil preserves the separate InstanceStatus and RetryBlock writes
+	// used by adapters that do not expose this stronger capability.
+	ApplyInstanceMutationsWithRetryBlock func(ctx context.Context, muts []InstanceMutation, targetRevision string, mutateRetryBlock func(*RetryBlock) RetryBlockDisposition) error
+
+	// ScaleUpPodBatchSize bounds the number of missing Pods selected by one
+	// Create pass. Selection remains atomic at the Instance boundary, so a gang
+	// is either selected in full or deferred. The first eligible Instance may
+	// exceed a positive budget and proceeds alone. A nil pointer preserves the
+	// unbounded compatibility behavior. A non-nil zero value fails closed.
+	ScaleUpPodBatchSize *int32
 
 	// RemoveInstance drops the InstanceStatus entry for idx and
 	// returns (true, nil) when a real removal happened, (false, nil)
@@ -192,13 +210,24 @@ type ReconcileInput struct {
 	Clock clock.Clock
 }
 
-// InstanceMutation is one buffered InstanceStatus mutation, keyed by
-// Instance index. Mutate follows the MutateInstance callback contract:
-// it receives the located (or fresh-appended) slot's workload mirror
-// and returns true when a real change was made.
+// ErrStatusOwnerGone reports that the object owning a requested atomic status
+// transition disappeared before the transition could commit. Callers that
+// guard an external effect must treat it as an aborted write, even though
+// ordinary idempotent status writers may translate it to a successful no-op.
+var ErrStatusOwnerGone = errors.New("status owner is gone")
+
+// InstanceMutation is one buffered InstanceStatus mutation, keyed by Instance
+// index. An upsert sets Mutate; a removal sets Remove and leaves Mutate nil.
+// Precondition can reject a mutation against the fresh status snapshot.
+// OnCommit receives isolated copies of the exact before/after values only after
+// the containing status write commits; nil identifies an absent side. A
+// mutation with OnCommit requires its index to appear only once in the batch.
 type InstanceMutation struct {
-	Index  int32
-	Mutate func(*InstanceStatus) bool
+	Index        int32
+	Mutate       func(*InstanceStatus) bool
+	Remove       bool
+	Precondition func(*InstanceStatus) bool
+	OnCommit     func(previous, current *InstanceStatus)
 }
 
 // DispositionDeps carries the operator-config inputs and adapter hooks

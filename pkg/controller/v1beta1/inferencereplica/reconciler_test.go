@@ -441,6 +441,39 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 		"UpdateRevision must point at the target ControllerRevision")
 }
 
+func TestReconcile_Create_ConfiguredBatchSizeCapsPods(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 5)
+	r, c := newReconciler(t, ir)
+	batchSize := int32(2)
+	r.ScaleUpPodBatchSize = &batchSize
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(result.RequeueAfter).NotTo(gomega.BeZero(),
+		"deferred Instances must cause a follow-up reconcile")
+
+	pods := &corev1.PodList{}
+	g.Expect(c.List(context.Background(), pods, client.InNamespace(ir.Namespace))).To(gomega.Succeed())
+	g.Expect(pods.Items).To(gomega.HaveLen(2),
+		"configured scale-up Pod batch size must cap a reconcile to two missing Pods")
+	g.Expect(podNames(pods.Items)).To(gomega.ConsistOf(
+		query.PodName("llama", workload.ComponentEngine, 0, "default", 0),
+		query.PodName("llama", workload.ComponentEngine, 1, "default", 0),
+	))
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(2))
+	for _, status := range got.Status.InstanceStatuses {
+		g.Expect(status.Phase).To(gomega.Equal(v1beta1.OMENativeInstanceCreating))
+		g.Expect(status.Operation).NotTo(gomega.BeNil())
+		g.Expect(status.Operation.Type).To(gomega.Equal(v1beta1.InstanceOperationCreate))
+	}
+}
+
 // TestReconcile_Create_AlsoCreatesHeadlessService pins the headless
 // Service wire-in: a fresh IR reconcile must call
 // workload.ReconcileHeadlessService alongside workload.Reconcile so a

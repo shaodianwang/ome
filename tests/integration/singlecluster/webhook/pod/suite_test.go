@@ -55,7 +55,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	ginkgo.By("seeding inferenceservice-config so the mutator can read its injector configs")
 	gomega.Expect(util.SeedDefaultConfigMaps(suiteCtx, k8sClient)).To(gomega.Succeed())
 
-	// SeedDefaultConfigMaps seeds ingress/deploy/omeAgent — but NOT
+	// SeedDefaultConfigMaps seeds the base controller keys — but NOT
 	// the per-injector keys the pod mutator's
 	// chained injectors expect. The model-init injector's
 	// validate() rejects the request unless its config block has

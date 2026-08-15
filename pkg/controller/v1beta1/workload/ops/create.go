@@ -2,7 +2,9 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -24,9 +26,8 @@ const CreateRequeueInterval = 5 * time.Second
 // Create drives Create / Scale-Up toward each desired Instance.
 // Multi-pass:
 //
-//  1. Render missing pods with ome.io/serving=False; patch
-//     InstanceStatus to Phase=Creating with the Create operation
-//     stamped.
+//  1. Commit selected InstanceStatus entries as Phase=Creating, then render
+//     and create their missing pods with ome.io/serving=False.
 //  2. Wait for runtime Ready on every pod, flip ome.io/serving=True,
 //     promote InstanceStatus to Phase=Ready (Operation=nil).
 //
@@ -103,186 +104,525 @@ func createFiltered(ctx context.Context, deps workload.Deps, input workload.Reco
 		return ctrl.Result{}, fmt.Errorf("Create: list pods: %w", err)
 	}
 	byInstance := query.BucketPodsByInstanceIdx(existing)
+	return createFilteredBatched(ctx, deps, input, plan, target, keep, byInstance)
+}
 
+type createStartAction struct {
+	instance       workload.InstancePlan
+	missing        []podTarget
+	firstCreate    bool
+	statusChanges  bool
+	transition     statusTransition
+	statusMutation workload.InstanceMutation
+}
+
+type createReadyAction struct {
+	instance       workload.InstancePlan
+	existing       []*corev1.Pod
+	wasReady       bool
+	statusChanges  bool
+	markedServing  []*corev1.Pod
+	transition     statusTransition
+	statusMutation workload.InstanceMutation
+	pruneRevision  string
+}
+
+type statusTransition struct {
+	index    int32
+	previous *workload.InstanceStatus
+	current  *workload.InstanceStatus
+}
+
+type createPassAction struct {
+	start *createStartAction
+	ready *createReadyAction
+}
+
+// createFilteredBatched is the status-coalesced Create path. It preserves plan
+// order while batching adjacent actions behind two ordering barriers:
+//
+//  1. Each adjacent group of selected Creating intents is committed in one
+//     status update before any corresponding Pod create.
+//  2. Serving conditions are written before each adjacent Ready group is
+//     committed in one status update.
+//
+// ScaleUpPodBatchSize bounds missing Pods selected by a pass. Each Instance is
+// atomic: all of its missing Pods are selected together or the Instance is
+// deferred. The first eligible Instance may exceed a positive budget and
+// proceeds alone. Ready promotions do not consume the budget.
+func createFilteredBatched(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	target *appsv1.ControllerRevision,
+	keep func(idx int32) bool,
+	byInstance map[int32][]*corev1.Pod,
+) (ctrl.Result, error) {
 	allReady := true
-	// retryBlockWait is the earliest not-yet-due Backoff RetryBlock
-	// wake-up reported by a gated instance; folded into the pass result
-	// below so the gate is re-evaluated exactly on time (never a busy
-	// poll, never a missed wake-up).
 	var retryBlockWait time.Duration
+	actions := make([]createPassAction, 0, len(plan.Instances))
+	selectedPods := int32(0)
+	// Keep each wave as a stable Instance-order prefix. Once an eligible gang
+	// does not fit, it leads the next wave instead of being bypassed by smaller
+	// later Instances.
+	selectionClosed := false
+
 	for _, inst := range plan.Instances {
 		if !keep(inst.Index) {
 			continue
 		}
-		ready, retryAfter, err := reconcileInstance(ctx, deps, input, plan, inst, byInstance[inst.Index], target)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
-			retryBlockWait = retryAfter
-		}
-		if !ready {
+		existing := byInstance[inst.Index]
+		missing := missingPodTargets(input, plan, inst, existing)
+		if len(missing) > 0 {
+			allowed, treatedReady, retryAfter := allowCreateForMissingInstance(input, plan, inst, existing, target)
+			if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
+				retryBlockWait = retryAfter
+			}
+			if !allowed {
+				if !treatedReady {
+					allReady = false
+				}
+				continue
+			}
+
+			podCost := int32(len(missing))
+			if selectionClosed || !scaleUpPodBatchAdmits(input.ScaleUpPodBatchSize, selectedPods, podCost) {
+				selectionClosed = true
+				allReady = false
+				continue
+			}
+			now := metav1.NewTime(input.Now())
+			mutation := createStatusCreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, now)
+			observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+			probe := workload.InstanceStatus{Index: inst.Index}
+			if observed != nil {
+				probe = *observed
+			}
+			action := &createStartAction{
+				instance:      inst,
+				missing:       missing,
+				firstCreate:   observed == nil,
+				statusChanges: mutation.Mutate(&probe),
+				transition:    statusTransition{index: inst.Index},
+			}
+			mutation.OnCommit = action.transition.capture
+			action.statusMutation = mutation
+			actions = append(actions, createPassAction{start: action})
+			selectedPods += podCost
+			if input.ScaleUpPodBatchSize != nil && selectedPods >= *input.ScaleUpPodBatchSize {
+				selectionClosed = true
+			}
 			allReady = false
+			continue
 		}
+
+		if !query.AllPodsRuntimeReady(existing) {
+			allReady = false
+			continue
+		}
+
+		observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		wasReady := observed != nil && observed.Phase == workload.InstancePhaseReady
+		action := &createReadyAction{
+			instance: inst,
+			existing: existing,
+			wasReady: wasReady,
+		}
+		var mutation workload.InstanceMutation
+		if target != nil && existingPodsMatchTargetRevision(existing, target) {
+			mutation = createStatusReadyOnRevisionMutation(inst.Index, target.Name)
+			action.pruneRevision = target.Name
+		} else {
+			mutation = createStatusReadyMutation(inst.Index)
+		}
+		probe := workload.InstanceStatus{Index: inst.Index}
+		if observed != nil {
+			probe = *observed
+		}
+		action.statusChanges = mutation.Mutate(&probe)
+		action.transition.index = inst.Index
+		mutation.OnCommit = action.transition.capture
+		action.statusMutation = mutation
+		actions = append(actions, createPassAction{ready: action})
+	}
+
+	readyStatusBatchingAvailable := input.ApplyInstanceMutations != nil || input.ApplyInstanceMutationsWithRetryBlock != nil
+	// A revision-targeted start also transitions its RetryBlock. Group it only
+	// when the adapter can commit both changes atomically.
+	startStatusBatchingAvailable := input.ApplyInstanceMutationsWithRetryBlock != nil ||
+		(target == nil && input.ApplyInstanceMutations != nil)
+	for i := 0; i < len(actions); {
+		j := i + 1
+		if actions[i].start != nil {
+			starts := []*createStartAction{actions[i].start}
+			for startStatusBatchingAvailable && j < len(actions) && actions[j].start != nil &&
+				actions[j].start.statusChanges == actions[i].start.statusChanges {
+				starts = append(starts, actions[j].start)
+				j++
+			}
+			ownerPresent, err := processStartActions(ctx, deps, input, plan, target, starts)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ownerPresent {
+				return ctrl.Result{}, nil
+			}
+		} else {
+			ready := []*createReadyAction{actions[i].ready}
+			for readyStatusBatchingAvailable && j < len(actions) && actions[j].ready != nil &&
+				actions[j].ready.statusChanges == actions[i].ready.statusChanges {
+				ready = append(ready, actions[j].ready)
+				j++
+			}
+			ownerPresent, err := processReadyActions(ctx, deps, input, ready)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ownerPresent {
+				return ctrl.Result{}, nil
+			}
+		}
+		i = j
 	}
 
 	res := ctrl.Result{}
 	if !allReady {
 		res.RequeueAfter = CreateRequeueInterval
 	}
-	// Additive fold, mirroring the dispatcher's foldRetryAfter: take the
-	// earlier wake-up, never remove one.
 	if retryBlockWait > 0 && (res.RequeueAfter == 0 || retryBlockWait < res.RequeueAfter) {
 		res.RequeueAfter = retryBlockWait
 	}
 	return res, nil
 }
 
-// reconcileInstance drives one Instance toward Ready. Returns ready=true
-// only when every pod is runtime-ready and ome.io/serving=True. target has
-// the same nil-OK semantics as Create. retryAfter > 0 means the instance
-// was skipped by a not-yet-due Backoff RetryBlock for the target
-// revision; re-evaluate then.
-func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (ready bool, retryAfter time.Duration, err error) {
-	desired := expectedPodNamesForInstance(input, plan, inst)
-	existingByName := query.IndexPodsByName(existing)
-
-	missing := make([]podTarget, 0)
-	for _, t := range desired {
-		if _, ok := existingByName[t.Name]; !ok {
-			missing = append(missing, t)
-		}
+func processStartActions(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	target *appsv1.ControllerRevision,
+	actions []*createStartAction,
+) (bool, error) {
+	mutations := make([]workload.InstanceMutation, 0, len(actions))
+	for _, action := range actions {
+		mutations = append(mutations, action.statusMutation)
+	}
+	ownerPresent, err := applyCreateIntentMutations(ctx, input, mutations, target)
+	if err != nil {
+		return true, fmt.Errorf("batch patch status Creating: %w", err)
+	}
+	if !ownerPresent {
+		return false, nil
 	}
 
-	// Only patch Creating when there's something to create — otherwise the
-	// next pass would oscillate status back to Creating after Ready.
-	if len(missing) > 0 {
-		// Disposed fresh-start gate. A deadline-disposed create leaves the
-		// instance Failed-with-no-Operation — a fresh start — so without
-		// this gate the pass would re-materialize pods at the same bad
-		// revision every reconcile, bypassing the RetryBlock the
-		// disposition recorded. Gate on the block for the revision these
-		// pods would stamp (target). An absent status slot gates too: a
-		// scale-up onto a blocked revision materializes the same wedged
-		// pods. Instances with no block for the target — genuinely-new
-		// scale-ups — pass untouched. Denial is a skip, not un-readiness:
-		// Held has no wake-up (a corrected revision re-triggers via watch)
-		// and Backoff surfaces its NextRetryAt to the caller.
+	for i, action := range actions {
+		if err := ctx.Err(); err != nil {
+			rollbackErr := rollbackStartActions(ctx, input, actions[i:])
+			return true, errors.Join(err, rollbackErr)
+		}
+		if action.firstCreate {
+			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceCreated,
+				"OMENative %s materialized; %d pod(s) requested",
+				instanceKey(input.Key.Component, action.instance.Index), len(action.missing))
+		}
+		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, action.instance.Index) {
+			continue
+		}
+		if _, err := createMissingPods(ctx, deps, input, plan, action.instance, action.instance.Index, action.missing, revisionHashFromTarget(target)); err != nil {
+			rollbackErr := rollbackStartActions(ctx, input, actions[i+1:])
+			return true, errors.Join(err, rollbackErr)
+		}
+	}
+	return true, nil
+}
+
+func processReadyActions(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, actions []*createReadyAction) (bool, error) {
+	completed := make([]*createReadyAction, 0, len(actions))
+	for _, action := range actions {
+		if err := ctx.Err(); err != nil {
+			ownerPresent, commitErr := commitReadyActions(ctx, deps, input, completed)
+			if !ownerPresent {
+				return false, nil
+			}
+			if commitErr != nil {
+				return true, commitErr
+			}
+			return true, err
+		}
+		for _, pod := range action.existing {
+			if podreadiness.IsServing(pod) {
+				continue
+			}
+			changed, err := podreadiness.MarkPodServingWithChange(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady)
+			if err != nil {
+				ownerPresent, commitErr := commitReadyActions(ctx, deps, input, completed)
+				if !ownerPresent {
+					return false, nil
+				}
+				markErr := fmt.Errorf("mark serving (instance=%d, pod=%s): %w", action.instance.Index, pod.Name, err)
+				if commitErr != nil {
+					compensateErr := rollbackReadyServing(ctx, deps, []*createReadyAction{action})
+					return true, errors.Join(commitErr, compensateErr)
+				}
+				return true, markErr
+			}
+			if changed {
+				action.markedServing = append(action.markedServing, pod)
+			}
+		}
+		completed = append(completed, action)
+	}
+	return commitReadyActions(ctx, deps, input, completed)
+}
+
+func commitReadyActions(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, actions []*createReadyAction) (bool, error) {
+	if len(actions) == 0 {
+		return true, nil
+	}
+	mutations := make([]workload.InstanceMutation, 0, len(actions))
+	for _, action := range actions {
+		mutations = append(mutations, action.statusMutation)
+	}
+	ownerPresent, err := applyInstanceMutationsWithOutcome(ctx, input, mutations)
+	if err != nil {
+		compensateErr := rollbackReadyServing(ctx, deps, actions[1:])
+		return true, errors.Join(fmt.Errorf("batch patch status Ready: %w", err), compensateErr)
+	}
+	if !ownerPresent {
+		return false, nil
+	}
+	prunedRevisions := make(map[string]struct{})
+	for i, action := range actions {
+		if action.pruneRevision != "" {
+			if _, pruned := prunedRevisions[action.pruneRevision]; !pruned {
+				if err := pruneRetryBlockOnPromote(ctx, input, action.pruneRevision); err != nil {
+					rollbackStatusErr := rollbackReadyStatuses(ctx, input, actions[i+1:])
+					rollbackServingErr := rollbackReadyServing(ctx, deps, actions[i+1:])
+					return true, errors.Join(err, rollbackStatusErr, rollbackServingErr)
+				}
+				prunedRevisions[action.pruneRevision] = struct{}{}
+			}
+		}
+		if !action.wasReady {
+			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceReady,
+				"OMENative %s is Ready (%d pod(s) serving)",
+				instanceKey(input.Key.Component, action.instance.Index), len(action.existing))
+			if earliest := earliestPodCreation(action.existing); !earliest.IsZero() {
+				obsmetrics.RecordPodCreateToReady(input.Key.Namespace, input.Key.OwnerName,
+					string(input.Key.Component), time.Since(earliest).Seconds())
+			}
+		}
+	}
+	return true, nil
+}
+
+func rollbackReadyStatuses(ctx context.Context, input workload.ReconcileInput, actions []*createReadyAction) error {
+	mutations := make([]workload.InstanceMutation, 0, len(actions))
+	for _, action := range actions {
+		if mutation, ok := action.transition.rollbackMutation(); ok {
+			mutations = append(mutations, mutation)
+		}
+	}
+	if len(mutations) == 0 {
+		return nil
+	}
+	_, err := applyInstanceMutationsWithOutcome(ctx, input, mutations)
+	if err != nil {
+		return fmt.Errorf("rollback unprocessed Ready status: %w", err)
+	}
+	return nil
+}
+
+func rollbackReadyServing(ctx context.Context, deps workload.Deps, actions []*createReadyAction) error {
+	var rollbackErrs []error
+	for _, action := range actions {
+		for _, pod := range action.markedServing {
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+				rollbackErrs = append(rollbackErrs,
+					fmt.Errorf("rollback serving (instance=%d, pod=%s): %w", action.instance.Index, pod.Name, err))
+			}
+		}
+	}
+	return errors.Join(rollbackErrs...)
+}
+
+func rollbackStartActions(ctx context.Context, input workload.ReconcileInput, actions []*createStartAction) error {
+	mutations := make([]workload.InstanceMutation, 0, len(actions))
+	for _, action := range actions {
+		if mutation, ok := action.transition.rollbackMutation(); ok {
+			mutations = append(mutations, mutation)
+		}
+	}
+	if len(mutations) == 0 {
+		return nil
+	}
+	_, err := applyInstanceMutationsWithOutcome(ctx, input, mutations)
+	if err != nil {
+		return fmt.Errorf("rollback unattempted Creating status: %w", err)
+	}
+	return nil
+}
+
+func (transition *statusTransition) capture(previous, current *workload.InstanceStatus) {
+	transition.previous = previous
+	transition.current = current
+}
+
+func (transition *statusTransition) rollbackMutation() (workload.InstanceMutation, bool) {
+	if transition.current == nil {
+		return workload.InstanceMutation{}, false
+	}
+	committed := *transition.current
+	matchesCommitted := func(status *workload.InstanceStatus) bool {
+		return reflect.DeepEqual(*status, committed)
+	}
+	if transition.previous == nil {
+		return workload.InstanceMutation{
+			Index:        transition.index,
+			Remove:       true,
+			Precondition: matchesCommitted,
+		}, true
+	}
+	previous := *transition.previous
+	return workload.InstanceMutation{
+		Index: transition.index,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			if !matchesCommitted(status) {
+				return false
+			}
+			*status = previous
+			return true
+		},
+	}, true
+}
+
+func scaleUpPodBatchAdmits(limit *int32, selectedPods, candidatePods int32) bool {
+	if limit == nil {
+		return true
+	}
+	if *limit <= 0 {
+		return false
+	}
+	if selectedPods == 0 {
+		return true
+	}
+	remaining := *limit - selectedPods
+	return remaining > 0 && candidatePods <= remaining
+}
+
+func applyInstanceMutations(ctx context.Context, input workload.ReconcileInput, mutations []workload.InstanceMutation) error {
+	if len(mutations) == 0 {
+		return nil
+	}
+	if input.ApplyInstanceMutations != nil {
+		return input.ApplyInstanceMutations(ctx, mutations)
+	}
+	for _, mutation := range mutations {
+		if mutation.Remove {
+			if mutation.Mutate != nil {
+				return fmt.Errorf("instance mutation for index %d sets both Remove and Mutate", mutation.Index)
+			}
+			if input.RemoveInstance == nil {
+				return fmt.Errorf("instance status removal is not configured")
+			}
+			if _, err := input.RemoveInstance(ctx, mutation.Index); err != nil {
+				return err
+			}
+			continue
+		}
+		if mutation.Mutate == nil {
+			return fmt.Errorf("instance mutation for index %d has no operation", mutation.Index)
+		}
+		if input.MutateInstance == nil {
+			return fmt.Errorf("instance status mutation is not configured")
+		}
+		if err := input.MutateInstance(ctx, mutation.Index, mutation.Mutate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyInstanceMutationsWithOutcome(ctx context.Context, input workload.ReconcileInput, mutations []workload.InstanceMutation) (bool, error) {
+	if len(mutations) == 0 {
+		return true, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock != nil {
+		err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, "", nil)
+		if errors.Is(err, workload.ErrStatusOwnerGone) {
+			return false, nil
+		}
+		return true, err
+	}
+	return true, applyInstanceMutations(ctx, input, mutations)
+}
+
+func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInput, mutations []workload.InstanceMutation, target *appsv1.ControllerRevision) (bool, error) {
+	if len(mutations) == 0 {
+		return true, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock != nil {
+		var targetRevision string
+		var mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition
 		if target != nil {
-			s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-			freshStart := s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
-			if freshStart {
-				if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); b != nil {
-					attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) ||
-						anyInFlightCreateAttempt(input.ObservedState.InstanceStatuses)
-					if denied, wait := evaluateRetryBlockGate(b, input.Now(), attemptInFlight); denied {
-						return true, wait, nil
-					}
+			targetRevision = target.Name
+			mutateRetryBlock = markRetryBlockAttemptStarted
+		}
+		err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, targetRevision, mutateRetryBlock)
+		if errors.Is(err, workload.ErrStatusOwnerGone) {
+			return false, nil
+		}
+		return true, err
+	}
+	if err := applyInstanceMutations(ctx, input, mutations); err != nil {
+		return true, err
+	}
+	if target == nil {
+		return true, nil
+	}
+	return true, flipRetryBlockOnAttemptStart(ctx, input, target.Name)
+}
+
+func missingPodTargets(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod) []podTarget {
+	desired := expectedPodNamesForInstance(input, plan, inst)
+	existingByName := query.IndexPodsByName(existing)
+	missing := make([]podTarget, 0)
+	for _, target := range desired {
+		if _, ok := existingByName[target.Name]; !ok {
+			missing = append(missing, target)
+		}
+	}
+	return missing
+}
+
+// allowCreateForMissingInstance evaluates the gates that precede a Creating
+// intent. A denied revision is intentionally skipped rather than reported as
+// an unready create.
+func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (allowed, treatedReady bool, retryAfter time.Duration) {
+	if target != nil {
+		s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		freshStart := s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
+		if freshStart {
+			if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); block != nil {
+				attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) ||
+					anyInFlightCreateAttempt(input.ObservedState.InstanceStatuses)
+				if denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight); denied {
+					return false, true, wait
 				}
 			}
 		}
-		// Create materializes an Instance; Restart repairs one that was
-		// already materialized. Under RecreateInstance the policy contract is
-		// that a partial Instance is drained and recreated WHOLE, so filling
-		// just the hole here would leave the survivors at their old
-		// incarnation — and holding whatever topology domain the gang was
-		// placed in, which the replacement then cannot enter.
-		//
-		// Both sides of the boundary read one predicate, so Create declines
-		// exactly the pod sets the restart trigger selects and neither a gap
-		// nor a race between them is representable. Fresh/empty Instances
-		// (initial create + scale-up), total loss, and partial Instances under
-		// other restart policies remain Create's responsibility.
-		if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
-			s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-			if s != nil && s.Phase == workload.InstancePhaseReady {
-				return false, 0, nil
-			}
-			if _, lost := instanceLostGangMember(input, plan, s, inst.TotalPods(), existing); lost {
-				return false, 0, nil
-			}
-		}
-		// Capture before patch — findInstanceStatus reads ObservedState,
-		// so the patch below doesn't backfill this view.
-		isFirstCreate := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index) == nil
-		if err := patchInstanceStatusCreating(ctx, input, inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, revisionNameFromTarget(target)); err != nil {
-			return false, 0, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
-		}
-		if isFirstCreate {
-			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceCreated,
-				"OMENative %s materialized; %d pod(s) requested",
-				instanceKey(input.Key.Component, inst.Index), len(missing))
-		}
-
-		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
-			return false, 0, nil
-		}
-
-		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, missing, revisionHashFromTarget(target)); err != nil {
-			return false, 0, err
-		}
-		return false, 0, nil
 	}
-
-	// All desired pods exist. Are they runtime-Ready?
-	if !query.AllPodsRuntimeReady(existing) {
-		return false, 0, nil
-	}
-
-	// Flip ome.io/serving=True. For freshly-created pods the condition
-	// doesn't exist yet; the Lifecycle writer creates it on first flip.
-	for _, pod := range existing {
-		if podreadiness.IsServing(pod) {
-			continue
+	if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
+		s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		if s != nil && s.Phase == workload.InstancePhaseReady {
+			return false, false, 0
 		}
-		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
-			return false, 0, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+		if _, lost := instanceLostGangMember(input, plan, s, inst.TotalPods(), existing); lost {
+			return false, false, 0
 		}
 	}
-
-	// Promote to Ready. Fire InstanceReady only on transition.
-	wasReady := false
-	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil && s.Phase == workload.InstancePhaseReady {
-		wasReady = true
-	}
-	var promoteErr error
-	// Only stamp RunningRevision=target.Name when the existing pods
-	// actually carry that revision hash. The Create pass can run after a
-	// surge promote in the SAME reconcile (with stale ObservedState
-	// showing the pre-promote ActiveOrdinal) or in a follow-up reconcile
-	// where target has since moved past the in-flight surge's pinned
-	// rev — both are the X-2 bump-during-bump scenario. Naively
-	// promoting to target.Name here writes
-	// `RunningRevision=<latest-target>` while the pod is on the prior
-	// rev. The next reconcile sees RunningRev==target and short-circuits
-	// detectUpdateTrigger, leaving the pod stranded on the intermediate
-	// revision forever. Falling back to patchInstanceStatusReady (no
-	// RunningRevision write) preserves whatever revision the surge
-	// promote actually recorded; the next reconcile's detectUpdateTrigger
-	// observes the genuine RunningRev != target mismatch and fires a
-	// fresh surge cycle.
-	if target != nil && existingPodsMatchTargetRevision(existing, target) {
-		promoteErr = patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name)
-	} else {
-		promoteErr = patchInstanceStatusReady(ctx, input, inst.Index)
-	}
-	if promoteErr != nil {
-		return false, 0, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, promoteErr)
-	}
-	if !wasReady {
-		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceReady,
-			"OMENative %s is Ready (%d pod(s) serving)",
-			instanceKey(input.Key.Component, inst.Index), len(existing))
-		// Pod-create-to-ready latency: gap between the earliest pod's
-		// creation timestamp and this first Ready promotion. Recorded
-		// only on the not-ready→ready edge so re-reconciles of an
-		// already-Ready Instance don't re-observe.
-		if earliest := earliestPodCreation(existing); !earliest.IsZero() {
-			obsmetrics.RecordPodCreateToReady(input.Key.Namespace, input.Key.OwnerName,
-				string(input.Key.Component), time.Since(earliest).Seconds())
-		}
-	}
-	return true, 0, nil
+	return true, false, 0
 }
 
 // earliestPodCreation returns the oldest CreationTimestamp across the
@@ -475,24 +815,10 @@ func revisionHashFromTarget(target *appsv1.ControllerRevision) string {
 	return query.RevisionOf(target).Hash()
 }
 
-// revisionNameFromTarget returns target.Name, or "" for a nil target.
-func revisionNameFromTarget(target *appsv1.ControllerRevision) string {
-	return query.RevisionOf(target).Name()
-}
-
-// patchInstanceStatusCreating idempotently stamps Phase=Creating with the
-// Create operation and a Deadline of StartedAt+timeout. incarnation is
-// written on first-touch; existing nonzero values are preserved so a
-// post-restart reconcile doesn't downgrade the lifecycle token.
-//
-// targetRev is the revision the created pods will carry. Like the
-// Update stampers, the attempt stamp — not the gate — flips a due
-// Backoff RetryBlock to RetryInProgress: the flip must be
-// co-transactional with the attempt actually starting, so wave counting
-// can't double-count a pass that gated-allowed but never stamped.
-func patchInstanceStatusCreating(ctx context.Context, input workload.ReconcileInput, idx int32, incarnation int64, timeout time.Duration, targetRev string) error {
-	now := metav1.NewTime(input.Now())
-	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+// createStatusCreatingMutation stamps Phase=Creating with a durable Create
+// operation. Existing nonzero incarnations are preserved across retries.
+func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Duration, now metav1.Time) workload.InstanceMutation {
+	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseCreating &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate &&
 			s.Incarnation > 0 {
@@ -511,26 +837,24 @@ func patchInstanceStatusCreating(ctx context.Context, input workload.ReconcileIn
 			Deadline:       metav1.NewTime(now.Add(timeout)),
 		}
 		return true
-	})
-	if err != nil {
-		return err
-	}
-	if targetRev == "" {
-		return nil
-	}
-	return flipRetryBlockOnAttemptStart(ctx, input, targetRev)
+	}}
 }
 
 // patchInstanceStatusReady idempotently moves to Phase=Ready, clears Operation.
 func patchInstanceStatusReady(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	mutation := createStatusReadyMutation(idx)
+	return input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
+}
+
+func createStatusReadyMutation(idx int32) workload.InstanceMutation {
+	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseReady && s.Operation == nil {
 			return false
 		}
 		s.Phase = workload.InstancePhaseReady
 		s.Operation = nil
 		return true
-	})
+	}}
 }
 
 // patchInstanceStatusReadyOnRevision idempotently moves to Phase=Ready
@@ -540,7 +864,16 @@ func patchInstanceStatusReady(ctx context.Context, input workload.ReconcileInput
 // rev also prunes rev's RetryBlock — a converged subject leaves no
 // active block.
 func patchInstanceStatusReadyOnRevision(ctx context.Context, input workload.ReconcileInput, idx int32, rev string) error {
-	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	mutation := createStatusReadyOnRevisionMutation(idx, rev)
+	err := input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
+	if err != nil {
+		return err
+	}
+	return pruneRetryBlockOnPromote(ctx, input, rev)
+}
+
+func createStatusReadyOnRevisionMutation(idx int32, rev string) workload.InstanceMutation {
+	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseReady &&
 			s.Operation == nil &&
 			s.RunningRevision == rev &&
@@ -552,9 +885,5 @@ func patchInstanceStatusReadyOnRevision(ctx context.Context, input workload.Reco
 		s.TargetRevision = ""
 		s.Operation = nil
 		return true
-	})
-	if err != nil {
-		return err
-	}
-	return pruneRetryBlockOnPromote(ctx, input, rev)
+	}}
 }

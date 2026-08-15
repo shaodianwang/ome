@@ -72,16 +72,18 @@ func flipRetryBlockOnAttemptStart(ctx context.Context, input workload.ReconcileI
 	if input.MutateRetryBlock == nil {
 		return nil
 	}
-	if err := input.MutateRetryBlock(ctx, targetRev, func(rb *workload.RetryBlock) workload.RetryBlockDisposition {
-		if rb.State != workload.RetryBlockBackoff {
-			return workload.RetryBlockUnchanged
-		}
-		rb.State = workload.RetryBlockRetryInProgress
-		return workload.RetryBlockPersist
-	}); err != nil {
+	if err := input.MutateRetryBlock(ctx, targetRev, markRetryBlockAttemptStarted); err != nil {
 		return fmt.Errorf("mark retry in progress (rev=%s): %w", targetRev, err)
 	}
 	return nil
+}
+
+func markRetryBlockAttemptStarted(rb *workload.RetryBlock) workload.RetryBlockDisposition {
+	if rb.State != workload.RetryBlockBackoff {
+		return workload.RetryBlockUnchanged
+	}
+	rb.State = workload.RetryBlockRetryInProgress
+	return workload.RetryBlockPersist
 }
 
 // patchInstanceStatusUpdating idempotently stamps Phase=Updating with the

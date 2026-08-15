@@ -24,6 +24,16 @@ data:
       "defaultDeploymentMode": "RawDeployment"
     }
 
+  # scaleUpPodBatchSize is a missing-Pod budget; each Instance or gang is
+  # selected atomically. A first eligible Instance larger than the budget
+  # proceeds alone. Omit for field-specific unbounded compatibility. It is
+  # read once at manager startup; non-positive values prevent startup, and a
+  # direct ConfigMap edit requires a manager restart.
+  lifecycle: |-
+    {
+      "scaleUpPodBatchSize": 100
+    }
+
   canaryAnalysis: |-
     {
       "bundledPrometheusAddress": "http://ome-prometheus.ome.svc:9090",

@@ -2,6 +2,7 @@ package controllerconfig
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -37,6 +38,16 @@ func TestNewLifecycleConfig(t *testing.T) {
 				assert.Equal(t, "1m", cfg.UpdateRetry.InitialDelay)
 				assert.Equal(t, "30m", cfg.UpdateRetry.MaxDelay)
 				assert.Equal(t, 2.0, cfg.UpdateRetry.Multiplier)
+			},
+		},
+		{
+			name: "valid scaleUpPodBatchSize",
+			configMapData: map[string]string{
+				LifecycleConfigName: `{"scaleUpPodBatchSize":100}`,
+			},
+			validate: func(t *testing.T, cfg *LifecycleConfig) {
+				require.NotNil(t, cfg.ScaleUpPodBatchSize)
+				assert.Equal(t, int32(100), *cfg.ScaleUpPodBatchSize)
 			},
 		},
 		{
@@ -91,6 +102,50 @@ func TestNewLifecycleConfig(t *testing.T) {
 			if tt.validate != nil {
 				tt.validate(t, cfg)
 			}
+		})
+	}
+}
+
+// TestLifecycleConfig_ToScaleUpPodBatchSize pins the field-specific contract:
+// absent configuration preserves this field's unbounded compatibility path, a
+// positive missing-Pod budget passes through exactly, and an explicitly
+// non-positive value is rejected during manager startup.
+func TestLifecycleConfig_ToScaleUpPodBatchSize(t *testing.T) {
+	t.Run("nil config is unconfigured", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		size, err := cfg.ToScaleUpPodBatchSize()
+		require.NoError(t, err)
+		assert.Nil(t, size)
+	})
+
+	t.Run("absent field is unconfigured", func(t *testing.T) {
+		cfg := &LifecycleConfig{}
+		size, err := cfg.ToScaleUpPodBatchSize()
+		require.NoError(t, err)
+		assert.Nil(t, size)
+	})
+
+	t.Run("positive value passes through", func(t *testing.T) {
+		configured := int32(100)
+		cfg := &LifecycleConfig{ScaleUpPodBatchSize: &configured}
+		size, err := cfg.ToScaleUpPodBatchSize()
+		require.NoError(t, err)
+		require.NotNil(t, size)
+		assert.Equal(t, int32(100), *size)
+
+		// The conversion returns a value copy, not an alias into the parsed
+		// ConfigMap object that a cached reader may share with other callers.
+		configured = 200
+		assert.Equal(t, int32(100), *size)
+	})
+
+	for _, configured := range []int32{0, -1} {
+		configured := configured
+		t.Run(fmt.Sprintf("rejects %d", configured), func(t *testing.T) {
+			cfg := &LifecycleConfig{ScaleUpPodBatchSize: &configured}
+			size, err := cfg.ToScaleUpPodBatchSize()
+			assert.Error(t, err)
+			assert.Nil(t, size)
 		})
 	}
 }
@@ -241,7 +296,7 @@ func TestNewLifecycleConfig_StuckPodGracePeriod(t *testing.T) {
 // TestForceDeleteConfig_ToPolicy pins the validation contract: a nil
 // receiver (absent block) is unconfigured — nil policy, no error — the
 // chart example converts 1:1, and every violation (either field missing,
-// unparseable, or non-positive) is an error the caller treats as
+// unparsable, or non-positive) is an error the caller treats as
 // unconfigured (escalation OFF), never patched with fallback numbers.
 func TestForceDeleteConfig_ToPolicy(t *testing.T) {
 	t.Run("nil receiver yields nil policy, no error", func(t *testing.T) {
@@ -332,7 +387,7 @@ func TestNewLifecycleConfig_ForceDelete(t *testing.T) {
 // TestTeardownConfig_ToDeadline pins the validation contract: a nil
 // receiver (absent block) is unconfigured — nil deadline, no error —
 // the chart default converts 1:1, and every violation (missing
-// deadline, unparseable, or non-positive) is an error the caller
+// deadline, unparsable, or non-positive) is an error the caller
 // treats as unconfigured (no deadline), never patched with fallback.
 func TestTeardownConfig_ToDeadline(t *testing.T) {
 	t.Run("nil receiver yields nil deadline, no error", func(t *testing.T) {

@@ -13,10 +13,30 @@ rendered="$("${helm_bin}" template ome-resources "${chart_dir}" --namespace ome)
 controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
   --show-only templates/ome-controller/deployment.yaml)"
+controller_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --show-only templates/ome-controller/configmap.yaml)"
 grep -Fq 'helm.sh/chart: ome-resources-0.1.0' <<<"${controller}" ||
   fail "controller chart version label was not rendered"
 grep -Fq 'app.kubernetes.io/version: "1.16.0"' <<<"${controller}" ||
   fail "controller app version label was not rendered"
+grep -Fq '"scaleUpPodBatchSize":100' <<<"${controller_config}" ||
+  fail "default OMENative scale-up Pod batch size was not rendered"
+
+pod_batch_overridden="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.controller.lifecycle.scaleUpPodBatchSize=37 \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '"scaleUpPodBatchSize":37' <<<"${pod_batch_overridden}" ||
+  fail "OMENative scale-up Pod batch size override was not rendered"
+
+pod_batch_zero="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.controller.lifecycle.scaleUpPodBatchSize=0 \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '"scaleUpPodBatchSize":0' <<<"${pod_batch_zero}" ||
+  fail "explicit zero OMENative scale-up Pod batch size was not rendered"
+
 model_agent="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
   --set modelAgent.enabled=true \

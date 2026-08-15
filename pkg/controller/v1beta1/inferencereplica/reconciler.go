@@ -63,17 +63,15 @@ import (
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
 
-// Reconciler is the per-IR lifecycle reconciler. Replaced the no-op
-// skeleton with the real workload-driven pipeline.
+// Reconciler drives each IR lifecycle through the workload pipeline.
 type Reconciler struct {
 	client.Client
 	Log      logr.Logger
 	Recorder record.EventRecorder
 
-	// Clientset reads the inferenceservice-config ConfigMap for the
-	// operator lifecycle config (same-target update retry policy).
-	// Optional: when nil the policy resolves to nil and retry-blocking
-	// fails safe (Held on the first same-target failure).
+	// Clientset reads the inferenceservice-config ConfigMap for operator
+	// lifecycle configuration. When nil, each resolver applies its documented
+	// compatibility or fail-safe behavior.
 	Clientset kubernetes.Interface
 
 	// ConfigCache memoizes the inferenceservice-config ConfigMap for a
@@ -87,6 +85,10 @@ type Reconciler struct {
 	// --config-cache-ttl flag / chart value); a non-positive value
 	// disables caching (always reads the apiserver).
 	ConfigCacheTTL time.Duration
+	// ScaleUpPodBatchSize is the startup-validated missing-Pod budget. It is
+	// immutable for the manager process lifetime; nil preserves the unbounded
+	// compatibility behavior when the field is absent.
+	ScaleUpPodBatchSize *int32
 
 	// APIReader is the live (uncached) API reader. Used for the
 	// correctness-critical reads in revision bookkeeping and immutable topology
@@ -295,6 +297,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	forceDeletePolicy := r.resolveForceDeletePolicy(log)
 
 	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, stuckPodGrace, autoMigrateBudget)
+	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
 
 	// Relocation-directive memory: prune AutoRecover ledger records for
 	// instances observed Ready (the success-prune mirror of the

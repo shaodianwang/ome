@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -124,17 +125,19 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	if parent != nil {
 		eventTarget = parent
 	}
+	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.Client, r.reader(), ir)
 	input := workload.ReconcileInput{
-		OwnerObject:             ir,
-		OwnerGVK:                irGVK,
-		EventTarget:             eventTarget,
-		Key:                     buildKey(ir),
-		DesiredSpec:             desired,
-		ObservedState:           observed,
-		MutateInstance:          buildMutateInstance(r.Client, ir),
-		ApplyInstanceMutations:  buildApplyInstanceMutations(r.Client, ir),
-		RemoveInstance:          buildRemoveInstance(r.Client, ir, r.Expectations),
-		WriteAggregateCondition: buildWriteAggregateCondition(r.Client, ir),
+		OwnerObject:                          ir,
+		OwnerGVK:                             irGVK,
+		EventTarget:                          eventTarget,
+		Key:                                  buildKey(ir),
+		DesiredSpec:                          desired,
+		ObservedState:                        observed,
+		MutateInstance:                       buildMutateInstance(r.Client, ir),
+		ApplyInstanceMutations:               instanceOnlyMutationAdapter(applyInstanceMutationsWithRetryBlock),
+		ApplyInstanceMutationsWithRetryBlock: applyInstanceMutationsWithRetryBlock,
+		RemoveInstance:                       buildRemoveInstance(r.Client, ir, r.Expectations),
+		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, ir),
 		// Same-target RetryBlock persistence + policy. The
 		// closure is always wired on the IR-managed path — the policy
 		// alone decides Backoff vs fail-safe Held.
@@ -517,7 +520,12 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
-			committed = slot.DeepCopy()
+			for i := range fresh.Status.InstanceStatuses {
+				if fresh.Status.InstanceStatuses[i].Index == idx {
+					committed = fresh.Status.InstanceStatuses[i].DeepCopy()
+					break
+				}
+			}
 			return nil
 		})
 		if err != nil {
@@ -530,85 +538,286 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 	}
 }
 
-// buildApplyInstanceMutations is the batched sibling of
-// buildMutateInstance — the ReconcileInput.ApplyInstanceMutations
-// capability: ONE fresh Get under retry.RetryOnConflict, every mutation
-// applied to its located-or-appended InstanceStatus slot, ONE
-// Status().Update when any mutation reported a change, zero writes
-// otherwise. A conflicted batch retries as a whole. Per-slot semantics
-// match buildMutateInstance exactly: a mutation on a missing index gets
-// a fresh slot that is appended only if the callback reports a change,
-// and NotFound on Get or Update is a successful no-op (the IR was
-// deleted under us). Every committed slot is mirrored onto the caller's
-// in-memory IR so later steps in the same reconcile observe the
-// post-write values.
+// buildApplyInstanceMutations exposes the instance-only view of the atomic
+// status mutation capability. The shared implementation keeps instance-only
+// callers and callers that also transition a RetryBlock on the same conflict,
+// no-op, and in-memory-mirror semantics.
 func buildApplyInstanceMutations(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
-	key := client.ObjectKeyFromObject(ir)
+	return instanceOnlyMutationAdapter(buildApplyInstanceMutationsWithRetryBlock(c, ir))
+}
+
+func instanceOnlyMutationAdapter(apply func(context.Context, []workloadtypes.InstanceMutation, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error) func(context.Context, []workloadtypes.InstanceMutation) error {
 	return func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
-		if len(muts) == 0 {
+		err := apply(ctx, muts, "", nil)
+		if errors.Is(err, workloadtypes.ErrStatusOwnerGone) {
 			return nil
 		}
-		var committed []v1beta1.OMENativeInstanceStatus
+		return err
+	}
+}
+
+type committedInstanceMutation struct {
+	index    int32
+	onCommit func(previous, current *workloadtypes.InstanceStatus)
+	previous *workloadtypes.InstanceStatus
+	current  *workloadtypes.InstanceStatus
+}
+
+// buildApplyInstanceMutationsWithRetryBlock applies a batch of InstanceStatus
+// mutations and an optional RetryBlock mutation to one fresh IR snapshot and
+// persists their combined result in one Status().Update. A conflict retries
+// the complete mutation set. Missing InstanceStatus entries are appended only
+// when their callback reports a change. Instance removals share the same O(N)
+// indexed pass and cause the complete committed InstanceStatus slice to be
+// mirrored in memory. Removing a missing InstanceStatus or RetryBlock and all
+// other no-op combinations write nothing. A missing owner returns
+// ErrStatusOwnerGone so callers can suppress the corresponding external
+// effect. Committed values are mirrored onto the caller's IR so later work in
+// the same reconcile observes exactly the persisted state.
+func buildApplyInstanceMutationsWithRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+	return buildApplyInstanceMutationsWithRetryBlockFromReader(c, c, ir)
+}
+
+// buildApplyInstanceMutationsWithRetryBlockFromReader uses an authoritative
+// reader for conflict retries and the client for status writes. The split is
+// required for adjacent writes in one reconcile: the informer cache may not
+// observe the first write before the next mutation starts.
+func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+	if reads == nil {
+		reads = c
+	}
+	key := client.ObjectKeyFromObject(ir)
+	return func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+		mutationCounts := make(map[int32]int, len(muts))
+		for i := range muts {
+			mutationCounts[muts[i].Index]++
+		}
+		for i := range muts {
+			switch {
+			case muts[i].Remove && muts[i].Mutate != nil:
+				return fmt.Errorf("instance mutation %d for index %d sets both Remove and Mutate", i, muts[i].Index)
+			case !muts[i].Remove && muts[i].Mutate == nil:
+				return fmt.Errorf("instance mutation %d for index %d sets neither Remove nor Mutate", i, muts[i].Index)
+			case muts[i].OnCommit != nil && mutationCounts[muts[i].Index] > 1:
+				return fmt.Errorf("instance mutation %d for index %d uses OnCommit but the index appears %d times", i, muts[i].Index, mutationCounts[muts[i].Index])
+			}
+		}
+		if len(muts) == 0 && mutateRetryBlock == nil {
+			return nil
+		}
+		var committedInstances []v1beta1.OMENativeInstanceStatus
+		var committedRetryBlocks []v1beta1.RetryBlock
+		var committedMutationCallbacks []committedInstanceMutation
+		replaceCommittedInstances := false
+		committedRetryBlockMutation := false
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			committed = nil
+			committedInstances = nil
+			committedRetryBlocks = nil
+			committedMutationCallbacks = nil
+			replaceCommittedInstances = false
+			committedRetryBlockMutation = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := c.Get(ctx, key, fresh); err != nil {
+			if err := reads.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
 			}
 			insts := fresh.Status.InstanceStatuses
-			var touched []int
-			for _, m := range muts {
-				pos := -1
-				for i := range insts {
-					if insts[i].Index == m.Index {
-						pos = i
-						break
-					}
+			slots := make(map[int32]v1beta1.OMENativeInstanceStatus, len(insts)+len(muts))
+			order := make([]int32, 0, len(insts)+len(muts))
+			ordered := make(map[int32]struct{}, len(insts)+len(muts))
+			for i := range insts {
+				idx := insts[i].Index
+				if _, seen := ordered[idx]; !seen {
+					order = append(order, idx)
+					ordered[idx] = struct{}{}
 				}
-				slot := v1beta1.OMENativeInstanceStatus{Index: m.Index}
-				if pos != -1 {
-					slot = insts[pos]
+				slots[idx] = insts[i]
+			}
+			instanceChanged := false
+			removalApplied := false
+			touched := make([]int32, 0, len(muts))
+			touchedSet := make(map[int32]struct{}, len(muts))
+			for _, m := range muts {
+				if m.Remove {
+					slot, found := slots[m.Index]
+					if !found {
+						continue
+					}
+					previous := v1beta1convert.InstanceStatusToWorkload(*slot.DeepCopy())
+					if m.Precondition != nil && !m.Precondition(&previous) {
+						continue
+					}
+					delete(slots, m.Index)
+					instanceChanged = true
+					removalApplied = true
+					if m.OnCommit != nil {
+						previousCopy := cloneWorkloadInstanceStatus(previous)
+						committedMutationCallbacks = append(committedMutationCallbacks, committedInstanceMutation{
+							index:    m.Index,
+							onCommit: m.OnCommit,
+							previous: previousCopy,
+						})
+					}
+					continue
+				}
+				slot, found := slots[m.Index]
+				if !found {
+					slot = v1beta1.OMENativeInstanceStatus{Index: m.Index}
 				}
 				w := v1beta1convert.InstanceStatusToWorkload(slot)
+				if m.Precondition != nil && !m.Precondition(&w) {
+					continue
+				}
+				var previous *workloadtypes.InstanceStatus
+				if found {
+					previous = cloneWorkloadInstanceStatus(w)
+				}
 				if !m.Mutate(&w) {
 					continue
 				}
 				slot = v1beta1convert.InstanceStatusFromWorkload(w)
-				if pos == -1 {
-					insts = append(insts, slot)
-					pos = len(insts) - 1
-				} else {
-					insts[pos] = slot
+				slots[m.Index] = slot
+				if _, seen := ordered[m.Index]; !seen {
+					order = append(order, m.Index)
+					ordered[m.Index] = struct{}{}
 				}
-				touched = append(touched, pos)
+				instanceChanged = true
+				if _, seen := touchedSet[m.Index]; !seen {
+					touched = append(touched, m.Index)
+					touchedSet[m.Index] = struct{}{}
+				}
+				if m.OnCommit != nil {
+					committedMutationCallbacks = append(committedMutationCallbacks, committedInstanceMutation{
+						index:    m.Index,
+						onCommit: m.OnCommit,
+						previous: previous,
+						current:  cloneWorkloadInstanceStatus(w),
+					})
+				}
 			}
-			if len(touched) == 0 {
+			if instanceChanged {
+				insts = make([]v1beta1.OMENativeInstanceStatus, 0, len(slots))
+				for _, idx := range order {
+					if slot, found := slots[idx]; found {
+						insts = append(insts, slot)
+					}
+				}
+				fresh.Status.InstanceStatuses = insts
+			}
+
+			retryBlockChanged := false
+			if mutateRetryBlock != nil {
+				blocks := fresh.Status.RetryBlocks
+				pos := -1
+				for i := range blocks {
+					if blocks[i].TargetRevision == targetRevision {
+						pos = i
+						break
+					}
+				}
+				w := workloadtypes.RetryBlock{TargetRevision: targetRevision}
+				if pos != -1 {
+					w = retryBlockToWorkload(blocks[pos])
+				}
+				switch mutateRetryBlock(&w) {
+				case workloadtypes.RetryBlockPersist:
+					next := retryBlockFromWorkload(w)
+					next.TargetRevision = targetRevision
+					if pos == -1 {
+						blocks = append(blocks, next)
+					} else {
+						blocks[pos] = next
+					}
+					retryBlockChanged = true
+				case workloadtypes.RetryBlockRemove:
+					if pos != -1 {
+						blocks = append(blocks[:pos], blocks[pos+1:]...)
+						retryBlockChanged = true
+					}
+				}
+				if retryBlockChanged {
+					fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
+				}
+			}
+
+			if !instanceChanged && !retryBlockChanged {
 				return nil
 			}
-			fresh.Status.InstanceStatuses = insts
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
-			committed = make([]v1beta1.OMENativeInstanceStatus, 0, len(touched))
-			for _, pos := range touched {
-				committed = append(committed, *insts[pos].DeepCopy())
+			persistedSlots := make(map[int32]v1beta1.OMENativeInstanceStatus, len(fresh.Status.InstanceStatuses))
+			for i := range fresh.Status.InstanceStatuses {
+				persisted := fresh.Status.InstanceStatuses[i]
+				persistedSlots[persisted.Index] = persisted
+			}
+			for i := range committedMutationCallbacks {
+				if committedMutationCallbacks[i].current == nil {
+					continue
+				}
+				committedMutationCallbacks[i].current = nil
+				if persisted, found := persistedSlots[committedMutationCallbacks[i].index]; found {
+					current := v1beta1convert.InstanceStatusToWorkload(*persisted.DeepCopy())
+					committedMutationCallbacks[i].current = cloneWorkloadInstanceStatus(current)
+				}
+			}
+			if removalApplied {
+				replaceCommittedInstances = true
+				committedInstances = make([]v1beta1.OMENativeInstanceStatus, len(fresh.Status.InstanceStatuses))
+				for i := range fresh.Status.InstanceStatuses {
+					committedInstances[i] = *fresh.Status.InstanceStatuses[i].DeepCopy()
+				}
+			} else {
+				committedInstances = make([]v1beta1.OMENativeInstanceStatus, 0, len(touched))
+				for _, idx := range touched {
+					if persisted, found := persistedSlots[idx]; found {
+						committedInstances = append(committedInstances, *persisted.DeepCopy())
+					}
+				}
+			}
+			if retryBlockChanged {
+				committedRetryBlockMutation = true
+				committedRetryBlocks = make([]v1beta1.RetryBlock, len(fresh.Status.RetryBlocks))
+				for i := range fresh.Status.RetryBlocks {
+					committedRetryBlocks[i] = *fresh.Status.RetryBlocks[i].DeepCopy()
+				}
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		for i := range committed {
-			mirrorInstanceStatus(ir, committed[i])
+		if replaceCommittedInstances {
+			replaceInstanceStatuses(ir, committedInstances)
+		} else {
+			mirrorInstanceStatuses(ir, committedInstances)
+		}
+		if committedRetryBlockMutation && ir != nil {
+			ir.Status.RetryBlocks = committedRetryBlocks
+		}
+		for _, committed := range committedMutationCallbacks {
+			committed.onCommit(committed.previous, committed.current)
 		}
 		return nil
 	}
+}
+
+func cloneWorkloadInstanceStatus(status workloadtypes.InstanceStatus) *workloadtypes.InstanceStatus {
+	converted := v1beta1convert.InstanceStatusFromWorkload(status)
+	copy := v1beta1convert.InstanceStatusToWorkload(*converted.DeepCopy())
+	return &copy
+}
+
+func replaceInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OMENativeInstanceStatus) {
+	if ir == nil {
+		return
+	}
+	ir.Status.InstanceStatuses = statuses
 }
 
 // mirrorInstanceStatus copies the just-committed InstanceStatus onto
@@ -617,20 +826,24 @@ func buildApplyInstanceMutations(c client.Client, ir *v1beta1.InferenceReplica) 
 // pre-reconcile snapshot — same shape as status/mutate.go on the
 // ISVC side.
 func mirrorInstanceStatus(ir *v1beta1.InferenceReplica, src v1beta1.OMENativeInstanceStatus) {
-	if ir == nil {
+	mirrorInstanceStatuses(ir, []v1beta1.OMENativeInstanceStatus{src})
+}
+
+func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OMENativeInstanceStatus) {
+	if ir == nil || len(statuses) == 0 {
 		return
 	}
-	pos := -1
-	for i, s := range ir.Status.InstanceStatuses {
-		if s.Index == src.Index {
-			pos = i
-			break
-		}
+	positions := make(map[int32]int, len(ir.Status.InstanceStatuses)+len(statuses))
+	for i := range ir.Status.InstanceStatuses {
+		positions[ir.Status.InstanceStatuses[i].Index] = i
 	}
-	if pos == -1 {
+	for _, src := range statuses {
+		if pos, found := positions[src.Index]; found {
+			ir.Status.InstanceStatuses[pos] = src
+			continue
+		}
 		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, src)
-	} else {
-		ir.Status.InstanceStatuses[pos] = src
+		positions[src.Index] = len(ir.Status.InstanceStatuses) - 1
 	}
 }
 

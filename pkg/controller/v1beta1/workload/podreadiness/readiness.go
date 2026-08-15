@@ -161,7 +161,8 @@ func AddNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, 
 // (nil falls back to c). Wrapped in retry.RetryOnConflict; patches
 // only the single condition slot.
 func RemoveNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message) error {
-	return removeNotReadyKey(ctx, c, reader, pod, msg, false)
+	_, err := removeNotReadyKey(ctx, c, reader, pod, msg, false)
+	return err
 }
 
 // RemoveNotReadyKeyIgnoreNotFound is RemoveNotReadyKey for drain-hold
@@ -171,17 +172,20 @@ func RemoveNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 // "replacement may be gone" and lets the caller drain its predecessor
 // with nothing serving.
 func RemoveNotReadyKeyIgnoreNotFound(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message) error {
-	return removeNotReadyKey(ctx, c, reader, pod, msg, true)
+	_, err := removeNotReadyKey(ctx, c, reader, pod, msg, true)
+	return err
 }
 
-func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message, ignoreNotFound bool) error {
+func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, msg Message, ignoreNotFound bool) (bool, error) {
 	if pod == nil {
-		return fmt.Errorf("RemoveNotReadyKey: nil pod")
+		return false, fmt.Errorf("RemoveNotReadyKey: nil pod")
 	}
 	if reader == nil {
 		reader = c
 	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		changed = false
 		fresh := &corev1.Pod{}
 		if err := reader.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
 			if ignoreNotFound && apierrors.IsNotFound(err) {
@@ -194,18 +198,22 @@ func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 			// Fresh pod, no condition yet. Removing a key that isn't
 			// present is vacuously "no writers hold it NotReady"
 			// → write Status=True.
-			return patchCondition(ctx, c, fresh, corev1.PodCondition{
+			if err := patchCondition(ctx, c, fresh, corev1.PodCondition{
 				Type:               ConditionType,
 				Status:             corev1.ConditionTrue,
 				Reason:             "Serving",
 				LastTransitionTime: metav1.Now(),
-			})
+			}); err != nil {
+				return err
+			}
+			changed = true
+			return nil
 		}
-		changed, list, err := removeMessage(cond.Message, msg)
+		messageChanged, list, err := removeMessage(cond.Message, msg)
 		if err != nil {
 			return fmt.Errorf("pod %s/%s: %w", fresh.Namespace, fresh.Name, err)
 		}
-		if !changed && cond.Status == corev1.ConditionTrue {
+		if !messageChanged && cond.Status == corev1.ConditionTrue {
 			// Key wasn't in the list AND condition already True.
 			// Nothing to do.
 			return nil
@@ -220,14 +228,19 @@ func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 		}
 		// If only the status field needs updating, still issue a
 		// patch — the list dedup is in the helper.
-		return patchCondition(ctx, c, fresh, corev1.PodCondition{
+		if err := patchCondition(ctx, c, fresh, corev1.PodCondition{
 			Type:               ConditionType,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,
 			LastTransitionTime: metav1.Now(),
-		})
+		}); err != nil {
+			return err
+		}
+		changed = messageChanged || cond.Status != status
+		return nil
 	})
+	return changed, err
 }
 
 // ContainsNotReadyKey reports whether the readiness condition
@@ -316,6 +329,13 @@ func IsPodReady(pod *corev1.Pod) bool {
 // rotation, so promote-then-drain callers may safely act on it.
 func MarkPodServing(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, userAgent, key string) error {
 	return RemoveNotReadyKey(ctx, c, reader, pod, Message{UserAgent: userAgent, Key: key})
+}
+
+// MarkPodServingWithChange is MarkPodServing plus whether this call committed
+// a condition change. Callers use the result when they may need to compensate
+// only the serving transition they own.
+func MarkPodServingWithChange(ctx context.Context, c client.Client, reader client.Reader, pod *corev1.Pod, userAgent, key string) (bool, error) {
+	return removeNotReadyKey(ctx, c, reader, pod, Message{UserAgent: userAgent, Key: key}, false)
 }
 
 // MarkPodNotServing adds the {userAgent, key} entry to the

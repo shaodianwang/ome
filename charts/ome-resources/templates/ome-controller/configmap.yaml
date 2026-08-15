@@ -47,6 +47,9 @@ data:
 
   {{- with .Values.ome.controller.lifecycle }}
   {{- $fields := list }}
+  {{- if hasKey . "scaleUpPodBatchSize" }}
+  {{- $fields = append $fields (dict "scaleUpPodBatchSize" .scaleUpPodBatchSize) }}
+  {{- end }}
   {{- with .updateRetry }}
   {{- $fields = append $fields (dict "updateRetry" (dict "maxAttempts" .maxAttempts "initialDelay" .initialDelay "maxDelay" .maxDelay "multiplier" .multiplier)) }}
   {{- end }}

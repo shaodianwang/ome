@@ -230,7 +230,7 @@ func startControlPlaneManager(c *cluster) {
 //
 // Like startControlPlaneManager it must run only after every cluster's
 // createCluster has returned (scheme stable). The reconcilers read
-// inferenceservice-config at reconcile time, so it is seeded here first.
+// inferenceservice-config during setup and reconciliation, so it is seeded first.
 func startMemberManager(c *cluster) {
 	gomega.Expect(util.SeedDefaultConfigMaps(c.ctx, c.client)).To(gomega.Succeed(), "seed member inferenceservice-config")
 	err := c.fwk.StartManager(c.ctx, c.cfg, func(setupCtx context.Context, mgr ctrl.Manager) error {

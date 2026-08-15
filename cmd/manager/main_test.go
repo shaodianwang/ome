@@ -356,6 +356,94 @@ func createMockConfigMap() *corev1.ConfigMap {
 	}
 }
 
+func TestLoadScaleUpPodBatchSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		configMapData map[string]string
+		omitConfigMap bool
+		wantValue     int32
+		wantError     string
+	}{
+		{
+			name: "positive configured value",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":37}`,
+			},
+			wantValue: 37,
+		},
+		{
+			name:          "absent lifecycle key preserves compatibility behavior",
+			configMapData: map[string]string{},
+		},
+		{
+			name: "absent field preserves compatibility behavior",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{}`,
+			},
+		},
+		{
+			name:          "missing ConfigMap is rejected",
+			omitConfigMap: true,
+			wantError:     `configmaps "inferenceservice-config" not found`,
+		},
+		{
+			name: "malformed lifecycle JSON is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{not-json`,
+			},
+			wantError: "unable to parse lifecycle config json",
+		},
+		{
+			name: "zero is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":0}`,
+			},
+			wantError: "must be > 0, got 0",
+		},
+		{
+			name: "negative value is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":-1}`,
+			},
+			wantError: "must be > 0, got -1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+			if !tt.omitConfigMap {
+				_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(
+					context.Background(),
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      constants.InferenceServiceConfigMapName,
+							Namespace: constants.OMENamespace,
+						},
+						Data: tt.configMapData,
+					},
+					metav1.CreateOptions{},
+				)
+				require.NoError(t, err)
+			}
+
+			got, err := loadScaleUpPodBatchSize(clientset)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantValue == 0 {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, tt.wantValue, *got)
+		})
+	}
+}
+
 // TestDeployConfigSetup tests the setup of deployment configuration
 func TestDeployConfigSetup(t *testing.T) {
 	tests := []struct {

@@ -191,6 +191,9 @@ type InstanceStatus struct {
 	AvailablePodCount int32
 	// ScheduledPodCount counts pods with Spec.NodeName set.
 	ScheduledPodCount int32
+	// Admitted reports that the Instance has pods and none remain behind an
+	// admission scheduling gate.
+	Admitted bool
 
 	// NodesOccupied is the set of node names hosting pods of this
 	// Instance.

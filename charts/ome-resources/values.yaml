@@ -178,6 +178,15 @@ ome:
       trafficWeightDeadbandPercent: 0
     # lifecycle tunes the OMENative per-Instance lifecycle state machine.
     lifecycle:
+      # Missing-Pod budget for one OMENative scale-up pass. Instance and
+      # leader/worker gang boundaries remain atomic: all missing Pods for a
+      # selected Instance are handled together. Creating intents are committed
+      # in one status update before the corresponding Pods are created. A first
+      # eligible Instance larger than this value proceeds alone. Omit only to
+      # preserve this field's unbounded compatibility behavior. The manager
+      # reads this once at startup and rejects non-positive values; Helm rolls
+      # the manager automatically when the rendered ConfigMap changes.
+      scaleUpPodBatchSize: 100
       # updateRetry bounds automatic same-target update retries (RetryBlock).
       # A rollout that fails toward an UNCHANGED target revision backs off
       # exponentially (initialDelay * multiplier^(attempt-1), capped at

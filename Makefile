@@ -714,6 +714,7 @@ test-perf-isvc: run-perf-isvc ## 🏁 Run the perf harness, then check results a
 # via the fake kubelet, so its cost scales with pod count). Override on the CLI.
 PERF_OMEN_GENERATOR ?= tests/perf/omenative/configs/baseline/generator.yaml
 PERF_OMEN_RANGESPEC ?= tests/perf/omenative/configs/baseline/rangespec.yaml
+PERF_OMEN_CONFIG_CACHE_TTL ?= 30s
 
 .PHONY: run-perf-omenative
 run-perf-omenative: envtest dep-crds ## 🏎️  Run the local OMENative/IR pod-reconcile scale harness (envtest + fake kubelet).
@@ -722,6 +723,7 @@ run-perf-omenative: envtest dep-crds ## 🏎️  Run the local OMENative/IR pod-
 	@$(TEST_ENV) go run ./tests/perf/omenative/runner \
 		-o $(PROJECT_DIR)/artifacts/perf-omenative \
 		-generator-config $(PERF_OMEN_GENERATOR) \
+		-config-cache-ttl $(PERF_OMEN_CONFIG_CACHE_TTL) \
 		-project-root $(PROJECT_DIR)
 
 .PHONY: test-perf-omenative

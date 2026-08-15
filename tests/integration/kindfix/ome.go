@@ -8,6 +8,7 @@ package kindfix
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/components"
@@ -172,23 +174,23 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		}
 
 		if opts.WireInferenceReplica {
-			// Clientset gives the IR reconciler live access to the
-			// inferenceservice-config ConfigMap for the operator lifecycle
-			// config (same-target update RetryBlock policy) — mirrors the
-			// cmd/manager wiring. ConfigCacheTTL stays zero: a non-positive
-			// TTL disables the config cache, so a spec that patches the
-			// ConfigMap's lifecycle key sees the change on the very next
-			// reconcile with no staleness window to reason about.
+			// Clientset supplies dynamic lifecycle settings and the startup-scoped
+			// scale-up budget through the same paths as cmd/manager.
 			clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
 			if err != nil {
 				return err
 			}
+			scaleUpPodBatchSize, err := controllerconfig.LoadScaleUpPodBatchSize(clientset)
+			if err != nil {
+				return fmt.Errorf("load scale-up Pod batch size: %w", err)
+			}
 			return (&inferencereplica.Reconciler{
-				Client:    mgr.GetClient(),
-				Clientset: clientset,
-				Log:       ctrl.Log.WithName("InferenceReplica"),
-				APIReader: mgr.GetAPIReader(),
-				Recorder:  mgr.GetEventRecorderFor("InferenceReplica"),
+				Client:              mgr.GetClient(),
+				Clientset:           clientset,
+				Log:                 ctrl.Log.WithName("InferenceReplica"),
+				APIReader:           mgr.GetAPIReader(),
+				Recorder:            mgr.GetEventRecorderFor("InferenceReplica"),
+				ScaleUpPodBatchSize: scaleUpPodBatchSize,
 			}).SetupWithManager(mgr)
 		}
 		return nil

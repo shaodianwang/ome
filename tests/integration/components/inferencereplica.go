@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 )
 
@@ -42,13 +44,23 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	for _, o := range opts {
 		o(cfg)
 	}
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("SetupInferenceReplica: create clientset: %w", err)
+	}
+	scaleUpPodBatchSize, err := controllerconfig.LoadScaleUpPodBatchSize(clientset)
+	if err != nil {
+		return fmt.Errorf("SetupInferenceReplica: load scale-up Pod batch size: %w", err)
+	}
 
 	r := &inferencereplica.Reconciler{
 		Client:                  mgr.GetClient(),
+		Clientset:               clientset,
 		Log:                     ctrl.Log.WithName("InferenceReplica"),
 		APIReader:               mgr.GetAPIReader(),
 		Recorder:                mgr.GetEventRecorderFor("InferenceReplica"),
 		MaxConcurrentReconciles: cfg.maxConcurrentReconciles,
+		ScaleUpPodBatchSize:     scaleUpPodBatchSize,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("SetupInferenceReplica: SetupWithManager: %w", err)

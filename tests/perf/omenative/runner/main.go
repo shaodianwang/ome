@@ -61,6 +61,7 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	v1beta1isvc "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
@@ -104,6 +105,7 @@ var (
 	// sets it so the controllers keep up with the generated fan-out.
 	isvcConcurrency = flag.Int("isvc-concurrency", 10, "MaxConcurrentReconciles for the InferenceService reconciler")
 	irConcurrency   = flag.Int("ir-concurrency", 10, "MaxConcurrentReconciles for the InferenceReplica reconciler")
+	configCacheTTL  = flag.Duration("config-cache-ttl", 0, "InferenceReplica operator-config cache TTL; 0 disables caching")
 
 	// Recorder intake buffer. Bounded so a saturated recorder drops (and
 	// counts) events rather than back-pressuring the observer.
@@ -451,6 +453,14 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 	if err := setupInferenceService(mgr, countingClient); err != nil {
 		return nil, fmt.Errorf("wiring InferenceService reconciler: %w", err)
 	}
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating InferenceReplica clientset: %w", err)
+	}
+	scaleUpPodBatchSize, err := controllerconfig.LoadScaleUpPodBatchSize(clientset)
+	if err != nil {
+		return nil, fmt.Errorf("loading scale-up Pod batch size: %w", err)
+	}
 
 	// InferenceReplica reconciler — the pod lifecycle controller, the
 	// subject the OMENative harness measures. Constructed directly (not via
@@ -459,11 +469,14 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 	// pod op it issues is counted.
 	ir := &inferencereplica.Reconciler{
 		Client:                  countingClient,
+		Clientset:               clientset,
 		Log:                     ctrl.Log.WithName("InferenceReplica"),
 		APIReader:               countingReader,
 		Recorder:                mgr.GetEventRecorderFor("InferenceReplica"),
 		Expectations:            workload.NewExpectations(),
 		MaxConcurrentReconciles: *irConcurrency,
+		ConfigCacheTTL:          *configCacheTTL,
+		ScaleUpPodBatchSize:     scaleUpPodBatchSize,
 	}
 	if err := ir.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("wiring InferenceReplica reconciler: %w", err)

@@ -76,6 +76,85 @@ func TestFreshPod_RemoveNotReadyKey_WritesStatusTrue(t *testing.T) {
 	}
 }
 
+func TestMarkPodServingWithChangeReportsOnlyOwnedTransition(t *testing.T) {
+	t.Run("fresh condition", func(t *testing.T) {
+		pod := newReadinessTestPod("p-change-fresh")
+		c := newReadinessTestClient(t, pod)
+
+		changed, err := MarkPodServingWithChange(context.Background(), c, c, pod, WriterLifecycle, KeyLifecycleInstanceReady)
+		if err != nil {
+			t.Fatalf("first MarkPodServingWithChange: %v", err)
+		}
+		if !changed {
+			t.Fatal("fresh Pod serving promotion must report a committed change")
+		}
+		changed, err = MarkPodServingWithChange(context.Background(), c, c, pod, WriterLifecycle, KeyLifecycleInstanceReady)
+		if err != nil {
+			t.Fatalf("idempotent MarkPodServingWithChange: %v", err)
+		}
+		if changed {
+			t.Fatal("already-serving Pod must not report a change owned by this call")
+		}
+	})
+
+	t.Run("held lifecycle key", func(t *testing.T) {
+		pod := newReadinessTestPod("p-change-held")
+		c := newReadinessTestClient(t, pod)
+		if err := AddNotReadyKey(context.Background(), c, c, pod, Message{UserAgent: WriterLifecycle, Key: KeyLifecycleInstanceReady}); err != nil {
+			t.Fatalf("AddNotReadyKey: %v", err)
+		}
+
+		changed, err := MarkPodServingWithChange(context.Background(), c, c, pod, WriterLifecycle, KeyLifecycleInstanceReady)
+		if err != nil {
+			t.Fatalf("MarkPodServingWithChange: %v", err)
+		}
+		if !changed {
+			t.Fatal("removing the held Lifecycle key must report a committed change")
+		}
+	})
+
+	t.Run("unrelated writer key", func(t *testing.T) {
+		pod := newReadinessTestPod("p-change-unrelated")
+		c := newReadinessTestClient(t, pod)
+		other := Message{UserAgent: WriterDeleteDrain, Key: "delete-0"}
+		if err := AddNotReadyKey(context.Background(), c, c, pod, other); err != nil {
+			t.Fatalf("AddNotReadyKey: %v", err)
+		}
+
+		changed, err := MarkPodServingWithChange(context.Background(), c, c, pod, WriterLifecycle, KeyLifecycleInstanceReady)
+		if err != nil {
+			t.Fatalf("MarkPodServingWithChange: %v", err)
+		}
+		if changed {
+			t.Fatal("an unrelated writer's hold must not be reported as a Lifecycle-owned transition")
+		}
+		got := &corev1.Pod{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+			t.Fatalf("get Pod: %v", err)
+		}
+		if !ContainsNotReadyKey(got, other) {
+			t.Fatal("unrelated writer hold was not preserved")
+		}
+	})
+
+	t.Run("inconsistent false condition", func(t *testing.T) {
+		pod := newReadinessTestPod("p-change-inconsistent")
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:   ConditionType,
+			Status: corev1.ConditionFalse,
+		}}
+		c := newReadinessTestClient(t, pod)
+
+		changed, err := MarkPodServingWithChange(context.Background(), c, c, pod, WriterLifecycle, KeyLifecycleInstanceReady)
+		if err != nil {
+			t.Fatalf("MarkPodServingWithChange: %v", err)
+		}
+		if !changed {
+			t.Fatal("self-healing False to True must report an owned serving transition")
+		}
+	})
+}
+
 func TestAddNotReadyKey_SetsStatusFalse(t *testing.T) {
 	pod := newReadinessTestPod("p")
 	c := newReadinessTestClient(t, pod)
@@ -497,7 +576,7 @@ func TestPatchCondition_StaleBaseRejected(t *testing.T) {
 // contract: a deleted pod must surface NotFound, not silently succeed.
 // A surge pod evicted between the reconcile-start snapshot and the
 // promote patch would otherwise let the caller "promote" nothing and
-// drain the old pod in the same pass — an availability trough (a full
+// drain the old pod in the same pass — an availability outage (a full
 // outage at replicas=1) with zero signal.
 func TestRemoveNotReadyKey_PodGone_Errors(t *testing.T) {
 	pod := newReadinessTestPod("gone")

@@ -16,9 +16,9 @@ import (
 // SeedDefaultConfigMaps creates the ConfigMap the controllers read at
 // reconcile time:
 //
-//   - inferenceservice-config — keys: ingress, deploy, omeAgent. The
+//   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent. The
 //     ISVC reconciler reads ingress + deploy; the BaseModel PVC path
-//     reads omeAgent.
+//     reads omeAgent; the InferenceReplica reconciler reads lifecycle.
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -27,6 +27,8 @@ import (
 //     to keep the controller from materializing routes
 //   - deploy.defaultDeploymentMode = RawDeployment (the safe default;
 //     NewDeployConfig errors on empty)
+//   - lifecycle.scaleUpPodBatchSize bounds OMENative missing-Pod creates in
+//     missing-Pod units while keeping each Instance or gang atomic
 //   - omeAgent gets a minimal image so the helpers don't panic on nil
 //     dereferences when a test doesn't override
 //
@@ -51,6 +53,9 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 }`,
 		"deploy": `{
   "defaultDeploymentMode": "RawDeployment"
+}`,
+		"lifecycle": `{
+  "scaleUpPodBatchSize": 100
 }`,
 		"omeAgent": `{
   "image": "ghcr.io/test/ome-agent:test",

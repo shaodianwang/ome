@@ -96,6 +96,10 @@ func registerOptionalScheme(cfg *rest.Config, s *runtime.Scheme, groupVersion sc
 	return nil
 }
 
+func loadScaleUpPodBatchSize(clientset kubernetes.Interface) (*int32, error) {
+	return controllerconfig.LoadScaleUpPodBatchSize(clientset)
+}
+
 func init() {
 	utilruntime.Must(v1beta1.AddToScheme(scheme))
 	utilruntime.Must(schedulerpluginsv1alpha1.AddToScheme(scheme))
@@ -373,6 +377,11 @@ func main() {
 		setupLog.Error(err, "Failed to initialize deployment configuration")
 		os.Exit(1)
 	}
+	scaleUpPodBatchSize, err := loadScaleUpPodBatchSize(clientSet)
+	if err != nil {
+		setupLog.Error(err, "Failed to initialize scale-up Pod batch configuration")
+		os.Exit(1)
+	}
 	ingressConfig, err := controllerconfig.NewIngressConfig(clientSet)
 	if err != nil {
 		setupLog.Error(err, "Failed to initialize ingress configuration")
@@ -544,6 +553,7 @@ func main() {
 			Recorder:                eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 			MaxConcurrentReconciles: options.irMaxConcurrentReconciles,
 			ConfigCacheTTL:          options.configCacheTTL,
+			ScaleUpPodBatchSize:     scaleUpPodBatchSize,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)
