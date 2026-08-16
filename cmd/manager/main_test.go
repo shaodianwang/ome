@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -356,20 +357,45 @@ func createMockConfigMap() *corev1.ConfigMap {
 	}
 }
 
-func TestLoadScaleUpPodBatchSize(t *testing.T) {
+func TestLoadPodBatchSizes(t *testing.T) {
 	tests := []struct {
 		name          string
 		configMapData map[string]string
 		omitConfigMap bool
-		wantValue     int32
+		wantScaleUp   int32
+		wantScaleDown int32
+		wantInterval  time.Duration
 		wantError     string
 	}{
 		{
-			name: "positive configured value",
+			name: "positive configured values",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":37,"scaleDownPodBatchSize":41,"scaleDownRequeueInterval":"7s"}`,
+			},
+			wantScaleUp:   37,
+			wantScaleDown: 41,
+			wantInterval:  7 * time.Second,
+		},
+		{
+			name: "scale-up field does not configure scale-down",
 			configMapData: map[string]string{
 				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":37}`,
 			},
-			wantValue: 37,
+			wantScaleUp: 37,
+		},
+		{
+			name: "scale-down field does not configure scale-up",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownPodBatchSize":41}`,
+			},
+			wantScaleDown: 41,
+		},
+		{
+			name: "requeue interval does not configure either batch size",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownRequeueInterval":"11s"}`,
+			},
+			wantInterval: 11 * time.Second,
 		},
 		{
 			name:          "absent lifecycle key preserves compatibility behavior",
@@ -394,18 +420,67 @@ func TestLoadScaleUpPodBatchSize(t *testing.T) {
 			wantError: "unable to parse lifecycle config json",
 		},
 		{
-			name: "zero is rejected",
+			name: "zero scale-up is rejected",
 			configMapData: map[string]string{
 				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":0}`,
 			},
 			wantError: "must be > 0, got 0",
 		},
 		{
-			name: "negative value is rejected",
+			name: "negative scale-up is rejected",
 			configMapData: map[string]string{
 				controllerconfig.LifecycleConfigName: `{"scaleUpPodBatchSize":-1}`,
 			},
 			wantError: "must be > 0, got -1",
+		},
+		{
+			name: "zero scale-down is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownPodBatchSize":0}`,
+			},
+			wantError: "must be > 0, got 0",
+		},
+		{
+			name: "negative scale-down is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownPodBatchSize":-1}`,
+			},
+			wantError: "must be > 0, got -1",
+		},
+		{
+			name: "malformed scale-down type is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownPodBatchSize":"many"}`,
+			},
+			wantError: "cannot unmarshal string",
+		},
+		{
+			name: "malformed requeue interval is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownRequeueInterval":"many"}`,
+			},
+			wantError: "lifecycle.scaleDownRequeueInterval",
+		},
+		{
+			name: "explicit empty requeue interval is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownRequeueInterval":""}`,
+			},
+			wantError: "lifecycle.scaleDownRequeueInterval",
+		},
+		{
+			name: "zero requeue interval is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownRequeueInterval":"0s"}`,
+			},
+			wantError: "must be > 0, got 0s",
+		},
+		{
+			name: "negative requeue interval is rejected",
+			configMapData: map[string]string{
+				controllerconfig.LifecycleConfigName: `{"scaleDownRequeueInterval":"-1s"}`,
+			},
+			wantError: "must be > 0, got -1s",
 		},
 	}
 
@@ -427,19 +502,35 @@ func TestLoadScaleUpPodBatchSize(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			got, err := loadScaleUpPodBatchSize(clientset)
+			before := len(clientset.Actions())
+			got, err := loadPodBatchSizes(clientset)
 			if tt.wantError != "" {
 				require.ErrorContains(t, err, tt.wantError)
-				assert.Nil(t, got)
-				return
+				assert.Equal(t, controllerconfig.PodBatchSizes{}, got)
+			} else {
+				require.NoError(t, err)
+				if tt.wantScaleUp == 0 {
+					assert.Nil(t, got.ScaleUp)
+				} else {
+					require.NotNil(t, got.ScaleUp)
+					assert.Equal(t, tt.wantScaleUp, *got.ScaleUp)
+				}
+				if tt.wantScaleDown == 0 {
+					assert.Nil(t, got.ScaleDown)
+				} else {
+					require.NotNil(t, got.ScaleDown)
+					assert.Equal(t, tt.wantScaleDown, *got.ScaleDown)
+				}
+				assert.Equal(t, tt.wantInterval, got.ScaleDownRequeueInterval)
 			}
-			require.NoError(t, err)
-			if tt.wantValue == 0 {
-				assert.Nil(t, got)
-				return
+
+			getCount := 0
+			for _, action := range clientset.Actions()[before:] {
+				if action.GetVerb() == "get" && action.GetResource().Resource == "configmaps" {
+					getCount++
+				}
 			}
-			require.NotNil(t, got)
-			assert.Equal(t, tt.wantValue, *got)
+			assert.Equal(t, 1, getCount, "scale settings must share one ConfigMap GET")
 		})
 	}
 }

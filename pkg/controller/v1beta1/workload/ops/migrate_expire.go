@@ -48,9 +48,9 @@ const migrationExpiredReason = "MigrationExpired"
 // Everything else past Deadline expires in one transition:
 //
 //  1. Clear the Migrate op on the surge (it KEEPS its status slot;
-//     unpinned, the next pass's plan drops it and the ordinary
-//     scale-down Delete pipeline tears it down — drain gate,
-//     escalation, RemoveInstance — no bespoke teardown).
+//     unpinned, the next pass's plan drops it and the bounded
+//     scale-down pipeline tears it down — drain gate,
+//     escalation, atomic status removal — no bespoke teardown).
 //  2. Clear the source's Migrate op, remove the drive's source-drain
 //     serving key from every live source pod (expiry must undo every
 //     reversible mutation the drive made — the key's normal removal is
@@ -192,7 +192,7 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 	if allocated {
 		// Surge: clear the pin only. Its status slot (Phase=Creating,
 		// or whatever it reached) stays — unpinned, the next pass's
-		// plan drops the index and the standard Delete pipeline tears
+		// plan drops the index and the scale-down batch pipeline tears
 		// it down.
 		if err := clearMigrateOperation(ctx, input, *rec.SurgeInstance, uuid); err != nil {
 			return false, fmt.Errorf("clear surge Migrate op (instance=%d): %w", *rec.SurgeInstance, err)

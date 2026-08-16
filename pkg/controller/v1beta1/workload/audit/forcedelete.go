@@ -1,8 +1,8 @@
 package audit
 
 // ReasonForceDelete is the Reason stamped on stuck-Terminating
-// force-delete records — the terminal ledger rows the Delete op's
-// escalation writes after force-deleting a pod wedged on a dead node
+// force-delete records — the terminal ledger rows scale-down escalation
+// writes after force-deleting a pod wedged on a dead node
 // (and the report-only rows for finalizer-pinned pods).
 //
 // ForceDelete entries are RECORDS, never work orders, and every ledger

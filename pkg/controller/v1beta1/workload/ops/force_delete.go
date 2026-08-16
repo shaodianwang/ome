@@ -34,7 +34,7 @@ const (
 	// evidenceNodeReadError: the live Node read failed (non-NotFound).
 	// Fail-safe: not actionable this pass.
 	evidenceNodeReadError
-	// evidenceNodeHealthy: the node is Ready — the kubelet-slow case.
+	// evidenceNodeHealthy: the node has no current unreachable evidence.
 	evidenceNodeHealthy
 	// evidenceNodeNotDeadLongEnough: unreachable taint / NotReady
 	// condition present but younger than the threshold (or of unprovable
@@ -91,6 +91,9 @@ func (e forceDeleteEvidence) String() string {
 type evidenceResult struct {
 	kind     forceDeleteEvidence
 	nodeName string
+	// requeueAt is the next time-based evidence boundary or live recheck.
+	// Zero means progress depends on a resource event.
+	requeueAt time.Time
 	// overdue is how far past the pod's own DeletionTimestamp now is.
 	overdue time.Duration
 	// nodeReadErr carries the non-NotFound Node read failure when kind
@@ -154,8 +157,11 @@ func stuckTerminatingEvidence(ctx context.Context, reader client.Reader, pod *co
 		// pass Terminating pods.
 		return evidenceResult{kind: evidenceWithinGrace}
 	}
-	if !now.After(pod.DeletionTimestamp.Add(policy.OverdueSlack)) {
-		return evidenceResult{kind: evidenceWithinGrace}
+	overdueAt := pod.DeletionTimestamp.Add(policy.OverdueSlack)
+	if !now.After(overdueAt) {
+		// The policy is strictly "past" the deadline. One nanosecond is the
+		// smallest representable wake after equality, not a polling cadence.
+		return evidenceResult{kind: evidenceWithinGrace, requeueAt: overdueAt.Add(time.Nanosecond)}
 	}
 	overdue := now.Sub(pod.DeletionTimestamp.Time)
 	if len(pod.Finalizers) > 0 {
@@ -180,21 +186,33 @@ func stuckTerminatingEvidence(ctx context.Context, reader client.Reader, pod *co
 	// never grow it.
 	for _, cond := range node.Status.Conditions {
 		if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-			return evidenceResult{kind: evidenceNodeHealthy, nodeName: node.Name, overdue: overdue}
+			return evidenceResult{
+				kind:      evidenceNodeHealthy,
+				nodeName:  node.Name,
+				requeueAt: now.Add(policy.NodeUnreachableThreshold),
+				overdue:   overdue,
+			}
 		}
 	}
 
 	// Evidence present but younger than the threshold — remembered so
 	// the fall-through distinguishes "dying, wait" from "healthy".
 	young := false
+	var nextEvidenceAt time.Time
 	for _, taint := range node.Spec.Taints {
 		if taint.Key != corev1.TaintNodeUnreachable {
 			continue
 		}
 		// Age comes from the taint's own TimeAdded; a nil TimeAdded
 		// cannot prove the threshold elapsed.
-		if taint.TimeAdded != nil && now.Sub(taint.TimeAdded.Time) >= policy.NodeUnreachableThreshold {
-			return evidenceResult{kind: evidenceNodeUnreachableTaint, nodeName: node.Name, overdue: overdue}
+		if taint.TimeAdded != nil {
+			actionableAt := taint.TimeAdded.Add(policy.NodeUnreachableThreshold)
+			if !now.Before(actionableAt) {
+				return evidenceResult{kind: evidenceNodeUnreachableTaint, nodeName: node.Name, overdue: overdue}
+			}
+			if nextEvidenceAt.IsZero() || actionableAt.Before(nextEvidenceAt) {
+				nextEvidenceAt = actionableAt
+			}
 		}
 		young = true
 	}
@@ -203,16 +221,29 @@ func stuckTerminatingEvidence(ctx context.Context, reader client.Reader, pod *co
 			continue
 		}
 		if cond.Status == corev1.ConditionFalse || cond.Status == corev1.ConditionUnknown {
-			if now.Sub(cond.LastTransitionTime.Time) >= policy.NodeUnreachableThreshold {
+			actionableAt := cond.LastTransitionTime.Add(policy.NodeUnreachableThreshold)
+			if !now.Before(actionableAt) {
 				return evidenceResult{kind: evidenceNodeNotReady, nodeName: node.Name, overdue: overdue}
+			}
+			if nextEvidenceAt.IsZero() || actionableAt.Before(nextEvidenceAt) {
+				nextEvidenceAt = actionableAt
 			}
 			young = true
 		}
 	}
 	if young {
-		return evidenceResult{kind: evidenceNodeNotDeadLongEnough, nodeName: node.Name, overdue: overdue}
+		res := evidenceResult{kind: evidenceNodeNotDeadLongEnough, nodeName: node.Name, overdue: overdue}
+		if !nextEvidenceAt.IsZero() {
+			res.requeueAt = nextEvidenceAt
+		}
+		return res
 	}
-	return evidenceResult{kind: evidenceNodeHealthy, nodeName: node.Name, overdue: overdue}
+	return evidenceResult{
+		kind:      evidenceNodeHealthy,
+		nodeName:  node.Name,
+		requeueAt: now.Add(policy.NodeUnreachableThreshold),
+		overdue:   overdue,
+	}
 }
 
 // escalateStuckTerminating evaluates one Terminating pod against the
@@ -221,21 +252,30 @@ func stuckTerminatingEvidence(ctx context.Context, reader client.Reader, pod *co
 // ledgers the action. Foreign-finalizer pods get a once-per-pod-UID
 // Warning instead. All other classifications are silent no-ops.
 //
-// Errors are advisory: the caller logs and continues — escalation
-// trouble must never fail the Delete pass it is trying to unwedge.
+// Callers with periodic polling may treat errors as advisory. A caller
+// without polling must return the error so controller-runtime backoff
+// supplies another observation opportunity.
 func escalateStuckTerminating(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, pod *corev1.Pod, idx int32) error {
+	_, err := escalateStuckTerminatingWithDeadline(ctx, deps, input, pod, idx)
+	return err
+}
+
+// escalateStuckTerminatingWithDeadline also reports the next exact policy
+// boundary. Callers without a periodic poll use it to preserve time-driven
+// force-delete progress without inventing a default cadence.
+func escalateStuckTerminatingWithDeadline(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, pod *corev1.Pod, idx int32) (time.Time, error) {
 	if input.ForceDelete == nil {
-		return nil
+		return time.Time{}, nil
 	}
 	res := stuckTerminatingEvidence(ctx, deps.Reader(), pod, input.ForceDelete, input.Now())
 	if res.kind == evidenceNodeReadError {
-		return fmt.Errorf("force-delete evidence for pod %s: node %s read: %w", pod.Name, res.nodeName, res.nodeReadErr)
+		return time.Time{}, fmt.Errorf("force-delete evidence for pod %s: node %s read: %w", pod.Name, res.nodeName, res.nodeReadErr)
 	}
 	if res.kind == evidenceForeignFinalizers {
-		return reportFinalizerBlockedPod(ctx, deps, input, pod, idx, res)
+		return time.Time{}, reportFinalizerBlockedPod(ctx, deps, input, pod, idx, res)
 	}
 	if !res.kind.actionable() {
-		return nil
+		return res.requeueAt, nil
 	}
 
 	// UID precondition: OMENative reuses stable pod names, so a
@@ -249,9 +289,9 @@ func escalateStuckTerminating(ctx context.Context, deps workload.Deps, input wor
 		// precondition missed — a successor exists; never touch it.
 		// Both are success.
 		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
-			return nil
+			return time.Time{}, nil
 		}
-		return fmt.Errorf("force-delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return time.Time{}, fmt.Errorf("force-delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
 	// Event + ledger AFTER the successful delete: a crash in this window
@@ -262,9 +302,9 @@ func escalateStuckTerminating(ctx context.Context, deps workload.Deps, input wor
 		"OMENative %s: force-deleted stuck-Terminating pod %s on node %s (evidence=%s, %s past the pod's own deletion deadline)",
 		instanceKey(input.Key.Component, idx), pod.Name, pod.Spec.NodeName, res.kind, res.overdue.Round(time.Second))
 	if err := recordForceDeleteLedgerEntry(ctx, deps, input, pod, idx, audit.OutcomeForceDeleteUnreachable); err != nil {
-		return fmt.Errorf("record force-delete ledger entry (pod=%s): %w", pod.Name, err)
+		return time.Time{}, fmt.Errorf("record force-delete ledger entry (pod=%s): %w", pod.Name, err)
 	}
-	return nil
+	return time.Time{}, nil
 }
 
 // reportFinalizerBlockedPod emits the once-per-pod-UID Warning for an
@@ -277,7 +317,7 @@ func escalateStuckTerminating(ctx context.Context, deps workload.Deps, input wor
 // replaces rather than appends on the same key — so a wedged pod
 // produces at most one Warning for its lifetime. Repeats are possible
 // only while the ledger write itself keeps failing (abnormal and
-// bounded to one attempt per Delete pass) or after ring-buffer
+// bounded to one attempt per reconciliation pass) or after ring-buffer
 // eviction of the marker (requires 200 newer terminal entries while
 // the same pod stays wedged).
 func reportFinalizerBlockedPod(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, pod *corev1.Pod, idx int32, res evidenceResult) error {

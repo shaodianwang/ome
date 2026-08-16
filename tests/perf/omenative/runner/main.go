@@ -457,9 +457,9 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 	if err != nil {
 		return nil, fmt.Errorf("creating InferenceReplica clientset: %w", err)
 	}
-	scaleUpPodBatchSize, err := controllerconfig.LoadScaleUpPodBatchSize(clientset)
+	podBatchSizes, err := controllerconfig.LoadPodBatchSizes(clientset)
 	if err != nil {
-		return nil, fmt.Errorf("loading scale-up Pod batch size: %w", err)
+		return nil, fmt.Errorf("loading lifecycle scale settings: %w", err)
 	}
 
 	// InferenceReplica reconciler — the pod lifecycle controller, the
@@ -468,15 +468,17 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 	// handles; its SetupWithManager does not rebind either field, so every
 	// pod op it issues is counted.
 	ir := &inferencereplica.Reconciler{
-		Client:                  countingClient,
-		Clientset:               clientset,
-		Log:                     ctrl.Log.WithName("InferenceReplica"),
-		APIReader:               countingReader,
-		Recorder:                mgr.GetEventRecorderFor("InferenceReplica"),
-		Expectations:            workload.NewExpectations(),
-		MaxConcurrentReconciles: *irConcurrency,
-		ConfigCacheTTL:          *configCacheTTL,
-		ScaleUpPodBatchSize:     scaleUpPodBatchSize,
+		Client:                   countingClient,
+		Clientset:                clientset,
+		Log:                      ctrl.Log.WithName("InferenceReplica"),
+		APIReader:                countingReader,
+		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
+		Expectations:             workload.NewExpectations(),
+		MaxConcurrentReconciles:  *irConcurrency,
+		ConfigCacheTTL:           *configCacheTTL,
+		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
+		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
+		ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
 	}
 	if err := ir.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("wiring InferenceReplica reconciler: %w", err)

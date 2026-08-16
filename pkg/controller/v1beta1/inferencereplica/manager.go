@@ -1,6 +1,7 @@
 package inferencereplica
 
 import (
+	"context"
 	"fmt"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -19,6 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -84,6 +86,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	r.GangSchedulingAvailable = podGroupFound
+	if podGroupFound {
+		if err := workloadgang.RegisterPodGroupControllerUIDIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+			return fmt.Errorf("inferencereplica: register PodGroup controller UID index: %w", err)
+		}
+	}
 	if err := r.validateWiring(); err != nil {
 		return err
 	}

@@ -55,8 +55,9 @@ control-plane burst can make the Kubernetes API server or etcd reject requests.
 
 This OEP makes scale-down a **durably admitted, gang-aware wave**:
 
-1. The manager reads an optional `lifecycle.scaleDownPodBatchSize` from the
-   existing `inferenceservice-config` ConfigMap at startup.
+1. The manager reads optional `lifecycle.scaleDownPodBatchSize` and
+   `lifecycle.scaleDownRequeueInterval` settings from the existing
+   `inferenceservice-config` ConfigMap at startup.
 2. One authoritative Component Pod list supplies the cost and Pod set for every
    scale-down candidate in the reconcile.
 3. The controller resumes admitted deletions first. It admits a deterministic
@@ -244,12 +245,16 @@ For every IR scale-down, treating an absent budget as unbounded:
    UID, a generation change, a changed incarnation, or a new competing
    operation aborts the complete fresh batch with zero new external effects.
 7. Every selected gang MUST have all serving holds applied and all endpoints
-   observed drained before the first member Pod delete.
+   observed drained before the first member Pod delete. A serving-hold write
+   MUST verify the Pod UID from the authoritative snapshot, and every Pod
+   DELETE MUST carry that UID as a precondition. NotFound or a UID-precondition
+   conflict proves only that the observed object is gone; a same-name successor
+   MUST remain untouched.
 8. Every terminal Instance-removal path that can own a PodGroup MUST use one
-   finalization contract: authoritative zero Pods, then PodGroup delete
-   accepted, NotFound, or optional kind unavailable, then InstanceStatus
-   removal. A failed PodGroup delete retains the status so the work remains
-   discoverable.
+   finalization contract: authoritative zero Pods, request PodGroup deletion,
+   then wait for authoritative absence (or optional-kind unavailability)
+   before InstanceStatus removal. A failed or incomplete PodGroup deletion
+   retains the status so the work remains discoverable.
 9. Completed selected InstanceStatus removals MUST commit in one status update.
    Per-Instance expectation cleanup runs after the corresponding absence is
    authoritatively confirmed, including a retry after an ambiguous write
@@ -259,6 +264,10 @@ For every IR scale-down, treating an absent budget as unbounded:
     Pod snapshot.
 11. While any extra or delete-owned Instance remains deferred or incomplete,
     the workload pipeline MUST NOT advance Restart, Migrate, Update, or Create.
+12. Deferred revision promotion and status aggregation MUST verify the IR
+    generation captured at reconcile start. A generation change ends the pass
+    with an immediate replan before stale rollup, aggregation, or retention
+    effects can run.
 
 These rules preserve the existing high-level behavior: scale-down completes
 before later lifecycle verbs. They change the amount of work allowed to advance
@@ -266,13 +275,15 @@ at once.
 
 ### Configuration
 
-The existing `inferenceservice-config` ConfigMap gains one field:
+The existing `inferenceservice-config` ConfigMap gains scale-down budget and
+polling settings:
 
 ```json
 {
   "lifecycle": {
     "scaleUpPodBatchSize": 100,
-    "scaleDownPodBatchSize": 100
+    "scaleDownPodBatchSize": 100,
+    "scaleDownRequeueInterval": "5s"
   }
 }
 ```
@@ -291,9 +302,25 @@ the default value. This OEP proposes `100`, matching the scale-up Pod budget and
 bounding a fully populated eight-Pod deployment to twelve newly admitted gangs
 per wave. A Helm-driven change rolls the manager through the existing ConfigMap
 checksum; a manual ConfigMap edit requires restarting every manager replica.
-The startup path loads and validates the scale-up and scale-down fields from
-one lifecycle configuration read so the two manager settings cannot observe
-different ConfigMap versions.
+The startup path loads and validates the scale-up, scale-down, and polling
+fields from one lifecycle configuration read so the manager settings cannot
+observe different ConfigMap versions.
+
+`scaleDownRequeueInterval` controls only the periodic wake-up while drain, Pod
+deletion, or per-Instance cleanup remains in flight:
+
+- **Absent:** no cadence timer. Pod, EndpointSlice, PodGroup, and owner events
+  continue to drive progress. Configured force-delete and teardown deadlines
+  independently schedule their exact next evaluation, so time-based safety and
+  liveness policies do not depend on a later resource event.
+- **Positive duration:** poll at the configured cadence.
+- **Zero, negative, or malformed duration:** invalid; manager startup fails.
+
+The binary contains no polling default. The Helm chart and rendered ConfigMap
+own the `5s` default, preserving the existing cadence for managed installs.
+An older hand-authored ConfigMap that omits the field degrades to watch- and
+deadline-driven progress rather than receiving a hidden fallback or entering
+an immediate requeue loop.
 
 Scale-up and scale-down keep separate fields. Reusing the scale-up value would
 silently change destructive behavior for every installation that configured
@@ -378,7 +405,7 @@ and live resources on every pass; Complete is represented by status absence.
 | Unadmitted extra | Outside the current plan with no Delete operation | Selection only; no external effect. A desired-count change may make it non-extra. A UID-, generation-, incarnation-, and ownership-guarded batch write admits it. |
 | DeleteOwned / Draining | Authoritative status has `Phase=Deleting`, `Operation.Type=Delete`, `Operation.Step=Drain`; live Pods exist | Mark all selected live Pods NotServing, then read the shared drain index. |
 | DeleteOwned / DeletingPods | Every routed endpoint for that Instance is drained; live or Terminating Pods exist | Record expectation before each Pod DELETE; wait or force-delete under the existing policy. |
-| DeleteOwned / Finalizing | The authoritative Component snapshot has zero Pods for the index | Accept PodGroup DELETE or NotFound, then enqueue status removal. |
+| DeleteOwned / Finalizing | The authoritative Component snapshot has zero Pods for the index | Request PodGroup deletion; enqueue status removal only after a fresh authoritative inventory proves absence. |
 | Complete | Batched status removal is authoritatively confirmed | Forget expectations for that absent index and immediately requeue before index reuse. |
 
 The admission write is the first linearization point. The batched status
@@ -399,7 +426,8 @@ batched IR Deleting intent (new admissions only)
   -> build one routed-endpoint drain index
   -> evaluate each Instance and issue per-Pod expectation, then Pod DELETE
   -> wait for authoritative live Pod set to become empty
-  -> delete PodGroup (if applicable)
+  -> request PodGroup deletion (if applicable)
+  -> wait for a fresh authoritative inventory to prove PodGroup absence
   -> batched InstanceStatus removal
 ```
 
@@ -416,9 +444,9 @@ effects in deterministic order and retains all committed intents for retry.
 
 IR deletion normally uses the same bounded executor. The finalizer remains
 until an authoritative Component Pod list is empty and every owned PodGroup is
-either absent or already Terminating after a controller-issued delete. This
-avoids replacing a controlled Pod delete wave with an unbounded owner-reference
-cascade of thousands of PodGroups.
+absent from an authoritative inventory. This avoids replacing a controlled Pod
+delete wave with an unbounded owner-reference cascade of thousands of
+PodGroups.
 
 Teardown also discovers an owned PodGroup whose InstanceStatus is already
 absent. The IR `deletionTimestamp` is durable authorization to delete that
@@ -595,15 +623,19 @@ owner:
 1. while any Instance Pod exists, retain the PodGroup;
 2. after the authoritative Pod bucket is empty, issue the deterministic
    PodGroup delete;
-3. treat an accepted delete or NotFound as success; physical disappearance is
-   not required before status removal;
-4. remove InstanceStatus only after PodGroup deletion succeeds.
+3. retain InstanceStatus after an accepted delete and end the pass;
+4. remove InstanceStatus only after a fresh authoritative inventory reports
+   the PodGroup absent.
+
+Already-Terminating PodGroups consume the configured active budget. Repeated
+watch or poll reconciles may fill unused capacity, but MUST NOT accumulate new
+PodGroup deletes beyond the bound while earlier deletions remain pending.
 
 An owned PodGroup with `deletionTimestamp` is a creation gate. Ensure returns a
 requeue without treating a matching Terminating object as success, and the
 workload executor creates neither its replacement PodGroup nor member Pods
-until an authoritative inventory reports NotFound. This gate makes accepted
-DELETE safe across status removal, restart, and index reuse.
+until an authoritative inventory reports NotFound. Keeping terminal status
+through the same absence proof makes restart and index reuse reconstructible.
 
 This order makes failures resumable. If PodGroup deletion fails while status
 still exists, the next reconcile can retry. Removing status first would make
@@ -624,7 +656,8 @@ gone. Each path MUST call the same terminal finalizer:
 
 ```text
 authoritative Component Pod bucket is empty for index
-  -> owned PodGroup DELETE accepted, NotFound, or optional kind unavailable
+  -> owned PodGroup DELETE requested
+  -> fresh authoritative inventory reports absent, or optional kind unavailable
   -> InstanceStatus Remove commits
   -> expectations for confirmed-absent index are forgotten
 ```
@@ -790,6 +823,15 @@ Compatibility is explicit:
 | Restart in the middle of a wave | Work is reconstructed from DeleteOwned status and live resources. |
 | Budget lowered below committed work | Committed victims advance in bounded prefixes; no fresh victim is admitted until every DeleteOwned status completes. |
 
+Go source compatibility is intentionally narrower than Kubernetes API
+compatibility. The implementation removes the exported controller-internal
+`ops.Delete` function and its hard-coded `ops.DeleteRequeueInterval`; the
+multi-Instance executor and configured cadence replace them. There are no
+in-repository callers, but downstream Go code importing either symbol must
+migrate to the batch executor and provide the owner-aware atomic status adapter.
+Keeping a wrapper would be misleading because the old signature cannot express
+the admission transaction or distinguish admission from effect progress.
+
 The proposed Helm value is `100`, so the implementation's chart upgrade will opt
 the deployment into bounded scale-down. This is deliberate and must be called
 out in release notes because capacity release can take multiple waves. During a
@@ -917,16 +959,22 @@ fixtures have these upper bounds:
 | Fixture | Waves | Passes including final verification | Lifecycle status writes |
 | --- | ---: | ---: | ---: |
 | 2,000 -> 1 singleton | 20 | 61 | 40 |
-| 2,000 -> 1, eight Pods per gang | 167 | 502 | 334 |
+| 2,000 -> 1, eight Pods per gang, no PodGroups | 167 | 502 | 334 |
+| 2,000 -> 1, eight Pods per gang with PodGroups | 167 | 669 | 334 |
 
-Each wave needs an admission pass, an effect pass, and a completion pass because
-the design immediately replans after status commits and never takes a second
-Component Pod list in one pass. Real endpoint or termination delay may add
-passes but cannot increase the per-pass bounds. The benchmark records lifecycle
-and aggregate writes separately, total logical JSON bytes, and maximum
-individual request size. Batching reduces cumulative pressure; the maximum
-single IR update remains O(N) and is not rescued if it already exceeds an API
-server or etcd object-size limit.
+Without a per-Instance PodGroup, each wave needs admission, effect, and
+completion passes. A gang with a PodGroup needs a fourth pass: the first
+Podless pass issues the PodGroup DELETE, and the next authoritative inventory
+must prove absence before status removal. The final `+1` pass verifies that no
+extra Instance remains. Endpoint or termination delay may add passes but cannot
+increase the per-pass bounds.
+
+The benchmark records lifecycle and aggregate writes separately, total logical
+JSON bytes, and maximum individual request size. Aggregate counter writes may
+occur between lifecycle transitions as Pod status changes; `40` and `334` are
+therefore **lifecycle-write** counts, not total IR status-write counts. Batching
+reduces cumulative pressure; the maximum single IR update remains O(N) and is
+not rescued if it already exceeds an API server or etcd object-size limit.
 
 ### Ordering and failure injection
 
@@ -943,7 +991,8 @@ boundary:
 - EndpointSlice and empty-slice Service lookup failures;
 - unsatisfied expectations and an undrained Instance while another selected
   Instance is eligible to progress;
-- Pod delete NotFound, transport error, and partial success;
+- Pod delete NotFound, UID-precondition conflict, transport error, and partial
+  success, including a same-name replacement that remains serving;
 - stuck-Terminating force-delete evidence;
 - PodGroup delete failure;
 - completion status conflict, failure, and ambiguous response with
@@ -982,6 +1031,10 @@ Race-oriented unit tests cover:
    expect rejection of the whole removal batch and no expectation cleanup;
 10. owner deletion races ordinary scale-down — expect teardown to resume the
     same durable work, not duplicate or cancel it.
+11. the generation changes before deferred revision promotion or aggregation —
+    expect an immediate replan with no stale aggregation or retention sweep;
+12. a same-name Pod replaces the observed UID before drain or deletion — expect
+    the successor to remain serving and undeleted.
 
 These tests use explicit synchronization hooks; sleeps are not accepted as race
 proof.
@@ -991,16 +1044,17 @@ proof.
 - all gang Pods receive the Delete drain key before any member delete;
 - all routed endpoints are absent before any member delete;
 - selected live gang retains its PodGroup;
-- selected Podless gang deletes its PodGroup before status removal;
+- selected Podless gang requests PodGroup deletion and waits for authoritative
+  absence before status removal;
 - unselected gang's PodGroup is untouched;
 - a same-named PodGroup with a different controller UID is not deleted;
 - PodGroup delete failure keeps InstanceStatus;
-- PodGroup delete success followed by status-removal failure reconstructs the
+- PodGroup absence followed by status-removal failure reconstructs the
   terminal-finalization-owned set on the next pass and performs zero PodGroup
   create/update;
-- a PodGroup held Terminating by a foreign finalizer permits guarded status
-  removal but blocks replacement PodGroup and Pod creation through rebound and
-  restart until authoritative NotFound;
+- a PodGroup held Terminating by a foreign finalizer retains terminal status
+  and blocks replacement PodGroup and Pod creation through rebound and restart
+  until authoritative NotFound;
 - full teardown of 2,000 gang Instances cleans selected PodGroups in bounded
   waves;
 - a statusless empty owned PodGroup costs one teardown unit, while one whose
@@ -1057,17 +1111,22 @@ CI does not create 16,000 Pods. A dedicated scale environment validates one
 request latency, IR status bytes, and convergence time. The cluster shape and
 baseline load remain `TBD` until the performance owner provisions that run.
 
-The counting harness freezes the pre-change implementation as a baseline. With
-immediate fake deletion and no injected conflicts, the new path must reduce
-full Component Pod-list calls by at least 95% for singleton Instances and 85%
-for eight-Pod gangs, and lifecycle status-update calls by at least 98% and 90%
-respectively. Pod readiness patches and deletes are expected to remain
-proportional to Pods removed; they are necessary work. The harness reports
-logical lifecycle and aggregate status bytes separately. Cumulative lifecycle
-status request bytes must fall by at least 80%, and total IR status request
-bytes including aggregation by at least 70%, against the frozen baseline. The
-maximum individual IR request must not exceed the baseline maximum; batching
-cannot hide an object-size regression.
+The graduation counting harness will freeze the unbounded implementation as a
+baseline. With immediate fake deletion and no injected conflicts, the bounded
+path must reduce
+authoritative destructive Component Pod-list calls by at least 95% for
+singleton Instances and 65% for eight-Pod gangs with PodGroups. The latter
+threshold reflects the required authoritative-absence pass: `1 - 669/1999` is
+about 66.5%. Cached aggregation reads are measured separately and remain
+unchanged. Lifecycle status-update calls must fall by at least 98% and 90%,
+respectively. Pod readiness patches and deletes remain proportional to Pods
+removed because they are necessary work.
+
+The harness reports logical lifecycle and aggregate status bytes separately.
+Cumulative lifecycle status request bytes must fall by at least 80%, and total
+IR status request bytes including aggregation by at least 70%, against the
+frozen baseline. The maximum individual IR request must not exceed the baseline
+maximum; batching cannot hide an object-size regression.
 
 ## Graduation Criteria
 
@@ -1090,10 +1149,11 @@ cannot hide an object-size regression.
 - The 2,000 -> 1 singleton and eight-Pod-gang scale tests complete with
   zero OME-attributable 413, 429, or 5xx responses under the documented
   test-cluster envelope and meet the operation- and byte-reduction gates above.
-- Active scale-down passes record exactly one Component Pod list total, no more
-  than two scale-down lifecycle IR status writes, and, in the stable-state
-  fixture, no more than one additional aggregate write. Integration results
-  report any unrelated writer separately.
+- Active scale-down passes record exactly one authoritative destructive
+  Component Pod list, no more than two scale-down lifecycle IR status writes,
+  and, in the stable-state fixture, no more than one additional aggregate
+  write. Cached aggregation reads and unrelated writers are reported
+  separately.
 - A controller restart and a replica rebound during active deletion converge
   without a stranded NotServing key, PodGroup, or InstanceStatus.
 - Operators have dashboards for active Pod cost, deferred Instances, error rate,

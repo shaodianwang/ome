@@ -1,6 +1,6 @@
 // escalation.go — the terminal-failure escalation pass. Reconcile runs
-// it once at the end of every non-teardown, non-paused, non-error
-// reconcile: per Instance it consumes the snapshot's failure evidence
+// it once at the end of every eligible non-teardown, non-paused,
+// non-error reconcile: per Instance it consumes the snapshot's failure evidence
 // (stuck pod / elapsed Operation deadline) and decides the Failed
 // transition through the shared disposition classification
 // (disposition.go). The Failed DECISION lives here, next to the rest of
@@ -45,11 +45,17 @@ import (
 //     deadline-parking step (ReconcileGatedDeadlines) owns their clock,
 //     and a queued wait must not count against the timeout.
 //
-// BOTH paths skip Instances carrying a Migrate Operation (either pair
-// side): a migration's timeout authority is the owner's
-// status.migrations record, consumed by the dispatcher's
-// migration-expiry pass — stamping here would mark a healthy serving
-// source Failed while the record keeps driving the pair.
+// BOTH paths skip operations whose state machine owns its own terminal
+// handling:
+//
+//   - Migrate (either pair side): timeout authority is the owner's
+//     status.migrations record, consumed by the dispatcher's
+//     migration-expiry pass. Stamping here would mark a healthy serving
+//     source Failed while the record keeps driving the pair.
+//   - Delete: DeleteBatch owns progress, stuck-Terminating escalation,
+//     and completion. Its durable ownership must survive an elapsed
+//     generic operation deadline, including when the index is planned
+//     again while deletion finishes.
 //
 // FAILED-WHILE-SERVING GUARD: an Instance whose blamed pod set is fully
 // healthy — every live (non-deleting) pod ContainersReady AND in the
@@ -76,7 +82,7 @@ import (
 // Adapter-agnostic: writes Phase=Failed via
 // input.ApplyInstanceMutations / input.MutateInstance, emits the
 // operator-facing event via input.WarnInstanceFailed.
-func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) error {
+func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, excluded map[int32]struct{}) error {
 	byIdx, err := snapshot.CachedPods(ctx)
 	if err != nil {
 		return fmt.Errorf("workload.Reconcile: list pods for escalation pass (component=%s): %w", plan.Component, err)
@@ -97,17 +103,19 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 	dd.MigrationMode = plan.MigrationMode
 	buf := &failureStampBuffer{input: input}
 	for _, s := range input.ObservedState.InstanceStatuses {
+		if _, skip := excluded[s.Index]; skip {
+			continue
+		}
 		// Idempotent: skip an already-Failed Instance so the
 		// operator-facing event fires exactly once per escalation.
 		if s.Phase == InstancePhaseFailed {
 			continue
 		}
-		// Migrate pairs are owned by the status.migrations record — the
-		// migration-expiry pass consumes their deadline. Neither the
-		// stuck-pod fast path nor the deadline backstop may stamp either
-		// side: a stuck surge pod would fail the healthy serving source.
-		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
-			continue
+		if s.Operation != nil {
+			switch s.Operation.Type {
+			case InstanceOperationMigrate, InstanceOperationDelete:
+				continue
+			}
 		}
 		ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
 		if ev.StuckPod == nil && !ev.DeadlinePassed {

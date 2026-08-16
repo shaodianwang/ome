@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -128,6 +129,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
+	ownerGeneration := ir.Generation
 	desiredByIdx := workload.DesiredPodCountByInstance(plan)
 	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
 
@@ -171,6 +173,9 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if ownerUID == "" || fresh.UID != ownerUID {
 			ownerUnavailable = true
 			return nil
+		}
+		if fresh.Generation != ownerGeneration {
+			return workload.ErrStatusMutationPrecondition
 		}
 
 		// Snapshot the live status before recomputation so a no-op
@@ -275,13 +280,14 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultSuccess)
 		return nil
 	}); err != nil {
-		// Exhausted RetryOnConflict still surfaces a Conflict error
-		// (wrapped via %w above); bucket it apart from other write
-		// failures so the 409 churn hotspot is visible per controller.
-		if apierrors.IsConflict(err) {
-			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultConflict)
-		} else {
-			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultError)
+		// A generation change replans without a write outcome. Other terminal
+		// retry failures retain their status-write classification.
+		if !errors.Is(err, workload.ErrStatusMutationPrecondition) {
+			if apierrors.IsConflict(err) {
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultConflict)
+			} else {
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultError)
+			}
 		}
 		return err
 	}

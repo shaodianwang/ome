@@ -97,6 +97,24 @@ type ReconcileInput struct {
 	// unbounded compatibility behavior. A non-nil zero value fails closed.
 	ScaleUpPodBatchSize *int32
 
+	// ScaleDownPodBatchSize bounds active delete work in Pod-equivalent units.
+	// Selection remains atomic at the Instance boundary, so a gang is either
+	// selected in full or deferred. The first eligible Instance may exceed a
+	// positive budget and proceeds alone. A nil pointer preserves unbounded
+	// candidate selection. A non-nil zero value fails closed.
+	ScaleDownPodBatchSize *int32
+
+	// ScaleDownRequeueInterval is the configured poll cadence while a delete
+	// wave is waiting on drain or resource disappearance. Zero disables cadence
+	// polling; watched resources and exact force-delete deadlines still wake it.
+	ScaleDownRequeueInterval time.Duration
+
+	// AuthoritativePods is a live Component-wide Pod observation shared by
+	// every destructive consumer in one reconcile pass. Nil means the caller
+	// did not preload an observation; a non-nil snapshot is authoritative even
+	// when Pods and ByInstance are empty.
+	AuthoritativePods *ComponentPodSnapshot
+
 	// FinalizeInstanceResources removes optional per-Instance resources after
 	// the authoritative Pod snapshot is empty. It reports complete only after
 	// those resources are authoritatively absent.
@@ -104,12 +122,11 @@ type ReconcileInput struct {
 
 	// RemoveInstance drops the InstanceStatus entry for idx and
 	// returns (true, nil) when a real removal happened, (false, nil)
-	// when already absent. Called from Delete's final step once every
-	// pod for the Instance is gone.
+	// when already absent. Compatibility lifecycle paths use this seam
+	// when they remove one status slot outside an atomic batch.
 	//
-	// MUST be set when ObservedState carries any Instance entries the
-	// Delete state machine might converge to gone — nil panics rather
-	// than silently leak status entries.
+	// It must be set whenever a caller can enter one of those paths; nil
+	// fails closed rather than silently leaking a status entry.
 	RemoveInstance func(ctx context.Context, idx int32) (bool, error)
 
 	// WriteAggregateCondition merges cond into the owner's per-Component
@@ -203,8 +220,8 @@ type ReconcileInput struct {
 
 	// Teardown marks this reconcile as owner-deletion teardown. When
 	// set, the dispatcher treats the planned index set as empty — every
-	// observed Instance is a scale-down extra and runs the ordinary
-	// Delete pipeline (drain gate, graceful delete, stuck-Terminating
+	// observed Instance is a scale-down extra and runs the scale-down batch
+	// pipeline (drain gate, graceful delete, stuck-Terminating
 	// force-delete escalation, audit) — and runs NOTHING else: no
 	// Paused gate, no Restart / Migrate / Update / Create. The caller
 	// owns completion detection (live component pod list) and all
@@ -227,11 +244,20 @@ var ErrStatusOwnerGone = errors.New("status owner is gone")
 // The complete batch is rejected and callers must replan before effects.
 var ErrStatusMutationPrecondition = errors.New("status mutation precondition failed")
 
+// ComponentPodSnapshot is one authoritative Component Pod LIST represented
+// both as the complete set and as per-Instance buckets. The two views share
+// Pod pointers and are immutable for the lifetime of a reconcile pass.
+type ComponentPodSnapshot struct {
+	Pods       []*corev1.Pod
+	ByInstance map[int32][]*corev1.Pod
+}
+
 // InstanceMutationSnapshot is the authoritative owner/status view presented
 // to a batch precondition on every conflict attempt.
 type InstanceMutationSnapshot struct {
-	OwnerUID  k8stypes.UID
-	Instances map[int32]InstanceStatus
+	OwnerUID        k8stypes.UID
+	OwnerGeneration int64
+	Instances       map[int32]InstanceStatus
 }
 
 // InstanceMutation is one buffered InstanceStatus mutation, keyed by Instance

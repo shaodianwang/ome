@@ -2,7 +2,7 @@
 // point the ISVC OMENative dispatcher and the InferenceReplica
 // controller call into; it drives one logical workload (one Component
 // of one owner) through the Create / Update / Restart / Migrate /
-// Delete pipeline by way of the workload/ops state machines.
+// scale-down pipelines by way of the workload/ops state machines.
 //
 // What this dispatcher does NOT own (the caller runs these around
 // Reconcile):
@@ -37,9 +37,9 @@ import (
 
 // ratioGateRequeueInterval is short enough that a peer Component
 // catching up next reconcile unblocks this one promptly; long
-// enough not to spam the apiserver. Unlike the per-op intervals
-// (workloadops.{Create,Delete,Restart,Migrate,Update}RequeueInterval)
-// this pacing is dispatcher-owned, not op-state-machine-owned.
+// enough not to spam the apiserver. Unlike the Create, Restart, Migrate, and
+// Update intervals or the configured scale-down cadence and deadlines, this
+// pacing is dispatcher-owned.
 const ratioGateRequeueInterval = 3 * time.Second
 
 // Reconcile drives one workload (one Component of one owner) toward its
@@ -54,7 +54,7 @@ const ratioGateRequeueInterval = 3 * time.Second
 //
 // The op chain:
 //
-//  1. Scale-down — Delete for any InstanceStatus index the plan no
+//  1. Scale-down — DeleteBatch for any InstanceStatus index the plan no
 //     longer asks for. Completes before scale-up so excess pods don't
 //     run alongside in-flight drains.
 //  2. Restart — per-Instance pod-loss / pod-Failed triggers; dispatched
@@ -77,9 +77,9 @@ const ratioGateRequeueInterval = 3 * time.Second
 //  7. Escalation — the terminal-failure pass (escalation.go): stuck-pod
 //     and elapsed-deadline evidence from the snapshot decides the
 //     Phase=Failed transition through the disposition classification.
-//     Runs after the op passes on every non-teardown, non-paused,
-//     non-error return — including the in-flight early-requeue paths, so
-//     a wedged surge or gang is escalated while its op keeps requeueing.
+//     Runs after eligible non-error op-pass returns. A scale-down admission
+//     or completion commit ends the pass; an active wave excludes every extra
+//     index while retained Instances remain eligible for escalation.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -91,9 +91,9 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 
 	// Teardown mode: the owner is being deleted. The planned index set is
 	// treated as empty so every observed Instance is a scale-down extra
-	// and runs the ordinary Delete pipeline; nothing else runs — not the
+	// and runs the scale-down batch pipeline; nothing else runs — not the
 	// Paused gate, not Restart / Migrate / Update / Create, not the
-	// escalation pass (the Delete pipeline owns wedge escalation via
+	// escalation pass (the scale-down pipeline owns wedge escalation via
 	// lifecycle.forceDelete). The caller owns completion detection and
 	// finalizer decisions.
 	//
@@ -101,17 +101,21 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	// deleted like everything else. The normal-path exclusion protects an
 	// in-flight Migrate from the scale-down pass, but under teardown there
 	// is no Migrate to protect — excluding the pair would leave its pods
-	// with no Delete op and wedge the teardown forever.
+	// with no scale-down operation and wedge the teardown forever.
 	if input.Teardown {
 		emptied := plan
 		emptied.Instances = nil
 		extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, emptied, true)
-		allDeleted, err := deleteExtraInstances(ctx, deps, input, plan, extras)
+		snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
+		outcome, err := deleteExtraInstances(ctx, deps, input, plan, snapshot, extras)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if !allDeleted {
-			return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
+		if outcome.ImmediateRequeue {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		if outcome.InProgress {
+			return scaleDownPollResult(input, outcome.RequeueAfter, outcome.PolicyDeadlineDue), nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -130,19 +134,20 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 
 // Execute applies the Decision: the op-pass action loop, then — when
 // Decision.Escalate allows it — the escalation pass and the RetryBlock
-// supersede-prune. Escalation runs on every non-error action-loop
-// return — including the in-flight early-requeue returns — so a wedged
-// surge or gang is escalated while its op keeps requeueing; an op-pass
-// error requeues with backoff and the next reconcile escalates from
-// fresh evidence. The supersede-prune shares the Escalate gate (both
-// are end-of-pass bookkeeping suspended while paused, and Teardown
-// never reaches Execute).
+// supersede-prune. A scale-down status commit is a pass boundary because it
+// invalidates the plan. While an admitted wave is polling, escalation still
+// runs for retained Instances but excludes every scale-down extra; deferred
+// victims must receive no lifecycle mutation before admission. Other operation
+// requeues retain the existing escalation behavior so a wedged surge or gang
+// can fail while its operation keeps polling. The supersede-prune shares the
+// Escalate gate (both are end-of-pass bookkeeping suspended while paused, and
+// Teardown never reaches Execute).
 func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
-	res, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
-	if err != nil || !d.Escalate {
+	res, statusCommitBoundary, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
+	if err != nil || !d.Escalate || statusCommitBoundary {
 		return res, err
 	}
-	if eerr := escalateFromEvidence(ctx, deps, input, plan, target, snapshot); eerr != nil {
+	if eerr := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(d)); eerr != nil {
 		return ctrl.Result{}, eerr
 	}
 	if perr := pruneSupersededRetryBlocks(ctx, input, target); perr != nil {
@@ -151,22 +156,24 @@ func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan Componen
 	return res, nil
 }
 
-// executeActions runs the op-pass pipeline (steps 1-6 of the chain
-// documented on Reconcile) for the Decision's selected actions, in
-// order. Early returns are in-flight requeues; the ops decide them —
-// the Decision selects which op advances, the op's outcome decides
-// whether the pipeline stops here.
-func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
+// executeActions runs the op-pass pipeline (steps 1-6 of the chain documented
+// on Reconcile) for the Decision's selected actions, in order. The bool result
+// marks a scale-down status-commit boundary. Other early returns preserve the
+// existing end-of-pass escalation and pruning behavior.
+func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, bool, error) {
 	for _, action := range d.Actions {
 		switch action.Kind {
 		// 1. Scale-down.
 		case ActionScaleDown:
-			allDeleted, err := deleteExtraInstances(ctx, deps, input, plan, action.Extras)
+			outcome, err := deleteExtraInstances(ctx, deps, input, plan, snapshot, action.Extras)
 			if err != nil {
-				return ctrl.Result{}, err
+				return ctrl.Result{}, false, err
 			}
-			if !allDeleted {
-				return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
+			if outcome.ImmediateRequeue {
+				return ctrl.Result{Requeue: true}, true, nil
+			}
+			if outcome.InProgress {
+				return scaleDownPollResult(input, outcome.RequeueAfter, outcome.PolicyDeadlineDue), false, nil
 			}
 
 		// 2. Per-Instance restart pass.
@@ -175,14 +182,14 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			for _, sel := range action.Restarts {
 				done, rerr := workloadops.Restart(ctx, deps, input, plan, sel.Instance, sel.Reason)
 				if rerr != nil {
-					return ctrl.Result{}, fmt.Errorf("workload.Reconcile: restart instance %d: %w", sel.Instance.Index, rerr)
+					return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: restart instance %d: %w", sel.Instance.Index, rerr)
 				}
 				if !done {
 					anyRestarting = true
 				}
 			}
 			if anyRestarting {
-				return ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}, nil
+				return ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}, false, nil
 			}
 
 		// 3. Migration expiry pass. When anything expired, requeue
@@ -192,9 +199,9 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 		// pipeline tears it down.
 		case ActionMigrateExpiry:
 			if expiredCount, eerr := workloadops.ExpireMigrations(ctx, deps, input, plan); eerr != nil {
-				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: expire migrations: %w", eerr)
+				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: expire migrations: %w", eerr)
 			} else if expiredCount > 0 {
-				return ctrl.Result{Requeue: true}, nil
+				return ctrl.Result{Requeue: true}, false, nil
 			}
 
 		// 4. Per-Component migration pass (dispatch pacing unchanged:
@@ -229,11 +236,11 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			sourceIdx := rec.SourceInstance
 			done, accepted, merr := workloadops.Migrate(ctx, deps, input, plan, sourceIdx, rec.RequestUUID, req)
 			if merr != nil {
-				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, merr)
+				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, merr)
 			}
 			if !done && accepted {
 				// Mid-flight: requeue at the per-op interval.
-				return ctrl.Result{RequeueAfter: workloadops.MigrateRequeueInterval}, nil
+				return ctrl.Result{RequeueAfter: workloadops.MigrateRequeueInterval}, false, nil
 			}
 			if done {
 				// Migrate just removed the source InstanceStatus and
@@ -244,7 +251,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 				// through to recreate the source-side index. Re-queue so
 				// the next reconcile rebuilds plan from the post-
 				// migration status.
-				return ctrl.Result{Requeue: true}, nil
+				return ctrl.Result{Requeue: true}, false, nil
 			}
 			// !done && !accepted: fresh-record defer (e.g., source
 			// Phase=Updating from an in-flight spec edit). Fall through
@@ -256,25 +263,47 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 		case ActionUpdate:
 			res, stop, uerr := executeUpdatePass(ctx, deps, input, plan, target, snapshot, action.Update, d.RequeueAfter)
 			if uerr != nil {
-				return ctrl.Result{}, uerr
+				return ctrl.Result{}, false, uerr
 			}
 			if stop {
-				return res, nil
+				return res, false, nil
 			}
 
 		// 6. Create pass.
 		case ActionCreate:
 			res, cerr := workloadops.Create(ctx, deps, input, plan, target)
 			if cerr != nil {
-				return res, cerr
+				return res, false, cerr
 			}
-			return foldRetryAfter(res, d.RequeueAfter), nil
+			return foldRetryAfter(res, d.RequeueAfter), false, nil
 		}
 	}
 
 	// Only a paused Decision ends without a Create action: scale-down
 	// (if any) has run, nothing else may.
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, false, nil
+}
+
+func scaleDownPollResult(input ReconcileInput, policyRequeueAfter time.Duration, policyDeadlineDue bool) ctrl.Result {
+	if policyDeadlineDue {
+		return ctrl.Result{Requeue: true}
+	}
+	result := foldRetryAfter(ctrl.Result{}, input.ScaleDownRequeueInterval)
+	return foldRetryAfter(result, policyRequeueAfter)
+}
+
+func scaleDownExtras(d Decision) map[int32]struct{} {
+	for _, action := range d.Actions {
+		if action.Kind != ActionScaleDown || len(action.Extras) == 0 {
+			continue
+		}
+		extras := make(map[int32]struct{}, len(action.Extras))
+		for _, index := range action.Extras {
+			extras[index] = struct{}{}
+		}
+		return extras
+	}
+	return nil
 }
 
 // executeUpdatePass runs the Update op for the Decision's selected
@@ -447,22 +476,28 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 	return ctrl.Result{}, false, nil
 }
 
-// deleteExtraInstances dispatches workloadops.Delete for every index in
-// extras. Shared verbatim by the scale-down step and the teardown branch
-// so Delete-of-extras semantics cannot drift between them. Returns
-// allDeleted=false while any Delete is still in flight.
-func deleteExtraInstances(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, extras []int32) (bool, error) {
-	allDeleted := true
-	for _, idx := range extras {
-		done, derr := workloadops.Delete(ctx, deps, input, plan, idx)
-		if derr != nil {
-			return false, fmt.Errorf("workload.Reconcile: delete instance %d: %w", idx, derr)
-		}
-		if !done {
-			allDeleted = false
+// deleteExtraInstances advances the Component's one durable scale-down wave.
+// The snapshot supplies the single authoritative Pod observation shared by
+// selection, drain, deletion, and completion.
+func deleteExtraInstances(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot, extras []int32) (workloadops.DeleteBatchResult, error) {
+	pods, err := snapshot.LivePods(ctx)
+	if err != nil {
+		return workloadops.DeleteBatchResult{}, fmt.Errorf("workload.Reconcile: list pods for scale-down (component=%s): %w", plan.Component, err)
+	}
+	outcome, err := workloadops.DeleteBatch(ctx, deps, input, plan, extras, pods)
+	if err != nil {
+		return workloadops.DeleteBatchResult{}, fmt.Errorf("workload.Reconcile: delete batch: %w", err)
+	}
+	return outcome, nil
+}
+
+func hasDeleteOwnedInstance(statuses []InstanceStatus) bool {
+	for _, status := range statuses {
+		if status.Phase == InstancePhaseDeleting && status.Operation != nil && status.Operation.Type == InstanceOperationDelete {
+			return true
 		}
 	}
-	return allDeleted, nil
+	return false
 }
 
 // foldRetryAfter folds a RetryBlock re-evaluation wake-up into res.
@@ -521,8 +556,8 @@ func cachedBucketPods(ctx context.Context, deps Deps, input ReconcileInput, comp
 // Operation.Type=Migrate surges — so the pair isn't scale-down-deleted
 // out from under Migrate. Teardown passes includeMigrating=true:
 // everything must die, and since source and surge each carry their own
-// InstanceStatus entry, both run the full Delete pipeline
-// (patchInstanceStatusDeleting stamps Deleting over any phase).
+// InstanceStatus entry, both run the full scale-down pipeline
+// (batch admission stamps Deleting over any phase).
 func ExtraInstanceIndices(observed []InstanceStatus, plan ComponentPlan, includeMigrating bool) []int32 {
 	planned := make(map[int32]struct{}, len(plan.Instances))
 	for _, inst := range plan.Instances {

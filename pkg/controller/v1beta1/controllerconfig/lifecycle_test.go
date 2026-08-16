@@ -41,13 +41,17 @@ func TestNewLifecycleConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "valid scaleUpPodBatchSize",
+			name: "valid scale settings",
 			configMapData: map[string]string{
-				LifecycleConfigName: `{"scaleUpPodBatchSize":100}`,
+				LifecycleConfigName: `{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":75,"scaleDownRequeueInterval":"7s"}`,
 			},
 			validate: func(t *testing.T, cfg *LifecycleConfig) {
 				require.NotNil(t, cfg.ScaleUpPodBatchSize)
 				assert.Equal(t, int32(100), *cfg.ScaleUpPodBatchSize)
+				require.NotNil(t, cfg.ScaleDownPodBatchSize)
+				assert.Equal(t, int32(75), *cfg.ScaleDownPodBatchSize)
+				require.NotNil(t, cfg.ScaleDownRequeueInterval)
+				assert.Equal(t, "7s", *cfg.ScaleDownRequeueInterval)
 			},
 		},
 		{
@@ -104,6 +108,244 @@ func TestNewLifecycleConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLifecycleConfig_ToScaleDownPodBatchSize(t *testing.T) {
+	t.Run("nil config is unconfigured", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		size, err := cfg.ToScaleDownPodBatchSize()
+		require.NoError(t, err)
+		assert.Nil(t, size)
+	})
+
+	t.Run("absent field is unconfigured", func(t *testing.T) {
+		cfg := &LifecycleConfig{}
+		size, err := cfg.ToScaleDownPodBatchSize()
+		require.NoError(t, err)
+		assert.Nil(t, size)
+	})
+
+	t.Run("positive value passes through as a copy", func(t *testing.T) {
+		configured := int32(100)
+		cfg := &LifecycleConfig{ScaleDownPodBatchSize: &configured}
+		size, err := cfg.ToScaleDownPodBatchSize()
+		require.NoError(t, err)
+		require.NotNil(t, size)
+		assert.Equal(t, int32(100), *size)
+
+		configured = 200
+		assert.Equal(t, int32(100), *size)
+	})
+
+	for _, configured := range []int32{0, -1} {
+		configured := configured
+		t.Run(fmt.Sprintf("rejects %d", configured), func(t *testing.T) {
+			cfg := &LifecycleConfig{ScaleDownPodBatchSize: &configured}
+			size, err := cfg.ToScaleDownPodBatchSize()
+			require.ErrorContains(t, err, "lifecycle.scaleDownPodBatchSize")
+			assert.Nil(t, size)
+		})
+	}
+}
+
+func TestLifecycleConfig_ToScaleDownRequeueInterval(t *testing.T) {
+	t.Run("nil config disables periodic polling", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		interval, err := cfg.ToScaleDownRequeueInterval()
+		require.NoError(t, err)
+		assert.Zero(t, interval)
+	})
+
+	t.Run("absent field disables periodic polling", func(t *testing.T) {
+		cfg := &LifecycleConfig{}
+		interval, err := cfg.ToScaleDownRequeueInterval()
+		require.NoError(t, err)
+		assert.Zero(t, interval)
+	})
+
+	t.Run("positive duration passes through", func(t *testing.T) {
+		cfg := &LifecycleConfig{ScaleDownRequeueInterval: stringPointer("37s")}
+		interval, err := cfg.ToScaleDownRequeueInterval()
+		require.NoError(t, err)
+		assert.Equal(t, 37*time.Second, interval)
+	})
+
+	for _, value := range []string{"", "many", "0s", "-1s"} {
+		value := value
+		t.Run("rejects "+value, func(t *testing.T) {
+			cfg := &LifecycleConfig{ScaleDownRequeueInterval: &value}
+			interval, err := cfg.ToScaleDownRequeueInterval()
+			require.ErrorContains(t, err, "lifecycle.scaleDownRequeueInterval")
+			assert.Zero(t, interval)
+		})
+	}
+}
+
+func TestLoadPodBatchSizes(t *testing.T) {
+	tests := []struct {
+		name          string
+		lifecycle     *string
+		omitConfigMap bool
+		wantScaleUp   *int32
+		wantScaleDown *int32
+		wantInterval  time.Duration
+		wantError     string
+	}{
+		{
+			name:          "scale settings come from one snapshot",
+			lifecycle:     stringPointer(`{"scaleUpPodBatchSize":37,"scaleDownPodBatchSize":41,"scaleDownRequeueInterval":"7s"}`),
+			wantScaleUp:   int32Pointer(37),
+			wantScaleDown: int32Pointer(41),
+			wantInterval:  7 * time.Second,
+		},
+		{
+			name:        "scale-up alone leaves scale-down unbounded",
+			lifecycle:   stringPointer(`{"scaleUpPodBatchSize":37}`),
+			wantScaleUp: int32Pointer(37),
+		},
+		{
+			name:          "scale-down alone leaves scale-up unbounded",
+			lifecycle:     stringPointer(`{"scaleDownPodBatchSize":41}`),
+			wantScaleDown: int32Pointer(41),
+		},
+		{
+			name:         "requeue interval alone leaves both directions unbounded",
+			lifecycle:    stringPointer(`{"scaleDownRequeueInterval":"11s"}`),
+			wantInterval: 11 * time.Second,
+		},
+		{
+			name: "absent lifecycle key leaves both directions unbounded",
+		},
+		{
+			name:      "empty lifecycle object leaves both directions unbounded",
+			lifecycle: stringPointer(`{}`),
+		},
+		{
+			name:          "missing ConfigMap is rejected",
+			omitConfigMap: true,
+			wantError:     `configmaps "inferenceservice-config" not found`,
+		},
+		{
+			name:      "malformed lifecycle JSON is rejected",
+			lifecycle: stringPointer(`{not-json`),
+			wantError: "unable to parse lifecycle config json",
+		},
+		{
+			name:      "malformed scale-down field type is rejected",
+			lifecycle: stringPointer(`{"scaleDownPodBatchSize":"many"}`),
+			wantError: "cannot unmarshal string",
+		},
+		{
+			name:      "malformed requeue interval is rejected",
+			lifecycle: stringPointer(`{"scaleDownRequeueInterval":"many"}`),
+			wantError: "lifecycle.scaleDownRequeueInterval",
+		},
+		{
+			name:      "explicit empty requeue interval is rejected",
+			lifecycle: stringPointer(`{"scaleDownRequeueInterval":""}`),
+			wantError: "lifecycle.scaleDownRequeueInterval",
+		},
+		{
+			name:      "zero requeue interval is rejected",
+			lifecycle: stringPointer(`{"scaleDownRequeueInterval":"0s"}`),
+			wantError: "must be > 0, got 0s",
+		},
+		{
+			name:      "negative requeue interval is rejected",
+			lifecycle: stringPointer(`{"scaleDownRequeueInterval":"-1s"}`),
+			wantError: "must be > 0, got -1s",
+		},
+		{
+			name:      "zero scale-up is rejected",
+			lifecycle: stringPointer(`{"scaleUpPodBatchSize":0,"scaleDownPodBatchSize":41}`),
+			wantError: "lifecycle.scaleUpPodBatchSize: must be > 0, got 0",
+		},
+		{
+			name:      "negative scale-up is rejected",
+			lifecycle: stringPointer(`{"scaleUpPodBatchSize":-1,"scaleDownPodBatchSize":41}`),
+			wantError: "lifecycle.scaleUpPodBatchSize: must be > 0, got -1",
+		},
+		{
+			name:      "zero scale-down is rejected",
+			lifecycle: stringPointer(`{"scaleUpPodBatchSize":37,"scaleDownPodBatchSize":0}`),
+			wantError: "lifecycle.scaleDownPodBatchSize: must be > 0, got 0",
+		},
+		{
+			name:      "negative scale-down is rejected",
+			lifecycle: stringPointer(`{"scaleUpPodBatchSize":37,"scaleDownPodBatchSize":-1}`),
+			wantError: "lifecycle.scaleDownPodBatchSize: must be > 0, got -1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+			if !tt.omitConfigMap {
+				data := map[string]string{}
+				if tt.lifecycle != nil {
+					data[LifecycleConfigName] = *tt.lifecycle
+				}
+				_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(
+					context.Background(),
+					&v1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:            constants.InferenceServiceConfigMapName,
+							Namespace:       constants.OMENamespace,
+							ResourceVersion: "one-snapshot",
+						},
+						Data: data,
+					},
+					metav1.CreateOptions{},
+				)
+				require.NoError(t, err)
+			}
+
+			before := len(clientset.Actions())
+			got, err := LoadPodBatchSizes(clientset)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Equal(t, PodBatchSizes{}, got)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantScaleUp, got.ScaleUp)
+				assert.Equal(t, tt.wantScaleDown, got.ScaleDown)
+				assert.Equal(t, tt.wantInterval, got.ScaleDownRequeueInterval)
+			}
+
+			getCount := 0
+			for _, action := range clientset.Actions()[before:] {
+				if action.GetVerb() == "get" && action.GetResource().Resource == "configmaps" {
+					getCount++
+				}
+			}
+			assert.Equal(t, 1, getCount, "scale settings must share one ConfigMap GET")
+		})
+	}
+}
+
+func TestLoadScaleUpPodBatchSize_IgnoresScaleDownValidation(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.InferenceServiceConfigMapName,
+			Namespace: constants.OMENamespace,
+		},
+		Data: map[string]string{
+			LifecycleConfigName: `{"scaleUpPodBatchSize":37,"scaleDownPodBatchSize":0}`,
+		},
+	})
+
+	got, err := LoadScaleUpPodBatchSize(clientset)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, int32(37), *got)
+}
+
+func int32Pointer(value int32) *int32 {
+	return &value
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 // TestLifecycleConfig_ToScaleUpPodBatchSize pins the field-specific contract:

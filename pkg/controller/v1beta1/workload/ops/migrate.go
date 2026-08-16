@@ -564,8 +564,8 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// migration was requested) never emits the watch DELETE that
 		// satisfies its expectation, and the delete loop below skips
 		// Terminating pods, so without this the migration can never
-		// reach a terminal phase. Same ordering + advisory-error
-		// semantics as Delete's escalation.
+		// reach a terminal phase. This uses the scale-down escalation's
+		// ordering and advisory-error semantics.
 		for _, pod := range sourcePods {
 			if pod.DeletionTimestamp == nil {
 				continue

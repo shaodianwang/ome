@@ -161,3 +161,28 @@ func TestPromoteCurrentRevision_SameNameReplacementAborts(t *testing.T) {
 	g.Expect(persisted.UID).To(gomega.Equal(replacement.UID))
 	g.Expect(persisted.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
 }
+
+func TestPromoteCurrentRevision_GenerationChangeAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	stale := baselineIR("llama-engine", "prod", 1)
+	stale.Status.CurrentRevision = promotePriorRev
+	stale.Status.UpdateRevision = promoteTargetRev
+	stale.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promoteTargetRev,
+	}}
+
+	liveObject := stale.DeepCopy()
+	liveObject.Generation++
+	live, writes := newCountingStatusClient(t, 0, liveObject)
+
+	promote := buildPromoteCurrentRevision(live, live, stale)
+	err := promote(context.Background(), promoteTargetRev)
+	g.Expect(errors.Is(err, workload.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
+	g.Expect(*writes).To(gomega.Equal(0))
+	g.Expect(stale.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
+
+	persisted := &v1beta1.InferenceReplica{}
+	g.Expect(live.Get(context.Background(), types.NamespacedName{Name: stale.Name, Namespace: stale.Namespace}, persisted)).To(gomega.Succeed())
+	g.Expect(persisted.Generation).To(gomega.Equal(liveObject.Generation))
+	g.Expect(persisted.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
+}

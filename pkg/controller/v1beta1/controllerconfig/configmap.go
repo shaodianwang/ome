@@ -296,6 +296,30 @@ type LifecycleConfig struct {
 	// eligible Instance may exceed a positive budget and proceeds alone. Nil
 	// preserves this field's unbounded compatibility behavior.
 	ScaleUpPodBatchSize *int32 `json:"scaleUpPodBatchSize,omitempty"`
+	// ScaleDownPodBatchSize bounds active delete selection in Pod-equivalent
+	// units: its live and Terminating Pods, with a cost-1 floor for Podless
+	// status work. An Instance (including a leader/worker gang) remains
+	// indivisible. The first eligible Instance may exceed a positive budget and
+	// proceeds alone. Nil preserves this field's unbounded compatibility behavior.
+	ScaleDownPodBatchSize *int32 `json:"scaleDownPodBatchSize,omitempty"`
+	// ScaleDownRequeueInterval is the periodic wake-up cadence while destructive
+	// work remains in flight. The controller also watches Pods, EndpointSlices,
+	// PodGroups, and its owner. Absence disables only cadence polling; configured
+	// force-delete and teardown deadlines still schedule their exact wake-ups.
+	// There is intentionally no in-code default.
+	ScaleDownRequeueInterval *string `json:"scaleDownRequeueInterval,omitempty"`
+}
+
+// PodBatchSizes contains the process-scoped OMENative scale settings loaded
+// from one lifecycle ConfigMap snapshot. Nil batch fields preserve that
+// direction's unbounded compatibility behavior; a zero requeue interval leaves
+// progress to watched resources and exact configured lifecycle deadlines.
+//
+// +kubebuilder:object:generate=false
+type PodBatchSizes struct {
+	ScaleUp                  *int32
+	ScaleDown                *int32
+	ScaleDownRequeueInterval time.Duration
 }
 
 // UpdateRetryConfig is the same-target update retry policy: a failed rollout
@@ -469,19 +493,84 @@ func (c *AutoMigrateConfig) Validate() error {
 // compatibility behavior; it does not fabricate a default. Explicit zero or
 // negative values are invalid so manager startup can reject bad configuration.
 func (c *LifecycleConfig) ToScaleUpPodBatchSize() (*int32, error) {
-	if c == nil || c.ScaleUpPodBatchSize == nil {
+	if c == nil {
 		return nil, nil
 	}
-	if *c.ScaleUpPodBatchSize <= 0 {
-		return nil, fmt.Errorf("invalid lifecycle.scaleUpPodBatchSize: must be > 0, got %d", *c.ScaleUpPodBatchSize)
+	return positivePodBatchSize("scaleUpPodBatchSize", c.ScaleUpPodBatchSize)
+}
+
+// ToScaleDownPodBatchSize validates the configured delete Pod-equivalent batch
+// size. A nil LifecycleConfig or absent field preserves unbounded candidate
+// selection. Explicit zero or negative values are invalid so manager startup
+// can reject bad configuration.
+func (c *LifecycleConfig) ToScaleDownPodBatchSize() (*int32, error) {
+	if c == nil {
+		return nil, nil
 	}
-	size := *c.ScaleUpPodBatchSize
+	return positivePodBatchSize("scaleDownPodBatchSize", c.ScaleDownPodBatchSize)
+}
+
+// ToScaleDownRequeueInterval validates the configured destructive-work polling
+// cadence. A nil LifecycleConfig or absent field disables periodic polling
+// without disabling exact configured lifecycle-deadline wake-ups or fabricating
+// a binary default. Explicit malformed, zero, or negative durations are
+// rejected at startup.
+func (c *LifecycleConfig) ToScaleDownRequeueInterval() (time.Duration, error) {
+	if c == nil || c.ScaleDownRequeueInterval == nil {
+		return 0, nil
+	}
+	interval, err := time.ParseDuration(*c.ScaleDownRequeueInterval)
+	if err != nil {
+		return 0, fmt.Errorf("invalid lifecycle.scaleDownRequeueInterval %q: %w", *c.ScaleDownRequeueInterval, err)
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("invalid lifecycle.scaleDownRequeueInterval: must be > 0, got %s", interval)
+	}
+	return interval, nil
+}
+
+func positivePodBatchSize(field string, configured *int32) (*int32, error) {
+	if configured == nil {
+		return nil, nil
+	}
+	if *configured <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.%s: must be > 0, got %d", field, *configured)
+	}
+	size := *configured
 	return &size, nil
 }
 
-// LoadScaleUpPodBatchSize reads and validates the process-scoped scale-up
-// budget from the operator ConfigMap. Callers keep the returned value for the
+// LoadPodBatchSizes reads one lifecycle ConfigMap snapshot and validates the
+// process-scoped scale settings. Callers keep the returned values for the
 // lifetime of the controller process.
+func LoadPodBatchSizes(clientset kubernetes.Interface) (PodBatchSizes, error) {
+	lifecycleConfig, err := NewLifecycleConfig(clientset)
+	if err != nil {
+		return PodBatchSizes{}, fmt.Errorf("load lifecycle configuration: %w", err)
+	}
+	scaleUp, err := lifecycleConfig.ToScaleUpPodBatchSize()
+	if err != nil {
+		return PodBatchSizes{}, fmt.Errorf("validate lifecycle.scaleUpPodBatchSize: %w", err)
+	}
+	scaleDown, err := lifecycleConfig.ToScaleDownPodBatchSize()
+	if err != nil {
+		return PodBatchSizes{}, fmt.Errorf("validate lifecycle.scaleDownPodBatchSize: %w", err)
+	}
+	scaleDownRequeueInterval, err := lifecycleConfig.ToScaleDownRequeueInterval()
+	if err != nil {
+		return PodBatchSizes{}, fmt.Errorf("validate lifecycle.scaleDownRequeueInterval: %w", err)
+	}
+	return PodBatchSizes{
+		ScaleUp:                  scaleUp,
+		ScaleDown:                scaleDown,
+		ScaleDownRequeueInterval: scaleDownRequeueInterval,
+	}, nil
+}
+
+// LoadScaleUpPodBatchSize reads and validates only the process-scoped scale-up
+// budget. The manager uses LoadPodBatchSizes so both directions share one
+// ConfigMap snapshot; this field-specific loader remains available to callers
+// that do not consume scale-down configuration.
 func LoadScaleUpPodBatchSize(clientset kubernetes.Interface) (*int32, error) {
 	lifecycleConfig, err := NewLifecycleConfig(clientset)
 	if err != nil {

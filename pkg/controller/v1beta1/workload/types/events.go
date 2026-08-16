@@ -80,7 +80,7 @@ const (
 	// changed.
 	EventReasonRetryBlockReleaseSkipped EventReason = "RetryBlockReleaseSkipped"
 
-	// EventReasonPodForceDeleted fires when the Delete op's escalation
+	// EventReasonPodForceDeleted fires when scale-down escalation
 	// force-deletes (grace 0, UID-preconditioned) a Terminating pod
 	// overdue past its own deletion deadline on a node that provably
 	// cannot acknowledge the termination (gone, or unreachable-tainted /
@@ -107,7 +107,7 @@ const (
 	// EventReasonMigrationExpired fires when a non-terminal Manual
 	// migration record passes its Deadline: the record is closed
 	// Failed, the pair's Migrate ops are cleared, the surge is torn
-	// down by the ordinary scale-down Delete pipeline, and the source
+	// down by the ordinary scale-down batch pipeline, and the source
 	// phase is restored from observation.
 	EventReasonMigrationExpired              EventReason = "MigrationExpired"
 	EventReasonRateLimited                   EventReason = "RateLimited"

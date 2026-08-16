@@ -11,7 +11,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 )
 
 // Teardown-mode dispatcher contract (owner deletion): the planned index
@@ -19,7 +18,7 @@ import (
 // Delete pipeline, and nothing else runs — no Paused gate, no
 // Restart / Migrate / Update / Create. The caller owns completion
 // detection and finalizer decisions, so the dispatcher only reports
-// "deletes still in flight" (DeleteRequeueInterval) or "all observed
+// "deletes still in flight" (the configured poll interval) or "all observed
 // Instances resolved" (zero result).
 
 // TestReconcile_Teardown_DeletesEveryObservedInstance drives teardown
@@ -44,13 +43,7 @@ func TestReconcile_Teardown_DeletesEveryObservedInstance(t *testing.T) {
 		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
 		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady},
 	}
-	phaseByIdx := map[int32]workload.InstancePhase{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
-		s := workload.InstanceStatus{Index: idx}
-		fn(&s)
-		phaseByIdx[idx] = s.Phase
-		return nil
-	}
+	store := installTestAtomicMutationStore(&in)
 	// A non-terminal Manual record that would be dispatched on a normal
 	// reconcile; teardown must never reach the migration pass.
 	in.ObservedState.Migrations = []workload.MigrationRecord{{
@@ -75,25 +68,49 @@ func TestReconcile_Teardown_DeletesEveryObservedInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.RequeueAfter != workloadops.DeleteRequeueInterval {
-		t.Errorf("teardown with pods in flight must requeue at DeleteRequeueInterval, got %+v", result)
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("teardown admission must requeue immediately, got %+v", result)
 	}
 	for _, idx := range []int32{0, 1, 2} {
-		if phaseByIdx[idx] != workload.InstancePhaseDeleting {
-			t.Errorf("instance %d: phase = %q, want Deleting (every observed index is an extra under teardown)", idx, phaseByIdx[idx])
+		status := store.status(idx)
+		if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+			t.Errorf("instance %d was not durably admitted for teardown: %+v", idx, status)
 		}
 	}
 	if migrationMutated {
 		t.Errorf("teardown must not run the migration pass")
 	}
-	// Every pod deleted, none created (Create pass must not run even
-	// though the plan asks for index 0).
 	pods := &corev1.PodList{}
 	if err := c.List(context.Background(), pods); err != nil {
 		t.Fatalf("list pods: %v", err)
 	}
+	if len(pods.Items) != 3 {
+		t.Fatalf("admission pass must have zero Pod effects; got %d Pods", len(pods.Items))
+	}
+
+	store.sync(&in)
+	result, err = workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Fatalf("effect pass: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("teardown effect pass must use delete cadence, got %+v", result)
+	}
+	pods = &corev1.PodList{}
+	if err := c.List(context.Background(), pods); err != nil {
+		t.Fatalf("list pods after effect pass: %v", err)
+	}
 	if len(pods.Items) != 0 {
-		t.Errorf("teardown must delete every pod and create none; %d pods remain", len(pods.Items))
+		t.Errorf("teardown must delete every Pod and create none; %d remain", len(pods.Items))
+	}
+
+	store.sync(&in)
+	result, err = workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Fatalf("completion pass: %v", err)
+	}
+	if !result.Requeue || len(store.statuses) != 0 {
+		t.Fatalf("teardown completion result/statuses = %+v/%+v", result, store.statuses)
 	}
 }
 
@@ -121,13 +138,7 @@ func TestReconcile_Teardown_DeletesMigratingPair(t *testing.T) {
 		{Index: 7, Incarnation: 1, Phase: workload.InstancePhaseCreating,
 			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationMigrate}},
 	}
-	phaseByIdx := map[int32]workload.InstancePhase{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
-		s := workload.InstanceStatus{Index: idx}
-		fn(&s)
-		phaseByIdx[idx] = s.Phase
-		return nil
-	}
+	store := installTestAtomicMutationStore(&in)
 
 	plan := minimalPlan() // covers only index 0
 	plan.MigrationMode = workload.MigrationModeAuto
@@ -136,20 +147,37 @@ func TestReconcile_Teardown_DeletesMigratingPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.RequeueAfter != workloadops.DeleteRequeueInterval {
-		t.Errorf("teardown with pods in flight must requeue at DeleteRequeueInterval, got %+v", result)
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("mid-migration teardown admission must requeue immediately, got %+v", result)
 	}
 	for _, idx := range []int32{0, 7} {
-		if phaseByIdx[idx] != workload.InstancePhaseDeleting {
-			t.Errorf("instance %d: phase = %q, want Deleting (mid-migration pair must not survive teardown)", idx, phaseByIdx[idx])
+		status := store.status(idx)
+		if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+			t.Errorf("mid-migration instance %d was not durably admitted: %+v", idx, status)
 		}
 	}
 	pods := &corev1.PodList{}
 	if err := c.List(context.Background(), pods); err != nil {
 		t.Fatalf("list pods: %v", err)
 	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("admission pass must leave the migration pair untouched; %d Pods remain", len(pods.Items))
+	}
+
+	store.sync(&in)
+	result, err = workload.Reconcile(context.Background(), deps, in, plan, nil)
+	if err != nil {
+		t.Fatalf("effect pass: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("mid-migration teardown effect result = %+v", result)
+	}
+	pods = &corev1.PodList{}
+	if err := c.List(context.Background(), pods); err != nil {
+		t.Fatalf("list pods after effect pass: %v", err)
+	}
 	if len(pods.Items) != 0 {
-		t.Errorf("teardown must delete the source AND surge pods; %d remain", len(pods.Items))
+		t.Errorf("teardown must delete the source and surge Pods; %d remain", len(pods.Items))
 	}
 }
 
@@ -186,10 +214,8 @@ func TestReconcile_Teardown_NoInstancesNoPods_CleanReturn(t *testing.T) {
 }
 
 // TestReconcile_Teardown_PodlessInstances_RemovedAndDone pins the
-// converged shape: observed Instances whose pods are already gone
-// resolve in one pass — RemoveInstance drops each entry and the
-// dispatcher returns a zero result so the caller can run its
-// completion check.
+// converged shape: observed Instances whose Pods are already gone still use a
+// durable admission pass, a batched removal pass, and a final verification.
 func TestReconcile_Teardown_PodlessInstances_RemovedAndDone(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -201,21 +227,32 @@ func TestReconcile_Teardown_PodlessInstances_RemovedAndDone(t *testing.T) {
 		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
 		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseDeleting},
 	}
-	removed := map[int32]bool{}
-	in.RemoveInstance = func(_ context.Context, idx int32) (bool, error) {
-		removed[idx] = true
-		return true, nil
-	}
+	store := installTestAtomicMutationStore(&in)
 
 	result, err := workload.Reconcile(context.Background(), deps, in, minimalPlan(), nil)
 	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("admission pass: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
-		t.Errorf("fully-resolved teardown must return a zero result, got %+v", result)
+	if !result.Requeue || len(store.statuses) != 2 {
+		t.Fatalf("podless admission result/statuses = %+v/%+v", result, store.statuses)
 	}
-	if !removed[0] || !removed[1] {
-		t.Errorf("both podless Instances must be removed; got %v", removed)
+
+	store.sync(&in)
+	result, err = workload.Reconcile(context.Background(), deps, in, minimalPlan(), nil)
+	if err != nil {
+		t.Fatalf("completion pass: %v", err)
+	}
+	if !result.Requeue || len(store.statuses) != 0 {
+		t.Fatalf("podless completion result/statuses = %+v/%+v", result, store.statuses)
+	}
+
+	store.sync(&in)
+	result, err = workload.Reconcile(context.Background(), deps, in, minimalPlan(), nil)
+	if err != nil {
+		t.Fatalf("verification pass: %v", err)
+	}
+	if !result.IsZero() {
+		t.Errorf("fully resolved teardown must return zero, got %+v", result)
 	}
 }
 
@@ -233,21 +270,38 @@ func TestReconcile_Teardown_IgnoresPaused(t *testing.T) {
 	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
 		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
 	}
+	store := installTestAtomicMutationStore(&in)
 	plan := minimalPlan()
 	plan.Paused = true
 
 	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("admission pass: %v", err)
 	}
-	if result.RequeueAfter != workloadops.DeleteRequeueInterval {
-		t.Errorf("paused teardown must still dispatch Delete and requeue, got %+v", result)
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("paused teardown admission must requeue immediately, got %+v", result)
 	}
 	pods := &corev1.PodList{}
 	if err := c.List(context.Background(), pods); err != nil {
 		t.Fatalf("list pods: %v", err)
 	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("admission pass must leave the Pod untouched; %d remain", len(pods.Items))
+	}
+
+	store.sync(&in)
+	result, err = workload.Reconcile(context.Background(), deps, in, plan, nil)
+	if err != nil {
+		t.Fatalf("effect pass: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("paused teardown effect pass must use delete cadence, got %+v", result)
+	}
+	pods = &corev1.PodList{}
+	if err := c.List(context.Background(), pods); err != nil {
+		t.Fatalf("list pods after effect pass: %v", err)
+	}
 	if len(pods.Items) != 0 {
-		t.Errorf("paused teardown must still delete the pod; %d remain", len(pods.Items))
+		t.Errorf("paused teardown must still delete the Pod; %d remain", len(pods.Items))
 	}
 }

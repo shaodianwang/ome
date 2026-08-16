@@ -8,8 +8,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -37,6 +39,27 @@ func podAtIncarnation(isvc *v1beta1.InferenceService, instanceIdx int32, incarna
 	pod := podForInstance(isvc, instanceIdx, ready, serving)
 	pod.Labels[query.LabelInstanceIncarnation] = fmt.Sprintf("%d", incarnation)
 	return pod
+}
+
+// sliceWithEndpoint constructs one routed-service endpoint for a restart Pod.
+func sliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod, ready bool) *discoveryv1.EndpointSlice {
+	return &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sliceName,
+			Namespace: namespace,
+			Labels:    map[string]string{discoveryv1.LabelServiceName: serviceName},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses:  []string{"10.0.0.1"},
+			Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(ready)},
+			TargetRef: &corev1.ObjectReference{
+				Kind:      "Pod",
+				Namespace: pod.Namespace,
+				Name:      pod.Name,
+			},
+		}},
+	}
 }
 
 // buildPlanSinglePodEngineForRestart is the per-Restart-test plan builder.
@@ -68,7 +91,7 @@ func TestRestart_FirstPassBumpsIncarnationAndPatchesStatus(t *testing.T) {
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
 	c := newFakeClient(t, isvc, ir, pod)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "test trigger")
@@ -115,7 +138,7 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, true /* still Ready */)
 	c := newFakeClient(t, isvc, ir, pod, slice)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -147,7 +170,7 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	pod := podAtIncarnation(isvc, 0, 1, true, false /* already drained */)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false /* Ready=false */)
 	c := newFakeClient(t, isvc, ir, pod, slice)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -179,7 +202,7 @@ func TestRestart_RefusesToDeleteOrphanPod(t *testing.T) {
 	orphan.Name = "orphan-pod"
 	delete(orphan.Labels, query.LabelInstanceIncarnation)
 	c := newFakeClient(t, isvc, ir, orphan)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -215,7 +238,7 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 		},
 	}
 	c := newFakeClient(t, isvc, ir)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -255,7 +278,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 		// status to pick up the new incarnation after Restart bumps it.
 		fresh := &v1beta1.InferenceService{}
 		_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-		input := buildTestInputForDelete(fresh, c, workload.ComponentEngine)
+		input := buildTestInput(fresh, c, workload.ComponentEngine)
 		plan := buildPlanSinglePodEngineForRestart(c, fresh)
 
 		// Fast-forward: simulate the fake watch observing every delete the
@@ -344,7 +367,7 @@ func TestRestart_CapturesLastFailureBeforeDrain(t *testing.T) {
 		"llama-70b-engine-" + testRevisionHash
 	failed := failedPodOOM(isvc, 1)
 	c := newFakeClient(t, isvc, ir, failed)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod Failed"); err != nil {
@@ -385,7 +408,7 @@ func TestRestart_PodVanished_PreservesPriorLastFailure(t *testing.T) {
 	}
 	// No pods exist → "pod count below desired" trigger.
 	c := newFakeClient(t, isvc, ir)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod count 0 below desired 1"); err != nil {
@@ -406,7 +429,7 @@ func TestDetectRestartTrigger_RichReasonForFailedPod(t *testing.T) {
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	failed := failedPodOOM(isvc, 1)
 	c := newFakeClient(t, isvc, ir, failed)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	needs, reason, err := ops.DetectRestartTrigger(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0])
@@ -430,7 +453,7 @@ func TestRestart_EmitsRichRestartTriggeredEvent(t *testing.T) {
 		"llama-70b-engine-" + testRevisionHash
 	failed := failedPodOOM(isvc, 1)
 	c := newFakeClient(t, isvc, ir, failed)
-	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
 	rec := record.NewFakeRecorder(16)

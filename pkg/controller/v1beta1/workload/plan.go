@@ -339,8 +339,8 @@ func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 // once no source op points at it (the source promoted, was reset, or
 // was re-adopted after a corrective edit) the marker is an ORPHAN —
 // pinning it would leak a dead replacement gang forever. Unpinned, it
-// falls out of the plan as a scale-down extra and the Delete pipeline
-// reaps its pods and clears the slot.
+// falls out of the plan as a scale-down extra and the scale-down batch
+// pipeline reaps its pods and clears the slot.
 func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	referenced := map[int32]struct{}{}

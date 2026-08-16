@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	clockutils "k8s.io/utils/clock"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -26,6 +27,18 @@ import (
 
 // fdNow is the pinned "wall clock" every force-delete test runs at.
 var fdNow = time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+
+type fdSteppingClock struct {
+	clockutils.RealClock
+	next time.Time
+	step time.Duration
+}
+
+func (c *fdSteppingClock) Now() time.Time {
+	now := c.next
+	c.next = c.next.Add(c.step)
+	return now
+}
 
 func fdPolicy() *workload.ForceDeletePolicy {
 	return &workload.ForceDeletePolicy{
@@ -72,8 +85,8 @@ type recordedDeleteOpts struct {
 	uid   *k8stypes.UID
 }
 
-// fdDeleteRecorder returns interceptor funcs that record every pod
-// Delete's applied options before delegating to the inner client.
+// fdDeleteRecorder returns interceptor funcs that record every Pod deletion
+// RPC's applied options before delegating to the inner client.
 func fdDeleteRecorder(rec *[]recordedDeleteOpts) interceptor.Funcs {
 	return interceptor.Funcs{
 		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
@@ -210,6 +223,95 @@ func fdLedgerEntries(t *testing.T, c client.Client, isvc *v1beta1.InferenceServi
 // overdue under fdPolicy's 2m slack.
 var overdueTS = fdNow.Add(-10 * time.Minute)
 
+func TestForceDeleteRequeueTracksExactPolicyBoundaries(t *testing.T) {
+	isvc := fdISVC("deadline-requeue")
+	policy := fdPolicy()
+
+	t.Run("pod overdue slack", func(t *testing.T) {
+		pod := fdTerminatingPod("within-grace", "unread-node", fdNow.Add(-time.Minute))
+		nodeGets := 0
+		funcs := interceptor.Funcs{Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Node); ok {
+				nodeGets++
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		}}
+		c := fdFakeClient(t, &funcs)
+		next, err := escalateStuckTerminatingWithDeadline(context.Background(), workload.Deps{Client: c}, fdInput(isvc, policy), pod, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fdNow.Add(time.Minute + time.Nanosecond)
+		if !next.Equal(want) || nodeGets != 0 {
+			t.Fatalf("next/node reads = %s/%d, want %s/0", next, nodeGets, want)
+		}
+	})
+
+	t.Run("node unreachable threshold", func(t *testing.T) {
+		pod := fdTerminatingPod("young-unreachable", "node-a", overdueTS)
+		node := fdNodeNotReady("node-a", 2*time.Minute)
+		c := fdFakeClient(t, nil, node)
+		next, err := escalateStuckTerminatingWithDeadline(context.Background(), workload.Deps{Client: c}, fdInput(isvc, policy), pod, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fdNow.Add(3 * time.Minute)
+		if !next.Equal(want) {
+			t.Fatalf("next = %s, want %s", next, want)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		node *corev1.Node
+	}{
+		{name: "ready node recheck", node: fdNodeReady("node-a")},
+		{name: "node without unreachable evidence recheck", node: &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recheckPolicy := *policy
+			recheckPolicy.NodeUnreachableThreshold = 7*time.Minute + 13*time.Second
+			pod := fdTerminatingPod("overdue", "node-a", overdueTS)
+			c := fdFakeClient(t, nil, test.node)
+			next, err := escalateStuckTerminatingWithDeadline(context.Background(), workload.Deps{Client: c}, fdInput(isvc, &recheckPolicy), pod, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fdNow.Add(recheckPolicy.NodeUnreachableThreshold)
+			if !next.Equal(want) {
+				t.Fatalf("next = %s, want %s", next, want)
+			}
+		})
+	}
+}
+
+func TestDeleteBatchComparesAbsolutePolicyDeadlinesAcrossLongPass(t *testing.T) {
+	owner := deleteBatchOwner()
+	status := deleteOwnedStatus(0, fdNow.Add(-time.Minute))
+	first := fdTerminatingPod("first-deadline", "unread-node", fdNow.Add(-time.Minute))
+	second := fdTerminatingPod("second-deadline", "unread-node", fdNow.Add(-30*time.Second))
+	clock := &fdSteppingClock{next: fdNow, step: 40 * time.Second}
+	store := newDeleteMutationStore(owner, []workload.InstanceStatus{status})
+	input := deleteBatchInput(owner, []workload.InstanceStatus{status})
+	input.Clock = clock
+	input.ForceDelete = fdPolicy()
+	input.ScaleDownRequeueInterval = 0
+	input.ApplyInstanceMutationsWithRetryBlock = store.apply
+	client := newDeleteFailureBaseClient(t)
+
+	result, err := DeleteBatch(context.Background(), workload.Deps{
+		Client: client, Expectations: workload.NewExpectations(),
+	}, input, deleteBatchPlan(), nil, map[int32][]*corev1.Pod{0: {first, second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.InProgress || !result.PolicyDeadlineDue || result.RequeueAfter != 0 {
+		t.Fatalf("result = %+v, want earliest absolute deadline already due", result)
+	}
+}
+
 // Invariant 1: config absent → the predicate never evaluates; zero
 // Node reads, pod untouched.
 func TestForceDelete_NilPolicy_NoNodeReadsNoAction(t *testing.T) {
@@ -285,6 +387,9 @@ func TestForceDelete_Overdue_NodeReady_Untouched(t *testing.T) {
 	res := stuckTerminatingEvidence(context.Background(), c, pod, fdPolicy(), fdNow)
 	if res.kind != evidenceNodeHealthy {
 		t.Errorf("evidence kind: got %s want node-healthy", res.kind)
+	}
+	if want := fdNow.Add(fdPolicy().NodeUnreachableThreshold); !res.requeueAt.Equal(want) {
+		t.Errorf("requeueAt: got %s want %s", res.requeueAt, want)
 	}
 	if err := escalateStuckTerminating(context.Background(), workload.Deps{Client: c}, fdInput(isvc, fdPolicy()), pod, 0); err != nil {
 		t.Fatalf("escalate: %v", err)
@@ -394,6 +499,9 @@ func TestForceDelete_StaleTaintOnRecoveredNode_ReadyTrueVetoes(t *testing.T) {
 	res := stuckTerminatingEvidence(context.Background(), c, pod, fdPolicy(), fdNow)
 	if res.kind != evidenceNodeHealthy {
 		t.Errorf("evidence kind: got %s want node-healthy (Ready=True must veto the stale taint)", res.kind)
+	}
+	if want := fdNow.Add(fdPolicy().NodeUnreachableThreshold); !res.requeueAt.Equal(want) {
+		t.Errorf("requeueAt: got %s want %s", res.requeueAt, want)
 	}
 	if err := escalateStuckTerminating(context.Background(), workload.Deps{Client: c}, fdInput(isvc, fdPolicy()), pod, 0); err != nil {
 		t.Fatalf("escalate: %v", err)
@@ -564,233 +672,5 @@ func TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay(t *testing.T) {
 	}
 	if e.StartedAt == "" || e.CompletedAt == "" {
 		t.Errorf("timestamps: StartedAt=%q CompletedAt=%q", e.StartedAt, e.CompletedAt)
-	}
-}
-
-// Invariant 10: a Delete op wedged on a
-// Terminating pod whose node is gone escalates, the pod list empties,
-// RemoveInstance fires, and the op completes — while the control run
-// with the config absent stays wedged forever.
-func TestDelete_WedgedPodOnDeadNode_EscalationUnblocks(t *testing.T) {
-	legacyResetExpectations(t)
-
-	dt := metav1.NewTime(overdueTS)
-	isvc := legacyMinimalISVC("llama", "prod", 1)
-	ir := legacyInstanceIR(isvc, workload.ComponentEngine,
-		v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceDeleting})
-	pod := legacyPodForInstance(isvc, 0, false, false)
-	pod.Spec.NodeName = "dead-node"
-	pod.UID = k8stypes.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002")
-
-	// The fake client can't store a Terminating-but-finalizer-free pod,
-	// so the List interceptor presents it as Terminating instead.
-	var deletes []recordedDeleteOpts
-	funcs := fdDeleteRecorder(&deletes)
-	funcs.List = func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-		if err := cl.List(ctx, list, opts...); err != nil {
-			return err
-		}
-		if pl, ok := list.(*corev1.PodList); ok {
-			for i := range pl.Items {
-				if pl.Items[i].Name == pod.Name {
-					pl.Items[i].DeletionTimestamp = &dt
-				}
-			}
-		}
-		return nil
-	}
-	c := fdFakeClient(t, &funcs, isvc, ir, pod) // node "dead-node" absent
-
-	input := legacyTestInput(isvc, c, workload.ComponentEngine)
-	input.RemoveInstance = legacyRemoveInstance(c, isvc, workload.ComponentEngine)
-	input.ForceDelete = fdPolicy()
-	input.Clock = clocktesting.NewFakeClock(fdNow)
-	rec := record.NewFakeRecorder(16)
-	deps := workload.Deps{Client: c, Recorder: rec, Clock: clocktesting.NewFakeClock(fdNow)}
-	plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)
-
-	// Pass 1: the escalation removes the wedge; the pass itself stays
-	// non-done (completion detection unchanged).
-	done, err := Delete(context.Background(), deps, input, plan, 0)
-	if err != nil {
-		t.Fatalf("pass 1: %v", err)
-	}
-	if done {
-		t.Fatalf("pass 1: expected done=false")
-	}
-	if len(deletes) != 1 {
-		t.Fatalf("pass 1 deletes: got %d want 1", len(deletes))
-	}
-	if deletes[0].grace == nil || *deletes[0].grace != 0 || deletes[0].uid == nil || *deletes[0].uid != pod.UID {
-		t.Fatalf("force-delete options: grace=%v uid=%v", deletes[0].grace, deletes[0].uid)
-	}
-
-	// Pass 2: pod list is empty → RemoveInstance → done.
-	done, err = Delete(context.Background(), deps, input, plan, 0)
-	if err != nil {
-		t.Fatalf("pass 2: %v", err)
-	}
-	if !done {
-		t.Fatalf("pass 2: expected done=true after escalation emptied the pod list")
-	}
-	if insts := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine); len(insts) != 0 {
-		t.Errorf("InstanceStatuses left: %d", len(insts))
-	}
-	if n := fdCountEvents(fdDrainEvents(rec), workload.EventReasonPodForceDeleted); n != 1 {
-		t.Errorf("PodForceDeleted events: got %d want 1", n)
-	}
-
-	// Control run: config absent → the wedge persists, forever.
-	legacyResetExpectations(t)
-	isvcCtl := legacyMinimalISVC("llama-ctl", "prod", 1)
-	irCtl := legacyInstanceIR(isvcCtl, workload.ComponentEngine,
-		v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceDeleting})
-	podCtl := legacyPodForInstance(isvcCtl, 0, false, false)
-	podCtl.Spec.NodeName = "dead-node"
-	var ctlDeletes []recordedDeleteOpts
-	ctlFuncs := fdDeleteRecorder(&ctlDeletes)
-	ctlFuncs.List = func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-		if err := cl.List(ctx, list, opts...); err != nil {
-			return err
-		}
-		if pl, ok := list.(*corev1.PodList); ok {
-			for i := range pl.Items {
-				if pl.Items[i].Name == podCtl.Name {
-					pl.Items[i].DeletionTimestamp = &dt
-				}
-			}
-		}
-		return nil
-	}
-	cCtl := fdFakeClient(t, &ctlFuncs, isvcCtl, irCtl, podCtl)
-	inputCtl := legacyTestInput(isvcCtl, cCtl, workload.ComponentEngine)
-	inputCtl.RemoveInstance = legacyRemoveInstance(cCtl, isvcCtl, workload.ComponentEngine)
-	inputCtl.ForceDelete = nil
-	inputCtl.Clock = clocktesting.NewFakeClock(fdNow)
-	for pass := 0; pass < 3; pass++ {
-		done, err := Delete(context.Background(), workload.Deps{Client: cCtl}, inputCtl, plan, 0)
-		if err != nil {
-			t.Fatalf("control pass %d: %v", pass, err)
-		}
-		if done {
-			t.Fatalf("control pass %d: must stay wedged with config absent", pass)
-		}
-	}
-	if len(ctlDeletes) != 0 {
-		t.Errorf("control deletes: got %d want 0", len(ctlDeletes))
-	}
-	got := &corev1.Pod{}
-	if err := cCtl.Get(context.Background(), client.ObjectKeyFromObject(podCtl), got); err != nil {
-		t.Errorf("control pod must survive: %v", err)
-	}
-}
-
-// fdWedgedDeleteFixture assembles the invariant-11 harness: a Delete-op
-// pass over one wedged Terminating pod (overdue, node absent → NodeGone)
-// whose delete expectation is deliberately left UNSATISFIED — the exact
-// state a dead node produces, since the watch DELETE that would
-// decrement it never arrives.
-func fdWedgedDeleteFixture(t *testing.T, isvcName string) (workload.Deps, workload.ReconcileInput, workload.ComponentPlan, *corev1.Pod, *[]recordedDeleteOpts, *record.FakeRecorder) {
-	t.Helper()
-	legacyResetExpectations(t)
-
-	dt := metav1.NewTime(overdueTS)
-	isvc := legacyMinimalISVC(isvcName, "prod", 1)
-	ir := legacyInstanceIR(isvc, workload.ComponentEngine,
-		v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceDeleting})
-	pod := legacyPodForInstance(isvc, 0, false, false)
-	pod.Spec.NodeName = "dead-node"
-	pod.UID = k8stypes.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0003")
-
-	deletes := &[]recordedDeleteOpts{}
-	funcs := fdDeleteRecorder(deletes)
-	funcs.List = func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-		if err := cl.List(ctx, list, opts...); err != nil {
-			return err
-		}
-		if pl, ok := list.(*corev1.PodList); ok {
-			for i := range pl.Items {
-				if pl.Items[i].Name == pod.Name {
-					pl.Items[i].DeletionTimestamp = &dt
-				}
-			}
-		}
-		return nil
-	}
-	c := fdFakeClient(t, &funcs, isvc, ir, pod) // node "dead-node" absent → NodeGone
-
-	input := legacyTestInput(isvc, c, workload.ComponentEngine)
-	input.RemoveInstance = legacyRemoveInstance(c, isvc, workload.ComponentEngine)
-	input.ForceDelete = fdPolicy()
-	input.Clock = clocktesting.NewFakeClock(fdNow)
-	rec := record.NewFakeRecorder(16)
-	deps := workload.Deps{Client: c, Recorder: rec, Clock: clocktesting.NewFakeClock(fdNow)}
-	plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)
-
-	// Seed the wedge's permanent expectations state: the graceful delete
-	// from a prior pass is still "in flight" and will never be observed.
-	deps.ExpectationsCache().ExpectDeletes(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, 0, 1)
-	if deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, 0) {
-		t.Fatalf("precondition: delete expectation must be unsatisfied")
-	}
-	return deps, input, plan, pod, deletes, rec
-}
-
-// Invariant 11 (gate-order): an unsatisfied delete expectation — the
-// permanent state for a pod wedged on a dead node, since the watch
-// DELETE that would decrement it never fires — must not defer the
-// escalation to the 2-minute expectations TTL. The escalation runs
-// before the expectations gate, so it fires THIS pass even though the
-// pass still early-returns done=false at the gate.
-func TestDelete_UnsatisfiedExpectations_EscalationFiresSamePass(t *testing.T) {
-	deps, input, plan, pod, deletes, rec := fdWedgedDeleteFixture(t, "llama-exp")
-
-	done, err := Delete(context.Background(), deps, input, plan, 0)
-	if err != nil {
-		t.Fatalf("pass: %v", err)
-	}
-	if done {
-		t.Fatalf("expected done=false (pass still gated on expectations)")
-	}
-	if len(*deletes) != 1 {
-		t.Fatalf("deletes: got %d want 1 (escalation must fire before the expectations gate)", len(*deletes))
-	}
-	d := (*deletes)[0]
-	if d.grace == nil || *d.grace != 0 || d.uid == nil || *d.uid != pod.UID {
-		t.Fatalf("force-delete options: grace=%v uid=%v (want grace-0 + pod UID precondition)", d.grace, d.uid)
-	}
-	// The gate stayed closed the whole pass: nothing decremented the
-	// seeded expectation, so the escalation cannot have ridden through
-	// the graceful-delete path.
-	if deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, 0) {
-		t.Errorf("delete expectation must remain unsatisfied after the pass")
-	}
-	if n := fdCountEvents(fdDrainEvents(rec), workload.EventReasonPodForceDeleted); n != 1 {
-		t.Errorf("PodForceDeleted events: got %d want 1", n)
-	}
-}
-
-// Invariant 11 companion: identical wedge, config absent → the gate
-// reorder leaks nothing; zero deletes, no events.
-func TestDelete_UnsatisfiedExpectations_NilPolicy_NoDeletes(t *testing.T) {
-	deps, input, plan, pod, deletes, rec := fdWedgedDeleteFixture(t, "llama-exp-ctl")
-	input.ForceDelete = nil
-
-	done, err := Delete(context.Background(), deps, input, plan, 0)
-	if err != nil {
-		t.Fatalf("pass: %v", err)
-	}
-	if done {
-		t.Fatalf("expected done=false")
-	}
-	if len(*deletes) != 0 {
-		t.Errorf("deletes with nil policy: got %d want 0", len(*deletes))
-	}
-	if events := fdDrainEvents(rec); len(events) != 0 {
-		t.Errorf("events with nil policy: %v", events)
-	}
-	got := &corev1.Pod{}
-	if err := deps.Client.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
-		t.Errorf("pod must survive with nil policy: %v", err)
 	}
 }

@@ -2,6 +2,7 @@ package drain
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -381,17 +382,34 @@ func TestIsPodDrained_TargetRefKindNotPod_Rejected(t *testing.T) {
 
 // --- Batcher: single LIST per serviceName, identical semantics ---
 
-// countingReader wraps a client.Reader and counts EndpointSlice LIST calls.
+// countingReader records the reads that build a Service drain observation and
+// can inject failures at either boundary.
 type countingReader struct {
 	client.Reader
-	sliceLists int
+	sliceLists  int
+	serviceGets int
+	listErr     error
+	getErr      error
 }
 
 func (r *countingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if _, ok := list.(*discoveryv1.EndpointSliceList); ok {
 		r.sliceLists++
+		if r.listErr != nil {
+			return r.listErr
+		}
 	}
 	return r.Reader.List(ctx, list, opts...)
+}
+
+func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Service); ok {
+		r.serviceGets++
+		if r.getErr != nil {
+			return r.getErr
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 func TestBatcher_OneListPerServiceNameAcrossPods(t *testing.T) {
@@ -417,6 +435,9 @@ func TestBatcher_OneListPerServiceNameAcrossPods(t *testing.T) {
 	}
 	if cr.sliceLists != 1 {
 		t.Fatalf("expected exactly 1 EndpointSlice LIST across 2 pods, got %d", cr.sliceLists)
+	}
+	if cr.serviceGets != 0 {
+		t.Fatalf("non-empty EndpointSlices must not GET the Service, got %d GETs", cr.serviceGets)
 	}
 }
 
@@ -496,12 +517,206 @@ func TestBatcher_MatchesIsPodDrainedSemantics(t *testing.T) {
 }
 
 func TestBatcher_NilPodAndEmptyServiceRejected(t *testing.T) {
-	b := NewBatcher(newDrainTestClient(t), "ns")
+	cr := &countingReader{Reader: newDrainTestClient(t)}
+	b := NewBatcher(cr, "ns")
 	if _, err := b.IsPodDrained(context.Background(), "svc", nil); err == nil {
 		t.Fatal("expected error for nil pod")
 	}
 	if _, err := b.IsPodDrained(context.Background(), "", testPod("ns", "p1")); err == nil {
 		t.Fatal("expected error for empty service name")
+	}
+	if cr.sliceLists != 0 || cr.serviceGets != 0 {
+		t.Fatalf("invalid inputs must perform no reads, got LIST=%d GET=%d", cr.sliceLists, cr.serviceGets)
+	}
+}
+
+func TestBatcher_EmptySlicesCachesServiceLookup(t *testing.T) {
+	tests := []struct {
+		name string
+		objs []client.Object
+		want bool
+	}{
+		{
+			name: "existing service is not drained",
+			objs: []client.Object{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"}}},
+			want: false,
+		},
+		{
+			name: "absent service is drained",
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := &countingReader{Reader: newDrainTestClient(t, tt.objs...)}
+			batcher := NewBatcher(cr, "ns")
+			for _, pod := range []*corev1.Pod{testPod("ns", "p1"), testPod("ns", "p2"), testPod("ns", "p1")} {
+				drained, err := batcher.IsPodDrained(context.Background(), "svc", pod)
+				if err != nil {
+					t.Fatalf("IsPodDrained(%s): %v", pod.Name, err)
+				}
+				if drained != tt.want {
+					t.Fatalf("IsPodDrained(%s)=%v, want %v", pod.Name, drained, tt.want)
+				}
+			}
+			if cr.sliceLists != 1 || cr.serviceGets != 1 {
+				t.Fatalf("empty-slice observation reads: LIST=%d GET=%d, want 1/1", cr.sliceLists, cr.serviceGets)
+			}
+		})
+	}
+}
+
+func TestBatcher_CachesObservationErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		listErr  error
+		getErr   error
+		wantList int
+		wantGet  int
+	}{
+		{
+			name:     "EndpointSlice list failure",
+			listErr:  errors.New("slice list failed"),
+			wantList: 1,
+		},
+		{
+			name:     "empty-slice Service lookup failure",
+			getErr:   errors.New("service lookup failed"),
+			wantList: 1,
+			wantGet:  1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := &countingReader{
+				Reader:  newDrainTestClient(t),
+				listErr: tt.listErr,
+				getErr:  tt.getErr,
+			}
+			batcher := NewBatcher(cr, "ns")
+			for _, pod := range []*corev1.Pod{testPod("ns", "p1"), testPod("ns", "p2")} {
+				if _, err := batcher.IsPodDrained(context.Background(), "svc", pod); err == nil {
+					t.Fatalf("IsPodDrained(%s) returned no error", pod.Name)
+				}
+			}
+			if cr.sliceLists != tt.wantList || cr.serviceGets != tt.wantGet {
+				t.Fatalf("cached failure reads: LIST=%d GET=%d, want %d/%d", cr.sliceLists, cr.serviceGets, tt.wantList, tt.wantGet)
+			}
+		})
+	}
+}
+
+func TestBatcher_IndexesRoutableTargetsWithDuplicateEndpointSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		endpoints []endpointSpec
+		want      bool
+	}{
+		{
+			name: "duplicate false and nil Ready remains routable",
+			endpoints: []endpointSpec{
+				{podName: "p1", address: "10.0.0.1", ready: ptr.To(false)},
+				{podName: "p1", address: "10.0.0.2", ready: nil},
+			},
+			want: false,
+		},
+		{
+			name: "duplicate false endpoints are drained",
+			endpoints: []endpointSpec{
+				{podName: "p1", address: "10.0.0.1", ready: ptr.To(false)},
+				{podName: "p1", address: "10.0.0.2", ready: ptr.To(false)},
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			slice := sliceForService("ns", "svc-1", "svc", tt.endpoints...)
+			cr := &countingReader{Reader: newDrainTestClient(t, slice)}
+			drained, err := NewBatcher(cr, "ns").IsPodDrained(context.Background(), "svc", testPod("ns", "p1"))
+			if err != nil {
+				t.Fatalf("IsPodDrained: %v", err)
+			}
+			if drained != tt.want {
+				t.Fatalf("IsPodDrained=%v, want %v", drained, tt.want)
+			}
+			if cr.sliceLists != 1 || cr.serviceGets != 0 {
+				t.Fatalf("reads: LIST=%d GET=%d, want 1/0", cr.sliceLists, cr.serviceGets)
+			}
+		})
+	}
+}
+
+func TestBatcher_TargetRefNamespaceIndexPreservesMatchingRules(t *testing.T) {
+	pod := testPod("other-ns", "p1")
+	tests := []struct {
+		name         string
+		refNamespace string
+		refKind      string
+		want         bool
+	}{
+		{name: "empty namespace matches", refKind: "Pod", want: false},
+		{name: "exact namespace matches", refNamespace: "other-ns", refKind: "Pod", want: false},
+		{name: "different namespace is ignored", refNamespace: "ns", refKind: "Pod", want: true},
+		{name: "empty kind matches", refNamespace: "other-ns", want: false},
+		{name: "non-Pod kind is ignored", refNamespace: "other-ns", refKind: "Node", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			slice := sliceForService("ns", "svc-1", "svc")
+			slice.Endpoints = []discoveryv1.Endpoint{{
+				Addresses:  []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)},
+				TargetRef: &corev1.ObjectReference{
+					Kind:      tt.refKind,
+					Namespace: tt.refNamespace,
+					Name:      pod.Name,
+				},
+			}}
+			drained, err := NewBatcher(newDrainTestClient(t, slice), "ns").IsPodDrained(context.Background(), "svc", pod)
+			if err != nil {
+				t.Fatalf("IsPodDrained: %v", err)
+			}
+			if drained != tt.want {
+				t.Fatalf("IsPodDrained=%v, want %v", drained, tt.want)
+			}
+		})
+	}
+}
+
+func TestBatcher_HoldsOneObservationForItsLifetime(t *testing.T) {
+	pod := testPod("ns", "p1")
+	slice := sliceForService("ns", "svc-1", "svc", endpointSpec{
+		podName: pod.Name, address: "10.0.0.1", ready: ptr.To(true),
+	})
+	base := newDrainTestClient(t, slice)
+	cr := &countingReader{Reader: base}
+	batcher := NewBatcher(cr, "ns")
+
+	drained, err := batcher.IsPodDrained(context.Background(), "svc", pod)
+	if err != nil || drained {
+		t.Fatalf("initial observation: drained=%v err=%v, want false/nil", drained, err)
+	}
+	fresh := slice.DeepCopy()
+	fresh.Endpoints[0].Conditions.Ready = ptr.To(false)
+	if err := base.Update(context.Background(), fresh); err != nil {
+		t.Fatalf("update EndpointSlice: %v", err)
+	}
+	drained, err = batcher.IsPodDrained(context.Background(), "svc", pod)
+	if err != nil || drained {
+		t.Fatalf("memoized observation: drained=%v err=%v, want false/nil", drained, err)
+	}
+	if cr.sliceLists != 1 {
+		t.Fatalf("EndpointSlice LISTs=%d, want 1", cr.sliceLists)
+	}
+
+	newBatch := NewBatcher(cr, "ns")
+	drained, err = newBatch.IsPodDrained(context.Background(), "svc", pod)
+	if err != nil || !drained {
+		t.Fatalf("new observation: drained=%v err=%v, want true/nil", drained, err)
+	}
+	if cr.sliceLists != 2 {
+		t.Fatalf("EndpointSlice LISTs=%d, want 2 after a new Batcher", cr.sliceLists)
 	}
 }
 

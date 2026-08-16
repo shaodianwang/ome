@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,9 +30,11 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
@@ -112,17 +116,21 @@ func baselineIR(name, namespace string, replicas int32) *v1beta1.InferenceReplic
 // newReconciler builds a fake-client-backed Reconciler with the IR
 // status subresource wired and a fresh Expectations cache so per-test
 // create attempts aren't blocked by entries from a previous test.
+const testScaleDownRequeueInterval = 37 * time.Second
+
 func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Client) {
 	t.Helper()
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
 		WithObjects(objs...).
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithIndex(&schedulingv1alpha1.PodGroup{}, workloadgang.PodGroupControllerUIDIndexField, workloadgang.PodGroupControllerUIDIndexExtractor).
 		Build()
 	return &Reconciler{
-		Client:       c,
-		Log:          logf.Log.WithName("test"),
-		Expectations: workload.NewExpectations(),
+		Client:                   c,
+		Log:                      logf.Log.WithName("test"),
+		Expectations:             workload.NewExpectations(),
+		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
 	}, c
 }
 
@@ -132,13 +140,58 @@ func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Cli
 func TestReconcile_NotFound_NoError(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, _ := newReconciler(t)
+	key := types.NamespacedName{Name: "missing", Namespace: "default"}
+	r.scaleDownSeriesCache = map[types.NamespacedName]scaleDownSeriesIdentity{
+		key: {uid: "deleted-uid", namespace: key.Namespace, isvc: "deleted-isvc", component: "engine"},
+	}
+	obsmetrics.SetScaleDownActivePods(key.Namespace, "deleted-isvc", "engine", 5)
+	obsmetrics.SetScaleDownDeferredInstances(key.Namespace, "deleted-isvc", "engine", 3)
+	assertScaleDownGaugeSeries(t, true, key.Namespace, "deleted-isvc", "engine")
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "missing", Namespace: "default"},
+		NamespacedName: key,
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred(),
 		"deleted IR between enqueue and reconcile should be a no-op")
 	g.Expect(result.Requeue).To(gomega.BeFalse())
 	g.Expect(result.RequeueAfter).To(gomega.BeZero())
+	assertScaleDownGaugeSeries(t, false, key.Namespace, "deleted-isvc", "engine")
+	g.Expect(r.scaleDownSeriesCache).NotTo(gomega.HaveKey(key))
+}
+
+func TestScaleDownSeriesCacheReplacesIdentityAndSupportsConcurrentKeys(t *testing.T) {
+	r := &Reconciler{}
+	old := baselineIR("shared-name", "metric-identity", 1)
+	old.Spec.ParentRef.Name = "old-parent"
+	r.rememberScaleDownSeries(old)
+	obsmetrics.SetScaleDownActivePods(old.Namespace, old.Spec.ParentRef.Name, string(old.Spec.Component), 7)
+	obsmetrics.SetScaleDownDeferredInstances(old.Namespace, old.Spec.ParentRef.Name, string(old.Spec.Component), 3)
+	assertScaleDownGaugeSeries(t, true, old.Namespace, old.Spec.ParentRef.Name, string(old.Spec.Component))
+
+	replacement := old.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Spec.ParentRef.Name = "new-parent"
+	replacement.Spec.Component = v1beta1.DecoderComponent
+	r.rememberScaleDownSeries(replacement)
+	assertScaleDownGaugeSeries(t, false, old.Namespace, old.Spec.ParentRef.Name, string(old.Spec.Component))
+	if got := r.scaleDownSeriesCache[client.ObjectKeyFromObject(replacement)]; got.uid != replacement.UID || got.isvc != replacement.Spec.ParentRef.Name || got.component != string(replacement.Spec.Component) {
+		t.Fatalf("replacement metric identity = %+v", got)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		ir := baselineIR(fmt.Sprintf("parallel-%d", i), "metric-parallel", 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.rememberScaleDownSeries(ir)
+			r.deleteRememberedScaleDownSeries(client.ObjectKeyFromObject(ir))
+		}()
+	}
+	wg.Wait()
+	if len(r.scaleDownSeriesCache) != 1 {
+		t.Fatalf("metric identity cache entries = %d, want only replacement", len(r.scaleDownSeriesCache))
+	}
+	r.deleteScaleDownSeries(replacement)
 }
 
 func TestApplyRollbackPayload_RecordedTopologyIsAuthoritative(t *testing.T) {
@@ -268,38 +321,34 @@ func (r podListFailingReader) List(ctx context.Context, list client.ObjectList, 
 	return r.Reader.List(ctx, list, opts...)
 }
 
-type podGroupListFailingReader struct {
+type podGroupListCountingReader struct {
 	client.Reader
 	lists int
 }
 
-func (r *podGroupListFailingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+func (r *podGroupListCountingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if _, ok := list.(*schedulingv1alpha1.PodGroupList); ok {
 		r.lists++
-		return errors.New("injected PodGroup list failure")
 	}
 	return r.Reader.List(ctx, list, opts...)
 }
 
-func TestReconcile_SinglePodSkipsPodGroupInventory(t *testing.T) {
-	ir := baselineIR("llama-engine", "prod", 1)
-	r, c := newReconciler(t, ir)
-	reader := &podGroupListFailingReader{Reader: c}
-	r.APIReader = reader
-	r.GangSchedulingAvailable = true
-
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
-		Name: ir.Name, Namespace: ir.Namespace,
-	}})
-	if err != nil {
-		t.Fatalf("single-pod reconcile must not depend on PodGroup inventory: %v", err)
-	}
-	if reader.lists != 0 {
-		t.Fatalf("single-pod reconcile issued %d PodGroup LIST(s)", reader.lists)
-	}
+type firstStaleInferenceReplicaReader struct {
+	client.Reader
+	stale  *v1beta1.InferenceReplica
+	served bool
 }
 
-func TestReconcile_TerminatingPodGroupWaitsForDeleteEvent(t *testing.T) {
+func (r *firstStaleInferenceReplicaReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if target, ok := obj.(*v1beta1.InferenceReplica); ok && !r.served && key == client.ObjectKeyFromObject(r.stale) {
+		r.served = true
+		r.stale.DeepCopyInto(target)
+		return nil
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func TestReconcile_TerminatingPodGroupUsesConfiguredPoll(t *testing.T) {
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Spec.Runners = []v1beta1.Runner{
 		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "test:v1"}}}}},
@@ -322,8 +371,8 @@ func TestReconcile_TerminatingPodGroupWaitsForDeleteEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile terminating PodGroup: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
-		t.Fatalf("terminating PodGroup must wait for its watched delete event, got %+v", result)
+	if result.Requeue || result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("terminating PodGroup must use the configured poll interval, got %+v", result)
 	}
 	pods := &corev1.PodList{}
 	if err := c.List(context.Background(), pods, client.InNamespace(ir.Namespace)); err != nil {
@@ -424,6 +473,103 @@ func TestReconcile_GangCleanupRetainsStatusUntilPodGroupAbsent(t *testing.T) {
 	source := statusByIndex(stored.Status.InstanceStatuses, 0)
 	if source == nil || source.Phase != v1beta1.OMENativeInstanceReady || source.Operation != nil {
 		t.Fatalf("source was not reset atomically with marker removal: %+v", source)
+	}
+}
+
+func TestReconcile_GangScaleDownWaitsForPodGroupAbsence(t *testing.T) {
+	ir := baselineIR("llama-engine", "gang-scale-down", 1)
+	ir.Finalizers = []string{TeardownFinalizer}
+	ir.Spec.Runners = []v1beta1.Runner{
+		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "test:v1"}}}}},
+		{Name: v1beta1.RunnerNameWorker, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "test:v1"}}}}},
+	}
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 2, ReadyPodCount: 2, ServingPodCount: 2},
+		{Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 2, ReadyPodCount: 2, ServingPodCount: 2},
+	}
+	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
+	objects := []client.Object{ir}
+	for index := int32(0); index <= 1; index++ {
+		groupName := query.PodGroupName(ir.Spec.ParentRef.Name, component, index)
+		for _, runner := range []string{string(v1beta1.RunnerNameLeader), string(v1beta1.RunnerNameWorker)} {
+			pod := podForIR(ir, index, runner, 0, true, true)
+			pod.Labels[query.LabelPodGroup] = groupName
+			objects = append(objects, pod)
+		}
+		pg := ownedPodGroupForIR(ir, groupName, index)
+		pg.Spec.MinMember = 2
+		objects = append(objects, pg)
+	}
+
+	r, base := newReconciler(t, objects...)
+	podDeletes, podGroupDeletes := 0, 0
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			switch obj.(type) {
+			case *corev1.Pod:
+				podDeletes++
+			case *schedulingv1alpha1.PodGroup:
+				podGroupDeletes++
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	r.APIReader = base
+	r.GangSchedulingAvailable = true
+	budget := int32(2)
+	r.ScaleDownPodBatchSize = &budget
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil || !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("admission pass result/error = %+v/%v", result, err)
+	}
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Pod effect pass: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval || podDeletes != 2 || podGroupDeletes != 0 {
+		t.Fatalf("Pod effect result/deletes = %+v/%d/%d, want poll/2/0", result, podDeletes, podGroupDeletes)
+	}
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PodGroup delete pass: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval || podGroupDeletes != 1 {
+		t.Fatalf("PodGroup delete result/count = %+v/%d, want poll/1", result, podGroupDeletes)
+	}
+	extraGroup := types.NamespacedName{
+		Namespace: ir.Namespace,
+		Name:      query.PodGroupName(ir.Spec.ParentRef.Name, component, 1),
+	}
+	if err := base.Get(context.Background(), extraGroup, &schedulingv1alpha1.PodGroup{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("extra PodGroup still present after accepted delete: %v", err)
+	}
+	stored := &v1beta1.InferenceReplica{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get IR after PodGroup delete: %v", err)
+	}
+	if statusByIndex(stored.Status.InstanceStatuses, 1) == nil {
+		t.Fatal("InstanceStatus was removed before a fresh PodGroup absence observation")
+	}
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil || !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("status completion pass result/error = %+v/%v", result, err)
+	}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get completed IR: %v", err)
+	}
+	if statusByIndex(stored.Status.InstanceStatuses, 1) != nil {
+		t.Fatalf("extra InstanceStatus remained after PodGroup absence: %+v", stored.Status.InstanceStatuses)
+	}
+	retainedGroup := types.NamespacedName{
+		Namespace: ir.Namespace,
+		Name:      query.PodGroupName(ir.Spec.ParentRef.Name, component, 0),
+	}
+	if err := base.Get(context.Background(), retainedGroup, &schedulingv1alpha1.PodGroup{}); err != nil {
+		t.Fatalf("retained Instance PodGroup changed: %v", err)
 	}
 }
 
@@ -782,9 +928,14 @@ func TestReconcile_ScaleDown_DeletesExcessInstances(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	// Delete pass requests a requeue while progressing.
-	g.Expect(result.RequeueAfter).NotTo(gomega.BeZero(),
-		"scale-down should request a requeue while Delete advances")
+	g.Expect(result.Requeue).To(gomega.BeTrue(), "admission commit must requeue immediately before effects")
+	g.Expect(result.RequeueAfter).To(gomega.BeZero())
+
+	result, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(result.RequeueAfter).NotTo(gomega.BeZero(), "the effect pass must poll while Pod deletion converges")
 
 	// Instance 1's pod should be gone (or marked for deletion).
 	pods := &corev1.PodList{}
@@ -793,6 +944,626 @@ func TestReconcile_ScaleDown_DeletesExcessInstances(t *testing.T) {
 		if p.Name == pod1.Name && p.DeletionTimestamp == nil {
 			t.Errorf("expected pod %s to be deleted, but it still exists with no DeletionTimestamp", p.Name)
 		}
+	}
+}
+
+func TestReconcile_ScaleDownTwoThousandUsesOneAuthoritativePodList(t *testing.T) {
+	const replicas = int32(2000)
+	ir := baselineIR("llama-engine", "scale-down-two-thousand", 1)
+	ir.Finalizers = []string{TeardownFinalizer}
+	ir.Status.InstanceStatuses = make([]v1beta1.OMENativeInstanceStatus, 0, replicas)
+	objects := make([]client.Object, 0, replicas+1)
+	objects = append(objects, ir)
+	for index := int32(0); index < replicas; index++ {
+		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+			Index:           index,
+			Incarnation:     1,
+			Phase:           v1beta1.OMENativeInstanceReady,
+			PodCount:        1,
+			ReadyPodCount:   1,
+			ServingPodCount: 1,
+			ActiveOrdinal:   0,
+		})
+		objects = append(objects, podForIR(ir, index, "default", 0, true, true))
+	}
+
+	r, base := newReconciler(t, objects...)
+	deletedPods := 0
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*corev1.Pod); ok {
+				deletedPods++
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	reader := &teardownListReader{Reader: base}
+	r.APIReader = reader
+	budget := int32(100)
+	r.ScaleDownPodBatchSize = &budget
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("fresh bounded admission must requeue immediately, got %+v", result)
+	}
+	if reader.podLists != 1 {
+		t.Fatalf("authoritative Pod LISTs = %d, want 1", reader.podLists)
+	}
+	if deletedPods != 0 {
+		t.Fatalf("admission pass deleted %d Pods, want 0", deletedPods)
+	}
+
+	stored := &v1beta1.InferenceReplica{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get admitted IR: %v", err)
+	}
+	deleteOwned := make(map[int32]bool, budget)
+	for _, status := range stored.Status.InstanceStatuses {
+		if status.Phase == v1beta1.OMENativeInstanceDeleting && status.Operation != nil &&
+			status.Operation.Type == v1beta1.InstanceOperationDelete {
+			deleteOwned[status.Index] = true
+		}
+	}
+	if len(deleteOwned) != int(budget) {
+		t.Fatalf("Delete-owned instances = %d, want %d", len(deleteOwned), budget)
+	}
+	for index := replicas - budget; index < replicas; index++ {
+		if !deleteOwned[index] {
+			t.Errorf("highest-index victim %d was not admitted", index)
+		}
+	}
+	if deleteOwned[replicas-budget-1] {
+		t.Fatalf("deferred instance %d was admitted", replicas-budget-1)
+	}
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("effect pass: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("effect pass must poll for Pod absence, got %+v", result)
+	}
+	if reader.podLists != 2 {
+		t.Fatalf("effect-pass authoritative Pod LISTs = %d total, want 2", reader.podLists)
+	}
+	if deletedPods != int(budget) {
+		t.Fatalf("effect pass deleted %d Pods, want %d", deletedPods, budget)
+	}
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("completion pass: %v", err)
+	}
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("completion commit must requeue immediately, got %+v", result)
+	}
+	if reader.podLists != 3 {
+		t.Fatalf("completion-pass authoritative Pod LISTs = %d total, want 3", reader.podLists)
+	}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get completed wave IR: %v", err)
+	}
+	if len(stored.Status.InstanceStatuses) != int(replicas-budget) {
+		t.Fatalf("statuses after one completed wave = %d, want %d",
+			len(stored.Status.InstanceStatuses), replicas-budget)
+	}
+	for _, status := range stored.Status.InstanceStatuses {
+		if status.Phase == v1beta1.OMENativeInstanceDeleting && status.Operation != nil &&
+			status.Operation.Type == v1beta1.InstanceOperationDelete {
+			t.Fatalf("completion pass admitted another victim %d", status.Index)
+		}
+	}
+}
+
+func TestReconcile_ScaleDownMalformedOwnedPodFailsBeforeLifecycleEffects(t *testing.T) {
+	ir := baselineIR("llama-engine", "scale-down-malformed-index", 1)
+	ir.Finalizers = []string{TeardownFinalizer}
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ActiveOrdinal: 0,
+		},
+		{
+			Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ActiveOrdinal: 0,
+		},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	pod1 := podForIR(ir, 1, "default", 0, true, true)
+	orphan := podForIR(ir, 7, "default", 0, true, true)
+	orphan.Labels[query.LabelInstanceIdx] = "not-an-index"
+	pgName := query.PodGroupName(ir.Spec.ParentRef.Name,
+		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), 1)
+	pg := ownedPodGroupForIR(ir, pgName, 1)
+	before := ir.Status.DeepCopy()
+
+	r, base := newReconciler(t, ir, pod0, pod1, orphan, pg)
+	effects := 0
+	counting := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			effects++
+			return c.Delete(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			effects++
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			effects++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			effects++
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	r.Client = counting
+	r.APIReader = counting
+	r.GangSchedulingAvailable = true
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err == nil {
+		t.Fatal("malformed UID-owned Pod must fail closed")
+	}
+	if !strings.Contains(err.Error(), "1 UID-owned component pod(s)") ||
+		!strings.Contains(err.Error(), query.LabelInstanceIdx) {
+		t.Fatalf("error lacks bounded malformed-pod summary: %v", err)
+	}
+	if strings.Contains(err.Error(), orphan.Name) {
+		t.Fatalf("error must not grow with Pod names: %v", err)
+	}
+	if effects != 0 {
+		t.Fatalf("malformed snapshot allowed %d lifecycle write(s), want 0", effects)
+	}
+
+	stored := &v1beta1.InferenceReplica{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	if !reflect.DeepEqual(&stored.Status, before) {
+		t.Fatalf("status changed despite malformed snapshot:\n got: %+v\nwant: %+v", stored.Status, *before)
+	}
+	for _, pod := range []*corev1.Pod{pod0, pod1, orphan} {
+		storedPod := &corev1.Pod{}
+		if err := base.Get(context.Background(), client.ObjectKeyFromObject(pod), storedPod); err != nil {
+			t.Fatalf("owned Pod %s was removed: %v", pod.Name, err)
+		}
+		if storedPod.DeletionTimestamp != nil {
+			t.Fatalf("owned Pod %s started deletion", pod.Name)
+		}
+	}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(pg), &schedulingv1alpha1.PodGroup{}); err != nil {
+		t.Fatalf("owned PodGroup was removed: %v", err)
+	}
+	service := &corev1.Service{}
+	serviceKey := client.ObjectKey{Namespace: ir.Namespace, Name: query.HeadlessServiceName(
+		ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))}
+	if err := base.Get(context.Background(), serviceKey, service); !apierrors.IsNotFound(err) {
+		t.Fatalf("downstream headless Service effect occurred: %v", err)
+	}
+}
+
+func TestInvalidInstanceIndexPodCount(t *testing.T) {
+	validZero := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "0"}}}
+	validMax := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "2147483647"}}}
+	missing := &corev1.Pod{}
+	malformed := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "not-an-index"}}}
+	negative := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "-1"}}}
+	overflow := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "2147483648"}}}
+
+	if got := invalidInstanceIndexPodCount([]*corev1.Pod{validZero, validMax, missing, malformed, negative, overflow, nil}); got != 5 {
+		t.Fatalf("invalidInstanceIndexPodCount = %d, want 5", got)
+	}
+}
+
+func TestReconcile_SteadySinglePodSkipsAuthoritativePodGroupInventory(t *testing.T) {
+	ir := baselineIR("llama-engine", "podgroup-steady-single", 1)
+	r, c := newReconciler(t, ir)
+	reader := &podGroupListCountingReader{Reader: c}
+	r.APIReader = reader
+	r.GangSchedulingAvailable = true
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass := 1; pass <= 2; pass++ {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("steady single-pod pass %d: %v", pass, err)
+		}
+	}
+	if reader.lists != 0 {
+		t.Fatalf("steady single-pod reconciliation issued %d authoritative PodGroup LIST(s), want 0", reader.lists)
+	}
+}
+
+func TestRequiresAuthoritativePodGroupInventoryLifecycleTriggers(t *testing.T) {
+	ir := baselineIR("llama-engine", "podgroup-inventory-triggers", 1)
+	r, _ := newReconciler(t, ir)
+	singlePlan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Instances: []workload.InstancePlan{{
+			Index:   0,
+			Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+	multiPlan := singlePlan
+	multiPlan.Instances = []workload.InstancePlan{{
+		Index: 0,
+		Runners: []workload.RunnerPlan{
+			{Name: "leader", Size: 1},
+			{Name: "worker", Size: 1},
+		},
+	}}
+	steadyInput := workload.ReconcileInput{
+		OwnerObject: ir,
+		ObservedState: workload.WorkloadObservedState{InstanceStatuses: []workload.InstanceStatus{{
+			Index: 0,
+			Phase: workload.InstancePhaseReady,
+		}}},
+	}
+	scaleDownInput := steadyInput
+	scaleDownInput.ObservedState.InstanceStatuses = append(
+		append([]workload.InstanceStatus(nil), steadyInput.ObservedState.InstanceStatuses...),
+		workload.InstanceStatus{Index: 1, Phase: workload.InstancePhaseReady})
+	terminalInput := steadyInput
+	terminalInput.ObservedState.Migrations = []workload.MigrationRecord{{
+		SourceInstance: 0,
+		Phase:          workload.MigrationPhaseDraining,
+	}}
+
+	for _, tc := range []struct {
+		name  string
+		input workload.ReconcileInput
+		plan  workload.ComponentPlan
+		want  bool
+	}{
+		{name: "steady single pod", input: steadyInput, plan: singlePlan, want: false},
+		{name: "planned gang", input: steadyInput, plan: multiPlan, want: true},
+		{name: "scale down", input: scaleDownInput, plan: singlePlan, want: true},
+		{name: "terminal finalization", input: terminalInput, plan: singlePlan, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := r.requiresAuthoritativePodGroupInventory(context.Background(), tc.input, tc.plan)
+			if err != nil {
+				t.Fatalf("requiresAuthoritativePodGroupInventory: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("requiresAuthoritativePodGroupInventory = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcile_SinglePodForeignGroupDoesNotTriggerInventory(t *testing.T) {
+	ir := baselineIR("llama-engine", "podgroup-foreign-single", 1)
+	pgName := query.PodGroupName(ir.Spec.ParentRef.Name,
+		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), 0)
+	pg := ownedPodGroupForIR(ir, pgName, 0)
+	pg.OwnerReferences[0].UID = "foreign-ir-uid"
+	r, c := newReconciler(t, ir, pg)
+	reader := &podGroupListCountingReader{Reader: c}
+	r.APIReader = reader
+	r.GangSchedulingAvailable = true
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if reader.lists != 0 {
+		t.Fatalf("foreign PodGroup triggered %d authoritative inventory LIST(s), want 0", reader.lists)
+	}
+	retained := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), retained); err != nil {
+		t.Fatalf("foreign PodGroup was removed: %v", err)
+	}
+}
+
+// TestReconcile_MultiToSinglePodGroupCleanupGatesWorkload pins the ownership
+// handoff when an Instance has a single-Pod plan. A stale PodGroup must enter
+// deletion and disappear before Create admission can resume.
+func TestReconcile_MultiToSinglePodGroupCleanupGatesWorkload(t *testing.T) {
+	ir := baselineIR("llama-engine", "podgroup-transition", 1)
+	ir.Finalizers = []string{TeardownFinalizer}
+	pgName := query.PodGroupName(ir.Spec.ParentRef.Name,
+		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), 0)
+	pg := ownedPodGroupForIR(ir, pgName, 0)
+	pg.Labels = nil
+	pg.Finalizers = []string{"test.ome.io/hold"}
+	r, c := newReconciler(t, ir, pg)
+	reader := &podGroupListCountingReader{Reader: c}
+	r.APIReader = reader
+	r.GangSchedulingAvailable = true
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass := 1; pass <= 2; pass++ {
+		result, err := r.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("gated pass %d: %v", pass, err)
+		}
+		if result.RequeueAfter != testScaleDownRequeueInterval {
+			t.Fatalf("gated pass %d must poll for PodGroup deletion, got %+v", pass, result)
+		}
+		gotIR := &v1beta1.InferenceReplica{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), gotIR); err != nil {
+			t.Fatalf("gated pass %d get IR: %v", pass, err)
+		}
+		if len(gotIR.Status.InstanceStatuses) != 0 {
+			t.Fatalf("gated pass %d admitted workload before PodGroup removal: %+v", pass, gotIR.Status.InstanceStatuses)
+		}
+		pods := &corev1.PodList{}
+		if err := c.List(context.Background(), pods, client.InNamespace(ir.Namespace)); err != nil {
+			t.Fatalf("gated pass %d list Pods: %v", pass, err)
+		}
+		if len(pods.Items) != 0 {
+			t.Fatalf("gated pass %d created Pods before PodGroup removal: %v", pass, podNames(pods.Items))
+		}
+	}
+	if reader.lists != 2 {
+		t.Fatalf("gated passes issued %d authoritative PodGroup LISTs, want 2", reader.lists)
+	}
+
+	terminatingPG := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: pgName}, terminatingPG); err != nil {
+		t.Fatalf("get terminating PodGroup: %v", err)
+	}
+	if terminatingPG.DeletionTimestamp == nil {
+		t.Fatal("stale PodGroup was not placed into deletion")
+	}
+	terminatingPG.Finalizers = nil
+	if err := c.Update(context.Background(), terminatingPG); err != nil {
+		t.Fatalf("release PodGroup test finalizer: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(terminatingPG), &schedulingv1alpha1.PodGroup{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("released PodGroup must be gone before workload resumes: %v", err)
+	}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("resumed pass: %v", err)
+	}
+	if result.IsZero() {
+		t.Fatalf("resumed workload must remain in progress, got %+v", result)
+	}
+	gotIR := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), gotIR); err != nil {
+		t.Fatalf("resumed pass get IR: %v", err)
+	}
+	if len(gotIR.Status.InstanceStatuses) != 1 ||
+		gotIR.Status.InstanceStatuses[0].Phase != v1beta1.OMENativeInstanceCreating ||
+		gotIR.Status.InstanceStatuses[0].Operation == nil ||
+		gotIR.Status.InstanceStatuses[0].Operation.Type != v1beta1.InstanceOperationCreate {
+		t.Fatalf("workload did not resume with Create admission after PodGroup removal: %+v", gotIR.Status.InstanceStatuses)
+	}
+	if reader.lists != 2 {
+		t.Fatalf("post-removal single-pod pass issued another authoritative PodGroup LIST: got %d total, want 2", reader.lists)
+	}
+}
+
+func TestReconcile_MultiToSinglePodGroupCleanupUsesScaleDownBudget(t *testing.T) {
+	const replicas = int32(5)
+	ir := baselineIR("llama-engine", "podgroup-transition-bounded", replicas)
+	ir.Finalizers = []string{TeardownFinalizer}
+	objects := make([]client.Object, 0, replicas+1)
+	objects = append(objects, ir)
+	for index := int32(0); index < replicas; index++ {
+		name := query.PodGroupName(ir.Spec.ParentRef.Name,
+			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), index)
+		objects = append(objects, ownedPodGroupForIR(ir, name, index))
+	}
+
+	r, base := newReconciler(t, objects...)
+	deleted := make([]string, 0, replicas)
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if pg, ok := obj.(*schedulingv1alpha1.PodGroup); ok {
+				deleted = append(deleted, pg.Name)
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	r.APIReader = base
+	r.GangSchedulingAvailable = true
+	budget := int32(2)
+	r.ScaleDownPodBatchSize = &budget
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass, wantRemaining := range []int{3, 1, 0} {
+		before := len(deleted)
+		result, err := r.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("cleanup pass %d: %v", pass+1, err)
+		}
+		if result.RequeueAfter != testScaleDownRequeueInterval {
+			t.Fatalf("cleanup pass %d must poll for authoritative absence, got %+v", pass+1, result)
+		}
+		if passDeletes := len(deleted) - before; passDeletes < 1 || passDeletes > int(budget) {
+			t.Fatalf("cleanup pass %d deleted %d PodGroups, want 1..%d", pass+1, passDeletes, budget)
+		}
+		groups := &schedulingv1alpha1.PodGroupList{}
+		if err := base.List(context.Background(), groups, client.InNamespace(ir.Namespace)); err != nil {
+			t.Fatalf("cleanup pass %d list PodGroups: %v", pass+1, err)
+		}
+		if len(groups.Items) != wantRemaining {
+			t.Fatalf("cleanup pass %d remaining PodGroups = %d, want %d", pass+1, len(groups.Items), wantRemaining)
+		}
+		stored := &v1beta1.InferenceReplica{}
+		if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+			t.Fatalf("cleanup pass %d get IR: %v", pass+1, err)
+		}
+		if len(stored.Status.InstanceStatuses) != 0 {
+			t.Fatalf("cleanup pass %d admitted workload before stale PodGroups were absent: %+v",
+				pass+1, stored.Status.InstanceStatuses)
+		}
+	}
+	if len(deleted) != int(replicas) {
+		t.Fatalf("deleted PodGroups = %d, want %d", len(deleted), replicas)
+	}
+}
+
+func TestReconcile_MultiToSinglePodGroupCleanupCountsTerminatingAgainstBudget(t *testing.T) {
+	const replicas = int32(4)
+	ir := baselineIR("llama-engine", "podgroup-transition-held-budget", replicas)
+	ir.Finalizers = []string{TeardownFinalizer}
+	objects := make([]client.Object, 0, replicas+1)
+	objects = append(objects, ir)
+	for index := int32(0); index < replicas; index++ {
+		name := query.PodGroupName(ir.Spec.ParentRef.Name,
+			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), index)
+		pg := ownedPodGroupForIR(ir, name, index)
+		pg.Finalizers = []string{"test.ome.io/hold"}
+		objects = append(objects, pg)
+	}
+
+	r, c := newReconciler(t, objects...)
+	r.APIReader = c
+	r.GangSchedulingAvailable = true
+	budget := int32(2)
+	r.ScaleDownPodBatchSize = &budget
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass := 1; pass <= 2; pass++ {
+		result, err := r.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("cleanup pass %d: %v", pass, err)
+		}
+		if result.RequeueAfter != testScaleDownRequeueInterval {
+			t.Fatalf("cleanup pass %d must poll, got %+v", pass, result)
+		}
+		terminating := 0
+		for index := int32(0); index < replicas; index++ {
+			name := query.PodGroupName(ir.Spec.ParentRef.Name,
+				v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), index)
+			pg := &schedulingv1alpha1.PodGroup{}
+			if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: name}, pg); err != nil {
+				t.Fatalf("cleanup pass %d get PodGroup %d: %v", pass, index, err)
+			}
+			if pg.DeletionTimestamp != nil {
+				terminating++
+			}
+		}
+		if terminating != int(budget) {
+			t.Fatalf("cleanup pass %d has %d Terminating PodGroups, want %d", pass, terminating, budget)
+		}
+	}
+}
+
+func TestReconcile_MultiToSinglePodGroupRetainsLiveInstanceWithoutGroupLabel(t *testing.T) {
+	ir := baselineIR("llama-engine", "podgroup-transition-live", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index:           0,
+		Incarnation:     1,
+		Phase:           v1beta1.OMENativeInstanceReady,
+		PodCount:        1,
+		ReadyPodCount:   1,
+		ServingPodCount: 1,
+		ActiveOrdinal:   0,
+	}}
+	pod := podForIR(ir, 0, "default", 0, true, true)
+	delete(pod.Labels, query.LabelPodGroup)
+	pgName := query.PodGroupName(ir.Spec.ParentRef.Name,
+		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), 0)
+	pg := ownedPodGroupForIR(ir, pgName, 0)
+	pg.Finalizers = []string{"test.ome.io/hold"}
+	r, c := newReconciler(t, ir, pod, pg)
+	r.GangSchedulingAvailable = true
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	retained := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), retained); err != nil {
+		t.Fatalf("live Instance PodGroup was deleted: %v", err)
+	}
+	if retained.DeletionTimestamp != nil {
+		t.Fatal("live Instance PodGroup entered deletion without its PodGroup-name label")
+	}
+}
+
+func TestReconcile_MultiToSinglePodGroupRejectsMalformedOwnedPodIndex(t *testing.T) {
+	ir := baselineIR("llama-engine", "podgroup-transition-invalid-index", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceReady,
+	}}
+	pod := podForIR(ir, 0, "default", 0, true, true)
+	delete(pod.Labels, query.LabelPodGroup)
+	pod.Labels[query.LabelInstanceIdx] = "malformed"
+	pgName := query.PodGroupName(ir.Spec.ParentRef.Name,
+		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), 0)
+	pg := ownedPodGroupForIR(ir, pgName, 0)
+	pg.Finalizers = []string{"test.ome.io/hold"}
+	r, c := newReconciler(t, ir, pod, pg)
+	r.GangSchedulingAvailable = true
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err == nil || !strings.Contains(err.Error(), "authoritative stale-PodGroup snapshot") {
+		t.Fatalf("Reconcile error = %v, want malformed owned Pod rejection", err)
+	}
+	retained := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), retained); err != nil {
+		t.Fatalf("malformed Pod evidence removed PodGroup: %v", err)
+	}
+	if retained.DeletionTimestamp != nil {
+		t.Fatal("malformed Pod evidence started PodGroup deletion")
+	}
+}
+
+func TestReconcile_MultiToSinglePodGroupSkipsStaleDeleteOwnedRebound(t *testing.T) {
+	cached := baselineIR("llama-engine", "podgroup-transition-rebound", 1)
+	cached.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       v1beta1.OMENativeInstanceDeleting,
+		Operation: &v1beta1.InstanceOperation{
+			ID:   "delete-stale",
+			Type: v1beta1.InstanceOperationDelete,
+			Step: "Drain",
+		},
+	}}
+	live := cached.DeepCopy()
+	live.Status.InstanceStatuses[0].Operation.ID = "delete-current"
+	pgName := query.PodGroupName(live.Spec.ParentRef.Name,
+		v1beta1convert.ComponentTypeToWorkload(live.Spec.Component), 0)
+	pg := ownedPodGroupForIR(live, pgName, 0)
+	pg.Finalizers = []string{"test.ome.io/hold"}
+	scheme := testScheme(t)
+	liveClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(live, pg).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithIndex(&schedulingv1alpha1.PodGroup{}, workloadgang.PodGroupControllerUIDIndexField, workloadgang.PodGroupControllerUIDIndexExtractor).
+		Build()
+	staleReader := &firstStaleInferenceReplicaReader{Reader: liveClient, stale: cached}
+	r := &Reconciler{
+		Client:                  &staleReadingClient{Client: liveClient, reader: staleReader},
+		APIReader:               liveClient,
+		Log:                     logf.Log.WithName("test"),
+		Expectations:            workload.NewExpectations(),
+		GangSchedulingAvailable: true,
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cached)})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("stale Delete identity must replan immediately, got %+v", result)
+	}
+	retained := &schedulingv1alpha1.PodGroup{}
+	if err := liveClient.Get(context.Background(), client.ObjectKeyFromObject(pg), retained); err != nil {
+		t.Fatalf("stale prerequisite deleted rebound PodGroup: %v", err)
+	}
+	if retained.DeletionTimestamp != nil {
+		t.Fatal("stale prerequisite started PodGroup deletion before Delete ownership preflight")
+	}
+	stored := &v1beta1.InferenceReplica{}
+	if err := liveClient.Get(context.Background(), client.ObjectKeyFromObject(live), stored); err != nil {
+		t.Fatalf("get live IR: %v", err)
+	}
+	if got := stored.Status.InstanceStatuses[0].Operation.ID; got != "delete-current" {
+		t.Fatalf("stale Delete identity changed live owner: got %q", got)
 	}
 }
 
@@ -878,6 +1649,7 @@ func podForIR(ir *v1beta1.InferenceReplica, instanceIdx int32, runnerName string
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      query.PodName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), instanceIdx, runnerName, ordinal),
 			Namespace: ir.Namespace,
+			UID:       types.UID(fmt.Sprintf("%s-%d-%s-%d-uid", ir.Name, instanceIdx, runnerName, ordinal)),
 			Labels: map[string]string{
 				constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
 				constants.OMEComponentLabel:           string(ir.Spec.Component),
@@ -930,7 +1702,7 @@ func podNames(pods []corev1.Pod) []string {
 // sliceForIRPod constructs an EndpointSlice carrying one endpoint for
 // pod against the IR's per-Component headless Service. Used by status
 // tests that need AvailableReplicas to mirror ReadyReplicas — the
-// post-fix aggregator reads availability off the EndpointSlice (same
+// aggregator reads availability off the EndpointSlice (same
 // as the omenative direct path), so without a slice every pod is
 // invisible to the availability counter regardless of ContainersReady.
 //
@@ -1136,7 +1908,6 @@ func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testi
 		t.Fatal("pre-terminal gang target unexpectedly suppressed PodGroup ensure")
 	}
 }
-
 func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
 	const index int32 = 4
 	tests := []struct {
@@ -1167,7 +1938,7 @@ func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
 			}}},
 		},
 		{
-			name: "ordinary delete remains eager",
+			name: "ordinary delete owns finalization",
 			observed: workload.WorkloadObservedState{InstanceStatuses: []workload.InstanceStatus{{
 				Index: index,
 				Phase: workload.InstancePhaseDeleting,
@@ -1175,6 +1946,7 @@ func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
 					Type: workload.InstanceOperationDelete,
 				},
 			}}},
+			want: true,
 		},
 	}
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,10 +57,99 @@ func TestObservePodGroups_OneListIndexesOwnedAndRetainsForeignNames(t *testing.T
 		t.Fatalf("inventory identity: available=%v ownerUID=%q", inv.Available(), inv.OwnerUID())
 	}
 	if got, found := inv.ByName(owned.Name); !found || got.Name != owned.Name {
+		t.Fatalf("owned collision lookup: found=%v got=%v", found, got)
+	}
+	if got, found := inv.OwnedByName(owned.Name); !found || got.Name != owned.Name {
 		t.Fatalf("owned name lookup: found=%v got=%v", found, got)
+	}
+	if _, found := inv.OwnedByName(foreign.Name); found {
+		t.Fatalf("foreign PodGroup appeared in owned lookup")
 	}
 	if got, found := inv.ByName(foreign.Name); !found || got.Name != foreign.Name {
 		t.Fatalf("foreign name collision was not retained: found=%v got=%v", found, got)
+	}
+	entries := inv.OwnedEntries()
+	if len(entries) != 1 || !entries[0].IndexKnown || entries[0].Index != 7 || entries[0].Name != owned.Name {
+		t.Fatalf("owned entries: %+v", entries)
+	}
+}
+
+func TestCachedOwnerHasPodGroups_UsesControllerUIDNotLabels(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	foreignOwner := newOwner("prod", "other")
+	withoutGroups := newOwner("prod", "empty")
+	owned := inventoryPodGroup(t, owner, "llama", 7)
+	owned.Labels = nil
+	foreign := inventoryPodGroup(t, foreignOwner, "llama", 8)
+	foreign.Labels = map[string]string{
+		constants.InferenceServicePodLabelKey: withoutGroups.GetName(),
+		constants.OMEComponentLabel:           string(workload.ComponentEngine),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelInstanceIdx:                "7",
+	}
+	base := newGangClient(t, owner, foreignOwner, withoutGroups, owned, foreign)
+
+	for _, tc := range []struct {
+		name  string
+		owner client.Object
+		want  bool
+	}{
+		{name: "owned despite missing labels", owner: owner, want: true},
+		{name: "foreign owner has its own group", owner: foreignOwner, want: true},
+		{name: "foreign labels do not transfer ownership", owner: withoutGroups, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CachedOwnerHasPodGroups(context.Background(), base, tc.owner)
+			if err != nil {
+				t.Fatalf("CachedOwnerHasPodGroups: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("CachedOwnerHasPodGroups = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPodGroupControllerUIDIndexExtractorSkipsNonControllers(t *testing.T) {
+	if got := PodGroupControllerUIDIndexExtractor(&corev1.Pod{}); got != nil {
+		t.Fatalf("non-PodGroup index values = %v, want nil", got)
+	}
+	if got := PodGroupControllerUIDIndexExtractor(&schedulingv1alpha1.PodGroup{}); got != nil {
+		t.Fatalf("ownerless PodGroup index values = %v, want nil", got)
+	}
+}
+
+func TestPodGroupIndexRejectsInvalidValues(t *testing.T) {
+	for _, raw := range []string{"", "malformed", "-1", "2147483648"} {
+		pg := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{query.LabelInstanceIdx: raw},
+		}}
+		if index, ok := podGroupIndex(pg); ok {
+			t.Errorf("podGroupIndex(%q) = %d, true; want invalid", raw, index)
+		}
+	}
+	pg := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+		Labels: map[string]string{query.LabelInstanceIdx: "2147483647"},
+	}}
+	if index, ok := podGroupIndex(pg); !ok || index != 2147483647 {
+		t.Fatalf("podGroupIndex(max int32) = %d, %t", index, ok)
+	}
+}
+
+func TestCachedOwnerHasPodGroups_RuntimeAPIRemovalIsSoftFail(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	base := newGangClient(t, owner)
+	reader := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return &apimeta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "scheduling.x-k8s.io", Kind: "PodGroup"}}
+		},
+	})
+	hasGroups, err := CachedOwnerHasPodGroups(context.Background(), reader, owner)
+	if err != nil {
+		t.Fatalf("runtime API removal must soft-fail: %v", err)
+	}
+	if hasGroups {
+		t.Fatal("runtime API removal reported cached PodGroups")
 	}
 }
 
@@ -116,6 +206,7 @@ func TestEnsurePodGroupsWithState_UsesInventoryWithoutPodGroupReads(t *testing.T
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
 	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 
 	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: counting}, input, plan,
@@ -127,24 +218,26 @@ func TestEnsurePodGroupsWithState_UsesInventoryWithoutPodGroupReads(t *testing.T
 	}
 }
 
-func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutPodGroupReads(t *testing.T) {
+func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutReads(t *testing.T) {
 	owner := newOwner("prod", "llama")
 	base := newGangClient(t, owner)
 	inv, err := ObservePodGroups(context.Background(), base, owner)
 	if err != nil {
 		t.Fatalf("ObservePodGroups: %v", err)
 	}
-	podGroupReads, creates, deletes := 0, 0, 0
+	reads, creates, deletes := 0, 0, 0
 	counting := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if _, ok := list.(*schedulingv1alpha1.PodGroupList); ok {
-				podGroupReads++
+			switch list.(type) {
+			case *corev1.PodList, *schedulingv1alpha1.PodGroupList:
+				reads++
 			}
 			return c.List(ctx, list, opts...)
 		},
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*schedulingv1alpha1.PodGroup); ok {
-				podGroupReads++
+			switch obj.(type) {
+			case *corev1.Pod, *schedulingv1alpha1.PodGroup:
+				reads++
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
@@ -162,6 +255,10 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutPodGroupReads(t *
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+	input.AuthoritativePods = &workload.ComponentPodSnapshot{
+		Pods:       []*corev1.Pod{},
+		ByInstance: map[int32][]*corev1.Pod{},
+	}
 	plan := planFor(workload.ComponentEngine, []int32{6}, true, 1, 5*time.Minute)
 	state := PodGroupReconcileState{Inventory: inv}
 
@@ -172,8 +269,8 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutPodGroupReads(t *
 	if _, err := ensure(context.Background(), input, plan, plan.Instances[0]); err != nil {
 		t.Fatalf("EnsureSurgePodGroupWithState: %v", err)
 	}
-	if podGroupReads != 0 {
-		t.Fatalf("shared surge prerequisite issued %d hidden PodGroup read(s)", podGroupReads)
+	if reads != 0 {
+		t.Fatalf("shared surge prerequisite issued %d hidden Pod/PodGroup read(s)", reads)
 	}
 	if creates != 1 {
 		t.Fatalf("top-level plus inline ensure created %d PodGroups, want exactly 1", creates)
@@ -183,9 +280,9 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutPodGroupReads(t *
 	if err != nil {
 		t.Fatalf("finalize same-pass PodGroup: %v", err)
 	}
-	if complete || deletes != 1 || !deleteAccepted(inv, query.PodGroupName("llama", workload.ComponentEngine, 6)) {
+	if complete || deletes != 1 || !inv.DeleteAccepted(query.PodGroupName("llama", workload.ComponentEngine, 6)) {
 		t.Fatalf("same-pass finalization: complete=%v deletes=%d accepted=%v", complete, deletes,
-			deleteAccepted(inv, query.PodGroupName("llama", workload.ComponentEngine, 6)))
+			inv.DeleteAccepted(query.PodGroupName("llama", workload.ComponentEngine, 6)))
 	}
 }
 
@@ -208,6 +305,7 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelUpdate(t *testing.T) {
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
 	plan := planFor(workload.ComponentEngine, []int32{6}, true, 1, 5*time.Minute)
 	state := PodGroupReconcileState{Inventory: inv}
 
@@ -248,6 +346,7 @@ func TestEnsurePodGroupsWithState_TerminalOwnedSkipsEnsure(t *testing.T) {
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
 	plan := planFor(workload.ComponentEngine, []int32{3}, true, 1, 5*time.Minute)
 
 	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: counting}, input, plan,
@@ -266,6 +365,36 @@ func TestEnsurePodGroupsWithState_TerminalOwnedSkipsEnsure(t *testing.T) {
 	}
 	if got.Spec.MinMember != 99 {
 		t.Fatalf("terminal-owned PodGroup drift was reconciled: got MinMember=%d want 99", got.Spec.MinMember)
+	}
+}
+
+func TestEnsurePodGroupsWithState_DeleteOwnedReboundSkipsEnsure(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	base := newGangClient(t, owner)
+	inv, err := ObservePodGroups(context.Background(), base, owner)
+	if err != nil {
+		t.Fatalf("ObservePodGroups: %v", err)
+	}
+	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+		Index: 4,
+		Phase: workload.InstancePhaseDeleting,
+		Operation: &workload.InstanceOperation{
+			Type: workload.InstanceOperationDelete,
+			Step: "Drain",
+		},
+	}}
+	plan := planFor(workload.ComponentEngine, []int32{4}, true, 1, 5*time.Minute)
+
+	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base}, input, plan,
+		PodGroupReconcileState{Inventory: inv}); err != nil {
+		t.Fatalf("EnsurePodGroupsWithState: %v", err)
+	}
+	pg := &schedulingv1alpha1.PodGroup{}
+	err = base.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: query.PodGroupName("llama", workload.ComponentEngine, 4)}, pg)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("DeleteOwned rebound recreated PodGroup: %v", err)
 	}
 }
 
@@ -298,8 +427,12 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 			tc.mutate(pg)
 			inv := newPodGroupInventory(owner.GetUID(), true)
 			inv.byName[pg.Name] = pg
+			if podgroup.ControlledByUID(pg, owner.GetUID()) {
+				inv.ownedName[pg.Name] = pg
+			}
 			base := newGangClient(t, owner)
 			input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+			input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
 			plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 			_, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base}, input, plan,
 				PodGroupReconcileState{Inventory: inv})
@@ -355,7 +488,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 		if deletes != 1 {
 			t.Fatalf("delete calls: got %d want 1", deletes)
 		}
-		if !deleteAccepted(inv, pg.Name) {
+		if !inv.DeleteAccepted(pg.Name) {
 			t.Fatal("successful delete was not recorded as accepted")
 		}
 		got := &schedulingv1alpha1.PodGroup{}
@@ -386,7 +519,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 		if err != nil || !complete {
 			t.Fatalf("foreign object is absent from this owner's finalization set: %v", err)
 		}
-		if deleteAccepted(inv, pg.Name) {
+		if inv.DeleteAccepted(pg.Name) {
 			t.Fatal("foreign object was recorded as an accepted owned delete")
 		}
 		got := &schedulingv1alpha1.PodGroup{}
@@ -417,25 +550,17 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 		if _, err := finalize(context.Background(), 5); err == nil {
 			t.Fatal("transient delete failure was swallowed")
 		}
-		if deleteAccepted(inv, pg.Name) {
+		if inv.DeleteAccepted(pg.Name) {
 			t.Fatal("failed delete was recorded as accepted")
 		}
 		complete, err := finalize(context.Background(), 5)
 		if err != nil || complete {
 			t.Fatalf("retry finalize: %v", err)
 		}
-		if attempts != 2 || !deleteAccepted(inv, pg.Name) {
-			t.Fatalf("retry state: attempts=%d accepted=%v", attempts, deleteAccepted(inv, pg.Name))
+		if attempts != 2 || !inv.DeleteAccepted(pg.Name) {
+			t.Fatalf("retry state: attempts=%d accepted=%v", attempts, inv.DeleteAccepted(pg.Name))
 		}
 	})
-}
-
-func deleteAccepted(inv *PodGroupInventory, name string) bool {
-	if inv == nil {
-		return false
-	}
-	_, accepted := inv.accepted[name]
-	return accepted
 }
 
 func inventoryPodGroup(t *testing.T, owner client.Object, ownerName string, index int32) *schedulingv1alpha1.PodGroup {

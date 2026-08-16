@@ -69,6 +69,11 @@ type SuiteState struct {
 	// SuiteOpts.Setup was nil (smoke-test pattern).
 	Manager ctrl.Manager
 
+	managerMu     sync.Mutex
+	managerStop   func()
+	managerSetup  ManagerSetup
+	managerScheme *runtime.Scheme
+
 	// ClusterName mirrors SuiteOpts.ClusterName for cleanup helpers
 	// that need to dispatch `kind` subcommands.
 	ClusterName string
@@ -157,14 +162,54 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 		if err != nil {
 			t.Fatalf("RunKindSuite: StartManager: %v", err)
 		}
-		t.Cleanup(stop)
 		state.Manager = mgr
+		state.managerStop = stop
+		state.managerSetup = opts.Setup
+		state.managerScheme = opts.Scheme
+		t.Cleanup(state.stopManager)
 	}
 
 	setActiveSuite(state)
 	t.Cleanup(func() { setActiveSuite(nil) })
 
 	return state
+}
+
+// RestartManager stops the suite's in-process manager, waits for it to exit,
+// and starts a fresh manager against the same cluster and setup callback. The
+// Kubernetes client and suite context remain valid, so specs can verify that
+// durable controller state resumes after process-local caches disappear.
+func (s *SuiteState) RestartManager() error {
+	if s == nil {
+		return fmt.Errorf("SuiteState is nil")
+	}
+	s.managerMu.Lock()
+	defer s.managerMu.Unlock()
+	if s.managerSetup == nil {
+		return fmt.Errorf("SuiteState has no manager setup callback")
+	}
+	if s.managerStop != nil {
+		s.managerStop()
+	}
+	s.Manager = nil
+	s.managerStop = nil
+	mgr, stop, err := StartManager(s.Ctx, s.RestConfig, s.managerScheme, s.managerSetup)
+	if err != nil {
+		return fmt.Errorf("restart manager: %w", err)
+	}
+	s.Manager = mgr
+	s.managerStop = stop
+	return nil
+}
+
+func (s *SuiteState) stopManager() {
+	s.managerMu.Lock()
+	defer s.managerMu.Unlock()
+	if s.managerStop != nil {
+		s.managerStop()
+		s.managerStop = nil
+	}
+	s.Manager = nil
 }
 
 // setActiveSuite swaps the package-global activeSuite under a write

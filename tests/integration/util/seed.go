@@ -27,8 +27,9 @@ import (
 //     to keep the controller from materializing routes
 //   - deploy.defaultDeploymentMode = RawDeployment (the safe default;
 //     NewDeployConfig errors on empty)
-//   - lifecycle.scaleUpPodBatchSize bounds OMENative missing-Pod creates in
-//     missing-Pod units while keeping each Instance or gang atomic
+//   - lifecycle scaleUpPodBatchSize and scaleDownPodBatchSize bound OMENative
+//     create and delete work in Pod-equivalent units while keeping each
+//     Instance or gang atomic
 //   - omeAgent gets a minimal image so the helpers don't panic on nil
 //     dereferences when a test doesn't override
 //
@@ -55,7 +56,8 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "defaultDeploymentMode": "RawDeployment"
 }`,
 		"lifecycle": `{
-  "scaleUpPodBatchSize": 100
+  "scaleUpPodBatchSize": 100,
+  "scaleDownPodBatchSize": 100
 }`,
 		"omeAgent": `{
   "image": "ghcr.io/test/ome-agent:test",

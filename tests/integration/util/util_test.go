@@ -79,7 +79,7 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		Expect(cm.Data).To(HaveKey("deploy"))
 		Expect(cm.Data).To(HaveKey("omeAgent"))
 		Expect(cm.Data).To(HaveKey("lifecycle"))
-		Expect(cm.Data["lifecycle"]).To(MatchJSON(`{"scaleUpPodBatchSize":100}`))
+		Expect(cm.Data["lifecycle"]).To(MatchJSON(`{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":100}`))
 	})
 })
 

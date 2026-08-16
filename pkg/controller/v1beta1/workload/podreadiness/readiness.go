@@ -60,6 +60,7 @@ package podreadiness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -84,6 +85,10 @@ type Message struct {
 	UserAgent string `json:"userAgent"`
 	Key       string `json:"key"`
 }
+
+// ErrPodIdentityChanged means a same-name Pod's UID differs from the caller's
+// observation. The replacement must not receive the stale effect.
+var ErrPodIdentityChanged = errors.New("pod identity changed")
 
 // AddNotReadyKey appends msg to the readiness condition's message list
 // and sets Status=False. No-op if msg is already present AND the
@@ -116,6 +121,9 @@ func AddNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, 
 		fresh := &corev1.Pod{}
 		if err := reader.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
 			return fmt.Errorf("re-read pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+		if pod.UID != "" && fresh.UID != pod.UID {
+			return fmt.Errorf("%w: pod %s/%s", ErrPodIdentityChanged, pod.Namespace, pod.Name)
 		}
 		cond := findCondition(fresh, ConditionType)
 		var base string

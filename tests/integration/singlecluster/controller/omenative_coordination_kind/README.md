@@ -51,6 +51,7 @@ vs. recreate updates.
 | Event recorder firing | events_kind (7 specs) |
 | Pod-state watch filters (label, cross-ISVC) | watches_kind |
 | Scale up/down + pod lifecycle | lifecycle_kind |
+| Bounded scale-down waves + victim order | bounded_scale_down_kind |
 | In-place update edge cases | update_kind |
 | State-machine interleavings | interleave_kind (INT-5) + interleave_extra_kind (INT-1..4/6) |
 | Runtime+model resolution (CBM/CSR stall, missing CSR) | runtime_resolution_kind (RT-4/5) |

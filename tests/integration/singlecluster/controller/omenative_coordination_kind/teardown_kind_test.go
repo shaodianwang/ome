@@ -68,9 +68,9 @@ func podPublishedReady(g Gomega, namespace, serviceName, podName string) bool {
 // Reconciled IR teardown. An IR with a DeletionTimestamp reconciles as
 // "desired instances = zero": every instance runs the ordinary Delete
 // pipeline (drain -> graceful delete -> stuck-Terminating force-delete
-// escalation) and the ome.io/ir-teardown finalizer lifts only when no
-// component pod remains. A Terminating IR WITHOUT the finalizer is left
-// entirely to background GC.
+// escalation) and the ome.io/ir-teardown finalizer lifts only when component
+// Pods and owned PodGroups are absent. A Terminating IR without the finalizer
+// is left entirely to background GC.
 var _ = ginkgo.Describe("OMENative reconciled IR teardown (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

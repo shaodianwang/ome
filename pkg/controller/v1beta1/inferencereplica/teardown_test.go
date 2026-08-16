@@ -22,13 +22,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -75,6 +78,84 @@ func eventsContaining(events []string, substr string) []string {
 		}
 	}
 	return out
+}
+
+type teardownListReader struct {
+	client.Reader
+	podLists      int
+	podGroupLists int
+	podError      error
+	podGroupError error
+}
+
+func (r *teardownListReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	switch list.(type) {
+	case *corev1.PodList:
+		r.podLists++
+		if r.podError != nil {
+			return r.podError
+		}
+	case *schedulingv1alpha1.PodGroupList:
+		r.podGroupLists++
+		if r.podGroupError != nil {
+			return r.podGroupError
+		}
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+func ownedPodGroupForIR(ir *v1beta1.InferenceReplica, name string, index int32) *schedulingv1alpha1.PodGroup {
+	return &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+		Name:      name,
+		Namespace: ir.Namespace,
+		Labels: map[string]string{
+			query.LabelInstanceIdx: intToLabel(int64(index)),
+		},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(
+			ir, v1beta1.SchemeGroupVersion.WithKind("InferenceReplica"))},
+	}}
+}
+
+func scaleDownGaugeSeriesExists(t *testing.T, metricName, namespace, isvc, component string) bool {
+	t.Helper()
+	families, err := controllermetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather controller metrics: %v", err)
+	}
+	want := map[string]string{"namespace": namespace, "isvc": isvc, "component": component}
+	for _, family := range families {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if len(metric.Label) != len(want) {
+				continue
+			}
+			matches := true
+			for _, label := range metric.Label {
+				if want[label.GetName()] != label.GetValue() {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func assertScaleDownGaugeSeries(t *testing.T, want bool, namespace, isvc, component string) {
+	t.Helper()
+	for _, name := range []string{
+		"ome_omenative_scale_down_active_pods",
+		"ome_omenative_scale_down_deferred_instances",
+	} {
+		if got := scaleDownGaugeSeriesExists(t, name, namespace, isvc, component); got != want {
+			t.Errorf("metric %s series existence: got %t want %t", name, got, want)
+		}
+	}
 }
 
 // TestReconcile_AddsTeardownFinalizer pins the arm step: the first
@@ -157,8 +238,17 @@ func TestTeardown_DispatchesDeletes_RetainsFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.RequeueAfter != workloadops.DeleteRequeueInterval {
-		t.Errorf("teardown in flight must requeue at DeleteRequeueInterval, got %+v", result)
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Errorf("teardown admission must requeue immediately before effects, got %+v", result)
+	}
+	result, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("effect reconcile: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Errorf("teardown effect pass must use the configured delete cadence, got %+v", result)
 	}
 
 	gotIR := &v1beta1.InferenceReplica{}
@@ -181,15 +271,68 @@ func TestTeardown_DispatchesDeletes_RetainsFinalizer(t *testing.T) {
 	}
 
 	events := drainEvents(rec)
-	if blocked := eventsContaining(events, ReasonTeardownBlocked); len(blocked) != 1 {
-		t.Errorf("strict hold (nil deadline) must warn TeardownBlocked once per pass; events=%v", events)
+	if blocked := eventsContaining(events, ReasonTeardownBlocked); len(blocked) == 0 {
+		t.Errorf("strict hold (nil deadline) must warn TeardownBlocked; events=%v", events)
 	} else {
-		msg := blocked[0]
-		for _, want := range []string{pod0.Name, TeardownFinalizer, "manual escape", "no lifecycle.teardown.deadline configured"} {
+		msg := blocked[len(blocked)-1]
+		for _, want := range []string{"selector:", TeardownFinalizer, "manual escape", "no lifecycle.teardown.deadline configured"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("TeardownBlocked message must contain %q; got %q", want, msg)
 			}
 		}
+		if strings.Contains(msg, pod0.Name) {
+			t.Errorf("TeardownBlocked message must remain bounded and omit Pod names: %q", msg)
+		}
+	}
+}
+
+// TestTeardown_StatusCommitsRequeueBeforeFinalizerCompletion keeps status
+// admission and removal as durable pass boundaries. A podless Instance makes
+// the live-resource completion predicate true throughout, so only the workload
+// result can prevent the teardown finalizer from lifting in the commit pass.
+func TestTeardown_StatusCommitsRequeueBeforeFinalizerCompletion(t *testing.T) {
+	ir := terminatingIR("llama-engine", "prod", 1, time.Now())
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}}
+	svcName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: ir.Namespace}}
+	r, c := newReconciler(t, ir, svc)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass, wantStatuses := range []int{1, 0} {
+		result, err := r.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("status commit pass %d: %v", pass+1, err)
+		}
+		if !result.Requeue || result.RequeueAfter != 0 {
+			t.Fatalf("status commit pass %d must requeue immediately, got %+v", pass+1, result)
+		}
+		gotIR := &v1beta1.InferenceReplica{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), gotIR); err != nil {
+			t.Fatalf("status commit pass %d removed IR/finalizer: %v", pass+1, err)
+		}
+		if !controllerutil.ContainsFinalizer(gotIR, TeardownFinalizer) {
+			t.Fatalf("status commit pass %d lifted teardown finalizer", pass+1)
+		}
+		if len(gotIR.Status.InstanceStatuses) != wantStatuses {
+			t.Fatalf("status commit pass %d: got %d statuses want %d: %+v",
+				pass+1, len(gotIR.Status.InstanceStatuses), wantStatuses, gotIR.Status.InstanceStatuses)
+		}
+		if err := c.Get(context.Background(), types.NamespacedName{Name: svcName, Namespace: ir.Namespace}, &corev1.Service{}); err != nil {
+			t.Fatalf("status commit pass %d deleted headless Service: %v", pass+1, err)
+		}
+	}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("completion pass: %v", err)
+	}
+	if !result.IsZero() {
+		t.Fatalf("completion pass must not requeue, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("completion pass must remove the finalizer: %v", err)
 	}
 }
 
@@ -635,7 +778,7 @@ func TestTeardown_StatuslessOrphanBlocksCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.RequeueAfter != workloadops.DeleteRequeueInterval {
+	if result.RequeueAfter != testScaleDownRequeueInterval {
 		t.Errorf("orphan pod must keep teardown polling, got %+v", result)
 	}
 	gotIR := &v1beta1.InferenceReplica{}
@@ -645,8 +788,224 @@ func TestTeardown_StatuslessOrphanBlocksCompletion(t *testing.T) {
 	if !controllerutil.ContainsFinalizer(gotIR, TeardownFinalizer) {
 		t.Errorf("statusless orphan must block finalizer removal (live list is the completion check)")
 	}
-	if blocked := eventsContaining(drainEvents(rec), ReasonTeardownBlocked); len(blocked) != 1 || !strings.Contains(blocked[0], orphan.Name) {
-		t.Errorf("TeardownBlocked must name the orphan survivor; events=%v", blocked)
+	if blocked := eventsContaining(drainEvents(rec), ReasonTeardownBlocked); len(blocked) != 1 ||
+		!strings.Contains(blocked[0], "selector:") || strings.Contains(blocked[0], orphan.Name) {
+		t.Errorf("TeardownBlocked must use a bounded selector summary; events=%v", blocked)
+	}
+}
+
+func TestTeardown_InvalidOwnedPodIndexBlocksAllEffects(t *testing.T) {
+	ir := terminatingIR("llama-engine", "invalid-index", 1, time.Now())
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceReady,
+	}}
+	pod := podForIR(ir, 0, "default", 0, false, false)
+	pod.Labels[query.LabelInstanceIdx] = "malformed"
+	pg := ownedPodGroupForIR(ir, "owned-pod-group", 0)
+	r, c := newReconciler(t, ir, pod, pg)
+	r.GangSchedulingAvailable = true
+	reader := &teardownListReader{Reader: c}
+	r.APIReader = reader
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err == nil || !strings.Contains(err.Error(), "without a valid "+query.LabelInstanceIdx+" label") {
+		t.Fatalf("Reconcile error = %v, want invalid owned Pod index", err)
+	}
+	if reader.podLists != 1 || reader.podGroupLists != 0 {
+		t.Fatalf("authoritative lists = pods:%d PodGroups:%d, want 1/0", reader.podLists, reader.podGroupLists)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("invalid-index Pod changed: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), &schedulingv1alpha1.PodGroup{}); err != nil {
+		t.Fatalf("PodGroup changed before Pod validation: %v", err)
+	}
+	gotIR := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), gotIR); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(gotIR, TeardownFinalizer) || len(gotIR.Status.InstanceStatuses) != 1 {
+		t.Fatalf("teardown state changed after invalid Pod observation: finalizers=%v statuses=%+v",
+			gotIR.Finalizers, gotIR.Status.InstanceStatuses)
+	}
+}
+
+// TestTeardown_StatuslessPodGroupsDeleteInBoundedWaves covers resources with
+// no remaining InstanceStatus owner. Empty owned PodGroups consume the same
+// configured budget in deterministic waves, while groups referenced by a
+// live owned Pod's name or owned Instance index remain intact.
+func TestTeardown_StatuslessPodGroupsDeleteInBoundedWaves(t *testing.T) {
+	ir := terminatingIR("llama-engine", "podgroup-waves", 1, time.Now())
+	ir.Status.InstanceStatuses = nil
+	liveGroupName := "zz-live"
+	livePod := podForIR(ir, 9, "default", 0, false, false)
+	livePod.Labels[query.LabelPodGroup] = liveGroupName
+	indexOnlyGroupName := "yy-live-by-index"
+	indexOnlyPod := podForIR(ir, 10, "default", 0, false, false)
+	delete(indexOnlyPod.Labels, query.LabelPodGroup)
+	emptyNames := []string{"aa-empty", "bb-empty", "cc-empty"}
+	objects := []client.Object{
+		ir,
+		livePod,
+		indexOnlyPod,
+		ownedPodGroupForIR(ir, liveGroupName, 9),
+		ownedPodGroupForIR(ir, indexOnlyGroupName, 10),
+	}
+	for idx, name := range emptyNames {
+		objects = append(objects, ownedPodGroupForIR(ir, name, int32(idx)))
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(objects...).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		Build()
+	reader := &teardownListReader{Reader: c}
+	budget := int32(2)
+	recorder := record.NewFakeRecorder(16)
+	r := &Reconciler{
+		Client:                   c,
+		APIReader:                reader,
+		Log:                      ctrl.Log.WithName("test"),
+		Recorder:                 recorder,
+		Expectations:             workload.NewExpectations(),
+		GangSchedulingAvailable:  true,
+		ScaleDownPodBatchSize:    &budget,
+		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
+	}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first cleanup wave: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("first cleanup wave must poll, got %+v", result)
+	}
+	for _, name := range emptyNames[:2] {
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: name}, &schedulingv1alpha1.PodGroup{}); !apierrors.IsNotFound(err) {
+			t.Errorf("first cleanup wave must delete %s: %v", name, err)
+		}
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: emptyNames[2]}, &schedulingv1alpha1.PodGroup{}); err != nil {
+		t.Errorf("first cleanup wave exceeded budget and deleted %s: %v", emptyNames[2], err)
+	}
+	for _, name := range []string{liveGroupName, indexOnlyGroupName} {
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: name}, &schedulingv1alpha1.PodGroup{}); err != nil {
+			t.Errorf("live referenced PodGroup %s was deleted: %v", name, err)
+		}
+	}
+	if reader.podLists != 1 || reader.podGroupLists != 1 {
+		t.Fatalf("first pass authoritative list counts: pods=%d PodGroups=%d, want 1 each", reader.podLists, reader.podGroupLists)
+	}
+	blocked := eventsContaining(drainEvents(recorder), ReasonTeardownBlocked)
+	if len(blocked) != 1 || !strings.Contains(blocked[0], "2 owned pod(s) and 5 owned PodGroup(s)") {
+		t.Fatalf("first pass must report the bounded pending-resource summary; events=%v", blocked)
+	}
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second cleanup wave: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("second cleanup wave must poll, got %+v", result)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: emptyNames[2]}, &schedulingv1alpha1.PodGroup{}); !apierrors.IsNotFound(err) {
+		t.Errorf("second cleanup wave must delete %s: %v", emptyNames[2], err)
+	}
+	for _, name := range []string{liveGroupName, indexOnlyGroupName} {
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: name}, &schedulingv1alpha1.PodGroup{}); err != nil {
+			t.Errorf("live referenced PodGroup %s was deleted in second wave: %v", name, err)
+		}
+	}
+	if reader.podLists != 2 || reader.podGroupLists != 2 {
+		t.Fatalf("two-pass authoritative list counts: pods=%d PodGroups=%d, want 2 each", reader.podLists, reader.podGroupLists)
+	}
+}
+
+func TestDeleteTeardownOrphanPodGroupsCountsTerminatingAgainstBudget(t *testing.T) {
+	ir := baselineIR("llama-engine", "teardown-podgroup-budget", 1)
+	names := []string{"aa-orphan", "bb-orphan", "cc-orphan", "dd-orphan"}
+	objects := make([]client.Object, 0, len(names)+1)
+	objects = append(objects, ir)
+	for index, name := range names {
+		pg := ownedPodGroupForIR(ir, name, int32(index))
+		pg.Finalizers = []string{"test.ome.io/hold"}
+		objects = append(objects, pg)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
+	budget := int32(2)
+	observe := func() *workloadgang.PodGroupInventory {
+		t.Helper()
+		inventory, err := workloadgang.ObservePodGroups(context.Background(), c, ir)
+		if err != nil {
+			t.Fatalf("observe PodGroups: %v", err)
+		}
+		return inventory
+	}
+
+	deleted, err := deleteTeardownOrphanPodGroups(context.Background(), c, observe(), nil, &budget)
+	if err != nil {
+		t.Fatalf("first wave: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("first-wave deletes = %d, want 2", deleted)
+	}
+	deleted, err = deleteTeardownOrphanPodGroups(context.Background(), c, observe(), nil, &budget)
+	if err != nil {
+		t.Fatalf("held wave: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("held Terminating PodGroups admitted %d more deletes, want 0", deleted)
+	}
+	for index, name := range names {
+		pg := &schedulingv1alpha1.PodGroup{}
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: ir.Namespace, Name: name}, pg); err != nil {
+			t.Fatalf("get PodGroup %s: %v", name, err)
+		}
+		if got, want := pg.DeletionTimestamp != nil, index < int(budget); got != want {
+			t.Errorf("PodGroup %s Terminating = %t, want %t", name, got, want)
+		}
+	}
+}
+
+func TestTeardown_StatuslessPodGroupDeleteWaitsForNextObservation(t *testing.T) {
+	ir := terminatingIR("llama-engine", "podgroup-delete-observation", 1, time.Now())
+	ir.Status.InstanceStatuses = nil
+	pg := ownedPodGroupForIR(ir, "orphan-pod-group", 0)
+	r, c := newReconciler(t, ir, pg)
+	r.GangSchedulingAvailable = true
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("delete admission pass: %v", err)
+	}
+	if result.RequeueAfter != testScaleDownRequeueInterval {
+		t.Fatalf("delete admission pass must wait for a fresh observation, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), &schedulingv1alpha1.PodGroup{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("orphan PodGroup was not deleted: %v", err)
+	}
+	stored := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("delete admission pass lifted the IR finalizer: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(stored, TeardownFinalizer) {
+		t.Fatal("delete admission was treated as authoritative PodGroup absence")
+	}
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("absence observation pass: %v", err)
+	}
+	if !result.IsZero() {
+		t.Fatalf("completed teardown must not requeue, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("fresh PodGroup absence did not release the IR: %v", err)
 	}
 }
 
@@ -658,15 +1017,44 @@ func TestTeardown_Complete_DeletesServiceAndFinalizer(t *testing.T) {
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
 		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceDeleting},
 	}
+	component := string(ir.Spec.Component)
+	obsmetrics.SetScaleDownActivePods(ir.Namespace, ir.Spec.ParentRef.Name, component, 7)
+	obsmetrics.SetScaleDownDeferredInstances(ir.Namespace, ir.Spec.ParentRef.Name, component, 3)
+	assertScaleDownGaugeSeries(t, true, ir.Namespace, ir.Spec.ParentRef.Name, component)
 	svcName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: ir.Namespace}}
 	r, c := newReconciler(t, ir, svc)
 
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
+	req := ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
-	})
+	}
+	result, err := r.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("delete admission pass: %v", err)
+	}
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("delete admission commit must requeue immediately, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); err != nil {
+		t.Fatalf("delete admission pass lifted finalizer: %v", err)
+	}
+	assertScaleDownGaugeSeries(t, true, ir.Namespace, ir.Spec.ParentRef.Name, component)
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("status removal pass: %v", err)
+	}
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("status removal commit must requeue immediately, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); err != nil {
+		t.Fatalf("status removal pass lifted finalizer: %v", err)
+	}
+	assertScaleDownGaugeSeries(t, true, ir.Namespace, ir.Spec.ParentRef.Name, component)
+
+	result, err = r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("completion pass: %v", err)
 	}
 	if result.Requeue || result.RequeueAfter != 0 {
 		t.Errorf("completed teardown must not requeue, got %+v", result)
@@ -678,6 +1066,90 @@ func TestTeardown_Complete_DeletesServiceAndFinalizer(t *testing.T) {
 	// the deletion.
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); !apierrors.IsNotFound(err) {
 		t.Errorf("IR must be gone after finalizer removal; get returned %v", err)
+	}
+	assertScaleDownGaugeSeries(t, false, ir.Namespace, ir.Spec.ParentRef.Name, component)
+}
+
+func TestTeardown_CleansMetricSeriesBeforeFinalizerRelease(t *testing.T) {
+	ir := terminatingIR("llama-engine", "metric-order", 1, time.Now())
+	ir.Status.InstanceStatuses = nil
+	component := string(ir.Spec.Component)
+	obsmetrics.SetScaleDownActivePods(ir.Namespace, ir.Spec.ParentRef.Name, component, 7)
+	obsmetrics.SetScaleDownDeferredInstances(ir.Namespace, ir.Spec.ParentRef.Name, component, 3)
+	assertScaleDownGaugeSeries(t, true, ir.Namespace, ir.Spec.ParentRef.Name, component)
+	finalizerAttempted := false
+	seriesPresentAtFinalizerWrite := false
+	base := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(ir).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updated, ok := obj.(*v1beta1.InferenceReplica)
+				if !ok || controllerutil.ContainsFinalizer(updated, TeardownFinalizer) {
+					return cl.Update(ctx, obj, opts...)
+				}
+				finalizerAttempted = true
+				seriesPresentAtFinalizerWrite =
+					scaleDownGaugeSeriesExists(t, "ome_omenative_scale_down_active_pods", ir.Namespace, ir.Spec.ParentRef.Name, component) ||
+						scaleDownGaugeSeriesExists(t, "ome_omenative_scale_down_deferred_instances", ir.Namespace, ir.Spec.ParentRef.Name, component)
+				return errors.New("injected finalizer update failure")
+			},
+		}).
+		Build()
+	r := &Reconciler{Client: base, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err == nil || !strings.Contains(err.Error(), "injected finalizer update failure") {
+		t.Fatalf("reconcile error = %v", err)
+	}
+	if !finalizerAttempted {
+		t.Fatal("test wiring: finalizer update was not attempted")
+	}
+	if seriesPresentAtFinalizerWrite {
+		t.Fatal("scale-down metric series survived until the finalizer write")
+	}
+	assertScaleDownGaugeSeries(t, false, ir.Namespace, ir.Spec.ParentRef.Name, component)
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); err != nil {
+		t.Fatalf("failed finalizer update must retain the IR: %v", err)
+	}
+}
+
+func TestTeardown_DeadlineSchedulesExactWakeWithoutPollInterval(t *testing.T) {
+	base := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	ir := terminatingIR("llama-engine", "deadline-wake", 1, base.Add(-10*time.Minute))
+	ir.Status.InstanceStatuses = nil
+	orphan := podForIR(ir, 3, "default", 0, false, false)
+	r, _ := newReconciler(t, ir, orphan)
+	r.Clock = clocktesting.NewFakeClock(base)
+	r.ScaleDownRequeueInterval = 0
+	withLifecycleConfig(r, `{"teardown":{"deadline":"30m"}}`)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 20*time.Minute+time.Nanosecond {
+		t.Fatalf("result = %+v, want teardown deadline wake in 20m+1ns", result)
+	}
+}
+
+func TestTeardown_DeadlineFoldsAheadOfLongPollInterval(t *testing.T) {
+	base := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	ir := terminatingIR("llama-engine", "deadline-fold", 1, base.Add(-10*time.Minute))
+	ir.Status.InstanceStatuses = nil
+	orphan := podForIR(ir, 3, "default", 0, false, false)
+	r, _ := newReconciler(t, ir, orphan)
+	r.Clock = clocktesting.NewFakeClock(base)
+	r.ScaleDownRequeueInterval = time.Hour
+	withLifecycleConfig(r, `{"teardown":{"deadline":"30m"}}`)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 20*time.Minute+time.Nanosecond {
+		t.Fatalf("result = %+v, want deadline to precede 1h poll", result)
 	}
 }
 
@@ -715,11 +1187,62 @@ func TestTeardown_DeadlineExceeded_WarnsAndReleases(t *testing.T) {
 	if len(exceeded) != 1 {
 		t.Fatalf("expected one TeardownDeadlineExceeded warning, got %v", exceeded)
 	}
-	for _, want := range []string{orphan.Name, "background GC", "manual escape"} {
+	for _, want := range []string{"selector:", "background GC", "manual escape"} {
 		if !strings.Contains(exceeded[0], want) {
 			t.Errorf("TeardownDeadlineExceeded message must contain %q; got %q", want, exceeded[0])
 		}
 	}
+	if strings.Contains(exceeded[0], orphan.Name) {
+		t.Errorf("TeardownDeadlineExceeded must omit Pod names: %q", exceeded[0])
+	}
+}
+
+// TestTeardown_DeadlinePrecedesResourceObservationErrors proves the absolute
+// deadline remains an escape hatch when authoritative resource observation is
+// degraded. Pod observation contributes only a bounded diagnostic, and the
+// PodGroup inventory is not consulted before the finalizer is released.
+func TestTeardown_DeadlinePrecedesResourceObservationErrors(t *testing.T) {
+	base := time.Now()
+	ir := terminatingIR("llama-engine", "deadline-errors", 1, base.Add(-time.Hour))
+	ir.Spec.ParentRef.Name = "deadline-parent"
+	orphan := podForIR(ir, 3, "default", 0, false, false)
+	pg := ownedPodGroupForIR(ir, "deadline-owned", 3)
+	r, c := newReconciler(t, ir, orphan, pg)
+	reader := &teardownListReader{
+		Reader:        c,
+		podError:      errors.New("injected Pod list failure"),
+		podGroupError: errors.New("injected PodGroup list failure"),
+	}
+	r.APIReader = reader
+	r.GangSchedulingAvailable = true
+	r.Clock = clocktesting.NewFakeClock(base)
+	withLifecycleConfig(r, `{"teardown":{"deadline":"30m"}}`)
+	component := string(ir.Spec.Component)
+	obsmetrics.SetScaleDownActivePods(ir.Namespace, ir.Spec.ParentRef.Name, component, 11)
+	obsmetrics.SetScaleDownDeferredInstances(ir.Namespace, ir.Spec.ParentRef.Name, component, 5)
+	assertScaleDownGaugeSeries(t, true, ir.Namespace, ir.Spec.ParentRef.Name, component)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err != nil {
+		t.Fatalf("deadline reconcile: %v", err)
+	}
+	if !result.IsZero() {
+		t.Fatalf("deadline release must not requeue, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("deadline must release the finalizer despite list failures: %v", err)
+	}
+	if reader.podLists != 1 || reader.podGroupLists != 0 {
+		t.Fatalf("deadline list calls: pods=%d PodGroups=%d, want one best-effort Pod list and no PodGroup list",
+			reader.podLists, reader.podGroupLists)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(orphan), &corev1.Pod{}); err != nil {
+		t.Errorf("deadline path must leave surviving Pod to background GC: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), &schedulingv1alpha1.PodGroup{}); err != nil {
+		t.Errorf("deadline path must leave surviving PodGroup to background GC: %v", err)
+	}
+	assertScaleDownGaugeSeries(t, false, ir.Namespace, ir.Spec.ParentRef.Name, component)
 }
 
 // recordedPodDelete captures one pod Delete RPC's grace period.
@@ -792,7 +1315,12 @@ func TestTeardown_ForceDeleteEscalation_UnwedgesDeadNodePod(t *testing.T) {
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("admission Reconcile: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	}); err != nil {
+		t.Fatalf("effect Reconcile: %v", err)
 	}
 
 	// The escalation must have grace-0 force-deleted the wedged pod.
@@ -839,8 +1367,26 @@ func TestTeardown_ForceDeleteEscalation_UnwedgesDeadNodePod(t *testing.T) {
 		t.Errorf("ledger ConfigMap must be owned by the IR when the parent is gone")
 	}
 
-	// With the wedge cleared, the same pass completes teardown: the
-	// finalizer lifted and the IR is gone.
+	// A fresh authoritative pass observes the Pod absent and commits
+	// InstanceStatus removal. Finalizer completion follows from the next
+	// authoritative snapshot.
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("status removal Reconcile: %v", err)
+	}
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("status removal must requeue before finalizer completion, got %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); err != nil {
+		t.Fatalf("status removal pass lifted the finalizer: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	}); err != nil {
+		t.Fatalf("completion Reconcile: %v", err)
+	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); !apierrors.IsNotFound(err) {
 		t.Errorf("teardown must complete once the wedge is escalated; get returned %v", err)
 	}

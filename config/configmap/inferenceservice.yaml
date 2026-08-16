@@ -24,14 +24,19 @@ data:
       "defaultDeploymentMode": "RawDeployment"
     }
 
-  # scaleUpPodBatchSize is a missing-Pod budget; each Instance or gang is
-  # selected atomically. A first eligible Instance larger than the budget
-  # proceeds alone. Omit for field-specific unbounded compatibility. It is
-  # read once at manager startup; non-positive values prevent startup, and a
-  # direct ConfigMap edit requires a manager restart.
+  # The scale-up and scale-down Pod batch sizes bound create and delete work in
+  # Pod-equivalent units. Each Instance or gang is selected atomically, and a
+  # first eligible Instance larger than its budget proceeds alone. Omitting a
+  # batch field preserves that direction's unbounded selection. The scale-down
+  # requeue interval polls while destructive work remains in flight; omitting
+  # it leaves progress to watched resources and exact configured lifecycle
+  # deadlines. These settings are read once at manager startup; invalid values
+  # prevent startup, and a direct ConfigMap edit requires a manager restart.
   lifecycle: |-
     {
-      "scaleUpPodBatchSize": 100
+      "scaleUpPodBatchSize": 100,
+      "scaleDownPodBatchSize": 100,
+      "scaleDownRequeueInterval": "5s"
     }
 
   canaryAnalysis: |-

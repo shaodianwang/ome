@@ -81,6 +81,7 @@ func newGangClient(t *testing.T, initObjs ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(initObjs...).
+		WithIndex(&schedulingv1alpha1.PodGroup{}, PodGroupControllerUIDIndexField, PodGroupControllerUIDIndexExtractor).
 		Build()
 }
 
@@ -577,10 +578,10 @@ func TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup(t *testin
 	assertCondition(t, store, metav1.ConditionTrue, string(workload.ReasonPodGroupCRDNotInstalled))
 }
 
-// TestEnsurePodGroups_ScaleDownDeletesExtraPodGroups — when an
-// Instance drops out of the plan, its PodGroup is GC'd. Scale-down
-// case.
-func TestEnsurePodGroups_ScaleDownDeletesExtraPodGroups(t *testing.T) {
+// TestEnsurePodGroups_ScaleDownLeavesExtraPodGroupsForFinalizer verifies the
+// prerequisite pass never gets ahead of Pod drain. The terminal lifecycle
+// owner removes the extra group after the shared Pod observation is empty.
+func TestEnsurePodGroups_ScaleDownLeavesExtraPodGroupsForFinalizer(t *testing.T) {
 	owner := newOwner("prod", "llama") // plan replicas=1 → index 0 stays, index 1 drops
 	// Pre-existing PodGroups for both Instances.
 	pg0 := &schedulingv1alpha1.PodGroup{
@@ -611,11 +612,11 @@ func TestEnsurePodGroups_ScaleDownDeletesExtraPodGroups(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-engine-0"}, gotPg0); err != nil {
 		t.Errorf("expected llama-engine-0 to remain, got %v", err)
 	}
-	// Index 1 PodGroup deleted.
+	// Index 1 remains until the finalization callback owns deletion.
 	gotPg1 := &schedulingv1alpha1.PodGroup{}
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-engine-1"}, gotPg1)
-	if err == nil || !apierrors.IsNotFound(err) {
-		t.Errorf("expected llama-engine-1 to be deleted, got err=%v pg=%+v", err, gotPg1)
+	if err != nil {
+		t.Errorf("expected llama-engine-1 to remain for terminal finalization, got %v", err)
 	}
 }
 
@@ -731,29 +732,6 @@ func TestPatchGangSchedulingCondition_ISVCGoneIsSafe(t *testing.T) {
 	// production closure.
 	if err := patchGangSchedulingCondition(context.Background(), input, true, true); err != nil {
 		t.Errorf("expected nil error when owner missing, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------
-// extraPodGroupIndices — set-difference semantic.
-// ---------------------------------------------------------------------
-
-func TestExtraPodGroupIndices(t *testing.T) {
-	observed := []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},
-		{Index: 1, Phase: workload.InstancePhaseReady},
-		{Index: 2, Phase: workload.InstancePhaseMigrating},
-		{Index: 3, Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationMigrate}},
-	}
-	plan := workload.ComponentPlan{
-		Instances: []workload.InstancePlan{{Index: 0}},
-	}
-
-	got := extraPodGroupIndices(observed, plan)
-	want := []int32{1}
-	if len(got) != 1 || got[0] != 1 {
-		t.Errorf("extraPodGroupIndices: got %v want %v", got, want)
 	}
 }
 

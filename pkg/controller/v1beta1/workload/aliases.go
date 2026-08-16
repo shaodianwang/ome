@@ -62,6 +62,7 @@ type (
 )
 
 type InstanceMutationSnapshot = types.InstanceMutationSnapshot
+type ComponentPodSnapshot = types.ComponentPodSnapshot
 
 var (
 	ErrStatusOwnerGone            = types.ErrStatusOwnerGone

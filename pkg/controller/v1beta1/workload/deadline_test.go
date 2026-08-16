@@ -280,6 +280,36 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 	}
 }
 
+// TestExpireOperations_DeleteOperationSkipped pins Delete's ownership of
+// terminal handling even when a stale observation carries a transient phase.
+// DeleteBatch, rather than generic deadline escalation, decides when that
+// durable operation is complete.
+func TestExpireOperations_DeleteOperationSkipped(t *testing.T) {
+	now := time.Now()
+	insts := []workload.InstanceStatus{{
+		Index: 0,
+		Phase: workload.InstancePhaseRestarting,
+		Operation: &workload.InstanceOperation{
+			Type:     workload.InstanceOperationDelete,
+			Step:     "Drain",
+			Deadline: metav1.NewTime(now.Add(-time.Minute)),
+		},
+	}}
+	input, store, event := expireFixture(insts)
+
+	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	got := (*store)[0]
+	if got.Phase != workload.InstancePhaseRestarting || got.Operation == nil || got.Operation.Type != workload.InstanceOperationDelete {
+		t.Errorf("Delete operation must be untouched; got phase=%q op=%+v", got.Phase, got.Operation)
+	}
+	if event.count != 0 {
+		t.Errorf("event count: got %d want 0", event.count)
+	}
+}
+
 // TestExpireOperations_NoOperationUntouched pins that an Instance with no
 // in-flight Operation is skipped (nothing to time out).
 func TestExpireOperations_NoOperationUntouched(t *testing.T) {

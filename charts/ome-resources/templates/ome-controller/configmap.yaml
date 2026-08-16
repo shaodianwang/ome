@@ -50,6 +50,12 @@ data:
   {{- if hasKey . "scaleUpPodBatchSize" }}
   {{- $fields = append $fields (dict "scaleUpPodBatchSize" .scaleUpPodBatchSize) }}
   {{- end }}
+  {{- if hasKey . "scaleDownPodBatchSize" }}
+  {{- $fields = append $fields (dict "scaleDownPodBatchSize" .scaleDownPodBatchSize) }}
+  {{- end }}
+  {{- if hasKey . "scaleDownRequeueInterval" }}
+  {{- $fields = append $fields (dict "scaleDownRequeueInterval" .scaleDownRequeueInterval) }}
+  {{- end }}
   {{- with .updateRetry }}
   {{- $fields = append $fields (dict "updateRetry" (dict "maxAttempts" .maxAttempts "initialDelay" .initialDelay "maxDelay" .maxDelay "multiplier" .multiplier)) }}
   {{- end }}

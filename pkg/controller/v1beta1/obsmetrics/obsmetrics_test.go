@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -64,6 +65,60 @@ func histogramFor(metricName string, labels prometheus.Labels) (uint64, float64)
 		}
 	}
 	return 0, 0
+}
+
+func histogramBucketFor(metricName string, labels prometheus.Labels, upperBound float64) uint64 {
+	gathered, err := metrics.Registry.Gather()
+	if err != nil {
+		return 0
+	}
+	for _, family := range gathered {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metric.Histogram == nil || !labelsMatch(metric.GetLabel(), labels) {
+				continue
+			}
+			for _, bucket := range metric.Histogram.GetBucket() {
+				if bucket.GetUpperBound() == upperBound {
+					return bucket.GetCumulativeCount()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func gaugeFor(metricName string, labels prometheus.Labels) (float64, bool) {
+	gathered, err := metrics.Registry.Gather()
+	if err != nil {
+		return 0, false
+	}
+	for _, family := range gathered {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metric.Gauge == nil || !labelsMatch(metric.GetLabel(), labels) {
+				continue
+			}
+			return metric.Gauge.GetValue(), true
+		}
+	}
+	return 0, false
+}
+
+func labelsMatch(pairs []*dto.LabelPair, labels prometheus.Labels) bool {
+	if len(pairs) != len(labels) {
+		return false
+	}
+	for _, pair := range pairs {
+		if value, ok := labels[pair.GetName()]; !ok || value != pair.GetValue() {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRecordStatusUpdate_IncrementsPerResult(t *testing.T) {
@@ -169,5 +224,130 @@ func TestRecordPodCreateToReady_ISVCLabelIsolated(t *testing.T) {
 	}
 	if secondEnd != secondStart {
 		t.Errorf("first ISVC observation changed second ISVC count from %v to %v", secondStart, secondEnd)
+	}
+}
+
+func TestRecordScaleDownBatchPods(t *testing.T) {
+	engine := prometheus.Labels{"component": "scale-down-batch-engine"}
+	decoder := prometheus.Labels{"component": "scale-down-batch-decoder"}
+	engineStartCount, engineStartSum := histogramFor("ome_omenative_scale_down_batch_pods", engine)
+	engineStart128 := histogramBucketFor("ome_omenative_scale_down_batch_pods", engine, 128)
+	decoderStartCount, _ := histogramFor("ome_omenative_scale_down_batch_pods", decoder)
+
+	RecordScaleDownBatchPods("scale-down-batch-engine", 96)
+	RecordScaleDownBatchPods("scale-down-batch-engine", 8)
+	RecordScaleDownBatchPods("scale-down-batch-decoder", 4)
+	RecordScaleDownBatchPods("scale-down-batch-engine", 0)
+	RecordScaleDownBatchPods("scale-down-batch-engine", -1)
+	RecordScaleDownBatchPods("", 10)
+
+	engineCount, engineSum := histogramFor("ome_omenative_scale_down_batch_pods", engine)
+	if engineCount-engineStartCount != 2 {
+		t.Fatalf("engine sample count delta: got %d, want 2", engineCount-engineStartCount)
+	}
+	if delta := engineSum - engineStartSum; delta != 104 {
+		t.Errorf("engine sample sum delta: got %v, want 104", delta)
+	}
+	if delta := histogramBucketFor("ome_omenative_scale_down_batch_pods", engine, 128) - engineStart128; delta != 2 {
+		t.Errorf("engine <=128 bucket delta: got %d, want 2", delta)
+	}
+	decoderCount, _ := histogramFor("ome_omenative_scale_down_batch_pods", decoder)
+	if decoderCount-decoderStartCount != 1 {
+		t.Errorf("decoder sample count delta: got %d, want 1", decoderCount-decoderStartCount)
+	}
+}
+
+func TestScaleDownGaugesSetResetAndCleanup(t *testing.T) {
+	labels := prometheus.Labels{
+		"namespace": "metrics-cleanup",
+		"isvc":      "scale-down-gauges",
+		"component": "engine",
+	}
+	DeleteScaleDownSeries("metrics-cleanup", "scale-down-gauges", "engine")
+	if _, found := gaugeFor("ome_omenative_scale_down_active_pods", labels); found {
+		t.Fatal("active gauge exists before it is set")
+	}
+	if _, found := gaugeFor("ome_omenative_scale_down_deferred_instances", labels); found {
+		t.Fatal("deferred gauge exists before it is set")
+	}
+
+	SetScaleDownActivePods("metrics-cleanup", "scale-down-gauges", "engine", 96)
+	SetScaleDownDeferredInstances("metrics-cleanup", "scale-down-gauges", "engine", 1987)
+	if got, found := gaugeFor("ome_omenative_scale_down_active_pods", labels); !found || got != 96 {
+		t.Errorf("active gauge: got (%v, %t), want (96, true)", got, found)
+	}
+	if got, found := gaugeFor("ome_omenative_scale_down_deferred_instances", labels); !found || got != 1987 {
+		t.Errorf("deferred gauge: got (%v, %t), want (1987, true)", got, found)
+	}
+	DeleteScaleDownSeries("", "scale-down-gauges", "engine")
+	if got, found := gaugeFor("ome_omenative_scale_down_active_pods", labels); !found || got != 96 {
+		t.Errorf("incomplete cleanup identity changed active gauge: got (%v, %t), want (96, true)", got, found)
+	}
+
+	SetScaleDownActivePods("metrics-cleanup", "scale-down-gauges", "engine", 0)
+	SetScaleDownDeferredInstances("metrics-cleanup", "scale-down-gauges", "engine", 0)
+	if got, found := gaugeFor("ome_omenative_scale_down_active_pods", labels); !found || got != 0 {
+		t.Errorf("reset active gauge: got (%v, %t), want (0, true)", got, found)
+	}
+	if got, found := gaugeFor("ome_omenative_scale_down_deferred_instances", labels); !found || got != 0 {
+		t.Errorf("reset deferred gauge: got (%v, %t), want (0, true)", got, found)
+	}
+
+	DeleteScaleDownSeries("metrics-cleanup", "scale-down-gauges", "engine")
+	DeleteScaleDownSeries("metrics-cleanup", "scale-down-gauges", "engine")
+	if _, found := gaugeFor("ome_omenative_scale_down_active_pods", labels); found {
+		t.Error("active gauge survived series cleanup")
+	}
+	if _, found := gaugeFor("ome_omenative_scale_down_deferred_instances", labels); found {
+		t.Error("deferred gauge survived series cleanup")
+	}
+}
+
+func TestScaleDownGaugesRejectInvalidSamples(t *testing.T) {
+	labels := prometheus.Labels{
+		"namespace": "metrics-invalid",
+		"isvc":      "scale-down-gauges",
+		"component": "engine",
+	}
+	DeleteScaleDownSeries("metrics-invalid", "scale-down-gauges", "engine")
+	SetScaleDownActivePods("metrics-invalid", "scale-down-gauges", "engine", -1)
+	SetScaleDownDeferredInstances("metrics-invalid", "scale-down-gauges", "engine", -1)
+	SetScaleDownActivePods("", "scale-down-gauges", "engine", 10)
+	SetScaleDownDeferredInstances("metrics-invalid", "", "engine", 10)
+	if _, found := gaugeFor("ome_omenative_scale_down_active_pods", labels); found {
+		t.Error("invalid active sample created a series")
+	}
+	if _, found := gaugeFor("ome_omenative_scale_down_deferred_instances", labels); found {
+		t.Error("invalid deferred sample created a series")
+	}
+}
+
+func TestRecordScaleDownInstanceDuration(t *testing.T) {
+	labels := prometheus.Labels{"component": "scale-down-duration-engine"}
+	startCount, startSum := histogramFor("ome_omenative_scale_down_instance_duration_seconds", labels)
+	start16 := histogramBucketFor("ome_omenative_scale_down_instance_duration_seconds", labels, 16)
+	RecordScaleDownInstanceDuration("scale-down-duration-engine", 12.5)
+	RecordScaleDownInstanceDuration("scale-down-duration-engine", 0)
+	RecordScaleDownInstanceDuration("scale-down-duration-engine", -1)
+	RecordScaleDownInstanceDuration("", 7)
+	count, sum := histogramFor("ome_omenative_scale_down_instance_duration_seconds", labels)
+	if count-startCount != 2 {
+		t.Errorf("sample count delta: got %d, want 2", count-startCount)
+	}
+	if delta := sum - startSum; delta != 12.5 {
+		t.Errorf("sample sum delta: got %v, want 12.5", delta)
+	}
+	if delta := histogramBucketFor("ome_omenative_scale_down_instance_duration_seconds", labels, 16) - start16; delta != 2 {
+		t.Errorf("<=16s bucket delta: got %d, want 2", delta)
+	}
+}
+
+func TestRecordScaleDownOversizedBatch(t *testing.T) {
+	labels := prometheus.Labels{"component": "scale-down-oversized-engine"}
+	start := counterFor("ome_omenative_scale_down_oversized_batch_total", labels)
+	RecordScaleDownOversizedBatch("scale-down-oversized-engine")
+	RecordScaleDownOversizedBatch("")
+	if delta := counterFor("ome_omenative_scale_down_oversized_batch_total", labels) - start; delta != 1 {
+		t.Errorf("counter delta: got %v, want 1", delta)
 	}
 }

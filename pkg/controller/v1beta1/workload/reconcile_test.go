@@ -81,8 +81,132 @@ func stubInputCallbacks(input *workload.ReconcileInput) {
 	}
 }
 
+type testAtomicMutationStore struct {
+	owner    client.Object
+	statuses []workload.InstanceStatus
+	writes   int
+}
+
+func installTestAtomicMutationStore(input *workload.ReconcileInput) *testAtomicMutationStore {
+	store := &testAtomicMutationStore{
+		owner:    input.OwnerObject,
+		statuses: cloneTestInstanceStatuses(input.ObservedState.InstanceStatuses),
+	}
+	input.ApplyInstanceMutationsWithRetryBlock = store.apply
+	return store
+}
+
+func (s *testAtomicMutationStore) apply(_ context.Context, mutations []workload.InstanceMutation, _ string, mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	if mutateRetryBlock != nil {
+		return fmt.Errorf("test atomic mutation store does not support RetryBlock mutations")
+	}
+	snapshot := workload.InstanceMutationSnapshot{Instances: make(map[int32]workload.InstanceStatus, len(s.statuses))}
+	if s.owner != nil {
+		snapshot.OwnerUID = s.owner.GetUID()
+		snapshot.OwnerGeneration = s.owner.GetGeneration()
+	}
+	for _, status := range s.statuses {
+		snapshot.Instances[status.Index] = cloneTestInstanceStatus(status)
+	}
+	for _, mutation := range mutations {
+		if mutation.BatchPrecondition != nil && !mutation.BatchPrecondition(snapshot) {
+			return workload.ErrStatusMutationPrecondition
+		}
+	}
+
+	type committedMutation struct {
+		callback func(*workload.InstanceStatus, *workload.InstanceStatus)
+		before   *workload.InstanceStatus
+		after    *workload.InstanceStatus
+	}
+	next := cloneTestInstanceStatuses(s.statuses)
+	committed := make([]committedMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		position := -1
+		for i := range next {
+			if next[i].Index == mutation.Index {
+				position = i
+				break
+			}
+		}
+		if mutation.Remove {
+			if position < 0 {
+				continue
+			}
+			before := cloneTestInstanceStatus(next[position])
+			if mutation.Precondition != nil && !mutation.Precondition(&before) {
+				continue
+			}
+			next = append(next[:position], next[position+1:]...)
+			committed = append(committed, committedMutation{callback: mutation.OnCommit, before: &before})
+			continue
+		}
+
+		status := workload.InstanceStatus{Index: mutation.Index}
+		var before *workload.InstanceStatus
+		if position >= 0 {
+			status = cloneTestInstanceStatus(next[position])
+			copy := cloneTestInstanceStatus(status)
+			before = &copy
+		}
+		if mutation.Precondition != nil && !mutation.Precondition(&status) {
+			continue
+		}
+		if !mutation.Mutate(&status) {
+			continue
+		}
+		if position >= 0 {
+			next[position] = cloneTestInstanceStatus(status)
+		} else {
+			next = append(next, cloneTestInstanceStatus(status))
+		}
+		after := cloneTestInstanceStatus(status)
+		committed = append(committed, committedMutation{callback: mutation.OnCommit, before: before, after: &after})
+	}
+	if len(committed) == 0 {
+		return nil
+	}
+	s.statuses = next
+	s.writes++
+	for _, mutation := range committed {
+		if mutation.callback != nil {
+			mutation.callback(mutation.before, mutation.after)
+		}
+	}
+	return nil
+}
+
+func (s *testAtomicMutationStore) sync(input *workload.ReconcileInput) {
+	input.ObservedState.InstanceStatuses = cloneTestInstanceStatuses(s.statuses)
+}
+
+func (s *testAtomicMutationStore) status(index int32) *workload.InstanceStatus {
+	for i := range s.statuses {
+		if s.statuses[i].Index == index {
+			status := cloneTestInstanceStatus(s.statuses[i])
+			return &status
+		}
+	}
+	return nil
+}
+
+func cloneTestInstanceStatuses(statuses []workload.InstanceStatus) []workload.InstanceStatus {
+	cloned := make([]workload.InstanceStatus, len(statuses))
+	for i := range statuses {
+		cloned[i] = cloneTestInstanceStatus(statuses[i])
+	}
+	return cloned
+}
+
+func cloneTestInstanceStatus(status workload.InstanceStatus) workload.InstanceStatus {
+	converted := v1beta1convert.InstanceStatusFromWorkload(status)
+	return v1beta1convert.InstanceStatusToWorkload(*converted.DeepCopy())
+}
+
 // minimalInput builds a ReconcileInput with the bare minimum fields
 // the dispatcher reads. Tests pad observed state + plan as needed.
+const testScaleDownRequeueInterval = 37 * time.Second
+
 func minimalInput(t *testing.T) workload.ReconcileInput {
 	t.Helper()
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
@@ -97,6 +221,7 @@ func minimalInput(t *testing.T) workload.ReconcileInput {
 			Component: workload.ComponentEngine,
 			OwnerName: "llama-70b",
 		},
+		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
 		DesiredSpec: workload.WorkloadDesiredSpec{
 			Replicas: 1,
 			PodSpec: &corev1.PodSpec{Containers: []corev1.Container{
@@ -260,31 +385,29 @@ func TestReconcile_PausedStillScalesDown(t *testing.T) {
 		{Index: 0, Phase: workload.InstancePhaseReady},
 		{Index: 1, Phase: workload.InstancePhaseReady},
 	}
-	removed := 0
-	in.RemoveInstance = func(_ context.Context, idx int32) (bool, error) {
-		if idx != 1 {
-			t.Fatalf("RemoveInstance index=%d want 1", idx)
-		}
-		removed++
-		return true, nil
-	}
+	store := installTestAtomicMutationStore(&in)
 	plan := minimalPlan()
 	plan.Paused = true
 
-	if _, err := workload.Reconcile(context.Background(), deps, in, plan, nil); err != nil {
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
+	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if removed != 1 {
-		t.Fatalf("paused scale-down removed %d Instances, want 1", removed)
+	if !result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("paused scale-down admission must requeue immediately, got %+v", result)
+	}
+	status := store.status(1)
+	if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+		t.Fatalf("paused scale-down did not durably admit index 1: %+v", status)
+	}
+	if retained := store.status(0); retained == nil || retained.Phase != workload.InstancePhaseReady {
+		t.Fatalf("paused scale-down changed retained index 0: %+v", retained)
 	}
 }
 
-// TestReconcile_ScaleDownExtra_DrivesDelete covers the
-// "InstanceStatus has index 1 but plan doesn't" scale-down path. The
-// dispatcher MUST drive Delete for the extra index, and because Delete
-// is the first op in the chain, it returns the per-Delete requeue
-// when the live pod count is non-zero. The fake client has no pods,
-// so Delete resolves done=true and the dispatcher falls through.
+// TestReconcile_ScaleDownExtra_DrivesDelete covers an InstanceStatus whose
+// index is outside the plan. Fresh Delete admission is committed before any
+// Pod effect and immediately requeues for a new observation.
 func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -296,13 +419,17 @@ func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 		{Index: 1, Phase: workload.InstancePhaseReady}, // extra
 	}
 	plan := minimalPlan() // covers only index 0
+	store := installTestAtomicMutationStore(&in)
 
 	if extras := workload.ExtraInstanceIndices(in.ObservedState.InstanceStatuses, plan, false); len(extras) != 1 || extras[0] != 1 {
 		t.Fatalf("ExtraInstanceIndices: got %v, want [1]", extras)
 	}
-	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.Requeue || store.writes != 1 {
+		t.Fatalf("scale-down admission result/writes = %+v/%d, want immediate requeue/1", result, store.writes)
 	}
 }
 
@@ -836,6 +963,7 @@ func enginePod(isvc, ns string, idx int32) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      query.PodName(isvc, workload.ComponentEngine, idx, "default", 0),
 			Namespace: ns,
+			UID:       types.UID(fmt.Sprintf("%s-engine-%d-uid", isvc, idx)),
 			Labels: map[string]string{
 				constants.InferenceServicePodLabelKey: isvc,
 				constants.OMEComponentLabel:           string(workload.ComponentEngine),

@@ -166,12 +166,10 @@ type Decision struct {
 	RequeueAfter time.Duration
 
 	// Escalate gates the terminal-failure escalation pass
-	// (escalation.go): the executor runs it after the action loop on
-	// every non-error return — including in-flight early-requeue
-	// returns, so a wedged surge or gang is escalated while its op
-	// keeps requeueing. False while paused: escalation is suspended
-	// with the rest of the lifecycle machinery (deadlines are parked
-	// by the adapter while paused).
+	// (escalation.go). False while paused: escalation is suspended with the
+	// rest of the lifecycle machinery (deadlines are parked by the adapter
+	// while paused). The executor separately guards status-commit boundaries
+	// and excludes deferred scale-down extras.
 	Escalate bool
 }
 
@@ -193,7 +191,7 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	// Scale-down selection: indices observed but no longer planned.
 	// Runs before everything else so excess pods don't run alongside
 	// in-flight drains.
-	if extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false); len(extras) > 0 {
+	if extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false); len(extras) > 0 || hasDeleteOwnedInstance(input.ObservedState.InstanceStatuses) {
 		d.Actions = append(d.Actions, PlannedAction{Kind: ActionScaleDown, Extras: extras})
 	}
 

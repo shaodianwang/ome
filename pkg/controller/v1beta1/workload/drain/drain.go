@@ -59,24 +59,36 @@ func IsPodDrained(ctx context.Context, reader client.Reader, namespace, serviceN
 	return podDrainedInSlices(slices, pod), nil
 }
 
-// Batcher amortizes the per-service EndpointSlice LIST across a whole
-// gang/drain loop. IsPodDrained on the bare reader does one LIST per
-// pod (N+1); when a Delete / Restart-Phase-A / recreate pass walks
-// every pod in an Instance, those pods share at most a handful of
-// per-revision Service names, so the slice set can be listed once per
-// service name and reused. Mirrors AvailablePodSet's single-list
-// approach in status_aggregate.go.
+// Batcher records one drain observation per Service for a whole
+// gang/drain loop. Each observation lists EndpointSlices once, indexes
+// routable Pod target names, and caches the empty-slice Service lookup.
+// Per-Pod checks are therefore O(1) after O(E) observation construction.
 //
-// Semantics are identical to IsPodDrained, including the empty-slice
-// disambiguation (Service-exists Get): only the redundant repeat LISTs
-// for the same serviceName are elided.
+// Semantics are identical to IsPodDrained, including Ready=nil and
+// empty TargetRef.Namespace handling. Results and read errors are held
+// for the Batcher lifetime so every Pod in a wave is judged against the
+// same observation.
 //
 // Not safe for concurrent use; scoped to one reconcile pass.
 type Batcher struct {
 	reader    client.Reader
 	namespace string
-	// slicesByService memoizes EndpointSlicesForService per serviceName.
-	slicesByService map[string][]discoveryv1.EndpointSlice
+	services  map[string]serviceDrainObservation
+}
+
+type serviceDrainObservation struct {
+	hasEndpointSlices    bool
+	drainedWithoutSlices bool
+	routableTargets      routablePodTargets
+	err                  error
+}
+
+// routablePodTargets mirrors endpointTargetsPod without retaining or scanning
+// the complete EndpointSlice payload for every Pod check. A TargetRef with an
+// empty Namespace matches a same-named Pod in any namespace.
+type routablePodTargets struct {
+	exactNamespace map[client.ObjectKey]struct{}
+	anyNamespace   map[string]struct{}
 }
 
 // NewBatcher returns a Batcher bound to reader + namespace. Callers
@@ -84,23 +96,34 @@ type Batcher struct {
 // per distinct serviceName.
 func NewBatcher(reader client.Reader, namespace string) *Batcher {
 	return &Batcher{
-		reader:          reader,
-		namespace:       namespace,
-		slicesByService: map[string][]discoveryv1.EndpointSlice{},
+		reader:    reader,
+		namespace: namespace,
+		services:  map[string]serviceDrainObservation{},
 	}
 }
 
-// slicesFor returns the (memoized) EndpointSlices for serviceName.
-func (b *Batcher) slicesFor(ctx context.Context, serviceName string) ([]discoveryv1.EndpointSlice, error) {
-	if slices, ok := b.slicesByService[serviceName]; ok {
-		return slices, nil
+func (b *Batcher) observeService(ctx context.Context, serviceName string) serviceDrainObservation {
+	if observation, ok := b.services[serviceName]; ok {
+		return observation
 	}
+
+	observation := serviceDrainObservation{}
 	slices, err := EndpointSlicesForService(ctx, b.reader, b.namespace, serviceName)
 	if err != nil {
-		return nil, err
+		observation.err = err
+		b.services[serviceName] = observation
+		return observation
 	}
-	b.slicesByService[serviceName] = slices
-	return slices, nil
+	if len(slices) == 0 {
+		observation.drainedWithoutSlices, observation.err = drainedWhenSliceListEmpty(ctx, b.reader, b.namespace, serviceName)
+		b.services[serviceName] = observation
+		return observation
+	}
+
+	observation.hasEndpointSlices = true
+	observation.routableTargets = indexRoutablePodTargets(slices)
+	b.services[serviceName] = observation
+	return observation
 }
 
 // IsPodDrained reports whether pod is no longer routable through
@@ -113,20 +136,53 @@ func (b *Batcher) IsPodDrained(ctx context.Context, serviceName string, pod *cor
 	if serviceName == "" {
 		return false, fmt.Errorf("IsPodDrained: empty serviceName")
 	}
-	slices, err := b.slicesFor(ctx, serviceName)
-	if err != nil {
-		return false, err
+	observation := b.observeService(ctx, serviceName)
+	if observation.err != nil {
+		return false, observation.err
 	}
-	if len(slices) == 0 {
-		return drainedWhenSliceListEmpty(ctx, b.reader, b.namespace, serviceName)
+	if !observation.hasEndpointSlices {
+		return observation.drainedWithoutSlices, nil
 	}
-	return podDrainedInSlices(slices, pod), nil
+	return !observation.routableTargets.contains(pod), nil
 }
 
-// podDrainedInSlices is the pure slice-walk shared by IsPodDrained and
-// Batcher.IsPodDrained: a pod is drained when no endpoint targeting it
-// across slices reports Ready. Assumes slices is non-empty — the
-// empty-list disambiguation is the caller's responsibility.
+func indexRoutablePodTargets(slices []discoveryv1.EndpointSlice) routablePodTargets {
+	targets := routablePodTargets{
+		exactNamespace: make(map[client.ObjectKey]struct{}),
+		anyNamespace:   make(map[string]struct{}),
+	}
+	for i := range slices {
+		for j := range slices[i].Endpoints {
+			ep := &slices[i].Endpoints[j]
+			if !endpointIsReady(*ep) || ep.TargetRef == nil {
+				continue
+			}
+			ref := ep.TargetRef
+			if ref.Kind != "" && ref.Kind != "Pod" {
+				continue
+			}
+			if ref.Namespace == "" {
+				targets.anyNamespace[ref.Name] = struct{}{}
+				continue
+			}
+			targets.exactNamespace[client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}] = struct{}{}
+		}
+	}
+	return targets
+}
+
+func (targets routablePodTargets) contains(pod *corev1.Pod) bool {
+	if _, ok := targets.anyNamespace[pod.Name]; ok {
+		return true
+	}
+	_, ok := targets.exactNamespace[client.ObjectKeyFromObject(pod)]
+	return ok
+}
+
+// podDrainedInSlices is the package-level check used by IsPodDrained: a pod is
+// drained when no endpoint targeting it across slices reports Ready. Assumes
+// slices is non-empty; the caller owns empty-list disambiguation. Batcher builds
+// the equivalent indexed representation once per Service.
 func podDrainedInSlices(slices []discoveryv1.EndpointSlice, pod *corev1.Pod) bool {
 	for _, slice := range slices {
 		for _, ep := range slice.Endpoints {

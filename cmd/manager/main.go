@@ -96,8 +96,8 @@ func registerOptionalScheme(cfg *rest.Config, s *runtime.Scheme, groupVersion sc
 	return nil
 }
 
-func loadScaleUpPodBatchSize(clientset kubernetes.Interface) (*int32, error) {
-	return controllerconfig.LoadScaleUpPodBatchSize(clientset)
+func loadPodBatchSizes(clientset kubernetes.Interface) (controllerconfig.PodBatchSizes, error) {
+	return controllerconfig.LoadPodBatchSizes(clientset)
 }
 
 func init() {
@@ -377,9 +377,9 @@ func main() {
 		setupLog.Error(err, "Failed to initialize deployment configuration")
 		os.Exit(1)
 	}
-	scaleUpPodBatchSize, err := loadScaleUpPodBatchSize(clientSet)
+	podBatchSizes, err := loadPodBatchSizes(clientSet)
 	if err != nil {
-		setupLog.Error(err, "Failed to initialize scale-up Pod batch configuration")
+		setupLog.Error(err, "Failed to initialize lifecycle scale configuration")
 		os.Exit(1)
 	}
 	ingressConfig, err := controllerconfig.NewIngressConfig(clientSet)
@@ -546,14 +546,16 @@ func main() {
 	if options.enableInferenceReplicaCtrl && !isControlPlane {
 		setupLog.Info("Setting up InferenceReplica controller")
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
-			Client:                  mgr.GetClient(),
-			Clientset:               clientSet,
-			Log:                     ctrl.Log.WithName("InferenceReplica"),
-			APIReader:               mgr.GetAPIReader(),
-			Recorder:                eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
-			MaxConcurrentReconciles: options.irMaxConcurrentReconciles,
-			ConfigCacheTTL:          options.configCacheTTL,
-			ScaleUpPodBatchSize:     scaleUpPodBatchSize,
+			Client:                   mgr.GetClient(),
+			Clientset:                clientSet,
+			Log:                      ctrl.Log.WithName("InferenceReplica"),
+			APIReader:                mgr.GetAPIReader(),
+			Recorder:                 eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+			MaxConcurrentReconciles:  options.irMaxConcurrentReconciles,
+			ConfigCacheTTL:           options.configCacheTTL,
+			ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
+			ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
+			ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)

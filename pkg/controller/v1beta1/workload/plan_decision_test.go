@@ -152,6 +152,23 @@ func TestPlan_ScaleDown_SelectsExtras(t *testing.T) {
 	}
 }
 
+func TestPlan_DeleteOwnedDesiredIndexFinishesBeforeRecreate(t *testing.T) {
+	input := minimalInput(t)
+	forbidMutations(t, &input)
+	plan := minimalPlan()
+	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+		Index: 0, Incarnation: 3, Phase: workload.InstancePhaseDeleting,
+		Operation: &workload.InstanceOperation{ID: "delete-0", Type: workload.InstanceOperationDelete, Step: "Drain"},
+	}}
+	decision := planOrFail(t, input, plan, planSnapshot(input, nil))
+	if len(decision.Actions) == 0 || decision.Actions[0].Kind != workload.ActionScaleDown {
+		t.Fatalf("actions = %v, want ScaleDown first", actionKinds(decision))
+	}
+	if len(decision.Actions[0].Extras) != 0 {
+		t.Fatalf("desired Delete-owned index must not be reclassified as a fresh extra: %v", decision.Actions[0].Extras)
+	}
+}
+
 // TestPlan_Restart_SelectsTriggeredInstances asserts the restart
 // selection: a Ready Instance whose live pod count is below desired is
 // selected (with the trigger reason), healthy Instances are not, and

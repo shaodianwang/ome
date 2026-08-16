@@ -2,7 +2,7 @@
 // record's Deadline — not the instance-op deadline — bounds a Manual
 // migration; expiry closes the record, unpins the pair, restores the
 // source phase from observation, and leaves the surge to the ordinary
-// scale-down Delete pipeline. Reuses the entry-lifecycle harness
+// scale-down batch pipeline. Reuses the entry-lifecycle harness
 // (migFixture) with an injected fake clock.
 package ops
 
@@ -43,6 +43,36 @@ func (f *migFixture) expire(t *testing.T) int {
 	return n
 }
 
+// deleteExtraBatch runs one dispatcher-equivalent scale-down pass and reports
+// whether the extra's authoritative status slot has been removed.
+func (f *migFixture) deleteExtraBatch(t *testing.T, idx int32) bool {
+	t.Helper()
+	legacyResetExpectations(t)
+	for _, pod := range f.listPods(t) {
+		if pod.UID != "" {
+			continue
+		}
+		pod.UID = types.UID(pod.Name + "-uid")
+		if err := f.c.Update(context.Background(), pod); err != nil {
+			t.Fatalf("assign fake Pod UID: %v", err)
+		}
+	}
+	input := f.input(t)
+	input.ApplyInstanceMutationsWithRetryBlock = f.applyInstanceMutationsWithRetryBlock
+	_, err := DeleteBatch(
+		context.Background(),
+		f.deps(),
+		input,
+		f.plan,
+		[]int32{idx},
+		query.BucketPodsByInstanceIdx(f.listPods(t)),
+	)
+	if err != nil {
+		t.Fatalf("DeleteBatch extra %d: %v", idx, err)
+	}
+	return findInstanceStatusOnIRForFixture(t, f, idx) == nil
+}
+
 // withFakeClock wires a fake clock into the fixture and returns it.
 func (f *migFixture) withFakeClock() *clocktesting.FakeClock {
 	clk := clocktesting.NewFakeClock(time.Now())
@@ -58,16 +88,11 @@ func mkMigRecordWithDeadline(uuid string, sourceIdx int32, fromNode string, dead
 	return rec
 }
 
-// TestMigrateExpiry_GangWedgeRegression is THE wedge regression,
-// verbatim: a 3-pod gang migration whose surge never becomes
-// schedulable (pods stay Pending) passes its Deadline. Pre-change,
-// deadline.go stamped the HEALTHY serving source Phase=Failed with the
-// Migrate op preserved and nothing ever consumed it — the migration
-// "ran" forever and the capacity slot leaked. Post-change the record
-// expires: Failed with the SurgePending blocker, both ops cleared,
-// source restored to Ready from live observation, the unpinned surge
-// torn down by the standard Delete pipeline, the capacity slot freed,
-// and a NEW migration accepted and completed.
+// TestMigrateExpiry_GangWedgeRegression verifies that an unschedulable
+// three-Pod surge expires at its deadline. Expiry marks the record Failed,
+// clears both operations, restores the source from live observation, leaves
+// the unpinned surge to scale-down, frees migration capacity, and permits a
+// subsequent migration.
 func TestMigrateExpiry_GangWedgeRegression(t *testing.T) {
 	f := newGangMigFixture(t)
 	clk := f.withFakeClock()
@@ -139,20 +164,15 @@ func TestMigrateExpiry_GangWedgeRegression(t *testing.T) {
 	}
 
 	// The unpinned surge is an ordinary extra for the dispatcher's
-	// step-1 scale-down — tear it down through the standard Delete
+	// step-1 scale-down — tear it down through the batch
 	// pipeline (no bespoke teardown).
 	deleted := false
 	for i := 0; i < 8 && !deleted; i++ {
-		legacyResetExpectations(t)
-		done, derr := Delete(context.Background(), f.deps(), f.input(t), f.plan, 1)
-		if derr != nil {
-			t.Fatalf("Delete surge extra: %v", derr)
-		}
-		deleted = done
+		deleted = f.deleteExtraBatch(t, 1)
 		f.react(t)
 	}
 	if !deleted {
-		t.Fatalf("surge Delete pipeline did not converge")
+		t.Fatalf("surge scale-down batch did not converge")
 	}
 	for _, pod := range f.listPods(t) {
 		if pod.Labels[query.LabelInstanceIdx] == "1" {
@@ -160,7 +180,7 @@ func TestMigrateExpiry_GangWedgeRegression(t *testing.T) {
 		}
 	}
 	if s := findInstanceStatusOnIRForFixture(t, f, 1); s != nil {
-		t.Errorf("surge InstanceStatus must be removed by the Delete pipeline; got %+v", s)
+		t.Errorf("surge InstanceStatus must be removed by the scale-down batch; got %+v", s)
 	}
 
 	// Capacity slot freed structurally (terminal records don't count).
@@ -497,7 +517,7 @@ func driveToDrainingDrainIncomplete(t *testing.T, f *migFixture, uuid string) {
 // drain NOT complete, the record expires — the source is un-drained
 // (serving key removed, back in rotation) as well as restored to
 // Ready, and the surge, which WAS serving in rotation, is torn down
-// through the drain-gated Delete pipeline like any extra.
+// through the drain-gated scale-down pipeline like any extra.
 func TestMigrateExpiry_DrainingIncomplete_Expired(t *testing.T) {
 	f := newSinglePodMigFixture(t)
 	clk := f.withFakeClock()
@@ -566,19 +586,14 @@ func TestMigrateExpiry_DrainingIncomplete_Expired(t *testing.T) {
 		t.Fatalf("un-drained source must re-enter rotation")
 	}
 
-	// The serving surge drains properly through the standard Delete.
+	// The serving surge drains properly through the scale-down batch.
 	deleted := false
 	for i := 0; i < 8 && !deleted; i++ {
-		legacyResetExpectations(t)
-		done, derr := Delete(context.Background(), f.deps(), f.input(t), f.plan, 1)
-		if derr != nil {
-			t.Fatalf("Delete serving surge: %v", derr)
-		}
-		deleted = done
+		deleted = f.deleteExtraBatch(t, 1)
 		f.react(t)
 	}
 	if !deleted {
-		t.Fatalf("serving-surge Delete pipeline did not converge")
+		t.Fatalf("serving-surge scale-down batch did not converge")
 	}
 	surgePod := &corev1.Pod{}
 	surgePodName := query.PodName(f.isvc.Name, f.component, 1, "default", 0)

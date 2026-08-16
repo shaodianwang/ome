@@ -10,10 +10,15 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // Suite-wide state populated by RunKindSuite + BeforeSuite. Specs
@@ -22,6 +27,35 @@ var (
 	suiteCtx  context.Context
 	k8sClient client.Client
 )
+
+// The suite uses a small destructive-work budget so scale-down behavior is
+// exercised in bounded waves without requiring a large Pod population. The
+// interval preserves the production polling cadence; Pod and EndpointSlice
+// watches normally wake the controller sooner.
+const kindLifecycleConfig = `{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":2,"scaleDownRequeueInterval":"5s"}`
+
+func setupOMENativeCoordinationManager(ctx context.Context, mgr ctrl.Manager) error {
+	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return err
+	}
+	if err := util.SeedDefaultConfigMaps(ctx, directClient); err != nil {
+		return err
+	}
+	key := client.ObjectKey{Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName}
+	configMap := &corev1.ConfigMap{}
+	if err := directClient.Get(ctx, key, configMap); err != nil {
+		return err
+	}
+	if configMap.Data == nil {
+		configMap.Data = map[string]string{}
+	}
+	configMap.Data[controllerconfig.LifecycleConfigName] = kindLifecycleConfig
+	if err := directClient.Update(ctx, configMap); err != nil {
+		return err
+	}
+	return kindfix.StandardOMESetup(kindfix.SetupOpts{WireInferenceReplica: true})(ctx, mgr)
+}
 
 // TestOMENativeCoordinationKindController is the Go entrypoint Ginkgo
 // hooks into. Brings up the KIND cluster + OME reconcilers + fake-serving
@@ -51,7 +85,7 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		// controller wires the same coordination.EvaluateUpdateGate decision
 		// site the direct path used. WireInferenceReplica starts that
 		// controller so projected InferenceReplica CRs turn into pods + status.
-		Setup: kindfix.StandardOMESetup(kindfix.SetupOpts{WireInferenceReplica: true}),
+		Setup: setupOMENativeCoordinationManager,
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)

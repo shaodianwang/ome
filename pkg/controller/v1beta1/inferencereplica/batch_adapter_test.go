@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
+	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,8 +27,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
@@ -1132,6 +1135,34 @@ func TestBuildApplyInstanceMutations_BatchPreconditionRejectsEverything(t *testi
 	g.Expect(got.Status.InstanceStatuses).To(gomega.Equal(ir.Status.InstanceStatuses))
 }
 
+func TestBuildApplyInstanceMutations_BatchPreconditionIncludesOwnerIdentity(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Generation = 17
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 2, Phase: v1beta1.OMENativeInstanceReady,
+	}}
+	c, writes := newCountingStatusClient(t, 0, ir)
+	var observed workloadtypes.InstanceMutationSnapshot
+
+	err := buildApplyInstanceMutationsWithRetryBlock(c, ir)(context.Background(), []workloadtypes.InstanceMutation{{
+		Index: 0,
+		BatchPrecondition: func(snapshot workloadtypes.InstanceMutationSnapshot) bool {
+			observed = snapshot
+			return true
+		},
+		Mutate: func(status *workloadtypes.InstanceStatus) bool {
+			status.Phase = workloadtypes.InstancePhaseDeleting
+			return true
+		},
+	}}, "", nil)
+
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(observed.OwnerUID).To(gomega.Equal(ir.UID))
+	g.Expect(observed.OwnerGeneration).To(gomega.Equal(ir.Generation))
+	g.Expect(*writes).To(gomega.Equal(1))
+}
+
 func TestBuildApplyInstanceMutations_BatchPreconditionRecheckedAfterConflict(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
@@ -1164,6 +1195,10 @@ func TestBuildApplyInstanceMutations_GuardedRemovalRejectsOwnershipDriftAfterCon
 	c, writes := newCountingStatusClient(t, 1, ir)
 	reads := &driftingInstanceReader{Reader: c, index: 0}
 	apply := buildApplyInstanceMutationsWithRetryBlockFromReader(c, reads, ir)
+	metricBefore := make(map[string]float64)
+	for _, result := range []string{obsmetrics.ResultSuccess, obsmetrics.ResultConflict, obsmetrics.ResultNotFound, obsmetrics.ResultError} {
+		metricBefore[result] = irStatusUpdateMetric(t, result)
+	}
 	commits := 0
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
@@ -1180,6 +1215,11 @@ func TestBuildApplyInstanceMutations_GuardedRemovalRejectsOwnershipDriftAfterCon
 	g.Expect(*writes).To(gomega.Equal(1), "the retry must stop before a second status write")
 	g.Expect(reads.reads).To(gomega.Equal(3), "conflict confirmation plus the retry must use authoritative snapshots")
 	g.Expect(commits).To(gomega.Equal(0))
+	for result, before := range metricBefore {
+		g.Expect(irStatusUpdateMetric(t, result)).To(gomega.Equal(before),
+			"a rejected replan must not report a terminal status-write outcome")
+	}
+
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
 	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1), "ownership drift must retain the incumbent status")
@@ -1357,4 +1397,110 @@ func TestBuildWriteAggregateCondition_SameNameReplacementAborts(t *testing.T) {
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
 	g.Expect(got.Status.Conditions).To(gomega.BeEmpty())
+}
+
+func TestBuildApplyInstanceMutations_RecordsOneTerminalStatusOutcome(t *testing.T) {
+	t.Run("conflict then success records success once", func(t *testing.T) {
+		ir := baselineIR("metric-success", "prod", 1)
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+		c, writes := newCountingStatusClient(t, 1, ir)
+		beforeSuccess := irStatusUpdateMetric(t, obsmetrics.ResultSuccess)
+		beforeConflict := irStatusUpdateMetric(t, obsmetrics.ResultConflict)
+
+		err := buildApplyInstanceMutationsWithRetryBlock(c, ir)(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)}, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *writes != 2 {
+			t.Fatalf("status attempts = %d, want 2", *writes)
+		}
+		if got := irStatusUpdateMetric(t, obsmetrics.ResultSuccess) - beforeSuccess; got != 1 {
+			t.Fatalf("success metric delta = %g, want 1", got)
+		}
+		if got := irStatusUpdateMetric(t, obsmetrics.ResultConflict) - beforeConflict; got != 0 {
+			t.Fatalf("terminal conflict metric delta = %g, want 0", got)
+		}
+	})
+
+	t.Run("terminal error records error once", func(t *testing.T) {
+		ir := baselineIR("metric-error", "prod", 1)
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+		c, _ := newFailingStatusClient(t, ir)
+		before := irStatusUpdateMetric(t, obsmetrics.ResultError)
+		if err := buildApplyInstanceMutationsWithRetryBlock(c, ir)(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)}, "", nil); err == nil {
+			t.Fatal("expected status failure")
+		}
+		if got := irStatusUpdateMetric(t, obsmetrics.ResultError) - before; got != 1 {
+			t.Fatalf("error metric delta = %g, want 1", got)
+		}
+	})
+
+	t.Run("owner disappearance records notfound once", func(t *testing.T) {
+		ir := baselineIR("metric-notfound", "prod", 1)
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+		c, _ := newStatusOwnerGoneOnUpdateClient(t, ir)
+		before := irStatusUpdateMetric(t, obsmetrics.ResultNotFound)
+		err := buildApplyInstanceMutationsWithRetryBlock(c, ir)(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)}, "", nil)
+		if !errors.Is(err, workloadtypes.ErrStatusOwnerGone) {
+			t.Fatalf("owner-gone error = %v", err)
+		}
+		if got := irStatusUpdateMetric(t, obsmetrics.ResultNotFound) - before; got != 1 {
+			t.Fatalf("notfound metric delta = %g, want 1", got)
+		}
+	})
+
+	t.Run("no-op records no outcome", func(t *testing.T) {
+		ir := baselineIR("metric-noop", "prod", 1)
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+		c, writes := newCountingStatusClient(t, 0, ir)
+		before := map[string]float64{}
+		for _, result := range []string{obsmetrics.ResultSuccess, obsmetrics.ResultConflict, obsmetrics.ResultNotFound, obsmetrics.ResultError} {
+			before[result] = irStatusUpdateMetric(t, result)
+		}
+		err := buildApplyInstanceMutationsWithRetryBlock(c, ir)(context.Background(), []workloadtypes.InstanceMutation{{
+			Index: 0, Mutate: func(*workload.InstanceStatus) bool { return false },
+		}}, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *writes != 0 {
+			t.Fatalf("no-op status writes = %d, want 0", *writes)
+		}
+		for result, value := range before {
+			if got := irStatusUpdateMetric(t, result); got != value {
+				t.Fatalf("%s metric changed on no-op: got %g want %g", result, got, value)
+			}
+		}
+	})
+}
+
+func irStatusUpdateMetric(t *testing.T, result string) float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "ome_isvc_status_update_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricLabelsMatch(metric, map[string]string{"controller": obsmetrics.ControllerIR, "result": result}) {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+func metricLabelsMatch(metric *dto.Metric, expected map[string]string) bool {
+	if len(metric.GetLabel()) != len(expected) {
+		return false
+	}
+	for _, label := range metric.GetLabel() {
+		if expected[label.GetName()] != label.GetValue() {
+			return false
+		}
+	}
+	return true
 }

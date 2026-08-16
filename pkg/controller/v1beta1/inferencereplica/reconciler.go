@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	omenativecore "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -92,6 +94,15 @@ type Reconciler struct {
 	// immutable for the manager process lifetime; nil preserves the unbounded
 	// compatibility behavior when the field is absent.
 	ScaleUpPodBatchSize *int32
+	// ScaleDownPodBatchSize is the startup-validated active delete budget in
+	// Pod-equivalent units. It is immutable for the manager process lifetime;
+	// nil preserves unbounded candidate selection when the field is absent.
+	ScaleDownPodBatchSize *int32
+	// ScaleDownRequeueInterval is the startup-validated poll cadence for an
+	// active delete wave. Zero disables cadence polling; watches and configured
+	// lifecycle deadlines still schedule progress.
+	ScaleDownRequeueInterval time.Duration
+
 	// APIReader is the live (uncached) API reader. Used for the
 	// correctness-critical reads in revision bookkeeping and immutable topology
 	// safety where stale cache contents could cause a collision or split a live
@@ -135,6 +146,11 @@ type Reconciler struct {
 	// name misses the stale entry.
 	revisionHashCache map[types.NamespacedName]revisionHashEntry
 
+	// scaleDownSeriesMu guards the identity needed to remove per-IR metric
+	// series after the object has disappeared and its labels are unavailable.
+	scaleDownSeriesMu    sync.Mutex
+	scaleDownSeriesCache map[types.NamespacedName]scaleDownSeriesIdentity
+
 	// Clock supplies wall-clock time to the workload lifecycle layer.
 	// SetupWithManager defaults it to the real clock; tests may inject a fake.
 	Clock clock.Clock
@@ -153,9 +169,16 @@ type revisionHashEntry struct {
 	raw                    []byte
 }
 
+type scaleDownSeriesIdentity struct {
+	uid       types.UID
+	namespace string
+	isvc      string
+	component string
+}
+
 // Reconcile loads the InferenceReplica, projects (Spec, Status) onto a
 // workload.ReconcileInput, computes the target ControllerRevision,
-// delegates the per-Instance dispatch loop to workload.Reconcile, and
+// delegates lifecycle dispatch to workload.Reconcile, and
 // aggregates the per-Component counters onto IR.Status.
 //
 // Loop (mirrors the omenative.ReconcileComponent shape):
@@ -163,11 +186,11 @@ type revisionHashEntry struct {
 //  1. Get IR. NotFound → no-op (background owner-ref GC handles
 //     children).
 //  2. DeletionTimestamp set → finalizer-driven teardown (teardown.go):
-//     dispatch the ordinary Delete pipeline against every observed
-//     Instance until no component pod remains, then lift the teardown
-//     finalizer. Without the finalizer, cleanup is plain BACKGROUND
-//     kube-GC via the children's owner references (nothing sets a
-//     foreground propagation policy).
+//     dispatch the scale-down batch pipeline against every observed
+//     Instance until component Pods and owned PodGroups are absent, then
+//     lift the teardown finalizer. Without the finalizer, cleanup is plain
+//     BACKGROUND kube-GC via the children's owner references (nothing sets
+//     a foreground propagation policy).
 //  3. Resolve parent ISVC so user-facing events stay on the ISVC
 //     stream. Parent fetch failure is NON-fatal — fall back to the
 //     IR itself as the event target.
@@ -193,11 +216,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			// Drop the memoized revision hash so the cache doesn't retain
 			// entries for IRs that no longer exist.
 			r.forgetRevisionHash(req.NamespacedName)
+			r.deleteRememberedScaleDownSeries(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		log.Error(err, "Failed to get InferenceReplica")
 		return ctrl.Result{}, err
 	}
+	r.rememberScaleDownSeries(ir)
 
 	// Bind structured logging context for the remainder of this
 	// reconcile so every downstream callback inherits the same
@@ -217,7 +242,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if ir.DeletionTimestamp != nil {
 		// Finalizer-driven teardown: reconcile the deletion as "desired
 		// instances = zero" so pods drain and escalate through the same
-		// Delete pipeline as scale-down; any remainder after the
+		// scale-down batch pipeline; any remainder after the
 		// finalizer lifts is BACKGROUND kube-GC via the children's owner
 		// references (nothing sets a foreground propagation policy).
 		return r.reconcileTeardown(ctx, log, ir)
@@ -301,6 +326,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, stuckPodGrace, autoMigrateBudget)
 	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
+	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
+	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
 
 	// Relocation-directive memory: prune AutoRecover ledger records for
 	// instances observed Ready (the success-prune mirror of the
@@ -402,11 +429,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: build plan (ir=%s/%s): %w",
 			ir.Namespace, ir.Name, perr)
 	}
+	if !scaleDownPodObservationRequired(input, plan) {
+		obsmetrics.SetScaleDownActivePods(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component), 0)
+		obsmetrics.SetScaleDownDeferredInstances(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component), 0)
+	}
 	// Install status aggregation before PodGroup reconciliation. Besides
 	// counters, the aggregator parks InstanceReadyTimeout deadlines while the
 	// workload is paused. A live-read or PodGroup error must not bypass that
 	// circuit-breaker bookkeeping.
+	skipDeferredEffects := false
 	defer func() {
+		if skipDeferredEffects {
+			return
+		}
 		// CurrentRevision promotion: component-level revision rollup against
 		// the SPEC target (paired with the aggregator's UpdateRevision stamp;
 		// coordination reads their skew as RolloutInFlight, and canary
@@ -416,6 +451,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// tolerance matches the aggregator: requeue, don't error.
 		if specTarget != nil {
 			if perr := buildPromoteCurrentRevision(r.Client, r.reader(), ir)(ctx, specTarget.Name); perr != nil {
+				if errors.Is(perr, workload.ErrStatusMutationPrecondition) {
+					result, err = ctrl.Result{Requeue: true}, nil
+					return
+				}
 				if err == nil {
 					if apierrors.IsConflict(perr) {
 						result, err = ctrl.Result{Requeue: true}, nil
@@ -429,6 +468,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			}
 		}
 		serr := r.aggregateAndWriteStatus(ctx, ir, plan, specTarget)
+		if errors.Is(serr, workload.ErrStatusMutationPrecondition) {
+			result, err = ctrl.Result{Requeue: true}, nil
+			return
+		}
 		if serr != nil && err != nil {
 			log.V(1).Error(serr, "Status write also failed; primary error preserved")
 		}
@@ -458,6 +501,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if rollbackPayload != nil {
 		log.Info("Canary rollback: rolling Instances back to stable revision", "revision", rollbackRevision.Name)
 	}
+	if scaleDownPodObservationRequired(input, plan) {
+		pods, lerr := query.LiveListPodsForComponent(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name,
+			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
+		if lerr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: observe scale-down pods (component=%s): %w", ir.Spec.Component, lerr)
+		}
+		owned := podsControlledBy(pods, ir.UID)
+		if invalid := invalidInstanceIndexPodCount(owned); invalid > 0 {
+			skipDeferredEffects = true
+			return ctrl.Result{}, fmt.Errorf(
+				"InferenceReplica reconciler: authoritative scale-down snapshot contains %d UID-owned component pod(s) without a valid %s label; refusing scale-down effects",
+				invalid, query.LabelInstanceIdx)
+		}
+		input.AuthoritativePods = &workload.ComponentPodSnapshot{
+			Pods:       owned,
+			ByInstance: query.BucketPodsByInstanceIdx(owned),
+		}
+	}
+
 	deps := workload.Deps{
 		Client:       r.Client,
 		APIReader:    r.APIReader,
@@ -480,10 +542,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	var podGroupInventory *workloadgang.PodGroupInventory
 	if input.DesiredSpec.GangSchedulingAvailable {
-		if input.DesiredSpec.MultiPod {
+		observePodGroups, observeErr := r.requiresAuthoritativePodGroupInventory(ctx, input, plan)
+		if observeErr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: check pod group inventory requirement (component=%s): %w", ir.Spec.Component, observeErr)
+		}
+		if observePodGroups {
 			podGroupInventory, err = workloadgang.ObservePodGroups(ctx, deps.Reader(), input.OwnerObject)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: observe pod groups (component=%s): %w", ir.Spec.Component, err)
+			}
+			blocked, cleanupErr := r.reconcileStaleSinglePodGroups(ctx, ir, &input, plan, podGroupInventory)
+			if cleanupErr != nil {
+				return ctrl.Result{}, cleanupErr
+			}
+			if blocked {
+				return scaleDownRequeueResult(r.ScaleDownRequeueInterval), nil
 			}
 		}
 		input.FinalizeInstanceResources = workloadgang.BuildFinalizeInstanceResources(
@@ -506,7 +579,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	effectiveTopology, gerr := workloadgang.EnsurePodGroupsWithState(ctx, deps, input, plan, podGroupState)
 	if gerr != nil {
 		if errors.Is(gerr, workloadgang.ErrPodGroupTerminating) {
-			return ctrl.Result{}, nil
+			return scaleDownRequeueResult(r.ScaleDownRequeueInterval), nil
 		}
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure pod groups (component=%s): %w", ir.Spec.Component, gerr)
 	}
@@ -568,6 +641,165 @@ func (r *Reconciler) resolveUpdateRetryPolicy(log logr.Logger) *workload.RetryPo
 	return policy
 }
 
+func scaleDownPodObservationRequired(input workload.ReconcileInput, plan workload.ComponentPlan) bool {
+	if len(workload.ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false)) > 0 {
+		return true
+	}
+	for _, status := range input.ObservedState.InstanceStatuses {
+		if status.Phase == workload.InstancePhaseDeleting && status.Operation != nil && status.Operation.Type == workload.InstanceOperationDelete {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidInstanceIndexPodCount(pods []*corev1.Pod) int {
+	invalid := 0
+	for _, pod := range pods {
+		if pod == nil {
+			invalid++
+			continue
+		}
+		raw, found := pod.Labels[query.LabelInstanceIdx]
+		idx, err := strconv.ParseInt(raw, 10, 32)
+		if !found || err != nil || idx < 0 {
+			invalid++
+		}
+	}
+	return invalid
+}
+
+func scaleDownRequeueResult(interval time.Duration) ctrl.Result {
+	if interval <= 0 {
+		return ctrl.Result{}
+	}
+	return ctrl.Result{RequeueAfter: interval}
+}
+
+// requiresAuthoritativePodGroupInventory keeps steady single-pod workloads on
+// the owner-UID cache index while preserving live proofs for lifecycle work.
+func (r *Reconciler) requiresAuthoritativePodGroupInventory(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+) (bool, error) {
+	for _, instance := range plan.Instances {
+		if instance.TotalPods() > 1 {
+			return true, nil
+		}
+	}
+	if scaleDownPodObservationRequired(input, plan) {
+		return true, nil
+	}
+	if len(terminalFinalizationOwned(input.ObservedState)) > 0 {
+		return true, nil
+	}
+	return workloadgang.CachedOwnerHasPodGroups(ctx, r.Client, input.OwnerObject)
+}
+
+func podsControlledBy(pods []*corev1.Pod, ownerUID types.UID) []*corev1.Pod {
+	owned := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		controller := metav1.GetControllerOf(pod)
+		if controller != nil && controller.UID == ownerUID {
+			owned = append(owned, pod)
+		}
+	}
+	return owned
+}
+
+func (r *Reconciler) reconcileStaleSinglePodGroups(
+	ctx context.Context,
+	ir *v1beta1.InferenceReplica,
+	input *workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	inventory *workloadgang.PodGroupInventory,
+) (bool, error) {
+	if inventory == nil || !inventory.Available() {
+		return false, nil
+	}
+	terminalOwned := terminalFinalizationOwned(input.ObservedState)
+	type stalePodGroup struct {
+		name  string
+		index int32
+	}
+	var groups []stalePodGroup
+	for _, instance := range plan.Instances {
+		if instance.TotalPods() != 1 {
+			continue
+		}
+		if _, terminal := terminalOwned[instance.Index]; terminal {
+			continue
+		}
+		name := query.PodGroupName(input.Key.OwnerName, plan.Component, instance.Index)
+		if _, found := inventory.OwnedByName(name); found {
+			groups = append(groups, stalePodGroup{name: name, index: instance.Index})
+		}
+	}
+	if len(groups) == 0 {
+		return false, nil
+	}
+	if input.AuthoritativePods == nil {
+		pods, err := query.LiveListPodsForComponent(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name, plan.Component)
+		if err != nil {
+			return false, fmt.Errorf("InferenceReplica reconciler: observe pods for stale PodGroup cleanup: %w", err)
+		}
+		owned := podsControlledBy(pods, ir.UID)
+		input.AuthoritativePods = &workload.ComponentPodSnapshot{Pods: owned, ByInstance: query.BucketPodsByInstanceIdx(owned)}
+	}
+	if invalid := invalidInstanceIndexPodCount(input.AuthoritativePods.Pods); invalid > 0 {
+		return false, fmt.Errorf(
+			"InferenceReplica reconciler: authoritative stale-PodGroup snapshot contains %d UID-owned component pod(s) without a valid %s label; refusing PodGroup effects",
+			invalid, query.LabelInstanceIdx)
+	}
+	referenced := make(map[string]struct{})
+	for _, pod := range input.AuthoritativePods.Pods {
+		if pod != nil && pod.Labels[query.LabelPodGroup] != "" {
+			referenced[pod.Labels[query.LabelPodGroup]] = struct{}{}
+		}
+	}
+	podsByInstance := input.AuthoritativePods.ByInstance
+	if podsByInstance == nil {
+		podsByInstance = query.BucketPodsByInstanceIdx(input.AuthoritativePods.Pods)
+	}
+	pending := int32(0)
+	for _, entry := range inventory.OwnedEntries() {
+		if entry.PodGroup.DeletionTimestamp != nil || inventory.DeleteAccepted(entry.Name) {
+			pending++
+		}
+	}
+	deleted := int32(0)
+	blocked := false
+	for _, group := range groups {
+		pg, _ := inventory.OwnedByName(group.name)
+		if pg.DeletionTimestamp != nil || inventory.DeleteAccepted(group.name) {
+			blocked = true
+			continue
+		}
+		if _, inUse := referenced[group.name]; inUse {
+			continue
+		}
+		// The PodGroup name is the direct reference. Its planned index is
+		// conservative recovery evidence when a Pod lost that reference.
+		if len(podsByInstance[group.index]) > 0 {
+			continue
+		}
+		if input.ScaleDownPodBatchSize != nil && pending+deleted >= *input.ScaleDownPodBatchSize {
+			blocked = true
+			continue
+		}
+		if err := inventory.DeleteOwnedName(ctx, r.Client, group.name); err != nil {
+			return false, fmt.Errorf("InferenceReplica reconciler: delete stale PodGroup %s: %w", group.name, err)
+		}
+		deleted++
+		blocked = true
+	}
+	return blocked, nil
+}
+
 func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int32]struct{} {
 	owned := make(map[int32]struct{})
 	for _, record := range observed.Migrations {
@@ -578,6 +810,9 @@ func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int3
 	for _, status := range observed.InstanceStatuses {
 		if status.Operation == nil {
 			continue
+		}
+		if status.Phase == workload.InstancePhaseDeleting && status.Operation.Type == workload.InstanceOperationDelete {
+			owned[status.Index] = struct{}{}
 		}
 		if status.Operation.Type == workload.InstanceOperationUpdate && status.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup {
 			owned[status.Index] = struct{}{}
@@ -1204,6 +1439,52 @@ func (r *Reconciler) forgetRevisionHash(key types.NamespacedName) {
 	r.revisionHashMu.Lock()
 	defer r.revisionHashMu.Unlock()
 	delete(r.revisionHashCache, key)
+}
+
+func (r *Reconciler) rememberScaleDownSeries(ir *v1beta1.InferenceReplica) {
+	if ir == nil {
+		return
+	}
+	key := client.ObjectKeyFromObject(ir)
+	identity := scaleDownSeriesIdentity{
+		uid:       ir.UID,
+		namespace: ir.Namespace,
+		isvc:      ir.Spec.ParentRef.Name,
+		component: string(ir.Spec.Component),
+	}
+	r.scaleDownSeriesMu.Lock()
+	previous, found := r.scaleDownSeriesCache[key]
+	if r.scaleDownSeriesCache == nil {
+		r.scaleDownSeriesCache = make(map[types.NamespacedName]scaleDownSeriesIdentity)
+	}
+	r.scaleDownSeriesCache[key] = identity
+	r.scaleDownSeriesMu.Unlock()
+	if found && previous != identity {
+		obsmetrics.DeleteScaleDownSeries(previous.namespace, previous.isvc, previous.component)
+	}
+}
+
+func (r *Reconciler) deleteRememberedScaleDownSeries(key types.NamespacedName) {
+	r.scaleDownSeriesMu.Lock()
+	identity, found := r.scaleDownSeriesCache[key]
+	delete(r.scaleDownSeriesCache, key)
+	r.scaleDownSeriesMu.Unlock()
+	if found {
+		obsmetrics.DeleteScaleDownSeries(identity.namespace, identity.isvc, identity.component)
+	}
+}
+
+func (r *Reconciler) deleteScaleDownSeries(ir *v1beta1.InferenceReplica) {
+	if ir == nil {
+		return
+	}
+	obsmetrics.DeleteScaleDownSeries(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component))
+	key := client.ObjectKeyFromObject(ir)
+	r.scaleDownSeriesMu.Lock()
+	if identity, found := r.scaleDownSeriesCache[key]; found && identity.uid == ir.UID {
+		delete(r.scaleDownSeriesCache, key)
+	}
+	r.scaleDownSeriesMu.Unlock()
 }
 
 // bumpCollisionCount increments IR.Status.CollisionCount (initializing

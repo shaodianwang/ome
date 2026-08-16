@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -609,6 +611,7 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 		var committedMutationCallbacks []committedInstanceMutation
 		replaceCommittedInstances := false
 		committedRetryBlockMutation := false
+		statusWriteAttempted := false
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			committedInstances = nil
 			committedRetryBlocks = nil
@@ -642,8 +645,9 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 					continue
 				}
 				snapshot := workloadtypes.InstanceMutationSnapshot{
-					OwnerUID:  fresh.UID,
-					Instances: make(map[int32]workloadtypes.InstanceStatus, len(slots)),
+					OwnerUID:        fresh.UID,
+					OwnerGeneration: fresh.Generation,
+					Instances:       make(map[int32]workloadtypes.InstanceStatus, len(slots)),
 				}
 				for index, slot := range slots {
 					snapshot.Instances[index] = v1beta1convert.InstanceStatusToWorkload(*slot.DeepCopy())
@@ -769,6 +773,7 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 			if !instanceChanged && !retryBlockChanged {
 				return nil
 			}
+			statusWriteAttempted = true
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
@@ -828,7 +833,21 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 			return nil
 		})
 		if err != nil {
+			switch {
+			case errors.Is(err, workloadtypes.ErrStatusMutationPrecondition):
+				// Replanning is expected control flow and has no terminal status
+				// write outcome of its own.
+			case errors.Is(err, workloadtypes.ErrStatusOwnerGone):
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
+			case apierrors.IsConflict(err):
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultConflict)
+			case statusWriteAttempted:
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultError)
+			}
 			return err
+		}
+		if statusWriteAttempted {
+			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultSuccess)
 		}
 		if replaceCommittedInstances {
 			replaceInstanceStatuses(ir, committedInstances)
@@ -949,6 +968,7 @@ func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1bet
 	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
+	ownerGeneration := ir.Generation
 	return func(ctx context.Context, targetName string) error {
 		if targetName == "" {
 			return nil
@@ -965,6 +985,9 @@ func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1bet
 			}
 			if ownerUID == "" || fresh.UID != ownerUID {
 				return workloadtypes.ErrStatusOwnerGone
+			}
+			if fresh.Generation != ownerGeneration {
+				return workloadtypes.ErrStatusMutationPrecondition
 			}
 			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
 			if fresh.Status.CurrentRevision == targetName || !workload.RolloutComplete(insts, targetName) {

@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
@@ -698,6 +700,127 @@ func TestAggregateAndWriteStatus_SameNameReplacementIsUntouched(t *testing.T) {
 	g.Expect(live.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
 	g.Expect(got.UID).To(gomega.Equal(replacement.UID))
 	g.Expect(got.Status).To(gomega.Equal(*wantStatus))
+}
+
+func TestAggregateAndWriteStatus_GenerationChangeAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	stale := baselineIR("llama-engine", "prod", 1)
+	liveObject := stale.DeepCopy()
+	liveObject.Generation++
+	liveObject.Status.Replicas = 7
+	liveObject.Status.ReadyReplicas = 6
+	wantStatus := liveObject.Status.DeepCopy()
+	live, writes := newCountingStatusClient(t, 0, liveObject)
+	r := &Reconciler{
+		Client:       live,
+		APIReader:    live,
+		Log:          logf.Log.WithName("test"),
+		Expectations: workload.NewExpectations(),
+	}
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(stale.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+	metricBefore := make(map[string]float64)
+	for _, result := range []string{obsmetrics.ResultSuccess, obsmetrics.ResultConflict, obsmetrics.ResultNotFound, obsmetrics.ResultError} {
+		metricBefore[result] = irStatusUpdateMetric(t, result)
+	}
+
+	err := r.aggregateAndWriteStatus(context.Background(), stale, plan, nil)
+	g.Expect(errors.Is(err, workload.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
+	g.Expect(*writes).To(gomega.Equal(0))
+	for result, before := range metricBefore {
+		g.Expect(irStatusUpdateMetric(t, result)).To(gomega.Equal(before),
+			"a generation precondition must not report a terminal status-write outcome")
+	}
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(live.Get(context.Background(), client.ObjectKeyFromObject(liveObject), got)).To(gomega.Succeed())
+	g.Expect(got.Generation).To(gomega.Equal(liveObject.Generation))
+	g.Expect(got.Status).To(gomega.Equal(*wantStatus))
+}
+
+type firstIRGenerationReader struct {
+	client.Reader
+	generation int64
+	reads      int
+}
+
+func (r *firstIRGenerationReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	ir, ok := obj.(*v1beta1.InferenceReplica)
+	if !ok {
+		return nil
+	}
+	r.reads++
+	if r.reads == 1 {
+		ir.Generation = r.generation
+	}
+	return nil
+}
+
+func TestReconcile_GenerationChangeRequeuesBeforeDeferredEffects(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		changeBeforeAggregation bool
+	}{
+		{name: "promotion observes the new generation"},
+		{name: "aggregation observes the new generation", changeBeforeAggregation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			stale := baselineIR("llama-engine", "prod", 1)
+			stale.Finalizers = []string{TeardownFinalizer}
+			stale.Spec.Paused = true
+			liveObject := stale.DeepCopy()
+			liveObject.Generation++
+
+			objects := []client.Object{liveObject}
+			oldestRevision := ""
+			for i := 0; i < defaultRevisionRetention+2; i++ {
+				revision := seedControllerRevision(liveObject, fmt.Sprintf("fence%02d", i), int64(i+1))
+				if i == 0 {
+					oldestRevision = revision.Name
+				}
+				objects = append(objects, revision)
+			}
+			r, live := newReconciler(t, objects...)
+			staleCache := fake.NewClientBuilder().
+				WithScheme(testScheme(t)).
+				WithObjects(stale).
+				Build()
+			r.Client = &staleReadingClient{Client: live, reader: staleCache}
+			var generationReader *firstIRGenerationReader
+			if tc.changeBeforeAggregation {
+				generationReader = &firstIRGenerationReader{Reader: live, generation: stale.Generation}
+				r.APIReader = generationReader
+			} else {
+				r.APIReader = live
+			}
+
+			result, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: client.ObjectKeyFromObject(stale),
+			})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(result.Requeue).To(gomega.BeTrue())
+			g.Expect(result.RequeueAfter).To(gomega.BeZero())
+			if generationReader != nil {
+				g.Expect(generationReader.reads).To(gomega.Equal(2),
+					"promotion must accept the starting generation before aggregation observes the change")
+			}
+
+			got := &v1beta1.InferenceReplica{}
+			g.Expect(live.Get(context.Background(), client.ObjectKeyFromObject(liveObject), got)).To(gomega.Succeed())
+			g.Expect(got.Status.ObservedGeneration).NotTo(gomega.Equal(got.Generation))
+			survivors := listRevisionNames(t, live, liveObject.Namespace)
+			g.Expect(survivors).To(gomega.HaveKey(oldestRevision),
+				"the stale deferred pass must not run revision retention")
+		})
+	}
 }
 
 // TestAggregateAndWriteStatus_ConflictSurfacesAsConflict pins the

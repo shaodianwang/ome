@@ -48,19 +48,21 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	if err != nil {
 		return fmt.Errorf("SetupInferenceReplica: create clientset: %w", err)
 	}
-	scaleUpPodBatchSize, err := controllerconfig.LoadScaleUpPodBatchSize(clientset)
+	podBatchSizes, err := controllerconfig.LoadPodBatchSizes(clientset)
 	if err != nil {
-		return fmt.Errorf("SetupInferenceReplica: load scale-up Pod batch size: %w", err)
+		return fmt.Errorf("SetupInferenceReplica: load lifecycle scale settings: %w", err)
 	}
 
 	r := &inferencereplica.Reconciler{
-		Client:                  mgr.GetClient(),
-		Clientset:               clientset,
-		Log:                     ctrl.Log.WithName("InferenceReplica"),
-		APIReader:               mgr.GetAPIReader(),
-		Recorder:                mgr.GetEventRecorderFor("InferenceReplica"),
-		MaxConcurrentReconciles: cfg.maxConcurrentReconciles,
-		ScaleUpPodBatchSize:     scaleUpPodBatchSize,
+		Client:                   mgr.GetClient(),
+		Clientset:                clientset,
+		Log:                      ctrl.Log.WithName("InferenceReplica"),
+		APIReader:                mgr.GetAPIReader(),
+		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
+		MaxConcurrentReconciles:  cfg.maxConcurrentReconciles,
+		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
+		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
+		ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("SetupInferenceReplica: SetupWithManager: %w", err)

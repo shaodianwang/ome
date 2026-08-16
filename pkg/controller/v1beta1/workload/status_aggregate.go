@@ -557,7 +557,7 @@ func podsForStuckCheck(s InstanceStatus, byIdx map[int32][]*corev1.Pod) []*corev
 //     where the controller's per-Instance bookkeeping has been reset
 //     while a real stuck pod still exists.
 //
-// Skips Failed (already done) and Deleting (Delete pass owns its own
+// Skips Failed (already done) and Deleting (the scale-down pass owns its own
 // deadline). Empty currentHash suppresses the wedged branch (no
 // rollout has ever promoted → over-firing risk during initial Create).
 func ShouldCheckForStuckPods(s *InstanceStatus, pods []*corev1.Pod, currentHash, revisionHashLabel string) bool {

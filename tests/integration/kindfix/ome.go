@@ -175,22 +175,24 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 
 		if opts.WireInferenceReplica {
 			// Clientset supplies dynamic lifecycle settings and the startup-scoped
-			// scale-up budget through the same paths as cmd/manager.
+			// scale settings through the same paths as cmd/manager.
 			clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
 			if err != nil {
 				return err
 			}
-			scaleUpPodBatchSize, err := controllerconfig.LoadScaleUpPodBatchSize(clientset)
+			podBatchSizes, err := controllerconfig.LoadPodBatchSizes(clientset)
 			if err != nil {
-				return fmt.Errorf("load scale-up Pod batch size: %w", err)
+				return fmt.Errorf("load lifecycle scale settings: %w", err)
 			}
 			return (&inferencereplica.Reconciler{
-				Client:              mgr.GetClient(),
-				Clientset:           clientset,
-				Log:                 ctrl.Log.WithName("InferenceReplica"),
-				APIReader:           mgr.GetAPIReader(),
-				Recorder:            mgr.GetEventRecorderFor("InferenceReplica"),
-				ScaleUpPodBatchSize: scaleUpPodBatchSize,
+				Client:                   mgr.GetClient(),
+				Clientset:                clientset,
+				Log:                      ctrl.Log.WithName("InferenceReplica"),
+				APIReader:                mgr.GetAPIReader(),
+				Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
+				ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
+				ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
+				ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
 			}).SetupWithManager(mgr)
 		}
 		return nil

@@ -3,9 +3,12 @@ package gang
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,6 +19,68 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
+// PodGroupControllerUIDIndexField is the controller-runtime cache field index
+// keyed by a PodGroup's controller OwnerReference UID. Unlike the mutable
+// workload labels, the controller UID is the ownership proof used by cleanup.
+// The field name is an internal cache identifier, not a Kubernetes field.
+const PodGroupControllerUIDIndexField = "ome.io/podgroup-controller-uid"
+
+// PodGroupControllerUIDIndexExtractor indexes PodGroups by controller UID.
+// Objects without a controller OwnerReference are intentionally unindexed.
+func PodGroupControllerUIDIndexExtractor(obj client.Object) []string {
+	pg, ok := obj.(*schedulingv1alpha1.PodGroup)
+	if !ok {
+		return nil
+	}
+	controller := metav1.GetControllerOfNoCopy(pg)
+	if controller == nil || controller.UID == "" {
+		return nil
+	}
+	return []string{string(controller.UID)}
+}
+
+// RegisterPodGroupControllerUIDIndex installs the ownership index on the
+// manager cache. It must run before the manager starts.
+func RegisterPodGroupControllerUIDIndex(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &schedulingv1alpha1.PodGroup{},
+		PodGroupControllerUIDIndexField, PodGroupControllerUIDIndexExtractor)
+}
+
+// CachedOwnerHasPodGroups reports whether the watch-backed cache contains any
+// PodGroup controlled by owner. It is a cheap hint only: callers that receive
+// true still take an authoritative inventory before topology or delete work.
+func CachedOwnerHasPodGroups(ctx context.Context, reader client.Reader, owner client.Object) (bool, error) {
+	if reader == nil {
+		return false, fmt.Errorf("CachedOwnerHasPodGroups: nil reader")
+	}
+	if owner == nil {
+		return false, fmt.Errorf("CachedOwnerHasPodGroups: nil owner")
+	}
+	if owner.GetUID() == "" {
+		return false, fmt.Errorf("CachedOwnerHasPodGroups: owner %s/%s has no UID", owner.GetNamespace(), owner.GetName())
+	}
+	list := &schedulingv1alpha1.PodGroupList{}
+	if err := reader.List(ctx, list,
+		client.InNamespace(owner.GetNamespace()),
+		client.MatchingFields{PodGroupControllerUIDIndexField: string(owner.GetUID())}); err != nil {
+		if apimeta.IsNoMatchError(err) || apierrors.IsNotFound(err) || runtime.IsNotRegisteredError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("CachedOwnerHasPodGroups: list owner %s: %w", owner.GetUID(), err)
+	}
+	return len(list.Items) > 0, nil
+}
+
+// PodGroupInventoryEntry identifies one owned PodGroup by optional Instance
+// index and object name. Name remains authoritative when a damaged object has
+// lost or malformed its controller-owned index label.
+type PodGroupInventoryEntry struct {
+	Index      int32
+	IndexKnown bool
+	Name       string
+	PodGroup   *schedulingv1alpha1.PodGroup
+}
+
 // PodGroupInventory is one authoritative namespace LIST partitioned for one
 // controller owner. It retains foreign objects by name so ensure can detect a
 // deterministic-name collision without a per-Instance GET.
@@ -23,6 +88,8 @@ type PodGroupInventory struct {
 	available bool
 	ownerUID  types.UID
 	byName    map[string]*schedulingv1alpha1.PodGroup
+	ownedName map[string]*schedulingv1alpha1.PodGroup
+	owned     []PodGroupInventoryEntry
 	accepted  map[string]struct{}
 }
 
@@ -52,7 +119,18 @@ func ObservePodGroups(ctx context.Context, reader client.Reader, owner client.Ob
 	for i := range list.Items {
 		pg := list.Items[i].DeepCopy()
 		inv.byName[pg.Name] = pg
+		if !podgroup.ControlledByUID(pg, inv.ownerUID) {
+			continue
+		}
+		inv.ownedName[pg.Name] = pg
+		entry := PodGroupInventoryEntry{Name: pg.Name, PodGroup: pg}
+		if idx, ok := podGroupIndex(pg); ok {
+			entry.Index = idx
+			entry.IndexKnown = true
+		}
+		inv.owned = append(inv.owned, entry)
 	}
+	sort.Slice(inv.owned, func(i, j int) bool { return inv.owned[i].Name < inv.owned[j].Name })
 	return inv, nil
 }
 
@@ -61,6 +139,7 @@ func newPodGroupInventory(ownerUID types.UID, available bool) *PodGroupInventory
 		available: available,
 		ownerUID:  ownerUID,
 		byName:    make(map[string]*schedulingv1alpha1.PodGroup),
+		ownedName: make(map[string]*schedulingv1alpha1.PodGroup),
 		accepted:  make(map[string]struct{}),
 	}
 }
@@ -97,6 +176,38 @@ func (i *PodGroupInventory) recordReconciled(pg *schedulingv1alpha1.PodGroup) {
 	}
 	observed := pg.DeepCopy()
 	i.byName[pg.Name] = observed
+	if podgroup.ControlledByUID(observed, i.ownerUID) {
+		i.ownedName[pg.Name] = observed
+	}
+}
+
+// OwnedByName returns the object at name only when its controller UID matches
+// the inventory owner.
+func (i *PodGroupInventory) OwnedByName(name string) (*schedulingv1alpha1.PodGroup, bool) {
+	if i == nil {
+		return nil, false
+	}
+	pg, found := i.ownedName[name]
+	return pg, found
+}
+
+// OwnedEntries returns all owned objects in deterministic name order.
+func (i *PodGroupInventory) OwnedEntries() []PodGroupInventoryEntry {
+	if i == nil {
+		return nil
+	}
+	return append([]PodGroupInventoryEntry(nil), i.owned...)
+}
+
+// DeleteAccepted reports whether this inventory issued or observed deletion
+// for name. It suppresses duplicate same-pass DELETEs; authoritative absence
+// still requires a later inventory.
+func (i *PodGroupInventory) DeleteAccepted(name string) bool {
+	if i == nil {
+		return false
+	}
+	_, accepted := i.accepted[name]
+	return accepted
 }
 
 // DeleteOwnedName accepts deletion of one inventory-owned object. A foreign
@@ -171,4 +282,19 @@ func BuildFinalizeInstanceResources(
 		name := query.PodGroupName(ownerName, component, idx)
 		return inv.FinalizeOwnedName(ctx, c, name)
 	}
+}
+
+func podGroupIndex(pg *schedulingv1alpha1.PodGroup) (int32, bool) {
+	if pg == nil {
+		return 0, false
+	}
+	raw, found := pg.Labels[query.LabelInstanceIdx]
+	if !found {
+		return 0, false
+	}
+	idx, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || idx < 0 {
+		return 0, false
+	}
+	return int32(idx), true
 }

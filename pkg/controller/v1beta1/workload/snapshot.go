@@ -65,7 +65,11 @@ func NewObservedSnapshot(deps Deps, input ReconcileInput, component ComponentTyp
 // Memoized: at most one live List per reconcile.
 func (s *ObservedSnapshot) LivePods(ctx context.Context) (map[int32][]*corev1.Pod, error) {
 	if !s.live.done {
-		s.live.buckets, s.live.err = liveBucketPods(ctx, s.deps, s.input, s.component)
+		if s.input.AuthoritativePods != nil {
+			s.live.buckets = s.input.AuthoritativePods.ByInstance
+		} else {
+			s.live.buckets, s.live.err = liveBucketPods(ctx, s.deps, s.input, s.component)
+		}
 		s.live.done = true
 	}
 	return s.live.buckets, s.live.err

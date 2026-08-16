@@ -15,7 +15,7 @@ import (
 // pass directly. target is the reconcile's target ControllerRevision
 // (nil is valid — the Create-op fallback stays empty).
 func EscalateFromEvidenceForTest(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) error {
-	return escalateFromEvidence(ctx, deps, input, plan, target, snapshot)
+	return escalateFromEvidence(ctx, deps, input, plan, target, snapshot, nil)
 }
 
 // PruneSupersededRetryBlocksForTest invokes the RetryBlock

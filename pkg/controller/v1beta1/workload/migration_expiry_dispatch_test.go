@@ -81,6 +81,12 @@ func pastDeadlineRecord(uuid string) workload.MigrationRecord {
 // rebuilds plan + ObservedState from the post-expiry status.
 func TestReconcile_ExpiryBeforeDrive(t *testing.T) {
 	in, deps, records, migrateStamped := expiryDispatchFixture(t, pastDeadlineRecord("u-expired"))
+	in.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: "superseded"}}
+	prunes := 0
+	in.MutateRetryBlock = func(context.Context, string, func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		prunes++
+		return nil
+	}
 	plan := minimalPlan()
 	plan.MigrationMode = workload.MigrationModeAuto
 
@@ -97,6 +103,9 @@ func TestReconcile_ExpiryBeforeDrive(t *testing.T) {
 	}
 	if *migrateStamped {
 		t.Errorf("the drive pass must never stamp a Migrate op for an expired record")
+	}
+	if prunes != 1 {
+		t.Errorf("non-scale-down immediate requeue pruned %d RetryBlocks, want 1", prunes)
 	}
 }
 
