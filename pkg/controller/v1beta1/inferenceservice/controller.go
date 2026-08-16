@@ -449,8 +449,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
-	// The merged runner container ports are the only resolved view of the
-	// port each Component listens on. OMENative's per-revision Service
+	// The effective serving container ports are the resolved view of the
+	// port each Component exposes. OMENative's per-revision Service
 	// producers (coordination, canary) publish their routing Service on
 	// this port, so it must be captured here and threaded down.
 	componentRunnerPorts := isvcutils.MergedRunnerPorts(mergedEngine, mergedDecoder, mergedRouter)
@@ -477,6 +477,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		r.Log.Error(err, "Failed to determine deployment modes", "Name", isvc.Name)
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "DeploymentModeError", err.Error())
 		return reconcile.Result{}, err
+	}
+	componentDeploymentModes := make(map[v1beta1.ComponentType]constants.DeploymentModeType, 3)
+	if mergedEngine != nil {
+		componentDeploymentModes[v1beta1.EngineComponent] = engineDeploymentMode
+	}
+	if mergedDecoder != nil {
+		componentDeploymentModes[v1beta1.DecoderComponent] = decoderDeploymentMode
+	}
+	if mergedRouter != nil {
+		componentDeploymentModes[v1beta1.RouterComponent] = routerDeploymentMode
 	}
 
 	// If both engine and decoder exist, it's PD-disaggregated. V(1):
@@ -637,6 +647,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Reader:                       r.APIReader,
 		Recorder:                     r.Recorder,
 		TrafficWeightDeadbandPercent: coordinationConfig.TrafficWeightDeadbandPercent,
+		ComponentDeploymentModes:     componentDeploymentModes,
 		ComponentRunnerPorts:         componentRunnerPorts,
 	}); err != nil {
 		log.Error(err, "Failed to reconcile cross-Component coordination")

@@ -25,7 +25,109 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
+
+func TestDecoderReconcileOMENativeSubresources_LeaderSelector(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(monitoringv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	tests := []struct {
+		name                  string
+		workerSize            *int
+		wantStableSelectorHas string
+	}{
+		{
+			name:                  "single-pod decoder has no pod-ordinal filter",
+			workerSize:            nil,
+			wantStableSelectorHas: "",
+		},
+		{
+			name:                  "multi-pod decoder selects leader ordinal zero",
+			workerSize:            intPtr(3),
+			wantStableSelectorHas: "0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decoderSpec := &v1beta1.DecoderSpec{
+				PodSpec: v1beta1.PodSpec{
+					Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1"}},
+				},
+			}
+			if tt.workerSize != nil {
+				decoderSpec.Leader = &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1"}},
+					},
+				}
+				decoderSpec.Worker = &v1beta1.WorkerSpec{
+					Size: tt.workerSize,
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1"}},
+					},
+				}
+			}
+
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-isvc", Namespace: "default",
+					UID: types.UID("test-isvc-uid"),
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Decoder: decoderSpec,
+				},
+			}
+			objectMeta := metav1.ObjectMeta{
+				Name:      "test-isvc-decoder",
+				Namespace: "default",
+			}
+			podSpec := &v1.PodSpec{
+				Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1",
+					Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8080}}}},
+			}
+
+			c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+			clientset := fake.NewClientset()
+			decoder := NewDecoder(
+				&ComponentDeps{Client: c, Clientset: clientset, Scheme: scheme, Config: &controllerconfig.InferenceServicesConfig{}},
+				ComponentInputs{DeploymentMode: constants.OMENative},
+				decoderSpec,
+			).(*Decoder)
+
+			err := decoder.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			svc := &v1.Service{}
+			g.Expect(c.Get(context.Background(),
+				client.ObjectKey{Namespace: "default", Name: "test-isvc-decoder"},
+				svc)).To(gomega.Succeed())
+			g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+				constants.OMEComponentLabel, string(v1beta1.DecoderComponent)))
+			if tt.wantStableSelectorHas == "" {
+				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelPodOrdinal))
+				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelRunner))
+			} else {
+				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+					query.LabelPodOrdinal, tt.wantStableSelectorHas))
+				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+					query.LabelRunner, string(v1beta1.RunnerNameLeader)))
+			}
+
+			pm := &monitoringv1.PodMonitor{}
+			g.Expect(c.Get(context.Background(),
+				client.ObjectKey{Namespace: "default", Name: "test-isvc-decoder"},
+				pm)).To(gomega.Succeed())
+			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelPodOrdinal))
+			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelRunner))
+		})
+	}
+}
 
 func TestDecoderReconcile(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)

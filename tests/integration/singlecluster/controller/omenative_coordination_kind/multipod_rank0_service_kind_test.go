@@ -14,53 +14,29 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// MPR-1 — multi-pod rank-0 customer Service selector.
-//
-// Pins the rank-0 selector fix: for multi-pod
-// Components (Worker.Size > 0) the per-Component STABLE Service must
-// publish ONLY the rank-0 (leader) pod's endpoint, even though the
-// headless Service still discovers all gang members for peer init.
-//
-// Bug this guards against: without the rank-0 selector filter, kube-
-// proxy round-robins customer traffic across every pod of the gang
-// including workers, and ~(Size-1)/(Size+1) of requests 502 because
-// workers run distributed-init peers and cannot serve.
-//
-// Test shape: a 3-pod engine (1 leader + 2 workers via
-// Worker.Size=2). The KIND suite is configured with Workers=2 so the
-// gang has room to schedule.
-//
-// Assertions:
-//   - stable Service `<isvc>-engine` selector carries
-//     `ome.io/pod-ordinal=0` AND its EndpointSlice has exactly 1
-//     endpoint (the leader pod).
-//   - headless Service `<isvc>-engine-headless` selector does NOT carry
-//     the rank-0 filter AND its EndpointSlice has 3 endpoints
-//     (workers must remain discoverable for peer DNS).
-//
-// Why this is in omenative_coordination_kind/: the rank-0 plumbing crosses the
-// per-Component Service builder + the OMENative pod renderer + the
-// kube-controller-manager EndpointSlice mirror. KIND is the only suite
-// with a real EndpointSlice controller.
-var _ = ginkgo.Describe("MPR — multi-pod rank-0 Service selector", ginkgo.Ordered, func() {
+// A multi-pod stable Service routes to the leader while its headless peer
+// Service keeps every gang member discoverable.
+var _ = ginkgo.Describe("Multi-pod stable Service routing", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
-		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "mpr-")
+		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "leader-routing-")
 		Expect(err).NotTo(HaveOccurred())
 	})
 	ginkgo.AfterEach(func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("MPR-1 stable Service routes only to rank-0; headless still discovers workers", func() {
+	ginkgo.It("routes only to the leader while headless discovery includes workers", func() {
+		const isvcName = "leader-routing"
+
 		// 3 engine pods (1 leader + 2 workers). The KIND suite has 2
 		// worker nodes (plus the control-plane node which carries
 		// the standard NoSchedule taint); the engine gang of 3 lands
 		// on the two worker nodes per default soft affinity. Decoder
 		// is left at single-pod default for spec brevity.
 		fix := newCoordFixture(ns.Name,
-			WithISVCName("mpr1"),
+			WithISVCName(isvcName),
 			WithEngineImage("fake-serving:v1"),
 			WithEngineWorkerSize(2),
 			WithoutDecoder())
@@ -72,7 +48,7 @@ var _ = ginkgo.Describe("MPR — multi-pod rank-0 Service selector", ginkgo.Orde
 		// caught up — without this wait the slice could legitimately
 		// be empty or partial on a fast machine.
 		Eventually(func(g Gomega) {
-			pods := listOMENativePods(g, ns.Name, "mpr1")
+			pods := listOMENativePods(g, ns.Name, isvcName)
 			engPods := 0
 			for _, p := range pods {
 				if p.Labels[constants.OMEComponentLabel] == string(v1beta1.EngineComponent) {
@@ -81,7 +57,7 @@ var _ = ginkgo.Describe("MPR — multi-pod rank-0 Service selector", ginkgo.Orde
 			}
 			g.Expect(engPods).To(Equal(3),
 				"expected 3 engine pods (1 leader + 2 workers); got %d", engPods)
-			c := freshISVC(g, ns.Name, "mpr1")
+			c := freshISVC(g, ns.Name, isvcName)
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			// All 3 pods reach Ready (= 1 Instance with 3 pods of
@@ -92,28 +68,27 @@ var _ = ginkgo.Describe("MPR — multi-pod rank-0 Service selector", ginkgo.Orde
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Per-Component STABLE Service: <isvc>-<comp>.
-		stableSvcName := query.StableServiceName("mpr1",
+		stableSvcName := query.StableServiceName(isvcName,
 			v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent))
 		stable := &corev1.Service{}
 		Expect(k8sClient.Get(suiteCtx,
 			client.ObjectKey{Namespace: ns.Name, Name: stableSvcName},
 			stable)).To(Succeed(), "stable Service %s should exist", stableSvcName)
-		// Stable Service selector MUST carry pod-ordinal=0 for multi-pod
-		// Components. Without this filter, kube-proxy routes traffic to
-		// workers — which can't serve.
+		// The stable Service selects the leader pod for this raw
+		// multi-pod shape.
 		Expect(stable.Spec.Selector).To(HaveKeyWithValue(query.LabelPodOrdinal, "0"),
 			"multi-pod stable Service %s must carry %s=0 selector; got %v",
 			stableSvcName, query.LabelPodOrdinal, stable.Spec.Selector)
 
 		// Per-Component HEADLESS Service: <isvc>-<comp>-headless.
-		headlessSvcName := query.HeadlessServiceName("mpr1",
+		headlessSvcName := query.HeadlessServiceName(isvcName,
 			v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent))
 		headless := &corev1.Service{}
 		Expect(k8sClient.Get(suiteCtx,
 			client.ObjectKey{Namespace: ns.Name, Name: headlessSvcName},
 			headless)).To(Succeed(), "headless Service %s should exist", headlessSvcName)
-		// Headless Service selector MUST NOT carry the rank-0 filter —
-		// workers need DNS discovery for distributed init.
+		// The headless Service remains broad so workers are available for
+		// peer discovery.
 		Expect(headless.Spec.Selector).NotTo(HaveKey(query.LabelPodOrdinal),
 			"headless Service %s selector must NOT carry %s; got %v",
 			headlessSvcName, query.LabelPodOrdinal, headless.Spec.Selector)

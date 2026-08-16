@@ -14,7 +14,6 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
-	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -49,10 +48,13 @@ type ReconcileInputs struct {
 	// Recorder emits K8s Events for coordination transitions.
 	Recorder record.EventRecorder
 
-	// ComponentRunnerPorts holds the container ports each Component's
-	// merged runner declares, keyed by Component. The per-revision routing
-	// Service publishes the serving port resolved from this set so it
-	// targets the port the pods actually listen on. A Component missing
+	// ComponentDeploymentModes holds each Component's mode resolved from its
+	// merged spec. Missing entries are not coordination-owned.
+	ComponentDeploymentModes map[v1beta1.ComponentType]constants.DeploymentModeType
+
+	// ComponentRunnerPorts holds each Component's effective serving ports.
+	// The per-revision routing Service publishes the port resolved from this set
+	// so it targets the port the pods actually listen on. A Component missing
 	// from the map gets a headless Service only — see
 	// EnsurePerRevisionServices.
 	ComponentRunnerPorts map[v1beta1.ComponentType][]corev1.ContainerPort
@@ -145,7 +147,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// The per-group state machine (Status.RolloutCoordination,
 	// RolloutCoordinationReady condition, group events) remains
 	// opt-in — those only run when groups are declared.
-	componentsTouched := collectOMENativeComponents(in.ISVC)
+	componentsTouched := collectOMENativeComponents(in.ComponentDeploymentModes)
 	// Drop Components owned by a canary group: canary.Dispatch is their
 	// authoritative per-revision Service + traffic producer (it sets the explicit
 	// step weight, decoupled from pod count). coordination runs unconditionally in
@@ -179,7 +181,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 	// Cached client carries the OMENative Pod field index — useIndex=true takes
 	// the index fast path instead of scanning the whole informer store per Component.
-	perRevisionPods, perRevisionReadyPods, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
+	perRevisionPods, perRevisionReadyPods, perRevisionRouting, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
 	}
@@ -190,12 +192,6 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// is declared so the HTTPRoute weighted-backendRef consumer has
 	// the per-revision backends to point at.
 	for _, c := range componentsTouched {
-		// Compute the multi-pod predicate once per Component — the
-		// answer is identical across every revisionHash on that
-		// Component (Worker.Size is a per-Component spec field, not
-		// per-revision). Multi-pod Components route traffic only to
-		// rank-0; the routing Service selector picks that up.
-		multiPod := isvcutils.IsMultiPodComponent(in.ISVC, c)
 		SetPerRevisionServiceCount(in.ISVC.Namespace, in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
 
 		// Ensure runs EVERY reconcile — it is the self-heal path. A
@@ -209,7 +205,8 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			if hash == "" {
 				continue
 			}
-			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash, multiPod, in.ComponentRunnerPorts[c]); err != nil {
+			routing := perRevisionRouting[c][hash]
+			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash, routing, in.ComponentRunnerPorts[c]); err != nil {
 				// The namespace is being torn down (common during test
 				// teardown and any namespace-scoped delete): the create is
 				// forbidden and will never succeed, and the ISVC is going
@@ -359,52 +356,26 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	return result, nil
 }
 
-// collectOMENativeComponents returns the Components on the ISVC that
-// resolve to OMENative dispatch. Only those Components participate in
-// coordination's per-revision service emission / traffic write.
-// Resolution follows the precedence chain: per-Component annotation >
-// spec.deploymentMode > none.
-func collectOMENativeComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
-	if isvc == nil {
-		return nil
-	}
-	specMode := isvc.Spec.DeploymentMode
+// collectOMENativeComponents returns the Components whose merged specs resolve
+// to OMENative dispatch. Only those Components participate in coordination's
+// per-revision Service emission and traffic write.
+func collectOMENativeComponents(modes map[v1beta1.ComponentType]constants.DeploymentModeType) []v1beta1.ComponentType {
 	out := make([]v1beta1.ComponentType, 0, 3)
-	if isvc.Spec.Engine != nil && componentIsOMENative(&isvc.Spec.Engine.ComponentExtensionSpec, specMode) {
-		out = append(out, v1beta1.EngineComponent)
-	}
-	if isvc.Spec.Decoder != nil && componentIsOMENative(&isvc.Spec.Decoder.ComponentExtensionSpec, specMode) {
-		out = append(out, v1beta1.DecoderComponent)
-	}
-	if isvc.Spec.Router != nil && componentIsOMENative(&isvc.Spec.Router.ComponentExtensionSpec, specMode) {
-		out = append(out, v1beta1.RouterComponent)
+	for _, component := range []v1beta1.ComponentType{
+		v1beta1.EngineComponent,
+		v1beta1.DecoderComponent,
+		v1beta1.RouterComponent,
+	} {
+		if modes[component] == constants.OMENative {
+			out = append(out, component)
+		}
 	}
 	return out
 }
 
-// componentIsOMENative reports whether the Component dispatches to the
-// OMENative backend. Resolves the per-Component
-// ome.io/deploymentMode annotation first, then falls back to the
-// top-level spec.deploymentMode field.
-func componentIsOMENative(ext *v1beta1.ComponentExtensionSpec, specMode *constants.DeploymentModeType) bool {
-	if ext == nil {
-		return false
-	}
-	if ann := ext.Annotations[constants.DeploymentMode]; ann != "" {
-		return ann == string(constants.OMENative)
-	}
-	if specMode != nil {
-		return *specMode == constants.OMENative
-	}
-	return false
-}
-
-// observePerRevisionPods returns per-Component, per-revisionHash pod counts —
-// both the TOTAL pods carrying each revision hash and the subset that are READY
-// (serving). Callers that gate on serving capacity (e.g. the canary traffic-shift
-// gate) MUST use the ready map: a pod that merely exists (ContainerCreating/Pending)
-// is not serving yet, and counting it lets a rollout cut over before the new
-// revision can actually take traffic.
+// observePerRevisionPods returns per-revision pod counts and routing selector
+// capabilities. LeaderOnly requires an observed leader or worker runner;
+// PodOrdinal additionally requires every such pod to carry an ordinal label.
 //
 // The per-Component pod fetch routes through query.ListOMENativePodsByName so it
 // rides the OMENative Pod field index instead of scanning the whole informer
@@ -413,19 +384,21 @@ func componentIsOMENative(ext *v1beta1.ComponentExtensionSpec, specMode *constan
 // false for the live API reader (canary capacity gate — the apiserver has no
 // custom Pod field selector). Both modes return the identical pod set; useIndex
 // only picks how the set is fetched.
-func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, useIndex bool) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, error) {
+func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, useIndex bool) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]RevisionRoutingSelector, error) {
 	total := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	ready := make(map[v1beta1.ComponentType]map[string]int32, len(components))
+	routing := make(map[v1beta1.ComponentType]map[string]RevisionRoutingSelector, len(components))
 	if reads == nil {
-		return total, ready, nil
+		return total, ready, routing, nil
 	}
 	for _, c := range components {
 		pods, err := query.ListOMENativePodsByName(ctx, reads, isvc.Namespace, isvc.Name, v1beta1convert.ComponentTypeToWorkload(c), useIndex)
 		if err != nil {
-			return nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
+			return nil, nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
 		}
 		byHash := make(map[string]int32, 4)
 		readyByHash := make(map[string]int32, 4)
+		routingByHash := make(map[string]RevisionRoutingSelector, 4)
 		for _, pod := range pods {
 			hash := pod.Labels[query.LabelRevisionHash]
 			if hash == "" {
@@ -435,11 +408,24 @@ func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1be
 			if podReadyAndServing(pod) {
 				readyByHash[hash]++
 			}
+			selector := routingByHash[hash]
+			switch v1beta1.RunnerName(pod.Labels[query.LabelRunner]) {
+			case v1beta1.RunnerNameLeader, v1beta1.RunnerNameWorker:
+				hasOrdinal := pod.Labels[query.LabelPodOrdinal] != ""
+				if selector.LeaderOnly {
+					selector.PodOrdinal = selector.PodOrdinal && hasOrdinal
+				} else {
+					selector.LeaderOnly = true
+					selector.PodOrdinal = hasOrdinal
+				}
+			}
+			routingByHash[hash] = selector
 		}
 		total[c] = byHash
 		ready[c] = readyByHash
+		routing[c] = routingByHash
 	}
-	return total, ready, nil
+	return total, ready, routing, nil
 }
 
 // podReadyAndServing reports whether a pod is currently serving traffic: Running,

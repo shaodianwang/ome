@@ -26,14 +26,14 @@ import (
 // no port under this name falls through to its first declared port.
 const servingPortName = "http"
 
-// ErrNoServingPort reports that a Component's merged runner declares no
-// container port, so no per-revision routing Service can be built. A
+// ErrNoServingPort reports that a Component's effective serving template has
+// no container port, so no per-revision routing Service can be built. A
 // ClusterIP Service must publish at least one port, and publishing a port
 // the runner does not listen on produces a Service whose EndpointSlice
 // reads ready while every request is dropped — pod readiness is a property
 // of the pod, not of the published port. Callers skip the routing Service
 // instead of inventing a number.
-var ErrNoServingPort = errors.New("component runner declares no container port")
+var ErrNoServingPort = errors.New("component serving template declares no container port")
 
 // isvcGroupVersionKind identifies the InferenceService owner reference
 // on each per-revision Service. Declared locally so this subpackage
@@ -41,15 +41,15 @@ var ErrNoServingPort = errors.New("component runner declares no container port")
 // without closing an import cycle.
 var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// PerRevisionService describes the routing + headless pair OMENative
-// creates per (component, revisionHash). The two Services share the
-// same selector but differ in ClusterIP semantics.
+// PerRevisionService describes the routing + headless pair OMENative creates
+// per (component, revisionHash). Both share the revision selector; routing may
+// add leader and ordinal filters.
 type PerRevisionService struct {
 	// RoutingName is the ClusterIP Service name —
 	// `<isvc>-<component>-rev-<hash>`. Used as the backend target by
 	// the HTTPRoute weighted-backendRef consumer. Empty when
 	// EnsurePerRevisionServices skipped the routing Service because the
-	// Component's runner declares no container port.
+	// Component's serving template declares no container port.
 	RoutingName string
 
 	// HeadlessName is the headless Service name —
@@ -57,6 +57,13 @@ type PerRevisionService struct {
 	// DNS within the revision (multi-node tensor-parallel groups need
 	// per-pod addressability among one revision's pods).
 	HeadlessName string
+}
+
+// RevisionRoutingSelector controls the optional pod filters on one revision's
+// routing Service. PodOrdinal is applied only when LeaderOnly is also true.
+type RevisionRoutingSelector struct {
+	LeaderOnly bool
+	PodOrdinal bool
 }
 
 // PerRevisionServiceName returns the per-revision Service name for one
@@ -87,25 +94,18 @@ func PerRevisionServiceNames(isvcName string, component v1beta1.ComponentType, r
 // BuildPerRevisionRoutingService produces the ClusterIP per-revision
 // Service for one (component, revisionHash). Pure compute; idempotent.
 //
-// `runnerPorts` are the container ports the Component's merged runner
-// declares; the published port is resolved from them (see
+// `runnerPorts` are the effective serving container ports; the published
+// port is resolved from them (see
 // perRevisionRoutingPorts). Returns ErrNoServingPort when the set is
 // empty — the Service is not buildable without a port the pods listen on.
 //
-// `multiPod` toggles the rank-0 filter on the routing selector:
-//   - false (single-pod) → broad selector. SurgeThenDrain alternates
-//     the pod-naming ordinal between 0 and 1; pinning ordinal=0 would
-//     zero-endpoint the Service during surge.
-//   - true (multi-pod) → adds `ome.io/runner=leader` + `ome.io/pod-ordinal=0`
-//     so only the leader (rank-0) pod handles customer traffic. Workers run
-//     distributed-init peers and cannot serve; pod-ordinal alone is not enough
-//     because it is numbered per runner, so the rank-0 worker also carries 0.
+// `routing` may restrict the selector to leader pods and, when supported by
+// the observed revision, leader ordinal 0. Revisions without ordinal labels
+// retain a reachable leader-only selector.
 //
-// The routing Service's label map intentionally does NOT include the
-// `pod-ordinal=0` key — Labels describe the Service itself for
-// catalog/UI purposes; the Selector is the filter that gates pod
-// membership.
-func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool, runnerPorts []corev1.ContainerPort) (*corev1.Service, error) {
+// The routing Service's label map intentionally excludes optional runner and
+// ordinal filters. Labels describe the Service; the Selector gates pod membership.
+func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, routing RevisionRoutingSelector, runnerPorts []corev1.ContainerPort) (*corev1.Service, error) {
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
 	}
@@ -118,17 +118,17 @@ func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1
 	}
 	labels := perRevisionServiceSelector(isvc.Name, component, revisionHash)
 	selector := labels
-	if multiPod {
+	if routing.LeaderOnly {
 		selector = make(map[string]string, len(labels)+2)
 		for k, v := range labels {
 			selector[k] = v
 		}
-		// Pin the leader: pod-ordinal is numbered PER RUNNER, so the rank-0
-		// worker also carries pod-ordinal=0. Without runner=leader the selector
-		// would match leader + worker-0 and route customer traffic to a worker
-		// that cannot serve. runner=leader + pod-ordinal=0 selects only the leader.
 		selector[query.LabelRunner] = string(v1beta1.RunnerNameLeader)
-		selector[query.LabelPodOrdinal] = "0"
+		if routing.PodOrdinal {
+			// Ordinals are numbered per runner, so runner=leader is required
+			// alongside ordinal 0 to exclude worker ordinal 0.
+			selector[query.LabelPodOrdinal] = "0"
+		}
 	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -148,7 +148,7 @@ func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1
 	}, nil
 }
 
-// perRevisionRoutingPorts maps a Component's merged runner container ports
+// perRevisionRoutingPorts maps a Component's effective serving container ports
 // onto the single ServicePort the routing Service publishes. HTTPRoute
 // backendRef consumers route to that port, so it must be the one the
 // runner listens on. Runtimes routinely declare several ports (serving,
@@ -209,8 +209,7 @@ func servingContainerPort(ports []corev1.ContainerPort) (corev1.ContainerPort, b
 // including workers — regardless of multi-pod-ness. Peer discovery
 // for distributed init (NCCL all-gather, vLLM ray-init, etc.)
 // requires every pod to be addressable via per-pod DNS. Only the
-// per-revision ROUTING Service (BuildPerRevisionRoutingService) adds
-// the rank-0 filter for multi-pod Components.
+// per-revision routing Service adds leader and ordinal filters.
 func BuildPerRevisionHeadlessService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string) (*corev1.Service, error) {
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
@@ -257,11 +256,10 @@ func perRevisionServiceSelector(isvcName string, component v1beta1.ComponentType
 // the names so the coordination layer can record them on
 // Status.Components.<c>.Traffic[].
 //
-// `multiPod` tightens the routing Service selector to rank-0 only;
-// the headless Service is unaffected (workers must stay discoverable
-// for peer DNS).
+// `routing` controls the optional leader and ordinal filters. The headless
+// Service is unaffected because workers must stay discoverable for peer DNS.
 //
-// `runnerPorts` are the Component's merged runner container ports. When
+// `runnerPorts` are the Component's effective serving container ports. When
 // they are empty the routing Service is skipped and logged rather than
 // published on a guessed port: a routing Service on a port nothing listens
 // on is indistinguishable from a healthy one (its EndpointSlice still reads
@@ -270,19 +268,19 @@ func perRevisionServiceSelector(isvcName string, component v1beta1.ComponentType
 // port. The reconcile does not fail: coordination is a producer layer, and
 // one Component's missing port declaration must not wedge the rest of the
 // InferenceService.
-func EnsurePerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool, runnerPorts []corev1.ContainerPort) (PerRevisionService, error) {
+func EnsurePerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, routing RevisionRoutingSelector, runnerPorts []corev1.ContainerPort) (PerRevisionService, error) {
 	out := PerRevisionServiceNames(isvc.Name, component, revisionHash)
 	if c == nil {
 		return out, fmt.Errorf("EnsurePerRevisionServices: nil client")
 	}
 
 	routingBuild := func(i *v1beta1.InferenceService, comp v1beta1.ComponentType, hash string) (*corev1.Service, error) {
-		return BuildPerRevisionRoutingService(i, comp, hash, multiPod, runnerPorts)
+		return BuildPerRevisionRoutingService(i, comp, hash, routing, runnerPorts)
 	}
 	switch err := ensureService(ctx, c, isvc, routingBuild, component, revisionHash, out.RoutingName, false); {
 	case errors.Is(err, ErrNoServingPort):
 		out.RoutingName = ""
-		log.FromContext(ctx).Info("Skipping per-revision routing Service: component runner declares no container port",
+		log.FromContext(ctx).Info("Skipping per-revision routing Service: component serving template declares no container port",
 			"component", component, "revisionHash", revisionHash, "service", PerRevisionServiceName(isvc.Name, component, revisionHash))
 	case err != nil:
 		return out, err

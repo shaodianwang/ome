@@ -737,12 +737,9 @@ func canonicalScaleTargetRef(mode constants.DeploymentModeType, isvcName, compon
 // rules: prefer a port named "metrics", else the first declared port,
 // else "http".
 //
-// Stable Service selector — for multi-pod Components, also pin to
-// `pod-ordinal=0` so customer traffic lands only on the rank-0
-// (leader) pod. Workers run distributed-init peers and cannot
-// handle inference requests; without this filter, kube-proxy would
-// round-robin to all pods of the gang and ~(Size-1)/Size of
-// requests would 502.
+// The stable Service adds leader filters only when the ISVC declares
+// Worker.Size. Runtime-only shape is not used here because this
+// Service spans revisions that may have different runner shapes.
 //
 // The multi-pod filter is runner=leader AND pod-ordinal=0: pod-ordinal
 // is numbered per runner, so the rank-0 worker also carries ordinal 0
@@ -784,8 +781,8 @@ func ReconcileOMENativeSubresources(
 	}
 	// Base selector — narrows to OMENative-managed pods of this (ISVC,
 	// Component) pair. Used as-is for PodMonitor; augmented with a
-	// `runner=leader` + `pod-ordinal=0` filter for the stable Service of
-	// multi-pod Components (see function-level docstring for rationale).
+	// `runner=leader` + `pod-ordinal=0` filter when the ISVC declares a
+	// multi-pod shape (see function-level docstring for rationale).
 	baseSelector := map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(componentType),
@@ -797,10 +794,8 @@ func ReconcileOMENativeSubresources(
 		for k, v := range baseSelector {
 			stableSelector[k] = v
 		}
-		// pod-ordinal is numbered PER RUNNER, so the rank-0 worker also carries
-		// pod-ordinal=0; without runner=leader the selector matches leader +
-		// worker-0 and kube-proxy round-robins customer traffic onto a worker
-		// that cannot serve. runner=leader + pod-ordinal=0 selects only the leader.
+		// Pod ordinals are numbered per runner, so worker ordinal 0 also carries
+		// this value. Combining the runner and ordinal selects only the leader.
 		stableSelector[query.LabelRunner] = string(v1beta1.RunnerNameLeader)
 		stableSelector[query.LabelPodOrdinal] = "0"
 	}

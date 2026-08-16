@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,36 @@ func TestReconcile_NoOpForNonOMENativeISVC(t *testing.T) {
 	}
 }
 
+func TestReconcile_UsesResolvedOMENativeMembership(t *testing.T) {
+	isvc := testReconcilerISVC()
+	isvc.Spec.Engine = &v1beta1.EngineSpec{}
+	c := testClient(buildPod(isvc, v1beta1.EngineComponent, "hash1", 0))
+
+	r, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC:   isvc,
+		Client: c,
+		Reader: c,
+		ComponentDeploymentModes: map[v1beta1.ComponentType]constants.DeploymentModeType{
+			v1beta1.EngineComponent: constants.OMENative,
+		},
+		ComponentRunnerPorts: testComponentRunnerPorts(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PerRevisionServicesEnsured != 1 {
+		t.Fatalf("resolved OMENative Engine should ensure one revision Service pair, got %d", r.PerRevisionServicesEnsured)
+	}
+	for _, name := range []string{
+		PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1"),
+		PerRevisionHeadlessServiceName(isvc.Name, v1beta1.EngineComponent, "hash1"),
+	} {
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: name}, &corev1.Service{}); err != nil {
+			t.Errorf("resolved OMENative Engine Service %s missing: %v", name, err)
+		}
+	}
+}
+
 func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	isvc := testOMENativeISVC()
 	isvc.Spec.Rollout = singleEngineGroup()
@@ -63,11 +94,12 @@ func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	}
 	c := testClient(pods...)
 	r, err := Reconcile(context.Background(), ReconcileInputs{
-		ISVC:                 isvc,
-		Client:               c,
-		Reader:               c,
-		Now:                  time.Now(),
-		ComponentRunnerPorts: testComponentRunnerPorts(),
+		ISVC:                     isvc,
+		Client:                   c,
+		Reader:                   c,
+		Now:                      time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+		ComponentRunnerPorts:     testComponentRunnerPorts(),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -81,14 +113,90 @@ func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	if err := c.Get(context.Background(), key, svc); err != nil {
 		t.Errorf("per-revision Service missing: %v", err)
 	}
-	// The published port comes from the Component's merged runner, not from
-	// a builder-side default.
+	// The published port comes from the Component's effective serving
+	// template, not from a builder-side default.
 	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 8000 {
 		t.Errorf("per-revision Service ports: got %+v want a single port 8000", svc.Spec.Ports)
 	}
 }
 
-// A Component whose merged runner declares no port gets no routing Service:
+func TestReconcile_UsesObservedRunnerShapeForRevisionServices(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Rollout = singleEngineGroup()
+	stablePod := buildRunnerPod(isvc, v1beta1.EngineComponent, "stable", 0, v1beta1.RunnerNameDefault, "0")
+	multiLeader := buildRunnerPod(isvc, v1beta1.EngineComponent, "multi", 1, v1beta1.RunnerNameLeader, "0")
+	multiWorker := buildRunnerPod(isvc, v1beta1.EngineComponent, "multi", 2, v1beta1.RunnerNameWorker, "0")
+	c := testClient(stablePod, multiLeader, multiWorker)
+
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC:                     isvc,
+		Client:                   c,
+		Reader:                   c,
+		Now:                      time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+		ComponentRunnerPorts:     testComponentRunnerPorts(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, tc := range []struct {
+		hash     string
+		multiPod bool
+	}{
+		{hash: "stable", multiPod: false},
+		{hash: "multi", multiPod: true},
+	} {
+		routing := &corev1.Service{}
+		routingKey := client.ObjectKey{
+			Namespace: isvc.Namespace,
+			Name:      PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, tc.hash),
+		}
+		if err := c.Get(context.Background(), routingKey, routing); err != nil {
+			t.Fatalf("routing Service for %s missing: %v", tc.hash, err)
+		}
+		if tc.multiPod {
+			if got := routing.Spec.Selector[query.LabelRunner]; got != string(v1beta1.RunnerNameLeader) {
+				t.Errorf("multi-pod routing Service selector %s: got %q want %q", query.LabelRunner, got, v1beta1.RunnerNameLeader)
+			}
+			if got := routing.Spec.Selector[query.LabelPodOrdinal]; got != "0" {
+				t.Errorf("multi-pod routing Service selector %s: got %q want 0", query.LabelPodOrdinal, got)
+			}
+			if !routingSelectorMatches(routing.Spec.Selector, multiLeader.Labels) {
+				t.Errorf("multi-pod leader must match routing selector: selector=%v labels=%v", routing.Spec.Selector, multiLeader.Labels)
+			}
+			if routingSelectorMatches(routing.Spec.Selector, multiWorker.Labels) {
+				t.Errorf("multi-pod worker must not match routing selector: selector=%v labels=%v", routing.Spec.Selector, multiWorker.Labels)
+			}
+		} else {
+			if _, ok := routing.Spec.Selector[query.LabelRunner]; ok {
+				t.Errorf("single-pod routing Service selector must not include %s: %v", query.LabelRunner, routing.Spec.Selector)
+			}
+			if _, ok := routing.Spec.Selector[query.LabelPodOrdinal]; ok {
+				t.Errorf("single-pod routing Service selector must not include %s: %v", query.LabelPodOrdinal, routing.Spec.Selector)
+			}
+			if !routingSelectorMatches(routing.Spec.Selector, stablePod.Labels) {
+				t.Errorf("single-pod revision must match broad routing selector: selector=%v labels=%v", routing.Spec.Selector, stablePod.Labels)
+			}
+		}
+
+		headless := &corev1.Service{}
+		headlessKey := client.ObjectKey{
+			Namespace: isvc.Namespace,
+			Name:      PerRevisionHeadlessServiceName(isvc.Name, v1beta1.EngineComponent, tc.hash),
+		}
+		if err := c.Get(context.Background(), headlessKey, headless); err != nil {
+			t.Fatalf("headless Service for %s missing: %v", tc.hash, err)
+		}
+		if _, ok := headless.Spec.Selector[query.LabelRunner]; ok {
+			t.Errorf("headless Service for %s selector must not include %s: %v", tc.hash, query.LabelRunner, headless.Spec.Selector)
+		}
+		if _, ok := headless.Spec.Selector[query.LabelPodOrdinal]; ok {
+			t.Errorf("headless Service for %s selector must not include %s: %v", tc.hash, query.LabelPodOrdinal, headless.Spec.Selector)
+		}
+	}
+}
+
+// A Component whose serving template declares no port gets no routing Service:
 // the reconcile still succeeds and the rest of the coordination pass runs.
 func TestReconcile_SkipsRoutingServiceWithoutRunnerPort(t *testing.T) {
 	isvc := testOMENativeISVC()
@@ -96,6 +204,7 @@ func TestReconcile_SkipsRoutingServiceWithoutRunnerPort(t *testing.T) {
 	c := testClient(buildPod(isvc, v1beta1.EngineComponent, "hash1", 0))
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,6 +235,7 @@ func TestReconcile_DataPlaneRunsWithoutCoordinationGroup(t *testing.T) {
 	c := testClient(pods...)
 	r, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -161,21 +271,9 @@ func steadyEngineStatus(isvc *v1beta1.InferenceService, hash string) {
 	}
 }
 
-// TestReconcile_SkipsGCWhenRevisionSetConverged pins the change-driven
-// perf contract: when the live revision-hash set already matches the set
-// recorded on Status.Components.<c>.Traffic, the heavier GC orphan sweep
-// (a namespace Service LIST) is skipped — a prior reconcile already GC'd
-// every orphan for that set. Ensure, by contrast, still runs (self-heal,
-// see TestReconcile_RecreatesDeletedServiceWhenConverged); its Gets are
-// cache-served and cheap. The cached-read switch is orthogonal: pods are
-// still observed via Client every pass.
-// The orphan sweep must run even when the live revision-hash set already
-// matches Status.Components.<c>.Traffic. That state is reached one reconcile
-// BEFORE a drained pod disappears, because Traffic is written from READY pods
-// while the sweep is keyed on TOTAL pods: the pass on which the drained pod
-// finally leaves the total set is exactly the pass on which the two sets agree.
-// Gating the sweep on that agreement stranded the drained revision's Services
-// until some later rollout happened to sweep them.
+// TestReconcile_GCsOrphanWhenRevisionSetLooksConverged verifies that GC runs
+// when live and recorded revision sets agree. Traffic uses ready pods while GC
+// uses total pods, so set equality does not prove no orphan is collectible.
 func TestReconcile_GCsOrphanWhenRevisionSetLooksConverged(t *testing.T) {
 	isvc := testOMENativeISVC()
 	// Post-drain steady state: Traffic records only hash1, and only hash1 has
@@ -193,6 +291,7 @@ func TestReconcile_GCsOrphanWhenRevisionSetLooksConverged(t *testing.T) {
 	c := &listCountingClient{Client: testClient(objs...)}
 	r, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -252,7 +351,11 @@ func TestReconcile_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 	ctx := context.Background()
 
 	// First reconcile creates the per-revision Services for hash1.
-	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts()}); err != nil {
+	if _, err := Reconcile(ctx, ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+		ComponentRunnerPorts:     testComponentRunnerPorts(),
+	}); err != nil {
 		t.Fatalf("first reconcile: unexpected error: %v", err)
 	}
 	routingKey := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
@@ -271,7 +374,11 @@ func TestReconcile_RecreatesDeletedServiceWhenConverged(t *testing.T) {
 
 	// Second reconcile: revision set is unchanged (converged), but the
 	// deleted Service must be recreated.
-	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts()}); err != nil {
+	if _, err := Reconcile(ctx, ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+		ComponentRunnerPorts:     testComponentRunnerPorts(),
+	}); err != nil {
 		t.Fatalf("second reconcile: unexpected error: %v", err)
 	}
 	if err := c.Get(ctx, routingKey, &corev1.Service{}); err != nil {
@@ -293,6 +400,7 @@ func TestReconcile_EnsuresServicesWhenRevisionSetDiverges(t *testing.T) {
 	c := testClient(pods...)
 	r, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -321,6 +429,7 @@ func TestReconcile_ObservesPodsViaCachedClient(t *testing.T) {
 	// this would panic. The cached Client must carry the observation.
 	r, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: nil, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -344,6 +453,7 @@ func TestReconcile_WritesTrafficStatus(t *testing.T) {
 	c := testClient(pods...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -405,7 +515,10 @@ func TestReconcile_DoesNotClobberCanaryTraffic(t *testing.T) {
 		buildPod(isvc, v1beta1.EngineComponent, "stablehash", 1),
 	}
 	c := testClient(pods...)
-	if _, err := Reconcile(context.Background(), ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := isvc.Status.Components[v1beta1.EngineComponent].Traffic
@@ -471,6 +584,11 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 	c := testClient(append(pods, engineIR, decoderIR, routerIR)...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(
+			v1beta1.EngineComponent,
+			v1beta1.DecoderComponent,
+			v1beta1.RouterComponent,
+		),
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -526,6 +644,7 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 	// First reconcile: UpdateRevision empty → LatestRevision=false.
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	}); err != nil {
 		t.Fatalf("first reconcile: unexpected error: %v", err)
 	}
@@ -553,6 +672,7 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 	// observed — LatestRevision must flip to true on the next write.
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	}); err != nil {
 		t.Fatalf("second reconcile: unexpected error: %v", err)
 	}
@@ -591,6 +711,7 @@ func TestReconcile_WritesGroupStatus(t *testing.T) {
 	c := testClient(pods...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -635,6 +756,7 @@ func TestReconcile_InvalidGroupShapeErrors(t *testing.T) {
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err == nil {
 		t.Errorf("zero-budget pacing: want error")
@@ -666,7 +788,10 @@ func TestReconcile_ClearsStaleCoordinationStatusWhenGroupsGone(t *testing.T) {
 		},
 	}
 	c := testClient()
-	if _, err := Reconcile(context.Background(), ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if isvc.Status.RolloutCoordination != nil {
@@ -700,6 +825,14 @@ func testReconcilerISVC() *v1beta1.InferenceService {
 	}
 }
 
+func testOMENativeModes(components ...v1beta1.ComponentType) map[v1beta1.ComponentType]constants.DeploymentModeType {
+	modes := make(map[v1beta1.ComponentType]constants.DeploymentModeType, len(components))
+	for _, component := range components {
+		modes[component] = constants.OMENative
+	}
+	return modes
+}
+
 // buildPod returns a Running+Ready pod (the realistic steady state):
 // the traffic writer weighs only READY pods, so a status-less fixture
 // would carry zero weight.
@@ -724,22 +857,17 @@ func buildPod(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, r
 	}
 }
 
-func podName(isvc string, component v1beta1.ComponentType, idx int) string {
-	// Test pod names — simplified pattern for test fixtures.
-	return isvc + "-" + string(component) + "-pod-" + itoa(idx)
+func buildRunnerPod(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, idx int, runner v1beta1.RunnerName, ordinal string) *corev1.Pod {
+	pod := buildPod(isvc, component, revisionHash, idx).(*corev1.Pod)
+	pod.Labels[query.LabelRunner] = string(runner)
+	if ordinal != "" {
+		pod.Labels[query.LabelPodOrdinal] = ordinal
+	}
+	return pod
 }
 
-func itoa(i int) string {
-	switch i {
-	case 0:
-		return "0"
-	case 1:
-		return "1"
-	case 2:
-		return "2"
-	default:
-		return "n"
-	}
+func podName(isvc string, component v1beta1.ComponentType, idx int) string {
+	return isvc + "-" + string(component) + "-pod-" + strconv.Itoa(idx)
 }
 
 func testClient(objs ...runtime.Object) client.Client {
@@ -781,6 +909,7 @@ func TestReconcile_ConsiderCoordinationGroupEventFiresForMultiOMENativeWithoutCo
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent, v1beta1.DecoderComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -804,6 +933,7 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredForSingleComponent(t *t
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -835,6 +965,7 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent, v1beta1.DecoderComponent),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1256,7 +1387,7 @@ func TestObservePerRevisionPods_TotalVsReady(t *testing.T) {
 		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 2, true),  // serving
 		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 3, false), // exists, not serving yet
 	}
-	total, ready, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, []v1beta1.ComponentType{v1beta1.EngineComponent}, true)
+	total, ready, _, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, []v1beta1.ComponentType{v1beta1.EngineComponent}, true)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods: %v", err)
 	}
@@ -1269,6 +1400,44 @@ func TestObservePerRevisionPods_TotalVsReady(t *testing.T) {
 	}
 	if total[eng][stable] != 2 || ready[eng][stable] != 2 {
 		t.Errorf("stable total/ready = %d/%d, want 2/2", total[eng][stable], ready[eng][stable])
+	}
+}
+
+func TestObservePerRevisionPods_DetectsRoutingSelectorPerRevision(t *testing.T) {
+	isvc := testReconcilerISVC()
+	objs := []runtime.Object{
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "default", 0, v1beta1.RunnerNameDefault, "0"),
+		buildPod(isvc, v1beta1.EngineComponent, "missing", 1),
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "leader", 2, v1beta1.RunnerNameLeader, ""),
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "worker", 3, v1beta1.RunnerNameWorker, ""),
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "with-ordinal", 4, v1beta1.RunnerNameLeader, "0"),
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "with-ordinal", 5, v1beta1.RunnerNameWorker, "0"),
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "mixed-ordinal", 6, v1beta1.RunnerNameLeader, "0"),
+		buildRunnerPod(isvc, v1beta1.EngineComponent, "mixed-ordinal", 7, v1beta1.RunnerNameWorker, ""),
+	}
+
+	_, _, routing, err := observePerRevisionPods(
+		context.Background(),
+		testClient(objs...),
+		isvc,
+		[]v1beta1.ComponentType{v1beta1.EngineComponent},
+		true,
+	)
+	if err != nil {
+		t.Fatalf("observePerRevisionPods: %v", err)
+	}
+	want := map[string]RevisionRoutingSelector{
+		"default":       {},
+		"missing":       {},
+		"leader":        {LeaderOnly: true},
+		"worker":        {LeaderOnly: true},
+		"with-ordinal":  {LeaderOnly: true, PodOrdinal: true},
+		"mixed-ordinal": {LeaderOnly: true},
+	}
+	for hash, selector := range want {
+		if got := routing[v1beta1.EngineComponent][hash]; got != selector {
+			t.Errorf("routing selector for %s: got %+v want %+v", hash, got, selector)
+		}
 	}
 }
 
@@ -1290,11 +1459,11 @@ func TestObservePerRevisionPods_IndexParityWithLabelPath(t *testing.T) {
 	}
 	comps := []v1beta1.ComponentType{v1beta1.EngineComponent}
 
-	totalIdx, readyIdx, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, true)
+	totalIdx, readyIdx, routingIdx, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, true)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods(useIndex=true): %v", err)
 	}
-	totalLbl, readyLbl, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, false)
+	totalLbl, readyLbl, routingLbl, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, false)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods(useIndex=false): %v", err)
 	}
@@ -1304,6 +1473,9 @@ func TestObservePerRevisionPods_IndexParityWithLabelPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(readyIdx, readyLbl) {
 		t.Errorf("ready maps differ: index=%v label=%v", readyIdx, readyLbl)
+	}
+	if !reflect.DeepEqual(routingIdx, routingLbl) {
+		t.Errorf("routing selector maps differ: index=%v label=%v", routingIdx, routingLbl)
 	}
 	eng := v1beta1.EngineComponent
 	// Empty-hash pod must not appear under any bucket.
@@ -1354,6 +1526,7 @@ func TestReconcile_IRReadErrorFailsReconcile(t *testing.T) {
 	c := &failingIRClient{Client: testClient(pods...)}
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	})
 	if err == nil {
 		t.Fatal("IR read error must fail the reconcile, not silently degrade")
@@ -1376,6 +1549,7 @@ func TestReconcile_TrafficWeighsOnlyReadyPods(t *testing.T) {
 	c := testClient(pods...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(), ComponentRunnerPorts: testComponentRunnerPorts(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1494,6 +1668,7 @@ func TestReconcile_SteadyStateEmitsNoGroupEvents(t *testing.T) {
 	for pass := 0; pass < 2; pass++ {
 		if _, err := Reconcile(context.Background(), ReconcileInputs{
 			ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+			ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
 		}); err != nil {
 			t.Fatalf("pass %d: unexpected error: %v", pass, err)
 		}

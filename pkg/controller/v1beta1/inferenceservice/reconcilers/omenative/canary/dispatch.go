@@ -16,7 +16,6 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/utils"
 )
@@ -42,10 +41,9 @@ type DispatchDeps struct {
 	// config (fetched per-reconcile by the controller), threaded to the sampler.
 	BundledPrometheusAddress string
 	QueryTimeout             time.Duration
-	// ComponentRunnerPorts holds the container ports each Component's merged
-	// runner declares, keyed by Component. The per-revision routing Service
-	// publishes the serving port resolved from this set so it targets the port
-	// the pods actually listen on. Mirrors coordination.ReconcileInputs.
+	// ComponentRunnerPorts holds each Component's effective serving ports.
+	// The per-revision routing Service publishes the port resolved from this set
+	// so it targets the port the pods actually listen on.
 	ComponentRunnerPorts map[v1beta1.ComponentType][]corev1.ContainerPort
 }
 
@@ -73,7 +71,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// onto canary pods that exist but are not serving yet.
 	// d.Reader is the live API reader (no Pod field index) — useIndex=false skips
 	// the doomed MatchingFields probe and goes straight to the label-selector List.
-	perRev, readyRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC), false)
+	perRev, readyRev, routingRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC), false)
 	if err != nil {
 		return 0, err
 	}
@@ -98,12 +96,12 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		// recreates a missing Service. Gating ensure on revision-set
 		// convergence would strand the weighted-route consumer on a
 		// dead backend.
-		multiPod := isvcutils.IsMultiPodComponent(d.ISVC, comp)
 		for hash := range perRev[comp] {
 			if hash == "" {
 				continue
 			}
-			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, multiPod, d.ComponentRunnerPorts[comp]); err != nil {
+			routing := routingRev[comp][hash]
+			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, routing, d.ComponentRunnerPorts[comp]); err != nil {
 				return 0, err
 			}
 		}

@@ -113,7 +113,13 @@ func defaultEngine(engine *v1beta1.EngineSpec, specMode *constants.DeploymentMod
 		engine.MaxReplicas = 3
 	}
 	defaultWorkerSize(engine.Leader, engine.Worker)
-	defaultOMENativeComponent(&engine.ComponentExtensionSpec, engineIsMultiPod(engine), specMode)
+	// A raw spec without a runner shape may inherit Leader/Worker from its
+	// runtime.
+	shape := podShapeUnresolved
+	if engineIsMultiPod(engine) {
+		shape = podShapeMulti
+	}
+	defaultOMENativeComponent(&engine.ComponentExtensionSpec, shape, specMode)
 }
 
 func defaultDecoder(decoder *v1beta1.DecoderSpec, specMode *constants.DeploymentModeType) {
@@ -125,26 +131,17 @@ func defaultDecoder(decoder *v1beta1.DecoderSpec, specMode *constants.Deployment
 		decoder.MaxReplicas = 3
 	}
 	defaultWorkerSize(decoder.Leader, decoder.Worker)
-	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, decoderIsMultiPod(decoder), specMode)
+	// A raw spec without a runner shape may inherit Leader/Worker from its
+	// runtime.
+	shape := podShapeUnresolved
+	if decoderIsMultiPod(decoder) {
+		shape = podShapeMulti
+	}
+	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, shape, specMode)
 }
 
-// defaultWorkerSize fills Worker.Size=1 when a multi-pod pairing is
-// declared (Leader set AND Worker set) but Worker.Size is nil. Acts
-// only when both halves of the pairing are present — pure
-// leader-without-worker or worker-without-leader specs are left
-// untouched (the validator rejects them later with the appropriate
-// reason).
-//
-// Treats nil Size as the operator-friendly "minimum-viable
-// multi-pod" default; if the operator wants more workers they set
-// Size explicitly. A Size of 0 is preserved (and rejected at
-// validation as WorkerSizeMustBePositive) so we don't quietly turn
-// the operator's "no workers, please" mistake into a 2-pod gang.
-//
-// Must run BEFORE engineIsMultiPod / decoderIsMultiPod so the
-// downstream multi-pod detection sees the defaulted Size and stamps
-// the gang lifecycle policies (RecreateInstance restart, AllPodReady
-// readiness, SurgeThenDrain update).
+// defaultWorkerSize sets Worker.Size=1 only for a declared Leader+Worker pair.
+// Explicit sizes and one-sided shapes are preserved for validation.
 func defaultWorkerSize(leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) {
 	if leader == nil || worker == nil {
 		return
@@ -165,50 +162,39 @@ func defaultRouter(router *v1beta1.RouterSpec, specMode *constants.DeploymentMod
 		router.MaxReplicas = 2
 	}
 	// Router has no Leader/Worker; always single-pod.
-	defaultOMENativeComponent(&router.ComponentExtensionSpec, false, specMode)
+	defaultOMENativeComponent(&router.ComponentExtensionSpec, podShapeSingle, specMode)
 }
 
-// engineIsMultiPod reports whether the Engine spawns more than one pod per
-// Instance — true when a Leader is declared or when Worker.Size > 0.
+// engineIsMultiPod reports whether Engine declares a complete Leader+Worker
+// pair with a positive Worker.Size.
 func engineIsMultiPod(engine *v1beta1.EngineSpec) bool {
 	if engine == nil {
 		return false
 	}
-	if engine.Leader != nil {
-		return true
-	}
-	return engine.Worker != nil && engine.Worker.Size != nil && *engine.Worker.Size > 0
+	return engine.Leader != nil && engine.Worker != nil && engine.Worker.Size != nil && *engine.Worker.Size > 0
 }
 
-// decoderIsMultiPod reports whether the Decoder spawns more than one pod per
-// Instance — true when a Leader is declared or when Worker.Size > 0.
+// decoderIsMultiPod reports whether Decoder declares a complete Leader+Worker
+// pair with a positive Worker.Size.
 func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
 	if decoder == nil {
 		return false
 	}
-	if decoder.Leader != nil {
-		return true
-	}
-	return decoder.Worker != nil && decoder.Worker.Size != nil && *decoder.Worker.Size > 0
+	return decoder.Leader != nil && decoder.Worker != nil && decoder.Worker.Size != nil && *decoder.Worker.Size > 0
 }
 
-// defaultOMENativeComponent fills in lifecycle-policy defaults on
-// the Component's omenative sub-block. Only acts when the Component
-// resolves to OMENative — either via its own
-// ome.io/deploymentMode annotation or via the top-level
-// spec.deploymentMode field (per-Component annotation wins). For any
-// other mode the block is left untouched. multiPod toggles the
-// restart/ready policy defaults: a multi-pod Instance defaults to group
-// restart + AllPodReady aggregation; a single-pod Instance defaults to
-// None for both.
-//
-// Multi-pod defaults:
-//
-//   - RestartPolicy = RecreateInstanceOnPodRestart (gang restart)
-//   - ReadyPolicy = AllPodReady (Instance Ready iff every pod Ready)
-//   - UpdateStrategy.Type = SurgeThenDrain (same default as single-pod;
-//     multi-pod gangs surge as a unit via the gang-surge path)
-func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod bool, specMode *constants.DeploymentModeType) {
+type componentPodShape uint8
+
+const (
+	podShapeUnresolved componentPodShape = iota
+	podShapeSingle
+	podShapeMulti
+)
+
+// defaultOMENativeComponent fills lifecycle defaults for an OMENative Component.
+// Shape-dependent policies remain unset when runtime resolution may change
+// the shape.
+func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, shape componentPodShape, specMode *constants.DeploymentModeType) {
 	if ext == nil {
 		return
 	}
@@ -220,9 +206,9 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	}
 	spec := ext.Lifecycle
 
-	if spec.RestartPolicy == nil {
+	if shape != podShapeUnresolved && spec.RestartPolicy == nil {
 		rp := v1beta1.InstanceRestartPolicyNone
-		if multiPod {
+		if shape == podShapeMulti {
 			rp = v1beta1.InstanceRestartPolicyRecreateInstance
 		}
 		spec.RestartPolicy = &rp
@@ -272,9 +258,9 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 		spec.UpdateStrategy.RollingUpdate.MaxUnavailable = &mu
 	}
 
-	if spec.ReadyPolicy == nil {
+	if shape != podShapeUnresolved && spec.ReadyPolicy == nil {
 		rp := v1beta1.InstanceReadyPolicyNone
-		if multiPod {
+		if shape == podShapeMulti {
 			rp = v1beta1.InstanceReadyPolicyAllPodReady
 		}
 		spec.ReadyPolicy = &rp

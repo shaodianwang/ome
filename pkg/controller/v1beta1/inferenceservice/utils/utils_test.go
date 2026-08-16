@@ -1754,6 +1754,104 @@ func TestMergedRunnerPorts_FallsBackToPodContainer(t *testing.T) {
 	})
 }
 
+func TestMergedRunnerPorts_UsesEffectiveLeaderTemplateForMultiPod(t *testing.T) {
+	workerSize := 1
+	cases := []struct {
+		name      string
+		engine    *v1beta1.EngineSpec
+		decoder   *v1beta1.DecoderSpec
+		component v1beta1.ComponentType
+		want      []v1.ContainerPort
+	}{
+		{
+			name: "Engine Leader runner",
+			engine: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{
+					Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8100}},
+				}}},
+				Worker: &v1beta1.WorkerSpec{Size: &workerSize},
+			},
+			component: v1beta1.EngineComponent,
+			want:      []v1.ContainerPort{{Name: "http", ContainerPort: 8100}},
+		},
+		{
+			name: "Engine Leader pod container",
+			engine: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{PodSpec: v1beta1.PodSpec{Containers: []v1.Container{{
+					Name: "engine", Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8200}},
+				}}}},
+				Worker: &v1beta1.WorkerSpec{Size: &workerSize},
+			},
+			component: v1beta1.EngineComponent,
+			want:      []v1.ContainerPort{{Name: "http", ContainerPort: 8200}},
+		},
+		{
+			name: "Decoder Leader runner",
+			decoder: &v1beta1.DecoderSpec{
+				Leader: &v1beta1.LeaderSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{
+					Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8300}},
+				}}},
+				Worker: &v1beta1.WorkerSpec{Size: &workerSize},
+			},
+			component: v1beta1.DecoderComponent,
+			want:      []v1.ContainerPort{{Name: "http", ContainerPort: 8300}},
+		},
+		{
+			name: "Decoder Leader pod container",
+			decoder: &v1beta1.DecoderSpec{
+				Leader: &v1beta1.LeaderSpec{PodSpec: v1beta1.PodSpec{Containers: []v1.Container{{
+					Name: "decoder", Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8400}},
+				}}}},
+				Worker: &v1beta1.WorkerSpec{Size: &workerSize},
+			},
+			component: v1beta1.DecoderComponent,
+			want:      []v1.ContainerPort{{Name: "http", ContainerPort: 8400}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				engine  = tc.engine
+				decoder = tc.decoder
+				err     error
+			)
+			if engine != nil {
+				engine, err = MergeEngineSpec(engine, &v1beta1.EngineSpec{})
+				if err != nil {
+					t.Fatalf("MergeEngineSpec: %v", err)
+				}
+			}
+			if decoder != nil {
+				decoder, err = MergeDecoderSpec(decoder, &v1beta1.DecoderSpec{})
+				if err != nil {
+					t.Fatalf("MergeDecoderSpec: %v", err)
+				}
+			}
+			assert.Equal(t, tc.want, MergedRunnerPorts(engine, decoder, nil)[tc.component])
+		})
+	}
+}
+
+func TestMergedRunnerPorts_InvalidMultiPodShapeUsesTopLevelTemplate(t *testing.T) {
+	topLevelPorts := []v1.ContainerPort{{Name: "http", ContainerPort: 8500}}
+	leaderPorts := []v1.ContainerPort{{Name: "http", ContainerPort: 8600}}
+	zeroWorkers := 0
+
+	engine := &v1beta1.EngineSpec{
+		Runner: &v1beta1.RunnerSpec{Container: v1.Container{Ports: topLevelPorts}},
+		Leader: &v1beta1.LeaderSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Ports: leaderPorts}}},
+		Worker: &v1beta1.WorkerSpec{Size: &zeroWorkers},
+	}
+	decoder := &v1beta1.DecoderSpec{
+		Runner: &v1beta1.RunnerSpec{Container: v1.Container{Ports: topLevelPorts}},
+		Leader: &v1beta1.LeaderSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Ports: leaderPorts}}},
+	}
+
+	got := MergedRunnerPorts(engine, decoder, nil)
+	assert.Equal(t, topLevelPorts, got[v1beta1.EngineComponent])
+	assert.Equal(t, topLevelPorts, got[v1beta1.DecoderComponent])
+}
+
 func TestGetTargetServicePort(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = v1.AddToScheme(scheme)

@@ -121,25 +121,8 @@ func DetermineEntrypointComponent(isvc *v1beta1.InferenceService) v1beta1.Compon
 	return v1beta1.EngineComponent
 }
 
-// IsMultiPodComponent reports whether the named Component spawns more
-// than one pod per Instance (Leader + N workers, where N = Worker.Size).
-// Returns true when `Worker != nil && Worker.Size != nil && *Worker.Size > 0`.
-//
-// The admission webhook (inference_service_defaults.defaultWorkerSize)
-// ensures Worker.Size is populated when Leader+Worker are paired, and
-// the validator rejects orphan Leader/Worker shapes, so this predicate
-// captures the only valid multi-pod shape: a Worker block with a
-// positive Size.
-//
-// Used by per-Component Service builders to decide whether to add the
-// `ome.io/pod-ordinal=0` selector. Multi-pod Components route customer
-// traffic only to the rank-0 (leader) pod; workers run distributed-init
-// peers and cannot serve. Single-pod Components keep the broader
-// selector because SurgeThenDrain alternates the pod-naming ordinal
-// between 0 and 1 across surges — pinning ordinal=0 there would
-// zero-endpoint the Service during the surge phase.
-//
-// Router is always single-pod (has no Leader/Worker fields).
+// IsMultiPodComponent reports whether a Component has a positive Worker.Size.
+// Router is always single-pod.
 func IsMultiPodComponent(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) bool {
 	if isvc == nil {
 		return false
@@ -156,11 +139,8 @@ func IsMultiPodComponent(isvc *v1beta1.InferenceService, component v1beta1.Compo
 }
 
 // engineSpawnsMultiplePods is the Engine-specific tail of
-// IsMultiPodComponent. Mirrors the webhook's engineIsMultiPod but does
-// NOT treat a Leader without Worker as multi-pod — the validator rejects
-// that shape before reconcile, but we stay strict on the
-// `Worker.Size > 0` half so the selector tightening only fires when
-// at least 2 pods exist per Instance.
+// IsMultiPodComponent. It requires a positive Worker.Size so selector
+// tightening only applies when at least two pods exist per Instance.
 func engineSpawnsMultiplePods(engine *v1beta1.EngineSpec) bool {
 	if engine == nil {
 		return false

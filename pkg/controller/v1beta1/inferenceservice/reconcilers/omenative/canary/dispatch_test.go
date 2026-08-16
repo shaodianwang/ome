@@ -8,6 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -193,7 +194,7 @@ func TestSecondaryCapacityReady_UnbumpedSecondary(t *testing.T) {
 }
 
 // canaryRunnerPorts mirrors what the controller threads in: the merged
-// runner container ports of every Component a canary group may touch. The
+// effective serving ports of every Component a canary group may touch. The
 // per-revision routing Service publishes the `http` one.
 func canaryRunnerPorts() map[v1beta1.ComponentType][]corev1.ContainerPort {
 	ports := []corev1.ContainerPort{{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP}}
@@ -257,6 +258,111 @@ func canaryPod(ns, isvc, comp, hash, name string) *corev1.Pod {
 			Phase:      corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 		},
+	}
+}
+
+func canaryRunnerPod(ns, isvc, comp, hash, name string, runner v1beta1.RunnerName, ordinal string) *corev1.Pod {
+	pod := canaryPod(ns, isvc, comp, hash, name)
+	pod.Labels[query.LabelRunner] = string(runner)
+	if ordinal != "" {
+		pod.Labels[query.LabelPodOrdinal] = ordinal
+	}
+	return pod
+}
+
+func canaryRoutingSelectorMatches(selector, podLabels map[string]string) bool {
+	return labels.SelectorFromSet(selector).Matches(labels.Set(podLabels))
+}
+
+func TestDispatch_UsesObservedRunnerShapeForRevisionServices(t *testing.T) {
+	ns := "default"
+	n2 := 2
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "runtime-shape"}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n2}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{{
+			Capacity: intstr.FromString("50%"),
+			Traffic:  50,
+		}}},
+	}}}
+	engineIR := ir(ns, isvc.Name, v1beta1.EngineComponent, "newhash")
+	engineIR.Status.CurrentRevision = isvc.Name + "-engine-stable0"
+	multiLeader := canaryRunnerPod(ns, isvc.Name, "engine", "newhash", isvc.Name+"-engine-1", v1beta1.RunnerNameLeader, "0")
+	multiWorker := canaryRunnerPod(ns, isvc.Name, "engine", "newhash", isvc.Name+"-engine-2", v1beta1.RunnerNameWorker, "0")
+	stablePod := canaryRunnerPod(ns, isvc.Name, "engine", "stable0", isvc.Name+"-engine-0", v1beta1.RunnerNameDefault, "0")
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		isvc,
+		engineIR,
+		multiLeader,
+		multiWorker,
+		stablePod,
+	).Build()
+	ctx := context.Background()
+
+	if _, err := Dispatch(ctx, DispatchDeps{
+		Client:               c,
+		Reader:               c,
+		ISVC:                 isvc,
+		ComponentRunnerPorts: canaryRunnerPorts(),
+	}); err != nil {
+		t.Fatalf("Dispatch error: %v", err)
+	}
+
+	for _, tc := range []struct {
+		hash     string
+		multiPod bool
+	}{
+		{hash: "stable0", multiPod: false},
+		{hash: "newhash", multiPod: true},
+	} {
+		routing := &corev1.Service{}
+		routingKey := types.NamespacedName{
+			Namespace: ns,
+			Name:      coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, tc.hash),
+		}
+		if err := c.Get(ctx, routingKey, routing); err != nil {
+			t.Fatalf("routing Service for %s missing: %v", tc.hash, err)
+		}
+		if tc.multiPod {
+			if got := routing.Spec.Selector[query.LabelRunner]; got != string(v1beta1.RunnerNameLeader) {
+				t.Errorf("multi-pod routing Service selector %s: got %q want %q", query.LabelRunner, got, v1beta1.RunnerNameLeader)
+			}
+			if got := routing.Spec.Selector[query.LabelPodOrdinal]; got != "0" {
+				t.Errorf("multi-pod routing Service selector %s: got %q want 0", query.LabelPodOrdinal, got)
+			}
+			if !canaryRoutingSelectorMatches(routing.Spec.Selector, multiLeader.Labels) {
+				t.Errorf("multi-pod leader must match routing selector: selector=%v labels=%v", routing.Spec.Selector, multiLeader.Labels)
+			}
+			if canaryRoutingSelectorMatches(routing.Spec.Selector, multiWorker.Labels) {
+				t.Errorf("multi-pod worker must not match routing selector: selector=%v labels=%v", routing.Spec.Selector, multiWorker.Labels)
+			}
+		} else {
+			if _, ok := routing.Spec.Selector[query.LabelRunner]; ok {
+				t.Errorf("single-pod routing Service selector must not include %s: %v", query.LabelRunner, routing.Spec.Selector)
+			}
+			if _, ok := routing.Spec.Selector[query.LabelPodOrdinal]; ok {
+				t.Errorf("single-pod routing Service selector must not include %s: %v", query.LabelPodOrdinal, routing.Spec.Selector)
+			}
+			if !canaryRoutingSelectorMatches(routing.Spec.Selector, stablePod.Labels) {
+				t.Errorf("single-pod revision must match broad routing selector: selector=%v labels=%v", routing.Spec.Selector, stablePod.Labels)
+			}
+		}
+
+		headless := &corev1.Service{}
+		headlessKey := types.NamespacedName{
+			Namespace: ns,
+			Name:      coordination.PerRevisionHeadlessServiceName(isvc.Name, v1beta1.EngineComponent, tc.hash),
+		}
+		if err := c.Get(ctx, headlessKey, headless); err != nil {
+			t.Fatalf("headless Service for %s missing: %v", tc.hash, err)
+		}
+		if _, ok := headless.Spec.Selector[query.LabelRunner]; ok {
+			t.Errorf("headless Service for %s selector must not include %s: %v", tc.hash, query.LabelRunner, headless.Spec.Selector)
+		}
+		if _, ok := headless.Spec.Selector[query.LabelPodOrdinal]; ok {
+			t.Errorf("headless Service for %s selector must not include %s: %v", tc.hash, query.LabelPodOrdinal, headless.Spec.Selector)
+		}
 	}
 }
 
