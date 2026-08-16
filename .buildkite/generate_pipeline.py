@@ -11,6 +11,8 @@ Usage:
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
     BUILDKITE_COMMIT          – full commit SHA
+    BUILDKITE_PULL_REQUEST    – pull request number, or "false"
+    BUILDKITE_PULL_REQUEST_BASE_BRANCH – pull request base branch
     AWS_ACCOUNT_ID            – dev AWS account for ECR (default: 588845226011)
     PROD_AWS_ACCOUNT_ID       – prod AWS account for ECR (default: 168653207203)
     AWS_REGION                – AWS region for ECR (default: us-east-2)
@@ -413,6 +415,17 @@ def ci_steps() -> str:
     base = textwrap.dedent(
         f"""\
         steps:
+          - label: ":github: Git Author Email"
+            key: "git-author-email"
+{_gh_status("git-author-email")}
+{_infra_retry()}
+            command: |
+              bash .buildkite/check_git_author_email.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
+
           - label: ":golangci-lint: Lint"
             key: "lint"
 {_gh_status("lint")}

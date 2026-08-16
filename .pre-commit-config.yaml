@@ -36,6 +36,15 @@ repos:
 
   - repo: local
     hooks:
+      - id: github-noreply-author-email
+        name: GitHub noreply author email
+        description: Require the configured Git author email to use GitHub noreply
+        entry: bash hack/check-git-author-email.sh --current
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
+
       - id: go-fmt
         name: go fmt
         description: Format Go code with gofmt
