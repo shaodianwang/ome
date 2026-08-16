@@ -742,9 +742,21 @@ func TestAggregateAndWriteStatus_GenerationChangeAborts(t *testing.T) {
 	g.Expect(got.Status).To(gomega.Equal(*wantStatus))
 }
 
+// liveReadsThroughPromotion is how many InferenceReplica reads reach the
+// authoritative reader up to and including the CurrentRevision promotion:
+// the migration-entry sync, the aggregate-condition write, then promotion.
+// Every conflict-retry closure re-reads its base live, so promotion is not
+// the first live read.
+const liveReadsThroughPromotion = 3
+
 type firstIRGenerationReader struct {
 	client.Reader
 	generation int64
+	// staleUntil is how many leading InferenceReplica reads report the
+	// pre-change generation. The window has to cover everything up to and
+	// including promotion so the generation change lands between promotion
+	// and aggregation.
+	staleUntil int
 	reads      int
 }
 
@@ -757,7 +769,7 @@ func (r *firstIRGenerationReader) Get(ctx context.Context, key client.ObjectKey,
 		return nil
 	}
 	r.reads++
-	if r.reads == 1 {
+	if r.reads <= r.staleUntil {
 		ir.Generation = r.generation
 	}
 	return nil
@@ -796,7 +808,7 @@ func TestReconcile_GenerationChangeRequeuesBeforeDeferredEffects(t *testing.T) {
 			r.Client = &staleReadingClient{Client: live, reader: staleCache}
 			var generationReader *firstIRGenerationReader
 			if tc.changeBeforeAggregation {
-				generationReader = &firstIRGenerationReader{Reader: live, generation: stale.Generation}
+				generationReader = &firstIRGenerationReader{Reader: live, generation: stale.Generation, staleUntil: liveReadsThroughPromotion}
 				r.APIReader = generationReader
 			} else {
 				r.APIReader = live
@@ -809,7 +821,7 @@ func TestReconcile_GenerationChangeRequeuesBeforeDeferredEffects(t *testing.T) {
 			g.Expect(result.Requeue).To(gomega.BeTrue())
 			g.Expect(result.RequeueAfter).To(gomega.BeZero())
 			if generationReader != nil {
-				g.Expect(generationReader.reads).To(gomega.Equal(2),
+				g.Expect(generationReader.reads).To(gomega.Equal(liveReadsThroughPromotion+1),
 					"promotion must accept the starting generation before aggregation observes the change")
 			}
 

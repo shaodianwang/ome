@@ -173,6 +173,7 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			TopologyKey:        d.decoderSpec.TopologyKey,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             d.Client,
+			Reader:             d.APIReader,
 		})
 		if err != nil {
 			if apierrors.IsConflict(err) {

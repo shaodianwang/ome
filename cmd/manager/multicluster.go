@@ -184,6 +184,7 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 
 	if err := (&placement.Reconciler{
 		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
 		Scheme:                  mgr.GetScheme(),
 		Log:                     ctrl.Log.WithName("controllers").WithName("Placement"),
 		Clusters:                clusterManager,

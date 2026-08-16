@@ -70,7 +70,10 @@ import (
 // ability in operator logs. A real read/write error (apiserver
 // outage, permission denied) is returned to the caller so the
 // reconcile retries; transient NotFound on the IR Get is swallowed.
-func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, componentModes map[v1beta1.ComponentType]constants.DeploymentModeType) error {
+func AggregateIRStatus(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, componentModes map[v1beta1.ComponentType]constants.DeploymentModeType) error {
+	if reads == nil {
+		reads = c
+	}
 	if c == nil {
 		return fmt.Errorf("AggregateIRStatus: nil client")
 	}
@@ -86,7 +89,7 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 		if !IsIRManagedComponent(mode) {
 			continue
 		}
-		if err := aggregateOneComponent(ctx, c, isvc, comp); err != nil {
+		if err := aggregateOneComponent(ctx, c, reads, isvc, comp); err != nil {
 			return err
 		}
 	}
@@ -125,7 +128,7 @@ func componentExtFor(isvc *v1beta1.InferenceService, component v1beta1.Component
 	return nil
 }
 
-func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) error {
+func aggregateOneComponent(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) error {
 	name := InferenceReplicaName(isvc.Name, component)
 	key := types.NamespacedName{Namespace: isvc.Namespace, Name: name}
 	ir := &v1beta1.InferenceReplica{}
@@ -163,7 +166,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	isvcKey := client.ObjectKeyFromObject(isvc)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
-		if err := c.Get(ctx, isvcKey, fresh); err != nil {
+		if err := reads.Get(ctx, isvcKey, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}

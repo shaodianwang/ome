@@ -528,7 +528,10 @@ func TestConsumeMigrationRequests_LedgerLoadedViaLiveReader(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: audit.ConfigMapNameForOwner(parent), Namespace: "default"},
 		Data:       map[string]string{audit.LedgerKey: string(raw)},
 	}
-	r.APIReader = fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cm).Build()
+	// The live reader is the apiserver: it sees every object, not just the
+	// ledger under test. Seeding only the ConfigMap would make the parent
+	// look deleted to the conflict-retry re-reads on this path.
+	r.APIReader = fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cm, parent, ir).Build()
 
 	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())

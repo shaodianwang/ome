@@ -88,7 +88,7 @@ func TestAggregateIRStatus_NonOMENativeMode_NoOp(t *testing.T) {
 		WithObjects(isvc).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineDirectModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineDirectModes)).To(gomega.Succeed())
 
 	// The pre-populated sentinel must survive — we didn't touch the status.
 	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(gomega.BeNil())
@@ -110,7 +110,7 @@ func TestAggregateIRStatus_OMENative_NoIR_NoErr(t *testing.T) {
 		WithObjects(isvc).
 		Build()
 
-	err := AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)
+	err := AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)
 	g.Expect(err).NotTo(gomega.HaveOccurred(),
 		"missing IR on first reconcile after OMENative dispatch must be a clean no-op")
 }
@@ -129,7 +129,7 @@ func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 
 	// Read the post-write ISVC from the apiserver — the aggregator
 	// writes via Status().Update so we can't rely on the in-memory
@@ -197,7 +197,7 @@ func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T
 		v1beta1.EngineComponent:  constants.OMENative,
 		v1beta1.DecoderComponent: constants.RawDeployment,
 	}
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, componentModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, componentModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),
@@ -220,7 +220,7 @@ func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T
 func TestAggregateIRStatus_NilClient_Rejected(t *testing.T) {
 	g := gomega.NewWithT(t)
 	isvc := baselineISVC("llama", "prod")
-	err := AggregateIRStatus(context.Background(), nil, isvc, engineOMENativeModes)
+	err := AggregateIRStatus(context.Background(), nil, nil, isvc, engineOMENativeModes)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("nil client"))
 }
@@ -231,7 +231,7 @@ func TestAggregateIRStatus_NilClient_Rejected(t *testing.T) {
 func TestAggregateIRStatus_NilISVC_Rejected(t *testing.T) {
 	g := gomega.NewWithT(t)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	err := AggregateIRStatus(context.Background(), c, nil, engineOMENativeModes)
+	err := AggregateIRStatus(context.Background(), c, c, nil, engineOMENativeModes)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("nil ISVC"))
 }
@@ -258,7 +258,7 @@ func TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),
@@ -296,7 +296,7 @@ func TestAggregateIRStatus_EmitsEngineReadyCondition(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),
@@ -351,7 +351,7 @@ func TestAggregateIRStatus_EmitsEngineReadyConditionFalse(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),
@@ -423,7 +423,7 @@ func TestAggregateIRStatus_MultiComponent_EmitsBothConditions(t *testing.T) {
 		v1beta1.EngineComponent:  constants.OMENative,
 		v1beta1.DecoderComponent: constants.OMENative,
 	}
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, componentModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, componentModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),
@@ -468,7 +468,7 @@ func TestAggregateIRStatus_NoWriteWhenUnchanged(t *testing.T) {
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 
 	// First pass: status changes (subtree + EngineReady condition) → write.
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 	afterFirst := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(), key, afterFirst)).To(gomega.Succeed())
 	rvAfterFirst := afterFirst.ResourceVersion
@@ -477,7 +477,7 @@ func TestAggregateIRStatus_NoWriteWhenUnchanged(t *testing.T) {
 	// the DeepEqual guard must skip Status().Update (ResourceVersion stable).
 	// Use a fresh in-memory ISVC snapshot so the in-memory mirror from the
 	// first pass doesn't shortcut the recompute.
-	g.Expect(AggregateIRStatus(context.Background(), c, afterFirst.DeepCopy(), engineOMENativeModes)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, c, afterFirst.DeepCopy(), engineOMENativeModes)).To(gomega.Succeed())
 	afterSecond := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(), key, afterSecond)).To(gomega.Succeed())
 	g.Expect(afterSecond.ResourceVersion).To(gomega.Equal(rvAfterFirst),

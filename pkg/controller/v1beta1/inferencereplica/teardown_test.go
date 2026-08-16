@@ -672,10 +672,12 @@ func TestTeardown_StaleParentNotFound_ClosesParentLedger(t *testing.T) {
 		WithObjects(ir, cachedLedgerCM).
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		Build()
-	// Live: parent exists.
+	// Live: parent exists. The IR is seeded here too — the live reader is
+	// the apiserver, so it sees everything the cache does; only the parent
+	// is deliberately absent from the CACHE to model the stale NotFound.
 	reader := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
-		WithObjects(parent, liveLedgerCM).
+		WithObjects(parent, liveLedgerCM, ir).
 		Build()
 	r := &Reconciler{Client: c, APIReader: reader, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
 

@@ -326,7 +326,7 @@ func (r *Reconciler) removeTeardownFinalizer(ctx context.Context, ir *v1beta1.In
 	key := client.ObjectKeyFromObject(ir)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.Get(ctx, key, fresh); err != nil {
+		if err := r.reader().Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}

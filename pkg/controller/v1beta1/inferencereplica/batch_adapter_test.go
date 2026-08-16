@@ -1352,7 +1352,7 @@ func TestBuildMutateInstance_SameNameReplacementAborts(t *testing.T) {
 	r, c := newReconciler(t, replacement)
 	called := false
 
-	mutate := buildMutateInstance(r.Client, original)
+	mutate := buildMutateInstance(r.Client, r.Client, original)
 	err := mutate(context.Background(), 0, func(*workload.InstanceStatus) bool {
 		called = true
 		return true
@@ -1373,7 +1373,7 @@ func TestBuildRemoveInstance_SameNameReplacementAborts(t *testing.T) {
 	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
 	r, c := newReconciler(t, replacement)
 
-	remove := buildRemoveInstance(r.Client, original, workload.NewExpectations())
+	remove := buildRemoveInstance(r.Client, r.Client, original, workload.NewExpectations())
 	removed, err := remove(context.Background(), 0)
 	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(removed).To(gomega.BeFalse())
@@ -1390,7 +1390,7 @@ func TestBuildWriteAggregateCondition_SameNameReplacementAborts(t *testing.T) {
 	replacement.UID = "replacement-uid"
 	r, c := newReconciler(t, replacement)
 
-	write := buildWriteAggregateCondition(r.Client, original)
+	write := buildWriteAggregateCondition(r.Client, r.Client, original)
 	err := write(context.Background(), metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Ready"})
 	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
 

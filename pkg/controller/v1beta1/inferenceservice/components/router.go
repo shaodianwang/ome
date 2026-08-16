@@ -155,6 +155,7 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			MultiPod:           false,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             r.Client,
+			Reader:             r.APIReader,
 		})
 		if err != nil {
 			if apierrors.IsConflict(err) {

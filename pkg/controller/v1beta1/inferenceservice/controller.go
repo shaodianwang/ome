@@ -791,7 +791,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		v1beta1.DecoderComponent: decoderDeploymentMode,
 		v1beta1.RouterComponent:  routerDeploymentMode,
 	}
-	if err = irprojector.AggregateIRStatus(ctx, r.Client, isvc, componentModes); err != nil {
+	if err = irprojector.AggregateIRStatus(ctx, r.Client, r.APIReader, isvc, componentModes); err != nil {
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
 	}

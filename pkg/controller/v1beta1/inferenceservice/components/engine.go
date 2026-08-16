@@ -185,6 +185,7 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			TopologyKey:        e.engineSpec.TopologyKey,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             e.Client,
+			Reader:             e.APIReader,
 		})
 		if err != nil {
 			if apierrors.IsConflict(err) {

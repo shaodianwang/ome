@@ -135,24 +135,24 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		Key:                                  buildKey(ir),
 		DesiredSpec:                          desired,
 		ObservedState:                        observed,
-		MutateInstance:                       buildMutateInstance(r.Client, ir),
+		MutateInstance:                       buildMutateInstance(r.Client, r.reader(), ir),
 		ApplyInstanceMutations:               instanceOnlyMutationAdapter(applyInstanceMutationsWithRetryBlock),
 		ApplyInstanceMutationsWithRetryBlock: applyInstanceMutationsWithRetryBlock,
-		RemoveInstance:                       buildRemoveInstance(r.Client, ir, r.Expectations),
-		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, ir),
+		RemoveInstance:                       buildRemoveInstance(r.Client, r.reader(), ir, r.Expectations),
+		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, r.reader(), ir),
 		// Same-target RetryBlock persistence + policy. The
 		// closure is always wired on the IR-managed path — the policy
 		// alone decides Backoff vs fail-safe Held.
-		MutateRetryBlock:  buildMutateRetryBlock(r.Client, ir),
+		MutateRetryBlock:  buildMutateRetryBlock(r.Client, r.reader(), ir),
 		UpdateRetryPolicy: updateRetryPolicy,
 		// Migration-record persistence: the executor advances
 		// status.migrations phases through this seam (same RMW +
 		// in-memory-mirror discipline as MutateRetryBlock).
-		MutateMigration: buildMutateMigration(r.Client, ir),
+		MutateMigration: buildMutateMigration(r.Client, r.reader(), ir),
 		// Record creation (born-terminal Auto mirrors from the
 		// disposition). Separate from MutateMigration so mutate-on-
 		// missing stays a structural no-op.
-		AppendMigration: buildAppendMigration(r.Client, ir),
+		AppendMigration: buildAppendMigration(r.Client, r.reader(), ir),
 		// Stuck-Terminating force-delete gate. nil disables the
 		// escalation; non-nil durations are validated > 0 upstream.
 		ForceDelete: forceDeletePolicy,
@@ -480,7 +480,10 @@ func buildKey(ir *v1beta1.InferenceReplica) workload.Key {
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone so callers
 // stop before applying effects selected from the stale snapshot.
-func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+func buildMutateInstance(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	if reads == nil {
+		reads = c
+	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
@@ -488,7 +491,7 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			committed = nil
 			fresh := &v1beta1.InferenceReplica{}
-			if err := c.Get(ctx, key, fresh); err != nil {
+			if err := reads.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1033,7 +1036,10 @@ const maxHistoricalRetryBlocks = 3
 // post-write state.
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
-func buildMutateRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+func buildMutateRetryBlock(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	if reads == nil {
+		reads = c
+	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
@@ -1042,7 +1048,7 @@ func buildMutateRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(c
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			wrote = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := c.Get(ctx, key, fresh); err != nil {
+			if err := reads.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1166,7 +1172,10 @@ func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
 // counters. The expectations bucket keys on Key.OwnerName — the parent
 // ISVC name (buildKey), not the IR name — so Forget must use the same.
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
-func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
+func buildRemoveInstance(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
+	if reads == nil {
+		reads = c
+	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32) (bool, error) {
@@ -1174,7 +1183,7 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			hadEntry = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := c.Get(ctx, key, fresh); err != nil {
+			if err := reads.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1226,7 +1235,10 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 // other. Today this surface is exercised only by the workload-side
 // gang reconciler (GangSchedulingUnavailable); the IR controller
 // inherits it for free.
-func buildWriteAggregateCondition(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, cond metav1.Condition) error {
+func buildWriteAggregateCondition(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, cond metav1.Condition) error {
+	if reads == nil {
+		reads = c
+	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, cond metav1.Condition) error {
@@ -1235,7 +1247,7 @@ func buildWriteAggregateCondition(c client.Client, ir *v1beta1.InferenceReplica)
 		}
 		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			fresh := &v1beta1.InferenceReplica{}
-			if err := c.Get(ctx, key, fresh); err != nil {
+			if err := reads.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}

@@ -142,6 +142,13 @@ type Params struct {
 	// Client is the controller-runtime client used to CreateOrUpdate
 	// the IR. The ISVC controller already holds this.
 	Client client.Client
+
+	// Reader is the live (uncached) reader used to re-read the IR inside
+	// the conflict-retry loop. A 409 means the apiserver holds a newer
+	// ResourceVersion than the informer has observed, so re-reading the
+	// cache resubmits the same stale base and burns the whole backoff.
+	// Optional; nil falls back to Client.
+	Reader client.Reader
 }
 
 // EnsureInferenceReplica computes the desired IR Spec from Params,
@@ -175,9 +182,13 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		"inferencereplica", key)
 
 	var committed *v1beta1.InferenceReplica
+	reads := client.Reader(p.Client)
+	if p.Reader != nil {
+		reads = p.Reader
+	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		ir := &v1beta1.InferenceReplica{}
-		getErr := p.Client.Get(ctx, key, ir)
+		getErr := reads.Get(ctx, key, ir)
 		switch {
 		case apierrors.IsNotFound(getErr):
 			ir = newInferenceReplica(p, name)

@@ -80,6 +80,13 @@ type Reconciler struct {
 	Scheme   *runtime.Scheme
 	Log      logr.Logger
 	Clusters ClusterClients
+	// APIReader is the live (uncached) reader used to re-read the control-plane
+	// ISVC inside the conflict-retry loop. This controller and the endpoint
+	// publisher both write this object, so a 409 here is genuine external
+	// contention: the apiserver holds a newer ResourceVersion than the informer
+	// has observed, and re-reading the cache would resubmit the same stale base
+	// for the whole backoff. Optional; nil falls back to the cached Client.
+	APIReader client.Reader
 	// Requeue is the status-refresh poll cadence; defaults to DefaultPlacementRequeue.
 	Requeue time.Duration
 	// ControlPlaneID is this control plane's identity, stamped onto every derived
@@ -1090,7 +1097,7 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 	key := client.ObjectKeyFromObject(isvc)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &v1beta1.InferenceService{}
-		if err := r.Get(ctx, key, cur); err != nil {
+		if err := r.reader().Get(ctx, key, cur); err != nil {
 			return err
 		}
 		if cur.Status.Placement == nil {
@@ -1412,4 +1419,13 @@ func isvcStatusReferencesCluster(isvc *v1beta1.InferenceService, clusterName str
 		}
 	}
 	return false
+}
+
+// reader returns the authoritative live reader when wired, else the cached
+// client. Single home for the consistency-class fallback.
+func (r *Reconciler) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
