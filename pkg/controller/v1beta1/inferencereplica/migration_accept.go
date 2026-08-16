@@ -276,6 +276,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 // same RequestUUID already present writes nothing.
 func appendMigrationStatus(ctx context.Context, c client.Client, ir *v1beta1.InferenceReplica, entry v1beta1.MigrationStatus) error {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	var committed []v1beta1.MigrationStatus
 	wrote := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -283,9 +284,12 @@ func appendMigrationStatus(ctx context.Context, c client.Client, ir *v1beta1.Inf
 		fresh := &v1beta1.InferenceReplica{}
 		if err := c.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("re-read IR: %w", err)
+		}
+		if ownerUID == "" || fresh.UID != ownerUID {
+			return workload.ErrStatusOwnerGone
 		}
 		for i := range fresh.Status.Migrations {
 			if fresh.Status.Migrations[i].RequestUUID == entry.RequestUUID {
@@ -297,7 +301,7 @@ func appendMigrationStatus(ctx context.Context, c client.Client, ir *v1beta1.Inf
 		fresh.Status.Migrations = append(fresh.Status.Migrations, entry)
 		if err := c.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("update IR status: %w", err)
 		}
@@ -406,12 +410,11 @@ func migrationsFromIR(ir *v1beta1.InferenceReplica) []workload.MigrationRecord {
 // caller's in-memory IR so later ops in the same pass observe the
 // post-write state.
 //
-// A missing entry (trimmed, or the IR was recreated) is a clean no-op —
-// the callback never runs against a phantom. NotFound on Get or Update
-// is a successful no-op: the IR was deleted under us and the entry is
-// gone with it.
+// A missing entry is a clean no-op. Owner disappearance or replacement
+// returns ErrStatusOwnerGone so callers stop effects from a stale snapshot.
 func buildMutateMigration(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, requestUUID string, mutate func(*workload.MigrationRecord) bool) error {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, requestUUID string, mutate func(*workload.MigrationRecord) bool) error {
 		var committed []v1beta1.MigrationStatus
 		wrote := false
@@ -420,9 +423,12 @@ func buildMutateMigration(c client.Client, ir *v1beta1.InferenceReplica) func(ct
 			fresh := &v1beta1.InferenceReplica{}
 			if err := c.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workload.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workload.ErrStatusOwnerGone
 			}
 			pos := -1
 			for i := range fresh.Status.Migrations {
@@ -443,7 +449,7 @@ func buildMutateMigration(c client.Client, ir *v1beta1.InferenceReplica) func(ct
 			fresh.Status.Migrations[pos] = migrationFromWorkload(w)
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workload.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
@@ -518,6 +524,7 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 	imports := importableLedgerMigrations(ledger, string(ir.Spec.Component), metav1.NewTime(r.now()), instanceReadyTimeout)
 
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	var committed []v1beta1.MigrationStatus
 	wrote := false
 	trimBlocked := 0
@@ -526,9 +533,12 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 		fresh := &v1beta1.InferenceReplica{}
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("re-read IR: %w", err)
+		}
+		if ownerUID == "" || fresh.UID != ownerUID {
+			return workload.ErrStatusOwnerGone
 		}
 		changed := false
 
@@ -571,7 +581,7 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 		}
 		if err := r.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("update IR status: %w", err)
 		}

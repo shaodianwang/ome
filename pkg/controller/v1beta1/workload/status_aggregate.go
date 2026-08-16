@@ -504,7 +504,7 @@ func disposableAttempt(s *InstanceStatus, desiredPods int32) bool {
 	case InstanceOperationCreate:
 		return true
 	case InstanceOperationUpdate:
-		if s.Operation.SurgeIndex != nil || s.Operation.Step == UpdateStepGangSurgeTarget {
+		if s.Operation.SurgeIndex != nil || s.Operation.Step == UpdateStepGangSurgeTarget || s.Operation.Step == UpdateStepGangSurgeTargetCleanup {
 			return false
 		}
 		// Deliberate divergence: multi-pod RECREATE/in-place updates

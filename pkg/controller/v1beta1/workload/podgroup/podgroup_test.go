@@ -2,6 +2,7 @@ package podgroup
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,8 +10,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -331,6 +334,50 @@ func TestEnsurePodGroup_CreatesWhenAbsent(t *testing.T) {
 	}
 	if got.Annotations[query.AnnotationTopologyKey] != plan.TopologyKey {
 		t.Errorf("%s annotation: got %#v want %q", query.AnnotationTopologyKey, got.Annotations, plan.TopologyKey)
+	}
+}
+
+func TestEnsurePodGroupForPodsFromObservation_TerminatingBlocksReuse(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	c := newPodGroupClient(t, isvc)
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	existing, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	now := metav1.Now()
+	existing.DeletionTimestamp = &now
+
+	_, _, err = EnsurePodGroupForPodsFromObservation(context.Background(), c, isvc,
+		testPodGroupOwnerGVK, isvc.GetName(), plan, inst, nil, existing, true)
+	if !errors.Is(err, ErrPodGroupTerminating) {
+		t.Fatalf("terminating PodGroup error: got %v want ErrPodGroupTerminating", err)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(existing), got); !apierrors.IsNotFound(err) {
+		t.Fatalf("ensure must not create a replacement while observed object terminates: got %v", err)
+	}
+}
+
+func TestEnsurePodGroupForPodsFromObservation_ForeignCollisionIsNeverAdopted(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	foreign := newPodGroupISVC("prod", "foreign")
+	c := newPodGroupClient(t, isvc)
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	existing, err := BuildPodGroup(foreign, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+
+	_, _, err = EnsurePodGroupForPodsFromObservation(context.Background(), c, isvc,
+		testPodGroupOwnerGVK, isvc.GetName(), plan, inst, nil, existing, true)
+	if !errors.Is(err, ErrPodGroupOwnershipConflict) {
+		t.Fatalf("foreign collision error: got %v want ErrPodGroupOwnershipConflict", err)
+	}
+	if ref := metav1.GetControllerOfNoCopy(existing); ref == nil || ref.UID != foreign.UID {
+		t.Fatalf("foreign owner changed: %+v", existing.OwnerReferences)
 	}
 }
 
@@ -801,6 +848,114 @@ func TestDeletePodGroup_AbsentIsNoOp(t *testing.T) {
 	}
 }
 
+func TestDeleteObservedPodGroup_ForeignObjectIsNeverDeleted(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	foreign := newPodGroupISVC("prod", "foreign")
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	pg, err := BuildPodGroup(foreign, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	pg.UID = "foreign-pg-uid"
+	c := newPodGroupClient(t, isvc, pg)
+
+	err = DeleteObservedPodGroup(context.Background(), c, isvc.UID, pg)
+	if !errors.Is(err, ErrPodGroupOwnershipConflict) {
+		t.Fatalf("foreign delete error: got %v want ErrPodGroupOwnershipConflict", err)
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pg), got); err != nil {
+		t.Fatalf("foreign PodGroup was deleted: %v", err)
+	}
+}
+
+func TestDeleteObservedPodGroup_TerminatingIsAcceptedWithoutDelete(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	now := metav1.Now()
+	pg.DeletionTimestamp = &now
+	c := newPodGroupClient(t, isvc)
+	if err := DeleteObservedPodGroup(context.Background(), c, isvc.UID, pg); err != nil {
+		t.Fatalf("terminating PodGroup must count as accepted deletion: %v", err)
+	}
+	complete, err := FinalizeObservedPodGroup(context.Background(), c, isvc.UID, pg)
+	if err != nil || complete {
+		t.Fatalf("terminating PodGroup finalization: complete=%v err=%v", complete, err)
+	}
+}
+
+func TestDeleteObservedPodGroup_RuntimeAPIRemovalIsAccepted(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	base := newPodGroupClient(t, isvc, pg)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return &apimeta.NoResourceMatchError{PartialResource: schema.GroupVersionResource{
+				Group: "scheduling.x-k8s.io", Version: "v1alpha1", Resource: "podgroups",
+			}}
+		},
+	})
+	if err := DeleteObservedPodGroup(context.Background(), c, isvc.UID, pg); err != nil {
+		t.Fatalf("runtime PodGroup API removal must be treated as absence: %v", err)
+	}
+	complete, err := FinalizeObservedPodGroup(context.Background(), c, isvc.UID, pg)
+	if err != nil || !complete {
+		t.Fatalf("runtime API removal finalization: complete=%v err=%v", complete, err)
+	}
+}
+
+func TestDeleteObservedPodGroup_UIDPreconditionProtectsNameReuse(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	observed, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	observed.UID = "old-pg-uid"
+	replacement := observed.DeepCopy()
+	replacement.UID = "replacement-pg-uid"
+	base := newPodGroupClient(t, isvc, replacement)
+	sawUIDPrecondition := false
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, opts ...client.DeleteOption) error {
+			for _, opt := range opts {
+				preconditions, ok := opt.(client.Preconditions)
+				if ok && preconditions.UID != nil && *preconditions.UID == observed.UID {
+					sawUIDPrecondition = true
+				}
+			}
+			return errors.New("simulated UID precondition conflict")
+		},
+	})
+
+	complete, err := FinalizeObservedPodGroup(context.Background(), c, isvc.UID, observed)
+	if err == nil || complete {
+		t.Fatal("stale inventory delete unexpectedly passed the UID precondition")
+	}
+	if !sawUIDPrecondition {
+		t.Fatal("delete did not carry the observed PodGroup UID precondition")
+	}
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(replacement), got); err != nil {
+		t.Fatalf("same-named replacement was deleted: %v", err)
+	}
+	if got.UID != replacement.UID {
+		t.Fatalf("replacement UID changed: got %q want %q", got.UID, replacement.UID)
+	}
+}
+
 // ---------------------------------------------------------------------
 // Helpers — local fixtures (intentionally not shared with the parent
 // package; podgroup is leaf-level and shouldn't import test_helpers).
@@ -860,6 +1015,22 @@ func (cc *countingClient) reset() { cc.gets, cc.creates, cc.updates, cc.patches 
 
 func newPodGroupClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
+	var owner client.Object
+	for _, obj := range objs {
+		if _, isPodGroup := obj.(*schedulingv1alpha1.PodGroup); !isPodGroup {
+			owner = obj
+			break
+		}
+	}
+	if owner != nil {
+		for _, obj := range objs {
+			pg, ok := obj.(*schedulingv1alpha1.PodGroup)
+			if !ok || metav1.GetControllerOfNoCopy(pg) != nil {
+				continue
+			}
+			pg.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(owner, testPodGroupOwnerGVK)}
+		}
+	}
 	scheme := runtime.NewScheme()
 	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1 to scheme: %v", err)

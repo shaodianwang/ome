@@ -102,6 +102,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1beta1.InferenceReplica{}).
 		Owns(&appsv1.ControllerRevision{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{})
+	if podGroupFound {
+		b = b.Owns(&schedulingv1alpha1.PodGroup{}, builder.WithPredicates(podGroupPredicate()))
+	}
 	if kedaFound {
 		b = b.Owns(&kedav1.ScaledObject{})
 	} else {

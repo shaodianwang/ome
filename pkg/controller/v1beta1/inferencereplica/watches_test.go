@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -475,5 +476,50 @@ func TestEndpointSliceToIR(t *testing.T) {
 	// Non-EndpointSlice object -> nil.
 	if got := EndpointSliceToIR(context.Background(), &corev1.Pod{}); got != nil {
 		t.Errorf("EndpointSliceToIR(non-slice) = %v, want nil", got)
+	}
+}
+
+func TestPodGroupPredicate_FiltersOnlyStatusChurn(t *testing.T) {
+	p := podGroupPredicate()
+	oldObj := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: "prod", Generation: 1},
+		Spec:       schedulingv1alpha1.PodGroupSpec{MinMember: 1},
+	}
+	statusOnly := oldObj.DeepCopy()
+	statusOnly.ResourceVersion = "2"
+	statusOnly.Status.Phase = schedulingv1alpha1.PodGroupRunning
+	statusOnly.Status.Running = 1
+
+	if !p.Create(event.CreateEvent{Object: statusOnly}) {
+		t.Fatal("create event must enqueue reconciliation")
+	}
+	if p.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: statusOnly}) {
+		t.Fatal("status-only update must not enqueue reconciliation")
+	}
+
+	metadataDrift := statusOnly.DeepCopy()
+	metadataDrift.Labels = map[string]string{"example.com/reconcile": "true"}
+	if !p.Update(event.UpdateEvent{ObjectOld: statusOnly, ObjectNew: metadataDrift}) {
+		t.Fatal("metadata update must enqueue reconciliation")
+	}
+
+	specDrift := statusOnly.DeepCopy()
+	specDrift.Spec.MinMember = 2
+	specDrift.Generation = 2
+	if !p.Update(event.UpdateEvent{ObjectOld: statusOnly, ObjectNew: specDrift}) {
+		t.Fatal("generation update must enqueue reconciliation")
+	}
+
+	terminating := statusOnly.DeepCopy()
+	now := metav1.Now()
+	terminating.DeletionTimestamp = &now
+	if !p.Update(event.UpdateEvent{ObjectOld: statusOnly, ObjectNew: terminating}) {
+		t.Fatal("deletion transition must enqueue reconciliation")
+	}
+	if !p.Delete(event.DeleteEvent{Object: statusOnly}) {
+		t.Fatal("delete event must enqueue terminal cleanup")
+	}
+	if p.Generic(event.GenericEvent{Object: statusOnly}) {
+		t.Fatal("generic event must not enqueue terminal cleanup")
 	}
 }

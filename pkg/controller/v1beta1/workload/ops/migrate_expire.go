@@ -33,12 +33,9 @@ const migrationExpiredReason = "MigrationExpired"
 // expiry. Two carve-outs, both decided from live observation:
 //
 //   - Completed-tail crash window: the completion tail already promoted
-//     the surge and removed the source status, but died before the
-//     record's terminal write. The migration SUCCEEDED — the record is
-//     closed Completed and the surge is untouched. (The drive pass
-//     cannot finish this window itself: with the source status gone it
-//     can no longer resolve the source's RunningRevision and retries
-//     forever.)
+//     the surge and removed the source status, but died before resource
+//     finalization or the terminal record write. Expiry finishes that
+//     idempotent tail and leaves the promoted surge untouched.
 //   - Draining with the source fully drained AND the surge passing the
 //     drive pass's full completion gates (runtime-ready + in-rotation +
 //     Available — the SAME gates, via surgeTailGatesPassed): completion
@@ -139,10 +136,31 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 		surge = findInstanceStatus(input.ObservedState.InstanceStatuses, *rec.SurgeInstance)
 	}
 
-	// Completed-tail crash edge: source status gone + surge promoted
-	// Ready means the migration actually succeeded. Close Completed,
-	// touch nothing else.
+	// The promoted surge and absent source are the durable completion
+	// evidence. Residual per-Instance resources must disappear before the
+	// record becomes terminal, because terminal records are not driven again.
 	if allocated && source == nil && surge != nil && surge.Phase == workload.InstancePhaseReady {
+		confirmed, cerr := confirmMigrationCompletionPair(ctx, input, rec.SourceInstance, surge)
+		if cerr != nil {
+			return false, fmt.Errorf("confirm completed migration pair: %w", cerr)
+		}
+		if !confirmed {
+			return false, nil
+		}
+		finalized, ferr := finalizeAndRemoveInstance(ctx, deps, input, rec.SourceInstance, nil)
+		if ferr != nil {
+			return false, fmt.Errorf("finalize completed migration source: %w", ferr)
+		}
+		if !finalized {
+			return false, nil
+		}
+		confirmed, cerr = confirmMigrationCompletionPair(ctx, input, rec.SourceInstance, surge)
+		if cerr != nil {
+			return false, fmt.Errorf("recheck completed migration pair: %w", cerr)
+		}
+		if !confirmed {
+			return false, nil
+		}
 		msg := fmt.Sprintf("migrated to instance=%d", *rec.SurgeInstance)
 		if err := mirrorTerminalMigrationLedger(ctx, deps, input, plan, rec, audit.PhaseCompleted, "migrated"); err != nil {
 			return false, err

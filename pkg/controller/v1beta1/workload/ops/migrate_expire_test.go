@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -783,12 +784,24 @@ func TestMigrateExpiry_DrainingComplete_DrivenToCompleted(t *testing.T) {
 // completed-tail crash edge: the completion tail already promoted the
 // surge (Phase=Ready, op cleared) and removed the source status, but
 // the process died before the record's terminal write. The migration
-// SUCCEEDED — expiry must close the record Completed, never Failed,
-// and never touch the promoted surge.
+// SUCCEEDED — expiry must finish residual resource cleanup and close
+// the record Completed without touching the promoted surge.
 func TestMigrateExpiry_CompletedTailCrash_ClosedCompleted(t *testing.T) {
 	f := newSinglePodMigFixture(t)
 	clk := f.withFakeClock()
 	const uuid = "mig-tailcrash"
+	resourcesAbsent := false
+	finalizations := 0
+	f.finalizeInstanceResources = func(_ context.Context, index int32) (bool, error) {
+		finalizations++
+		if index != 0 {
+			t.Fatalf("finalized instance %d, want source 0", index)
+		}
+		if status := findInstanceStatusOnIRForFixture(t, f, index); status != nil {
+			t.Fatalf("finalized resources while source status was live: %+v", status)
+		}
+		return resourcesAbsent, nil
+	}
 
 	// Reconstruct the crash window directly: source status gone, surge
 	// promoted Ready at the source's revision.
@@ -807,8 +820,22 @@ func TestMigrateExpiry_CompletedTailCrash_ClosedCompleted(t *testing.T) {
 	rec.Phase = workload.MigrationPhaseDraining
 	f.records = []workload.MigrationRecord{rec}
 
+	if n := f.expire(t); n != 0 {
+		t.Fatalf("expiry while resources remain: got %d terminal records, want 0", n)
+	}
+	if got := f.record(t, uuid); got.Phase != workload.MigrationPhaseDraining || got.CompletedAt != nil {
+		t.Fatalf("pending finalization closed the migration record: %+v", *got)
+	}
+	if finalizations != 1 {
+		t.Fatalf("pending finalizations = %d, want 1", finalizations)
+	}
+
+	resourcesAbsent = true
 	if n := f.expire(t); n != 1 {
-		t.Fatalf("expiry: got %d, want 1", n)
+		t.Fatalf("expiry after resource absence: got %d, want 1", n)
+	}
+	if finalizations != 2 {
+		t.Fatalf("finalizations = %d, want 2", finalizations)
 	}
 	got := f.record(t, uuid)
 	if got.Phase != workload.MigrationPhaseCompleted || got.CompletedAt == nil {
@@ -821,6 +848,86 @@ func TestMigrateExpiry_CompletedTailCrash_ClosedCompleted(t *testing.T) {
 	if surge == nil || surge.Phase != v1beta1.OMENativeInstanceReady ||
 		surge.RunningRevision != "llama-70b-engine-abc123" || surge.Operation != nil {
 		t.Fatalf("promoted surge must be untouched; got %+v", surge)
+	}
+}
+
+func TestMigrateExpiry_CompletedTailCrashRejectsStatusDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*v1beta1.InferenceReplica, v1beta1.OMENativeInstanceStatus)
+	}{
+		{
+			name: "source index reappears",
+			mutate: func(ir *v1beta1.InferenceReplica, source v1beta1.OMENativeInstanceStatus) {
+				ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, source)
+			},
+		},
+		{
+			name: "surge index is repurposed",
+			mutate: func(ir *v1beta1.InferenceReplica, _ v1beta1.OMENativeInstanceStatus) {
+				ir.Status.InstanceStatuses[0].Incarnation++
+				ir.Status.InstanceStatuses[0].RunningRevision = "replacement-revision"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			clk := f.withFakeClock()
+			const uuid = "mig-expired-tail-drift"
+			ir := f.getIR(t)
+			source := ir.Status.InstanceStatuses[0]
+			ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+				Index: 1, Incarnation: 1,
+				Phase:           v1beta1.OMENativeInstanceReady,
+				RunningRevision: source.RunningRevision,
+			}}
+			if err := f.c.Status().Update(context.Background(), ir); err != nil {
+				t.Fatalf("seed completion tail: %v", err)
+			}
+			surgeIdx := int32(1)
+			record := mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(-time.Minute))
+			record.SurgeInstance = &surgeIdx
+			record.Phase = workload.MigrationPhaseDraining
+			f.records = []workload.MigrationRecord{record}
+			finalizations := 0
+			f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+				finalizations++
+				return true, nil
+			}
+
+			input := f.input(t)
+			live := f.getIR(t)
+			test.mutate(live, source)
+			if err := f.c.Status().Update(context.Background(), live); err != nil {
+				t.Fatalf("seed status drift: %v", err)
+			}
+			before := f.getIR(t).DeepCopy()
+
+			n, err := ExpireMigrations(context.Background(), f.deps(), input, f.plan)
+			if err != nil || n != 0 {
+				t.Fatalf("expiry with drift: terminal=%d err=%v", n, err)
+			}
+			if finalizations != 0 {
+				t.Fatalf("status drift triggered %d resource finalizations", finalizations)
+			}
+			got := f.record(t, uuid)
+			if got.Phase != workload.MigrationPhaseDraining || got.CompletedAt != nil {
+				t.Fatalf("status drift closed migration record: %+v", *got)
+			}
+			after := f.getIR(t)
+			if !equality.Semantic.DeepEqual(before.Status, after.Status) {
+				t.Fatalf("status drift changed IR status: before=%+v after=%+v", before.Status, after.Status)
+			}
+			ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+			if err != nil {
+				t.Fatalf("load ledger: %v", err)
+			}
+			if ledger.HasCompletedOrFailedRequest(uuid) {
+				t.Fatalf("status drift wrote a terminal ledger row: %+v", ledger.Entries)
+			}
+		})
 	}
 }
 

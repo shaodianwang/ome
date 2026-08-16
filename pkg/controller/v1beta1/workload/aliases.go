@@ -61,6 +61,13 @@ type (
 	DispositionDeps         = types.DispositionDeps
 )
 
+type InstanceMutationSnapshot = types.InstanceMutationSnapshot
+
+var (
+	ErrStatusOwnerGone            = types.ErrStatusOwnerGone
+	ErrStatusMutationPrecondition = types.ErrStatusMutationPrecondition
+)
+
 const (
 	ComponentRouter  = types.ComponentRouter
 	ComponentEngine  = types.ComponentEngine
@@ -108,7 +115,8 @@ const (
 	InstanceOperationMigrate = types.InstanceOperationMigrate
 	InstanceOperationDelete  = types.InstanceOperationDelete
 
-	UpdateStepGangSurgeTarget = types.UpdateStepGangSurgeTarget
+	UpdateStepGangSurgeTarget        = types.UpdateStepGangSurgeTarget
+	UpdateStepGangSurgeTargetCleanup = types.UpdateStepGangSurgeTargetCleanup
 
 	EventReasonInstanceCreated               = types.EventReasonInstanceCreated
 	EventReasonInstanceReady                 = types.EventReasonInstanceReady

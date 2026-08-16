@@ -30,32 +30,43 @@ func RecordUpdateFailureInRetryBlock(ctx context.Context, input ReconcileInput, 
 	// retries cannot duplicate the event.
 	var heldAttempts int32
 	err := input.MutateRetryBlock(ctx, targetRev, func(b *RetryBlock) RetryBlockDisposition {
-		heldAttempts = 0
-		if b.FirstFailureAt == nil {
-			b.FirstFailureAt = &now
-		}
-		b.LastFailureAt = &now
-		b.Reason = reason
-		switch b.State {
-		case RetryBlockBackoff, RetryBlockHeld:
-			// This wave already recorded (Backoff) or the subject is
-			// terminally held — evidence refresh only.
-			return RetryBlockPersist
-		}
-		b.AttemptsStarted++
-		if input.UpdateRetryPolicy.Exhausted(b.AttemptsStarted) {
-			b.State = RetryBlockHeld
-			b.NextRetryAt = nil
-			heldAttempts = b.AttemptsStarted
-		} else {
-			b.State = RetryBlockBackoff
-			next := metav1.NewTime(now.Add(input.UpdateRetryPolicy.NextRetryDelay(b.AttemptsStarted)))
-			b.NextRetryAt = &next
-		}
-		return RetryBlockPersist
+		var disposition RetryBlockDisposition
+		disposition, heldAttempts = ApplyUpdateFailureToRetryBlock(b, input.UpdateRetryPolicy, now, reason)
+		return disposition
 	})
 	if err == nil && heldAttempts > 0 && input.WarnRetryHeld != nil {
 		input.WarnRetryHeld(targetRev, heldAttempts, reason)
 	}
 	return err
+}
+
+// ApplyUpdateFailureToRetryBlock applies one terminal failure wave to a
+// RetryBlock value. It is pure apart from mutating b, so callers can compose
+// the transition into a larger atomic owner-status update. heldAttempts is
+// non-zero only for a new transition into Held.
+func ApplyUpdateFailureToRetryBlock(b *RetryBlock, policy *RetryPolicy, now metav1.Time, reason string) (RetryBlockDisposition, int32) {
+	if b == nil {
+		return RetryBlockUnchanged, 0
+	}
+	if b.FirstFailureAt == nil {
+		b.FirstFailureAt = &now
+	}
+	b.LastFailureAt = &now
+	b.Reason = reason
+	switch b.State {
+	case RetryBlockBackoff, RetryBlockHeld:
+		// This wave is already recorded or terminally held; refresh only the
+		// failure evidence.
+		return RetryBlockPersist, 0
+	}
+	b.AttemptsStarted++
+	if policy.Exhausted(b.AttemptsStarted) {
+		b.State = RetryBlockHeld
+		b.NextRetryAt = nil
+		return RetryBlockPersist, b.AttemptsStarted
+	}
+	b.State = RetryBlockBackoff
+	next := metav1.NewTime(now.Add(policy.NextRetryDelay(b.AttemptsStarted)))
+	b.NextRetryAt = &next
+	return RetryBlockPersist, 0
 }

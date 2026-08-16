@@ -2,11 +2,14 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -20,44 +23,14 @@ func gangSurgeDrainKey(sourceIdx int32) string {
 	return "gang-surge-source-" + strconv.Itoa(int(sourceIdx))
 }
 
-// eventReasonGangSurgeAbandoned fires when an in-flight gang surge is
-// torn down before promotion — a Failed abandon (Warning) or a
-// supersede redirect toward a newer target (Normal). Distinct from the
-// Started/Completed pair so reason-filtered monitoring can tell an
-// abandoned rollout from a finished one.
+// eventReasonGangSurgeAbandoned distinguishes a retired replacement from a
+// successfully promoted one.
 const eventReasonGangSurgeAbandoned workload.EventReason = "GangSurgeAbandoned"
 
-// gangSurgeUpdate performs a SurgeThenDrain rollout for a multi-pod
-// (gang) Instance by surging a whole replacement gang at a freshly
-// allocated instance index, then draining the source gang once the
-// replacement is fully Ready. The source keeps serving throughout, so
-// capacity never drops below N-1 and the cross-Component coordination
-// gate (which counts the source's Op.Step=Surge against MaxSurge) paces
-// it like any single-pod surge.
-//
-// Phases (one advanced per reconcile; the loop requeues between them):
-//  1. Stamp the source Op{Update,Surge,SurgeIndex=k} + a GangSurgeTarget
-//     marker on k. Both land k in instancePlanIndices' pinned set, so
-//     EnsurePodGroups creates k's PodGroup before any of its pods and
-//     the scale-down pass won't delete k mid-surge.
-//  2. Ensure k's PodGroup, then create k's gang (leader + workers) on the
-//     surge's PINNED revision (Op.TargetRevision), not the live `target` —
-//     see surgeTargetName. The ensure here guards the window where k's
-//     GangSurgeTarget status hasn't yet round-tripped into the plan the
-//     top-level EnsurePodGroups keys off (gang scheduler would otherwise
-//     reject the pods with "PodGroup not found").
-//  3. Wait until every pod of k's gang is Ready, then mark them serving.
-//  4. Drain (delete) the source gang's pods.
-//  5. Promote k to Ready (RunningRevision = the pinned rev) and remove the
-//     source InstanceStatus; the plan settles on k and EnsurePodGroups GCs
-//     the source's PodGroup. A spec bump that arrived mid-surge is picked
-//     up by the NEXT reconcile (RunningRevision != target → fresh cycle).
-//
-// Why a new index rather than the single-pod ActiveOrdinal toggle: for a
-// gang the pod-ordinal already enumerates gang members (leader=0,
-// worker=0..W-1), so there is no free ordinal slot to host a parallel
-// generation. A fresh index gives the replacement gang a distinct
-// identity and (via per-index PodGroup naming) its own PodGroup for free.
+// gangSurgeUpdate creates a replacement gang at a fresh Instance index, waits
+// for it to serve, then drains and finalizes the source. Source and target
+// status entries retain the pinned revision and cleanup ownership across
+// reconciles.
 func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision) (bool, error) {
 	sourceIdx := inst.Index
 	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
@@ -67,62 +40,11 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	src := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
 	surging := src != nil && src.Operation != nil &&
 		src.Operation.Type == workload.InstanceOperationUpdate &&
-		src.Operation.Step == updateStepSurge && src.Operation.SurgeIndex != nil
+		isSurgeUpdateStep(src.Operation.Step) && src.Operation.SurgeIndex != nil
+	startingSurge := surging && src.Operation.Step == updateStepSurge
 
-	// Failed-surge recovery: a prior gang surge escalated the SOURCE to
-	// Phase=Failed because its replacement gang wedged on a bad revision
-	// (e.g. ImagePullBackOff). Abandon the stale surge and reset the source
-	// to Ready so the NEXT reconcile starts a fresh surge cycle toward the
-	// current (corrective) target. The source gang keeps serving on its
-	// running revision throughout, so capacity never drops. Without this the
-	// gang surge stays pinned to the bad TargetRevision below and the
-	// rollout is wedged forever — the multi-pod analogue of surgeUpdate's
-	// single-pod Failed-recovery path.
-	if surging && src.Phase == workload.InstancePhaseFailed {
-		// Terminal same-target failure: the abandon's reset pass records the
-		// RetryBlock for the surge's committed target (Op.TargetRevision, the
-		// rev pinned when the surge was stamped) with the escalators' failure
-		// evidence — see the writer-ordering note on abandonFailedGangSurge.
-		return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision,
-			src.Operation.TargetRevision, instanceFailureReason(src, "gang surge abandoned before the target became Ready"))
-	}
-
-	// Superseded-surge redirect: the in-flight gang surge is committed to a rev
-	// that is no longer desired, and its replacement gang is NOT about to promote
-	// (not fully Ready). Abandon it and re-surge toward the current target — the
-	// level-triggered contract, the multi-pod analogue of surgeUpdate's superseded
-	// redirect. Keyed on target-supersede rather than Phase=Failed so a gang surge
-	// that never becomes Ready and never escalates can't pin itself to a dead rev
-	// and hold the maxSurge budget until instanceReadyTimeout. A gang about to
-	// promote (all pods Ready) keeps its pin so the promote stamps the rev the pods
-	// actually run (X-2 anti-corruption).
-	if surging && src.Operation.TargetRevision != target.Name {
-		surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, *src.Operation.SurgeIndex)
-		if err != nil {
-			return false, fmt.Errorf("list surge gang pods for supersede check (instance=%d): %w", *src.Operation.SurgeIndex, err)
-		}
-		if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
-			// Superseded, not failed — the target moved on. No RetryBlock:
-			// abandonment by spec change is not a terminal failure of the
-			// old target (empty failedTargetRev skips the record).
-			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision, "", "")
-		}
-	}
-
-	// surgeTargetName pins the revision THIS gang surge is committed to
-	// driving to — the gang-path equivalent of single-pod surgeUpdate's
-	// pin. On the FIRST pass (no in-flight Op) it equals target.Name, the
-	// rev the dispatcher just decided to roll to. On SUBSEQUENT passes it
-	// is the rev recorded when the surge was stamped, even if `target` has
-	// since moved because of a fresh spec bump mid-surge. Pinning prevents
-	// the X-2 bump-during-bump corruption: without it the replacement
-	// gang's pods would be created on, and the promote would stamp
-	// RunningRevision to, the LATEST target while the gang's pods still
-	// run the in-flight rev — DetectUpdateTrigger's RunningRevision==target
-	// fast-path then short-circuits and the rollout never converges (pods
-	// stranded on the intermediate rev). The next surge cycle for the
-	// newer target fires naturally after this one promotes, because
-	// DetectUpdateTrigger observes RunningRevision != target.Name.
+	// An in-flight operation stays pinned to the revision stamped at start.
+	// A newer desired revision is handled by a subsequent update.
 	surgeTargetName := target.Name
 	if surging && src.Operation.TargetRevision != "" {
 		surgeTargetName = src.Operation.TargetRevision
@@ -131,7 +53,119 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	var surgeIdx int32
 	if surging {
 		surgeIdx = *src.Operation.SurgeIndex
-	} else {
+	}
+	promotedSurgeTarget := false
+	var surgeMarker *workload.InstanceStatus
+	if surging {
+		surgeMarker = findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx)
+		if surgeMarker == nil {
+			cleanup := startingSurge && src.Phase == workload.InstancePhaseFailed
+			if startingSurge && !cleanup && src.Operation.TargetRevision != target.Name {
+				surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
+				if err != nil {
+					return false, fmt.Errorf("list missing surge target pods (instance=%d): %w", surgeIdx, err)
+				}
+				cleanup = int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods)
+			}
+			if cleanup && (input.ApplyInstanceMutationsWithRetryBlock != nil || input.FinalizeInstanceResources != nil) {
+				if _, err := restoreGangSurgeTargetCleanup(ctx, input, src, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
+					return false, fmt.Errorf("restore gang surge target cleanup marker (instance=%d): %w", surgeIdx, err)
+				}
+			} else if _, err := restoreInstanceStatusGangSurgeTarget(ctx, input, src, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
+				return false, fmt.Errorf("restore gang surge target marker (instance=%d): %w", surgeIdx, err)
+			}
+			return false, nil
+		}
+		promotedTarget := gangSurgePromotedTargetMatches(surgeMarker, surgeTargetName)
+		if !gangSurgeTargetClaimMatches(surgeMarker, surgeTargetName) && !promotedTarget {
+			if _, err := resetGangSurgeSourceAfterTargetConflict(ctx, input, src, surgeMarker); err != nil {
+				return false, fmt.Errorf("reset gang surge with occupied target (source=%d target=%d): %w", sourceIdx, surgeIdx, err)
+			}
+			return false, nil
+		}
+		if promotedTarget {
+			// A promoted target is safe to accept only after the source pods are
+			// gone. Nonzero source pods make an operation-less Ready slot
+			// insufficient proof that it belongs to this surge.
+			sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, sourceIdx)
+			if err != nil {
+				return false, fmt.Errorf("list source gang pods for promoted target recovery (instance=%d): %w", sourceIdx, err)
+			}
+			if len(sourcePods) != 0 {
+				if !startingSurge {
+					return false, nil
+				}
+				if _, err := resetGangSurgeSourceAfterTargetConflict(ctx, input, src, surgeMarker); err != nil {
+					return false, fmt.Errorf("reset gang surge with occupied promoted target (source=%d target=%d): %w", sourceIdx, surgeIdx, err)
+				}
+				return false, nil
+			}
+			if input.ApplyInstanceMutationsWithRetryBlock != nil {
+				confirmed, err := confirmPromotedGangSurgeTarget(ctx, input, src, surgeMarker)
+				if err != nil {
+					return false, fmt.Errorf("confirm promoted gang surge target (instance=%d): %w", surgeIdx, err)
+				}
+				if !confirmed {
+					return false, nil
+				}
+				if err := pruneRetryBlockOnPromote(ctx, input, surgeTargetName); err != nil {
+					return false, fmt.Errorf("prune retry block after gang promotion (revision=%s): %w", surgeTargetName, err)
+				}
+			}
+			promotedSurgeTarget = true
+		}
+		if startingSurge && !promotedTarget && surgeMarker.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup {
+			failedTargetRev, failureReason := "", ""
+			if src.Phase == workload.InstancePhaseFailed {
+				failedTargetRev = src.Operation.TargetRevision
+				failureReason = instanceFailureReason(src, "gang surge abandoned before the target became Ready")
+			}
+			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, surgeIdx, src.RunningRevision, failedTargetRev, failureReason)
+		}
+		if !promotedTarget && (input.ApplyInstanceMutationsWithRetryBlock != nil || input.FinalizeInstanceResources != nil) {
+			resolution, err := restoreInstanceStatusGangSurgeTarget(ctx, input, src, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout)
+			if err != nil {
+				return false, fmt.Errorf("confirm gang surge target marker (instance=%d): %w", surgeIdx, err)
+			}
+			if resolution == gangSurgeTargetMarkerCleanup {
+				if !startingSurge {
+					return false, nil
+				}
+				failedTargetRev, failureReason := "", ""
+				if src.Phase == workload.InstancePhaseFailed {
+					failedTargetRev = src.Operation.TargetRevision
+					failureReason = instanceFailureReason(src, "gang surge abandoned before the target became Ready")
+				}
+				return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, surgeIdx, src.RunningRevision, failedTargetRev, failureReason)
+			}
+			if resolution != gangSurgeTargetMarkerActive {
+				return false, nil
+			}
+		}
+	}
+
+	// A failed replacement is retired while the source remains on its running
+	// revision. Retry policy controls the next attempt.
+	if startingSurge && !promotedSurgeTarget && src.Phase == workload.InstancePhaseFailed {
+		// Record failure against the revision owned by this operation.
+		return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision,
+			src.Operation.TargetRevision, instanceFailureReason(src, "gang surge abandoned before the target became Ready"))
+	}
+
+	// Retire an incomplete replacement when the desired revision changes. A
+	// ready replacement finishes on its pinned revision first.
+	if startingSurge && !promotedSurgeTarget && src.Operation.TargetRevision != target.Name {
+		surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, *src.Operation.SurgeIndex)
+		if err != nil {
+			return false, fmt.Errorf("list surge gang pods for supersede check (instance=%d): %w", *src.Operation.SurgeIndex, err)
+		}
+		if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
+			// A spec change is not a failure of the retired revision.
+			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision, "", "")
+		}
+	}
+
+	if !surging {
 		surgeIdx = workload.AllocateSurgeIndex(input.ObservedState.InstanceStatuses)
 		if err := patchInstanceStatusGangSurging(ctx, input, sourceIdx, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("stamp gang surge source (instance=%d): %w", sourceIdx, err)
@@ -139,14 +173,8 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("stamp gang surge target (instance=%d): %w", surgeIdx, err)
 		}
-		// Reserve the chosen index in the IN-MEMORY snapshot so sibling
-		// Instances surging in the SAME reconcile pass allocate a DISTINCT
-		// index. The patches above only hit the API; input.ObservedState is the
-		// snapshot taken at the start of the pass, so without this the next
-		// sibling's AllocateSurgeIndex re-picks the same lowest-free index — the
-		// shared-surgeIndex collision that drains the whole fleet when the single
-		// shared surge becomes Ready. AllocateSurgeIndex now excludes
-		// Operation.SurgeIndex, so recording the claim on the source suffices.
+		// Reserve the index in this reconcile's snapshot so sibling updates cannot
+		// allocate the same replacement slot.
 		if src != nil {
 			si := surgeIdx
 			src.Operation = &workload.InstanceOperation{
@@ -214,11 +242,8 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, nil
 	}
 
-	// 3. Wait for the whole replacement gang to pass its readiness probes
-	// (ContainersReady), then put it into serving rotation. MarkPodServing is
-	// gated on ContainersReady, NOT PodReady, on purpose: ome.io/serving is
-	// itself a readiness gate, so gating the serving flip on PodReady would
-	// deadlock (PodReady needs serving=True needs PodReady).
+	// ContainersReady permits setting the serving gate; waiting for PodReady
+	// here would deadlock because PodReady includes that gate.
 	if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
 		return false, nil
 	}
@@ -237,29 +262,37 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, fmt.Errorf("list source gang pods (instance=%d): %w", sourceIdx, err)
 	}
 	if len(sourcePods) > 0 {
-		// Hold the drain until the replacement gang is actually PodReady —
-		// containers ready AND the ome.io/serving gate AND'd in by kubelet —
-		// not merely ContainersReady. Serving is itself a readiness gate, so a
-		// just-served pod is not yet PodReady (not in Service rotation) until
-		// kubelet re-evaluates the gate a beat after MarkPodServing. Draining
-		// the source before then drops it out of rotation while the replacement
-		// is still not in it — an N-1 capacity TROUGH. Across Components rolled
-		// on independent timelines those offset troughs skew the live
-		// RatioBalanced ratio. Waiting
-		// keeps true capacity overlap: N -> N+1 -> N, never below N. (Gated
-		// only when there is a source to drain; a source already gone — the
-		// promote step below — has no trough to guard against.)
+		// Do not drain until kubelet has incorporated the serving gate into
+		// PodReady; this preserves overlap with the source.
 		for _, pod := range surgePods {
 			if !podreadiness.IsPodReady(pod) {
 				return false, nil
 			}
 		}
-		// Flip the source gang OUT of serving rotation before deleting it. A
-		// pod merely Deleted keeps serving=True (ContainersReady) through its
-		// whole termination grace, so an undrained source would linger in
-		// ServingReplicas beside the replacement (a durable N+1). Flipping it
-		// now collapses serving back to N — and because the replacement is
-		// already PodReady, serving never dips below N in the gap.
+	}
+	if !promotedSurgeTarget && input.ApplyInstanceMutationsWithRetryBlock != nil {
+		claimed, err := claimGangSurgeDrain(ctx, input, src, surgeMarker)
+		if err != nil {
+			return false, fmt.Errorf("claim source gang drain (instance=%d): %w", sourceIdx, err)
+		}
+		if !claimed {
+			return false, nil
+		}
+		src.Operation.Step = updateStepSurgeDrain
+	} else if !promotedSurgeTarget && input.FinalizeInstanceResources != nil &&
+		(src.Operation.Step == updateStepSurge || src.Operation.Step == updateStepSurgeDrain) {
+		claimed, err := transitionTerminalOperationStep(ctx, input, src, updateStepSurgeDrain, true)
+		if err != nil {
+			return false, fmt.Errorf("stamp source gang drain (instance=%d): %w", sourceIdx, err)
+		}
+		if !claimed {
+			return false, nil
+		}
+		src.Operation.Step = updateStepSurgeDrain
+	}
+	if len(sourcePods) > 0 {
+		// Remove the source from rotation before deletion so termination grace
+		// does not leave both generations serving.
 		for _, pod := range sourcePods {
 			if !podreadiness.IsServing(pod) {
 				continue
@@ -288,24 +321,305 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, nil
 	}
 
-	// 5. Promote the replacement to Ready and drop the source. The plan
-	// settles on k; EnsurePodGroups GCs the source's PodGroup next pass.
-	// Promote on the PINNED rev — the rev the surged gang actually runs —
-	// NOT the latest target if a mid-surge bump moved it. Using target.Name
-	// here would write RunningRevision=<latest-target> while the pods are
-	// on the prior rev (the X-2 corruption mode); DetectUpdateTrigger picks
-	// up RunningRevision != target on the next reconcile and fires a fresh
-	// surge cycle toward the newer rev.
-	if err := patchInstanceStatusReadyOnRevision(ctx, input, surgeIdx, surgeTargetName); err != nil {
-		return false, fmt.Errorf("promote surge gang (instance=%d): %w", surgeIdx, err)
+	// Promote the replacement on its pinned revision. A newer desired revision
+	// remains visible as RunningRevision != target and starts another update.
+	if !promotedSurgeTarget {
+		if input.ApplyInstanceMutationsWithRetryBlock != nil {
+			promoted, err := promoteGangSurgeTarget(ctx, input, src, surgeMarker, surgeTargetName)
+			if err != nil {
+				return false, fmt.Errorf("promote surge gang (instance=%d): %w", surgeIdx, err)
+			}
+			if !promoted {
+				return false, nil
+			}
+		} else if err := patchInstanceStatusReadyOnRevision(ctx, input, surgeIdx, surgeTargetName); err != nil {
+			return false, fmt.Errorf("promote surge gang (instance=%d): %w", surgeIdx, err)
+		}
 	}
-	if _, rerr := input.RemoveInstance(ctx, sourceIdx); rerr != nil {
-		return false, fmt.Errorf("remove source InstanceStatus (instance=%d): %w", sourceIdx, rerr)
+	if !gangSurgeSourceOwnsRemoval(src, surgeIdx) {
+		return false, nil
+	}
+	removed, rerr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, src)
+	if rerr != nil {
+		return false, fmt.Errorf("finalize source Instance (instance=%d): %w", sourceIdx, rerr)
+	}
+	if !removed {
+		return false, nil
 	}
 	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateCompleted,
 		"OMENative %s gang surge complete: instance %d promoted to revision %s",
 		instanceKey(comp, sourceIdx), surgeIdx, surgeTargetName)
 	return true, nil
+}
+
+func gangSurgeSourceOwnsRemoval(status *workload.InstanceStatus, surgeIdx int32) bool {
+	return status != nil && status.Operation != nil &&
+		status.Operation.Type == workload.InstanceOperationUpdate &&
+		isSurgeUpdateStep(status.Operation.Step) &&
+		status.Operation.SurgeIndex != nil && *status.Operation.SurgeIndex == surgeIdx
+}
+
+func gangSurgePromotedTargetMatches(status *workload.InstanceStatus, targetRevision string) bool {
+	return status != nil && status.Incarnation == 1 && status.ActiveOrdinal == 0 &&
+		status.Phase == workload.InstancePhaseReady && status.RunningRevision == targetRevision &&
+		status.TargetRevision == "" && status.Operation == nil
+}
+
+func confirmPromotedGangSurgeTarget(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	target *workload.InstanceStatus,
+) (bool, error) {
+	if source == nil || target == nil || !gangSurgeSourceOwnsRemoval(source, target.Index) ||
+		!gangSurgePromotedTargetMatches(target, source.Operation.TargetRevision) {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	targetIdentity := captureTerminalInstanceIdentity(target)
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	preflight := workload.InstanceMutation{
+		Index:  source.Index,
+		Mutate: func(*workload.InstanceStatus) bool { return false },
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, sourceFound := snapshot.Instances[source.Index]
+			currentTarget, targetFound := snapshot.Instances[target.Index]
+			if !sourceFound || !targetFound ||
+				!sourceIdentity.matches(currentSource) || !targetIdentity.matches(currentTarget) {
+				return false
+			}
+			confirmed = true
+			return true
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{preflight})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return confirmed, nil
+}
+
+func claimGangSurgeDrain(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	target *workload.InstanceStatus,
+) (bool, error) {
+	if source == nil || target == nil || source.Operation == nil ||
+		(source.Operation.Step != updateStepSurge && source.Operation.Step != updateStepSurgeDrain) ||
+		!gangSurgeSourceOwnsRemoval(source, target.Index) ||
+		!gangSurgeActiveTargetClaimMatches(target, source.Operation.TargetRevision) {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	before := captureTerminalInstanceIdentity(source)
+	after := before
+	after.operation.step = updateStepSurgeDrain
+	targetIdentity := captureTerminalInstanceIdentity(target)
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	committed := false
+	mutation := workload.InstanceMutation{
+		Index: source.Index,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			if after.matches(*status) {
+				confirmed = true
+				return false
+			}
+			if !before.matches(*status) {
+				return false
+			}
+			status.Operation.Step = updateStepSurgeDrain
+			status.Operation.LastProgressAt = metav1.NewTime(input.Now())
+			return true
+		},
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, sourceFound := snapshot.Instances[source.Index]
+			currentTarget, targetFound := snapshot.Instances[target.Index]
+			if !sourceFound || !targetFound || !targetIdentity.matches(currentTarget) ||
+				!gangSurgeActiveTargetClaimMatches(&currentTarget, source.Operation.TargetRevision) {
+				return false
+			}
+			if after.matches(currentSource) {
+				confirmed = true
+				return true
+			}
+			return before.matches(currentSource)
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && after.matches(*status)
+		},
+		OnCommit: func(_, _ *workload.InstanceStatus) {
+			committed = true
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed || confirmed, nil
+}
+
+func promoteGangSurgeTarget(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	target *workload.InstanceStatus,
+	targetRevision string,
+) (bool, error) {
+	if source == nil || target == nil || source.Operation == nil ||
+		source.Operation.Step != updateStepSurgeDrain ||
+		!gangSurgeSourceOwnsRemoval(source, target.Index) ||
+		!gangSurgeActiveTargetClaimMatches(target, targetRevision) {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	targetIdentity := captureTerminalInstanceIdentity(target)
+	ownerUID := input.OwnerObject.GetUID()
+	promoted := false
+	mutation := createStatusReadyOnRevisionMutation(target.Index, targetRevision)
+	mutation.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
+		if snapshot.OwnerUID != ownerUID {
+			return false
+		}
+		currentSource, sourceFound := snapshot.Instances[source.Index]
+		currentTarget, targetFound := snapshot.Instances[target.Index]
+		return sourceFound && targetFound &&
+			sourceIdentity.matches(currentSource) && targetIdentity.matches(currentTarget) &&
+			gangSurgeActiveTargetClaimMatches(&currentTarget, targetRevision)
+	}
+	mutation.Postcondition = func(status *workload.InstanceStatus) bool {
+		return status != nil && status.Index == target.Index &&
+			status.Incarnation == target.Incarnation &&
+			status.ActiveOrdinal == target.ActiveOrdinal &&
+			status.Phase == workload.InstancePhaseReady &&
+			status.RunningRevision == targetRevision &&
+			status.TargetRevision == "" && status.Operation == nil
+	}
+	mutation.OnCommit = func(_, _ *workload.InstanceStatus) {
+		promoted = true
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !promoted {
+		return false, nil
+	}
+	if err := pruneRetryBlockOnPromote(ctx, input, targetRevision); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// resetGangSurgeSourceAfterTargetConflict releases a source claim without
+// changing the occupied target. The strong path guards both lifecycle
+// identities in one authoritative snapshot; compatibility adapters confirm
+// the target and source independently through their fresh mutation reads.
+func resetGangSurgeSourceAfterTargetConflict(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	target *workload.InstanceStatus,
+) (bool, error) {
+	if source == nil || target == nil || !gangSurgeSourceOwnsRemoval(source, target.Index) ||
+		gangSurgeTargetClaimMatches(target, source.Operation.TargetRevision) {
+		return false, nil
+	}
+
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	targetIdentity := captureTerminalInstanceIdentity(target)
+	reset := createStatusReadyOnRevisionMutation(source.Index, source.RunningRevision)
+	reset.Postcondition = func(status *workload.InstanceStatus) bool {
+		return status != nil && status.Index == source.Index &&
+			status.Incarnation == source.Incarnation &&
+			status.Phase == workload.InstancePhaseReady &&
+			status.RunningRevision == source.RunningRevision &&
+			status.TargetRevision == "" && status.Operation == nil &&
+			status.ActiveOrdinal == source.ActiveOrdinal
+	}
+
+	if input.ApplyInstanceMutationsWithRetryBlock != nil {
+		if err := validateTerminalMutationOwner(input); err != nil {
+			return false, err
+		}
+		ownerUID := input.OwnerObject.GetUID()
+		committed := false
+		reset.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, sourceFound := snapshot.Instances[source.Index]
+			currentTarget, targetFound := snapshot.Instances[target.Index]
+			return sourceFound && targetFound &&
+				sourceIdentity.matches(currentSource) && targetIdentity.matches(currentTarget)
+		}
+		reset.OnCommit = func(_, _ *workload.InstanceStatus) {
+			committed = true
+		}
+		err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{reset})
+		if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return committed, nil
+	}
+
+	if input.MutateInstance == nil {
+		return false, fmt.Errorf("gang surge target conflict requires a status mutation adapter")
+	}
+	targetMatched := false
+	if err := input.MutateInstance(ctx, target.Index, func(current *workload.InstanceStatus) bool {
+		targetMatched = targetIdentity.matches(*current)
+		return false
+	}); err != nil {
+		return false, err
+	}
+	if !targetMatched {
+		return false, nil
+	}
+	sourceMatched := false
+	if err := input.MutateInstance(ctx, source.Index, func(current *workload.InstanceStatus) bool {
+		sourceMatched = sourceIdentity.matches(*current)
+		if !sourceMatched {
+			return false
+		}
+		return reset.Mutate(current)
+	}); err != nil {
+		return false, err
+	}
+	return sourceMatched, nil
 }
 
 func cloneInstanceTopologyKeys(in map[int32]string) map[int32]string {
@@ -316,31 +630,39 @@ func cloneInstanceTopologyKeys(in map[int32]string) map[int32]string {
 	return out
 }
 
-// abandonFailedGangSurge tears down a gang surge that escalated to
-// Phase=Failed and resets the source Instance to Ready on its running
-// revision, so the next reconcile's DetectUpdateTrigger starts a fresh
-// surge cycle toward the current (corrective) target.
-//
-// Steps (one advanced per reconcile; the loop requeues between them):
-//  1. Delete the wedged replacement gang's pods at surgeIdx.
-//  2. Drop the surge index's marker InstanceStatus (if any).
-//  3. Record the terminal failure on failedTargetRev's RetryBlock, then
-//     reset the source: Phase=Ready, RunningRevision unchanged, Operation
-//     cleared. The source's own gang never left its running revision, so
-//     this is an accurate state — and RunningRevision != target then
-//     re-fires a clean surge on the next pass, through the RetryBlock gate.
-//
-// Writer-ordering invariant: the RetryBlock upsert lands in
-// the same pass as — immediately before — the reset that clears the
-// failed attempt's Operation. Upsert-first is crash-safe: a re-entered
-// abandon (upsert landed, reset didn't) re-routes here via the Failed
-// branch, where the writer's wave dedup refreshes without recounting; no
-// attempt-stamp helper runs while the Failed branch owns dispatch, so the
-// fresh Backoff cannot be prematurely flipped to RetryInProgress. An
-// empty failedTargetRev means the abandon is a supersede, not a failure —
-// nothing is recorded.
+// abandonFailedGangSurge drains and finalizes a retired replacement, then
+// atomically removes its marker and resets the source. A failed revision also
+// records its RetryBlock in that status transition.
 func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx, surgeIdx int32, sourceRunningRev, failedTargetRev, failureReason string) (bool, error) {
 	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
+	guardTerminalMarker := input.ApplyInstanceMutationsWithRetryBlock != nil || input.FinalizeInstanceResources != nil
+	source := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
+	if guardTerminalMarker && !gangSurgeSourceOwnsRemoval(source, surgeIdx) {
+		return false, nil
+	}
+	marker := findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx)
+	if guardTerminalMarker {
+		if marker == nil {
+			if _, err := restoreGangSurgeTargetCleanup(
+				ctx, input, source, surgeIdx, source.Operation.TargetRevision, plan.InstanceReadyTimeout,
+			); err != nil {
+				return false, fmt.Errorf("restore gang surge target cleanup marker (instance=%d): %w", surgeIdx, err)
+			}
+			return false, nil
+		}
+		claimed, err := transitionGangSurgeTargetCleanup(ctx, input, source, marker)
+		if err != nil {
+			return false, fmt.Errorf("stamp failed surge cleanup (instance=%d): %w", surgeIdx, err)
+		}
+		if !claimed {
+			return false, nil
+		}
+		marker.Operation.Step = workload.UpdateStepGangSurgeTargetCleanup
+	}
+	if marker != nil && (!gangSurgeTargetOwnsRemoval(marker, guardTerminalMarker) ||
+		guardTerminalMarker && !gangSurgeTargetClaimMatches(marker, source.Operation.TargetRevision)) {
+		return false, nil
+	}
 
 	// 1. Delete the wedged surge gang's pods.
 	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
@@ -367,20 +689,33 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 		return false, nil
 	}
 
-	// 2. Drop the surge index's marker InstanceStatus (no-op if absent).
-	if _, err := input.RemoveInstance(ctx, surgeIdx); err != nil {
-		return false, fmt.Errorf("remove failed surge marker (instance=%d): %w", surgeIdx, err)
-	}
-
-	// 3. Record the failure, then reset the source to Ready on its running
-	// revision, clearing the failed surge Operation. The reset's own prune
-	// targets sourceRunningRev — a different revision than failedTargetRev
-	// (an update never re-targets the running rev), so the block survives.
-	if err := recordUpdateFailureInRetryBlock(ctx, input, failedTargetRev, failureReason); err != nil {
-		return false, fmt.Errorf("record retry block for failed gang surge (rev=%s): %w", failedTargetRev, err)
-	}
-	if err := patchInstanceStatusReadyOnRevision(ctx, input, sourceIdx, sourceRunningRev); err != nil {
-		return false, fmt.Errorf("reset failed gang surge source (instance=%d): %w", sourceIdx, err)
+	// 2. Finalize the surge index and reset its source. The strong path commits
+	// both status changes atomically so target-marker absence can never be
+	// mistaken for an interrupted target-stamp and restored as active work.
+	if guardTerminalMarker {
+		complete, err := finalizeAndResetAbandonedGangSurge(
+			ctx, deps, input, source, marker, surgeIdx, sourceRunningRev, failedTargetRev, failureReason,
+		)
+		if err != nil {
+			return false, fmt.Errorf("finalize abandoned gang surge (instance=%d): %w", surgeIdx, err)
+		}
+		if !complete {
+			return false, nil
+		}
+	} else {
+		removed, err := finalizeAndRemoveInstance(ctx, deps, input, surgeIdx, marker)
+		if err != nil {
+			return false, fmt.Errorf("finalize failed surge Instance (instance=%d): %w", surgeIdx, err)
+		}
+		if !removed {
+			return false, nil
+		}
+		if err := recordUpdateFailureInRetryBlock(ctx, input, failedTargetRev, failureReason); err != nil {
+			return false, fmt.Errorf("record retry block for failed gang surge (rev=%s): %w", failedTargetRev, err)
+		}
+		if err := patchInstanceStatusReadyOnRevision(ctx, input, sourceIdx, sourceRunningRev); err != nil {
+			return false, fmt.Errorf("reset failed gang surge source (instance=%d): %w", sourceIdx, err)
+		}
 	}
 	if failedTargetRev != "" {
 		recordWarning(deps.Recorder, eventTarget(input), eventReasonGangSurgeAbandoned,
@@ -392,4 +727,319 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 			instanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
 	}
 	return false, nil
+}
+
+func transitionGangSurgeTargetCleanup(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	marker *workload.InstanceStatus,
+) (bool, error) {
+	if source == nil || marker == nil || !gangSurgeSourceOwnsRemoval(source, marker.Index) ||
+		!gangSurgeTargetClaimMatches(marker, source.Operation.TargetRevision) {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	before := captureTerminalInstanceIdentity(marker)
+	after := before
+	after.operation.step = workload.UpdateStepGangSurgeTargetCleanup
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	committed := false
+	mutation := workload.InstanceMutation{
+		Index: marker.Index,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			if after.matches(*status) {
+				confirmed = true
+				return false
+			}
+			if !before.matches(*status) {
+				return false
+			}
+			status.Operation.Step = workload.UpdateStepGangSurgeTargetCleanup
+			return true
+		},
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, found := snapshot.Instances[source.Index]
+			if !found || !sourceIdentity.matches(currentSource) {
+				return false
+			}
+			currentMarker, found := snapshot.Instances[marker.Index]
+			if !found {
+				return false
+			}
+			if after.matches(currentMarker) {
+				confirmed = true
+				return true
+			}
+			return before.matches(currentMarker)
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && after.matches(*status)
+		},
+		OnCommit: func(_, _ *workload.InstanceStatus) {
+			committed = true
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed || confirmed, nil
+}
+
+func restoreGangSurgeTargetCleanup(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	surgeIdx int32,
+	targetRevision string,
+	timeout time.Duration,
+) (bool, error) {
+	if source == nil || !gangSurgeSourceOwnsRemoval(source, surgeIdx) ||
+		source.Operation.TargetRevision != targetRevision {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	now := metav1.NewTime(input.Now())
+	desired := workload.InstanceStatus{
+		Index:          surgeIdx,
+		Incarnation:    1,
+		Phase:          workload.InstancePhaseCreating,
+		TargetRevision: targetRevision,
+		Operation: &workload.InstanceOperation{
+			ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepGangSurgeTargetCleanup,
+			TargetRevision: targetRevision,
+			StartedAt:      now,
+			LastProgressAt: now,
+			Deadline:       metav1.NewTime(now.Add(timeout)),
+		},
+	}
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	committed := false
+	mutation := workload.InstanceMutation{
+		Index: surgeIdx,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			if gangSurgeCleanupTargetClaimMatches(status, targetRevision) {
+				confirmed = true
+				return false
+			}
+			if gangSurgeActiveTargetClaimMatches(status, targetRevision) {
+				status.Operation.Step = workload.UpdateStepGangSurgeTargetCleanup
+				return true
+			}
+			if !emptyGangSurgeTargetSlot(status) {
+				return false
+			}
+			*status = cloneTerminalStatusValue(desired)
+			return true
+		},
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, found := snapshot.Instances[source.Index]
+			if !found || !sourceIdentity.matches(currentSource) {
+				return false
+			}
+			currentTarget, found := snapshot.Instances[surgeIdx]
+			if !found {
+				return true
+			}
+			if gangSurgeCleanupTargetClaimMatches(&currentTarget, targetRevision) {
+				confirmed = true
+				return true
+			}
+			return gangSurgeActiveTargetClaimMatches(&currentTarget, targetRevision)
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && status.Index == surgeIdx &&
+				gangSurgeCleanupTargetClaimMatches(status, targetRevision)
+		},
+		OnCommit: func(_, _ *workload.InstanceStatus) {
+			committed = true
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed || confirmed, nil
+}
+
+func finalizeAndResetAbandonedGangSurge(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	marker *workload.InstanceStatus,
+	surgeIdx int32,
+	sourceRunningRev string,
+	failedTargetRev string,
+	failureReason string,
+) (bool, error) {
+	if source == nil || !gangSurgeSourceOwnsRemoval(source, surgeIdx) {
+		return false, nil
+	}
+	if marker != nil && (!gangSurgeTargetOwnsRemoval(marker, true) ||
+		!gangSurgeTargetClaimMatches(marker, source.Operation.TargetRevision)) {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	ownerUID := input.OwnerObject.GetUID()
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	if marker == nil {
+		return false, nil
+	}
+	markerIdentity := captureTerminalInstanceIdentity(marker)
+	guard := func(snapshot workload.InstanceMutationSnapshot) bool {
+		if snapshot.OwnerUID != ownerUID {
+			return false
+		}
+		currentSource, found := snapshot.Instances[source.Index]
+		if !found || !sourceIdentity.matches(currentSource) {
+			return false
+		}
+		currentMarker, found := snapshot.Instances[surgeIdx]
+		return found && markerIdentity.matches(currentMarker)
+	}
+
+	preflight := workload.InstanceMutation{
+		Index:             source.Index,
+		Mutate:            func(*workload.InstanceStatus) bool { return false },
+		BatchPrecondition: guard,
+	}
+	if err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{preflight}); err != nil {
+		if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+			return false, nil
+		}
+		return false, err
+	}
+	if sourceRunningRev != "" && workload.FindRetryBlock(input.ObservedState.RetryBlocks, sourceRunningRev) != nil {
+		if err := pruneRetryBlockOnPromote(ctx, input, sourceRunningRev); err != nil {
+			return false, err
+		}
+	}
+
+	if input.FinalizeInstanceResources != nil {
+		complete, err := input.FinalizeInstanceResources(ctx, surgeIdx)
+		if err != nil {
+			return false, err
+		}
+		if !complete {
+			return false, nil
+		}
+	}
+
+	committed := false
+	reset := createStatusReadyOnRevisionMutation(source.Index, sourceRunningRev)
+	reset.BatchPrecondition = guard
+	reset.Postcondition = func(status *workload.InstanceStatus) bool {
+		return status != nil && status.Index == source.Index &&
+			status.Incarnation == source.Incarnation &&
+			status.Phase == workload.InstancePhaseReady &&
+			status.RunningRevision == sourceRunningRev &&
+			status.TargetRevision == "" && status.Operation == nil &&
+			status.ActiveOrdinal == source.ActiveOrdinal
+	}
+	reset.OnCommit = func(_, _ *workload.InstanceStatus) {
+		committed = true
+		deps.ExpectationsCache().Forget(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, surgeIdx)
+	}
+	removeMarker := workload.InstanceMutation{Index: surgeIdx, Remove: true}
+
+	var retryRevision string
+	var mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition
+	heldAttempts := int32(0)
+	if input.MutateRetryBlock != nil && failedTargetRev != "" {
+		retryRevision = failedTargetRev
+		now := metav1.NewTime(input.Now())
+		mutateRetryBlock = func(block *workload.RetryBlock) workload.RetryBlockDisposition {
+			var disposition workload.RetryBlockDisposition
+			disposition, heldAttempts = workload.ApplyUpdateFailureToRetryBlock(
+				block, input.UpdateRetryPolicy, now, failureReason,
+			)
+			return disposition
+		}
+	}
+	priorOnCommit := reset.OnCommit
+	reset.OnCommit = func(previous, current *workload.InstanceStatus) {
+		priorOnCommit(previous, current)
+		if heldAttempts > 0 && input.WarnRetryHeld != nil {
+			input.WarnRetryHeld(failedTargetRev, heldAttempts, failureReason)
+		}
+	}
+	err := input.ApplyInstanceMutationsWithRetryBlock(
+		ctx,
+		[]workload.InstanceMutation{reset, removeMarker},
+		retryRevision,
+		mutateRetryBlock,
+	)
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed, nil
+}
+
+func gangSurgeTargetOwnsRemoval(status *workload.InstanceStatus, requireCleanupMarker bool) bool {
+	if status == nil || status.Operation == nil || status.Operation.Type != workload.InstanceOperationUpdate {
+		return false
+	}
+	if requireCleanupMarker {
+		return status.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup
+	}
+	return status.Operation.Step == workload.UpdateStepGangSurgeTarget
+}
+
+func gangSurgeTargetMatches(status *workload.InstanceStatus, targetRevision string) bool {
+	return gangSurgeActiveTargetClaimMatches(status, targetRevision) &&
+		status.Phase == workload.InstancePhaseCreating &&
+		status.Operation.Step == workload.UpdateStepGangSurgeTarget
+}
+
+func gangSurgeTargetClaimMatches(status *workload.InstanceStatus, targetRevision string) bool {
+	return gangSurgeActiveTargetClaimMatches(status, targetRevision) ||
+		gangSurgeCleanupTargetClaimMatches(status, targetRevision)
+}
+
+func gangSurgeActiveTargetClaimMatches(status *workload.InstanceStatus, targetRevision string) bool {
+	return status != nil && status.TargetRevision == targetRevision && status.Operation != nil &&
+		status.Operation.Type == workload.InstanceOperationUpdate &&
+		status.Operation.Step == workload.UpdateStepGangSurgeTarget &&
+		status.Operation.TargetRevision == targetRevision
+}
+
+func gangSurgeCleanupTargetClaimMatches(status *workload.InstanceStatus, targetRevision string) bool {
+	return status != nil && status.TargetRevision == targetRevision && status.Operation != nil &&
+		status.Operation.Type == workload.InstanceOperationUpdate &&
+		status.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup &&
+		status.Operation.TargetRevision == targetRevision
 }

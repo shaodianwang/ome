@@ -34,9 +34,8 @@ import (
 // warned does a lookup-only pass per reconcile.
 var maybeNoGangSchedulerSeen sync.Map
 
-// extraPodGroupIndices returns InstanceStatus indices the plan no
-// longer covers — scale-down targets whose PodGroups need GC to match
-// the pod-level scale-down ops.delete pass.
+// extraPodGroupIndices returns InstanceStatus indices outside the plan whose
+// PodGroups remain eligible for ordinary scale-down cleanup.
 func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.ComponentPlan) []int32 {
 	if len(observed) == 0 {
 		return nil
@@ -46,24 +45,32 @@ func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.Comp
 		planned[inst.Index] = struct{}{}
 	}
 	var extras []int32
-	for _, s := range observed {
-		if _, inPlan := planned[s.Index]; inPlan {
+	for _, status := range observed {
+		if _, inPlan := planned[status.Index]; inPlan {
 			continue
 		}
-		// In-flight migration source / surge stay in the plan via the
-		// migration-protected branch in BuildPlan; they will not land
-		// in this 'extras' list. No-op explicitly to mirror
-		// workload.ExtraInstanceIndices' semantics in case BuildPlan
-		// ever regresses.
-		if s.Phase == workload.InstancePhaseMigrating {
+		if status.Phase == workload.InstancePhaseMigrating {
 			continue
 		}
-		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationMigrate {
+		if status.Operation != nil && status.Operation.Type == workload.InstanceOperationMigrate {
 			continue
 		}
-		extras = append(extras, s.Index)
+		extras = append(extras, status.Index)
 	}
 	return extras
+}
+
+// ErrPodGroupTerminating is returned when a planned gang's deterministic
+// PodGroup name is still occupied by an owned object being deleted. Callers
+// should requeue without running Pod creation.
+var ErrPodGroupTerminating = podgroup.ErrPodGroupTerminating
+
+// PodGroupReconcileState carries the one authoritative inventory and the
+// persisted lifecycle owners that suppress prerequisite creation. Callers may
+// preload it once and share the same Inventory with finalization.
+type PodGroupReconcileState struct {
+	Inventory     *PodGroupInventory
+	TerminalOwned map[int32]struct{}
 }
 
 // EnsureSurgePodGroup builds the Deps.EnsureGangPodGroup callback the
@@ -78,20 +85,45 @@ func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.Comp
 // (DesiredSpec.GangSchedulingAvailable == false) or the Instance is
 // single-pod. Idempotent.
 func EnsureSurgePodGroup(deps workload.Deps) workload.EnsureGangPodGroupFn {
+	return EnsureSurgePodGroupWithState(deps, PodGroupReconcileState{})
+}
+
+// EnsureSurgePodGroupWithState shares the Component's PodGroup inventory with
+// the inline surge prerequisite, avoiding a second PodGroup read.
+func EnsureSurgePodGroupWithState(deps workload.Deps, state PodGroupReconcileState) workload.EnsureGangPodGroupFn {
 	return func(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan) (string, error) {
 		if deps.Client == nil || !podgroup.IsMultiPodInstance(inst) {
 			return plan.TopologyKeyForInstance(inst.Index), nil
 		}
 		reader := deps.Reader()
-		pods, err := podsForPodGroup(ctx, reader, input.Key.Namespace,
-			query.PodGroupName(input.Key.OwnerName, plan.Component, inst.Index))
+		name := query.PodGroupName(input.Key.OwnerName, plan.Component, inst.Index)
+		pods, err := podsForPodGroup(ctx, reader, input.Key.Namespace, name)
 		if err != nil {
 			return "", fmt.Errorf("list surge PodGroup pods: %w", err)
 		}
-		if !input.DesiredSpec.GangSchedulingAvailable {
+
+		gangSchedulingAvailable := input.DesiredSpec.GangSchedulingAvailable
+		inv := state.Inventory
+		if gangSchedulingAvailable && inv != nil {
+			if input.OwnerObject == nil || inv.OwnerUID() != input.OwnerObject.GetUID() {
+				return "", fmt.Errorf("ensure surge PodGroup: inventory owner does not match input owner")
+			}
+			gangSchedulingAvailable = inv.Available()
+		}
+		if !gangSchedulingAvailable {
 			return podgroup.EffectiveTopologyKeyForPods(
 				plan.TopologyKeyForInstance(inst.Index), input.Key.OwnerName,
 				plan.Component, inst.Index, pods)
+		}
+		if inv != nil {
+			existing, found := inv.ByName(name)
+			key, reconciled, err := podgroup.EnsurePodGroupForPodsFromObservation(ctx, deps.Client,
+				input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst,
+				pods, existing, found)
+			if err == nil {
+				inv.recordReconciled(reconciled)
+			}
+			return key, err
 		}
 		return podgroup.EnsurePodGroupForPodsWithReader(ctx, deps.Client, reader, input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst, pods)
 	}
@@ -137,9 +169,19 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 // active gang's immutable pods or owned PodGroup annotation, reconciliation
 // fails closed before creating missing members.
 func EnsurePodGroupsWithTopology(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan) (map[int32]string, error) {
+	return EnsurePodGroupsWithState(ctx, deps, input, plan, PodGroupReconcileState{})
+}
+
+// EnsurePodGroupsWithState reconciles planned PodGroups from one inventory.
+// Terminal migration and update owners finalize their own groups; other extra
+// groups follow the ordinary scale-down cleanup path.
+func EnsurePodGroupsWithState(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, state PodGroupReconcileState) (map[int32]string, error) {
 	effectiveTopology := make(map[int32]string)
 	if deps.Client == nil {
 		return nil, fmt.Errorf("EnsurePodGroups: nil client")
+	}
+	if input.OwnerObject == nil {
+		return nil, fmt.Errorf("EnsurePodGroups: nil owner")
 	}
 
 	anyMultiPod := false
@@ -150,23 +192,39 @@ func EnsurePodGroupsWithTopology(ctx context.Context, deps workload.Deps, input 
 		}
 	}
 
-	// Always (re-)stamp the condition: True only when degraded
-	// (multi-pod requested AND CRD missing); False in every other
-	// case. Done first so partial PodGroup-create failures still
-	// leave the operator-visible degradation signal in a known
-	// state.
-	if cerr := patchGangSchedulingCondition(ctx, input, input.DesiredSpec.GangSchedulingAvailable, anyMultiPod); cerr != nil {
-		return nil, fmt.Errorf("EnsurePodGroups: patch GangSchedulingUnavailable condition: %w", cerr)
-	}
-
 	// No multi-pod Instances in the plan? Nothing to create. (Even
 	// when input.DesiredSpec.GangSchedulingAvailable is true,
 	// single-pod Instances skip the PodGroup — no gang to enforce on
 	// a single pod.)
 	if !anyMultiPod {
+		if cerr := patchGangSchedulingCondition(ctx, input, input.DesiredSpec.GangSchedulingAvailable, false); cerr != nil {
+			return nil, fmt.Errorf("EnsurePodGroups: patch GangSchedulingUnavailable condition: %w", cerr)
+		}
 		return effectiveTopology, nil
 	}
 	reader := deps.Reader()
+	inv := state.Inventory
+	gangSchedulingAvailable := input.DesiredSpec.GangSchedulingAvailable
+	if gangSchedulingAvailable {
+		if inv == nil {
+			var err error
+			inv, err = ObservePodGroups(ctx, reader, input.OwnerObject)
+			if err != nil {
+				return nil, fmt.Errorf("EnsurePodGroups: observe PodGroups: %w", err)
+			}
+		}
+		if inv.OwnerUID() != input.OwnerObject.GetUID() {
+			return nil, fmt.Errorf("EnsurePodGroups: inventory owner UID %q does not match owner UID %q", inv.OwnerUID(), input.OwnerObject.GetUID())
+		}
+		gangSchedulingAvailable = inv.Available()
+	}
+
+	// Stamp the degradation condition before Pod observation and PodGroup
+	// writes so later failures cannot hide whether gang scheduling is usable.
+	if cerr := patchGangSchedulingCondition(ctx, input, gangSchedulingAvailable, anyMultiPod); cerr != nil {
+		return nil, fmt.Errorf("EnsurePodGroups: patch GangSchedulingUnavailable condition: %w", cerr)
+	}
+
 	pods, err := query.ListOMENativePodsByName(ctx, reader, input.Key.Namespace,
 		input.Key.OwnerName, plan.Component, false)
 	if err != nil {
@@ -188,7 +246,7 @@ func EnsurePodGroupsWithTopology(ctx context.Context, deps workload.Deps, input 
 	// PodGroup writes, while still preserving the immutable topology carried by
 	// live pods. Missing members must not be recreated under a newer key merely
 	// because the optional PodGroup API is unavailable.
-	if !input.DesiredSpec.GangSchedulingAvailable {
+	if !gangSchedulingAvailable {
 		for _, inst := range plan.Instances {
 			if !podgroup.IsMultiPodInstance(inst) {
 				continue
@@ -205,31 +263,52 @@ func EnsurePodGroupsWithTopology(ctx context.Context, deps workload.Deps, input 
 		return effectiveTopology, nil
 	}
 
+	terminalOwned := terminalOwnedIndices(state.TerminalOwned)
+	ensured := false
 	for _, inst := range plan.Instances {
 		if !podgroup.IsMultiPodInstance(inst) {
 			continue
 		}
+		if _, terminal := terminalOwned[inst.Index]; terminal {
+			continue
+		}
 		name := query.PodGroupName(input.Key.OwnerName, plan.Component, inst.Index)
-		key, err := podgroup.EnsurePodGroupForPodsWithReader(ctx, deps.Client, reader, input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst, podsByGroup[name])
+		existing, found := inv.ByName(name)
+		key, reconciled, err := podgroup.EnsurePodGroupForPodsFromObservation(ctx, deps.Client,
+			input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst,
+			podsByGroup[name], existing, found)
 		if err != nil {
 			return nil, fmt.Errorf("EnsurePodGroups: instance %d: %w", inst.Index, err)
 		}
+		inv.recordReconciled(reconciled)
 		effectiveTopology[inst.Index] = key
+		ensured = true
 	}
 
 	// Heuristic warning when the rendered pod template uses the
 	// default scheduler — see EventReasonMaybeNoGangScheduler. Wired
 	// AFTER EnsurePodGroup so PodGroup-create failures take precedence.
-	maybeWarnNoGangScheduler(deps.Recorder, input, plan.Component, input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
-
-	// Per-Instance PodGroup GC. Whole-owner teardown is handled by
-	// the cascade-delete OwnerReference.
+	if ensured {
+		maybeWarnNoGangScheduler(deps.Recorder, input, plan.Component, input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
+	}
 	for _, idx := range extraPodGroupIndices(input.ObservedState.InstanceStatuses, plan) {
-		if err := podgroup.DeletePodGroup(ctx, deps.Client, input.OwnerObject, input.Key.OwnerName, plan.Component, idx); err != nil {
+		if _, terminal := terminalOwned[idx]; terminal {
+			continue
+		}
+		name := query.PodGroupName(input.Key.OwnerName, plan.Component, idx)
+		if err := inv.DeleteOwnedName(ctx, deps.Client, name); err != nil {
 			return nil, fmt.Errorf("EnsurePodGroups: delete extra instance %d: %w", idx, err)
 		}
 	}
 	return effectiveTopology, nil
+}
+
+func terminalOwnedIndices(explicit map[int32]struct{}) map[int32]struct{} {
+	out := make(map[int32]struct{}, len(explicit))
+	for idx := range explicit {
+		out[idx] = struct{}{}
+	}
+	return out
 }
 
 func podsForPodGroup(ctx context.Context, c client.Reader, namespace, name string) ([]*corev1.Pod, error) {

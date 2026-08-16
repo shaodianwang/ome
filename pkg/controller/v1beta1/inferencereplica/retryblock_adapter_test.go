@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -128,6 +129,30 @@ func TestBuildMutateRetryBlock_UnchangedWritesNothing(t *testing.T) {
 	g.Expect(after.ResourceVersion).To(gomega.Equal(before.ResourceVersion),
 		"Unchanged must perform zero writes")
 	g.Expect(after.Status.RetryBlocks[0].Reason).To(gomega.BeEmpty())
+}
+
+func TestBuildMutateRetryBlock_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.RetryBlocks = []v1beta1.RetryBlock{{
+		TargetRevision: "rev-a", State: v1beta1.RetryBlockHeld, AttemptsStarted: 2,
+	}}
+	r, c := newReconciler(t, replacement)
+	called := false
+
+	mutate := buildMutateRetryBlock(r.Client, original)
+	err := mutate(context.Background(), "rev-a", func(*workload.RetryBlock) workload.RetryBlockDisposition {
+		called = true
+		return workload.RetryBlockRemove
+	})
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(called).To(gomega.BeFalse())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}, got)).To(gomega.Succeed())
+	g.Expect(got.Status.RetryBlocks).To(gomega.Equal(replacement.Status.RetryBlocks))
 }
 
 // TestBuildMutateRetryBlock_RetentionPrunesOldest pins the retention

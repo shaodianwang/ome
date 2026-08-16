@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -95,6 +96,11 @@ type ReconcileInput struct {
 	// exceed a positive budget and proceeds alone. A nil pointer preserves the
 	// unbounded compatibility behavior. A non-nil zero value fails closed.
 	ScaleUpPodBatchSize *int32
+
+	// FinalizeInstanceResources removes optional per-Instance resources after
+	// the authoritative Pod snapshot is empty. It reports complete only after
+	// those resources are authoritatively absent.
+	FinalizeInstanceResources func(ctx context.Context, idx int32) (complete bool, err error)
 
 	// RemoveInstance drops the InstanceStatus entry for idx and
 	// returns (true, nil) when a real removal happened, (false, nil)
@@ -216,6 +222,18 @@ type ReconcileInput struct {
 // ordinary idempotent status writers may translate it to a successful no-op.
 var ErrStatusOwnerGone = errors.New("status owner is gone")
 
+// ErrStatusMutationPrecondition reports that an authoritative owner/status
+// snapshot does not match the decision that produced a mutation batch.
+// The complete batch is rejected and callers must replan before effects.
+var ErrStatusMutationPrecondition = errors.New("status mutation precondition failed")
+
+// InstanceMutationSnapshot is the authoritative owner/status view presented
+// to a batch precondition on every conflict attempt.
+type InstanceMutationSnapshot struct {
+	OwnerUID  k8stypes.UID
+	Instances map[int32]InstanceStatus
+}
+
 // InstanceMutation is one buffered InstanceStatus mutation, keyed by Instance
 // index. An upsert sets Mutate; a removal sets Remove and leaves Mutate nil.
 // Precondition can reject a mutation against the fresh status snapshot.
@@ -227,7 +245,15 @@ type InstanceMutation struct {
 	Mutate       func(*InstanceStatus) bool
 	Remove       bool
 	Precondition func(*InstanceStatus) bool
-	OnCommit     func(previous, current *InstanceStatus)
+	// BatchPrecondition guards the complete mutation set. When any batch
+	// precondition rejects the fresh snapshot, no mutation in the set is
+	// applied. Callers normally attach one shared guard to the first mutation.
+	BatchPrecondition func(InstanceMutationSnapshot) bool
+	// Postcondition identifies this mutation's committed representation after
+	// an ambiguous status-update response. Every mutation in a confirmable
+	// batch supplies one; removals are confirmed by authoritative absence.
+	Postcondition func(*InstanceStatus) bool
+	OnCommit      func(previous, current *InstanceStatus)
 }
 
 // DispositionDeps carries the operator-config inputs and adapter hooks

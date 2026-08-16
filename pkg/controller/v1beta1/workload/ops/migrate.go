@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -77,8 +78,9 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //     record Phase=Draining at drain start.
 //  6. Promote surge Ready+RunningRevision, drop source InstanceStatus,
 //     persist Completed ledger entry, then record Phase=Completed +
-//     CompletedAt — in that order (crash between steps re-runs the
-//     idempotent tail).
+//     CompletedAt — in that order. A Draining record whose source status
+//     and pods are already absent resumes at resource finalization and
+//     re-runs the idempotent completion tail.
 //
 // Multi-pod (gang) Instances migrate as a whole: the surge copies the
 // source's Runner layout and worker template from its RunningRevision;
@@ -118,7 +120,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	}
 	if entry.Phase.Terminal() {
 		// Already terminal — caller can continue. accepted=true so the
-		// caller knows the request was previously taken and is fully
+		// caller knows the request was already taken and is fully
 		// handled (no fall-through needed).
 		return true, true, nil
 	}
@@ -137,7 +139,9 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// fresh record (SurgeInstance unset, or the pre-allocation -1
 	// sentinel imported from a legacy ledger row).
 	source := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
+	var surge *workload.InstanceStatus
 	var surgeIdx int32
+	pairConfirmedForEffects := false
 	// freshStamp records that THIS pass allocated + stamped the surge
 	// (the default case below). A gang surge requeues right after, so the
 	// next pass's EnsurePodGroups creates the surge PodGroup before any
@@ -146,6 +150,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if entry.SurgeInstance != nil && *entry.SurgeInstance >= 0 {
 		// In-flight — accepted on a prior pass; the record is the anchor.
 		surgeIdx = *entry.SurgeInstance
+		surge = findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx)
 		accepted = true
 		// Crash window between the record's SurgeInstance write and the
 		// pair stamps: while the record is still <= SurgePending the
@@ -157,12 +162,25 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			// EnsurePodGroups ran without the surge index — treat the
 			// re-ensured stamp like a fresh one so a gang surge requeues
 			// below and gets its PodGroup before its pods render.
-			freshStamp = findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx) == nil
-			if err := patchInstanceStatusMigrating(ctx, input, sourceIdx, surgeIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
-				return false, accepted, fmt.Errorf("Migrate: ensure source stamp (instance=%d): %w", sourceIdx, err)
-			}
-			if err := patchInstanceStatusMigrationSurge(ctx, input, surgeIdx, sourceIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
-				return false, accepted, fmt.Errorf("Migrate: ensure surge stamp (instance=%d): %w", surgeIdx, err)
+			freshStamp = surge == nil
+			if input.ApplyInstanceMutationsWithRetryBlock != nil {
+				confirmed, cerr := establishMigrationPair(
+					ctx, input, source, surge, requestUUID, surgeIdx, plan.InstanceReadyTimeout,
+				)
+				if cerr != nil {
+					return false, accepted, fmt.Errorf("Migrate: ensure migration pair: %w", cerr)
+				}
+				if !confirmed {
+					return false, accepted, nil
+				}
+				pairConfirmedForEffects = true
+			} else {
+				if err := patchInstanceStatusMigrating(ctx, input, sourceIdx, surgeIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
+					return false, accepted, fmt.Errorf("Migrate: ensure source stamp (instance=%d): %w", sourceIdx, err)
+				}
+				if err := patchInstanceStatusMigrationSurge(ctx, input, surgeIdx, sourceIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
+					return false, accepted, fmt.Errorf("Migrate: ensure surge stamp (instance=%d): %w", surgeIdx, err)
+				}
 			}
 		}
 	} else {
@@ -271,11 +289,25 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		}); err != nil {
 			return false, false, fmt.Errorf("Migrate: record surge allocation (uuid=%s): %w", requestUUID, err)
 		}
-		if err := patchInstanceStatusMigrating(ctx, input, sourceIdx, surgeIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
-			return false, false, fmt.Errorf("Migrate: stamp source status (instance=%d): %w", sourceIdx, err)
-		}
-		if err := patchInstanceStatusMigrationSurge(ctx, input, surgeIdx, sourceIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
-			return false, false, fmt.Errorf("Migrate: stamp surge status (instance=%d): %w", surgeIdx, err)
+		accepted = true
+		if input.ApplyInstanceMutationsWithRetryBlock != nil {
+			confirmed, cerr := establishMigrationPair(
+				ctx, input, source, nil, requestUUID, surgeIdx, plan.InstanceReadyTimeout,
+			)
+			if cerr != nil {
+				return false, accepted, fmt.Errorf("Migrate: stamp migration pair: %w", cerr)
+			}
+			if !confirmed {
+				return false, accepted, nil
+			}
+			pairConfirmedForEffects = true
+		} else {
+			if err := patchInstanceStatusMigrating(ctx, input, sourceIdx, surgeIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
+				return false, false, fmt.Errorf("Migrate: stamp source status (instance=%d): %w", sourceIdx, err)
+			}
+			if err := patchInstanceStatusMigrationSurge(ctx, input, surgeIdx, sourceIdx, requestUUID, plan.InstanceReadyTimeout); err != nil {
+				return false, false, fmt.Errorf("Migrate: stamp surge status (instance=%d): %w", surgeIdx, err)
+			}
 		}
 		// Audit: replace the accept-time Started row (surge index -1
 		// sentinel) with the real surge index — same UUID upserts in place.
@@ -287,7 +319,6 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			"OMENative %s migration accepted (uuid=%s, source-node=%s, surge-index=%d)",
 			instanceKey(input.Key.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
 		// Record + stamps + ledger persisted — Migrate has taken ownership.
-		accepted = true
 		freshStamp = true
 	}
 
@@ -313,6 +344,55 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, surgeIdx)
 	if err != nil {
 		return false, accepted, fmt.Errorf("Migrate: list surge pods: %w", err)
+	}
+	if migrationCompletionTailRecoverable(entry, source, sourcePods, surge) {
+		// The source status is the normal ownership token for terminal
+		// cleanup. Once it is absent, only the owner-aware status adapter can
+		// prove that absence against the current owner before residual
+		// per-Instance resources are finalized.
+		if input.ApplyInstanceMutationsWithRetryBlock == nil {
+			return false, accepted, nil
+		}
+		confirmed, cerr := confirmMigrationCompletionPair(ctx, input, sourceIdx, surge)
+		if cerr != nil {
+			return false, accepted, fmt.Errorf("Migrate: confirm completion pair: %w", cerr)
+		}
+		if !confirmed {
+			return false, accepted, nil
+		}
+		finalized, ferr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, nil)
+		if ferr != nil {
+			return false, accepted, fmt.Errorf("Migrate: finalize absent source Instance: %w", ferr)
+		}
+		if !finalized {
+			return false, accepted, nil
+		}
+		confirmed, cerr = confirmMigrationCompletionPair(ctx, input, sourceIdx, surge)
+		if cerr != nil {
+			return false, accepted, fmt.Errorf("Migrate: recheck completion pair: %w", cerr)
+		}
+		if !confirmed {
+			return false, accepted, nil
+		}
+		if err := completeMigrationTail(ctx, deps, input, ledger, req, requestUUID, sourceIdx, surgeIdx, surge.RunningRevision); err != nil {
+			return false, accepted, err
+		}
+		return true, accepted, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock != nil && !pairConfirmedForEffects {
+		targetRevision := ""
+		if source != nil {
+			targetRevision = source.RunningRevision
+		}
+		confirmed, cerr := confirmMigrationDrainPair(
+			ctx, input, source, surge, requestUUID, surgeIdx, targetRevision, len(sourcePods) == 0,
+		)
+		if cerr != nil {
+			return false, accepted, fmt.Errorf("Migrate: confirm migration pair before effects: %w", cerr)
+		}
+		if !confirmed {
+			return false, accepted, nil
+		}
 	}
 
 	// Migration moves placement, not template — surge runs at the source's
@@ -427,6 +507,15 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if !tailOK {
 		return false, accepted, nil
 	}
+	pairConfirmed, perr := confirmMigrationDrainPair(
+		ctx, input, source, surge, requestUUID, surgeIdx, surgeRev.Name, len(sourcePods) == 0,
+	)
+	if perr != nil {
+		return false, accepted, fmt.Errorf("Migrate: confirm migration pair before drain: %w", perr)
+	}
+	if !pairConfirmed {
+		return false, accepted, nil
+	}
 
 	// Every surge gate passed (exists + runtime-ready + in-rotation +
 	// available) — the record advances to SurgeReady.
@@ -507,21 +596,72 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, accepted, nil
 	}
 
-	// Terminal order: surge promote + source-status removal first, then
-	// the Completed ledger row (audit), then the record's terminal
-	// stamp. The record write is LAST so a crash anywhere in this tail
+	// Terminal order: surge promote, source resource finalization, and guarded
+	// source-status removal; then the Completed ledger row (audit); then the
+	// record's terminal stamp. The record write is LAST so a crash in this tail
 	// leaves it non-terminal and the next pass re-runs the idempotent
 	// steps to completion; a record already Completed would never be
 	// picked again and cleanup would strand.
-	if err := patchInstanceStatusReadyOnRevision(ctx, input, surgeIdx, surgeRev.Name); err != nil {
-		return false, accepted, fmt.Errorf("Migrate: promote surge to Ready: %w", err)
+	promoted, perr := promoteMigrationSurge(ctx, input, source, surge, requestUUID, surgeRev.Name)
+	if perr != nil {
+		return false, accepted, fmt.Errorf("Migrate: promote surge to Ready: %w", perr)
 	}
-	if _, rerr := input.RemoveInstance(ctx, sourceIdx); rerr != nil {
-		return false, accepted, fmt.Errorf("Migrate: remove source InstanceStatus: %w", rerr)
+	if !promoted {
+		return false, accepted, nil
 	}
+	if source != nil && !migrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
+		return false, accepted, nil
+	}
+	removed, rerr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, source)
+	if rerr != nil {
+		return false, accepted, fmt.Errorf("Migrate: finalize source Instance: %w", rerr)
+	}
+	if !removed {
+		return false, accepted, nil
+	}
+	promotedSurge := *surge
+	promotedSurge.Phase = workload.InstancePhaseReady
+	promotedSurge.RunningRevision = surgeRev.Name
+	promotedSurge.TargetRevision = ""
+	promotedSurge.Operation = nil
+	confirmed, cerr := confirmMigrationCompletionPair(ctx, input, sourceIdx, &promotedSurge)
+	if cerr != nil {
+		return false, accepted, fmt.Errorf("Migrate: confirm promoted migration pair: %w", cerr)
+	}
+	if !confirmed {
+		return false, accepted, nil
+	}
+	if err := completeMigrationTail(ctx, deps, input, ledger, req, requestUUID, sourceIdx, surgeIdx, surgeRev.Name); err != nil {
+		return false, accepted, err
+	}
+	return true, accepted, nil
+}
+
+func migrationCompletionTailRecoverable(
+	record *workload.MigrationRecord,
+	source *workload.InstanceStatus,
+	sourcePods []*corev1.Pod,
+	surge *workload.InstanceStatus,
+) bool {
+	return record.Phase == workload.MigrationPhaseDraining &&
+		source == nil && len(sourcePods) == 0 &&
+		surge != nil && surge.Phase == workload.InstancePhaseReady &&
+		surge.Operation == nil && surge.RunningRevision != ""
+}
+
+func completeMigrationTail(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	ledger *audit.Ledger,
+	req *audit.MigrationRequest,
+	requestUUID string,
+	sourceIdx, surgeIdx int32,
+	runningRevision string,
+) error {
 	ledger.UpsertEntry(audit.NewTerminalEntry(*ledger.InFlightEntryOrSeed(requestUUID, req, surgeIdx), audit.PhaseCompleted, "migrated"))
 	if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
-		return false, accepted, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
+		return fmt.Errorf("Migrate: persist Completed ledger: %w", err)
 	}
 	completedMsg := fmt.Sprintf("migrated to instance=%d", surgeIdx)
 	if err := input.MutateMigration(ctx, requestUUID, func(m *workload.MigrationRecord) bool {
@@ -534,12 +674,281 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		m.CompletedAt = &now
 		return true
 	}); err != nil {
-		return false, accepted, fmt.Errorf("Migrate: record Phase=Completed (uuid=%s): %w", requestUUID, err)
+		return fmt.Errorf("Migrate: record Phase=Completed (uuid=%s): %w", requestUUID, err)
 	}
 	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationCompleted,
 		"OMENative migration uuid=%s complete: %s -> instance=%d (revision=%s)",
-		requestUUID, instanceKey(input.Key.Component, sourceIdx), surgeIdx, surgeRev.Name)
-	return true, accepted, nil
+		requestUUID, instanceKey(input.Key.Component, sourceIdx), surgeIdx, runningRevision)
+	return nil
+}
+
+func establishMigrationPair(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	surge *workload.InstanceStatus,
+	requestUUID string,
+	surgeIdx int32,
+	timeout time.Duration,
+) (bool, error) {
+	if !migrationPairStampable(source, surge, requestUUID, surgeIdx) {
+		return false, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+	ownerUID := input.OwnerObject.GetUID()
+	sourceGuard, sourceState := terminalIdentityGuard(input, source.Index, source)
+	surgeGuard, surgeState := terminalIdentityGuard(input, surgeIdx, surge)
+	confirmed := false
+	batchGuard := func(snapshot workload.InstanceMutationSnapshot) bool {
+		if snapshot.OwnerUID != ownerUID {
+			confirmed = false
+			return false
+		}
+		currentSource, sourceFound := snapshot.Instances[source.Index]
+		currentSurge, surgeFound := snapshot.Instances[surgeIdx]
+		currentSourceOwned := sourceFound && migrationSourceOwnsRemoval(&currentSource, requestUUID, surgeIdx)
+		currentSurgeOwned := surgeFound && migrationSurgeOwnsPromotion(&currentSurge, requestUUID, source.Index)
+		if (currentSourceOwned && currentSurgeOwned) ||
+			(surge == nil && currentSourceOwned && !surgeFound) {
+			confirmed = true
+			return true
+		}
+		confirmed = sourceGuard(snapshot) && sourceState.matched && surgeGuard(snapshot)
+		if surge == nil {
+			confirmed = confirmed && surgeState.absent
+		} else {
+			confirmed = confirmed && surgeState.matched
+		}
+		return confirmed
+	}
+
+	sourceMutation := migrationStatusMutation(input, source.Index, surgeIdx, migrationRoleSource, requestUUID, timeout)
+	sourceMutation.BatchPrecondition = batchGuard
+	sourceMutation.Postcondition = func(status *workload.InstanceStatus) bool {
+		return migrationSourceOwnsRemoval(status, requestUUID, surgeIdx)
+	}
+	surgeMutation := migrationStatusMutation(input, surgeIdx, source.Index, migrationRoleSurge, requestUUID, timeout)
+	surgeMutation.Postcondition = func(status *workload.InstanceStatus) bool {
+		return migrationSurgeOwnsPromotion(status, requestUUID, source.Index)
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{sourceMutation, surgeMutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	return confirmed, err
+}
+
+func migrationPairStampable(
+	source *workload.InstanceStatus,
+	surge *workload.InstanceStatus,
+	requestUUID string,
+	surgeIdx int32,
+) bool {
+	if source == nil {
+		return false
+	}
+	sourceOwned := migrationSourceOwnsRemoval(source, requestUUID, surgeIdx)
+	surgeOwned := migrationSurgeOwnsPromotion(surge, requestUUID, source.Index)
+	if sourceOwned {
+		return surge == nil || surgeOwned
+	}
+	return source.Phase == workload.InstancePhaseReady && source.Operation == nil &&
+		source.RunningRevision != "" && surge == nil
+}
+
+func confirmMigrationCompletionPair(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	sourceIdx int32,
+	surge *workload.InstanceStatus,
+) (bool, error) {
+	if surge == nil || surge.RunningRevision == "" ||
+		!migrationPromotedSurgeMatches(surge, surge.RunningRevision) {
+		return false, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock == nil {
+		return true, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+	sourceGuard, sourceState := terminalIdentityGuard(input, sourceIdx, nil)
+	surgeGuard, surgeState := terminalIdentityGuard(input, surge.Index, surge)
+	confirmed := false
+	preflight := workload.InstanceMutation{
+		Index:  sourceIdx,
+		Mutate: func(*workload.InstanceStatus) bool { return false },
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			confirmed = sourceGuard(snapshot) && sourceState.absent &&
+				surgeGuard(snapshot) && surgeState.matched
+			if !confirmed {
+				return false
+			}
+			currentSurge := snapshot.Instances[surge.Index]
+			confirmed = migrationPromotedSurgeMatches(&currentSurge, surge.RunningRevision)
+			return confirmed
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{preflight})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	return confirmed, err
+}
+
+func confirmMigrationDrainPair(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	surge *workload.InstanceStatus,
+	requestUUID string,
+	surgeIdx int32,
+	targetRevision string,
+	allowPromoted bool,
+) (bool, error) {
+	if !migrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
+		return false, nil
+	}
+	targetMatches := func(status *workload.InstanceStatus) bool {
+		return migrationSurgeOwnsPromotion(status, requestUUID, source.Index)
+	}
+	if !targetMatches(surge) {
+		if !allowPromoted || !migrationPromotedSurgeMatches(surge, targetRevision) {
+			return false, nil
+		}
+		targetMatches = func(status *workload.InstanceStatus) bool {
+			return migrationPromotedSurgeMatches(status, targetRevision)
+		}
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock == nil {
+		return true, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+	sourceGuard, sourceState := terminalIdentityGuard(input, source.Index, source)
+	surgeGuard, surgeState := terminalIdentityGuard(input, surge.Index, surge)
+	confirmed := false
+	preflight := workload.InstanceMutation{
+		Index:  source.Index,
+		Mutate: func(*workload.InstanceStatus) bool { return false },
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			if !sourceGuard(snapshot) || !sourceState.matched ||
+				!surgeGuard(snapshot) || !surgeState.matched {
+				confirmed = false
+				return false
+			}
+			currentSurge := snapshot.Instances[surge.Index]
+			confirmed = targetMatches(&currentSurge)
+			return confirmed
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{preflight})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	return confirmed, err
+}
+
+func promoteMigrationSurge(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	surge *workload.InstanceStatus,
+	requestUUID string,
+	targetRevision string,
+) (bool, error) {
+	if source == nil || surge == nil || !migrationSourceOwnsRemoval(source, requestUUID, surge.Index) {
+		return false, nil
+	}
+	active := migrationSurgeOwnsPromotion(surge, requestUUID, source.Index)
+	alreadyPromoted := migrationPromotedSurgeMatches(surge, targetRevision)
+	if !active && !alreadyPromoted {
+		return false, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock == nil {
+		if err := patchInstanceStatusReadyOnRevision(ctx, input, surge.Index, targetRevision); err != nil {
+			if errors.Is(err, workload.ErrStatusOwnerGone) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+	if alreadyPromoted {
+		confirmed, err := confirmMigrationDrainPair(
+			ctx, input, source, surge, requestUUID, surge.Index, targetRevision, true,
+		)
+		if err != nil || !confirmed {
+			return false, err
+		}
+		if err := pruneRetryBlockOnPromote(ctx, input, targetRevision); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+	sourceGuard, sourceState := terminalIdentityGuard(input, source.Index, source)
+	surgeGuard, surgeState := terminalIdentityGuard(input, surge.Index, surge)
+	mutation := createStatusReadyOnRevisionMutation(surge.Index, targetRevision)
+	promoted := false
+	mutation.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
+		if !sourceGuard(snapshot) || !sourceState.matched ||
+			!surgeGuard(snapshot) || !surgeState.matched {
+			return false
+		}
+		currentSource := snapshot.Instances[source.Index]
+		currentSurge := snapshot.Instances[surge.Index]
+		return migrationSourceOwnsRemoval(&currentSource, requestUUID, surge.Index) &&
+			migrationSurgeOwnsPromotion(&currentSurge, requestUUID, source.Index)
+	}
+	mutation.Postcondition = func(status *workload.InstanceStatus) bool {
+		return status != nil && status.Index == surge.Index &&
+			status.Incarnation == surge.Incarnation && status.ActiveOrdinal == surge.ActiveOrdinal &&
+			migrationPromotedSurgeMatches(status, targetRevision)
+	}
+	mutation.OnCommit = func(_, _ *workload.InstanceStatus) {
+		promoted = true
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil || !promoted {
+		return false, err
+	}
+
+	if err := pruneRetryBlockOnPromote(ctx, input, targetRevision); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func migrationSourceOwnsRemoval(status *workload.InstanceStatus, requestUUID string, surgeIdx int32) bool {
+	return status != nil && status.Phase == workload.InstancePhaseMigrating &&
+		status.RunningRevision != "" && status.TargetRevision == "" && status.Operation != nil &&
+		status.Operation.Type == workload.InstanceOperationMigrate &&
+		status.Operation.RequestUUID == requestUUID &&
+		status.Operation.SurgeIndex != nil && *status.Operation.SurgeIndex == surgeIdx
+}
+
+func migrationSurgeOwnsPromotion(status *workload.InstanceStatus, requestUUID string, sourceIdx int32) bool {
+	return status != nil && status.Incarnation == 1 && status.ActiveOrdinal == 0 &&
+		status.Phase == workload.InstancePhaseCreating && status.RunningRevision == "" &&
+		status.TargetRevision == "" && status.Operation != nil &&
+		status.Operation.Type == workload.InstanceOperationMigrate &&
+		status.Operation.RequestUUID == requestUUID &&
+		status.Operation.SurgeIndex != nil && *status.Operation.SurgeIndex == sourceIdx
+}
+
+func migrationPromotedSurgeMatches(status *workload.InstanceStatus, targetRevision string) bool {
+	return status != nil && status.Incarnation == 1 && status.ActiveOrdinal == 0 &&
+		status.Phase == workload.InstancePhaseReady &&
+		status.RunningRevision == targetRevision && status.TargetRevision == "" && status.Operation == nil
 }
 
 // surgeTailGatesPassed reports whether the surge Instance passes the
@@ -796,6 +1205,11 @@ const (
 // (FromNode, hints, reason) live on the owner's status.migrations
 // record, not here.
 func stampMigrationStatus(ctx context.Context, input workload.ReconcileInput, idx, siblingIdx int32, role migrationRole, uuid string, timeout time.Duration) error {
+	mutation := migrationStatusMutation(input, idx, siblingIdx, role, uuid, timeout)
+	return input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
+}
+
+func migrationStatusMutation(input workload.ReconcileInput, idx, siblingIdx int32, role migrationRole, uuid string, timeout time.Duration) workload.InstanceMutation {
 	now := metav1.NewTime(input.Now())
 	siblingPtr := siblingIdx
 	wantPhase := workload.InstancePhaseMigrating
@@ -804,7 +1218,7 @@ func stampMigrationStatus(ctx context.Context, input workload.ReconcileInput, id
 		wantPhase = workload.InstancePhaseCreating
 		idSuffix = "-surge"
 	}
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
 		if role == migrationRoleSource && s.Phase == "" {
 			// Fresh-empty slot from the append path: the source status
 			// was removed out from under us — don't resurrect it. The
@@ -831,7 +1245,7 @@ func stampMigrationStatus(ctx context.Context, input workload.ReconcileInput, id
 			Deadline:       metav1.NewTime(now.Add(timeout)),
 		}
 		return true
-	})
+	}}
 }
 
 // patchInstanceStatusMigrating stamps source Phase=Migrating; SurgeIndex

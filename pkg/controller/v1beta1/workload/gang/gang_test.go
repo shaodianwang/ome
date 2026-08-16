@@ -50,6 +50,24 @@ func newOwner(ns, name string) client.Object {
 
 func newGangClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
+	var owner client.Object
+	for _, obj := range initObjs {
+		if _, isPodGroup := obj.(*schedulingv1alpha1.PodGroup); !isPodGroup {
+			if _, isPod := obj.(*corev1.Pod); !isPod {
+				owner = obj
+				break
+			}
+		}
+	}
+	if owner != nil {
+		for _, obj := range initObjs {
+			pg, ok := obj.(*schedulingv1alpha1.PodGroup)
+			if !ok || metav1.GetControllerOfNoCopy(pg) != nil {
+				continue
+			}
+			pg.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(owner, testOwnerGVK)}
+		}
+	}
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1: %v", err)
@@ -724,12 +742,12 @@ func TestExtraPodGroupIndices(t *testing.T) {
 	observed := []workload.InstanceStatus{
 		{Index: 0, Phase: workload.InstancePhaseReady},
 		{Index: 1, Phase: workload.InstancePhaseReady},
-		{Index: 2, Phase: workload.InstancePhaseMigrating}, // protected from delete
+		{Index: 2, Phase: workload.InstancePhaseMigrating},
 		{Index: 3, Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationMigrate}}, // protected surge
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationMigrate}},
 	}
 	plan := workload.ComponentPlan{
-		Instances: []workload.InstancePlan{{Index: 0}}, // plan only covers index 0
+		Instances: []workload.InstancePlan{{Index: 0}},
 	}
 
 	got := extraPodGroupIndices(observed, plan)

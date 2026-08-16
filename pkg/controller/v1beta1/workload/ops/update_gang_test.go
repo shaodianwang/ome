@@ -273,9 +273,8 @@ func drainRecorderEvents(rec *record.FakeRecorder) []string {
 }
 
 // TestGangSurge_PromoteEmitsCompletedEvent pins the completion edge's
-// event reason: the promote pass must emit RecreateUpdateCompleted —
-// pre-fix it re-emitted RecreateUpdateStarted, so reason-filtered
-// monitoring never saw gang rollouts finish.
+// event reason: the promote pass must emit RecreateUpdateCompleted so
+// reason-filtered monitoring observes gang rollouts finishing.
 func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
 	legacyResetExpectations(t)
 	const isvcName, ns = "gang-b", "test-ns"
@@ -303,7 +302,20 @@ func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
 	}
 	var removed []int32
 	input := gangAbandonInput(isvcName, ns, src, &removed)
-	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{*src}
+	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		*src,
+		{
+			Index:          surgeIdx,
+			Incarnation:    1,
+			Phase:          workload.InstancePhaseCreating,
+			TargetRevision: "gang-b-engine-newrev",
+			Operation: &workload.InstanceOperation{
+				Type:           workload.InstanceOperationUpdate,
+				Step:           workload.UpdateStepGangSurgeTarget,
+				TargetRevision: "gang-b-engine-newrev",
+			},
+		},
+	}
 	input.EventTarget = legacyMinimalISVC(isvcName, ns, 1)
 	rec := record.NewFakeRecorder(16)
 	deps := legacyTestDeps(c)
@@ -333,10 +345,6 @@ func TestGangSurge_PromoteEmitsCompletedEvent(t *testing.T) {
 	}
 }
 
-// TestAbandonFailedGangSurge_EventReasons pins the abandon edge's event
-// identity: a failed abandon is a Warning with the dedicated
-// GangSurgeAbandoned reason (never the Started reason), a supersede
-// abandon a Normal with the same reason.
 func TestAbandonFailedGangSurge_EventReasons(t *testing.T) {
 	run := func(t *testing.T, failedTargetRev, wantPrefix string) []string {
 		t.Helper()
@@ -414,6 +422,17 @@ func TestGangSurge_InheritsExcludedNodes(t *testing.T) {
 		SurgeIndex:     &surgeIdx,
 		TargetRevision: tcr.Name,
 	}
+	ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+		Index:          surgeIdx,
+		Incarnation:    1,
+		Phase:          v1beta1.OMENativeInstanceCreating,
+		TargetRevision: tcr.Name,
+		Operation: &v1beta1.InstanceOperation{
+			Type:           v1beta1.InstanceOperationUpdate,
+			Step:           workload.UpdateStepGangSurgeTarget,
+			TargetRevision: tcr.Name,
+		},
+	})
 	if err := c.Status().Update(context.Background(), ir); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -29,6 +31,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
@@ -36,7 +39,7 @@ import (
 // testScheme returns a runtime.Scheme with the types the IR reconciler
 // exercises registered: v1beta1 (with status subresource for IR),
 // corev1 (Pods, EndpointSlices), appsv1 (ControllerRevisions),
-// discoveryv1 (EndpointSlices).
+// discoveryv1 (EndpointSlices), and schedulingv1alpha1 (PodGroups).
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -51,6 +54,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := discoveryv1.AddToScheme(s); err != nil {
 		t.Fatalf("discoveryv1.AddToScheme: %v", err)
+	}
+	if err := schedulingv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("schedulingv1alpha1.AddToScheme: %v", err)
 	}
 	return s
 }
@@ -260,6 +266,174 @@ func (r podListFailingReader) List(ctx context.Context, list client.ObjectList, 
 		return errors.New("injected live pod list failure")
 	}
 	return r.Reader.List(ctx, list, opts...)
+}
+
+type podGroupListFailingReader struct {
+	client.Reader
+	lists int
+}
+
+func (r *podGroupListFailingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*schedulingv1alpha1.PodGroupList); ok {
+		r.lists++
+		return errors.New("injected PodGroup list failure")
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+func TestReconcile_SinglePodSkipsPodGroupInventory(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	r, c := newReconciler(t, ir)
+	reader := &podGroupListFailingReader{Reader: c}
+	r.APIReader = reader
+	r.GangSchedulingAvailable = true
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Name: ir.Name, Namespace: ir.Namespace,
+	}})
+	if err != nil {
+		t.Fatalf("single-pod reconcile must not depend on PodGroup inventory: %v", err)
+	}
+	if reader.lists != 0 {
+		t.Fatalf("single-pod reconcile issued %d PodGroup LIST(s)", reader.lists)
+	}
+}
+
+func TestReconcile_TerminatingPodGroupWaitsForDeleteEvent(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Spec.Runners = []v1beta1.Runner{
+		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "test:v1"}}}}},
+		{Name: v1beta1.RunnerNameWorker, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "test:v1"}}}}},
+	}
+	now := metav1.Now()
+	pg := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+		Name:              query.PodGroupName(ir.Spec.ParentRef.Name, workload.ComponentEngine, 0),
+		Namespace:         ir.Namespace,
+		UID:               "terminating-pg",
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"example.com/hold"},
+		OwnerReferences:   []metav1.OwnerReference{*metav1.NewControllerRef(ir, IRGVK())},
+	}}
+	r, c := newReconciler(t, ir, pg)
+	r.APIReader = c
+	r.GangSchedulingAvailable = true
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err != nil {
+		t.Fatalf("reconcile terminating PodGroup: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("terminating PodGroup must wait for its watched delete event, got %+v", result)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace(ir.Namespace)); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("created %d pods while their PodGroup name was terminating", len(pods.Items))
+	}
+}
+
+func TestReconcile_GangCleanupRetainsStatusUntilPodGroupAbsent(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Spec.Runners = []v1beta1.Runner{
+		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "test:v2"}}}}},
+		{Name: v1beta1.RunnerNameWorker, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "test:v2"}}}}},
+	}
+	surgeIndex := int32(2)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceFailed,
+			RunningRevision: "llama-engine-old", TargetRevision: "llama-engine-retired",
+			Operation: &v1beta1.InstanceOperation{
+				ID: "source-0", Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
+				TargetRevision: "llama-engine-retired", SurgeIndex: &surgeIndex,
+			},
+		},
+		{
+			Index: surgeIndex, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating,
+			TargetRevision: "llama-engine-retired",
+			Operation: &v1beta1.InstanceOperation{
+				ID: "target-2", Type: v1beta1.InstanceOperationUpdate,
+				Step: workload.UpdateStepGangSurgeTarget, TargetRevision: "llama-engine-retired",
+			},
+		},
+	}
+	targetPG := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
+		Name:            query.PodGroupName(ir.Spec.ParentRef.Name, workload.ComponentEngine, surgeIndex),
+		Namespace:       ir.Namespace,
+		UID:             "target-pg",
+		Finalizers:      []string{"example.com/hold"},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ir, IRGVK())},
+	}}
+	r, c := newReconciler(t, ir, targetPG)
+	r.APIReader = c
+	r.GangSchedulingAvailable = true
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("delete PodGroup pass: %v", err)
+	}
+	stored := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get IR after delete request: %v", err)
+	}
+	if statusByIndex(stored.Status.InstanceStatuses, surgeIndex) == nil {
+		t.Fatal("cleanup marker was removed before PodGroup absence was observed")
+	}
+	terminating := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(targetPG), terminating); err != nil {
+		t.Fatalf("get terminating target PodGroup: %v", err)
+	}
+	if terminating.DeletionTimestamp == nil {
+		t.Fatal("target PodGroup delete was not issued")
+	}
+
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("terminating PodGroup pass: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get IR while PodGroup is terminating: %v", err)
+	}
+	if statusByIndex(stored.Status.InstanceStatuses, surgeIndex) == nil {
+		t.Fatal("cleanup marker was removed while the PodGroup was terminating")
+	}
+
+	terminating.Finalizers = nil
+	if err := c.Update(context.Background(), terminating); err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("release target PodGroup finalizer: %v", err)
+	}
+	remaining := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(targetPG), remaining); err == nil {
+		if err := c.Delete(context.Background(), remaining); err != nil && !apierrors.IsNotFound(err) {
+			t.Fatalf("complete target PodGroup deletion: %v", err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("get target PodGroup after finalizer release: %v", err)
+	}
+
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("absence completion pass: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get completed IR: %v", err)
+	}
+	if statusByIndex(stored.Status.InstanceStatuses, surgeIndex) != nil {
+		t.Fatal("cleanup marker remained after authoritative PodGroup absence")
+	}
+	source := statusByIndex(stored.Status.InstanceStatuses, 0)
+	if source == nil || source.Phase != v1beta1.OMENativeInstanceReady || source.Operation != nil {
+		t.Fatalf("source was not reset atomically with marker removal: %+v", source)
+	}
+}
+
+func statusByIndex(statuses []v1beta1.OMENativeInstanceStatus, index int32) *v1beta1.OMENativeInstanceStatus {
+	for i := range statuses {
+		if statuses[i].Index == index {
+			return &statuses[i]
+		}
+	}
+	return nil
 }
 
 func TestReconcile_PausedDeadlineParksWhenTopologyReadFails(t *testing.T) {
@@ -920,5 +1094,96 @@ func TestReconcileRelocationDirectives_ProjectionUsesCachedClient(t *testing.T) 
 
 	if got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3); got != nil {
 		t.Fatalf("exclusions: got %v want nil (projection must read the cache, where no ledger exists)", got)
+	}
+}
+
+func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testing.T) {
+	surgeIndex := int32(7)
+	observed := workload.WorkloadObservedState{
+		InstanceStatuses: []workload.InstanceStatus{
+			{
+				Index: 3,
+				Operation: &workload.InstanceOperation{
+					Type:       workload.InstanceOperationUpdate,
+					Step:       workloadops.UpdateStepSurgeDrain,
+					SurgeIndex: &surgeIndex,
+				},
+			},
+			{
+				Index: surgeIndex,
+				Operation: &workload.InstanceOperation{
+					Type: workload.InstanceOperationUpdate,
+					Step: workload.UpdateStepGangSurgeTargetCleanup,
+				},
+			},
+		},
+	}
+
+	owned := terminalFinalizationOwned(observed)
+	if _, found := owned[3]; !found {
+		t.Fatal("persisted gang source cleanup marker did not suppress PodGroup ensure")
+	}
+	if _, found := owned[surgeIndex]; !found {
+		t.Fatal("persisted gang target cleanup marker did not suppress PodGroup ensure")
+	}
+
+	observed.InstanceStatuses[0].Operation.Step = workloadops.UpdateStepSurge
+	observed.InstanceStatuses[1].Operation.Step = workload.UpdateStepGangSurgeTarget
+	if _, found := terminalFinalizationOwned(observed)[3]; found {
+		t.Fatal("pre-terminal gang source unexpectedly suppressed PodGroup ensure")
+	}
+	if _, found := terminalFinalizationOwned(observed)[surgeIndex]; found {
+		t.Fatal("pre-terminal gang target unexpectedly suppressed PodGroup ensure")
+	}
+}
+
+func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
+	const index int32 = 4
+	tests := []struct {
+		name     string
+		observed workload.WorkloadObservedState
+		want     bool
+	}{
+		{
+			name: "draining migration owns finalization",
+			observed: workload.WorkloadObservedState{Migrations: []workload.MigrationRecord{{
+				SourceInstance: index,
+				Phase:          workload.MigrationPhaseDraining,
+			}}},
+			want: true,
+		},
+		{
+			name: "surge-ready migration does not own finalization",
+			observed: workload.WorkloadObservedState{Migrations: []workload.MigrationRecord{{
+				SourceInstance: index,
+				Phase:          workload.MigrationPhaseSurgeReady,
+			}}},
+		},
+		{
+			name: "completed migration does not own finalization",
+			observed: workload.WorkloadObservedState{Migrations: []workload.MigrationRecord{{
+				SourceInstance: index,
+				Phase:          workload.MigrationPhaseCompleted,
+			}}},
+		},
+		{
+			name: "ordinary delete remains eager",
+			observed: workload.WorkloadObservedState{InstanceStatuses: []workload.InstanceStatus{{
+				Index: index,
+				Phase: workload.InstancePhaseDeleting,
+				Operation: &workload.InstanceOperation{
+					Type: workload.InstanceOperationDelete,
+				},
+			}}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, found := terminalFinalizationOwned(test.observed)[index]
+			if found != test.want {
+				t.Fatalf("terminal ownership: got %v want %v", found, test.want)
+			}
+		})
 	}
 }

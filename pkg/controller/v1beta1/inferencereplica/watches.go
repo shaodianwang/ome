@@ -37,6 +37,27 @@ const perRevisionServiceInfix = "-rev-"
 // headless Service name (`<isvc>-<component>-headless`).
 const headlessServiceSuffix = "-headless"
 
+// podGroupPredicate ignores scheduler status churn while preserving changes
+// that can affect reconciliation or complete terminal cleanup.
+func podGroupPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool { return true },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return true
+			}
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+				!equality.Semantic.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) ||
+				!equality.Semantic.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()) ||
+				!equality.Semantic.DeepEqual(e.ObjectOld.GetOwnerReferences(), e.ObjectNew.GetOwnerReferences()) ||
+				!equality.Semantic.DeepEqual(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers()) ||
+				!equality.Semantic.DeepEqual(e.ObjectOld.GetDeletionTimestamp(), e.ObjectNew.GetDeletionTimestamp())
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
 // EndpointSliceToIR maps an EndpointSlice for an OMENative drain Service
 // (the per-Component headless Service or a per-revision routed Service)
 // back to its owning InferenceReplica reconcile key.

@@ -2,12 +2,12 @@ package inferencereplica
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -476,12 +476,11 @@ func buildKey(ir *v1beta1.InferenceReplica) workload.Key {
 // apiserver round-trip when no real change happened — matches the
 // legacy ISVC-side contract so per-op writers stay idempotent.
 //
-// NotFound on Get or Update is treated as a successful no-op: the IR
-// was deleted under us, the InstanceStatus is gone with it, dropping
-// the work cleanly avoids saturating the work queue with retries on a
-// gone owner.
+// Owner disappearance or replacement returns ErrStatusOwnerGone so callers
+// stop before applying effects selected from the stale snapshot.
 func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 		var committed *v1beta1.OMENativeInstanceStatus
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -489,9 +488,12 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 			fresh := &v1beta1.InferenceReplica{}
 			if err := c.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			insts := fresh.Status.InstanceStatuses
 			pos := -1
@@ -516,7 +518,7 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 			fresh.Status.InstanceStatuses = insts
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
@@ -548,11 +550,7 @@ func buildApplyInstanceMutations(c client.Client, ir *v1beta1.InferenceReplica) 
 
 func instanceOnlyMutationAdapter(apply func(context.Context, []workloadtypes.InstanceMutation, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error) func(context.Context, []workloadtypes.InstanceMutation) error {
 	return func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
-		err := apply(ctx, muts, "", nil)
-		if errors.Is(err, workloadtypes.ErrStatusOwnerGone) {
-			return nil
-		}
-		return err
+		return apply(ctx, muts, "", nil)
 	}
 }
 
@@ -587,6 +585,7 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 		reads = c
 	}
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		mutationCounts := make(map[int32]int, len(muts))
 		for i := range muts {
@@ -623,6 +622,9 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 				}
 				return fmt.Errorf("re-read IR: %w", err)
 			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
+			}
 			insts := fresh.Status.InstanceStatuses
 			slots := make(map[int32]v1beta1.OMENativeInstanceStatus, len(insts)+len(muts))
 			order := make([]int32, 0, len(insts)+len(muts))
@@ -634,6 +636,21 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 					ordered[idx] = struct{}{}
 				}
 				slots[idx] = insts[i]
+			}
+			for _, mutation := range muts {
+				if mutation.BatchPrecondition == nil {
+					continue
+				}
+				snapshot := workloadtypes.InstanceMutationSnapshot{
+					OwnerUID:  fresh.UID,
+					Instances: make(map[int32]workloadtypes.InstanceStatus, len(slots)),
+				}
+				for index, slot := range slots {
+					snapshot.Instances[index] = v1beta1convert.InstanceStatusToWorkload(*slot.DeepCopy())
+				}
+				if !mutation.BatchPrecondition(snapshot) {
+					return workloadtypes.ErrStatusMutationPrecondition
+				}
 			}
 			instanceChanged := false
 			removalApplied := false
@@ -708,6 +725,7 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 			}
 
 			retryBlockChanged := false
+			var retryBlockPostcondition func([]v1beta1.RetryBlock) bool
 			if mutateRetryBlock != nil {
 				blocks := fresh.Status.RetryBlocks
 				pos := -1
@@ -721,7 +739,8 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 				if pos != -1 {
 					w = retryBlockToWorkload(blocks[pos])
 				}
-				switch mutateRetryBlock(&w) {
+				disposition := mutateRetryBlock(&w)
+				switch disposition {
 				case workloadtypes.RetryBlockPersist:
 					next := retryBlockFromWorkload(w)
 					next.TargetRevision = targetRevision
@@ -739,6 +758,11 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 				}
 				if retryBlockChanged {
 					fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
+					expected, expectedFound := retryBlockForRevision(fresh.Status.RetryBlocks, targetRevision)
+					retryBlockPostcondition = func(blocks []v1beta1.RetryBlock) bool {
+						actual, found := retryBlockForRevision(blocks, targetRevision)
+						return found == expectedFound && (!found || apiequality.Semantic.DeepEqual(actual, expected))
+					}
 				}
 			}
 
@@ -749,7 +773,21 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
-				return fmt.Errorf("update IR status: %w", err)
+				updateErr := fmt.Errorf("update IR status: %w", err)
+				confirmed := &v1beta1.InferenceReplica{}
+				if readErr := reads.Get(ctx, key, confirmed); readErr != nil || confirmed.UID != fresh.UID {
+					return updateErr
+				}
+				if len(muts) > 0 && !instanceMutationPostconditionsHold(confirmed, muts) {
+					return updateErr
+				}
+				if retryBlockPostcondition != nil && !retryBlockPostcondition(confirmed.Status.RetryBlocks) {
+					return updateErr
+				}
+				if len(muts) == 0 && retryBlockPostcondition == nil {
+					return updateErr
+				}
+				fresh = confirmed
 			}
 			persistedSlots := make(map[int32]v1beta1.OMENativeInstanceStatus, len(fresh.Status.InstanceStatuses))
 			for i := range fresh.Status.InstanceStatuses {
@@ -813,6 +851,39 @@ func cloneWorkloadInstanceStatus(status workloadtypes.InstanceStatus) *workloadt
 	return &copy
 }
 
+func instanceMutationPostconditionsHold(ir *v1beta1.InferenceReplica, mutations []workloadtypes.InstanceMutation) bool {
+	if ir == nil || len(mutations) == 0 {
+		return false
+	}
+	statuses := make(map[int32]*workloadtypes.InstanceStatus, len(ir.Status.InstanceStatuses))
+	for i := range ir.Status.InstanceStatuses {
+		status := v1beta1convert.InstanceStatusToWorkload(*ir.Status.InstanceStatuses[i].DeepCopy())
+		statuses[status.Index] = &status
+	}
+	for _, mutation := range mutations {
+		status, found := statuses[mutation.Index]
+		if mutation.Remove {
+			if found {
+				return false
+			}
+			continue
+		}
+		if !found || mutation.Postcondition == nil || !mutation.Postcondition(status) {
+			return false
+		}
+	}
+	return true
+}
+
+func retryBlockForRevision(blocks []v1beta1.RetryBlock, revision string) (v1beta1.RetryBlock, bool) {
+	for i := range blocks {
+		if blocks[i].TargetRevision == revision {
+			return *blocks[i].DeepCopy(), true
+		}
+	}
+	return v1beta1.RetryBlock{}, false
+}
+
 func replaceInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OMENativeInstanceStatus) {
 	if ir == nil {
 		return
@@ -858,8 +929,8 @@ func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OME
 // status tail on every return path, so promotion timing is uniform across
 // success, early-requeue, and paused reconciles.
 //
-//   - fresh-Get the IR so the RolloutComplete evaluation observes this
-//     reconcile's just-applied per-Instance updates;
+//   - authoritative Get the IR so RolloutComplete observes per-Instance
+//     updates committed earlier in the same reconcile;
 //   - promote CurrentRevision = targetName IFF workload.RolloutComplete
 //     (every Instance Ready on targetName at partition 0). Partition>0
 //     never satisfies RolloutComplete, so a staged rollout does not
@@ -867,13 +938,17 @@ func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OME
 //     CurrentRevision != UpdateRevision skew;
 //   - already-equal short-circuits with no write (a converged steady
 //     state performs ZERO writes);
-//   - retry.RetryOnConflict + NotFound-as-no-op mirror buildMutateInstance.
+//   - retry.RetryOnConflict mirrors buildMutateInstance.
 //
 // On a committed promotion the new CurrentRevision is mirrored onto the
 // caller's in-memory IR so the deferred aggregator's Ready computation and
 // the reconciler's promotion log observe the post-write value.
-func buildPromoteCurrentRevision(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetName string) error {
+func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetName string) error {
+	if reads == nil {
+		reads = c
+	}
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, targetName string) error {
 		if targetName == "" {
 			return nil
@@ -882,11 +957,14 @@ func buildPromoteCurrentRevision(c client.Client, ir *v1beta1.InferenceReplica) 
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			committed = ""
 			fresh := &v1beta1.InferenceReplica{}
-			if err := c.Get(ctx, key, fresh); err != nil {
+			if err := reads.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
 			if fresh.Status.CurrentRevision == targetName || !workload.RolloutComplete(insts, targetName) {
@@ -895,7 +973,7 @@ func buildPromoteCurrentRevision(c client.Client, ir *v1beta1.InferenceReplica) 
 			fresh.Status.CurrentRevision = targetName
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
@@ -931,10 +1009,10 @@ const maxHistoricalRetryBlocks = 3
 // caller's in-memory IR so later ops in the same pass observe the
 // post-write state.
 //
-// NotFound on Get or Update is a successful no-op: the IR was deleted
-// under us and the block is gone with it.
+// Owner disappearance or replacement returns ErrStatusOwnerGone.
 func buildMutateRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
 		var committed []v1beta1.RetryBlock
 		wrote := false
@@ -943,9 +1021,12 @@ func buildMutateRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(c
 			fresh := &v1beta1.InferenceReplica{}
 			if err := c.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			blocks := fresh.Status.RetryBlocks
 			pos := -1
@@ -982,7 +1063,7 @@ func buildMutateRetryBlock(c client.Client, ir *v1beta1.InferenceReplica) func(c
 			fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
@@ -1061,9 +1142,10 @@ func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
 // expectation entry so a later index reuse doesn't inherit stale
 // counters. The expectations bucket keys on Key.OwnerName — the parent
 // ISVC name (buildKey), not the IR name — so Forget must use the same.
-// NotFound on Get or Update is treated as success.
+// Owner disappearance or replacement returns ErrStatusOwnerGone.
 func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32) (bool, error) {
 		var hadEntry bool
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1071,9 +1153,12 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 			fresh := &v1beta1.InferenceReplica{}
 			if err := c.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			insts := fresh.Status.InstanceStatuses
 			pos := -1
@@ -1089,7 +1174,7 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 			fresh.Status.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
@@ -1120,6 +1205,7 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 // inherits it for free.
 func buildWriteAggregateCondition(c client.Client, ir *v1beta1.InferenceReplica) func(ctx context.Context, cond metav1.Condition) error {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	return func(ctx context.Context, cond metav1.Condition) error {
 		if c == nil || ir == nil {
 			return fmt.Errorf("buildWriteAggregateCondition: nil client or IR")
@@ -1128,9 +1214,12 @@ func buildWriteAggregateCondition(c client.Client, ir *v1beta1.InferenceReplica)
 			fresh := &v1beta1.InferenceReplica{}
 			if err := c.Get(ctx, key, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			// No-op short-circuit so we don't bump ResourceVersion every
 			// reconcile when nothing changed.
@@ -1144,7 +1233,7 @@ func buildWriteAggregateCondition(c client.Client, ir *v1beta1.InferenceReplica)
 			apimeta.SetStatusCondition(&fresh.Status.Conditions, cond)
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}

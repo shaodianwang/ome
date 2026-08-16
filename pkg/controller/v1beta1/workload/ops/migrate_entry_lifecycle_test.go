@@ -1,9 +1,7 @@
 // End-to-end tests for the status.migrations-driven Migrate executor:
 // the record is the single source of truth (dispatcher selects it, the
 // executor resumes from SurgeInstance + Phase and advances the phase
-// through MutateMigration). These are the first executing tests for the
-// GANG migration branch — the single-pod walk and the 3-pod
-// (leader + 2 workers) walk share one harness.
+// through MutateMigration). Single-pod and gang walks share one harness.
 //
 // The harness simulates the environment between Migrate passes:
 // "kubelet" flips ContainersReady, an "endpoint controller" maintains
@@ -52,6 +50,9 @@ type migFixture struct {
 	// forceDelete, when set, arms the stuck-Terminating escalation on
 	// the ReconcileInput (mirrors the adapter's config plumbing).
 	forceDelete *workload.ForceDeletePolicy
+	// finalizeInstanceResources models per-Instance cleanup owned by the IR
+	// adapter. When set, the fixture also wires the guarded batch status writer.
+	finalizeInstanceResources func(context.Context, int32) (bool, error)
 }
 
 // deps builds the fixture's workload.Deps (clock included when set).
@@ -116,6 +117,10 @@ func migInstStatusToWorkload(s v1beta1.OMENativeInstanceStatus) workload.Instanc
 		ReadyPodCount:     s.ReadyPodCount,
 		ServingPodCount:   s.ServingPodCount,
 		AvailablePodCount: s.AvailablePodCount,
+		ScheduledPodCount: s.ScheduledPodCount,
+		Admitted:          s.Admitted,
+		NodesOccupied:     append([]string(nil), s.NodesOccupied...),
+		Conditions:        append([]metav1.Condition(nil), s.Conditions...),
 		Operation:         legacyFromV1beta1Op(s.Operation),
 	}
 	if s.LastFailure != nil {
@@ -125,6 +130,10 @@ func migInstStatusToWorkload(s v1beta1.OMENativeInstanceStatus) workload.Instanc
 			Reason:        s.LastFailure.Reason,
 			Message:       s.LastFailure.Message,
 			Time:          s.LastFailure.Time,
+		}
+		if s.LastFailure.ExitCode != nil {
+			exitCode := *s.LastFailure.ExitCode
+			out.LastFailure.ExitCode = &exitCode
 		}
 	}
 	return out
@@ -142,6 +151,10 @@ func migInstStatusFromWorkload(w workload.InstanceStatus) v1beta1.OMENativeInsta
 		ReadyPodCount:     w.ReadyPodCount,
 		ServingPodCount:   w.ServingPodCount,
 		AvailablePodCount: w.AvailablePodCount,
+		ScheduledPodCount: w.ScheduledPodCount,
+		Admitted:          w.Admitted,
+		NodesOccupied:     append([]string(nil), w.NodesOccupied...),
+		Conditions:        append([]metav1.Condition(nil), w.Conditions...),
 		Operation:         legacyToV1beta1Op(w.Operation),
 	}
 	if w.LastFailure != nil {
@@ -151,6 +164,10 @@ func migInstStatusFromWorkload(w workload.InstanceStatus) v1beta1.OMENativeInsta
 			Reason:        w.LastFailure.Reason,
 			Message:       w.LastFailure.Message,
 			Time:          w.LastFailure.Time,
+		}
+		if w.LastFailure.ExitCode != nil {
+			exitCode := *w.LastFailure.ExitCode
+			out.LastFailure.ExitCode = &exitCode
 		}
 	}
 	return out
@@ -173,6 +190,10 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.DesiredSpec.GangSchedulingAvailable = f.gangSched
 	in.Clock = f.clk
 	in.ForceDelete = f.forceDelete
+	if f.finalizeInstanceResources != nil {
+		in.FinalizeInstanceResources = f.finalizeInstanceResources
+		in.ApplyInstanceMutationsWithRetryBlock = f.applyInstanceMutationsWithRetryBlock
+	}
 	in.ObservedState.Migrations = append([]workload.MigrationRecord(nil), f.records...)
 	in.MutateMigration = func(_ context.Context, uuid string, mutate func(*workload.MigrationRecord) bool) error {
 		for i := range f.records {
@@ -187,6 +208,93 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 		return nil
 	}
 	return in
+}
+
+func (f *migFixture) applyInstanceMutationsWithRetryBlock(
+	ctx context.Context,
+	mutations []workload.InstanceMutation,
+	_ string,
+	mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition,
+) error {
+	if mutateRetryBlock != nil {
+		return fmt.Errorf("migration fixture does not support RetryBlock mutations")
+	}
+	ir := &v1beta1.InferenceReplica{}
+	if err := f.c.Get(ctx, f.irKey(), ir); err != nil {
+		return err
+	}
+	slots := make(map[int32]workload.InstanceStatus, len(ir.Status.InstanceStatuses))
+	for _, status := range ir.Status.InstanceStatuses {
+		slots[status.Index] = migInstStatusToWorkload(status)
+	}
+	snapshot := workload.InstanceMutationSnapshot{
+		OwnerUID:  f.isvc.UID,
+		Instances: slots,
+	}
+	for _, mutation := range mutations {
+		if mutation.BatchPrecondition != nil && !mutation.BatchPrecondition(snapshot) {
+			return workload.ErrStatusMutationPrecondition
+		}
+	}
+
+	type committedMutation struct {
+		callback func(*workload.InstanceStatus, *workload.InstanceStatus)
+		previous *workload.InstanceStatus
+		current  *workload.InstanceStatus
+	}
+	var committed []committedMutation
+	changed := false
+	for _, mutation := range mutations {
+		status, found := slots[mutation.Index]
+		if mutation.Remove {
+			if !found || mutation.Precondition != nil && !mutation.Precondition(&status) {
+				continue
+			}
+			previous := status
+			delete(slots, mutation.Index)
+			changed = true
+			if mutation.OnCommit != nil {
+				committed = append(committed, committedMutation{callback: mutation.OnCommit, previous: &previous})
+			}
+			continue
+		}
+		if !found {
+			status = workload.InstanceStatus{Index: mutation.Index}
+		}
+		if mutation.Precondition != nil && !mutation.Precondition(&status) || mutation.Mutate == nil {
+			continue
+		}
+		previous := status
+		if !mutation.Mutate(&status) {
+			continue
+		}
+		slots[mutation.Index] = status
+		changed = true
+		if mutation.OnCommit != nil {
+			current := status
+			committed = append(committed, committedMutation{callback: mutation.OnCommit, previous: &previous, current: &current})
+		}
+	}
+	if changed {
+		persisted := make([]v1beta1.OMENativeInstanceStatus, 0, len(slots))
+		for _, original := range ir.Status.InstanceStatuses {
+			if status, found := slots[original.Index]; found {
+				persisted = append(persisted, migInstStatusFromWorkload(status))
+				delete(slots, original.Index)
+			}
+		}
+		for _, status := range slots {
+			persisted = append(persisted, migInstStatusFromWorkload(status))
+		}
+		ir.Status.InstanceStatuses = persisted
+		if err := f.c.Status().Update(ctx, ir); err != nil {
+			return err
+		}
+	}
+	for _, mutation := range committed {
+		mutation.callback(mutation.previous, mutation.current)
+	}
+	return nil
 }
 
 // mutateInstance is a full-fidelity (v1beta1convert) round-trip writer
@@ -240,6 +348,15 @@ func (f *migFixture) mutateInstance() func(ctx context.Context, idx int32, mutat
 // up).
 func (f *migFixture) pass(t *testing.T, uuid string) (done, accepted bool) {
 	t.Helper()
+	done, accepted, err := f.passResult(t, uuid)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	return done, accepted
+}
+
+func (f *migFixture) passResult(t *testing.T, uuid string) (done, accepted bool, err error) {
+	t.Helper()
 	legacyResetExpectations(t)
 	rec := f.record(t, uuid)
 	req := &audit.MigrationRequest{
@@ -251,11 +368,7 @@ func (f *migFixture) pass(t *testing.T, uuid string) (done, accepted bool) {
 		Reason:          rec.Reason,
 	}
 	in := f.input(t)
-	done, accepted, err := Migrate(context.Background(), f.deps(), in, f.plan, rec.SourceInstance, uuid, req)
-	if err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	return done, accepted
+	return Migrate(context.Background(), f.deps(), in, f.plan, rec.SourceInstance, uuid, req)
 }
 
 func (f *migFixture) listPods(t *testing.T) []*corev1.Pod {
@@ -431,6 +544,56 @@ func newSinglePodMigFixture(t *testing.T) *migFixture {
 	}
 }
 
+// seedMigrationCompletionTailWindow reconstructs the durable state after the
+// source status was removed and the surge was promoted, while the migration
+// record is still Draining. The caller controls whether authoritative source
+// pods remain and may weaken the surge evidence for negative cases.
+func seedMigrationCompletionTailWindow(
+	t *testing.T,
+	f *migFixture,
+	deleteSourcePods bool,
+	mutateSurge func(*v1beta1.OMENativeInstanceStatus),
+) v1beta1.OMENativeInstanceStatus {
+	t.Helper()
+	ir := f.getIR(t)
+	if len(ir.Status.InstanceStatuses) != 1 || ir.Status.InstanceStatuses[0].Index != 0 {
+		t.Fatalf("source fixture statuses = %+v, want only instance 0", ir.Status.InstanceStatuses)
+	}
+	source := ir.Status.InstanceStatuses[0]
+	if source.RunningRevision == "" {
+		t.Fatal("source fixture has no RunningRevision")
+	}
+	surge := v1beta1.OMENativeInstanceStatus{
+		Index:           1,
+		Incarnation:     1,
+		Phase:           v1beta1.OMENativeInstanceReady,
+		RunningRevision: source.RunningRevision,
+	}
+	if mutateSurge != nil {
+		mutateSurge(&surge)
+	}
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{surge}
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed completion-tail status: %v", err)
+	}
+	if deleteSourcePods {
+		deleted := 0
+		for _, pod := range f.listPods(t) {
+			if pod.Labels[query.LabelInstanceIdx] != "0" {
+				continue
+			}
+			if err := f.c.Delete(context.Background(), pod); err != nil {
+				t.Fatalf("delete source pod %s: %v", pod.Name, err)
+			}
+			deleted++
+		}
+		if deleted == 0 {
+			t.Fatal("source fixture has no pod to delete")
+		}
+	}
+	return source
+}
+
 // newMultiInstanceMigFixture: n single-pod instances (0..n-1), each
 // Ready on node-a with a seeded RunningRevision and a serving pod —
 // the shape a batch of migration requests lands on.
@@ -556,6 +719,14 @@ func newGangMigFixtureWithWorkerSpec(t *testing.T, workerSpec *corev1.PodSpec) *
 // promoted, record terminal with CompletedAt).
 func TestMigrate_EntryLifecycle_SinglePod(t *testing.T) {
 	f := newSinglePodMigFixture(t)
+	finalizations := 0
+	f.finalizeInstanceResources = func(_ context.Context, index int32) (bool, error) {
+		finalizations++
+		if index != 0 || findInstanceStatusOnIRForFixture(t, f, index) == nil {
+			t.Fatalf("finalization ran without the owned source status: index=%d", index)
+		}
+		return true, nil
+	}
 	const uuid = "mig-single-1"
 	rec0 := mkMigRecord(uuid, 0, "node-a")
 	rec0.HintTargetNodes = []string{"node-hint-1", "node-hint-2"}
@@ -610,6 +781,9 @@ func TestMigrate_EntryLifecycle_SinglePod(t *testing.T) {
 	if src := findInstanceStatusOnIRForFixture(t, f, 0); src != nil {
 		t.Errorf("source InstanceStatus must be removed on completion; got %+v", src)
 	}
+	if finalizations != 1 {
+		t.Errorf("source resource finalizations = %d, want 1", finalizations)
+	}
 	surge := findInstanceStatusOnIRForFixture(t, f, 1)
 	if surge == nil || surge.Phase != v1beta1.OMENativeInstanceReady || surge.RunningRevision == "" || surge.Operation != nil {
 		t.Errorf("surge must be promoted Ready on the source revision with the op cleared; got %+v", surge)
@@ -627,6 +801,277 @@ func TestMigrate_EntryLifecycle_SinglePod(t *testing.T) {
 	// Terminal record is never picked again.
 	if picked := workload.NextManualMigration(f.records); picked != nil {
 		t.Errorf("completed record must not be re-selected; picked %q", picked.RequestUUID)
+	}
+}
+
+func TestMigrate_FinalizationFailureRetainsSourceAndRecord(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	finalizeErr := fmt.Errorf("PodGroup delete failed")
+	finalizations := 0
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+		finalizations++
+		return false, finalizeErr
+	}
+	const uuid = "mig-finalize-failure"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+
+	for pass := 0; pass < 12; pass++ {
+		done, accepted, err := f.passResult(t, uuid)
+		if err != nil {
+			if !strings.Contains(err.Error(), finalizeErr.Error()) {
+				t.Fatalf("finalization error = %v", err)
+			}
+			if finalizations != 1 {
+				t.Fatalf("finalizations = %d, want 1", finalizations)
+			}
+			if source := findInstanceStatusOnIRForFixture(t, f, 0); source == nil {
+				t.Fatal("finalization failure removed the source status")
+			}
+			if record := f.record(t, uuid); record.Phase.Terminal() || record.CompletedAt != nil {
+				t.Fatalf("finalization failure stamped a terminal migration record: %+v", *record)
+			}
+			return
+		}
+		if done || !accepted {
+			t.Fatalf("pass %d completed or deferred before finalization failure: done=%v accepted=%v", pass, done, accepted)
+		}
+		f.react(t)
+	}
+	t.Fatal("migration never reached the finalization failure")
+}
+
+func TestMigrate_FinalizationWaitsForResourceAbsence(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	resourcesAbsent := false
+	finalizations := 0
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+		finalizations++
+		return resourcesAbsent, nil
+	}
+	const uuid = "mig-finalize-pending"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+
+	for pass := 0; pass < 12; pass++ {
+		done, accepted, err := f.passResult(t, uuid)
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if finalizations == 0 {
+			if done || !accepted {
+				t.Fatalf("pass %d completed or deferred before finalization: done=%v accepted=%v", pass, done, accepted)
+			}
+			f.react(t)
+			continue
+		}
+		if done || !accepted {
+			t.Fatalf("delete accepted completed migration: done=%v accepted=%v", done, accepted)
+		}
+		if source := findInstanceStatusOnIRForFixture(t, f, 0); source == nil {
+			t.Fatal("delete accepted removed the source status")
+		}
+		if record := f.record(t, uuid); record.Phase.Terminal() || record.CompletedAt != nil {
+			t.Fatalf("delete accepted stamped a terminal migration record: %+v", *record)
+		}
+
+		resourcesAbsent = true
+		done, accepted, err = f.passResult(t, uuid)
+		if err != nil || !done || !accepted {
+			t.Fatalf("absence pass: done=%v accepted=%v err=%v", done, accepted, err)
+		}
+		if source := findInstanceStatusOnIRForFixture(t, f, 0); source != nil {
+			t.Fatalf("absence pass retained source status: %+v", source)
+		}
+		if finalizations != 2 {
+			t.Fatalf("finalizations=%d want 2", finalizations)
+		}
+		return
+	}
+	t.Fatal("migration never reached resource finalization")
+}
+
+func TestMigrate_CompletionTailCrashRecoversBeforeDeadline(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	const uuid = "mig-tail-recovery"
+	source := seedMigrationCompletionTailWindow(t, f, true, nil)
+	surgeIdx := int32(1)
+	record := mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(30*time.Minute))
+	record.SurgeInstance = &surgeIdx
+	record.Phase = workload.MigrationPhaseDraining
+	f.records = []workload.MigrationRecord{record}
+
+	finalizations := 0
+	f.finalizeInstanceResources = func(_ context.Context, index int32) (bool, error) {
+		finalizations++
+		if index != 0 {
+			t.Fatalf("finalized instance %d, want source 0", index)
+		}
+		if status := findInstanceStatusOnIRForFixture(t, f, index); status != nil {
+			t.Fatalf("residual resource finalization ran while source status was live: %+v", status)
+		}
+		return true, nil
+	}
+
+	done, accepted, err := f.passResult(t, uuid)
+	if err != nil || !done || !accepted {
+		t.Fatalf("recovery pass: done=%v accepted=%v err=%v", done, accepted, err)
+	}
+	if !clk.Now().Before(record.Deadline.Time) {
+		t.Fatalf("test record expired before recovery: now=%v deadline=%v", clk.Now(), record.Deadline.Time)
+	}
+	if finalizations != 1 {
+		t.Fatalf("residual resource finalizations = %d, want 1", finalizations)
+	}
+	completed := f.record(t, uuid)
+	if completed.Phase != workload.MigrationPhaseCompleted || completed.CompletedAt == nil ||
+		!strings.Contains(completed.Message, "migrated to instance=1") {
+		t.Fatalf("recovered record = %+v, want Completed migration to instance 1", *completed)
+	}
+	if sourceStatus := findInstanceStatusOnIRForFixture(t, f, 0); sourceStatus != nil {
+		t.Fatalf("recovery resurrected source status: %+v", sourceStatus)
+	}
+	surge := findInstanceStatusOnIRForFixture(t, f, surgeIdx)
+	if surge == nil || surge.Phase != v1beta1.OMENativeInstanceReady ||
+		surge.Operation != nil || surge.RunningRevision != source.RunningRevision {
+		t.Fatalf("recovery changed promoted surge: %+v", surge)
+	}
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load recovery ledger: %v", err)
+	}
+	if len(ledger.Entries) != 1 || ledger.Entries[0].RequestUUID != uuid ||
+		ledger.Entries[0].Phase != audit.PhaseCompleted || ledger.Entries[0].Outcome != "migrated" {
+		t.Fatalf("recovery ledger = %+v, want one Completed migrated entry", ledger.Entries)
+	}
+	if picked := workload.NextManualMigration(f.records); picked != nil {
+		t.Fatalf("recovered record was selected again: %+v", *picked)
+	}
+
+	done, accepted, err = f.passResult(t, uuid)
+	if err != nil || !done || !accepted || finalizations != 1 {
+		t.Fatalf("terminal replay: done=%v accepted=%v err=%v finalizations=%d", done, accepted, err, finalizations)
+	}
+}
+
+func TestMigrate_CompletionTailRecoveryRequiresCompleteEvidence(t *testing.T) {
+	tests := []struct {
+		name              string
+		deleteSourcePods  bool
+		mutateSurgeStatus func(*v1beta1.OMENativeInstanceStatus)
+	}{
+		{
+			name:             "source pod remains",
+			deleteSourcePods: false,
+		},
+		{
+			name:             "surge is not Ready",
+			deleteSourcePods: true,
+			mutateSurgeStatus: func(status *v1beta1.OMENativeInstanceStatus) {
+				status.Phase = v1beta1.OMENativeInstanceCreating
+			},
+		},
+		{
+			name:             "surge still owns an operation",
+			deleteSourcePods: true,
+			mutateSurgeStatus: func(status *v1beta1.OMENativeInstanceStatus) {
+				status.Operation = &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationType(workload.InstanceOperationMigrate)}
+			},
+		},
+		{
+			name:             "surge has no running revision",
+			deleteSourcePods: true,
+			mutateSurgeStatus: func(status *v1beta1.OMENativeInstanceStatus) {
+				status.RunningRevision = ""
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			clk := f.withFakeClock()
+			const uuid = "mig-tail-incomplete"
+			seedMigrationCompletionTailWindow(t, f, test.deleteSourcePods, test.mutateSurgeStatus)
+			surgeIdx := int32(1)
+			record := mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(30*time.Minute))
+			record.SurgeInstance = &surgeIdx
+			record.Phase = workload.MigrationPhaseDraining
+			f.records = []workload.MigrationRecord{record}
+			finalizations := 0
+			f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+				finalizations++
+				return true, nil
+			}
+
+			done, accepted, err := f.passResult(t, uuid)
+			if err != nil || done || !accepted {
+				t.Fatalf("guarded pass: done=%v accepted=%v err=%v", done, accepted, err)
+			}
+			if finalizations != 0 {
+				t.Fatalf("incomplete evidence triggered %d resource finalizations", finalizations)
+			}
+			got := f.record(t, uuid)
+			if got.Phase != workload.MigrationPhaseDraining || got.CompletedAt != nil {
+				t.Fatalf("incomplete evidence closed record: %+v", *got)
+			}
+			ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+			if err != nil {
+				t.Fatalf("load ledger: %v", err)
+			}
+			if ledger.HasCompletedOrFailedRequest(uuid) {
+				t.Fatalf("incomplete evidence wrote a terminal ledger row: %+v", ledger.Entries)
+			}
+		})
+	}
+}
+
+func TestMigrate_CompletionTailRecoveryRechecksAuthoritativeAbsence(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	const uuid = "mig-tail-status-drift"
+	source := seedMigrationCompletionTailWindow(t, f, true, nil)
+	surgeIdx := int32(1)
+	record := mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(30*time.Minute))
+	record.SurgeInstance = &surgeIdx
+	record.Phase = workload.MigrationPhaseDraining
+	f.records = []workload.MigrationRecord{record}
+	finalizations := 0
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+		finalizations++
+		return true, nil
+	}
+
+	input := f.input(t)
+	liveIR := f.getIR(t)
+	liveIR.Status.InstanceStatuses = append(liveIR.Status.InstanceStatuses, source)
+	if err := f.c.Status().Update(context.Background(), liveIR); err != nil {
+		t.Fatalf("restore live source status: %v", err)
+	}
+	req := &audit.MigrationRequest{
+		SchemaVersion: audit.SchemaV1,
+		Component:     string(f.component),
+		Instance:      record.SourceInstance,
+		FromNode:      record.FromNode,
+		Reason:        record.Reason,
+	}
+	done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, record.SourceInstance, uuid, req)
+	if err != nil || done || !accepted {
+		t.Fatalf("drift pass: done=%v accepted=%v err=%v", done, accepted, err)
+	}
+	if finalizations != 0 {
+		t.Fatalf("live source status triggered %d residual resource finalizations", finalizations)
+	}
+	if status := findInstanceStatusOnIRForFixture(t, f, 0); status == nil {
+		t.Fatal("authoritative source status was removed")
+	}
+	if got := f.record(t, uuid); got.Phase != workload.MigrationPhaseDraining || got.CompletedAt != nil {
+		t.Fatalf("authoritative status drift closed record: %+v", *got)
+	}
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if ledger.HasCompletedOrFailedRequest(uuid) {
+		t.Fatalf("authoritative status drift wrote a terminal ledger row: %+v", ledger.Entries)
 	}
 }
 

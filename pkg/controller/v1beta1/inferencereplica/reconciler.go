@@ -20,6 +20,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	workloadpodgroup "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
@@ -90,7 +92,6 @@ type Reconciler struct {
 	// immutable for the manager process lifetime; nil preserves the unbounded
 	// compatibility behavior when the field is absent.
 	ScaleUpPodBatchSize *int32
-
 	// APIReader is the live (uncached) API reader. Used for the
 	// correctness-critical reads in revision bookkeeping and immutable topology
 	// safety where stale cache contents could cause a collision or split a live
@@ -401,7 +402,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: build plan (ir=%s/%s): %w",
 			ir.Namespace, ir.Name, perr)
 	}
-
 	// Install status aggregation before PodGroup reconciliation. Besides
 	// counters, the aggregator parks InstanceReadyTimeout deadlines while the
 	// workload is paused. A live-read or PodGroup error must not bypass that
@@ -415,7 +415,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// so the Ready condition below observes the promoted value. Conflict
 		// tolerance matches the aggregator: requeue, don't error.
 		if specTarget != nil {
-			if perr := buildPromoteCurrentRevision(r.Client, ir)(ctx, specTarget.Name); perr != nil {
+			if perr := buildPromoteCurrentRevision(r.Client, r.reader(), ir)(ctx, specTarget.Name); perr != nil {
 				if err == nil {
 					if apierrors.IsConflict(perr) {
 						result, err = ctrl.Result{Requeue: true}, nil
@@ -458,7 +458,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if rollbackPayload != nil {
 		log.Info("Canary rollback: rolling Instances back to stable revision", "revision", rollbackRevision.Name)
 	}
-
 	deps := workload.Deps{
 		Client:       r.Client,
 		APIReader:    r.APIReader,
@@ -479,7 +478,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// plan the top-level EnsurePodGroups keys off (a gang scheduler
 		// would otherwise reject the surge pods with "PodGroup not found").
 	}
-	deps.EnsureGangPodGroup = workloadgang.EnsureSurgePodGroup(deps)
+	var podGroupInventory *workloadgang.PodGroupInventory
+	if input.DesiredSpec.GangSchedulingAvailable {
+		if input.DesiredSpec.MultiPod {
+			podGroupInventory, err = workloadgang.ObservePodGroups(ctx, deps.Reader(), input.OwnerObject)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: observe pod groups (component=%s): %w", ir.Spec.Component, err)
+			}
+		}
+		input.FinalizeInstanceResources = workloadgang.BuildFinalizeInstanceResources(
+			deps.Client, deps.Reader(), podGroupInventory, input.OwnerObject, input.Key.OwnerName, plan.Component)
+	}
+	podGroupState := workloadgang.PodGroupReconcileState{
+		Inventory:     podGroupInventory,
+		TerminalOwned: terminalFinalizationOwned(input.ObservedState),
+	}
+	deps.EnsureGangPodGroup = workloadgang.EnsureSurgePodGroupWithState(deps, podGroupState)
 
 	// PodGroups must exist BEFORE the first pod of any multi-pod Instance is
 	// created, or the gang scheduler rejects the pods with "PodGroup not
@@ -489,8 +503,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// on DesiredSpec.GangSchedulingAvailable, stamps GangSchedulingUnavailable,
 	// and returns. Runs before the revision/dispatch so the gang is announced
 	// ahead of pod creation.
-	effectiveTopology, gerr := workloadgang.EnsurePodGroupsWithTopology(ctx, deps, input, plan)
+	effectiveTopology, gerr := workloadgang.EnsurePodGroupsWithState(ctx, deps, input, plan, podGroupState)
 	if gerr != nil {
+		if errors.Is(gerr, workloadgang.ErrPodGroupTerminating) {
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure pod groups (component=%s): %w", ir.Spec.Component, gerr)
 	}
 	plan.InstanceTopologyKeys = effectiveTopology
@@ -549,6 +566,32 @@ func (r *Reconciler) resolveUpdateRetryPolicy(log logr.Logger) *workload.RetryPo
 		return nil
 	}
 	return policy
+}
+
+func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int32]struct{} {
+	owned := make(map[int32]struct{})
+	for _, record := range observed.Migrations {
+		if record.Phase == workload.MigrationPhaseDraining {
+			owned[record.SourceInstance] = struct{}{}
+		}
+	}
+	for _, status := range observed.InstanceStatuses {
+		if status.Operation == nil {
+			continue
+		}
+		if status.Operation.Type == workload.InstanceOperationUpdate && status.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup {
+			owned[status.Index] = struct{}{}
+		}
+		if status.Operation.Type == workload.InstanceOperationUpdate && status.Operation.SurgeIndex != nil {
+			if status.Operation.Step == workloadops.UpdateStepSurgeDrain || status.Operation.Step == workloadops.UpdateStepSurgeDrainSettle {
+				owned[status.Index] = struct{}{}
+			}
+			if status.Phase == workload.InstancePhaseFailed {
+				owned[*status.Operation.SurgeIndex] = struct{}{}
+			}
+		}
+	}
+	return owned
 }
 
 // resolveStuckPodGrace loads lifecycle.stuckPodGracePeriod from the
@@ -694,7 +737,9 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 	// working memory for exclusions, the record is visible history. Runs
 	// before (and independent of) the ledger so a crash between the
 	// prune persist and this stamp still heals next pass.
-	r.stampAutoRelocationSuccess(ctx, log, ir)
+	if err := r.stampAutoRelocationSuccess(ctx, ir); err != nil {
+		log.V(1).Info("auto-relocation success stamp failed; will retry next pass", "error", err.Error())
+	}
 	owner := client.Object(ir)
 	gvk := irGVK
 	if parent != nil {
@@ -772,9 +817,9 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 // Phase=Ready with no in-flight Operation (the same predicate as the
 // ledger success-prune). Only the newest record per instance is
 // touched — older un-Succeeded records stay as history of relocations
-// that never confirmed. Best-effort: failures V(1)-log and retry next
-// pass; the record is a visibility mirror, never a work input.
-func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica) {
+// that never confirmed. The caller treats failures as best-effort because
+// the record is a visibility mirror, never a work input.
+func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, ir *v1beta1.InferenceReplica) error {
 	readyIdx := map[int32]bool{}
 	for i := range ir.Status.InstanceStatuses {
 		s := &ir.Status.InstanceStatuses[i]
@@ -791,11 +836,12 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Lo
 		}
 	}
 	if !stampable {
-		return
+		return nil
 	}
 
 	now := metav1.NewTime(r.now())
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	var committed []v1beta1.MigrationStatus
 	wrote := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -803,9 +849,12 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Lo
 		fresh := &v1beta1.InferenceReplica{}
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("re-read IR: %w", err)
+		}
+		if ownerUID == "" || fresh.UID != ownerUID {
+			return workload.ErrStatusOwnerGone
 		}
 		changed := false
 		for idx := range readyIdx {
@@ -824,7 +873,7 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Lo
 		}
 		if err := r.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("update IR status: %w", err)
 		}
@@ -833,8 +882,7 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Lo
 		return nil
 	})
 	if err != nil {
-		log.V(1).Info("auto-relocation success stamp failed; will retry next pass", "error", err.Error())
-		return
+		return err
 	}
 	if wrote {
 		out := make([]v1beta1.MigrationStatus, len(committed))
@@ -843,6 +891,7 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, log logr.Lo
 		}
 		ir.Status.Migrations = out
 	}
+	return nil
 }
 
 // newestUnsucceededAutoMigration returns the slice position of the
@@ -1164,20 +1213,22 @@ func (r *Reconciler) forgetRevisionHash(key types.NamespacedName) {
 // monotonic, so incrementing whatever the apiserver currently shows is
 // the right semantic.
 //
-// Mirrors the ISVC-side bumpCollisionCount; NotFound on Get/Update is
-// treated as "owner gone, nothing to bump" and the caller proceeds.
+// The write is scoped to the UID captured at the start of the reconcile.
+// Owner disappearance or replacement returns ErrStatusOwnerGone.
 func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.InferenceReplica) (*int32, error) {
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	var next int32
-	gone := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				gone = true
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("re-read IR for CollisionCount bump: %w", err)
+		}
+		if ownerUID == "" || fresh.UID != ownerUID {
+			return workload.ErrStatusOwnerGone
 		}
 		next = int32(1)
 		if fresh.Status.CollisionCount != nil {
@@ -1186,16 +1237,12 @@ func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.Inferen
 		fresh.Status.CollisionCount = &next
 		if err := r.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
-				gone = true
-				return nil
+				return workload.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("persist CollisionCount: %w", err)
 		}
 		return nil
 	})
-	if gone {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}

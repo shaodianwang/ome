@@ -491,7 +491,8 @@ func isMigrateOwnedStatus(s *workload.InstanceStatus) bool {
 func isGangSurgeTargetMarker(s *workload.InstanceStatus) bool {
 	return s != nil && s.Operation != nil &&
 		s.Operation.Type == workload.InstanceOperationUpdate &&
-		s.Operation.Step == workload.UpdateStepGangSurgeTarget
+		(s.Operation.Step == workload.UpdateStepGangSurgeTarget ||
+			s.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup)
 }
 
 // podMatchesTarget compares pod's runtime PodSpec to target — same

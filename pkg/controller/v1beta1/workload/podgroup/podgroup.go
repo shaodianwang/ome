@@ -38,20 +38,36 @@ package podgroup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+)
+
+var (
+	// ErrPodGroupTerminating means the deterministic PodGroup name is still
+	// occupied by an object whose deletion has begun. Callers must wait for an
+	// authoritative NotFound before creating either a replacement PodGroup or
+	// any member Pods that reference it.
+	ErrPodGroupTerminating = errors.New("PodGroup is terminating")
+	// ErrPodGroupOwnershipConflict means the deterministic PodGroup name is
+	// occupied by an object controlled by another owner. OME must neither
+	// update nor delete that object.
+	ErrPodGroupOwnershipConflict = errors.New("PodGroup is controlled by another owner")
 )
 
 // maxScheduleTimeoutSeconds caps the per-PodGroup schedule timeout derived
@@ -212,14 +228,60 @@ func EnsurePodGroupForPodsWithReader(ctx context.Context, c client.Client, reade
 		// transient Get error as an unprovable-topology error.
 		return "", fmt.Errorf("EnsurePodGroup: get %s/%s: %w", desired.Namespace, desired.Name, getErr)
 	}
-	if len(pods) > 0 {
-		if err := reconcileDesiredTopologyWithLivePods(desired, existing, getErr == nil, ownerName, plan.Component, inst.Index, pods); err != nil {
-			return "", fmt.Errorf("EnsurePodGroup: reconcile live topology: %w", err)
+	key, _, err := EnsurePodGroupForPodsFromObservation(ctx, c, owner, ownerGVK, ownerName,
+		plan, inst, pods, existing, getErr == nil)
+	return key, err
+}
+
+// EnsurePodGroupForPodsFromObservation reconciles one PodGroup from an
+// authoritative inventory entry supplied by the caller. It performs no GET;
+// this is the one-LIST path used when a Component has many gangs.
+//
+// A foreign same-named object is a collision, never an adoption candidate. A
+// terminating owned object is also not success: its name cannot safely be
+// reused until an authoritative inventory reports it absent. The reconciled
+// object is returned so a caller can overlay same-pass writes on that inventory.
+func EnsurePodGroupForPodsFromObservation(
+	ctx context.Context,
+	c client.Client,
+	owner client.Object,
+	ownerGVK schema.GroupVersionKind,
+	ownerName string,
+	plan workload.ComponentPlan,
+	inst workload.InstancePlan,
+	pods []*corev1.Pod,
+	existing *schedulingv1alpha1.PodGroup,
+	found bool,
+) (string, *schedulingv1alpha1.PodGroup, error) {
+	if c == nil {
+		return "", nil, fmt.Errorf("EnsurePodGroup: nil client")
+	}
+	if !IsMultiPodInstance(inst) {
+		return "", nil, nil
+	}
+	desired, err := BuildPodGroup(owner, ownerGVK, ownerName, plan, inst)
+	if err != nil {
+		return "", nil, fmt.Errorf("EnsurePodGroup: build desired: %w", err)
+	}
+	if found {
+		if existing == nil {
+			return "", nil, fmt.Errorf("EnsurePodGroup: observed %s/%s as present with a nil object", desired.Namespace, desired.Name)
+		}
+		if !ControlledByUID(existing, owner.GetUID()) {
+			return "", nil, fmt.Errorf("%w: %s/%s", ErrPodGroupOwnershipConflict, existing.Namespace, existing.Name)
+		}
+		if existing.DeletionTimestamp != nil {
+			return "", nil, fmt.Errorf("%w: %s/%s", ErrPodGroupTerminating, existing.Namespace, existing.Name)
 		}
 	}
-	if getErr == nil {
+	if len(pods) > 0 {
+		if err := reconcileDesiredTopologyWithLivePods(desired, existing, found, ownerName, plan.Component, inst.Index, pods); err != nil {
+			return "", nil, fmt.Errorf("EnsurePodGroup: reconcile live topology: %w", err)
+		}
+	}
+	if found {
 		if podGroupMatches(existing, desired) {
-			return desired.Annotations[query.AnnotationTopologyKey], nil
+			return desired.Annotations[query.AnnotationTopologyKey], existing, nil
 		}
 		target := existing.DeepCopy()
 		target.Labels = desired.Labels
@@ -228,14 +290,25 @@ func EnsurePodGroupForPodsWithReader(ctx context.Context, c client.Client, reade
 		target.Spec.MinMember = desired.Spec.MinMember
 		target.Spec.ScheduleTimeoutSeconds = desired.Spec.ScheduleTimeoutSeconds
 		if err := c.Update(ctx, target); err != nil {
-			return "", fmt.Errorf("EnsurePodGroup: update %s/%s: %w", target.Namespace, target.Name, err)
+			return "", nil, fmt.Errorf("EnsurePodGroup: update %s/%s: %w", target.Namespace, target.Name, err)
 		}
-		return desired.Annotations[query.AnnotationTopologyKey], nil
+		return desired.Annotations[query.AnnotationTopologyKey], target, nil
 	}
 	if err := c.Create(ctx, desired); err != nil {
-		return "", fmt.Errorf("EnsurePodGroup: create %s/%s: %w", desired.Namespace, desired.Name, err)
+		return "", nil, fmt.Errorf("EnsurePodGroup: create %s/%s: %w", desired.Namespace, desired.Name, err)
 	}
-	return desired.Annotations[query.AnnotationTopologyKey], nil
+	return desired.Annotations[query.AnnotationTopologyKey], desired, nil
+}
+
+// ControlledByUID reports whether obj's controller OwnerReference names the
+// supplied UID. UIDs, rather than names, keep delete-and-recreate collisions
+// from transferring ownership to a new object with the same name.
+func ControlledByUID(obj metav1.Object, ownerUID types.UID) bool {
+	if obj == nil || ownerUID == "" {
+		return false
+	}
+	ref := metav1.GetControllerOfNoCopy(obj)
+	return ref != nil && ref.UID == ownerUID
 }
 
 // EffectiveTopologyKeyForPods returns the topology contract that is safe for
@@ -426,19 +499,50 @@ func topologyKeyAnnotationMatches(existing, desired *schedulingv1alpha1.PodGroup
 	return existingHas == desiredHas && existingValue == desiredValue
 }
 
-// DeletePodGroup removes the PodGroup for an Instance that has been
-// drained. Safe to call when the PodGroup doesn't exist (returns nil)
-// or when single-pod Instances are passed (no-op).
+// FinalizeObservedPodGroup deletes an observed PodGroup with a UID precondition.
+// Complete means an authoritative operation proved the object absent.
+func FinalizeObservedPodGroup(ctx context.Context, c client.Client, ownerUID types.UID, pg *schedulingv1alpha1.PodGroup) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("DeletePodGroup: nil client")
+	}
+	if pg == nil {
+		return true, nil
+	}
+	if !ControlledByUID(pg, ownerUID) {
+		return false, fmt.Errorf("%w: %s/%s", ErrPodGroupOwnershipConflict, pg.Namespace, pg.Name)
+	}
+	if pg.DeletionTimestamp != nil {
+		return false, nil
+	}
+	var opts []client.DeleteOption
+	if pg.UID != "" {
+		uid := pg.UID
+		opts = append(opts, client.Preconditions{UID: &uid})
+	}
+	if err := c.Delete(ctx, pg.DeepCopy(), opts...); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("DeletePodGroup: delete %s/%s: %w", pg.Namespace, pg.Name, err)
+	}
+	return false, nil
+}
+
+// DeleteObservedPodGroup requests deletion of an authoritative inventory
+// object. Callers that own terminal status should use FinalizeObservedPodGroup
+// and retain that status until complete is true.
+func DeleteObservedPodGroup(ctx context.Context, c client.Client, ownerUID types.UID, pg *schedulingv1alpha1.PodGroup) error {
+	_, err := FinalizeObservedPodGroup(ctx, c, ownerUID, pg)
+	return err
+}
+
+// DeletePodGroup removes the PodGroup for an Instance that has been drained.
+// Safe to call when the PodGroup doesn't exist. Inventory-backed callers
+// should use DeleteObservedPodGroup to avoid this compatibility helper's GET.
 //
-// In practice cascade-delete on the owner handles whole-owner teardown
-// via the controller-owner ref; this function is for scale-down (one
-// Instance shrinks out of the plan while others remain) and for
-// migration (the source Instance's PodGroup is removed once the
-// surge is Ready).
-//
-// owner is taken as the abstract client.Object (rather than a concrete
-// v1beta1.InferenceService) for the same reason BuildPodGroup /
-// EnsurePodGroup do — see those docstrings.
+// owner is abstract because the same primitive serves every OMENative owner
+// shape. The controller UID is the authorization check; ownerName only derives
+// the deterministic resource name.
 func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, ownerName string, component workload.ComponentType, instanceIdx int32) error {
 	if c == nil {
 		return fmt.Errorf("DeletePodGroup: nil client")
@@ -446,14 +550,45 @@ func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 	if owner == nil {
 		return fmt.Errorf("DeletePodGroup: nil owner")
 	}
-	pg := &schedulingv1alpha1.PodGroup{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodGroupName(ownerName, component, instanceIdx),
-			Namespace: owner.GetNamespace(),
-		},
+	key := client.ObjectKey{
+		Name:      query.PodGroupName(ownerName, component, instanceIdx),
+		Namespace: owner.GetNamespace(),
 	}
-	if err := c.Delete(ctx, pg); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("DeletePodGroup: delete %s/%s: %w", pg.Namespace, pg.Name, err)
+	pg := &schedulingv1alpha1.PodGroup{}
+	if err := c.Get(ctx, key, pg); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+			return nil
+		}
+		return fmt.Errorf("DeletePodGroup: get %s: %w", key, err)
 	}
-	return nil
+	return DeleteObservedPodGroup(ctx, c, owner.GetUID(), pg)
+}
+
+// FinalizePodGroup requests deletion of an owned PodGroup and reports complete
+// only after an authoritative GET or NotFound response proves it absent.
+func FinalizePodGroup(ctx context.Context, c client.Client, reader client.Reader, owner client.Object, ownerName string, component workload.ComponentType, instanceIdx int32) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("DeletePodGroup: nil client")
+	}
+	if reader == nil {
+		reader = c
+	}
+	if owner == nil {
+		return false, fmt.Errorf("DeletePodGroup: nil owner")
+	}
+	key := client.ObjectKey{
+		Name:      query.PodGroupName(ownerName, component, instanceIdx),
+		Namespace: owner.GetNamespace(),
+	}
+	pg := &schedulingv1alpha1.PodGroup{}
+	if err := reader.Get(ctx, key, pg); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("DeletePodGroup: get %s: %w", key, err)
+	}
+	if !ControlledByUID(pg, owner.GetUID()) {
+		return true, nil
+	}
+	return FinalizeObservedPodGroup(ctx, c, owner.GetUID(), pg)
 }

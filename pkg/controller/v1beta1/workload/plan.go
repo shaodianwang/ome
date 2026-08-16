@@ -357,7 +357,7 @@ func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 		if s.Operation == nil || s.Operation.Type != InstanceOperationUpdate {
 			continue
 		}
-		if s.Operation.Step == UpdateStepGangSurgeTarget { // target (marker)
+		if s.Operation.Step == UpdateStepGangSurgeTarget || s.Operation.Step == UpdateStepGangSurgeTargetCleanup { // target (marker)
 			if _, live := referenced[s.Index]; live {
 				out[s.Index] = struct{}{}
 			}

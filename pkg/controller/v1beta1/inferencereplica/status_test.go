@@ -616,6 +616,90 @@ func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
 		"a no-op aggregateAndWriteStatus pass must perform ZERO writes (ResourceVersion unchanged)")
 }
 
+func TestAggregateAndWriteStatus_RebasesAfterAdjacentLifecycleWrite(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}}
+	stale := ir.DeepCopy()
+	apiClient := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(ir).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		Build()
+	key := client.ObjectKeyFromObject(ir)
+	live := &v1beta1.InferenceReplica{}
+	g.Expect(apiClient.Get(context.Background(), key, live)).To(gomega.Succeed())
+	live.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceDeleting
+	live.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+		ID: "delete-0", Type: v1beta1.InstanceOperationDelete, Step: "Drain",
+	}
+	g.Expect(apiClient.Status().Update(context.Background(), live)).To(gomega.Succeed())
+
+	staleCache := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(stale).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		Build()
+	r := &Reconciler{
+		Client:       &staleReadingClient{Client: apiClient, reader: staleCache},
+		APIReader:    apiClient,
+		Log:          logf.Log.WithName("test"),
+		Expectations: workload.NewExpectations(),
+	}
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), stale, plan, nil)).To(gomega.Succeed())
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(apiClient.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1))
+	g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceDeleting))
+	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
+	g.Expect(got.Status.InstanceStatuses[0].Operation.ID).To(gomega.Equal("delete-0"),
+		"aggregate status must preserve the adjacent lifecycle commit")
+}
+
+func TestAggregateAndWriteStatus_SameNameReplacementIsUntouched(t *testing.T) {
+	g := gomega.NewWithT(t)
+	stale := baselineIR("llama-engine", "prod", 1)
+	replacement := stale.DeepCopy()
+	replacement.UID = types.UID("replacement-uid")
+	replacement.Status.Replicas = 7
+	replacement.Status.ReadyReplicas = 6
+	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 9, Phase: v1beta1.OMENativeInstanceDeleting,
+	}}
+	wantStatus := replacement.Status.DeepCopy()
+	live, writes := newCountingStatusClient(t, 0, replacement)
+	r := &Reconciler{
+		Client:       live,
+		APIReader:    live,
+		Log:          logf.Log.WithName("test"),
+		Expectations: workload.NewExpectations(),
+	}
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(stale.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), stale, plan, nil)).To(gomega.Succeed())
+	g.Expect(*writes).To(gomega.Equal(0))
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(live.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
+	g.Expect(got.UID).To(gomega.Equal(replacement.UID))
+	g.Expect(got.Status).To(gomega.Equal(*wantStatus))
+}
+
 // TestAggregateAndWriteStatus_ConflictSurfacesAsConflict pins the
 // terminal-conflict contract the deferred Reconcile handler keys on: when
 // every status write loses the optimistic-lock race (RetryOnConflict

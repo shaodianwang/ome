@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
 
@@ -319,6 +321,35 @@ func TestReconcileRelocationDirectives_SuccessTouchIndependentOfLedger(t *testin
 	}
 	if len(fresh.Status.Migrations) != 1 || fresh.Status.Migrations[0].Succeeded == nil || !*fresh.Status.Migrations[0].Succeeded {
 		t.Errorf("record: got %+v want u-orphan stamped Succeeded=true without any ledger rows", fresh.Status.Migrations)
+	}
+}
+
+func TestStampAutoRelocationSuccess_SameNameReplacementUntouched(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	stale := baselineIR("llama-engine", "prod", 1)
+	stale.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+	}
+	stale.Status.Migrations = []v1beta1.MigrationStatus{autoRecord("u-stale", 0, "n1", t0)}
+
+	replacement := stale.DeepCopy()
+	replacement.UID = "replacement-uid"
+	r, c := newReconciler(t, replacement)
+
+	err := r.stampAutoRelocationSuccess(context.Background(), stale)
+	if !errors.Is(err, workload.ErrStatusOwnerGone) {
+		t.Fatalf("stamp error: got %v want ErrStatusOwnerGone", err)
+	}
+
+	fresh := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(replacement), fresh); err != nil {
+		t.Fatalf("re-read replacement: %v", err)
+	}
+	if got := fresh.Status.Migrations[0].Succeeded; got != nil {
+		t.Fatalf("replacement Succeeded: got %v want nil", *got)
+	}
+	if got := stale.Status.Migrations[0].Succeeded; got != nil {
+		t.Fatalf("stale in-memory Succeeded: got %v want nil", *got)
 	}
 }
 

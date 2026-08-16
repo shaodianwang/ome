@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,7 +31,7 @@ const (
 	// the unavailability gate doesn't apply; the surge gate does).
 	updateStepSurgeDrain = "SurgeDrain"
 	// updateStepSurgeDrainSettle is entered after EndpointSlice confirms
-	// the old pod is no longer eligible for new traffic. The controller
+	// the old pod is ineligible for new traffic. The controller
 	// keeps the pod alive in this step so persistent load-balancer
 	// connections can age out while both the router and its workers are
 	// still available, then deletes it after the configured grace period.
@@ -329,13 +330,13 @@ func patchInstanceStatusGangSurging(ctx context.Context, input workload.Reconcil
 func patchInstanceStatusGangSurgeTarget(ctx context.Context, input workload.ReconcileInput, surgeIdx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, surgeIdx, func(s *workload.InstanceStatus) bool {
-		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
-			s.Operation.Step == workload.UpdateStepGangSurgeTarget {
+		if gangSurgeTargetClaimMatches(s, targetRev) {
 			return false
 		}
-		if s.Incarnation == 0 {
-			s.Incarnation = 1
+		if !emptyGangSurgeTargetSlot(s) {
+			return false
 		}
+		s.Incarnation = 1
 		s.Phase = workload.InstancePhaseCreating
 		s.TargetRevision = targetRev
 		s.Operation = &workload.InstanceOperation{
@@ -349,4 +350,148 @@ func patchInstanceStatusGangSurgeTarget(ctx context.Context, input workload.Reco
 		}
 		return true
 	})
+}
+
+type gangSurgeTargetMarkerResolution uint8
+
+const (
+	gangSurgeTargetMarkerUnclaimed gangSurgeTargetMarkerResolution = iota
+	gangSurgeTargetMarkerActive
+	gangSurgeTargetMarkerRestored
+	gangSurgeTargetMarkerCleanup
+)
+
+// restoreInstanceStatusGangSurgeTarget closes the resumable gap between the
+// source's committed surge claim and its target marker. The result identifies
+// the authoritative marker state; Restored requires a fresh reconcile before
+// external effects. The strong path binds target creation to the exact source
+// operation on every conflict retry.
+func restoreInstanceStatusGangSurgeTarget(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	surgeIdx int32,
+	targetRev string,
+	timeout time.Duration,
+) (gangSurgeTargetMarkerResolution, error) {
+	if source == nil || source.Operation == nil {
+		return gangSurgeTargetMarkerUnclaimed, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock == nil {
+		if input.FinalizeInstanceResources != nil {
+			return gangSurgeTargetMarkerUnclaimed, fmt.Errorf("gang surge target recovery requires the owner-aware atomic status adapter")
+		}
+		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, targetRev, timeout); err != nil {
+			return gangSurgeTargetMarkerUnclaimed, err
+		}
+		return gangSurgeTargetMarkerRestored, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return gangSurgeTargetMarkerUnclaimed, err
+	}
+
+	now := metav1.NewTime(input.Now())
+	desired := workload.InstanceStatus{
+		Index:          surgeIdx,
+		Incarnation:    1,
+		Phase:          workload.InstancePhaseCreating,
+		TargetRevision: targetRev,
+		Operation: &workload.InstanceOperation{
+			ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepGangSurgeTarget,
+			TargetRevision: targetRev,
+			StartedAt:      now,
+			LastProgressAt: now,
+			Deadline:       metav1.NewTime(now.Add(timeout)),
+		},
+	}
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	ownerUID := input.OwnerObject.GetUID()
+	resolution := gangSurgeTargetMarkerUnclaimed
+	mutation := workload.InstanceMutation{
+		Index: surgeIdx,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			if gangSurgeActiveTargetClaimMatches(status, targetRev) {
+				resolution = gangSurgeTargetMarkerActive
+				return false
+			}
+			if gangSurgeCleanupTargetClaimMatches(status, targetRev) {
+				resolution = gangSurgeTargetMarkerCleanup
+				return false
+			}
+			if !emptyGangSurgeTargetSlot(status) {
+				return false
+			}
+			*status = cloneTerminalStatusValue(desired)
+			return true
+		},
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			resolution = gangSurgeTargetMarkerUnclaimed
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, found := snapshot.Instances[source.Index]
+			if !found || !sourceIdentity.matches(currentSource) {
+				return false
+			}
+			currentTarget, found := snapshot.Instances[surgeIdx]
+			if !found {
+				return true
+			}
+			if gangSurgeActiveTargetClaimMatches(&currentTarget, targetRev) {
+				resolution = gangSurgeTargetMarkerActive
+				return true
+			}
+			if gangSurgeCleanupTargetClaimMatches(&currentTarget, targetRev) {
+				resolution = gangSurgeTargetMarkerCleanup
+				return true
+			}
+			return false
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return sameRestoredGangSurgeTarget(status, &desired)
+		},
+		OnCommit: func(_, _ *workload.InstanceStatus) {
+			resolution = gangSurgeTargetMarkerRestored
+		},
+	}
+	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return gangSurgeTargetMarkerUnclaimed, nil
+	}
+	if err != nil {
+		return gangSurgeTargetMarkerUnclaimed, err
+	}
+	return resolution, nil
+}
+
+func emptyGangSurgeTargetSlot(status *workload.InstanceStatus) bool {
+	return status != nil && status.Incarnation == 0 && status.Phase == workload.InstancePhaseEmpty &&
+		status.RunningRevision == "" && status.TargetRevision == "" && status.Operation == nil &&
+		status.PodCount == 0 && status.ReadyPodCount == 0 && status.ServingPodCount == 0 &&
+		status.AvailablePodCount == 0 && status.ScheduledPodCount == 0 && !status.Admitted &&
+		len(status.NodesOccupied) == 0 && len(status.Conditions) == 0 && status.LastFailure == nil
+}
+
+func sameRestoredGangSurgeTarget(current, desired *workload.InstanceStatus) bool {
+	return current != nil && desired != nil && gangSurgeTargetMatches(current, desired.TargetRevision) &&
+		current.Index == desired.Index && current.Incarnation == desired.Incarnation &&
+		current.Operation.ID == desired.Operation.ID
+}
+
+func cloneTerminalStatusValue(status workload.InstanceStatus) workload.InstanceStatus {
+	copy := status
+	if status.Operation != nil {
+		operation := *status.Operation
+		operation.HintTargetNodes = append([]string(nil), status.Operation.HintTargetNodes...)
+		if status.Operation.SurgeIndex != nil {
+			surgeIndex := *status.Operation.SurgeIndex
+			operation.SurgeIndex = &surgeIndex
+		}
+		copy.Operation = &operation
+	}
+	copy.NodesOccupied = append([]string(nil), status.NodesOccupied...)
+	copy.Conditions = append([]metav1.Condition(nil), status.Conditions...)
+	return copy
 }

@@ -129,6 +129,34 @@ func newWireNormalizingStatusClient(t *testing.T, objs ...client.Object) (client
 		Build(), writes
 }
 
+func newCommitThenErrorStatusClient(t *testing.T, objs ...client.Object) (client.Client, *int) {
+	t.Helper()
+	writes := new(int)
+	funcs := interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			*writes++
+			wire := &v1beta1.InferenceReplica{}
+			encoded, err := json.Marshal(obj)
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(encoded, wire); err != nil {
+				return err
+			}
+			if err := c.SubResource(sub).Update(ctx, wire, opts...); err != nil {
+				return err
+			}
+			return fmt.Errorf("injected response loss")
+		},
+	}
+	return fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(objs...).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithInterceptorFuncs(funcs).
+		Build(), writes
+}
+
 type staleReadingClient struct {
 	client.Client
 	reader client.Reader
@@ -136,6 +164,34 @@ type staleReadingClient struct {
 
 func (c *staleReadingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	return c.reader.Get(ctx, key, obj, opts...)
+}
+
+type driftingInstanceReader struct {
+	client.Reader
+	reads int
+	index int32
+}
+
+func (r *driftingInstanceReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	r.reads++
+	if r.reads < 2 {
+		return nil
+	}
+	ir, ok := obj.(*v1beta1.InferenceReplica)
+	if !ok {
+		return fmt.Errorf("unexpected object %T", obj)
+	}
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == r.index {
+			ir.Status.InstanceStatuses[i].Operation = &v1beta1.InstanceOperation{
+				ID: "replacement-owner", Type: v1beta1.InstanceOperationUpdate,
+			}
+		}
+	}
+	return nil
 }
 
 type indexedPodCreateFailureClient struct {
@@ -664,18 +720,16 @@ func TestBuildApplyInstanceMutations_NoChangeZeroWrites(t *testing.T) {
 		"a declined missing-index mutation must not append a phantom slot")
 }
 
-// TestBuildApplyInstanceMutations_NotFoundIsNoOp pins the gone-owner
-// contract shared with buildMutateInstance: an IR deleted under us is a
-// successful no-op, not an error.
-func TestBuildApplyInstanceMutations_NotFoundIsNoOp(t *testing.T) {
+func TestBuildApplyInstanceMutations_NotFoundAbortsStaleReconcile(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
 	c, writes := newCountingStatusClient(t, 0) // IR never stored
 
 	apply := buildApplyInstanceMutations(c, ir)
-	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{
+	err := apply(context.Background(), []workloadtypes.InstanceMutation{
 		failedStamp(0),
-	})).To(gomega.Succeed())
+	})
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.Equal(0))
 }
 
@@ -988,8 +1042,8 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_OwnerGoneSentinel(t *testing.
 		g.Expect(*writes).To(gomega.Equal(0))
 
 		instanceOnlyApply := buildApplyInstanceMutations(c, ir)
-		g.Expect(instanceOnlyApply(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)})).To(gomega.Succeed(),
-			"the compatibility wrapper must retain NotFound-as-success semantics")
+		err = instanceOnlyApply(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)})
+		g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 		g.Expect(*writes).To(gomega.Equal(0))
 	})
 
@@ -1010,7 +1064,8 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_OwnerGoneSentinel(t *testing.
 		g.Expect(ir.Status).To(gomega.Equal(*original), "an uncommitted write must not advance the in-memory mirror")
 
 		instanceOnlyApply := buildApplyInstanceMutations(c, ir)
-		g.Expect(instanceOnlyApply(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)})).To(gomega.Succeed())
+		err = instanceOnlyApply(context.Background(), []workloadtypes.InstanceMutation{failedStamp(0)})
+		g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 		g.Expect(*writes).To(gomega.Equal(2))
 	})
 }
@@ -1041,4 +1096,265 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_RejectsAmbiguousMutation(t *t
 	}, "", nil)
 	g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("uses OnCommit but the index appears 2 times")))
 	g.Expect(*writes).To(gomega.Equal(0), "invalid mutation shapes must fail before any status write")
+}
+
+func TestBuildApplyInstanceMutations_BatchPreconditionRejectsEverything(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 2, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 1, Incarnation: 3, Phase: v1beta1.OMENativeInstanceReady},
+	}
+	c, writes := newCountingStatusClient(t, 0, ir)
+	apply := buildApplyInstanceMutationsWithRetryBlock(c, ir)
+	guardCalls := 0
+	err := apply(context.Background(), []workloadtypes.InstanceMutation{
+		{
+			Index: 0,
+			BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+				guardCalls++
+				return snapshot.OwnerUID == ir.UID &&
+					snapshot.Instances[1].Incarnation == 99
+			},
+			Mutate: func(status *workload.InstanceStatus) bool {
+				status.Phase = workload.InstancePhaseDeleting
+				return true
+			},
+		},
+		failedStamp(1),
+	}, "", nil)
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
+	g.Expect(guardCalls).To(gomega.Equal(1))
+	g.Expect(*writes).To(gomega.Equal(0))
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses).To(gomega.Equal(ir.Status.InstanceStatuses))
+}
+
+func TestBuildApplyInstanceMutations_BatchPreconditionRecheckedAfterConflict(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+	c, writes := newCountingStatusClient(t, 1, ir)
+	apply := buildApplyInstanceMutationsWithRetryBlock(c, ir)
+	guardCalls := 0
+	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
+		Index: 0,
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			guardCalls++
+			return snapshot.OwnerUID == ir.UID
+		},
+		Mutate: func(status *workload.InstanceStatus) bool {
+			status.Phase = workload.InstancePhaseDeleting
+			return true
+		},
+	}}, "", nil)).To(gomega.Succeed())
+	g.Expect(*writes).To(gomega.Equal(2))
+	g.Expect(guardCalls).To(gomega.Equal(2))
+}
+
+func TestBuildApplyInstanceMutations_GuardedRemovalRejectsOwnershipDriftAfterConflict(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 4, Phase: v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{ID: "gang-source", Type: v1beta1.InstanceOperationUpdate, Step: workloadops.UpdateStepSurgeDrain},
+	}}
+	c, writes := newCountingStatusClient(t, 1, ir)
+	reads := &driftingInstanceReader{Reader: c, index: 0}
+	apply := buildApplyInstanceMutationsWithRetryBlockFromReader(c, reads, ir)
+	commits := 0
+	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
+		Index:  0,
+		Remove: true,
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			status, found := snapshot.Instances[0]
+			return found && snapshot.OwnerUID == ir.UID && status.Incarnation == 4 &&
+				status.Operation != nil && status.Operation.ID == "gang-source" &&
+				status.Operation.Type == workload.InstanceOperationUpdate
+		},
+		OnCommit: func(*workload.InstanceStatus, *workload.InstanceStatus) { commits++ },
+	}}, "", nil)
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
+	g.Expect(*writes).To(gomega.Equal(1), "the retry must stop before a second status write")
+	g.Expect(reads.reads).To(gomega.Equal(3), "conflict confirmation plus the retry must use authoritative snapshots")
+	g.Expect(commits).To(gomega.Equal(0))
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1), "ownership drift must retain the incumbent status")
+}
+
+func TestBuildApplyInstanceMutations_AmbiguousCommitConfirmedAuthoritatively(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Incarnation: 4, Phase: v1beta1.OMENativeInstanceReady}}
+	c, writes := newCommitThenErrorStatusClient(t, ir)
+	apply := buildApplyInstanceMutationsWithRetryBlockFromReader(c, c, ir)
+	now := metav1.NewTime(time.Date(2026, 4, 5, 6, 7, 8, 987654321, time.UTC))
+	commits := 0
+	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
+		Index: 0,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			status.Phase = workload.InstancePhaseDeleting
+			status.Operation = &workload.InstanceOperation{
+				ID: "delete-0", Type: workload.InstanceOperationDelete, Step: "Drain", StartedAt: now,
+			}
+			return true
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && status.Phase == workload.InstancePhaseDeleting && status.Operation != nil && status.Operation.ID == "delete-0"
+		},
+		OnCommit: func(_, current *workload.InstanceStatus) {
+			commits++
+			g.Expect(current).NotTo(gomega.BeNil())
+			g.Expect(current.Operation.StartedAt.Nanosecond()).To(gomega.Equal(0), "callback must receive the wire-normalized value")
+		},
+	}}, "", nil)).To(gomega.Succeed())
+	g.Expect(*writes).To(gomega.Equal(1))
+	g.Expect(commits).To(gomega.Equal(1))
+	g.Expect(ir.Status.InstanceStatuses[0].Operation.StartedAt.Nanosecond()).To(gomega.Equal(0))
+}
+
+func TestBuildApplyInstanceMutations_AmbiguousRemovalForgetsOnlyAfterConfirmedAbsence(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 4, Phase: v1beta1.OMENativeInstanceDeleting,
+		Operation: &v1beta1.InstanceOperation{ID: "delete-0", Type: v1beta1.InstanceOperationDelete},
+	}}
+	c, writes := newCommitThenErrorStatusClient(t, ir)
+	apply := buildApplyInstanceMutationsWithRetryBlockFromReader(c, c, ir)
+	commits := 0
+	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
+		Index:  0,
+		Remove: true,
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			status, found := snapshot.Instances[0]
+			return found && snapshot.OwnerUID == ir.UID && status.Incarnation == 4 &&
+				status.Operation != nil && status.Operation.ID == "delete-0"
+		},
+		OnCommit: func(previous, current *workload.InstanceStatus) {
+			commits++
+			g.Expect(previous).NotTo(gomega.BeNil())
+			g.Expect(current).To(gomega.BeNil())
+		},
+	}}, "", nil)).To(gomega.Succeed())
+	g.Expect(*writes).To(gomega.Equal(1))
+	g.Expect(commits).To(gomega.Equal(1))
+	g.Expect(ir.Status.InstanceStatuses).To(gomega.BeEmpty())
+}
+
+func TestBuildApplyInstanceMutations_AmbiguousCombinedCommitConfirmed(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating}}
+	c, writes := newCommitThenErrorStatusClient(t, ir)
+	apply := buildApplyInstanceMutationsWithRetryBlockFromReader(c, c, ir)
+	commits := 0
+
+	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
+		Index: 0,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			status.Phase = workload.InstancePhaseReady
+			return true
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && status.Phase == workload.InstancePhaseReady
+		},
+		OnCommit: func(*workload.InstanceStatus, *workload.InstanceStatus) { commits++ },
+	}}, "revision-b", func(block *workload.RetryBlock) workload.RetryBlockDisposition {
+		block.State = workload.RetryBlockHeld
+		block.AttemptsStarted = 2
+		return workload.RetryBlockPersist
+	})
+
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(*writes).To(gomega.Equal(1))
+	g.Expect(commits).To(gomega.Equal(1))
+	g.Expect(ir.Status.RetryBlocks).To(gomega.ConsistOf(v1beta1.RetryBlock{
+		TargetRevision:  "revision-b",
+		State:           v1beta1.RetryBlockHeld,
+		AttemptsStarted: 2,
+	}))
+}
+
+func TestBuildApplyInstanceMutations_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+	c, writes := newCountingStatusClient(t, 0, replacement)
+	apply := buildApplyInstanceMutationsWithRetryBlockFromReader(c, c, original)
+
+	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
+		Index: 0,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			status.Phase = workload.InstancePhaseDeleting
+			return true
+		},
+	}}, "", nil)
+
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(*writes).To(gomega.BeZero())
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceReady))
+}
+
+func TestBuildMutateInstance_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+	r, c := newReconciler(t, replacement)
+	called := false
+
+	mutate := buildMutateInstance(r.Client, original)
+	err := mutate(context.Background(), 0, func(*workload.InstanceStatus) bool {
+		called = true
+		return true
+	})
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(called).To(gomega.BeFalse())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceReady))
+}
+
+func TestBuildRemoveInstance_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
+	r, c := newReconciler(t, replacement)
+
+	remove := buildRemoveInstance(r.Client, original, workload.NewExpectations())
+	removed, err := remove(context.Background(), 0)
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(removed).To(gomega.BeFalse())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses).To(gomega.Equal(replacement.Status.InstanceStatuses))
+}
+
+func TestBuildWriteAggregateCondition_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	r, c := newReconciler(t, replacement)
+
+	write := buildWriteAggregateCondition(r.Client, original)
+	err := write(context.Background(), metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Ready"})
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
+	g.Expect(got.Status.Conditions).To(gomega.BeEmpty())
 }

@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -110,6 +111,73 @@ func TestBuildMutateMigration_UnchangedWritesNothing(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, after)).To(gomega.Succeed())
 	g.Expect(after.ResourceVersion).To(gomega.Equal(before.ResourceVersion))
 	g.Expect(after.Status.Migrations[0].Message).To(gomega.BeEmpty())
+}
+
+func TestBuildMutateMigration_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.Migrations = []v1beta1.MigrationStatus{acceptedEntry("u-1")}
+	r, c := newReconciler(t, replacement)
+	key := types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}
+	before := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
+
+	called := false
+	mutate := buildMutateMigration(r.Client, original)
+	err := mutate(context.Background(), "u-1", func(*workload.MigrationRecord) bool {
+		called = true
+		return true
+	})
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(called).To(gomega.BeFalse())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.ResourceVersion).To(gomega.Equal(before.ResourceVersion))
+	g.Expect(got.Status.Migrations).To(gomega.Equal(before.Status.Migrations))
+}
+
+func TestBuildAppendMigration_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.Migrations = []v1beta1.MigrationStatus{acceptedEntry("u-1")}
+	r, c := newReconciler(t, replacement)
+	key := types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}
+	before := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
+
+	appendRec := buildAppendMigration(r.Client, original)
+	err := appendRec(context.Background(), workload.MigrationRecord{RequestUUID: "u-2"})
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.ResourceVersion).To(gomega.Equal(before.ResourceVersion))
+	g.Expect(got.Status.Migrations).To(gomega.Equal(before.Status.Migrations))
+}
+
+func TestSyncMigrationEntries_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	original := baselineIR("llama-engine", "prod", 1)
+	replacement := original.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.Status.Migrations = []v1beta1.MigrationStatus{acceptedEntry("u-1")}
+	r, c := newReconciler(t, replacement)
+	key := types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}
+	before := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
+
+	err := r.syncMigrationEntries(context.Background(), r.Log, original, nil, migrationTestTimeout)
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.ResourceVersion).To(gomega.Equal(before.ResourceVersion))
+	g.Expect(got.Status.Migrations).To(gomega.Equal(before.Status.Migrations))
 }
 
 // TestBuildAppendMigration_AppendsIdempotently pins the AppendMigration

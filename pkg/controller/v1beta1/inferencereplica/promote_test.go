@@ -2,12 +2,14 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
 const (
@@ -47,7 +49,7 @@ func TestPromoteCurrentRevision_PartitionedRolloutDoesNotPromote(t *testing.T) {
 	}
 
 	r, _ := newReconciler(t, ir)
-	promote := buildPromoteCurrentRevision(r.Client, ir)
+	promote := buildPromoteCurrentRevision(r.Client, r.Client, ir)
 	g.Expect(promote(context.Background(), promoteTargetRev)).To(gomega.Succeed())
 
 	// In-memory snapshot untouched.
@@ -74,7 +76,7 @@ func TestPromoteCurrentRevision_FullConvergePromotes(t *testing.T) {
 	}
 
 	r, _ := newReconciler(t, ir)
-	promote := buildPromoteCurrentRevision(r.Client, ir)
+	promote := buildPromoteCurrentRevision(r.Client, r.Client, ir)
 	g.Expect(promote(context.Background(), promoteTargetRev)).To(gomega.Succeed())
 
 	g.Expect(ir.Status.CurrentRevision).To(gomega.Equal(promoteTargetRev),
@@ -99,10 +101,63 @@ func TestPromoteCurrentRevision_AlreadyEqualNoWrite(t *testing.T) {
 	r, _ := newReconciler(t, ir)
 	before := getFreshIR(t, r, ir).ResourceVersion
 
-	promote := buildPromoteCurrentRevision(r.Client, ir)
+	promote := buildPromoteCurrentRevision(r.Client, r.Client, ir)
 	g.Expect(promote(context.Background(), promoteTargetRev)).To(gomega.Succeed())
 
 	after := getFreshIR(t, r, ir).ResourceVersion
 	g.Expect(after).To(gomega.Equal(before),
 		"an already-converged IR must perform no Status().Update (ResourceVersion unchanged)")
+}
+
+// TestPromoteCurrentRevision_UsesAuthoritativeStatusAfterLifecycleWrite keeps
+// a stale Ready cache view from racing a lifecycle status commit.
+func TestPromoteCurrentRevision_UsesAuthoritativeStatusAfterLifecycleWrite(t *testing.T) {
+	g := gomega.NewWithT(t)
+	stale := baselineIR("llama-engine", "prod", 1)
+	stale.Status.CurrentRevision = promotePriorRev
+	stale.Status.UpdateRevision = promoteTargetRev
+	stale.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promoteTargetRev,
+	}}
+	liveObject := stale.DeepCopy()
+	liveObject.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceDeleting
+
+	live, writes := newCountingStatusClient(t, 0, liveObject)
+	staleReader, _ := newCountingStatusClient(t, 0, stale.DeepCopy())
+	writer := &staleReadingClient{Client: live, reader: staleReader}
+
+	promote := buildPromoteCurrentRevision(writer, live, stale)
+	g.Expect(promote(context.Background(), promoteTargetRev)).To(gomega.Succeed())
+	g.Expect(*writes).To(gomega.Equal(0),
+		"a stale Ready cache view must not promote across a committed lifecycle transition")
+
+	persisted := &v1beta1.InferenceReplica{}
+	g.Expect(live.Get(context.Background(), types.NamespacedName{Name: stale.Name, Namespace: stale.Namespace}, persisted)).To(gomega.Succeed())
+	g.Expect(persisted.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
+	g.Expect(stale.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
+}
+
+func TestPromoteCurrentRevision_SameNameReplacementAborts(t *testing.T) {
+	g := gomega.NewWithT(t)
+	stale := baselineIR("llama-engine", "prod", 1)
+	stale.Status.CurrentRevision = promotePriorRev
+
+	replacement := stale.DeepCopy()
+	replacement.UID = types.UID("replacement-uid")
+	replacement.Status.CurrentRevision = promotePriorRev
+	replacement.Status.UpdateRevision = promoteTargetRev
+	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promoteTargetRev,
+	}}
+	live, writes := newCountingStatusClient(t, 0, replacement)
+
+	promote := buildPromoteCurrentRevision(live, live, stale)
+	err := promote(context.Background(), promoteTargetRev)
+	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(*writes).To(gomega.Equal(0))
+
+	persisted := &v1beta1.InferenceReplica{}
+	g.Expect(live.Get(context.Background(), types.NamespacedName{Name: stale.Name, Namespace: stale.Namespace}, persisted)).To(gomega.Succeed())
+	g.Expect(persisted.UID).To(gomega.Equal(replacement.UID))
+	g.Expect(persisted.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
 }

@@ -119,6 +119,10 @@ const (
 // value. The gang SOURCE uses Step="Surge" so the surge budget counts it.
 const UpdateStepGangSurgeTarget = "GangSurgeTarget"
 
+// UpdateStepGangSurgeTargetCleanup marks a replacement gang whose terminal
+// cleanup owns its Pods and PodGroup until the marker status is removed.
+const UpdateStepGangSurgeTargetCleanup = "GangSurgeTargetCleanup"
+
 // InstanceOperation is the durable recovery anchor written before any
 // destructive action against an Instance and cleared on completion.
 // Mirrors the CRD InstanceOperation field-for-field.

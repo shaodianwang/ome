@@ -127,6 +127,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		return fmt.Errorf("aggregateAndWriteStatus: nil client")
 	}
 	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
 	desiredByIdx := workload.DesiredPodCountByInstance(plan)
 	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
 
@@ -155,15 +156,21 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		return fmt.Errorf("aggregateAndWriteStatus: compute availability: %w", err)
 	}
 
+	ownerUnavailable := false
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.Client.Get(ctx, key, fresh); err != nil {
+		if err := r.reader().Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				// IR deleted under us; nothing to aggregate into.
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
+				ownerUnavailable = true
 				return nil
 			}
 			return fmt.Errorf("aggregateAndWriteStatus: re-read IR: %w", err)
+		}
+		if ownerUID == "" || fresh.UID != ownerUID {
+			ownerUnavailable = true
+			return nil
 		}
 
 		// Snapshot the live status before recomputation so a no-op
@@ -254,6 +261,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if err := r.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
+				ownerUnavailable = true
 				return nil
 			}
 			return fmt.Errorf("aggregateAndWriteStatus: update IR status: %w", err)
@@ -276,6 +284,9 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultError)
 		}
 		return err
+	}
+	if ownerUnavailable {
+		return nil
 	}
 
 	// Park the InstanceReadyTimeout clock for any Instance whose pods are
