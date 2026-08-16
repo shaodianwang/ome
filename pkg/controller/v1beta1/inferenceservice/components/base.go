@@ -633,16 +633,28 @@ func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceServic
 	return nil
 }
 
-// writeComponentAutoscalerStatus resolves the per-Component autoscaler from
-// the ISVC -> runtime -> default chain and stamps the resulting
-// ComponentAutoscalerStatus + ScaleTargetRef onto status.components.<c>.
+// writeComponentAutoscalerStatus resolves the per-Component autoscaler and
+// stamps the resulting ComponentAutoscalerStatus + ScaleTargetRef onto
+// status.components.<c>.
 // Existing fields on the ComponentStatusSpec entry are preserved — only the
 // .autoscaler and .scaleTargetRef sub-fields are overwritten.
 //
 // See pkg/.../reconcilers/autoscaler/status.go for the underlying mapping
 // + live-mirror semantics.
 func writeComponentAutoscalerStatus(b *BaseComponentFields, isvc *v1beta1.InferenceService, componentType v1beta1.ComponentType, objectMeta metav1.ObjectMeta) error {
-	resolved, source := autoscaler.ResolveComponentAutoscaler(b.Runtime, isvc, componentType)
+	var (
+		resolved *v1beta1.ComponentAutoscaler
+		source   autoscaler.SpecSource
+		err      error
+	)
+	if b.DeploymentMode == constants.RawDeployment {
+		resolved, source, err = autoscaler.ResolveRawComponentAutoscaler(b.Runtime, isvc, componentType, objectMeta.Annotations)
+		if err != nil {
+			return err
+		}
+	} else {
+		resolved, source = autoscaler.ResolveComponentAutoscaler(b.Runtime, isvc, componentType)
+	}
 
 	scaleTargetRef := canonicalScaleTargetRef(b.DeploymentMode, isvc.Name, objectMeta.Name, componentType)
 

@@ -1,6 +1,7 @@
 package hpa
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -8,7 +9,10 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -522,7 +526,7 @@ func TestSemanticHPAEquals(t *testing.T) {
 			Spec:       autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
 		}))
 
-	assert.True(t, semanticHPAEquals(
+	assert.False(t, semanticHPAEquals(
 		&autoscalingv2.HorizontalPodAutoscaler{
 			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"unrelated": "true"}},
 			Spec:       autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
@@ -531,6 +535,176 @@ func TestSemanticHPAEquals(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"unrelated": "false"}},
 			Spec:       autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
 		}))
+
+	assert.False(t, semanticHPAEquals(
+		&autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"component": "engine"}},
+			Spec:       autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
+		},
+		&autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"component": "decoder"}},
+			Spec:       autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
+		}))
+
+	assert.True(t, semanticHPAEquals(
+		&autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      map[string]string{"component": "engine"},
+				Annotations: map[string]string{"example.com/managed": "true"},
+			},
+			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
+		},
+		&autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{
+					"component":            "engine",
+					"example.com/injected": "keep",
+				},
+				Annotations: map[string]string{
+					"example.com/managed":  "true",
+					"example.com/injected": "keep",
+				},
+			},
+			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
+		}))
+
+	controller := true
+	desiredOwner := metav1.OwnerReference{
+		APIVersion: "ome.io/v1beta1",
+		Kind:       "InferenceService",
+		Name:       "demo",
+		UID:        "isvc-uid",
+		Controller: &controller,
+	}
+	staleOwner := desiredOwner
+	staleOwner.Name = "stale"
+	assert.False(t, semanticHPAEquals(
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{desiredOwner}}},
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{staleOwner}}},
+	))
+
+	nonControllerOwner := desiredOwner
+	nonControllerOwner.Controller = nil
+	assert.True(t, semanticHPAEquals(
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{desiredOwner}}},
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{desiredOwner, nonControllerOwner}}},
+	))
+}
+
+func TestHPAReconcilerUpdatePreservesUnmanagedMetadata(t *testing.T) {
+	controller := true
+	owner := metav1.OwnerReference{
+		APIVersion: v1beta1.SchemeGroupVersion.String(),
+		Kind:       "InferenceService",
+		Name:       "demo",
+		UID:        "isvc-uid",
+		Controller: &controller,
+	}
+	nonController := owner
+	nonController.Name = "observer"
+	nonController.UID = "observer-uid"
+	nonController.Controller = nil
+
+	existing := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "demo-engine",
+			Namespace:   "test-ns",
+			UID:         "hpa-uid",
+			Labels:      map[string]string{"component": "decoder", "example.com/injected": "keep"},
+			Annotations: map[string]string{"example.com/managed": "old", "example.com/injected": "keep"},
+			Finalizers:  []string{"example.com/finalizer"},
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+				nonController,
+			},
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{MaxReplicas: 3},
+	}
+	desired := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            existing.Name,
+			Namespace:       existing.Namespace,
+			Labels:          map[string]string{"component": "engine"},
+			Annotations:     map[string]string{"example.com/managed": "new"},
+			OwnerReferences: []metav1.OwnerReference{owner},
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{MaxReplicas: 5},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := autoscalingv2.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := &HPAReconciler{client: cl, HPA: desired}
+	if err := r.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := &autoscalingv2.HorizontalPodAutoscaler{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: existing.Namespace, Name: existing.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, int32(5), got.Spec.MaxReplicas)
+	assert.Equal(t, "engine", got.Labels["component"])
+	assert.Equal(t, "keep", got.Labels["example.com/injected"])
+	assert.Equal(t, "new", got.Annotations["example.com/managed"])
+	assert.Equal(t, "keep", got.Annotations["example.com/injected"])
+	assert.Equal(t, []string{"example.com/finalizer"}, got.Finalizers)
+	assert.Contains(t, got.OwnerReferences, nonController)
+}
+
+func TestHPAReconcilerRejectsForeignController(t *testing.T) {
+	controller := true
+	expectedOwner := metav1.OwnerReference{
+		APIVersion: "ome.io/v1beta1",
+		Kind:       "InferenceService",
+		Name:       "demo",
+		UID:        "expected-uid",
+		Controller: &controller,
+	}
+	foreignOwner := expectedOwner
+	foreignOwner.Name = "other"
+	foreignOwner.UID = "foreign-uid"
+
+	tests := []struct {
+		name   string
+		owners []metav1.OwnerReference
+	}{
+		{name: "ownerless"},
+		{name: "different controller", owners: []metav1.OwnerReference{foreignOwner}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired := &autoscalingv2.HorizontalPodAutoscaler{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:       "test-ns",
+					Name:            "demo-engine",
+					OwnerReferences: []metav1.OwnerReference{expectedOwner},
+				},
+			}
+			existing := desired.DeepCopy()
+			existing.UID = types.UID("hpa-uid")
+			existing.OwnerReferences = tt.owners
+
+			scheme := runtime.NewScheme()
+			if err := autoscalingv2.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+			r := &HPAReconciler{client: cl, HPA: desired}
+
+			err := r.Reconcile()
+			assert.ErrorContains(t, err, "not controlled by expected owner")
+
+			got := &autoscalingv2.HorizontalPodAutoscaler{}
+			if err := cl.Get(context.Background(), types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}, got); err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tt.owners, got.OwnerReferences)
+		})
+	}
 }
 
 // TestSemanticHPAEquals_ServerDefaultedBehavior is the regression test for the

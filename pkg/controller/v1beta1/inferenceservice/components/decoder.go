@@ -144,7 +144,11 @@ func (d *Decoder) getWorkerSize() int {
 func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
 	switch d.DeploymentMode {
 	case constants.RawDeployment:
-		return d.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
+		resolvedAS, _, err := autoscaler.ResolveRawComponentAutoscaler(d.Runtime, isvc, v1beta1.DecoderComponent, objectMeta.Annotations)
+		if err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw decoder")
+		}
+		return d.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent, resolvedAS)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.

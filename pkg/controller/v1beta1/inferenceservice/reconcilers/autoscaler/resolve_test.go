@@ -6,9 +6,11 @@ import (
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/gomega"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // isvcAutoscalerBlock builds a distinctive ComponentAutoscaler keyed by
@@ -354,4 +356,176 @@ func TestResolveComponentAutoscaler_PerComponentIsolation(t *testing.T) {
 	g.Expect(gotRouter.Class).To(gomega.Equal(v1beta1.AutoscalerHPA))
 	g.Expect(gotRouter.Keda).To(gomega.BeNil())
 	g.Expect(gotRouter.HPA).To(gomega.BeNil())
+}
+
+// TestResolveRawComponentAutoscaler_PriorityMatrix pins the RawDeployment
+// inheritance chain across every Component: typed ISVC, typed runtime, legacy
+// annotation, then the existing default. The legacy annotation is an input only
+// when neither typed layer supplied a block.
+func TestResolveRawComponentAutoscaler_PriorityMatrix(t *testing.T) {
+	components := []v1beta1.ComponentType{
+		v1beta1.EngineComponent,
+		v1beta1.DecoderComponent,
+		v1beta1.RouterComponent,
+	}
+
+	tests := []struct {
+		name         string
+		isvcBlock    *v1beta1.ComponentAutoscaler
+		runtimeBlock *v1beta1.ComponentAutoscaler
+		annotations  map[string]string
+		wantClass    v1beta1.AutoscalerClass
+		wantSource   SpecSource
+	}{
+		{
+			name:        "ISVC typed None beats legacy HPA",
+			isvcBlock:   &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone},
+			annotations: map[string]string{constants.AutoscalerClass: string(constants.AutoscalerClassHPA)},
+			wantClass:   v1beta1.AutoscalerNone,
+			wantSource:  SpecSourceISVC,
+		},
+		{
+			name: "runtime typed KEDA beats legacy HPA",
+			runtimeBlock: &v1beta1.ComponentAutoscaler{
+				Class: v1beta1.AutoscalerKEDA,
+				Keda: &v1beta1.KedaAutoscaler{Triggers: []kedav1.ScaleTriggers{{
+					Type: "cron",
+				}}},
+			},
+			annotations: map[string]string{constants.AutoscalerClass: string(constants.AutoscalerClassHPA)},
+			wantClass:   v1beta1.AutoscalerKEDA,
+			wantSource:  SpecSourceRuntime,
+		},
+		{
+			name:        "legacy HPA wins over default",
+			annotations: map[string]string{constants.AutoscalerClass: string(constants.AutoscalerClassHPA)},
+			wantClass:   v1beta1.AutoscalerHPA,
+			wantSource:  SpecSourceLegacy,
+		},
+		{
+			name:        "legacy KEDA wins over default",
+			annotations: map[string]string{constants.AutoscalerClass: string(constants.AutoscalerClassKEDA)},
+			wantClass:   v1beta1.AutoscalerKEDA,
+			wantSource:  SpecSourceLegacy,
+		},
+		{
+			name:        "legacy External wins over default",
+			annotations: map[string]string{constants.AutoscalerClass: string(constants.AutoscalerClassExternal)},
+			wantClass:   v1beta1.AutoscalerExternal,
+			wantSource:  SpecSourceLegacy,
+		},
+		{
+			name:       "no typed or legacy config preserves default HPA",
+			wantClass:  v1beta1.AutoscalerHPA,
+			wantSource: SpecSourceDefault,
+		},
+	}
+
+	for _, component := range components {
+		component := component
+		for _, tt := range tests {
+			tt := tt
+			t.Run(string(component)+"/"+tt.name, func(t *testing.T) {
+				g := gomega.NewWithT(t)
+				isvc := &v1beta1.InferenceService{}
+				if tt.isvcBlock != nil {
+					setISVCAutoscaler(isvc, component, tt.isvcBlock.DeepCopy())
+				}
+
+				var runtimeSpec *v1beta1.ServingRuntimeSpec
+				if tt.runtimeBlock != nil {
+					runtimeSpec = &v1beta1.ServingRuntimeSpec{}
+					setRuntimeAutoscaler(runtimeSpec, component, tt.runtimeBlock.DeepCopy())
+				}
+
+				got, source, err := ResolveRawComponentAutoscaler(runtimeSpec, isvc, component, tt.annotations)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				g.Expect(got).NotTo(gomega.BeNil())
+				g.Expect(got.Class).To(gomega.Equal(tt.wantClass))
+				g.Expect(source).To(gomega.Equal(tt.wantSource))
+			})
+		}
+	}
+}
+
+// TestResolveRawComponentAutoscaler_LegacyTargetUtilization verifies that the
+// Raw-only CPU target annotation becomes an explicit typed HPA metric. The
+// shared dispatcher must not need to inspect legacy annotations downstream.
+func TestResolveRawComponentAutoscaler_LegacyTargetUtilization(t *testing.T) {
+	g := gomega.NewWithT(t)
+	annotations := map[string]string{
+		constants.AutoscalerClass:             string(constants.AutoscalerClassHPA),
+		constants.TargetUtilizationPercentage: "67",
+	}
+
+	got, source, err := ResolveRawComponentAutoscaler(nil, &v1beta1.InferenceService{}, v1beta1.EngineComponent, annotations)
+
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(source).To(gomega.Equal(SpecSourceLegacy))
+	g.Expect(got.Class).To(gomega.Equal(v1beta1.AutoscalerHPA))
+	g.Expect(got.HPA).NotTo(gomega.BeNil())
+	g.Expect(got.HPA.Metrics).To(gomega.HaveLen(1))
+	metric := got.HPA.Metrics[0]
+	g.Expect(metric.Type).To(gomega.Equal(autoscalingv2.ResourceMetricSourceType))
+	g.Expect(metric.Resource).NotTo(gomega.BeNil())
+	g.Expect(metric.Resource.Name).To(gomega.Equal(corev1.ResourceCPU))
+	g.Expect(metric.Resource.Target.Type).To(gomega.Equal(autoscalingv2.UtilizationMetricType))
+	g.Expect(metric.Resource.Target.AverageUtilization).NotTo(gomega.BeNil())
+	g.Expect(*metric.Resource.Target.AverageUtilization).To(gomega.Equal(int32(67)))
+}
+
+// TestResolveRawComponentAutoscaler_LegacyFreshAllocation ensures callers own
+// the translated legacy block and cannot mutate a later resolution.
+func TestResolveRawComponentAutoscaler_LegacyFreshAllocation(t *testing.T) {
+	g := gomega.NewWithT(t)
+	annotations := map[string]string{
+		constants.AutoscalerClass:             string(constants.AutoscalerClassHPA),
+		constants.TargetUtilizationPercentage: "67",
+	}
+
+	first, _, err := ResolveRawComponentAutoscaler(nil, &v1beta1.InferenceService{}, v1beta1.EngineComponent, annotations)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	*first.HPA.Metrics[0].Resource.Target.AverageUtilization = 10
+
+	second, source, err := ResolveRawComponentAutoscaler(nil, &v1beta1.InferenceService{}, v1beta1.EngineComponent, annotations)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(source).To(gomega.Equal(SpecSourceLegacy))
+	g.Expect(second.HPA.Metrics[0].Resource.Target.AverageUtilization).NotTo(gomega.BeNil())
+	g.Expect(*second.HPA.Metrics[0].Resource.Target.AverageUtilization).To(gomega.Equal(int32(67)))
+}
+
+// TestResolveRawComponentAutoscaler_UnknownLegacyClassErrors verifies that an
+// invalid effective Component annotation cannot silently fall through to the
+// default HPA.
+func TestResolveRawComponentAutoscaler_UnknownLegacyClassErrors(t *testing.T) {
+	g := gomega.NewWithT(t)
+	annotations := map[string]string{constants.AutoscalerClass: "mystery"}
+
+	got, source, err := ResolveRawComponentAutoscaler(nil, &v1beta1.InferenceService{}, v1beta1.EngineComponent, annotations)
+
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring(constants.AutoscalerClass))
+	g.Expect(err.Error()).To(gomega.ContainSubstring("mystery"))
+	g.Expect(got).To(gomega.BeNil())
+	g.Expect(source).To(gomega.Equal(SpecSourceLegacy))
+}
+
+// TestResolveRawComponentAutoscaler_TargetUtilizationWithoutClass preserves
+// the legacy behavior where a CPU target annotation implicitly selects HPA.
+func TestResolveRawComponentAutoscaler_TargetUtilizationWithoutClass(t *testing.T) {
+	g := gomega.NewWithT(t)
+	annotations := map[string]string{constants.TargetUtilizationPercentage: "61"}
+
+	got, source, err := ResolveRawComponentAutoscaler(nil, &v1beta1.InferenceService{}, v1beta1.EngineComponent, annotations)
+
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(source).To(gomega.Equal(SpecSourceLegacy))
+	g.Expect(got.Class).To(gomega.Equal(v1beta1.AutoscalerHPA))
+	g.Expect(got.HPA).NotTo(gomega.BeNil())
+	g.Expect(got.HPA.Metrics).To(gomega.HaveLen(1))
+	metric := got.HPA.Metrics[0]
+	g.Expect(metric.Resource).NotTo(gomega.BeNil())
+	g.Expect(metric.Resource.Name).To(gomega.Equal(corev1.ResourceCPU))
+	g.Expect(metric.Resource.Target.AverageUtilization).NotTo(gomega.BeNil())
+	g.Expect(*metric.Resource.Target.AverageUtilization).To(gomega.Equal(int32(61)))
 }

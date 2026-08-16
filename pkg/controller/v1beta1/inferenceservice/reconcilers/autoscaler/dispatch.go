@@ -14,16 +14,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/hpa"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/keda"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/scalermetadata"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
-// DispatchParams is the input bag DispatchAutoscaler reads to emit the
-// per-Component HPA or ScaledObject. The OMENative IR-managed dispatch
-// fills it from the resolved ComponentAutoscaler (the output of
-// ResolveComponentAutoscaler), the projected IR identity (for owner-ref
-// + scale-target), and the per-Component min/max replicas.
+// DispatchParams is the input bag DispatchAutoscaler reads to emit a
+// per-Component HPA or ScaledObject. Callers provide the resolved autoscaler,
+// expected controller owner, scale target, and replica bounds.
 //
 // Alpha API. The shape may change without notice.
 type DispatchParams struct {
@@ -53,6 +53,12 @@ type DispatchParams struct {
 	Namespace string
 	Name      string
 
+	// Labels + Annotations are the rendered Component metadata propagated to
+	// the generated scaler. The stable ISVC + Component labels also identify
+	// an OME-managed scaler from the other deployment mode during handoff.
+	Labels      map[string]string
+	Annotations map[string]string
+
 	// ScaleTargetRef is forwarded verbatim to the generated HPA /
 	// ScaledObject. For the IR-managed path callers supply
 	// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` so the HPA /
@@ -66,40 +72,36 @@ type DispatchParams struct {
 	// share the same reconciliation path.
 	Autoscaler *v1beta1.ComponentAutoscaler
 
-	// MinReplicas + MaxReplicas drive the corresponding bounds on the
-	// generated HPA / ScaledObject. MaxReplicas < MinReplicas is
-	// clamped up by the generator (matches the legacy semantics).
+	// MinReplicas + MaxReplicas are forwarded to the generated HPA /
+	// ScaledObject.
 	MinReplicas int32
 	MaxReplicas int32
 }
 
-// DispatchAutoscaler reconciles the per-(IR, Component) autoscaler from
-// the resolved ComponentAutoscaler block. Always-on per reconcile — the
-// caller invokes DispatchAutoscaler unconditionally on every Component
-// reconcile. Deep-equal-on-Get inside the per-class reconciler keeps the
-// cost bounded (no-op when nothing diffs).
+// DispatchAutoscaler reconciles one Component autoscaler from the resolved
+// ComponentAutoscaler block. Deep-equal-on-Get inside the per-class reconciler
+// keeps steady-state reconciliation to a no-op.
 //
 // Three-way dispatch on Autoscaler.Class (NOTE: none + external are
 // status-field twins, both fall through to the "delete both" branch — the
 // status writer distinguishes them via ManagedBy):
 //
-//   - hpa  → ensure the per-IR HPA exists; delete any pre-existing
-//     OME-managed ScaledObject sharing the same (Namespace, Name).
-//   - keda → ensure the per-IR ScaledObject exists; delete any pre-
-//     existing OME-managed HPA sharing the same (Namespace, Name).
-//   - none | external | nil → delete both OME-managed HPA + SO; no
-//     OME-side autoscaler runs.
+//   - hpa  → ensure the HPA exists; delete the OME-managed ScaledObject.
+//   - keda → ensure the ScaledObject exists; delete the OME-managed HPA.
+//   - none | external | nil → delete OME-managed HPA + ScaledObject.
 //
-// Cross-class delete uses a Get-then-Delete-if-found pattern so the
-// switch keda → hpa (and vice versa) is idempotent: re-running the
-// dispatch after a no-op state-change reads NotFound and skips the
-// Delete. Owner-ref + controller flag are stamped from p.Owner so a
-// deletion of the parent (IR) cascades the autoscaler via GC.
+// Managed classes preflight both canonical objects before mutation. A foreign
+// or ownerless object holds reconciliation with an error; none and external
+// leave such objects untouched. The current controller UID is authoritative.
+// A scaler from the opposite OME deployment mode is recognized only when the
+// live InferenceReplica verifies the controller bridge and any stable ISVC /
+// Component labels match, allowing the owner and scale target to converge.
+// Requested-class reconciliation completes before stale sibling deletion so a
+// failed class switch preserves the working scaler.
+// KEDA dispatch also requires at least one trigger before ownership preflight
+// or mutation so an invalid configuration cannot remove a working scaler.
 //
-// Errors are wrapped with the offending object kind + key for grep-
-// ability in operator logs. A failure on the cross-class delete short-
-// circuits (the create / update for the new class is skipped) so the
-// next reconcile pass retries the same sequence from the same state.
+// Errors are wrapped with the offending object kind and key for operator logs.
 //
 // Alpha API. The signature may change without notice.
 func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
@@ -114,35 +116,62 @@ func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
 	}
 
 	class := autoscalerClass(p.Autoscaler)
+	if class == v1beta1.AutoscalerKEDA && (p.Autoscaler.Keda == nil || len(p.Autoscaler.Keda.Triggers) == 0) {
+		return fmt.Errorf("DispatchAutoscaler: KEDA autoscaler requires at least one trigger (ns=%s, name=%s)", p.Namespace, p.Name)
+	}
+	if class == v1beta1.AutoscalerKEDA && p.Autoscaler.Keda.Advanced != nil {
+		hpaConfig := p.Autoscaler.Keda.Advanced.HorizontalPodAutoscalerConfig
+		if hpaConfig != nil && hpaConfig.Name == p.Name {
+			return fmt.Errorf("DispatchAutoscaler: KEDA horizontalPodAutoscalerConfig.name %q conflicts with the reserved OME HPA name (ns=%s, name=%s)", hpaConfig.Name, p.Namespace, p.Name)
+		}
+	}
 
 	switch class {
 	case v1beta1.AutoscalerHPA:
-		// Drop any pre-existing OME-managed ScaledObject for the same
-		// IR — class switch keda → hpa cleans up the old SO before
-		// the new HPA lands.
-		if err := deleteScaledObjectIfExists(ctx, p.Client, p.Namespace, p.Name); err != nil {
+		if err := preflightHPAOwnership(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels); err != nil {
+			return fmt.Errorf("validate HPA ownership for HPA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
+		}
+		if err := preflightScaledObjectOwnership(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels); err != nil {
+			return fmt.Errorf("validate ScaledObject ownership for HPA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
+		}
+		if err := convergeHPAControllerOwnership(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels); err != nil {
+			return fmt.Errorf("converge HPA ownership for HPA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
+		}
+		if err := ensureHPA(ctx, p); err != nil {
+			return err
+		}
+		if err := deleteScaledObjectIfExists(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels, rejectForeignScaler); err != nil {
 			return fmt.Errorf("delete stale ScaledObject for HPA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
 		}
-		return ensureHPA(ctx, p)
+		return nil
 
 	case v1beta1.AutoscalerKEDA:
-		// Drop any pre-existing OME-managed HPA for the same IR —
-		// class switch hpa → keda cleans up the old HPA before the
-		// new SO lands.
-		if err := deleteHPAIfExists(ctx, p.Client, p.Namespace, p.Name); err != nil {
+		if err := preflightScaledObjectOwnership(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels); err != nil {
+			return fmt.Errorf("validate ScaledObject ownership for KEDA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
+		}
+		if err := preflightHPAOwnership(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels); err != nil {
+			return fmt.Errorf("validate HPA ownership for KEDA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
+		}
+		if err := convergeScaledObjectControllerOwnership(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels); err != nil {
+			return fmt.Errorf("converge ScaledObject ownership for KEDA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
+		}
+		if err := ensureScaledObject(ctx, p); err != nil {
+			return err
+		}
+		if err := deleteHPAIfExists(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels, rejectForeignScaler); err != nil {
 			return fmt.Errorf("delete stale HPA for KEDA dispatch (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
 		}
-		return ensureScaledObject(ctx, p)
+		return nil
 
 	default:
 		// AutoscalerNone, AutoscalerExternal, and nil all converge here.
 		// Delete any OME-managed HPA + SO; the status writer is responsible
 		// for the surface-level distinction between "none" (no autoscaler at
 		// all) and "external" (operator-managed autoscaler).
-		if err := deleteHPAIfExists(ctx, p.Client, p.Namespace, p.Name); err != nil {
+		if err := deleteHPAIfExists(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels, preserveForeignScaler); err != nil {
 			return fmt.Errorf("delete OME-managed HPA on class=%s (ns=%s, name=%s): %w", class, p.Namespace, p.Name, err)
 		}
-		if err := deleteScaledObjectIfExists(ctx, p.Client, p.Namespace, p.Name); err != nil {
+		if err := deleteScaledObjectIfExists(ctx, p.Client, p.Namespace, p.Name, p.Owner, p.Labels, preserveForeignScaler); err != nil {
 			return fmt.Errorf("delete OME-managed ScaledObject on class=%s (ns=%s, name=%s): %w", class, p.Namespace, p.Name, err)
 		}
 		return nil
@@ -160,7 +189,7 @@ func autoscalerClass(a *v1beta1.ComponentAutoscaler) v1beta1.AutoscalerClass {
 	return a.Class
 }
 
-// ensureHPA stamps the IR owner-ref on the generator output and runs
+// ensureHPA stamps the expected owner-ref on the generator output and runs
 // the HPA reconciler. The HPAReconciler.Reconcile() loop is idempotent
 // (Get-then-diff) so re-running on a steady state is a cheap no-op.
 func ensureHPA(ctx context.Context, p DispatchParams) error {
@@ -187,7 +216,7 @@ func ensureHPA(ctx context.Context, p DispatchParams) error {
 	return nil
 }
 
-// ensureScaledObject stamps the IR owner-ref on the generator output
+// ensureScaledObject stamps the expected owner-ref on the generator output
 // and runs the KEDA reconciler. The KEDAReconciler.Reconcile() loop is
 // idempotent (Get-then-diff).
 func ensureScaledObject(ctx context.Context, p DispatchParams) error {
@@ -217,13 +246,26 @@ func ensureScaledObject(ctx context.Context, p DispatchParams) error {
 // buildComponentMeta assembles the ObjectMeta the HPA / KEDA generators
 // consume. Owner-ref MUST be set here (the generators write it onto the
 // generated object directly — they don't call SetControllerReference).
-// Annotations is initialized empty so the legacy AutoscalerClass
-// annotation gate in shouldCreateHPA / shouldCreateScaledObject sees
-// `""` and falls through to the create branch.
+// The caller-provided labels and annotations are copied so generator-side
+// mutations cannot alias the rendered Component metadata. When the legacy
+// autoscalerClass annotation is present, its emitted value follows the
+// resolved typed class so the shared dispatch decision remains authoritative.
 func buildComponentMeta(p DispatchParams) metav1.ObjectMeta {
+	annotations := cloneMetadataMap(p.Annotations)
+	if _, present := annotations[constants.AutoscalerClass]; present {
+		switch autoscalerClass(p.Autoscaler) {
+		case v1beta1.AutoscalerHPA:
+			annotations[constants.AutoscalerClass] = string(constants.AutoscalerClassHPA)
+		case v1beta1.AutoscalerKEDA:
+			annotations[constants.AutoscalerClass] = string(constants.AutoscalerClassKEDA)
+		}
+	}
+	labels, annotations := scalermetadata.Track(p.Labels, annotations)
 	return metav1.ObjectMeta{
 		Name:            p.Name,
 		Namespace:       p.Namespace,
+		Labels:          labels,
+		Annotations:     annotations,
 		OwnerReferences: []metav1.OwnerReference{p.Owner},
 	}
 }
@@ -240,28 +282,77 @@ func kedaScaleTarget(ref autoscalingv2.CrossVersionObjectReference) kedav1.Scale
 	}
 }
 
-// deleteHPAIfExists is the idempotent Get + Delete-if-found primitive
-// the cross-class switch + "delete both" branches share. NotFound is
-// swallowed — the operator switching class twice in quick succession
-// must not error out on the second pass.
-func deleteHPAIfExists(ctx context.Context, c client.Client, namespace, name string) error {
-	obj := &autoscalingv2.HorizontalPodAutoscaler{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
+type foreignScalerPolicy bool
+
+const (
+	preserveForeignScaler foreignScalerPolicy = false
+	rejectForeignScaler   foreignScalerPolicy = true
+)
+
+// deleteHPAIfExists deletes the canonical HPA only when it is controlled by
+// the expected owner or a recognized OME owner from the opposite deployment
+// mode. The caller decides whether a foreign object is preserved silently or
+// reported as a reconciliation conflict.
+func deleteHPAIfExists(ctx context.Context, c client.Client, namespace, name string, owner metav1.OwnerReference, labels map[string]string, policy foreignScalerPolicy) error {
+	obj, err := getHPAIfExists(ctx, c, namespace, name)
+	if err != nil || obj == nil {
 		return err
 	}
-	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+	managed, err := controlledByExpectedOrVerifiedModeBridge(ctx, c, obj, owner, labels)
+	if err != nil {
+		return err
+	}
+	if !managed {
+		if policy == rejectForeignScaler {
+			return requireExpectedController(ctx, c, "HorizontalPodAutoscaler", obj, owner, labels)
+		}
+		return nil
+	}
+	uid := obj.UID
+	resourceVersion := obj.ResourceVersion
+	if err := c.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
 }
 
-// deleteScaledObjectIfExists is the SO equivalent. Names through
-// utils.GetScaledObjectName so the key matches what the KEDA generator
-// uses (prefix "scaledobject-" + truncation).
-func deleteScaledObjectIfExists(ctx context.Context, c client.Client, namespace, name string) error {
+func getHPAIfExists(ctx context.Context, c client.Client, namespace, name string) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+	obj := &autoscalingv2.HorizontalPodAutoscaler{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return obj, nil
+}
+
+// deleteScaledObjectIfExists applies the same ownership policy to the
+// canonical name produced by utils.GetScaledObjectName.
+func deleteScaledObjectIfExists(ctx context.Context, c client.Client, namespace, name string, owner metav1.OwnerReference, labels map[string]string, policy foreignScalerPolicy) error {
+	obj, err := getScaledObjectIfExists(ctx, c, namespace, name)
+	if err != nil || obj == nil {
+		return err
+	}
+	managed, err := controlledByExpectedOrVerifiedModeBridge(ctx, c, obj, owner, labels)
+	if err != nil {
+		return err
+	}
+	if !managed {
+		if policy == rejectForeignScaler {
+			return requireExpectedController(ctx, c, "ScaledObject", obj, owner, labels)
+		}
+		return nil
+	}
+	uid := obj.UID
+	resourceVersion := obj.ResourceVersion
+	if err := c.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func getScaledObjectIfExists(ctx context.Context, c client.Client, namespace, name string) (*kedav1.ScaledObject, error) {
 	soName := utils.GetScaledObjectName(name)
 	obj := &kedav1.ScaledObject{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: soName}, obj); err != nil {
@@ -270,12 +361,168 @@ func deleteScaledObjectIfExists(ctx context.Context, c client.Client, namespace,
 		// (IsNoMatchError), and the type may be unregistered in the scheme
 		// (IsNotRegisteredError). None of these should fail the reconcile.
 		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
-			return nil
+			return nil, nil
 		}
+		return nil, err
+	}
+	return obj, nil
+}
+
+func preflightHPAOwnership(ctx context.Context, c client.Client, namespace, name string, owner metav1.OwnerReference, labels map[string]string) error {
+	obj, err := getHPAIfExists(ctx, c, namespace, name)
+	if err != nil || obj == nil {
 		return err
 	}
-	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+	return requireExpectedController(ctx, c, "HorizontalPodAutoscaler", obj, owner, labels)
+}
+
+func preflightScaledObjectOwnership(ctx context.Context, c client.Client, namespace, name string, owner metav1.OwnerReference, labels map[string]string) error {
+	obj, err := getScaledObjectIfExists(ctx, c, namespace, name)
+	if err != nil || obj == nil {
 		return err
 	}
-	return nil
+	return requireExpectedController(ctx, c, "ScaledObject", obj, owner, labels)
+}
+
+func requireExpectedController(ctx context.Context, c client.Client, kind string, obj metav1.Object, owner metav1.OwnerReference, labels map[string]string) error {
+	managed, err := controlledByExpectedOrVerifiedModeBridge(ctx, c, obj, owner, labels)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return nil
+	}
+	controller := metav1.GetControllerOf(obj)
+	if controller == nil {
+		return fmt.Errorf("%s %s/%s is not controlled by expected owner %s %s (UID %q): object has no controller owner", kind, obj.GetNamespace(), obj.GetName(), owner.Kind, owner.Name, owner.UID)
+	}
+	return fmt.Errorf("%s %s/%s is not controlled by expected owner %s %s (UID %q): controller is %s %s (UID %q)", kind, obj.GetNamespace(), obj.GetName(), owner.Kind, owner.Name, owner.UID, controller.Kind, controller.Name, controller.UID)
+}
+
+func controlledByExpectedOwner(obj metav1.Object, owner metav1.OwnerReference) bool {
+	controller := metav1.GetControllerOf(obj)
+	return controller != nil && controller.UID == owner.UID
+}
+
+func controlledByExpectedOrVerifiedModeBridge(
+	ctx context.Context,
+	c client.Client,
+	obj metav1.Object,
+	owner metav1.OwnerReference,
+	labels map[string]string,
+) (bool, error) {
+	if controlledByExpectedOwner(obj, owner) {
+		return true, nil
+	}
+	return controlledByVerifiedModeBridge(ctx, c, obj, owner, labels)
+}
+
+// controlledByVerifiedModeBridge recognizes a scaler from the other OME
+// deployment mode only when the live InferenceReplica verifies both controller
+// owners and the desired ISVC Component. Stable labels must match when present.
+func controlledByVerifiedModeBridge(
+	ctx context.Context,
+	c client.Client,
+	obj metav1.Object,
+	owner metav1.OwnerReference,
+	labels map[string]string,
+) (bool, error) {
+	controller := metav1.GetControllerOf(obj)
+	if controller == nil || controller.APIVersion != v1beta1.SchemeGroupVersion.String() || controller.Kind == owner.Kind {
+		return false, nil
+	}
+	isvcName := labels[constants.InferenceServicePodLabelKey]
+	component := labels[constants.OMEComponentLabel]
+	if isvcName == "" || component == "" {
+		return false, nil
+	}
+	objectLabels := obj.GetLabels()
+	objectISVC, hasISVC := objectLabels[constants.InferenceServicePodLabelKey]
+	objectComponent, hasComponent := objectLabels[constants.OMEComponentLabel]
+	if hasISVC || hasComponent {
+		if !hasISVC || !hasComponent || objectISVC != isvcName || objectComponent != component {
+			return false, nil
+		}
+	}
+
+	var irName string
+	var irUID types.UID
+	var isvcUID types.UID
+	switch {
+	case controller.Kind == "InferenceReplica" && owner.Kind == "InferenceService":
+		irName = controller.Name
+		irUID = controller.UID
+		isvcUID = owner.UID
+	case controller.Kind == "InferenceService" && owner.Kind == "InferenceReplica":
+		irName = owner.Name
+		irUID = owner.UID
+		isvcUID = controller.UID
+	default:
+		return false, nil
+	}
+
+	ir := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: irName}, ir); err != nil {
+		if apierrors.IsNotFound(err) || runtime.IsNotRegisteredError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	irController := metav1.GetControllerOf(ir)
+	if ir.UID != irUID || irController == nil ||
+		irController.APIVersion != v1beta1.SchemeGroupVersion.String() ||
+		irController.Kind != "InferenceService" || irController.UID != isvcUID {
+		return false, nil
+	}
+	return ir.Labels[constants.InferenceServicePodLabelKey] == isvcName &&
+		ir.Labels[constants.OMEComponentLabel] == component &&
+		ir.Spec.ParentRef.Name == isvcName &&
+		ir.Spec.Component == v1beta1.ComponentType(component), nil
+}
+
+// convergeHPAControllerOwnership transfers a recognized same-class HPA to the
+// live mode owner before the per-class reconciler updates metadata and target.
+func convergeHPAControllerOwnership(ctx context.Context, c client.Client, namespace, name string, owner metav1.OwnerReference, labels map[string]string) error {
+	obj, err := getHPAIfExists(ctx, c, namespace, name)
+	if err != nil || obj == nil || controlledByExpectedOwner(obj, owner) {
+		return err
+	}
+	managed, err := controlledByExpectedOrVerifiedModeBridge(ctx, c, obj, owner, labels)
+	if err != nil {
+		return err
+	}
+	if !managed {
+		return requireExpectedController(ctx, c, "HorizontalPodAutoscaler", obj, owner, labels)
+	}
+	obj.OwnerReferences = replaceControllerOwner(obj.OwnerReferences, owner)
+	return c.Update(ctx, obj)
+}
+
+// convergeScaledObjectControllerOwnership is the ScaledObject equivalent of
+// convergeHPAControllerOwnership.
+func convergeScaledObjectControllerOwnership(ctx context.Context, c client.Client, namespace, name string, owner metav1.OwnerReference, labels map[string]string) error {
+	obj, err := getScaledObjectIfExists(ctx, c, namespace, name)
+	if err != nil || obj == nil || controlledByExpectedOwner(obj, owner) {
+		return err
+	}
+	managed, err := controlledByExpectedOrVerifiedModeBridge(ctx, c, obj, owner, labels)
+	if err != nil {
+		return err
+	}
+	if !managed {
+		return requireExpectedController(ctx, c, "ScaledObject", obj, owner, labels)
+	}
+	obj.OwnerReferences = replaceControllerOwner(obj.OwnerReferences, owner)
+	return c.Update(ctx, obj)
+}
+
+func replaceControllerOwner(refs []metav1.OwnerReference, owner metav1.OwnerReference) []metav1.OwnerReference {
+	updated := make([]metav1.OwnerReference, 0, len(refs)+1)
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller {
+			continue
+		}
+		updated = append(updated, ref)
+	}
+	return append(updated, owner)
 }

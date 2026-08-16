@@ -11,7 +11,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/deployment"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
@@ -25,7 +24,6 @@ type RawKubeReconciler struct {
 	scheme              *runtime.Scheme
 	Deployment          *deployment.DeploymentReconciler
 	Service             *service.ServiceReconciler
-	Scaler              *autoscaler.AutoscalerReconciler
 	PodDisruptionBudget *pdb.PDBReconciler
 	PodMonitor          *podmonitor.PodMonitorReconciler
 	URL                 *knapis.URL
@@ -39,11 +37,6 @@ func NewRawKubeReconciler(client client.Client,
 	inferenceServiceSpec *v1beta1.InferenceServiceSpec,
 	podSpec *corev1.PodSpec,
 ) (*RawKubeReconciler, error) {
-	as, err := autoscaler.NewAutoscalerReconciler(client, clientset, scheme, componentMeta, inferenceServiceSpec)
-	if err != nil {
-		return nil, err
-	}
-
 	pdb := pdb.NewPDBReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec)
 	pm := podmonitor.NewPodMonitorReconciler(client, scheme, componentMeta, podSpec)
 	url, err := createRawURL(clientset, componentMeta)
@@ -61,7 +54,6 @@ func NewRawKubeReconciler(client client.Client,
 		scheme:              scheme,
 		Deployment:          deployment.NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec),
 		Service:             service.NewServiceReconciler(client, scheme, componentMeta, componentExt, podSpec, nil),
-		Scaler:              as,
 		PodDisruptionBudget: pdb,
 		PodMonitor:          pm,
 		URL:                 url,
@@ -95,11 +87,6 @@ func (r *RawKubeReconciler) Reconcile() (*appsv1.Deployment, error) {
 	}
 	// reconcile Service
 	_, err = r.Service.Reconcile()
-	if err != nil {
-		return nil, err
-	}
-	// reconcile HPA
-	err = r.Scaler.Reconcile()
 	if err != nil {
 		return nil, err
 	}

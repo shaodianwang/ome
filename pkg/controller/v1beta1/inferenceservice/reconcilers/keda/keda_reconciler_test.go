@@ -1,11 +1,16 @@
 package keda
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -256,6 +261,208 @@ func TestCreateScaledObject_ComponentExtShim_Identical(t *testing.T) {
 
 	if diff := cmp.Diff(expected, got); diff != "" {
 		t.Errorf("ComponentExt shim is not byte-identical (-want +got): %s", diff)
+	}
+}
+
+func TestSemanticScaledObjectEquals_ControllerOwner(t *testing.T) {
+	controller := true
+	desiredOwner := metav1.OwnerReference{
+		APIVersion: "ome.io/v1beta1",
+		Kind:       "InferenceService",
+		Name:       "demo",
+		UID:        "isvc-uid",
+		Controller: &controller,
+	}
+	staleOwner := desiredOwner
+	staleOwner.Name = "stale"
+
+	desired := &kedav1.ScaledObject{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{desiredOwner}}}
+	existing := &kedav1.ScaledObject{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{staleOwner}}}
+	if semanticScaledObjectEquals(desired, existing) {
+		t.Fatal("ScaledObjects with different controller metadata must not be equal")
+	}
+
+	nonControllerOwner := desiredOwner
+	nonControllerOwner.Controller = nil
+	existing.OwnerReferences = []metav1.OwnerReference{desiredOwner, nonControllerOwner}
+	if !semanticScaledObjectEquals(desired, existing) {
+		t.Fatal("unrelated non-controller owner references must not force an update")
+	}
+}
+
+func TestSemanticScaledObjectEquals_Metadata(t *testing.T) {
+	desired := &kedav1.ScaledObject{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      map[string]string{"component": "engine"},
+			Annotations: map[string]string{"example.com/control": "enabled"},
+		},
+	}
+	existing := desired.DeepCopy()
+	if !semanticScaledObjectEquals(desired, existing) {
+		t.Fatal("identical ScaledObject metadata must compare equal")
+	}
+
+	existing.Labels["component"] = "decoder"
+	if semanticScaledObjectEquals(desired, existing) {
+		t.Fatal("different ScaledObject labels must force an update")
+	}
+
+	existing = desired.DeepCopy()
+	existing.Annotations["example.com/control"] = "disabled"
+	if semanticScaledObjectEquals(desired, existing) {
+		t.Fatal("different ScaledObject annotations must force an update")
+	}
+
+	existing = desired.DeepCopy()
+	existing.Labels["example.com/injected"] = "keep"
+	existing.Annotations["example.com/injected"] = "keep"
+	if !semanticScaledObjectEquals(desired, existing) {
+		t.Fatal("injected ScaledObject metadata must not force an update")
+	}
+}
+
+func TestKEDAReconcilerUpdatePreservesUnmanagedMetadata(t *testing.T) {
+	controller := true
+	owner := metav1.OwnerReference{
+		APIVersion: v1beta1.SchemeGroupVersion.String(),
+		Kind:       "InferenceService",
+		Name:       "demo",
+		UID:        "isvc-uid",
+		Controller: &controller,
+	}
+	nonController := owner
+	nonController.Name = "observer"
+	nonController.UID = "observer-uid"
+	nonController.Controller = nil
+	maxExisting := int32(3)
+	maxDesired := int32(5)
+
+	existing := &kedav1.ScaledObject{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "scaledobject-demo-engine",
+			Namespace:   "test-ns",
+			UID:         "scaledobject-uid",
+			Labels:      map[string]string{"component": "decoder", "example.com/injected": "keep"},
+			Annotations: map[string]string{"example.com/managed": "old", "example.com/injected": "keep"},
+			Finalizers:  []string{"example.com/finalizer"},
+			OwnerReferences: []metav1.OwnerReference{
+				owner,
+				nonController,
+			},
+		},
+		Spec: kedav1.ScaledObjectSpec{
+			MaxReplicaCount: &maxExisting,
+			Triggers:        []kedav1.ScaleTriggers{{Type: "cron"}},
+		},
+	}
+	desired := &kedav1.ScaledObject{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            existing.Name,
+			Namespace:       existing.Namespace,
+			Labels:          map[string]string{"component": "engine"},
+			Annotations:     map[string]string{"example.com/managed": "new"},
+			OwnerReferences: []metav1.OwnerReference{owner},
+		},
+		Spec: kedav1.ScaledObjectSpec{
+			MaxReplicaCount: &maxDesired,
+			Triggers:        []kedav1.ScaleTriggers{{Type: "cron"}},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := kedav1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	r := &KEDAReconciler{client: cl, ScaledObject: desired}
+	if err := r.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := &kedav1.ScaledObject{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: existing.Namespace, Name: existing.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.MaxReplicaCount == nil || *got.Spec.MaxReplicaCount != maxDesired {
+		t.Fatalf("MaxReplicaCount = %v, want %d", got.Spec.MaxReplicaCount, maxDesired)
+	}
+	if got.Labels["component"] != "engine" || got.Labels["example.com/injected"] != "keep" {
+		t.Fatalf("labels = %#v", got.Labels)
+	}
+	if got.Annotations["example.com/managed"] != "new" || got.Annotations["example.com/injected"] != "keep" {
+		t.Fatalf("annotations = %#v", got.Annotations)
+	}
+	if diff := cmp.Diff([]string{"example.com/finalizer"}, got.Finalizers); diff != "" {
+		t.Fatalf("finalizers mismatch (-want +got): %s", diff)
+	}
+	if !containsOwnerReference(got.OwnerReferences, nonController) {
+		t.Fatalf("non-controller owner reference was dropped: %#v", got.OwnerReferences)
+	}
+}
+
+func containsOwnerReference(refs []metav1.OwnerReference, want metav1.OwnerReference) bool {
+	for _, ref := range refs {
+		if ref == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestKEDAReconcilerRejectsForeignController(t *testing.T) {
+	controller := true
+	expectedOwner := metav1.OwnerReference{
+		APIVersion: "ome.io/v1beta1",
+		Kind:       "InferenceService",
+		Name:       "demo",
+		UID:        "expected-uid",
+		Controller: &controller,
+	}
+	foreignOwner := expectedOwner
+	foreignOwner.Name = "other"
+	foreignOwner.UID = "foreign-uid"
+
+	tests := []struct {
+		name   string
+		owners []metav1.OwnerReference
+	}{
+		{name: "ownerless"},
+		{name: "different controller", owners: []metav1.OwnerReference{foreignOwner}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired := &kedav1.ScaledObject{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:       "test-ns",
+					Name:            "scaledobject-demo-engine",
+					OwnerReferences: []metav1.OwnerReference{expectedOwner},
+				},
+			}
+			existing := desired.DeepCopy()
+			existing.UID = types.UID("scaledobject-uid")
+			existing.OwnerReferences = tt.owners
+
+			scheme := runtime.NewScheme()
+			if err := kedav1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+			r := &KEDAReconciler{client: cl, ScaledObject: desired}
+
+			err := r.Reconcile()
+			if err == nil || !strings.Contains(err.Error(), "not controlled by expected owner") {
+				t.Fatalf("expected ownership error, got %v", err)
+			}
+
+			got := &kedav1.ScaledObject{}
+			if err := cl.Get(context.Background(), types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}, got); err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tt.owners, got.OwnerReferences); diff != "" {
+				t.Errorf("owner references changed (-want +got): %s", diff)
+			}
+		})
 	}
 }
 

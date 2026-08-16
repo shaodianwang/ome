@@ -2,6 +2,7 @@ package hpa
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/scalermetadata"
 )
 
 var log = logf.Log.WithName("HPAReconciler")
@@ -230,6 +232,12 @@ func (r *HPAReconciler) checkHPAExist() (constants.CheckResultType, *autoscaling
 		}
 		return constants.CheckResultUnknown, nil, err
 	}
+	if err := validateHPAControllerOwnership(r.HPA, existingHPA); err != nil {
+		return constants.CheckResultUnknown, existingHPA, err
+	}
+	if existingHPA.DeletionTimestamp != nil {
+		return constants.CheckResultUnknown, existingHPA, fmt.Errorf("HorizontalPodAutoscaler %s/%s is terminating", existingHPA.Namespace, existingHPA.Name)
+	}
 
 	if semanticHPAEquals(r.HPA, existingHPA) {
 		return constants.CheckResultExisted, existingHPA, nil
@@ -240,18 +248,35 @@ func (r *HPAReconciler) checkHPAExist() (constants.CheckResultType, *autoscaling
 	return constants.CheckResultUpdate, existingHPA, nil
 }
 
+func validateHPAControllerOwnership(desired, existing *autoscalingv2.HorizontalPodAutoscaler) error {
+	expected := metav1.GetControllerOf(desired)
+	if expected == nil {
+		return nil
+	}
+	actual := metav1.GetControllerOf(existing)
+	if actual != nil && actual.UID == expected.UID {
+		return nil
+	}
+	if actual == nil {
+		return fmt.Errorf("HorizontalPodAutoscaler %s/%s is not controlled by expected owner %s %s (UID %q): object has no controller owner", existing.Namespace, existing.Name, expected.Kind, expected.Name, expected.UID)
+	}
+	return fmt.Errorf("HorizontalPodAutoscaler %s/%s is not controlled by expected owner %s %s (UID %q): controller is %s %s (UID %q)", existing.Namespace, existing.Name, expected.Kind, expected.Name, expected.UID, actual.Kind, actual.Name, actual.UID)
+}
+
 // semanticHPAEquals reports whether the live HPA already matches the desired
-// one for every field OME manages. The apiserver defaults spec.behavior
-// (scaleUp/scaleDown policies) whenever the desired HPA omits it, so the live
-// behavior is always populated while the generated one is nil or an empty stub.
+// metadata, controller owner, and spec fields OME manages. The apiserver
+// defaults spec.behavior (scaleUp/scaleDown policies) whenever the desired HPA
+// omits it, so the live behavior is always populated while the generated one
+// is nil or an empty stub.
 // Comparing the full spec would therefore diff on every reconcile and trigger a
 // perpetual no-op Update. When OME does not manage a behavior block (desired
 // behavior is nil or zero-valued) we treat it as "don't care" and exclude it
 // from the comparison rather than re-introducing the server defaults in code.
 func semanticHPAEquals(desired, existing *autoscalingv2.HorizontalPodAutoscaler) bool {
-	desiredAutoscalerClass := desired.Annotations[constants.AutoscalerClass]
-	existingAutoscalerClass := existing.Annotations[constants.AutoscalerClass]
-	if desiredAutoscalerClass != existingAutoscalerClass {
+	if desired.Annotations[constants.AutoscalerClass] != existing.Annotations[constants.AutoscalerClass] {
+		return false
+	}
+	if !scalermetadata.Contains(existing.Labels, existing.Annotations, desired.Labels, desired.Annotations) {
 		return false
 	}
 
@@ -262,7 +287,39 @@ func semanticHPAEquals(desired, existing *autoscalingv2.HorizontalPodAutoscaler)
 		existingSpec.Behavior = nil
 	}
 
-	return equality.Semantic.DeepEqual(desiredSpec, existingSpec)
+	return equality.Semantic.DeepEqual(desiredSpec, existingSpec) &&
+		equality.Semantic.DeepEqual(metav1.GetControllerOf(desired), metav1.GetControllerOf(existing))
+}
+
+func hpaForUpdate(desired, existing *autoscalingv2.HorizontalPodAutoscaler) *autoscalingv2.HorizontalPodAutoscaler {
+	updated := existing.DeepCopy()
+	updated.Spec = desired.Spec
+	updated.Labels, updated.Annotations = scalermetadata.Merge(
+		existing.Labels,
+		existing.Annotations,
+		desired.Labels,
+		desired.Annotations,
+	)
+	if _, present := desired.Annotations[constants.AutoscalerClass]; !present {
+		delete(updated.Annotations, constants.AutoscalerClass)
+	}
+	updated.OwnerReferences = mergeHPAOwnerReferences(existing.OwnerReferences, desired.OwnerReferences)
+	return updated
+}
+
+func mergeHPAOwnerReferences(existing, desired []metav1.OwnerReference) []metav1.OwnerReference {
+	merged := make([]metav1.OwnerReference, 0, len(existing)+len(desired))
+	for _, ref := range existing {
+		if ref.Controller == nil || !*ref.Controller {
+			merged = append(merged, ref)
+		}
+	}
+	for _, ref := range desired {
+		if ref.Controller != nil && *ref.Controller {
+			merged = append(merged, ref)
+		}
+	}
+	return merged
 }
 
 // behaviorUnmanaged reports whether OME is not asserting any HPA behavior:
@@ -287,7 +344,7 @@ func shouldCreateHPA(desired *autoscalingv2.HorizontalPodAutoscaler) bool {
 }
 
 func (r *HPAReconciler) Reconcile() error {
-	checkResult, _, err := r.checkHPAExist()
+	checkResult, existingHPA, err := r.checkHPAExist()
 	log.V(1).Info("Reconciling HPA", "namespace", r.HPA.Namespace, "name", r.HPA.Name, "checkResult", checkResult.String())
 	if err != nil {
 		return err
@@ -298,6 +355,7 @@ func (r *HPAReconciler) Reconcile() error {
 	case constants.CheckResultCreate:
 		opErr = r.client.Create(context.TODO(), r.HPA)
 	case constants.CheckResultUpdate:
+		r.HPA = hpaForUpdate(r.HPA, existingHPA)
 		opErr = r.client.Update(context.TODO(), r.HPA)
 	case constants.CheckResultDelete:
 		opErr = r.client.Delete(context.TODO(), r.HPA)

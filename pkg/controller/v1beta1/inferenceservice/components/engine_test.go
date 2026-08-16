@@ -237,6 +237,10 @@ func TestEngineReconcile(t *testing.T) {
 				Name: "llama-base",
 			},
 			engineSpec: &v1beta1.EngineSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					MinReplicas: intPtr(1),
+					MaxReplicas: 1,
+				},
 				PodSpec: v1beta1.PodSpec{
 					Containers: []v1.Container{
 						{
@@ -402,6 +406,9 @@ func TestEngineReconcile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.isvc != nil && tt.isvc.UID == "" {
+				tt.isvc.UID = types.UID(tt.isvc.Name + "-uid")
+			}
 			// Create objects to add to fake client
 			objects := []client.Object{tt.isvc}
 

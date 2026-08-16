@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
@@ -12,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/raw"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 )
@@ -27,16 +30,17 @@ type DeploymentReconciler struct {
 
 // ReconcileRawDeployment handles raw Kubernetes deployment
 func (r *DeploymentReconciler) ReconcileRawDeployment(
+	ctx context.Context,
 	isvc *v1beta1.InferenceService,
 	objectMeta metav1.ObjectMeta,
 	podSpec *v1.PodSpec,
 	componentSpec *v1beta1.ComponentExtensionSpec,
 	componentType v1beta1.ComponentType,
+	resolvedAutoscaler *v1beta1.ComponentAutoscaler,
 ) (ctrl.Result, error) {
 	// Synthetic InferenceServiceSpec carrying the component-level extension
-	// spec to the downstream raw reconciler. Engine is the carrier;
-	// raw/autoscaler/keda all read from Spec.Engine.ComponentExtensionSpec
-	// (which holds the per-component Autoscaler block).
+	// spec to the downstream raw resource builders. Engine is the carrier for
+	// the Deployment, Service, PDB, and PodMonitor configuration.
 	inferenceServiceSpec := &v1beta1.InferenceServiceSpec{
 		Engine: &v1beta1.EngineSpec{
 			ComponentExtensionSpec: *componentSpec,
@@ -55,6 +59,16 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 	deployment, err := reconciler.Reconcile()
 	if err != nil {
 		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile %s", componentType)
+	}
+	if err := autoscaler.DispatchForRawComponent(ctx, autoscaler.RawDispatchInput{
+		Client:             r.Client,
+		Scheme:             r.Scheme,
+		ISVC:               isvc,
+		ComponentMeta:      objectMeta,
+		ResolvedAutoscaler: resolvedAutoscaler,
+		ComponentExt:       componentSpec,
+	}); err != nil {
+		return ctrl.Result{}, errors.Wrapf(err, "failed to dispatch autoscaler for raw %s", componentType)
 	}
 
 	r.StatusManager.PropagateRawStatus(&isvc.Status, componentType, deployment, reconciler.URL)
@@ -75,6 +89,5 @@ func (r *DeploymentReconciler) setRawReferences(isvc *v1beta1.InferenceService, 
 	if err := controllerutil.SetControllerReference(isvc, reconciler.PodMonitor.PodMonitor, r.Scheme); err != nil {
 		return errors.Wrapf(err, "failed to set podmonitor owner reference")
 	}
-
-	return reconciler.Scaler.Autoscaler.SetControllerReferences(isvc, r.Scheme)
+	return nil
 }

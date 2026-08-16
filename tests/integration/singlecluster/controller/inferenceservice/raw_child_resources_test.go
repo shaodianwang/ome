@@ -55,11 +55,17 @@ var _ = ginkgo.Describe("InferenceService RawDeployment children", ginkgo.Ordere
 		Expect(k8sClient.Create(suiteCtx, csr)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, csr) })
 
+		minR, maxR := 1, 1
 		isvc := v1beta1testing.MakeInferenceService("svc-isvc", ns.Name).
 			Model("svc-llama").
 			Runtime("svc-runtime").
 			DeploymentMode(constants.RawDeployment).
-			Engine(&v1beta1.EngineSpec{}).Obj()
+			Engine(&v1beta1.EngineSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					MinReplicas: &minR,
+					MaxReplicas: maxR,
+				},
+			}).Obj()
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 
 		ginkgo.By("expecting at least one Service in the ISVC namespace pointing at the engine")
@@ -148,12 +154,6 @@ var _ = ginkgo.Describe("InferenceService RawDeployment children", ginkgo.Ordere
 			Model("keda-llama").
 			Runtime("keda-runtime").
 			DeploymentMode(constants.RawDeployment).
-			// RawDeployment resolves the autoscaler class from the
-			// ome.io/autoscalerClass annotation (getAutoscalerClass), not the
-			// Engine.Autoscaler.Class field — the field-based DispatchAutoscaler
-			// is not wired into the raw reconciler. Without this annotation the
-			// class defaults to HPA and no ScaledObject is created.
-			Annotation(constants.AutoscalerClass, string(constants.AutoscalerClassKEDA)).
 			Engine(&v1beta1.EngineSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 					MinReplicas: &minR,

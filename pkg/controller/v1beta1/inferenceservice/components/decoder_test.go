@@ -224,6 +224,9 @@ func TestDecoderReconcile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.isvc != nil && tt.isvc.UID == "" {
+				tt.isvc.UID = types.UID(tt.isvc.Name + "-uid")
+			}
 			// Create fake client
 			c := ctrlclientfake.NewClientBuilder().
 				WithScheme(scheme).

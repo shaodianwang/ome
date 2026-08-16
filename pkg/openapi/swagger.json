@@ -532,11 +532,11 @@
       }
     },
     "v1beta1.ComponentAutoscalerStatus": {
-      "description": "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components. The writer degrades gracefully when a Component has no live scaler — ManagedBy reports \"none\" and counters stay zero without crashing.\n\nAlpha. The shape may change without notice.",
+      "description": "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for RawDeployment- and OMENative-managed Components. The writer degrades gracefully when a Component has no live scaler — ManagedBy reports \"none\" and counters stay zero without crashing.\n\nAlpha. The shape may change without notice.",
       "type": "object",
       "properties": {
         "class": {
-          "description": "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler. One of HPA | KEDA | External | None. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
+          "description": "Class echoes the resolved autoscaler class as picked by the Component's deployment-mode resolver. One of HPA | KEDA | External | None. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
           "type": "string"
         },
         "conditions": {
@@ -566,11 +566,11 @@
           "$ref": "#/definitions/v1.Time"
         },
         "managedBy": {
-          "description": "ManagedBy reports who owns the underlying scaler object. Distinguished from Class because none and external are dispatch-equivalent (both =\u003e delete any OME-managed HPA / SO); the surface-level distinction lives here.\n  - \"ome\": OME emitted the HPA / ScaledObject; conditions and\n    replica counters below mirror its live status.\n  - \"external\": operator-owned scaler; OME publishes\n    scaleTargetRef and stays out. Conditions empty.\n  - \"none\": no scaler at all. Conditions empty; counters zero.",
+          "description": "ManagedBy reports who owns the underlying scaler object. Distinguished from Class because none and external are dispatch-equivalent (both =\u003e delete any OME-managed HPA / SO); the surface-level distinction lives here.\n  - \"ome\": OME emitted the HPA / ScaledObject; conditions and\n    replica counters below mirror its live status.\n  - \"external\": operator-owned scaler; OME publishes\n    scaleTargetRef and stays out. Conditions empty.\n  - \"none\": no OME-managed scaler is active. Conditions empty;\n    counters zero.",
           "type": "string"
         },
         "specSource": {
-          "description": "SpecSource reports which layer of the ISVC -\u003e runtime -\u003e default inheritance chain produced the resolved Autoscaler block. One of \"isvc\" | \"runtime\" | \"default\". Mirrors autoscaler.SpecSource so the operator can debug which layer is contributing the live config.",
+          "description": "SpecSource reports which layer of the ISVC -\u003e runtime -\u003e legacy -\u003e default inheritance chain produced the resolved Autoscaler block. One of \"isvc\" | \"runtime\" | \"legacy\" | \"default\". Mirrors autoscaler.SpecSource so the operator can debug which layer is contributing the live config.",
           "type": "string"
         }
       }
@@ -649,7 +649,7 @@
           "$ref": "#/definitions/knative.Addressable"
         },
         "autoscaler": {
-          "description": "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer; nil for Components that don't go through the new resolver yet (e.g., RawDeployment Components that haven't migrated). See ComponentAutoscalerStatus for the full field semantics.",
+          "description": "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer for RawDeployment- and OMENative-managed Components. See ComponentAutoscalerStatus for the full field semantics.",
           "$ref": "#/definitions/v1beta1.ComponentAutoscalerStatus"
         },
         "latestReadyRevision": {
@@ -4684,7 +4684,7 @@
       }
     },
     "v1beta1.ScaleTargetRef": {
-      "description": "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.\u003ccomp\u003e.scaleTargetRef so an external scaler knows which object to point at (the same GroupKind the user would target with kubectl scale \u003ckind\u003e/\u003cname\u003e).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha. The shape may change without notice.",
+      "description": "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.\u003ccomp\u003e.scaleTargetRef so an external scaler knows which object to point at (the same GroupKind the user would target with kubectl scale \u003ckind\u003e/\u003cname\u003e).\n\nPublished for every reconciled RawDeployment or OMENative Component, including when no OME-managed scaler is active.\n\nAlpha. The shape may change without notice.",
       "type": "object",
       "required": [
         "apiVersion",

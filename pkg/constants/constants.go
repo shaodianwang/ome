@@ -73,6 +73,7 @@ var (
 	DeploymentMode                          = OMEAPIGroupName + "/deploymentMode"
 	EnableRoutingTagAnnotationKey           = OMEAPIGroupName + "/enable-tag-routing"
 	AutoscalerClass                         = OMEAPIGroupName + "/autoscalerClass"
+	AutoscalerPropagatedMetadataKeys        = OMEAPIGroupName + "/autoscaler-propagated-metadata-keys"
 	AutoscalerMetrics                       = OMEAPIGroupName + "/metrics"
 	TargetUtilizationPercentage             = OMEAPIGroupName + "/targetUtilizationPercentage"
 	DeprecationWarning                      = OMEAPIGroupName + "/deprecation-warning"

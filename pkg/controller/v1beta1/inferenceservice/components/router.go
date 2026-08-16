@@ -131,7 +131,11 @@ func (r *Router) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) (ctrl.Result, error) {
 	switch r.DeploymentMode {
 	case constants.RawDeployment:
-		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
+		resolvedAS, _, err := autoscaler.ResolveRawComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent, objectMeta.Annotations)
+		if err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw router")
+		}
+		return r.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent, resolvedAS)
 	case constants.OMENative:
 		// OMENative-mode Components dispatch through the InferenceReplica
 		// path. Router is always single-pod (MultiPod=false; no Worker

@@ -1,7 +1,14 @@
 package autoscaler
 
 import (
+	"fmt"
+	"strconv"
+
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // SpecSource identifies the layer that produced the resolved
@@ -24,6 +31,11 @@ const (
 	// SpecSourceRuntime indicates the resolved ComponentAutoscaler was
 	// taken from runtime.Spec.<componentConfig>.ComponentExtensionSpec.Autoscaler.
 	SpecSourceRuntime SpecSource = "runtime"
+
+	// SpecSourceLegacy indicates the RawDeployment autoscaler was translated
+	// from the effective legacy autoscaler annotations after both typed layers
+	// were absent.
+	SpecSourceLegacy SpecSource = "legacy"
 
 	// SpecSourceDefault indicates neither the ISVC nor the resolved
 	// ServingRuntime declared a Component-level Autoscaler block.
@@ -49,9 +61,8 @@ const (
 // NOTE: The default is ALWAYS Class=hpa with CPU=80%. There is no "only
 // when Component declares a Resource metric" carve-out. The operator-
 // visible default unconditionally produces an HPA. The Autoscaler block
-// is fully authoritative. The ome.io/autoscalerClass annotation is still
-// consulted by the legacy Raw Deployment dispatch but does not feed this
-// resolver.
+// is fully authoritative. RawDeployment callers layer legacy annotation
+// compatibility through ResolveRawComponentAutoscaler.
 //
 // Returned pointer is always non-nil and always a deep copy of the
 // source (so callers can mutate freely without affecting the input
@@ -74,6 +85,92 @@ func ResolveComponentAutoscaler(
 		return a.DeepCopy(), SpecSourceRuntime
 	}
 	return defaultAutoscaler(), SpecSourceDefault
+}
+
+// ResolveRawComponentAutoscaler applies RawDeployment's compatibility layer
+// after the typed ISVC -> runtime resolution. A typed block always wins. Only
+// the default branch may be replaced by the effective legacy annotation.
+//
+// The target-utilization annotation is translated into an explicit HPA metric
+// so downstream shared dispatch does not need to inspect legacy metadata.
+func ResolveRawComponentAutoscaler(
+	runtime *v1beta1.ServingRuntimeSpec,
+	isvc *v1beta1.InferenceService,
+	component v1beta1.ComponentType,
+	annotations map[string]string,
+) (*v1beta1.ComponentAutoscaler, SpecSource, error) {
+	resolved, source := ResolveComponentAutoscaler(runtime, isvc, component)
+	if source != SpecSourceDefault {
+		return resolved, source, nil
+	}
+
+	legacy, present, err := legacyRawAutoscaler(annotations)
+	if err != nil {
+		return nil, SpecSourceLegacy, err
+	}
+	if !present {
+		return resolved, source, nil
+	}
+	return legacy, SpecSourceLegacy, nil
+}
+
+// legacyRawAutoscaler translates the supported legacy RawDeployment class
+// values into the typed representation. The boolean distinguishes absent
+// legacy input from an invalid value. Each call returns newly-owned data.
+func legacyRawAutoscaler(annotations map[string]string) (*v1beta1.ComponentAutoscaler, bool, error) {
+	rawClass, hasClass := annotations[constants.AutoscalerClass]
+	_, hasTargetUtilization := annotations[constants.TargetUtilizationPercentage]
+	if !hasClass && !hasTargetUtilization {
+		return nil, false, nil
+	}
+
+	class := constants.AutoscalerClassType(rawClass)
+	if !hasClass {
+		class = constants.AutoscalerClassHPA
+	}
+
+	switch class {
+	case constants.AutoscalerClassHPA:
+		return legacyRawHPA(annotations), true, nil
+	case constants.AutoscalerClassKEDA:
+		return &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerKEDA}, true, nil
+	case constants.AutoscalerClassExternal:
+		return &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal}, true, nil
+	default:
+		return nil, true, fmt.Errorf("unknown legacy autoscaler class %q in %s annotation", rawClass, constants.AutoscalerClass)
+	}
+}
+
+// legacyRawHPA preserves the target-utilization annotation for RawDeployment.
+// Invalid values are rejected by admission; defensively, an unparsable value
+// leaves HPA nil so the existing HPA generator default remains in effect.
+func legacyRawHPA(annotations map[string]string) *v1beta1.ComponentAutoscaler {
+	resolved := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
+	rawUtilization, ok := annotations[constants.TargetUtilizationPercentage]
+	if !ok {
+		return resolved
+	}
+
+	parsed, err := strconv.ParseInt(rawUtilization, 10, 32)
+	if err != nil {
+		return resolved
+	}
+	utilization := int32(parsed)
+	resolved.HPA = &v1beta1.HPAAutoscaler{
+		Metrics: []autoscalingv2.MetricSpec{
+			{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: corev1.ResourceCPU,
+					Target: autoscalingv2.MetricTarget{
+						Type:               autoscalingv2.UtilizationMetricType,
+						AverageUtilization: &utilization,
+					},
+				},
+			},
+		},
+	}
+	return resolved
 }
 
 // isvcAutoscaler dereferences the Component-level Autoscaler block on

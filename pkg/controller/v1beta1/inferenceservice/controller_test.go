@@ -77,6 +77,10 @@ func TestInferenceServiceReconcile(t *testing.T) {
 						Kind: stringPtr("BaseModel"),
 					},
 					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: intPtr(1),
+							MaxReplicas: 3,
+						},
 						PodSpec: v1beta1.PodSpec{
 							Containers: []v1.Container{
 								{
@@ -190,6 +194,10 @@ func TestInferenceServiceReconcile(t *testing.T) {
 						Kind: stringPtr("BaseModel"),
 					},
 					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: intPtr(1),
+							MaxReplicas: 3,
+						},
 						PodSpec: v1beta1.PodSpec{
 							Containers: []v1.Container{
 								{
@@ -200,6 +208,10 @@ func TestInferenceServiceReconcile(t *testing.T) {
 						},
 					},
 					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: intPtr(1),
+							MaxReplicas: 3,
+						},
 						PodSpec: v1beta1.PodSpec{
 							Containers: []v1.Container{
 								{
@@ -311,6 +323,10 @@ func TestInferenceServiceReconcile(t *testing.T) {
 						Name: "custom-runtime",
 					},
 					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: intPtr(1),
+							MaxReplicas: 3,
+						},
 						PodSpec: v1beta1.PodSpec{
 							Containers: []v1.Container{
 								{
@@ -411,6 +427,9 @@ func TestInferenceServiceReconcile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.isvc.UID == "" {
+				tt.isvc.UID = types.UID(tt.isvc.Name + "-uid")
+			}
 			// Create fake client
 			c := ctrlclientfake.NewClientBuilder().
 				WithScheme(scheme).

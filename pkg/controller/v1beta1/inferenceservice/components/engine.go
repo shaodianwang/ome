@@ -153,7 +153,11 @@ func (e *Engine) getWorkerSize() int {
 func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
 	switch e.DeploymentMode {
 	case constants.RawDeployment:
-		return e.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
+		resolvedAS, _, err := autoscaler.ResolveRawComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent, objectMeta.Annotations)
+		if err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw engine")
+		}
+		return e.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent, resolvedAS)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.

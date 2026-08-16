@@ -2,6 +2,7 @@ package keda
 
 import (
 	"context"
+	"fmt"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/scalermetadata"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
@@ -70,9 +72,9 @@ func NewKEDAReconciler(
 // any ComponentExtensionSpec concerns so the two callers are completely
 // decoupled.
 //
-// When kedaSpec is nil or kedaSpec.Triggers is empty the generated
-// ScaledObject ends up with no triggers; Reconcile() then skips the apply
-// to avoid creating an invalid (zero-trigger) ScaledObject.
+// Shared autoscaler dispatch supplies a non-nil KEDA block with at least one
+// trigger. Direct lower-level callers may still pass nil or empty input;
+// Reconcile() defensively skips applying the resulting invalid object.
 func NewKEDAReconcilerForTarget(
 	client client.Client,
 	scheme *runtime.Scheme,
@@ -98,10 +100,10 @@ func NewKEDAReconcilerForTarget(
 // kedaSpec / minReplicas / maxReplicas come from the resolver or the Raw
 // Deployment shim (createScaledObjectFromComponentExt). When kedaSpec is
 // non-nil the Triggers, Advanced, PollingInterval, CooldownPeriod,
-// IdleReplicaCount, and Fallback fields are all forwarded verbatim. When
-// kedaSpec is nil or kedaSpec.Triggers is empty the generated ScaledObject
-// ends up with no triggers; Reconcile() then skips the apply to avoid
-// creating an invalid (zero-trigger) ScaledObject.
+// IdleReplicaCount, and Fallback fields are all forwarded verbatim. Shared
+// dispatch validates that at least one trigger is present. Direct lower-level
+// callers with nil or empty input produce a triggerless object that Reconcile()
+// defensively skips applying.
 func createScaledObject(
 	componentMeta metav1.ObjectMeta,
 	scaleTargetRef kedav1.ScaleTarget,
@@ -138,12 +140,9 @@ func createScaledObject(
 			Namespace:   componentMeta.Namespace,
 			Labels:      filteredLabels,
 			Annotations: componentMeta.Annotations,
-			// Forward OwnerReferences so the IR-managed dispatch can
-			// stamp the SO with the IR's controller-ref for GC
-			// cascade. Raw Deployment callers go through
-			// createScaledObjectFromComponentExt → SetControllerReferences
-			// and don't populate componentMeta.OwnerReferences, so this is
-			// a no-op for them.
+			// Shared IR and typed Raw dispatch provide the controller owner
+			// through componentMeta. The legacy constructor applies its owner
+			// through SetControllerReferences.
 			OwnerReferences: componentMeta.OwnerReferences,
 		},
 		Spec: spec,
@@ -153,9 +152,8 @@ func createScaledObject(
 // createScaledObjectFromComponentExt is the Raw Deployment bridge from the
 // (componentMeta, componentExt) caller to the parameterized createScaledObject.
 // Reads Autoscaler.Keda when present (the canonical authoring location) and
-// otherwise leaves Triggers empty — the Reconcile() loop's
-// shouldCreateScaledObject gate then skips the apply to avoid emitting an
-// invalid (zero-trigger) ScaledObject.
+// otherwise leaves Triggers empty. The lower-level Reconcile() gate
+// defensively skips applying that invalid object.
 func createScaledObjectFromComponentExt(
 	componentMeta metav1.ObjectMeta,
 	componentExt *v1beta1.ComponentExtensionSpec,
@@ -209,6 +207,12 @@ func (r *KEDAReconciler) checkScaledObjectExist() (constants.CheckResultType, *k
 		}
 		return constants.CheckResultUnknown, nil, err
 	}
+	if err := validateScaledObjectControllerOwnership(r.ScaledObject, existingScaledObject); err != nil {
+		return constants.CheckResultUnknown, existingScaledObject, err
+	}
+	if existingScaledObject.DeletionTimestamp != nil {
+		return constants.CheckResultUnknown, existingScaledObject, fmt.Errorf("ScaledObject %s/%s is terminating", existingScaledObject.Namespace, existingScaledObject.Name)
+	}
 
 	if semanticScaledObjectEquals(r.ScaledObject, existingScaledObject) {
 		return constants.CheckResultExisted, existingScaledObject, nil
@@ -219,13 +223,62 @@ func (r *KEDAReconciler) checkScaledObjectExist() (constants.CheckResultType, *k
 	return constants.CheckResultUpdate, existingScaledObject, nil
 }
 
-// semanticScaledObjectEquals checks if the desired and existing ScaledObjects are equal
-func semanticScaledObjectEquals(desired, existing *kedav1.ScaledObject) bool {
-	desiredAutoscalerClass := desired.Annotations[constants.AutoscalerClass]
-	existingAutoscalerClass := existing.Annotations[constants.AutoscalerClass]
+func validateScaledObjectControllerOwnership(desired, existing *kedav1.ScaledObject) error {
+	expected := metav1.GetControllerOf(desired)
+	if expected == nil {
+		return nil
+	}
+	actual := metav1.GetControllerOf(existing)
+	if actual != nil && actual.UID == expected.UID {
+		return nil
+	}
+	if actual == nil {
+		return fmt.Errorf("ScaledObject %s/%s is not controlled by expected owner %s %s (UID %q): object has no controller owner", existing.Namespace, existing.Name, expected.Kind, expected.Name, expected.UID)
+	}
+	return fmt.Errorf("ScaledObject %s/%s is not controlled by expected owner %s %s (UID %q): controller is %s %s (UID %q)", existing.Namespace, existing.Name, expected.Kind, expected.Name, expected.UID, actual.Kind, actual.Name, actual.UID)
+}
 
-	autoscalerClassChanged := desiredAutoscalerClass != existingAutoscalerClass
-	return equality.Semantic.DeepEqual(desired.Spec, existing.Spec) && !autoscalerClassChanged
+// semanticScaledObjectEquals checks the metadata, controller owner, and spec
+// fields OME manages on the desired and existing ScaledObjects.
+func semanticScaledObjectEquals(desired, existing *kedav1.ScaledObject) bool {
+	if desired.Annotations[constants.AutoscalerClass] != existing.Annotations[constants.AutoscalerClass] {
+		return false
+	}
+	controllerChanged := !equality.Semantic.DeepEqual(metav1.GetControllerOf(desired), metav1.GetControllerOf(existing))
+	return equality.Semantic.DeepEqual(desired.Spec, existing.Spec) &&
+		scalermetadata.Contains(existing.Labels, existing.Annotations, desired.Labels, desired.Annotations) &&
+		!controllerChanged
+}
+
+func scaledObjectForUpdate(desired, existing *kedav1.ScaledObject) *kedav1.ScaledObject {
+	updated := existing.DeepCopy()
+	updated.Spec = desired.Spec
+	updated.Labels, updated.Annotations = scalermetadata.Merge(
+		existing.Labels,
+		existing.Annotations,
+		desired.Labels,
+		desired.Annotations,
+	)
+	if _, present := desired.Annotations[constants.AutoscalerClass]; !present {
+		delete(updated.Annotations, constants.AutoscalerClass)
+	}
+	updated.OwnerReferences = mergeScaledObjectOwnerReferences(existing.OwnerReferences, desired.OwnerReferences)
+	return updated
+}
+
+func mergeScaledObjectOwnerReferences(existing, desired []metav1.OwnerReference) []metav1.OwnerReference {
+	merged := make([]metav1.OwnerReference, 0, len(existing)+len(desired))
+	for _, ref := range existing {
+		if ref.Controller == nil || !*ref.Controller {
+			merged = append(merged, ref)
+		}
+	}
+	for _, ref := range desired {
+		if ref.Controller != nil && *ref.Controller {
+			merged = append(merged, ref)
+		}
+	}
+	return merged
 }
 
 // shouldDeleteScaledObject determines if the ScaledObject should be deleted
@@ -258,9 +311,7 @@ func (r *KEDAReconciler) Reconcile() error {
 	case constants.CheckResultCreate:
 		opErr = r.client.Create(context.TODO(), r.ScaledObject)
 	case constants.CheckResultUpdate:
-		// Use the resourceVersion from the existing ScaledObject
-		r.ScaledObject.ResourceVersion = existingScaledObject.ResourceVersion
-
+		r.ScaledObject = scaledObjectForUpdate(r.ScaledObject, existingScaledObject)
 		opErr = r.client.Update(context.TODO(), r.ScaledObject)
 	case constants.CheckResultDelete:
 		opErr = r.client.Delete(context.TODO(), r.ScaledObject)

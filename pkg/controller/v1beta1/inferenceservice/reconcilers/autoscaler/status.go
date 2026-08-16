@@ -20,8 +20,8 @@ import (
 // WriteAutoscalerStatus computes the per-Component ComponentAutoscalerStatus
 // + ScaleTargetRef for the ISVC status writer. Inputs:
 //
-//   - resolvedAutoscaler: the output of autoscaler.ResolveComponentAutoscaler.
-//     nil is treated as Class=none — surfaces ManagedBy=none.
+//   - resolvedAutoscaler: the output of the Component's deployment-mode
+//     resolver. nil is treated as Class=none — surfaces ManagedBy=none.
 //   - specSource: the SpecSource returned alongside resolvedAutoscaler so the
 //     status mirror echoes the inheritance-chain decision back to the operator.
 //   - scaleTargetRef: the canonical scale target for this Component. Always
@@ -47,13 +47,11 @@ import (
 // (= <objectName>) and mirrors Conditions, CurrentReplicas, DesiredReplicas,
 // LastScaleTime verbatim. NotFound is silently tolerated — the scaler may
 // have been created in the same reconcile pass and not yet reported, so
-// counters stay at zero and Conditions stays empty. The writer also
-// degrades gracefully when no Component has dispatch wired (every
-// Component lands on ManagedBy=none in that case) without crashing.
+// counters stay at zero and Conditions stays empty.
 //
 // objectName is the (Namespace, Name) the dispatch uses for the HPA /
 // ScaledObject. For OMENative-managed Components this is the IR name
-// (=<isvc>-<component>); for RawDeployment Components it's the legacy
+// (=<isvc>-<component>); for RawDeployment Components it's the rendered
 // component metadata Name. The KEDA generator translates this name through
 // utils.GetScaledObjectName under the hood so the lookup applies the same
 // prefix.

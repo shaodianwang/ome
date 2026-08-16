@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,8 +41,7 @@ type IRDispatchInput struct {
 	// irprojector.EnsureInferenceReplica. Its UID is captured into
 	// the OwnerReference so GC cascades the HPA / SO when
 	// the IR is deleted. Required — DispatchForIRComponent returns
-	// an error if IR is nil or IR.UID is empty (guards against the
-	// caller dispatching before the IR is committed).
+	// an error if IR is nil, terminating, or has an empty UID.
 	IR *v1beta1.InferenceReplica
 
 	// ResolvedAutoscaler is the resolver output (the output of
@@ -54,6 +54,101 @@ type IRDispatchInput struct {
 	ComponentExt *v1beta1.ComponentExtensionSpec
 }
 
+// RawDispatchInput carries the resolved autoscaler and Deployment identity for
+// one RawDeployment Component.
+type RawDispatchInput struct {
+	Client client.Client
+	Scheme *runtime.Scheme
+
+	ISVC          *v1beta1.InferenceService
+	ComponentMeta metav1.ObjectMeta
+
+	ResolvedAutoscaler *v1beta1.ComponentAutoscaler
+	ComponentExt       *v1beta1.ComponentExtensionSpec
+}
+
+// DispatchForRawComponent targets the Component's Deployment and owner-refs
+// the generated autoscaler to the live InferenceService.
+func DispatchForRawComponent(ctx context.Context, input RawDispatchInput) error {
+	if input.ISVC == nil {
+		return fmt.Errorf("DispatchForRawComponent: nil ISVC (refusing to stamp orphaned autoscaler)")
+	}
+	if input.ISVC.Name == "" {
+		return fmt.Errorf("DispatchForRawComponent: empty ISVC name")
+	}
+	if input.ISVC.Namespace == "" {
+		return fmt.Errorf("DispatchForRawComponent: empty ISVC namespace")
+	}
+	if input.ISVC.UID == "" {
+		return fmt.Errorf("DispatchForRawComponent: ISVC %s/%s has empty UID (refusing to stamp orphaned autoscaler)", input.ISVC.Namespace, input.ISVC.Name)
+	}
+	if input.ComponentMeta.Name == "" {
+		return fmt.Errorf("DispatchForRawComponent: empty component name")
+	}
+	if input.ComponentMeta.Namespace == "" {
+		return fmt.Errorf("DispatchForRawComponent: empty component namespace")
+	}
+	if input.ComponentMeta.Namespace != input.ISVC.Namespace {
+		return fmt.Errorf("DispatchForRawComponent: namespace mismatch: component %q, ISVC %q", input.ComponentMeta.Namespace, input.ISVC.Namespace)
+	}
+
+	minR, maxR, err := rawMinMaxReplicas(input.ComponentExt, input.ResolvedAutoscaler)
+	if err != nil {
+		return fmt.Errorf("DispatchForRawComponent: invalid replica bounds: %w", err)
+	}
+	owner := *metav1.NewControllerRef(input.ISVC, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))
+	scaleTargetRef := autoscalingv2.CrossVersionObjectReference{
+		APIVersion: appsv1.SchemeGroupVersion.String(),
+		Kind:       "Deployment",
+		Name:       input.ComponentMeta.Name,
+	}
+
+	return DispatchAutoscaler(ctx, DispatchParams{
+		Client:         input.Client,
+		Scheme:         input.Scheme,
+		Owner:          owner,
+		Namespace:      input.ComponentMeta.Namespace,
+		Name:           input.ComponentMeta.Name,
+		Labels:         cloneMetadataMap(input.ComponentMeta.Labels),
+		Annotations:    cloneMetadataMap(input.ComponentMeta.Annotations),
+		ScaleTargetRef: scaleTargetRef,
+		Autoscaler:     input.ResolvedAutoscaler,
+		MinReplicas:    minR,
+		MaxReplicas:    maxR,
+	})
+}
+
+func rawMinMaxReplicas(c *v1beta1.ComponentExtensionSpec, autoscaler *v1beta1.ComponentAutoscaler) (int32, int32, error) {
+	if c == nil {
+		return 0, 0, fmt.Errorf("component replica bounds are required")
+	}
+	if c.MinReplicas == nil {
+		return 0, 0, fmt.Errorf("minReplicas is required")
+	}
+	minR := *c.MinReplicas
+	maxR := c.MaxReplicas
+	if minR < 0 {
+		return 0, 0, fmt.Errorf("minReplicas must be non-negative, got %d", minR)
+	}
+	if maxR <= 0 {
+		return 0, 0, fmt.Errorf("maxReplicas must be positive, got %d", maxR)
+	}
+	if minR == 0 && !validTypedRawKEDA(autoscaler) {
+		return 0, 0, fmt.Errorf("minReplicas=0 requires typed KEDA with at least one trigger")
+	}
+	if minR > maxR {
+		return 0, 0, fmt.Errorf("minReplicas must not exceed maxReplicas: %d > %d", minR, maxR)
+	}
+	return int32(minR), int32(maxR), nil
+}
+
+func validTypedRawKEDA(autoscaler *v1beta1.ComponentAutoscaler) bool {
+	return autoscaler != nil &&
+		autoscaler.Class == v1beta1.AutoscalerKEDA &&
+		autoscaler.Keda != nil &&
+		len(autoscaler.Keda.Triggers) > 0
+}
+
 // DispatchForIRComponent is the convenience wrapper the ISVC-side
 // component dispatchers use to translate the per-Component
 // IRDispatchInput into a full DispatchParams call. Centralized here
@@ -63,15 +158,14 @@ type IRDispatchInput struct {
 //
 // The HPA + ScaledObject are stamped with:
 //
-//   - Owner: the live IR (Controller=true, BlockOwnerDeletion implied
-//     by controllerutil semantics). Deleting the IR cascades to both
-//     via GC.
+//   - Owner: the live IR with Controller=true. Deleting the IR cascades
+//     to both via GC.
 //   - ScaleTargetRef: ome.io/v1beta1/InferenceReplica/<ir-name>. The
 //     IR's /scale subresource is the canonical scale target for
 //     IR-managed Components.
 //   - Min/Max replicas: input.ComponentExt.MinReplicas (default 1) and
-//     input.ComponentExt.MaxReplicas (clamped up to MinReplicas in the
-//     generator).
+//     input.ComponentExt.MaxReplicas (clamped up to MinReplicas by the
+//     IR projection).
 //
 // Errors are wrapped with the IR namespace/name so the operator log
 // reveals which Component failed dispatch.
@@ -83,6 +177,9 @@ func DispatchForIRComponent(ctx context.Context, input IRDispatchInput) error {
 	}
 	if input.IR.UID == "" {
 		return fmt.Errorf("DispatchForIRComponent: IR %s/%s has empty UID (refusing to stamp orphaned autoscaler)", input.IR.Namespace, input.IR.Name)
+	}
+	if input.IR.DeletionTimestamp != nil {
+		return fmt.Errorf("DispatchForIRComponent: IR %s/%s is terminating", input.IR.Namespace, input.IR.Name)
 	}
 
 	minR, maxR := minMaxReplicas(input.ComponentExt)
@@ -107,11 +204,34 @@ func DispatchForIRComponent(ctx context.Context, input IRDispatchInput) error {
 		Owner:          owner,
 		Namespace:      input.IR.Namespace,
 		Name:           input.IR.Name,
+		Labels:         cloneMetadataMap(input.IR.Labels),
+		Annotations:    irRunnerAnnotations(input.IR),
 		ScaleTargetRef: scaleTargetRef,
 		Autoscaler:     input.ResolvedAutoscaler,
 		MinReplicas:    minR,
 		MaxReplicas:    maxR,
 	})
+}
+
+// irRunnerAnnotations reads effective Component annotations from the first
+// fully-rendered Runner template, which is the canonical metadata source for
+// Component-level scaler controls.
+func irRunnerAnnotations(ir *v1beta1.InferenceReplica) map[string]string {
+	if ir == nil || len(ir.Spec.Runners) == 0 {
+		return nil
+	}
+	return cloneMetadataMap(ir.Spec.Runners[0].Template.Annotations)
+}
+
+func cloneMetadataMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 // minMaxReplicas projects ComponentExtensionSpec bounds into the int32
