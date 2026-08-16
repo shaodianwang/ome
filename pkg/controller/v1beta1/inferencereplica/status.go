@@ -161,7 +161,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	ownerUnavailable := false
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.reader().Get(ctx, key, fresh); err != nil {
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				// IR deleted under us; nothing to aggregate into.
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
@@ -396,7 +396,7 @@ func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) worklo
 		Key:                     buildKey(ir),
 		ObservedState:           observedFromIR(ir),
 		Clock:                   r.Clock,
-		MutateInstance:          buildMutateInstance(r.Client, r.reader(), ir),
+		MutateInstance:          buildMutateInstance(r.Client, r.APIReader, ir),
 		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
 		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
 		WarnInstanceFailed:      func(_ int32, _, _ string) {},

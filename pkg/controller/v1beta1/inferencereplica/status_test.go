@@ -865,7 +865,7 @@ func TestAggregateAndWriteStatus_ConflictSurfacesAsConflict(t *testing.T) {
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		WithInterceptorFuncs(conflict).
 		Build()
-	r := &Reconciler{Client: c, Log: logf.Log.WithName("test"), Expectations: workload.NewExpectations()}
+	r := &Reconciler{Client: c, APIReader: c, Log: logf.Log.WithName("test"), Expectations: workload.NewExpectations()}
 
 	plan := workload.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),

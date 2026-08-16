@@ -93,7 +93,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		deadlineAt = ir.DeletionTimestamp.Add(*deadline)
 	}
 	if deadline != nil && clockInput.Now().After(deadlineAt) {
-		pods, lerr := query.LiveListPodsForComponent(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name,
+		pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
 			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 		summary := fmt.Sprintf("%d owned pod(s) observed", len(podsControlledBy(pods, ir.UID)))
 		if lerr != nil {
@@ -102,7 +102,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		r.warnTeardown(ir, ReasonTeardownDeadlineExceeded, fmt.Sprintf(
 			"teardown deadline %s exceeded (%s; selector: parent=%q, component=%q); releasing finalizer %s to background GC; "+teardownEscapeHint,
 			deadline, summary, ir.Spec.ParentRef.Name, ir.Spec.Component, TeardownFinalizer, ir.Name, ir.Namespace))
-		parent := r.resolveParentFrom(ctx, r.reader(), ir)
+		parent := r.resolveParentFrom(ctx, r.APIReader, ir)
 		r.closeDanglingLedgerEntries(ctx, log, ir, parent)
 		r.deleteScaleDownSeries(ir)
 		if ferr := r.removeTeardownFinalizer(ctx, ir); ferr != nil {
@@ -117,7 +117,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// IR-owned ledger and leave the parent-owned entry dangling. Resolve
 	// lifecycle config as usual — the force-delete escalation must keep
 	// working during teardown.
-	parent := r.resolveParentFrom(ctx, r.reader(), ir)
+	parent := r.resolveParentFrom(ctx, r.APIReader, ir)
 	forceDeletePolicy := r.resolveForceDeletePolicy(log)
 
 	// Desired-spec content is irrelevant under Teardown (the planned
@@ -136,7 +136,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	if perr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: build plan (ir=%s/%s): %w", ir.Namespace, ir.Name, perr)
 	}
-	pods, lerr := query.LiveListPodsForComponent(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name,
+	pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
 		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 	if lerr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: live-list component pods: %w", lerr)
@@ -153,12 +153,12 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	}
 	var podGroupInventory *workloadgang.PodGroupInventory
 	if input.DesiredSpec.GangSchedulingAvailable {
-		podGroupInventory, lerr = workloadgang.ObservePodGroups(ctx, r.reader(), input.OwnerObject)
+		podGroupInventory, lerr = workloadgang.ObservePodGroups(ctx, r.APIReader, input.OwnerObject)
 		if lerr != nil {
 			return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: observe PodGroups: %w", lerr)
 		}
 		input.FinalizeInstanceResources = workloadgang.BuildFinalizeInstanceResources(
-			r.Client, r.reader(), podGroupInventory, input.OwnerObject, input.Key.OwnerName, plan.Component)
+			r.Client, r.APIReader, podGroupInventory, input.OwnerObject, input.Key.OwnerName, plan.Component)
 	}
 
 	// The normal path's deferred aggregateAndWriteStatus is NOT
@@ -282,7 +282,7 @@ func (r *Reconciler) closeDanglingLedgerEntries(ctx context.Context, log logr.Lo
 	}
 	component := string(ir.Spec.Component)
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		ledger, err := audit.LoadLedgerForOwner(ctx, r.reader(), owner)
+		ledger, err := audit.LoadLedgerForOwner(ctx, r.APIReader, owner)
 		if err != nil {
 			return err
 		}
@@ -326,7 +326,7 @@ func (r *Reconciler) removeTeardownFinalizer(ctx context.Context, ir *v1beta1.In
 	key := client.ObjectKeyFromObject(ir)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.reader().Get(ctx, key, fresh); err != nil {
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}

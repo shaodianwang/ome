@@ -70,7 +70,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 	// buildReconcileInput's LedgerOwner). Live read: sibling IRs of the
 	// same parent write this ledger concurrently, and a cache-lagged
 	// snapshot persisted wholesale below would drop their rows.
-	ledger, err := audit.LoadLedgerForOwner(ctx, r.reader(), parent)
+	ledger, err := audit.LoadLedgerForOwner(ctx, r.APIReader, parent)
 	if err != nil {
 		return false, fmt.Errorf("load migration audit ledger: %w", err)
 	}
@@ -158,7 +158,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 		if mode == workload.MigrationModeNever {
 			now := metav1.NewTime(r.now())
 			msg := "migrations disabled by MigrationPolicy Mode=Never"
-			if aerr := appendMigrationStatus(ctx, r.Client, r.reader(), ir, v1beta1.MigrationStatus{
+			if aerr := appendMigrationStatus(ctx, r.Client, r.APIReader, ir, v1beta1.MigrationStatus{
 				RequestUUID:    uuid,
 				Trigger:        v1beta1.MigrationTriggerManual,
 				SourceInstance: req.Instance,
@@ -200,7 +200,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 			continue
 		}
 		now := metav1.NewTime(r.now())
-		if aerr := appendMigrationStatus(ctx, r.Client, r.reader(), ir, v1beta1.MigrationStatus{
+		if aerr := appendMigrationStatus(ctx, r.Client, r.APIReader, ir, v1beta1.MigrationStatus{
 			RequestUUID:     uuid,
 			Trigger:         v1beta1.MigrationTriggerManual,
 			SourceInstance:  req.Instance,
@@ -235,7 +235,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 	parentKey := client.ObjectKeyFromObject(parent)
 	uerr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		freshParent := &v1beta1.InferenceService{}
-		if err := r.reader().Get(ctx, parentKey, freshParent); err != nil {
+		if err := r.APIReader.Get(ctx, parentKey, freshParent); err != nil {
 			return err
 		}
 		changed := false
@@ -275,9 +275,6 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 // discipline as buildMutateRetryBlock. Idempotent: an entry with the
 // same RequestUUID already present writes nothing.
 func appendMigrationStatus(ctx context.Context, c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica, entry v1beta1.MigrationStatus) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	var committed []v1beta1.MigrationStatus
@@ -416,9 +413,6 @@ func migrationsFromIR(ir *v1beta1.InferenceReplica) []workload.MigrationRecord {
 // A missing entry is a clean no-op. Owner disappearance or replacement
 // returns ErrStatusOwnerGone so callers stop effects from a stale snapshot.
 func buildMutateMigration(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, requestUUID string, mutate func(*workload.MigrationRecord) bool) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, requestUUID string, mutate func(*workload.MigrationRecord) bool) error {
@@ -537,7 +531,7 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		wrote = false
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.reader().Get(ctx, key, fresh); err != nil {
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}

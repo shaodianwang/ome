@@ -68,7 +68,7 @@ func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Log
 		}
 	default:
 		rev := match.TargetRevision
-		if rerr := buildMutateRetryBlock(r.Client, r.reader(), ir)(ctx, rev, func(*workload.RetryBlock) workload.RetryBlockDisposition {
+		if rerr := buildMutateRetryBlock(r.Client, r.APIReader, ir)(ctx, rev, func(*workload.RetryBlock) workload.RetryBlockDisposition {
 			return workload.RetryBlockRemove
 		}); rerr != nil {
 			// Annotation NOT consumed: the request re-drives the removal
@@ -88,7 +88,7 @@ func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Log
 	key := client.ObjectKeyFromObject(ir)
 	uerr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.reader().Get(ctx, key, fresh); err != nil {
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
 			return err
 		}
 		if _, ok := fresh.Annotations[constants.ReleaseHeldRevisionAnnotationKey]; !ok {

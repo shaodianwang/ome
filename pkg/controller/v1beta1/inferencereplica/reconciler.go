@@ -106,7 +106,8 @@ type Reconciler struct {
 	// APIReader is the live (uncached) API reader. Used for the
 	// correctness-critical reads in revision bookkeeping and immutable topology
 	// safety where stale cache contents could cause a collision or split a live
-	// gang across domains. Optional; when nil the cached Client is used.
+	// gang across domains. Required: SetupWithManager defaults it to
+	// mgr.GetAPIReader() and rejects a reconciler still missing it.
 	APIReader client.Reader
 
 	// Expectations is the create/delete bookkeeping cache the
@@ -271,7 +272,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			// real failure — requeue onto the teardown path without
 			// surfacing an error (and its backoff noise).
 			fresh := &v1beta1.InferenceReplica{}
-			switch gerr := r.reader().Get(ctx, req.NamespacedName, fresh); {
+			switch gerr := r.APIReader.Get(ctx, req.NamespacedName, fresh); {
 			case gerr == nil && fresh.DeletionTimestamp != nil:
 				log.V(1).Info("Finalizer add rejected: IR already Terminating; requeueing onto the teardown path")
 				return ctrl.Result{Requeue: true}, nil
@@ -403,7 +404,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	var rollbackRevision *appsv1.ControllerRevision
 	if ir.Spec.Pacing != nil && ir.Spec.Pacing.RollbackToRevision != nil && *ir.Spec.Pacing.RollbackToRevision != "" {
 		cr := &appsv1.ControllerRevision{}
-		switch err := r.reader().Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: *ir.Spec.Pacing.RollbackToRevision}, cr); {
+		switch err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: *ir.Spec.Pacing.RollbackToRevision}, cr); {
 		case err == nil:
 			payload, perr := revision.PayloadFromControllerRevision(cr)
 			if perr != nil {
@@ -450,7 +451,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// so the Ready condition below observes the promoted value. Conflict
 		// tolerance matches the aggregator: requeue, don't error.
 		if specTarget != nil {
-			if perr := buildPromoteCurrentRevision(r.Client, r.reader(), ir)(ctx, specTarget.Name); perr != nil {
+			if perr := buildPromoteCurrentRevision(r.Client, r.APIReader, ir)(ctx, specTarget.Name); perr != nil {
 				if errors.Is(perr, workload.ErrStatusMutationPrecondition) {
 					result, err = ctrl.Result{Requeue: true}, nil
 					return
@@ -502,7 +503,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		log.Info("Canary rollback: rolling Instances back to stable revision", "revision", rollbackRevision.Name)
 	}
 	if scaleDownPodObservationRequired(input, plan) {
-		pods, lerr := query.LiveListPodsForComponent(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name,
+		pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
 			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 		if lerr != nil {
 			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: observe scale-down pods (component=%s): %w", ir.Spec.Component, lerr)
@@ -743,7 +744,7 @@ func (r *Reconciler) reconcileStaleSinglePodGroups(
 		return false, nil
 	}
 	if input.AuthoritativePods == nil {
-		pods, err := query.LiveListPodsForComponent(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name, plan.Component)
+		pods, err := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name, plan.Component)
 		if err != nil {
 			return false, fmt.Errorf("InferenceReplica reconciler: observe pods for stale PodGroup cleanup: %w", err)
 		}
@@ -1014,7 +1015,7 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 		// sibling IRs of the same parent write this ledger concurrently,
 		// and the persist writes the snapshot wholesale, so a cache-lagged
 		// base would drop their rows.
-		if live, lerr := audit.LoadLedgerForOwner(ctx, r.reader(), owner); lerr != nil {
+		if live, lerr := audit.LoadLedgerForOwner(ctx, r.APIReader, owner); lerr != nil {
 			// Projection below uses the cache-pruned in-memory view; the
 			// persisted prune retries next pass.
 			log.V(1).Info("relocation-directive prune: live ledger re-load failed; will retry next pass", "error", lerr.Error())
@@ -1082,7 +1083,7 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, ir *v1beta1
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		wrote = false
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.reader().Get(ctx, key, fresh); err != nil {
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}
@@ -1149,15 +1150,6 @@ func newestUnsucceededAutoMigration(migrations []v1beta1.MigrationStatus, idx in
 	return pos
 }
 
-// reader returns the authoritative live reader when wired, else the
-// cached client. Single home for the consistency-class fallback.
-func (r *Reconciler) reader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
 // applyRollbackPayload restores revision-owned render inputs. Explicitly
 // recorded topology is authoritative. A legacy multi-pod revision has no
 // topology field even when its live workers were rendered with OME-generated
@@ -1191,7 +1183,7 @@ func (r *Reconciler) applyRollbackPayload(ctx context.Context, ir *v1beta1.Infer
 		return fmt.Errorf("legacy rollback revision %q has no recognizable revision hash", target.Name)
 	}
 	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
-	pods, err := query.ListOMENativePodsByName(ctx, r.reader(), ir.Namespace, ir.Spec.ParentRef.Name, component, false)
+	pods, err := query.ListOMENativePodsByName(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name, component, false)
 	if err != nil {
 		return fmt.Errorf("list live pods for legacy rollback topology recovery: %w", err)
 	}
@@ -1286,8 +1278,6 @@ func irRevisionKey(ir *v1beta1.InferenceReplica) revision.Key {
 func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v1beta1.InferenceReplica, input workload.ReconcileInput) (*appsv1.ControllerRevision, error) {
 	revKey := irRevisionKey(ir)
 
-	reader := r.reader()
-
 	// scopeUID = parent ISVC's UID so the IR-managed path partitions the
 	// revision history by the same identity the direct OMENative path uses
 	// (isvc.UID, via core.EnsureControllerRevisionForISVC). Using ir.UID
@@ -1315,7 +1305,7 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 		return nil, err
 	}
 	target, collision, err := revision.EnsureControllerRevisionFromHash(
-		ctx, r.Client, reader,
+		ctx, r.Client, r.APIReader,
 		ir, irGVK, revKey, hash, raw,
 	)
 	if err != nil {
@@ -1340,7 +1330,7 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
 	}
 	target, collision, err = revision.EnsureControllerRevisionFromHash(
-		ctx, r.Client, reader,
+		ctx, r.Client, r.APIReader,
 		ir, irGVK, revKey, hash, raw,
 	)
 	if err != nil {
@@ -1502,7 +1492,7 @@ func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.Inferen
 	var next int32
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.reader().Get(ctx, key, fresh); err != nil {
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}

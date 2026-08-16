@@ -76,6 +76,7 @@ func newConsumeFixture(t *testing.T, ir *v1beta1.InferenceReplica, parent *v1bet
 	rec := record.NewFakeRecorder(16)
 	r := &Reconciler{
 		Client:       c,
+		APIReader:    c,
 		Log:          logf.Log.WithName("test"),
 		Recorder:     rec,
 		Expectations: workload.NewExpectations(),

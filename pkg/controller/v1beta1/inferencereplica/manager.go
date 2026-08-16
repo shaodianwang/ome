@@ -71,6 +71,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Clock == nil {
 		r.Clock = clock.RealClock{}
 	}
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	// Cache dynamically resolved lifecycle settings with the shared controller
 	// cache. The flag-driven TTL keeps those ConfigMap edits applying without a
 	// restart.

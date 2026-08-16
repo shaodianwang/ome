@@ -765,7 +765,7 @@ func TestBuildReconcileInput_AtomicInstanceAndRetryBlockMutationOneWrite(t *test
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), storedBefore)).To(gomega.Succeed())
 	wantBlock := *storedBefore.Status.RetryBlocks[0].DeepCopy()
 	wantBlock.State = v1beta1.RetryBlockRetryInProgress
-	r := &Reconciler{Client: c}
+	r := &Reconciler{Client: c, APIReader: c}
 	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0)
 	g.Expect(input.ApplyInstanceMutationsWithRetryBlock).NotTo(gomega.BeNil(),
 		"the production IR input must expose the atomic status capability")

@@ -128,6 +128,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Cli
 		Build()
 	return &Reconciler{
 		Client:                   c,
+		APIReader:                c,
 		Log:                      logf.Log.WithName("test"),
 		Expectations:             workload.NewExpectations(),
 		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
@@ -1826,6 +1827,7 @@ func TestReconcile_StatusWriteFailureStillSweepsRevisions(t *testing.T) {
 		Build()
 	r := &Reconciler{
 		Client:       c,
+		APIReader:    c,
 		Log:          logf.Log.WithName("test"),
 		Expectations: workload.NewExpectations(),
 	}

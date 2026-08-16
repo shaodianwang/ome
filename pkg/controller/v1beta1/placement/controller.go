@@ -85,7 +85,8 @@ type Reconciler struct {
 	// publisher both write this object, so a 409 here is genuine external
 	// contention: the apiserver holds a newer ResourceVersion than the informer
 	// has observed, and re-reading the cache would resubmit the same stale base
-	// for the whole backoff. Optional; nil falls back to the cached Client.
+	// for the whole backoff. Required: SetupWithManager defaults it to
+	// mgr.GetAPIReader() and rejects a reconciler still missing it.
 	APIReader client.Reader
 	// Requeue is the status-refresh poll cadence; defaults to DefaultPlacementRequeue.
 	Requeue time.Duration
@@ -1097,7 +1098,7 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 	key := client.ObjectKeyFromObject(isvc)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &v1beta1.InferenceService{}
-		if err := r.reader().Get(ctx, key, cur); err != nil {
+		if err := r.APIReader.Get(ctx, key, cur); err != nil {
 			return err
 		}
 		if cur.Status.Placement == nil {
@@ -1219,6 +1220,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...ConvergeOption) 
 	cfg := resolveConvergeConfig(opts...)
 	r.converge = &cfg
 
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
+	if err := r.validateWiring(); err != nil {
+		return err
+	}
+
 	// Register the field index that marks ISVCs declaring placement requirements,
 	// so a cluster change lists only those (not every cached ISVC) before the
 	// per-ISVC candidate check in isvcsForClusterChange.
@@ -1239,6 +1247,16 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...ConvergeOption) 
 		b = b.WatchesRawSource(source.Channel(cfg.statusEvents, r.statusEventHandler(cfg.batchPeriod)))
 	}
 	return b.Complete(r)
+}
+
+// validateWiring rejects a mis-wired reconciler at setup. The
+// authoritative (live) reader is a correctness dependency — see
+// workload/types AuthoritativeReader.
+func (r *Reconciler) validateWiring() error {
+	if r.APIReader == nil {
+		return fmt.Errorf("placement: APIReader (AuthoritativeReader) must be wired")
+	}
+	return nil
 }
 
 // statusEventHandler enqueues the funnel-resolved local key with the configured
@@ -1419,13 +1437,4 @@ func isvcStatusReferencesCluster(isvc *v1beta1.InferenceService, clusterName str
 		}
 	}
 	return false
-}
-
-// reader returns the authoritative live reader when wired, else the cached
-// client. Single home for the consistency-class fallback.
-func (r *Reconciler) reader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
 }

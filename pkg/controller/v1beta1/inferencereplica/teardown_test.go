@@ -531,7 +531,7 @@ func TestTeardown_LedgerClose_RetriesOnConflict(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &Reconciler{Client: c, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
+	r := &Reconciler{Client: c, APIReader: c, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -616,7 +616,7 @@ func TestTeardown_LedgerClose_RebasesOverPeerComponentWrite(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &Reconciler{Client: c, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
+	r := &Reconciler{Client: c, APIReader: c, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -1099,7 +1099,7 @@ func TestTeardown_CleansMetricSeriesBeforeFinalizerRelease(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &Reconciler{Client: base, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
+	r := &Reconciler{Client: base, APIReader: base, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations()}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
 	if err == nil || !strings.Contains(err.Error(), "injected finalizer update failure") {
@@ -1306,6 +1306,7 @@ func TestTeardown_ForceDeleteEscalation_UnwedgesDeadNodePod(t *testing.T) {
 		Build()
 	r := &Reconciler{
 		Client:       c,
+		APIReader:    c,
 		Log:          ctrl.Log.WithName("test"),
 		Expectations: workload.NewExpectations(),
 		Clock:        clocktesting.NewFakeClock(base),

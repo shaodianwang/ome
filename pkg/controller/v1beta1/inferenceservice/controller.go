@@ -1072,7 +1072,9 @@ func (r *InferenceServiceReconciler) ensureIngressDisableAnnotation(isvc *v1beta
 
 func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.ClientConfig = mgr.GetConfig()
-	r.APIReader = mgr.GetAPIReader()
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := r.validateWiring(); err != nil {
 		return err
 	}

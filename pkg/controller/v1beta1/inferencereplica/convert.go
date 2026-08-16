@@ -127,7 +127,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	if parent != nil {
 		eventTarget = parent
 	}
-	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.Client, r.reader(), ir)
+	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.Client, r.APIReader, ir)
 	input := workload.ReconcileInput{
 		OwnerObject:                          ir,
 		OwnerGVK:                             irGVK,
@@ -135,24 +135,24 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		Key:                                  buildKey(ir),
 		DesiredSpec:                          desired,
 		ObservedState:                        observed,
-		MutateInstance:                       buildMutateInstance(r.Client, r.reader(), ir),
+		MutateInstance:                       buildMutateInstance(r.Client, r.APIReader, ir),
 		ApplyInstanceMutations:               instanceOnlyMutationAdapter(applyInstanceMutationsWithRetryBlock),
 		ApplyInstanceMutationsWithRetryBlock: applyInstanceMutationsWithRetryBlock,
-		RemoveInstance:                       buildRemoveInstance(r.Client, r.reader(), ir, r.Expectations),
-		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, r.reader(), ir),
+		RemoveInstance:                       buildRemoveInstance(r.Client, r.APIReader, ir, r.Expectations),
+		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, r.APIReader, ir),
 		// Same-target RetryBlock persistence + policy. The
 		// closure is always wired on the IR-managed path — the policy
 		// alone decides Backoff vs fail-safe Held.
-		MutateRetryBlock:  buildMutateRetryBlock(r.Client, r.reader(), ir),
+		MutateRetryBlock:  buildMutateRetryBlock(r.Client, r.APIReader, ir),
 		UpdateRetryPolicy: updateRetryPolicy,
 		// Migration-record persistence: the executor advances
 		// status.migrations phases through this seam (same RMW +
 		// in-memory-mirror discipline as MutateRetryBlock).
-		MutateMigration: buildMutateMigration(r.Client, r.reader(), ir),
+		MutateMigration: buildMutateMigration(r.Client, r.APIReader, ir),
 		// Record creation (born-terminal Auto mirrors from the
 		// disposition). Separate from MutateMigration so mutate-on-
 		// missing stays a structural no-op.
-		AppendMigration: buildAppendMigration(r.Client, r.reader(), ir),
+		AppendMigration: buildAppendMigration(r.Client, r.APIReader, ir),
 		// Stuck-Terminating force-delete gate. nil disables the
 		// escalation; non-nil durations are validated > 0 upstream.
 		ForceDelete: forceDeletePolicy,
@@ -200,11 +200,11 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	// block to enforce and the dispatcher's nil-gate fallback ("always
 	// allowed") is correct.
 	if parent != nil {
-		// Prefer APIReader for gate freshness (cross-Component coordination
-		// needs live peer status), fall back to Client when unavailable.
-		reads := r.reader()
+		// The gate reads peer Component status, which must be live:
+		// cross-Component coordination against a cache-lagged peer would
+		// admit a rollout the peer's real state forbids.
 		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-			return coordination.EvaluateUpdateGate(ctx, reads, parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
+			return coordination.EvaluateUpdateGate(ctx, r.APIReader, parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
 		}
 	}
 	// The migration audit ledger (history) lives on the user-facing
@@ -481,9 +481,6 @@ func buildKey(ir *v1beta1.InferenceReplica) workload.Key {
 // Owner disappearance or replacement returns ErrStatusOwnerGone so callers
 // stop before applying effects selected from the stale snapshot.
 func buildMutateInstance(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
@@ -586,9 +583,6 @@ func buildApplyInstanceMutationsWithRetryBlock(c client.Client, ir *v1beta1.Infe
 // required for adjacent writes in one reconcile: the informer cache may not
 // observe the first write before the next mutation starts.
 func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
@@ -966,9 +960,6 @@ func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OME
 // caller's in-memory IR so the deferred aggregator's Ready computation and
 // the reconciler's promotion log observe the post-write value.
 func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetName string) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	ownerGeneration := ir.Generation
@@ -1037,9 +1028,6 @@ const maxHistoricalRetryBlocks = 3
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
 func buildMutateRetryBlock(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
@@ -1173,9 +1161,6 @@ func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
 // ISVC name (buildKey), not the IR name — so Forget must use the same.
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
 func buildRemoveInstance(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32) (bool, error) {
@@ -1236,9 +1221,6 @@ func buildRemoveInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 // gang reconciler (GangSchedulingUnavailable); the IR controller
 // inherits it for free.
 func buildWriteAggregateCondition(c client.Client, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, cond metav1.Condition) error {
-	if reads == nil {
-		reads = c
-	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, cond metav1.Condition) error {

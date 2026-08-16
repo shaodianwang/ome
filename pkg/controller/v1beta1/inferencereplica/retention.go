@@ -33,8 +33,6 @@ const defaultRevisionRetention = 10
 // just-committed CurrentRevision / UpdateRevision (the deferred status
 // writer mirrors those onto ir.Status before this runs).
 func (r *Reconciler) sweepRevisions(ctx context.Context, ir *v1beta1.InferenceReplica) {
-	reader := r.reader()
-
 	// liveNames union protects in-flight migrations: an Instance whose
 	// RunningRevision points at an older CR must keep that CR, or the
 	// migration resume path can't find its source payload and bails.
@@ -45,7 +43,7 @@ func (r *Reconciler) sweepRevisions(ctx context.Context, ir *v1beta1.InferenceRe
 	)
 
 	if err := revision.RetainControllerRevisions(
-		ctx, r.Client, reader, irRevisionKey(ir), defaultRevisionRetention, liveNames...,
+		ctx, r.Client, r.APIReader, irRevisionKey(ir), defaultRevisionRetention, liveNames...,
 	); err != nil {
 		r.Log.V(1).Error(err, "ControllerRevision retention sweep failed; non-live revisions may accumulate until the next reconcile",
 			"ir", client.ObjectKeyFromObject(ir))
