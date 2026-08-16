@@ -14,9 +14,8 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// defaultDispatchMinReplicas is the floor applied when the component spec
-// does not declare MinReplicas > 0. Matches the per-class generators'
-// internal defaults (hpa.calculateMinReplicas, keda.defaultMinReplicas).
+// defaultDispatchMinReplicas is the compatibility default for omitted bounds.
+// Dispatch paths without scale-to-zero support also use it as their floor.
 const defaultDispatchMinReplicas int32 = 1
 
 // IRDispatchInput is the per-Component projection of everything
@@ -122,19 +121,27 @@ func rawMinMaxReplicas(c *v1beta1.ComponentExtensionSpec, autoscaler *v1beta1.Co
 	if c == nil {
 		return 0, 0, fmt.Errorf("component replica bounds are required")
 	}
-	if c.MinReplicas == nil {
-		return 0, 0, fmt.Errorf("minReplicas is required")
+	// Stored objects can reach reconciliation without admission defaults, so
+	// omitted bounds use the same compatibility floor as the generators.
+	minR := int(defaultDispatchMinReplicas)
+	if c.MinReplicas != nil {
+		minR = *c.MinReplicas
 	}
-	minR := *c.MinReplicas
-	maxR := c.MaxReplicas
 	if minR < 0 {
 		return 0, 0, fmt.Errorf("minReplicas must be non-negative, got %d", minR)
 	}
-	if maxR <= 0 {
-		return 0, 0, fmt.Errorf("maxReplicas must be positive, got %d", maxR)
+	maxR := c.MaxReplicas
+	if maxR < 0 {
+		return 0, 0, fmt.Errorf("maxReplicas must be non-negative, got %d", maxR)
 	}
 	if minR == 0 && !validTypedRawKEDA(autoscaler) {
 		return 0, 0, fmt.Errorf("minReplicas=0 requires typed KEDA with at least one trigger")
+	}
+	if maxR == 0 {
+		maxR = minR
+		if maxR == 0 {
+			maxR = int(defaultDispatchMinReplicas)
+		}
 	}
 	if minR > maxR {
 		return 0, 0, fmt.Errorf("minReplicas must not exceed maxReplicas: %d > %d", minR, maxR)

@@ -603,28 +603,92 @@ func cloneStringMap(in map[string]string) map[string]string {
 }
 
 func TestDispatchForRawComponent_ReplicaBounds(t *testing.T) {
-	scheme := dispatchScheme(t)
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-	componentMeta := rawDispatchComponentMeta()
+	for _, tt := range []struct {
+		name    string
+		maximum int
+		wantMax int32
+	}{
+		{name: "explicit maximum", maximum: 6, wantMax: 6},
+		{name: "omitted maximum", wantMax: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := dispatchScheme(t)
+			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+			componentMeta := rawDispatchComponentMeta()
 
-	require.NoError(t, DispatchForRawComponent(context.Background(), RawDispatchInput{
-		Client:             cl,
-		Scheme:             scheme,
-		ISVC:               rawDispatchISVC(),
-		ComponentMeta:      componentMeta,
-		ResolvedAutoscaler: rawDispatchKEDAAutoscaler(),
-		ComponentExt: &v1beta1.ComponentExtensionSpec{
-			MinReplicas: ptr.To(0),
-			MaxReplicas: 6,
+			require.NoError(t, DispatchForRawComponent(context.Background(), RawDispatchInput{
+				Client:             cl,
+				Scheme:             scheme,
+				ISVC:               rawDispatchISVC(),
+				ComponentMeta:      componentMeta,
+				ResolvedAutoscaler: rawDispatchKEDAAutoscaler(),
+				ComponentExt: &v1beta1.ComponentExtensionSpec{
+					MinReplicas: ptr.To(0),
+					MaxReplicas: tt.maximum,
+				},
+			}))
+
+			got := &kedav1.ScaledObject{}
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: componentMeta.Namespace, Name: utils.GetScaledObjectName(componentMeta.Name)}, got))
+			require.NotNil(t, got.Spec.MinReplicaCount)
+			require.NotNil(t, got.Spec.MaxReplicaCount)
+			assert.Equal(t, int32(0), *got.Spec.MinReplicaCount)
+			assert.Equal(t, tt.wantMax, *got.Spec.MaxReplicaCount)
+		})
+	}
+}
+
+func TestDispatchForRawComponent_DefaultsOmittedReplicaBounds(t *testing.T) {
+	tests := []struct {
+		name      string
+		component *v1beta1.ComponentExtensionSpec
+		wantMin   int32
+		wantMax   int32
+	}{
+		{
+			name:      "both bounds omitted",
+			component: &v1beta1.ComponentExtensionSpec{},
+			wantMin:   1,
+			wantMax:   1,
 		},
-	}))
+		{
+			name:      "minimum omitted",
+			component: &v1beta1.ComponentExtensionSpec{MaxReplicas: 4},
+			wantMin:   1,
+			wantMax:   4,
+		},
+		{
+			name:      "maximum omitted",
+			component: &v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(2)},
+			wantMin:   2,
+			wantMax:   2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := dispatchScheme(t)
+			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+			componentMeta := rawDispatchComponentMeta()
 
-	got := &kedav1.ScaledObject{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: componentMeta.Namespace, Name: utils.GetScaledObjectName(componentMeta.Name)}, got))
-	require.NotNil(t, got.Spec.MinReplicaCount)
-	require.NotNil(t, got.Spec.MaxReplicaCount)
-	assert.Equal(t, int32(0), *got.Spec.MinReplicaCount)
-	assert.Equal(t, int32(6), *got.Spec.MaxReplicaCount)
+			require.NoError(t, DispatchForRawComponent(context.Background(), RawDispatchInput{
+				Client:             cl,
+				Scheme:             scheme,
+				ISVC:               rawDispatchISVC(),
+				ComponentMeta:      componentMeta,
+				ResolvedAutoscaler: rawDispatchHPAAutoscaler(),
+				ComponentExt:       tt.component,
+			}))
+
+			got := &autoscalingv2.HorizontalPodAutoscaler{}
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
+				Namespace: componentMeta.Namespace,
+				Name:      componentMeta.Name,
+			}, got))
+			require.NotNil(t, got.Spec.MinReplicas)
+			assert.Equal(t, tt.wantMin, *got.Spec.MinReplicas)
+			assert.Equal(t, tt.wantMax, got.Spec.MaxReplicas)
+		})
+	}
 }
 
 func TestDispatchForRawComponent_InvalidReplicaBounds(t *testing.T) {
@@ -640,18 +704,6 @@ func TestDispatchForRawComponent_InvalidReplicaBounds(t *testing.T) {
 			wantError:  "replica bounds are required",
 		},
 		{
-			name:       "unset minimum",
-			autoscaler: rawDispatchHPAAutoscaler(),
-			component:  &v1beta1.ComponentExtensionSpec{MaxReplicas: 3},
-			wantError:  "minReplicas is required",
-		},
-		{
-			name:       "zero maximum",
-			autoscaler: rawDispatchHPAAutoscaler(),
-			component:  &v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(1)},
-			wantError:  "maxReplicas must be positive",
-		},
-		{
 			name:       "negative minimum",
 			autoscaler: rawDispatchHPAAutoscaler(),
 			component:  &v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(-1), MaxReplicas: 3},
@@ -661,7 +713,7 @@ func TestDispatchForRawComponent_InvalidReplicaBounds(t *testing.T) {
 			name:       "negative maximum",
 			autoscaler: rawDispatchHPAAutoscaler(),
 			component:  &v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(1), MaxReplicas: -1},
-			wantError:  "maxReplicas must be positive",
+			wantError:  "maxReplicas must be non-negative",
 		},
 		{
 			name:       "HPA zero minimum",
