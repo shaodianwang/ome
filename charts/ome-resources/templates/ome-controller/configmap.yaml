@@ -31,6 +31,10 @@ data:
     {
       "defaultDeploymentMode": "{{ .Values.ome.controller.deploymentMode }}"
     }
+{{- with .Values.ome.controller.podDisruptionBudget }}
+  podDisruptionBudget: |-
+    {{- toJson . | nindent 4 }}
+{{- end }}
 
   canaryAnalysis: |-
     {

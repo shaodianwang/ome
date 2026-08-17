@@ -2,6 +2,7 @@ package raw
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -16,12 +17,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
@@ -88,10 +91,17 @@ func TestRawKubeReconciler_ReconcilesBaseResourcesWithoutAutoscaler(t *testing.T
 	clientset := fake.NewSimpleClientset(ingressConfigMap("https"))
 	minReplicas := 1
 	componentMeta := metav1.ObjectMeta{
-		Name:      "raw-base-only",
+		Name:      "raw-" + strings.Repeat("component", 8),
 		Namespace: "default",
 		Annotations: map[string]string{
 			constants.AutoscalerClass: string(constants.AutoscalerClassHPA),
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "raw-base",
+			Namespace: componentMeta.Namespace,
+			UID:       types.UID("raw-base-uid"),
 		},
 	}
 	spec := &v1beta1.InferenceServiceSpec{
@@ -106,10 +116,36 @@ func TestRawKubeReconciler_ReconcilesBaseResourcesWithoutAutoscaler(t *testing.T
 		Containers: []corev1.Container{{Name: constants.MainContainerName, Image: "example.com/runtime:test"}},
 	}
 
-	reconciler, err := NewRawKubeReconciler(cl, clientset, scheme, componentMeta, spec, podSpec)
+	maximum := intstr.FromInt(2)
+	pdbRequest := pdb.Request{
+		Owner:      isvc,
+		ObjectMeta: componentMeta,
+		Selector: map[string]string{
+			constants.RawDeploymentAppLabel: constants.GetRawServiceLabel(componentMeta.Name),
+		},
+		Budget: &pdb.Budget{MaxUnavailable: &maximum},
+	}
+	reconciler, err := NewRawKubeReconciler(cl, cl, clientset, scheme, pdbRequest, componentMeta, spec, podSpec)
 	require.NoError(t, err)
-	_, err = reconciler.Reconcile()
+	_, err = reconciler.Reconcile(context.Background())
 	require.NoError(t, err)
+
+	budget := &policyv1.PodDisruptionBudget{}
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
+		Namespace: componentMeta.Namespace,
+		Name:      componentMeta.Name,
+	}, budget))
+	require.NotNil(t, budget.Spec.MaxUnavailable)
+	assert.Equal(t, maximum, *budget.Spec.MaxUnavailable)
+	assert.Nil(t, budget.Spec.MinAvailable)
+	require.NotNil(t, budget.Spec.Selector)
+	expectedAppLabel := reconciler.Deployment.Deployment.Spec.Template.Labels[constants.RawDeploymentAppLabel]
+	assert.Equal(t, map[string]string{
+		constants.RawDeploymentAppLabel: expectedAppLabel,
+	}, budget.Spec.Selector.MatchLabels)
+	controller := metav1.GetControllerOf(budget)
+	require.NotNil(t, controller)
+	assert.Equal(t, isvc.UID, controller.UID)
 
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
 	err = cl.Get(context.Background(), types.NamespacedName{Namespace: componentMeta.Namespace, Name: componentMeta.Name}, hpa)
@@ -121,4 +157,65 @@ func TestRawKubeReconciler_ReconcilesBaseResourcesWithoutAutoscaler(t *testing.T
 		Name:      isvcutils.GetScaledObjectName(componentMeta.Name),
 	}, so)
 	assert.True(t, apierrors.IsNotFound(err), "RawKubeReconciler must not create a ScaledObject")
+}
+
+func TestRawKubeReconcilerDeletesOwnedPDBForNilBudget(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, addToScheme := range []func(*runtime.Scheme) error{
+		v1beta1.AddToScheme,
+		appsv1.AddToScheme,
+		autoscalingv2.AddToScheme,
+		corev1.AddToScheme,
+		policyv1.AddToScheme,
+		kedav1.AddToScheme,
+		monitoringv1.AddToScheme,
+	} {
+		require.NoError(t, addToScheme(scheme))
+	}
+
+	componentMeta := metav1.ObjectMeta{Name: "raw-no-budget", Namespace: "default"}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "raw-base",
+			Namespace: componentMeta.Namespace,
+			UID:       types.UID("raw-base-uid"),
+		},
+	}
+	staleMaximum := intstr.FromInt(3)
+	existing := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            componentMeta.Name,
+			Namespace:       componentMeta.Namespace,
+			UID:             types.UID("stale-pdb-uid"),
+			ResourceVersion: "1",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &staleMaximum,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+				constants.RawDeploymentAppLabel: constants.GetRawServiceLabel(componentMeta.Name),
+			}},
+		},
+	}
+	cl := ctrlclientfake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	clientset := fake.NewSimpleClientset(ingressConfigMap("https"))
+	spec := &v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}}
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: constants.MainContainerName, Image: "example.com/runtime:test"}},
+	}
+	pdbRequest := pdb.Request{Owner: isvc, ObjectMeta: componentMeta}
+
+	reconciler, err := NewRawKubeReconciler(cl, cl, clientset, scheme, pdbRequest, componentMeta, spec, podSpec)
+	require.NoError(t, err)
+	_, err = reconciler.Reconcile(context.Background())
+	require.NoError(t, err)
+
+	budget := &policyv1.PodDisruptionBudget{}
+	err = cl.Get(context.Background(), types.NamespacedName{
+		Namespace: componentMeta.Namespace,
+		Name:      componentMeta.Name,
+	}, budget)
+	assert.True(t, apierrors.IsNotFound(err), "owned PodDisruptionBudget must be deleted, got %v", err)
 }

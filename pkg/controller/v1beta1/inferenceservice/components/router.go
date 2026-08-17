@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
 )
 
@@ -43,6 +44,7 @@ func NewRouter(deps *ComponentDeps, in ComponentInputs, routerSpec *v1beta1.Rout
 		routerSpec:          routerSpec,
 		deploymentReconciler: &common.DeploymentReconciler{
 			Client:        deps.Client,
+			APIReader:     deps.APIReader,
 			Clientset:     deps.Clientset,
 			Scheme:        deps.Scheme,
 			StatusManager: base.StatusManager,
@@ -62,11 +64,24 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	if r.routerSpec == nil {
 		return ctrl.Result{}, errors.New("router spec is nil")
 	}
-
 	// Reconcile object metadata
 	objectMeta, err := r.reconcileObjectMeta(ctx, isvc)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile object metadata")
+	}
+	pdbRequest, err := resolveComponentPDBRequest(
+		&r.BaseComponentFields,
+		isvc,
+		r.DeploymentMode,
+		v1beta1.RouterComponent,
+		objectMeta,
+		&r.routerSpec.ComponentExtensionSpec,
+	)
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to resolve router PodDisruptionBudget")
+	}
+	if err := preflightComponentPDB(ctx, &r.BaseComponentFields, pdbRequest); err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to preflight router PodDisruptionBudget")
 	}
 
 	// Reconcile RBAC resources (ServiceAccount, Role, RoleBinding)
@@ -97,7 +112,7 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// in-flight Update / Create. Discarding it strands the rollout
 	// until an unrelated watch event happens to fire another reconcile
 	// (the post-decoder Sequential stall).
-	deploymentResult, err := r.reconcileDeployment(ctx, isvc, objectMeta, podSpec)
+	deploymentResult, err := r.reconcileDeployment(ctx, isvc, objectMeta, podSpec, pdbRequest)
 	if err != nil {
 		return deploymentResult, err
 	}
@@ -128,14 +143,14 @@ func (r *Router) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
-func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) (ctrl.Result, error) {
+func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, pdbRequest pdb.Request) (ctrl.Result, error) {
 	switch r.DeploymentMode {
 	case constants.RawDeployment:
 		resolvedAS, _, err := autoscaler.ResolveRawComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent, objectMeta.Annotations)
 		if err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw router")
 		}
-		return r.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent, resolvedAS)
+		return r.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent, resolvedAS, pdbRequest)
 	case constants.OMENative:
 		// OMENative-mode Components dispatch through the InferenceReplica
 		// path. Router is always single-pod (MultiPod=false; no Worker
@@ -165,6 +180,15 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 				return ctrl.Result{Requeue: true}, nil
 			}
 			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
+		}
+		if err := ReconcileOMENativePDB(
+			ctx,
+			&r.BaseComponentFields,
+			v1beta1.RouterComponent,
+			ir,
+			pdbRequest,
+		); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile router OMENative PodDisruptionBudget")
 		}
 		// Autoscaler dispatch is always-on per InferenceReplica.
 		// See engine dispatch for the full owner-ref + scaleTargetRef

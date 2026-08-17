@@ -1,6 +1,8 @@
 package raw
 
 import (
+	"context"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,24 +22,28 @@ import (
 
 // RawKubeReconciler reconciles the Native K8S Resources
 type RawKubeReconciler struct {
-	client              client.Client
-	scheme              *runtime.Scheme
+	reader              client.Reader
 	Deployment          *deployment.DeploymentReconciler
 	Service             *service.ServiceReconciler
 	PodDisruptionBudget *pdb.PDBReconciler
+	pdbRequest          pdb.Request
 	PodMonitor          *podmonitor.PodMonitorReconciler
 	URL                 *knapis.URL
 }
 
 // NewRawKubeReconciler creates raw kubernetes resource reconciler.
 func NewRawKubeReconciler(client client.Client,
+	reader client.Reader,
 	clientset kubernetes.Interface,
 	scheme *runtime.Scheme,
+	pdbRequest pdb.Request,
 	componentMeta metav1.ObjectMeta,
 	inferenceServiceSpec *v1beta1.InferenceServiceSpec,
 	podSpec *corev1.PodSpec,
 ) (*RawKubeReconciler, error) {
-	pdb := pdb.NewPDBReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec)
+	if reader == nil {
+		reader = client
+	}
 	pm := podmonitor.NewPodMonitorReconciler(client, scheme, componentMeta, podSpec)
 	url, err := createRawURL(clientset, componentMeta)
 	if err != nil {
@@ -48,13 +54,14 @@ func NewRawKubeReconciler(client client.Client,
 	// caller (deployment_reconciler.go) regardless of which actual
 	// component is being reconciled.
 	componentExt := &inferenceServiceSpec.Engine.ComponentExtensionSpec
+	pdbReconciler := pdb.NewPDBReconcilerWithReader(client, reader, scheme)
 
 	return &RawKubeReconciler{
-		client:              client,
-		scheme:              scheme,
+		reader:              reader,
 		Deployment:          deployment.NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec),
 		Service:             service.NewServiceReconciler(client, scheme, componentMeta, componentExt, podSpec, nil),
-		PodDisruptionBudget: pdb,
+		PodDisruptionBudget: pdbReconciler,
+		pdbRequest:          pdbRequest,
 		PodMonitor:          pm,
 		URL:                 url,
 	}, nil
@@ -79,19 +86,24 @@ func createRawURL(clientset kubernetes.Interface, metadata metav1.ObjectMeta) (*
 }
 
 // Reconcile ...
-func (r *RawKubeReconciler) Reconcile() (*appsv1.Deployment, error) {
+func (r *RawKubeReconciler) Reconcile(ctx context.Context) (*appsv1.Deployment, error) {
 	// reconcile Deployments
 	dply, err := r.Deployment.Reconcile()
 	if err != nil {
 		return nil, err
 	}
+	cutoverReady, err := pdb.RawDeploymentCutoverReady(ctx, r.reader, dply)
+	if err != nil {
+		return nil, err
+	}
+	r.pdbRequest.SelectorCutoverReady = cutoverReady
 	// reconcile Service
 	_, err = r.Service.Reconcile()
 	if err != nil {
 		return nil, err
 	}
 	// reconcile PDB
-	_, err = r.PodDisruptionBudget.Reconcile()
+	_, err = r.PodDisruptionBudget.Reconcile(ctx, r.pdbRequest)
 	if err != nil {
 		return nil, err
 	}

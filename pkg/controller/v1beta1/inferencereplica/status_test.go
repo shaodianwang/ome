@@ -250,7 +250,7 @@ func TestAggregateStatus_ReadyCondition_TrueWhenAllReady_RolloutDone(t *testing.
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 		},
 	}
-	cond := computeReadyCondition(status, nil)
+	cond := computeReadyCondition(status, nil, nil, nil)
 	g.Expect(cond.Type).To(gomega.Equal(InferenceReplicaConditionReady))
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
 		"Ready=True when ReadyReplicas == Replicas AND CurrentRevision == UpdateRevision")
@@ -278,7 +278,7 @@ func TestAggregateStatus_ReadyCondition_UnknownDuringRollout(t *testing.T) {
 				TargetRevision: "rev-b"},
 		},
 	}
-	cond := computeReadyCondition(status, nil)
+	cond := computeReadyCondition(status, nil, nil, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionUnknown),
 		"Ready=Unknown while CurrentRevision != UpdateRevision (rollout in flight)")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress))
@@ -303,7 +303,7 @@ func TestAggregateStatus_ReadyCondition_StagedAtPartition(t *testing.T) {
 			{Index: 2, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-a"}, // held by partition
 		},
 	}
-	cond := computeReadyCondition(status, &v1beta1.InferenceReplicaPacing{Partition: &part})
+	cond := computeReadyCondition(status, nil, nil, &v1beta1.InferenceReplicaPacing{Partition: &part})
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
 		"Ready=True when converged to a static partition (2 on target + 1 held, all Ready)")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonStaged))
@@ -311,7 +311,7 @@ func TestAggregateStatus_ReadyCondition_StagedAtPartition(t *testing.T) {
 	// Not yet converged (held instance still updating) → back to RolloutInProgress.
 	status.InstanceStatuses[2].Phase = v1beta1.OMENativeInstanceUpdating
 	status.ReadyReplicas = 2
-	cond = computeReadyCondition(status, &v1beta1.InferenceReplicaPacing{Partition: &part})
+	cond = computeReadyCondition(status, nil, nil, &v1beta1.InferenceReplicaPacing{Partition: &part})
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress),
 		"not staged until the partitioned shape is fully reached")
 }
@@ -340,18 +340,15 @@ func TestAggregateStatus_ReadyCondition_FalseOnStuck(t *testing.T) {
 			{Index: 1, Phase: v1beta1.OMENativeInstancePending, RunningRevision: "rev-a"},
 		},
 	}
-	// nil pacing → strict floor (all Instances), so serving 1/2 is below floor.
-	cond := computeReadyCondition(status, nil)
+	// nil lifecycle keeps the strict floor, so serving 1/2 is below it.
+	cond := computeReadyCondition(status, nil, nil, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse),
 		"Ready=False when serving is below the availability floor with no rollout in flight")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonReplicaCountMismatch))
 }
 
-// TestAggregateStatus_ReadyCondition_TrueWhenServingWithinBudget pins the
-// availability-based branch: ReadyReplicas < Replicas with no rollout in flight,
-// but the serving Instance count is at or above the floor derived from the
-// rollout MaxUnavailable budget → Ready=True/MinimumAvailable. Mirrors the
-// ISVC-side EngineReady so `kubectl wait irep --for=condition=Ready` agrees.
+// TestAggregateStatus_ReadyCondition_TrueWhenServingWithinBudget verifies that
+// lifecycle rollingUpdate.maxUnavailable supplies the Instance readiness floor.
 func TestAggregateStatus_ReadyCondition_TrueWhenServingWithinBudget(t *testing.T) {
 	g := gomega.NewWithT(t)
 	status := &v1beta1.InferenceReplicaStatus{
@@ -362,10 +359,53 @@ func TestAggregateStatus_ReadyCondition_TrueWhenServingWithinBudget(t *testing.T
 		UpdateRevision:  "rev-a",
 	}
 	mu := intstr.FromString("25%") // floor = 10 - ceil(2.5) = 7
-	cond := computeReadyCondition(status, &v1beta1.InferenceReplicaPacing{MaxUnavailable: &mu})
+	lifecycle := &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: &mu},
+		},
+	}
+	cond := computeReadyCondition(status, nil, lifecycle, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
 		"Ready=True when serving (9) >= floor (7) even though ReadyReplicas < Replicas")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonMinimumAvailable))
+}
+
+func TestAggregateStatus_ReadyCondition_SurgeUsesDesiredReplicaFloor(t *testing.T) {
+	g := gomega.NewWithT(t)
+	desired := int32(16)
+	status := &v1beta1.InferenceReplicaStatus{
+		Replicas:        32,
+		ReadyReplicas:   16,
+		ServingReplicas: 16,
+		CurrentRevision: "rev-a",
+		UpdateRevision:  "rev-a",
+	}
+	mu := intstr.FromString("25%")
+	lifecycle := &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: &mu},
+		},
+	}
+
+	cond := computeReadyCondition(status, &desired, lifecycle, nil)
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonMinimumAvailable))
+	g.Expect(cond.Message).To(gomega.Equal("16/32 Instances serving (min 12)"))
+}
+
+func TestAggregateStatus_ReadyCondition_PacingBudgetDoesNotRelaxReadiness(t *testing.T) {
+	g := gomega.NewWithT(t)
+	status := &v1beta1.InferenceReplicaStatus{
+		Replicas:        10,
+		ReadyReplicas:   9,
+		ServingReplicas: 9,
+		CurrentRevision: "rev-a",
+		UpdateRevision:  "rev-a",
+	}
+	mu := intstr.FromString("100%")
+	cond := computeReadyCondition(status, nil, nil, &v1beta1.InferenceReplicaPacing{MaxUnavailable: &mu})
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonReplicaCountMismatch))
 }
 
 // TestAggregateStatus_ReadyCondition_FalseOnFailed pins the
@@ -390,7 +430,7 @@ func TestAggregateStatus_ReadyCondition_FalseOnFailed(t *testing.T) {
 			{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
 		},
 	}
-	cond := computeReadyCondition(status, nil)
+	cond := computeReadyCondition(status, nil, nil, nil)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse),
 		"Ready=False when any Instance has Phase=Failed, overriding rollout-in-flight")
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonInstanceFailed))
@@ -413,7 +453,7 @@ func TestAggregateStatus_ReadyCondition_ObservedGenerationStamped(t *testing.T) 
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 		},
 	}
-	cond := computeReadyCondition(status, nil)
+	cond := computeReadyCondition(status, nil, nil, nil)
 	g.Expect(cond.ObservedGeneration).To(gomega.Equal(int64(7)),
 		"Ready condition must stamp ObservedGeneration off status.ObservedGeneration")
 }

@@ -13,6 +13,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -100,6 +101,193 @@ func TestNewInferenceServicesConfig(t *testing.T) {
 			require.NotNil(t, config)
 			if tt.validateConfig != nil {
 				tt.validateConfig(t, config)
+			}
+		})
+	}
+}
+
+func TestInferenceServicesConfigFromConfigMapParsesPodDisruptionBudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     map[string]string
+		validate func(*testing.T, *InferenceServicesConfig)
+	}{
+		{
+			name: "missing key",
+			data: map[string]string{},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Nil(t, cfg.PodDisruptionBudget.RawDeployment)
+				assert.Nil(t, cfg.PodDisruptionBudget.OMENative)
+			},
+		},
+		{
+			name: "empty key",
+			data: map[string]string{PodDisruptionBudgetConfigName: " \n\t"},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Nil(t, cfg.PodDisruptionBudget.RawDeployment)
+				assert.Nil(t, cfg.PodDisruptionBudget.OMENative)
+			},
+		},
+		{
+			name: "explicitly null modes",
+			data: map[string]string{
+				PodDisruptionBudgetConfigName: `{
+					"rawDeployment": null,
+					"omeNative": null
+				}`,
+			},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Nil(t, cfg.PodDisruptionBudget.RawDeployment)
+				assert.Nil(t, cfg.PodDisruptionBudget.OMENative)
+			},
+		},
+		{
+			name: "per mode policies",
+			data: map[string]string{
+				PodDisruptionBudgetConfigName: `{
+					"rawDeployment": {"maxUnavailable": 1},
+					"omeNative": {"minAvailable": "50%"}
+				}`,
+			},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				require.NotNil(t, cfg.PodDisruptionBudget.RawDeployment)
+				require.NotNil(t, cfg.PodDisruptionBudget.RawDeployment.MaxUnavailable)
+				assert.Equal(t, intstr.FromInt(1), *cfg.PodDisruptionBudget.RawDeployment.MaxUnavailable)
+				require.NotNil(t, cfg.PodDisruptionBudget.OMENative)
+				require.NotNil(t, cfg.PodDisruptionBudget.OMENative.MinAvailable)
+				assert.Equal(t, intstr.FromString("50%"), *cfg.PodDisruptionBudget.OMENative.MinAvailable)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := inferenceServicesConfigFromConfigMap(&v1.ConfigMap{Data: tt.data})
+			require.NoError(t, err)
+			tt.validate(t, cfg)
+		})
+	}
+}
+
+func TestInferenceServicesConfigFromConfigMapRejectsInvalidPodDisruptionBudget(t *testing.T) {
+	tests := []struct {
+		name       string
+		data       string
+		wantErrors []string
+	}{
+		{
+			name:       "malformed json",
+			data:       `{not-json`,
+			wantErrors: []string{PodDisruptionBudgetConfigName},
+		},
+		{
+			name: "raw deployment sets both fields",
+			data: `{
+				"rawDeployment": {"minAvailable": 1, "maxUnavailable": 1}
+			}`,
+			wantErrors: []string{
+				"podDisruptionBudget.rawDeployment.minAvailable",
+				"podDisruptionBudget.rawDeployment.maxUnavailable",
+			},
+		},
+		{
+			name: "OMENative percentage exceeds one hundred",
+			data: `{
+				"omeNative": {"maxUnavailable": "101%"}
+			}`,
+			wantErrors: []string{"podDisruptionBudget.omeNative.maxUnavailable"},
+		},
+		{
+			name: "unknown top-level field",
+			data: `{
+				"rawDeployment": {"maxUnavailable": 1},
+				"unexpected": {}
+			}`,
+			wantErrors: []string{`unknown field "unexpected"`},
+		},
+		{
+			name: "unknown mode field",
+			data: `{
+				"rawDeployment": {"maxUnavailable": 1, "unexpected": 2}
+			}`,
+			wantErrors: []string{`unknown field "unexpected"`},
+		},
+		{
+			name: "empty raw deployment policy",
+			data: `{
+				"rawDeployment": {}
+			}`,
+			wantErrors: []string{
+				"podDisruptionBudget.rawDeployment.minAvailable",
+				"podDisruptionBudget.rawDeployment.maxUnavailable",
+			},
+		},
+		{
+			name: "explicit null-only OMENative policy",
+			data: `{
+				"omeNative": {"maxUnavailable": null}
+			}`,
+			wantErrors: []string{
+				"podDisruptionBudget.omeNative.minAvailable",
+				"podDisruptionBudget.omeNative.maxUnavailable",
+			},
+		},
+		{
+			name: "misspelled budget field",
+			data: `{
+				"rawDeployment": {"maxUnavailble": 1}
+			}`,
+			wantErrors: []string{`unknown field "maxUnavailble"`},
+		},
+		{
+			name: "case-variant top-level field",
+			data: `{
+				"RawDeployment": {"maxUnavailable": 1}
+			}`,
+			wantErrors: []string{`unknown field "RawDeployment"`},
+		},
+		{
+			name: "case-variant policy field",
+			data: `{
+				"rawDeployment": {"MaxUnavailable": 1}
+			}`,
+			wantErrors: []string{`unknown field "MaxUnavailable"`},
+		},
+		{
+			name: "duplicate top-level field",
+			data: `{
+				"rawDeployment": {"maxUnavailable": 1},
+				"rawDeployment": {"maxUnavailable": 2}
+			}`,
+			wantErrors: []string{`duplicate field "rawDeployment"`},
+		},
+		{
+			name: "duplicate policy field",
+			data: `{
+				"rawDeployment": {
+					"maxUnavailable": 1,
+					"maxUnavailable": 2
+				}
+			}`,
+			wantErrors: []string{`duplicate field "maxUnavailable"`},
+		},
+		{
+			name: "trailing JSON value",
+			data: `{
+				"rawDeployment": {"maxUnavailable": 1}
+			} {}`,
+			wantErrors: []string{PodDisruptionBudgetConfigName},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := inferenceServicesConfigFromConfigMap(&v1.ConfigMap{Data: map[string]string{
+				PodDisruptionBudgetConfigName: tt.data,
+			}})
+			require.Error(t, err)
+			for _, want := range tt.wantErrors {
+				assert.ErrorContains(t, err, want)
 			}
 		})
 	}

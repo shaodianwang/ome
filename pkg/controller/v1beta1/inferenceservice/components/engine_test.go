@@ -48,6 +48,7 @@ func TestEngineReconcileDeployment_ProjectsMergedTopologyKey(t *testing.T) {
 		v1.AddToScheme,
 		appsv1.AddToScheme,
 		autoscalingv2.AddToScheme,
+		policyv1.AddToScheme,
 		kedav1.AddToScheme,
 	} {
 		g.Expect(add(scheme)).To(gomega.Succeed())
@@ -74,8 +75,13 @@ func TestEngineReconcileDeployment_ProjectsMergedTopologyKey(t *testing.T) {
 	}})).To(gomega.Succeed())
 	leaderPodSpec := &v1.PodSpec{Containers: []v1.Container{{Name: "leader", Image: "test:v1"}}}
 	workerPodSpec := &v1.PodSpec{Containers: []v1.Container{{Name: "worker", Image: "test:v1"}}}
+	componentMeta := metav1.ObjectMeta{
+		Name:      "topology-engine",
+		Namespace: "default",
+	}
+	request := mustComponentPDBRequest(t, &engine.BaseComponentFields, isvc, constants.OMENative, v1beta1.EngineComponent, componentMeta, &engineSpec.ComponentExtensionSpec)
 
-	_, err := engine.reconcileDeployment(context.Background(), isvc, metav1.ObjectMeta{}, leaderPodSpec, 1, workerPodSpec)
+	_, err := engine.reconcileDeployment(context.Background(), isvc, componentMeta, leaderPodSpec, 1, workerPodSpec, request)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	ir := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "topology-engine"}, ir)).To(gomega.Succeed())

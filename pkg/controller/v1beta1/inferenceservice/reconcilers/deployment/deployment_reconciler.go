@@ -54,7 +54,7 @@ func createRawDeployment(componentMeta metav1.ObjectMeta,
 	if podMetadata.Labels == nil {
 		podMetadata.Labels = map[string]string{}
 	}
-	podMetadata.Labels["app"] = constants.TruncateNameWithMaxLength(componentMeta.Name, 63)
+	podMetadata.Labels[constants.RawDeploymentAppLabel] = constants.GetRawServiceLabel(componentMeta.Name)
 	utils.SetPodLabelsFromAnnotations(&podMetadata)
 	setDefaultPodSpec(podSpec)
 
@@ -63,7 +63,7 @@ func createRawDeployment(componentMeta metav1.ObjectMeta,
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					"app": constants.TruncateNameWithMaxLength(componentMeta.Name, 63),
+					constants.RawDeploymentAppLabel: constants.GetRawServiceLabel(componentMeta.Name),
 				},
 			},
 			Template: corev1.PodTemplateSpec{

@@ -74,13 +74,16 @@ func TestRawComponentDeployment_UsesTypedKEDAForEveryComponent(t *testing.T) {
 			switch component {
 			case v1beta1.EngineComponent:
 				engine := NewEngine(deps, ComponentInputs{DeploymentMode: constants.RawDeployment}, isvc.Spec.Engine).(*Engine)
-				_, err = engine.reconcileDeployment(context.Background(), isvc, componentMeta, podSpec, 0, nil)
+				request := mustComponentPDBRequest(t, &engine.BaseComponentFields, isvc, constants.RawDeployment, component, componentMeta, &isvc.Spec.Engine.ComponentExtensionSpec)
+				_, err = engine.reconcileDeployment(context.Background(), isvc, componentMeta, podSpec, 0, nil, request)
 			case v1beta1.DecoderComponent:
 				decoder := NewDecoder(deps, ComponentInputs{DeploymentMode: constants.RawDeployment}, isvc.Spec.Decoder).(*Decoder)
-				_, err = decoder.reconcileDeployment(context.Background(), isvc, componentMeta, podSpec, 0, nil)
+				request := mustComponentPDBRequest(t, &decoder.BaseComponentFields, isvc, constants.RawDeployment, component, componentMeta, &isvc.Spec.Decoder.ComponentExtensionSpec)
+				_, err = decoder.reconcileDeployment(context.Background(), isvc, componentMeta, podSpec, 0, nil, request)
 			case v1beta1.RouterComponent:
 				router := NewRouter(deps, ComponentInputs{DeploymentMode: constants.RawDeployment}, isvc.Spec.Router).(*Router)
-				_, err = router.reconcileDeployment(context.Background(), isvc, componentMeta, podSpec)
+				request := mustComponentPDBRequest(t, &router.BaseComponentFields, isvc, constants.RawDeployment, component, componentMeta, &isvc.Spec.Router.ComponentExtensionSpec)
+				_, err = router.reconcileDeployment(context.Background(), isvc, componentMeta, podSpec, request)
 			}
 			require.NoError(t, err)
 

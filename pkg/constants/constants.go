@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"knative.dev/pkg/network"
 )
 
@@ -639,9 +640,9 @@ func GetModelsLabelWithUid(uid types.UID) string {
 	return ModelsLabelPrefix + string(uid)
 }
 
-// GetRawServiceLabel generate native service label
+// GetRawServiceLabel returns the shared label value for Raw workload resources.
 func GetRawServiceLabel(service string) string {
-	return service
+	return TruncateNameWithMaxLength(service, k8svalidation.LabelValueMaxLength)
 }
 
 func (e InferenceServiceComponent) String() string {

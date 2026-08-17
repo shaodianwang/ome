@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
@@ -40,6 +41,7 @@ func NewDecoder(deps *ComponentDeps, in ComponentInputs, decoderSpec *v1beta1.De
 		decoderSpec:         decoderSpec,
 		deploymentReconciler: &common.DeploymentReconciler{
 			Client:        deps.Client,
+			APIReader:     deps.APIReader,
 			Clientset:     deps.Clientset,
 			Scheme:        deps.Scheme,
 			StatusManager: base.StatusManager,
@@ -72,6 +74,20 @@ func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile object metadata")
 	}
+	pdbRequest, err := resolveComponentPDBRequest(
+		&d.BaseComponentFields,
+		isvc,
+		d.DeploymentMode,
+		v1beta1.DecoderComponent,
+		objectMeta,
+		&d.decoderSpec.ComponentExtensionSpec,
+	)
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to resolve decoder PodDisruptionBudget")
+	}
+	if err := preflightComponentPDB(ctx, &d.BaseComponentFields, pdbRequest); err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to preflight decoder PodDisruptionBudget")
+	}
 
 	// Reconcile pod spec
 	podSpec, err := d.reconcilePodSpec(isvc, &objectMeta)
@@ -95,7 +111,7 @@ func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService)
 	// in-flight Update / Create. Discarding it strands the rollout
 	// until an unrelated watch event happens to fire another reconcile
 	// (the post-decoder Sequential stall).
-	deploymentResult, err := d.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec)
+	deploymentResult, err := d.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec, pdbRequest)
 	if err != nil {
 		return deploymentResult, err
 	}
@@ -141,14 +157,14 @@ func (d *Decoder) getWorkerSize() int {
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
-func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
+func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec, pdbRequest pdb.Request) (ctrl.Result, error) {
 	switch d.DeploymentMode {
 	case constants.RawDeployment:
 		resolvedAS, _, err := autoscaler.ResolveRawComponentAutoscaler(d.Runtime, isvc, v1beta1.DecoderComponent, objectMeta.Annotations)
 		if err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw decoder")
 		}
-		return d.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent, resolvedAS)
+		return d.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent, resolvedAS, pdbRequest)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
@@ -183,6 +199,15 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 				return ctrl.Result{Requeue: true}, nil
 			}
 			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for decoder")
+		}
+		if err := ReconcileOMENativePDB(
+			ctx,
+			&d.BaseComponentFields,
+			v1beta1.DecoderComponent,
+			ir,
+			pdbRequest,
+		); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile decoder OMENative PodDisruptionBudget")
 		}
 		// Autoscaler dispatch is always-on per InferenceReplica.
 		// See engine dispatch for the full owner-ref + scaleTargetRef

@@ -1,9 +1,11 @@
 package controllerconfig
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"text/template"
@@ -11,6 +13,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
@@ -19,17 +22,19 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	omevalidation "github.com/ome-projects/ome/pkg/validation"
 )
 
 const (
-	IngressConfigKeyName     = "ingress"
-	DeployConfigName         = "deploy"
-	OmeAgentConfigName       = "omeAgent"
-	ModelCacheConfigName     = "modelCache"
-	CanaryAnalysisConfigName = "canaryAnalysis"
-	CoordinationConfigName   = "coordination"
-	PodMonitorConfigName     = "podMonitor"
-	LifecycleConfigName      = "lifecycle"
+	IngressConfigKeyName          = "ingress"
+	DeployConfigName              = "deploy"
+	OmeAgentConfigName            = "omeAgent"
+	ModelCacheConfigName          = "modelCache"
+	CanaryAnalysisConfigName      = "canaryAnalysis"
+	CoordinationConfigName        = "coordination"
+	PodMonitorConfigName          = "podMonitor"
+	LifecycleConfigName           = "lifecycle"
+	PodDisruptionBudgetConfigName = "podDisruptionBudget"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -63,6 +68,22 @@ type InferenceServicesConfig struct {
 	// PodMonitor (metadata labels + endpoint relabelings). Loaded from the
 	// "podMonitor" key of the inferenceservice-config ConfigMap.
 	PodMonitor PodMonitorConfig `json:"podMonitor,omitempty"`
+	// PodDisruptionBudget carries per-deployment-mode disruption budget policy.
+	PodDisruptionBudget PodDisruptionBudgetConfig `json:"podDisruptionBudget,omitempty"`
+}
+
+// PodDisruptionBudgetPolicy configures one deployment mode's availability
+// budget. A configured policy requires exactly one field to be set.
+type PodDisruptionBudgetPolicy struct {
+	MinAvailable   *intstr.IntOrString `json:"minAvailable,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// PodDisruptionBudgetConfig contains optional disruption budget policies for
+// deployment modes that generate PodDisruptionBudgets.
+type PodDisruptionBudgetConfig struct {
+	RawDeployment *PodDisruptionBudgetPolicy `json:"rawDeployment,omitempty"`
+	OMENative     *PodDisruptionBudgetPolicy `json:"omeNative,omitempty"`
 }
 
 // PodMonitorConfig configures the PodMonitor objects OME generates for each
@@ -771,9 +792,7 @@ func NewInferenceServicesConfigCached(cache *ConfigCache, clientset kubernetes.I
 }
 
 // inferenceServicesConfigFromConfigMap builds the InferenceServicesConfig from
-// the ConfigMap. ModelCache is still populated separately by the reconciler;
-// the podMonitor block is parsed here so components can read it via
-// InferenceServiceConfig.PodMonitor.
+// the ConfigMap. ModelCache is populated separately by the reconciler.
 func inferenceServicesConfigFromConfigMap(cm *v1.ConfigMap) (*InferenceServicesConfig, error) {
 	cfg := &InferenceServicesConfig{}
 	if cm == nil {
@@ -784,7 +803,136 @@ func inferenceServicesConfigFromConfigMap(cm *v1.ConfigMap) (*InferenceServicesC
 			return nil, fmt.Errorf("unable to parse %q config json: %w", PodMonitorConfigName, err)
 		}
 	}
+	if data, ok := cm.Data[PodDisruptionBudgetConfigName]; ok && strings.TrimSpace(data) != "" {
+		if err := validatePodDisruptionBudgetJSONKeys([]byte(data)); err != nil {
+			return nil, fmt.Errorf("unable to parse %q config json: %w", PodDisruptionBudgetConfigName, err)
+		}
+		decoder := json.NewDecoder(strings.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cfg.PodDisruptionBudget); err != nil {
+			return nil, fmt.Errorf("unable to parse %q config json: %w", PodDisruptionBudgetConfigName, err)
+		}
+		var trailing json.RawMessage
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return nil, fmt.Errorf("unable to parse %q config json: multiple JSON values", PodDisruptionBudgetConfigName)
+			}
+			return nil, fmt.Errorf("unable to parse %q config json: %w", PodDisruptionBudgetConfigName, err)
+		}
+		policies := []struct {
+			name   string
+			policy *PodDisruptionBudgetPolicy
+		}{
+			{name: "rawDeployment", policy: cfg.PodDisruptionBudget.RawDeployment},
+			{name: "omeNative", policy: cfg.PodDisruptionBudget.OMENative},
+		}
+		for _, mode := range policies {
+			if mode.policy == nil {
+				continue
+			}
+			path := PodDisruptionBudgetConfigName + "." + mode.name
+			if (mode.policy.MinAvailable == nil) == (mode.policy.MaxUnavailable == nil) {
+				return nil, fmt.Errorf("exactly one of %s.minAvailable or %s.maxUnavailable must be set", path, path)
+			}
+			if err := omevalidation.ValidatePodDisruptionBudget(
+				path,
+				mode.policy.MinAvailable,
+				mode.policy.MaxUnavailable,
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return cfg, nil
+}
+
+func validatePodDisruptionBudgetJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	start, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if start == nil {
+		return nil
+	}
+	delim, ok := start.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("expected JSON object")
+	}
+
+	seen := make(map[string]struct{}, 2)
+	for decoder.More() {
+		fieldToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		field, ok := fieldToken.(string)
+		if !ok {
+			return fmt.Errorf("expected JSON object field")
+		}
+		if _, duplicate := seen[field]; duplicate {
+			return fmt.Errorf("json: duplicate field %q", field)
+		}
+		seen[field] = struct{}{}
+
+		var policy json.RawMessage
+		if err := decoder.Decode(&policy); err != nil {
+			return err
+		}
+		switch field {
+		case "rawDeployment", "omeNative":
+			if err := validatePodDisruptionBudgetPolicyJSONKeys(policy); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("json: unknown field %q", field)
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func validatePodDisruptionBudgetPolicyJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	start, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if start == nil {
+		return nil
+	}
+	delim, ok := start.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("expected JSON object or null")
+	}
+
+	seen := make(map[string]struct{}, 2)
+	for decoder.More() {
+		fieldToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		field, ok := fieldToken.(string)
+		if !ok {
+			return fmt.Errorf("expected JSON object field")
+		}
+		if _, duplicate := seen[field]; duplicate {
+			return fmt.Errorf("json: duplicate field %q", field)
+		}
+		seen[field] = struct{}{}
+
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		switch field {
+		case "minAvailable", "maxUnavailable":
+		default:
+			return fmt.Errorf("json: unknown field %q", field)
+		}
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 // NewOmeAgentConfig loads the ome-agent block from the inferenceservice

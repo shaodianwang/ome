@@ -10,39 +10,19 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-func extMaxUnavail(s string) *v1beta1.ComponentExtensionSpec {
-	v := intstr.FromString(s)
-	return &v1beta1.ComponentExtensionSpec{MaxUnavailable: &v}
-}
-
-func extMinAvail(i int) *v1beta1.ComponentExtensionSpec {
-	v := intstr.FromInt(i)
-	return &v1beta1.ComponentExtensionSpec{MinAvailable: &v}
-}
-
-func extMinAvailPercent(s string) *v1beta1.ComponentExtensionSpec {
-	v := intstr.FromString(s)
-	return &v1beta1.ComponentExtensionSpec{MinAvailable: &v}
-}
-
-func extRolloutMaxUnavail(s string) *v1beta1.ComponentExtensionSpec {
-	v := intstr.FromString(s)
-	return &v1beta1.ComponentExtensionSpec{
-		Lifecycle: &v1beta1.LifecycleSpec{
-			UpdateStrategy: &v1beta1.UpdateStrategy{
-				RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: &v},
-			},
+func lifecycleWithMaxUnavailable(value intstr.IntOrString) *v1beta1.LifecycleSpec {
+	return &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: &value},
 		},
 	}
 }
 
 func replicas(i int32) *int32 { return &i }
 
-// TestTopLevelComponentReadyFromLifecycle locks the availability-based readiness
-// contract: Ready when serving Instances are at or above the Component's
-// disruption floor (MinAvailable/MaxUnavailable, else the rolling-update budget),
-// not the old strict all-Instances-ready equality — so a Component serving within
-// budget (e.g. 9/10) reports Ready instead of flapping to NotReady.
+// TestTopLevelComponentReadyFromLifecycle locks the Instance-level readiness
+// contract: only lifecycle rollingUpdate.maxUnavailable relaxes the strict
+// all-Instances-serving floor.
 //
 // The floor scales against the desired count, so rollout surge cannot raise it.
 func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
@@ -50,7 +30,7 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 		name       string
 		component  v1beta1.ComponentType
 		cs         *v1beta1.LifecycleStatus
-		ext        *v1beta1.ComponentExtensionSpec
+		lifecycle  *v1beta1.LifecycleSpec
 		desired    *int32
 		wantType   apis.ConditionType
 		wantStatus corev1.ConditionStatus
@@ -74,46 +54,46 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			wantReason: "InsufficientAvailable",
 		},
 		{
-			name:       "engine 9/10 within 25% maxUnavailable → ready",
+			name:       "engine 9/10 within lifecycle 25% maxUnavailable → ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 10, ReadyReplicas: 9, ServingReplicas: 9},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
 			wantReason: "MinimumAvailable",
 		},
 		{
-			name:       "engine 6/10 below 25% maxUnavailable → not ready",
+			name:       "engine 6/10 below lifecycle 25% maxUnavailable → not ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 10, ReadyReplicas: 6, ServingReplicas: 6},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionFalse,
 			wantReason: "InsufficientAvailable",
 		},
 		{
-			name:       "engine minAvailable met → ready",
+			name:       "engine 8/10 within lifecycle integer maxUnavailable → ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 10, ReadyReplicas: 8, ServingReplicas: 8},
-			ext:        extMinAvail(8),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromInt(2)),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
 			wantReason: "MinimumAvailable",
 		},
 		{
-			name:       "engine minAvailable not met → not ready",
+			name:       "engine 7/10 below lifecycle integer maxUnavailable → not ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 10, ReadyReplicas: 7, ServingReplicas: 7},
-			ext:        extMinAvail(8),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromInt(2)),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionFalse,
 			wantReason: "InsufficientAvailable",
 		},
 		{
-			name:       "engine rollout-budget fallback (25%) → ready at 3/4",
+			name:       "engine lifecycle 25% maxUnavailable → ready at 3/4",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 4, ReadyReplicas: 3, ServingReplicas: 3},
-			ext:        extRolloutMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
 			wantReason: "MinimumAvailable",
@@ -164,7 +144,7 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "surged 16->32, all desired serving → ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 32, ReadyReplicas: 16, ServingReplicas: 16},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(16),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
@@ -175,7 +155,7 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "surged 16->32, serving below desired floor → not ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 32, ReadyReplicas: 8, ServingReplicas: 8},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(16),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionFalse,
@@ -186,7 +166,7 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "surged 16->32, 24 serving → ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 32, ReadyReplicas: 24, ServingReplicas: 24},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(16),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
@@ -197,18 +177,17 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "post-drain 16/16 ready → fully ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 16, ReadyReplicas: 16, ServingReplicas: 16},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(16),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
 			wantReason: "Ready",
 		},
 		{
-			// Rolling-update budget as the only source (no PDB).
-			name:       "surged with rollout-budget fallback → ready",
+			name:       "surged with lifecycle maxUnavailable → ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 8, ReadyReplicas: 4, ServingReplicas: 4},
-			ext:        extRolloutMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(4),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
@@ -219,18 +198,18 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "scale-up 8 live of 16 desired → clamped to live floor, ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 8, ReadyReplicas: 6, ServingReplicas: 6},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(16),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
 			wantReason: "MinimumAvailable",
 		},
 		{
-			// nil desired keeps the old live-count floor.
-			name:       "surged with nil desired → legacy live-count floor",
+			// nil desired keeps the live-count floor.
+			name:       "surged with nil desired → live-count floor",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 32, ReadyReplicas: 16, ServingReplicas: 16},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    nil,
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionFalse,
@@ -240,18 +219,17 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "zero desired → falls back to live count",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 10, ReadyReplicas: 9, ServingReplicas: 9},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(0),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
 			wantReason: "MinimumAvailable",
 		},
 		{
-			// Percentage MinAvailable also scales against desired.
-			name:       "surged with percentage minAvailable → ready",
+			name:       "surged with lifecycle percentage maxUnavailable → ready",
 			component:  v1beta1.EngineComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 32, ReadyReplicas: 16, ServingReplicas: 16},
-			ext:        extMinAvailPercent("75%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(16),
 			wantType:   v1beta1.EngineReady,
 			wantStatus: corev1.ConditionTrue,
@@ -262,7 +240,7 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 			name:       "router surged 3->4, all desired serving → ready",
 			component:  v1beta1.RouterComponent,
 			cs:         &v1beta1.LifecycleStatus{Replicas: 4, ReadyReplicas: 3, ServingReplicas: 3},
-			ext:        extMaxUnavail("25%"),
+			lifecycle:  lifecycleWithMaxUnavailable(intstr.FromString("25%")),
 			desired:    replicas(3),
 			wantType:   v1beta1.RouterReady,
 			wantStatus: corev1.ConditionTrue,
@@ -271,7 +249,7 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := TopLevelComponentReadyFromLifecycle(tt.component, tt.cs, tt.ext, tt.desired)
+			got := TopLevelComponentReadyFromLifecycle(tt.component, tt.cs, tt.lifecycle, tt.desired)
 			if tt.wantNil {
 				if got != nil {
 					t.Fatalf("want nil condition, got %+v", got)
@@ -294,11 +272,8 @@ func TestTopLevelComponentReadyFromLifecycle(t *testing.T) {
 	}
 }
 
-// TestSurgeDoesNotInflateAvailabilityFloor pins the reported regression: a
-// 16-Instance engine (MaxSurge=100%, MaxUnavailable=25%) surged to 32 while all
-// 16 desired Instances served, and reported
-// `EngineReady=False InsufficientAvailable "16/32 Instances serving, need 24"`
-// for the whole rollout, gating IngressReady behind it. The floor must be 12.
+// TestSurgeDoesNotInflateAvailabilityFloor verifies that rollout surge does not
+// raise the lifecycle availability floor above the desired Instance count.
 func TestSurgeDoesNotInflateAvailabilityFloor(t *testing.T) {
 	cs := &v1beta1.LifecycleStatus{
 		Replicas:        32, // 16 desired + 100% surge
@@ -307,9 +282,12 @@ func TestSurgeDoesNotInflateAvailabilityFloor(t *testing.T) {
 		CurrentRevision: "engine-ed3867a3",
 		UpdateRevision:  "engine-66ed9807",
 	}
-	ext := extMaxUnavail("25%")
+	lifecycle := lifecycleWithMaxUnavailable(intstr.FromString("25%"))
+	if got := InstanceAvailabilityFloor(cs.Replicas, replicas(16), lifecycle); got != 12 {
+		t.Fatalf("InstanceAvailabilityFloor() = %d, want 12", got)
+	}
 
-	got := TopLevelComponentReadyFromLifecycle(v1beta1.EngineComponent, cs, ext, replicas(16))
+	got := TopLevelComponentReadyFromLifecycle(v1beta1.EngineComponent, cs, lifecycle, replicas(16))
 	if got == nil {
 		t.Fatal("want condition, got nil")
 	}
@@ -321,6 +299,29 @@ func TestSurgeDoesNotInflateAvailabilityFloor(t *testing.T) {
 	}
 	if want := "16/32 Instances serving (min 12)"; got.Message != want {
 		t.Errorf("Message: got %q want %q", got.Message, want)
+	}
+}
+
+func TestInstanceAvailabilityFloor(t *testing.T) {
+	lifecycle := lifecycleWithMaxUnavailable(intstr.FromString("25%"))
+	tests := []struct {
+		name    string
+		actual  int32
+		desired *int32
+		policy  *v1beta1.LifecycleSpec
+		want    int32
+	}{
+		{name: "surge scales against desired", actual: 32, desired: replicas(16), policy: lifecycle, want: 12},
+		{name: "nil desired scales against live", actual: 32, policy: lifecycle, want: 24},
+		{name: "absent lifecycle is strict", actual: 32, desired: replicas(16), want: 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InstanceAvailabilityFloor(tt.actual, tt.desired, tt.policy); got != tt.want {
+				t.Fatalf("InstanceAvailabilityFloor() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

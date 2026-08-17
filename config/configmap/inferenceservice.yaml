@@ -24,6 +24,13 @@ data:
       "defaultDeploymentMode": "RawDeployment"
     }
 
+  podDisruptionBudget: |-
+    {
+      "rawDeployment": {
+        "maxUnavailable": 1
+      }
+    }
+
   # The scale-up and scale-down Pod batch sizes bound create and delete work in
   # Pod-equivalent units. Each Instance or gang is selected atomically, and a
   # first eligible Instance larger than its budget proceeds alone. Omitting a

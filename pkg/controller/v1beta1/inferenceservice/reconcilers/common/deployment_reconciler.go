@@ -15,6 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/raw"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 )
@@ -22,6 +23,7 @@ import (
 // DeploymentReconciler handles common deployment reconciliation logic
 type DeploymentReconciler struct {
 	Client        client.Client
+	APIReader     client.Reader
 	Clientset     kubernetes.Interface
 	Scheme        *runtime.Scheme
 	StatusManager *status.StatusReconciler
@@ -37,17 +39,17 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 	componentSpec *v1beta1.ComponentExtensionSpec,
 	componentType v1beta1.ComponentType,
 	resolvedAutoscaler *v1beta1.ComponentAutoscaler,
+	pdbRequest pdb.Request,
 ) (ctrl.Result, error) {
-	// Synthetic InferenceServiceSpec carrying the component-level extension
-	// spec to the downstream raw resource builders. Engine is the carrier for
-	// the Deployment, Service, PDB, and PodMonitor configuration.
+	// The synthetic Engine spec carries component settings to the Raw
+	// Deployment and Service builders.
 	inferenceServiceSpec := &v1beta1.InferenceServiceSpec{
 		Engine: &v1beta1.EngineSpec{
 			ComponentExtensionSpec: *componentSpec,
 		},
 	}
 
-	reconciler, err := raw.NewRawKubeReconciler(r.Client, r.Clientset, r.Scheme, objectMeta, inferenceServiceSpec, podSpec)
+	reconciler, err := raw.NewRawKubeReconciler(r.Client, r.APIReader, r.Clientset, r.Scheme, pdbRequest, objectMeta, inferenceServiceSpec, podSpec)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrapf(err, "failed to create RawKubeReconciler for %s", componentType)
 	}
@@ -56,7 +58,7 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 		return ctrl.Result{}, err
 	}
 
-	deployment, err := reconciler.Reconcile()
+	deployment, err := reconciler.Reconcile(ctx)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile %s", componentType)
 	}
@@ -82,9 +84,6 @@ func (r *DeploymentReconciler) setRawReferences(isvc *v1beta1.InferenceService, 
 	}
 	if err := controllerutil.SetControllerReference(isvc, reconciler.Service.Service, r.Scheme); err != nil {
 		return errors.Wrapf(err, "failed to set service owner reference")
-	}
-	if err := controllerutil.SetControllerReference(isvc, reconciler.PodDisruptionBudget.PDB, r.Scheme); err != nil {
-		return errors.Wrapf(err, "failed to set pdb owner reference")
 	}
 	if err := controllerutil.SetControllerReference(isvc, reconciler.PodMonitor.PodMonitor, r.Scheme); err != nil {
 		return errors.Wrapf(err, "failed to set podmonitor owner reference")

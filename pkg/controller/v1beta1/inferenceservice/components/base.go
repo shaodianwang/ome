@@ -783,11 +783,7 @@ func ReconcileOMENativeSubresources(
 	// Component) pair. Used as-is for PodMonitor; augmented with a
 	// `runner=leader` + `pod-ordinal=0` filter when the ISVC declares a
 	// multi-pod shape (see function-level docstring for rationale).
-	baseSelector := map[string]string{
-		constants.InferenceServicePodLabelKey: isvc.Name,
-		constants.OMEComponentLabel:           string(componentType),
-		query.LabelManagedBy:                  query.ManagedByOMENative,
-	}
+	baseSelector := omeNativeComponentSelector(isvc, componentType)
 	stableSelector := baseSelector
 	if isvcutils.IsMultiPodComponent(isvc, componentType) {
 		stableSelector = make(map[string]string, len(baseSelector)+2)

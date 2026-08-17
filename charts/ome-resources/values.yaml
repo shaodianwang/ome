@@ -176,6 +176,12 @@ ome:
       # continuous churn at large pod counts; a sustained ratio change still
       # exceeds the band and converges.
       trafficWeightDeadbandPercent: 0
+    # podDisruptionBudget configures pod-level availability policies by mode.
+    # Omitting rawDeployment keeps the chart default; set rawDeployment: null
+    # to disable it.
+    podDisruptionBudget:
+      rawDeployment:
+        maxUnavailable: 1
     # lifecycle tunes the OMENative per-Instance lifecycle state machine.
     lifecycle:
       # Missing-Pod budget for one OMENative scale-up pass. Instance and

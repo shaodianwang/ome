@@ -26,6 +26,11 @@ grep -Fq '"scaleDownPodBatchSize":100' <<<"${controller_config}" ||
   fail "default OMENative scale-down Pod batch size was not rendered"
 grep -Fq '"scaleDownRequeueInterval":"5s"' <<<"${controller_config}" ||
   fail "default OMENative scale-down requeue interval was not rendered"
+grep -Fq '"rawDeployment":{"maxUnavailable":1}' <<<"${controller_config}" ||
+  fail "default RawDeployment disruption budget was not rendered"
+if grep -Fq '"omeNative"' <<<"${controller_config}"; then
+  fail "an OMENative disruption budget default was rendered"
+fi
 
 scale_up_batch_overridden="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \

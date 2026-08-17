@@ -8,7 +8,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -363,6 +365,133 @@ func TestAggregateIRStatus_EmitsEngineReadyConditionFalse(t *testing.T) {
 	g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionFalse),
 		"EngineReady must be False when serving is below the availability floor")
 	g.Expect(cond.Reason).To(gomega.Equal("InsufficientAvailable"))
+}
+
+func TestAggregateIRStatus_PDBPolicyDoesNotRelaxEngineReady(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*v1beta1.ComponentExtensionSpec)
+	}{
+		{
+			name: "minAvailable",
+			apply: func(ext *v1beta1.ComponentExtensionSpec) {
+				value := intstr.FromInt(1)
+				ext.MinAvailable = &value
+			},
+		},
+		{
+			name: "maxUnavailable",
+			apply: func(ext *v1beta1.ComponentExtensionSpec) {
+				value := intstr.FromString("100%")
+				ext.MaxUnavailable = &value
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			isvc := baselineISVC("llama", "prod")
+			isvc.Spec.Engine.Lifecycle = nil
+			tt.apply(&isvc.Spec.Engine.ComponentExtensionSpec)
+
+			desired := int32(10)
+			ir := liveIR("llama", "prod", desired)
+			ir.Spec.Replicas = &desired
+			ir.Spec.Lifecycle = nil
+			ir.Status.ReadyReplicas = 9
+			ir.Status.ServingReplicas = 9
+
+			c := fake.NewClientBuilder().
+				WithScheme(testScheme(t)).
+				WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+				WithObjects(isvc, ir).
+				Build()
+
+			g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+			got := &v1beta1.InferenceService{}
+			g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got)).To(gomega.Succeed())
+			cond := got.Status.GetCondition(v1beta1.EngineReady)
+			g.Expect(cond).NotTo(gomega.BeNil())
+			g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionFalse))
+			g.Expect(cond.Reason).To(gomega.Equal("InsufficientAvailable"))
+		})
+	}
+}
+
+func TestAggregateIRStatus_UsesCommittedIRLifecycleBudget(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	strictPDB := intstr.FromInt(10)
+	isvc.Spec.Engine.MinAvailable = &strictPDB
+
+	desired := int32(10)
+	maximum := intstr.FromInt(2)
+	ir := liveIR("llama", "prod", desired)
+	ir.Spec.Replicas = &desired
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: &maximum},
+		},
+	}
+	ir.Status.ReadyReplicas = 8
+	ir.Status.ServingReplicas = 8
+
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir).
+		Build()
+
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	got := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got)).To(gomega.Succeed())
+	cond := got.Status.GetCondition(v1beta1.EngineReady)
+	g.Expect(cond).NotTo(gomega.BeNil())
+	g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionTrue))
+	g.Expect(cond.Reason).To(gomega.Equal("MinimumAvailable"))
+}
+
+func TestAggregateIRStatus_UsesProjectedMergedLifecycleBudget(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Engine.Lifecycle = nil
+
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc).
+		Build()
+
+	desired := 10
+	maximum := intstr.FromString("25%")
+	// Component reconcilers pass the merged ISVC/runtime extension to the
+	// projector, so this lifecycle need not be present on the parent ISVC.
+	mergedExt := isvc.Spec.Engine.ComponentExtensionSpec
+	mergedExt.MinReplicas = &desired
+	mergedExt.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: &maximum},
+		},
+	}
+	params := minimalParams(t, isvc, c)
+	params.ComponentExt = &mergedExt
+	ir, err := EnsureInferenceReplica(context.Background(), params)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(ir.Spec.Lifecycle).NotTo(gomega.BeNil())
+
+	ir.Status = liveIR("llama", "prod", int32(desired)).Status
+	ir.Status.ReadyReplicas = 9
+	ir.Status.ServingReplicas = 9
+	g.Expect(c.Status().Update(context.Background(), ir)).To(gomega.Succeed())
+
+	g.Expect(AggregateIRStatus(context.Background(), c, c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	got := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got)).To(gomega.Succeed())
+	cond := got.Status.GetCondition(v1beta1.EngineReady)
+	g.Expect(cond).NotTo(gomega.BeNil())
+	g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionTrue))
+	g.Expect(cond.Reason).To(gomega.Equal("MinimumAvailable"))
 }
 
 // TestAggregateIRStatus_MultiComponent_EmitsBothConditions pins the

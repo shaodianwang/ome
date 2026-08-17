@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
@@ -43,6 +44,7 @@ func NewEngine(deps *ComponentDeps, in ComponentInputs, engineSpec *v1beta1.Engi
 		engineSpec:          engineSpec,
 		deploymentReconciler: &common.DeploymentReconciler{
 			Client:        deps.Client,
+			APIReader:     deps.APIReader,
 			Clientset:     deps.Clientset,
 			Scheme:        deps.Scheme,
 			StatusManager: base.StatusManager,
@@ -75,6 +77,20 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile object metadata")
 	}
+	pdbRequest, err := resolveComponentPDBRequest(
+		&e.BaseComponentFields,
+		isvc,
+		e.DeploymentMode,
+		v1beta1.EngineComponent,
+		objectMeta,
+		&e.engineSpec.ComponentExtensionSpec,
+	)
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to resolve engine PodDisruptionBudget")
+	}
+	if err := preflightComponentPDB(ctx, &e.BaseComponentFields, pdbRequest); err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to preflight engine PodDisruptionBudget")
+	}
 
 	// Reconcile pod spec
 	podSpec, err := e.reconcilePodSpec(isvc, &objectMeta)
@@ -98,7 +114,7 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// in-flight Update / Create. Discarding it strands the rollout
 	// until an unrelated watch event happens to fire another reconcile
 	// (the post-decoder Sequential stall).
-	deploymentResult, err := e.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec)
+	deploymentResult, err := e.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec, pdbRequest)
 	if err != nil {
 		return deploymentResult, err
 	}
@@ -150,14 +166,14 @@ func (e *Engine) getWorkerSize() int {
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
-func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
+func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec, pdbRequest pdb.Request) (ctrl.Result, error) {
 	switch e.DeploymentMode {
 	case constants.RawDeployment:
 		resolvedAS, _, err := autoscaler.ResolveRawComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent, objectMeta.Annotations)
 		if err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw engine")
 		}
-		return e.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent, resolvedAS)
+		return e.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent, resolvedAS, pdbRequest)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
@@ -195,6 +211,15 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 				return ctrl.Result{Requeue: true}, nil
 			}
 			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
+		}
+		if err := ReconcileOMENativePDB(
+			ctx,
+			&e.BaseComponentFields,
+			v1beta1.EngineComponent,
+			ir,
+			pdbRequest,
+		); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile engine OMENative PodDisruptionBudget")
 		}
 		// Autoscaler dispatch is always-on per InferenceReplica.
 		// Owner-ref the HPA / SO to the IR so GC cascades
