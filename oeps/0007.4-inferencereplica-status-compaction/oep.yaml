@@ -1,0 +1,45 @@
+title: "Compact OMENative InferenceReplica status"
+oep-number: "0007.4"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-08-16
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# OEP-0007 defines the OMENative lifecycle state machine. OEP-0007.1 adds
+# cross-Component coordination, and OEP-0007.3 reduces the number of large
+# status writes during scale-down. This follow-up reduces the size of each
+# InferenceReplica status without changing those lifecycle contracts.
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"
+  - "/oeps/0007.1-omenative-coordinated-rollout"
+  - "/oeps/0007.3-bounded-scale-down"
+  - "/oeps/0013-autoscaling"
+  - "/oeps/0017-unified-rollout-v2"
+  - "/oeps/0018-multi-cluster-placement"
+  - "/oeps/0018.2-multi-cluster-performance"
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# Compaction is selected through inferenceservice-config. An absent setting
+# means Preserve: existing objects keep their committed representation and new
+# objects begin InlineV1. No binary feature-gate default is introduced.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_omenative_ir_status_bytes
+  - ome_omenative_ir_status_derived_mismatch_total
+  - ome_omenative_ir_observation_duration_seconds
+  - ome_omenative_ir_observation_errors_total
+  - ome_omenative_ir_status_representation_objects
