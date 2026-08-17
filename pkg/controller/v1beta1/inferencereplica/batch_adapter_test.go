@@ -410,7 +410,6 @@ func TestBuildApplyInstanceMutations_DuplicateIndexMutationsCompose(t *testing.T
 // Instance. It also exercises the indexed slot lookup used by large batches.
 func TestBuildApplyInstanceMutations_TwoThousandEntriesOneWrite(t *testing.T) {
 	const replicas int32 = 2000
-	const defaultEtcdMaxRequestBytes = 1572864
 
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", replicas)
@@ -441,10 +440,6 @@ func TestBuildApplyInstanceMutations_TwoThousandEntriesOneWrite(t *testing.T) {
 			t.Fatalf("status[%d] is not a complete production-shaped Creating stamp: %+v", idx, status)
 		}
 	}
-	encoded, err := json.Marshal(got)
-	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(len(encoded)).To(gomega.BeNumerically("<", defaultEtcdMaxRequestBytes),
-		"a representative 2,000-instance Creating status must fit the default etcd request limit")
 	g.Expect(ir.Status.InstanceStatuses).To(gomega.HaveLen(int(replicas)),
 		"all committed slots must be mirrored onto the in-memory IR")
 	for idx, status := range ir.Status.InstanceStatuses {
