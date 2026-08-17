@@ -13,6 +13,7 @@ Environment variables read at runtime:
     BUILDKITE_COMMIT          – full commit SHA
     BUILDKITE_PULL_REQUEST    – pull request number, or "false"
     BUILDKITE_PULL_REQUEST_BASE_BRANCH – pull request base branch
+    OME_PIPELINE_MODE         – pipeline to generate ("daily" or "standard")
     AWS_ACCOUNT_ID            – dev AWS account for ECR (default: 588845226011)
     PROD_AWS_ACCOUNT_ID       – prod AWS account for ECR (default: 168653207203)
     AWS_REGION                – AWS region for ECR (default: us-east-2)
@@ -94,6 +95,7 @@ GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
+PIPELINE_MODE = os.environ.get("OME_PIPELINE_MODE", "").strip().lower()
 
 # (label-suffix, ECR repo name under msl_infra/, Dockerfile)
 # Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
@@ -781,7 +783,23 @@ def _priority_prefix() -> str:
 
 
 def main() -> None:
-    sys.stdout.write(_priority_prefix() + generate_pipeline())
+    if PIPELINE_MODE not in ("", "daily", "standard"):
+        sys.stderr.write(
+            "invalid OME_PIPELINE_MODE: "
+            f"{PIPELINE_MODE!r}; expected 'daily' or 'standard'\n"
+        )
+        raise SystemExit(2)
+
+    if PIPELINE_MODE == "daily":
+        # The daily generator imports this module for shared queue and plugin
+        # helpers, so load it lazily after this module has defined them.
+        import generate_daily_pipeline as daily
+
+        pipeline = daily.generate_pipeline()
+    else:
+        pipeline = generate_pipeline()
+
+    sys.stdout.write(_priority_prefix() + pipeline)
 
 
 if __name__ == "__main__":
