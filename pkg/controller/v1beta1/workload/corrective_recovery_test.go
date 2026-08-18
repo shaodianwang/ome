@@ -33,8 +33,8 @@ import (
 // stuck pods → escalation → disposition/abandon → Backoff → retry →
 // Held — through workload.Reconcile against a fake client with a
 // simulated kubelet and a fake clock, then apply a corrective edit and
-// assert the loop converges with zero manual intervention. Six
-// convergence assertions across the acceptance matrix:
+// assert the loop converges with zero manual intervention. The acceptance
+// matrix covers:
 //
 //   - direction: roll-forward (corrective NEW revision) and roll-back
 //     (target returns to the source's exact RunningRevision — zero
@@ -45,6 +45,9 @@ import (
 //   - timing: the settled at-Held state and the dirty mid-wreckage
 //     state (corrective edit lands while the source is
 //     Failed-with-Operation and the crashed attempt's pods are live).
+//
+// A partial initial Create retarget exercises the same recovery loop before
+// any serving source exists.
 //
 // The serving source must stay in rotation throughout every recovery:
 // cleanup only removes superseded-revision debris, never the healthy
@@ -499,6 +502,56 @@ func (h *recoveryHarness) settle(n int) {
 	h.t.Helper()
 	for i := 0; i < n; i++ {
 		h.step()
+	}
+}
+
+func TestCorrectiveRecovery_Gang_InitialCreateRetarget(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.setTarget(h.revBad, badImage)
+	h.step()
+
+	initial := h.livePods()
+	if len(initial) != 2 {
+		t.Fatalf("initial Create: got %d pods want leader and worker", len(initial))
+	}
+	removedWorker := false
+	for _, pod := range initial {
+		if pod.Labels[query.LabelRunner] != "worker" {
+			continue
+		}
+		if err := h.c.Delete(h.ctx, pod); err != nil {
+			t.Fatalf("delete worker %s: %v", pod.Name, err)
+		}
+		removedWorker = true
+		break
+	}
+	if !removedWorker {
+		t.Fatal("initial Create did not produce a worker pod")
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	converged := h.runWithInvariant(80,
+		func() bool { return h.converged(h.revFixed.Name) },
+		func() {
+			revisionsByInstance := map[string]map[string]struct{}{}
+			for _, pod := range h.livePods() {
+				index := pod.Labels[query.LabelInstanceIdx]
+				if revisionsByInstance[index] == nil {
+					revisionsByInstance[index] = map[string]struct{}{}
+				}
+				if hash := pod.Labels[query.LabelRevisionHash]; hash != "" {
+					revisionsByInstance[index][hash] = struct{}{}
+				}
+			}
+			for index, revisions := range revisionsByInstance {
+				if len(revisions) > 1 {
+					t.Fatalf("instance %s contains pods from multiple revisions: %v; statuses=%+v", index, revisions, h.irStatuses())
+				}
+			}
+		})
+	if !converged {
+		h.dumpState("initial Create retarget wedged")
+		t.Fatalf("gang initial Create did not converge after a corrective edit")
 	}
 }
 

@@ -265,6 +265,68 @@ func TestDispose_WorkloadCaused_CreateFallsBackToUpdateRevision(t *testing.T) {
 	}
 }
 
+func TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts := []workload.InstanceStatus{{
+		Index: 0,
+		Phase: workload.InstancePhaseCreating,
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationCreate,
+			TargetRevision: "own-engine-oldbad",
+		},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-newgood", nil, nil)
+	pod := waitingPod("engine-0-leader-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
+	pod.Labels = map[string]string{"ome.io/revision-hash": "oldbad"}
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
+		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != workload.DispositionHeldRevision {
+		t.Fatalf("outcome: got %v want DispositionHeldRevision", outcome)
+	}
+	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "own-engine-oldbad" {
+		t.Fatalf("block calls: got %+v want one call for own-engine-oldbad", rec.blockCalls)
+	}
+	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+		t.Fatalf("commit: got %+v want one Failed-no-operation commit", rec.commits)
+	}
+}
+
+func TestDispose_UnpinnedCreateDoesNotChargeCorrectiveRevision(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts := []workload.InstanceStatus{{
+		Index:     0,
+		Phase:     workload.InstancePhaseCreating,
+		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-newgood", nil, nil)
+	pod := waitingPod("engine-0-leader-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
+	pod.Labels = map[string]string{"ome.io/revision-hash": "oldbad"}
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
+		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != workload.DispositionTerminal {
+		t.Fatalf("outcome: got %v want DispositionTerminal", outcome)
+	}
+	if len(rec.blockCalls) != 0 {
+		t.Fatalf("corrective revision must not be charged; got %+v", rec.blockCalls)
+	}
+	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+		t.Fatalf("commit: got %+v want one Failed-no-operation commit", rec.commits)
+	}
+	if rec.commits[0].after.LastFailure == nil || rec.commits[0].after.LastFailure.PodName != pod.Name {
+		t.Fatalf("LastFailure: got %+v want diagnostics for %s", rec.commits[0].after.LastFailure, pod.Name)
+	}
+}
+
 // TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision pins the
 // superseded-leftover guard: after a corrective edit retargets an instance to a new
 // revision, the prior failed attempt's bad pod can linger in its drain

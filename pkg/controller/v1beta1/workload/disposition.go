@@ -107,8 +107,9 @@ const (
 //  1. WORKLOAD-CAUSED — a live pod shows a waiting reason in
 //     workloadCausedWaitingReasons AND a target revision is resolvable
 //     (Operation.TargetRevision, falling back to the owner's
-//     UpdateRevision for Create ops): record the RetryBlock for that
-//     revision, then clear the Operation and stamp Phase=Failed in ONE
+//     UpdateRevision for an unpinned Create whose pod does not prove a
+//     different revision): record the RetryBlock for that revision,
+//     then clear the Operation and stamp Phase=Failed in ONE
 //     MutateInstance call. Failed-with-no-Operation is a fresh start
 //     next pass; the RetryBlock gate denies the same revision and
 //     admits a corrected one. No resolvable revision → there is
@@ -148,12 +149,14 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 	// Branch 1: workload-caused with a resolvable target revision.
 	if pod := causePod; pod != nil {
 		targetRev := ""
+		unpinnedCreate := false
 		if inst.Operation != nil {
 			targetRev = inst.Operation.TargetRevision
+			unpinnedCreate = inst.Operation.Type == InstanceOperationCreate && targetRev == ""
 		}
 		if targetRev == "" {
-			// Create ops carry no TargetRevision — the attempt was
-			// toward the owner's current rollout target.
+			// An empty target is a supported persisted state. The pod label
+			// below decides whether the live rollout target can own its failure.
 			targetRev = input.ObservedState.UpdateRevision
 		}
 		// Superseded-leftover guard: a corrective edit retargets the
@@ -171,7 +174,12 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		podRev := query.RevisionFromPod(pod)
 		tgtRev := query.RevisionFromName(targetRev)
 		if !podRev.IsZero() && !tgtRev.IsZero() && !podRev.Same(tgtRev) {
-			return DispositionSkippedSuperseded, nil
+			if !unpinnedCreate {
+				return DispositionSkippedSuperseded, nil
+			}
+			// The pod proves an unpinned Create belongs to another revision.
+			// Clear the attempt without charging either revision below.
+			targetRev = ""
 		}
 		if targetRev != "" {
 			// Writer ordering: RetryBlock upsert lands BEFORE the mutation

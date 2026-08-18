@@ -1408,6 +1408,74 @@ func TestCreate_BatchedGateDeniedInstanceConsumesNoBudget(t *testing.T) {
 	}
 }
 
+func TestCreate_BatchesSupersededAttemptRetirement(t *testing.T) {
+	resetExpectations(t)
+	const replicas = int32(3)
+	isvc := minimalISVC("batch-retire", "prod", int(replicas))
+	statuses := make([]v1beta1.OMENativeInstanceStatus, 0, replicas)
+	objects := []client.Object{isvc}
+	const priorRevision = "batch-retire-engine-bad0bad0"
+	for idx := int32(0); idx < replicas; idx++ {
+		statuses = append(statuses, v1beta1.OMENativeInstanceStatus{
+			Index:       idx,
+			Incarnation: 1,
+			Phase:       v1beta1.OMENativeInstanceCreating,
+			Operation: &v1beta1.InstanceOperation{
+				ID:             fmt.Sprintf("create-%d", idx),
+				Type:           v1beta1.InstanceOperationCreate,
+				TargetRevision: priorRevision,
+			},
+		})
+		leader := gangPod(isvc, idx, "leader", 0, 1, false, false)
+		leader.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRevision)
+		objects = append(objects, leader)
+	}
+	objects = append(objects, instanceIR(isvc, workload.ComponentEngine, statuses...))
+	base := newFakeClient(t, objects...)
+	input := buildTestInput(isvc, base, workload.ComponentEngine)
+	recorder := newBatchMutationRecorder(input.ObservedState.InstanceStatuses)
+	input.ApplyInstanceMutations = recorder.apply
+	input.MutateInstance = unexpectedPerInstanceMutation
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "batch-retire-engine-good0bad", Namespace: isvc.Namespace},
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  replicas,
+	}
+	for idx := int32(0); idx < replicas; idx++ {
+		plan.Instances = append(plan.Instances, workload.InstancePlan{
+			Index:       idx,
+			Incarnation: 1,
+			Runners:     []workload.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}},
+		})
+	}
+
+	result, err := ops.Create(context.Background(), workload.Deps{Client: base}, input, plan, target)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("retirement batch must requeue immediately: %+v", result)
+	}
+	if len(recorder.batches) != 1 || !reflect.DeepEqual(recorder.batches[0], []int32{0, 1, 2}) {
+		t.Fatalf("retirement batches: got %v, want one batch [0 1 2]", recorder.batches)
+	}
+	for idx := int32(0); idx < replicas; idx++ {
+		status := recorder.statuses[idx]
+		if status.Phase != workload.InstancePhaseFailed || status.Operation != nil {
+			t.Errorf("instance %d after retirement: got %+v", idx, status)
+		}
+	}
+	pods := &corev1.PodList{}
+	if err := base.List(context.Background(), pods, client.InNamespace(isvc.Namespace)); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != int(replicas) {
+		t.Fatalf("retirement must not create missing workers: got %d pods want %d leaders", len(pods.Items), replicas)
+	}
+}
+
 func TestCreate_BatchedReadyPromotionsUseOneMutationBatch(t *testing.T) {
 	resetExpectations(t)
 	isvc, c, input := newReadyBatchFixture(t, "batch-ready", 3)

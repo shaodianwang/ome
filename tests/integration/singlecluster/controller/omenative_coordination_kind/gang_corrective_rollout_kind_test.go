@@ -6,6 +6,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -30,8 +31,8 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 		var err error
 		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "gang-corrective-")
 		Expect(err).NotTo(HaveOccurred())
-		// Seconds-scale same-target retry policy for the Held extension;
-		// inert for the corrective half (its update attempt never fails).
+		// Keep the test's seconds-scale retry ladder for the Held extension.
+		// Failure detection comes from the per-fixture timeout below.
 		configureFastUpdateRetry()
 	})
 	ginkgo.AfterEach(func() {
@@ -50,6 +51,12 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 			WithEngineReplicas(1),
 			WithEngineWorkerSize(1),
 			WithEngineImage(badImage))
+		// The production default InstanceReadyTimeout is 30 minutes, but this
+		// test's corrective-replacement assertion times out after 5 minutes.
+		if fix.ISVC.Spec.Engine.Lifecycle == nil {
+			fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{}
+		}
+		fix.ISVC.Spec.Engine.Lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 60 * time.Second}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 

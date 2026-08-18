@@ -555,6 +555,186 @@ func TestCreate_PartialPods_CreatesOnlyMissing(t *testing.T) {
 	}
 }
 
+// A corrective edit can advance the live target while an initial gang Create
+// is only partially materialized. The surviving pod still belongs to the
+// pinned Create attempt, so backfilling the missing member from the new target
+// would produce a mixed-revision gang that can never converge as one attempt.
+func TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	const priorRevision = "llama-70b-engine-bad0bad0"
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-good0bad", Namespace: "prod"},
+	}
+	ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceCreating,
+		PodCount:    1,
+		Operation: &v1beta1.InstanceOperation{
+			ID:             "create-0-1",
+			Type:           v1beta1.InstanceOperationCreate,
+			Step:           "CreatePods",
+			TargetRevision: priorRevision,
+		},
+	})
+	leader := gangPod(isvc, 0, "leader", 0, 1, false, false)
+	leader.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRevision)
+	c := newFakeClient(t, isvc, ir, leader)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanGangEngine(workload.RestartPolicyNone)
+
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("superseded Create retirement must requeue immediately: %+v", result)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("superseded partial Create must not mix revisions: got %d pods, want the one prior-revision survivor", len(pods.Items))
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
+		t.Fatalf("superseded pinned Create must retire; got %+v", s)
+	}
+}
+
+func TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	const priorRevision = "llama-70b-engine-bad0bad0"
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-good0bad", Namespace: "prod"},
+	}
+	ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceCreating,
+		PodCount:    1,
+		Operation: &v1beta1.InstanceOperation{
+			ID:   "create-0-1",
+			Type: v1beta1.InstanceOperationCreate,
+			Step: "CreatePods",
+		},
+	})
+	leader := gangPod(isvc, 0, "leader", 0, 1, false, false)
+	leader.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRevision)
+	c := newFakeClient(t, isvc, ir, leader)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanGangEngine(workload.RestartPolicyNone)
+
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("superseded Create retirement must requeue immediately: %+v", result)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("unpinned partial Create must not mix revisions: got %d pods, want the one prior-revision survivor", len(pods.Items))
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
+		t.Fatalf("superseded unpinned Create must retire; got %+v", s)
+	}
+}
+
+func TestCreate_CorrectiveEditRetiresFullyMaterializedGatedGang(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	const priorRevision = "llama-70b-engine-bad0bad0"
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-good0bad", Namespace: "prod"},
+	}
+	ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceCreating,
+		Operation: &v1beta1.InstanceOperation{
+			ID:             "create-0-1",
+			Type:           v1beta1.InstanceOperationCreate,
+			Step:           "CreatePods",
+			TargetRevision: priorRevision,
+		},
+	})
+	leader := gangPod(isvc, 0, "leader", 0, 1, false, false)
+	worker := gangPod(isvc, 0, "worker", 0, 1, false, false)
+	leader.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRevision)
+	worker.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRevision)
+	leader.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "example.com/admission"}}
+	worker.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "example.com/admission"}}
+	c := newFakeClient(t, isvc, ir, leader, worker)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanGangEngine(workload.RestartPolicyNone)
+
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("superseded gated Create must requeue immediately: %+v", result)
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
+		t.Fatalf("superseded gated Create must retire; got %+v", s)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("retirement must not mutate the live pod set: got %d pods want 2", len(pods.Items))
+	}
+}
+
+func TestCreate_AdoptsUnpinnedAttemptWithoutPods(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-good0bad", Namespace: "prod"},
+	}
+	ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 1,
+		Phase:       v1beta1.OMENativeInstanceCreating,
+		Operation: &v1beta1.InstanceOperation{
+			ID:   "create-0-1",
+			Type: v1beta1.InstanceOperationCreate,
+			Step: "CreatePods",
+		},
+	})
+	c := newFakeClient(t, isvc, ir)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanGangEngine(workload.RestartPolicyNone)
+
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Operation == nil || s.Operation.TargetRevision != target.Name {
+		t.Fatalf("safe persisted attempt must be pinned to %q; got %+v", target.Name, s)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("adopted Create must materialize the gang: got %d pods, want 2", len(pods.Items))
+	}
+}
+
 func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 	resetExpectations(t)
 	// Two reconciles back-to-back without the cache observing the first
@@ -977,6 +1157,17 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil || s.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("index 0 Phase must stay Updating (not reconciled by fresh pass); got %+v", s)
+	}
+	for _, idx := range []int32{1, 2} {
+		s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, idx)
+		if s == nil || s.Operation == nil {
+			t.Errorf("fresh index %d must have a Create operation; got %+v", idx, s)
+			continue
+		}
+		if s.Operation.TargetRevision != target.Name {
+			t.Errorf("fresh index %d Create TargetRevision: got %q want %q",
+				idx, s.Operation.TargetRevision, target.Name)
+		}
 	}
 }
 

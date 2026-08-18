@@ -162,6 +162,7 @@ func createFilteredBatched(
 	allReady := true
 	var retryBlockWait time.Duration
 	actions := make([]createPassAction, 0, len(plan.Instances))
+	retirements := make([]workload.InstanceMutation, 0)
 	selectedPods := int32(0)
 	// Keep each wave as a stable Instance-order prefix. Once an eligible gang
 	// does not fit, it leads the next wave instead of being bypassed by smaller
@@ -173,6 +174,11 @@ func createFilteredBatched(
 			continue
 		}
 		existing := byInstance[inst.Index]
+		if mutation, ok := retireSupersededCreateMutation(input, inst.Index, existing, target); ok {
+			retirements = append(retirements, mutation)
+			allReady = false
+			continue
+		}
 		missing := missingPodTargets(input, plan, inst, existing)
 		if len(missing) > 0 {
 			allowed, treatedReady, retryAfter := allowCreateForMissingInstance(input, plan, inst, existing, target)
@@ -193,7 +199,11 @@ func createFilteredBatched(
 				continue
 			}
 			now := metav1.NewTime(input.Now())
-			mutation := createStatusCreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, now)
+			targetRevision := ""
+			if target != nil {
+				targetRevision = target.Name
+			}
+			mutation := createStatusCreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, targetRevision, now)
 			observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
 			probe := workload.InstanceStatus{Index: inst.Index}
 			if observed != nil {
@@ -245,6 +255,16 @@ func createFilteredBatched(
 		mutation.OnCommit = action.transition.capture
 		action.statusMutation = mutation
 		actions = append(actions, createPassAction{ready: action})
+	}
+	if len(retirements) > 0 {
+		ownerPresent, err := applyInstanceMutationsWithOutcome(ctx, input, retirements)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("batch retire superseded Create attempts: %w", err)
+		}
+		if !ownerPresent {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	readyStatusBatchingAvailable := input.ApplyInstanceMutations != nil || input.ApplyInstanceMutationsWithRetryBlock != nil
@@ -649,6 +669,51 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 	return true, false, 0
 }
 
+// retireSupersededCreateMutation ends a Create when the live target changes.
+// An unpinned attempt is retired only when a pod label proves that the attempt
+// belongs to another revision.
+func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision) (workload.InstanceMutation, bool) {
+	if target == nil {
+		return workload.InstanceMutation{}, false
+	}
+	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
+	if status == nil || status.Phase != workload.InstancePhaseCreating ||
+		status.Operation == nil || status.Operation.Type != workload.InstanceOperationCreate {
+		return workload.InstanceMutation{}, false
+	}
+	if status.Operation.TargetRevision == target.Name {
+		return workload.InstanceMutation{}, false
+	}
+	if status.Operation.TargetRevision == "" {
+		targetRevision := query.RevisionOf(target)
+		provenDifferent := false
+		for _, pod := range existing {
+			podRevision := query.RevisionFromPod(pod)
+			if !podRevision.IsZero() && !podRevision.Same(targetRevision) {
+				provenDifferent = true
+				break
+			}
+		}
+		if !provenDifferent {
+			return workload.InstanceMutation{}, false
+		}
+	}
+
+	expectedIncarnation := status.Incarnation
+	expectedID := status.Operation.ID
+	expectedTarget := status.Operation.TargetRevision
+	return workload.InstanceMutation{Index: idx, Mutate: func(current *workload.InstanceStatus) bool {
+		if current.Incarnation != expectedIncarnation || current.Phase != workload.InstancePhaseCreating ||
+			current.Operation == nil || current.Operation.Type != workload.InstanceOperationCreate ||
+			current.Operation.ID != expectedID || current.Operation.TargetRevision != expectedTarget {
+			return false
+		}
+		current.Phase = workload.InstancePhaseFailed
+		current.Operation = nil
+		return true
+	}}, true
+}
+
 // earliestPodCreation returns the oldest CreationTimestamp across the
 // Instance's pods, or the zero time when the slice is empty / unstamped.
 func earliestPodCreation(pods []*corev1.Pod) time.Time {
@@ -841,11 +906,17 @@ func revisionHashFromTarget(target *appsv1.ControllerRevision) string {
 
 // createStatusCreatingMutation stamps Phase=Creating with a durable Create
 // operation. Existing nonzero incarnations are preserved across retries.
-func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Duration, now metav1.Time) workload.InstanceMutation {
+func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Duration, targetRev string, now metav1.Time) workload.InstanceMutation {
 	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseCreating &&
 			s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate &&
 			s.Incarnation > 0 {
+			if s.Operation.TargetRevision == "" && targetRev != "" {
+				op := *s.Operation
+				op.TargetRevision = targetRev
+				s.Operation = &op
+				return true
+			}
 			return false
 		}
 		if s.Incarnation == 0 {
@@ -859,6 +930,7 @@ func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Dur
 			StartedAt:      now,
 			LastProgressAt: now,
 			Deadline:       metav1.NewTime(now.Add(timeout)),
+			TargetRevision: targetRev,
 		}
 		return true
 	}}

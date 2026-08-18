@@ -49,11 +49,9 @@ func evaluateRetryBlockGate(b *workload.RetryBlock, now time.Time, attemptInFlig
 	return false, 0
 }
 
-// anyInFlightCreateAttempt reports whether any Instance carries an
-// in-flight Create attempt. Create Operations record no TargetRevision
-// — a create only ever aims at the current roll target — so an
-// in-flight create counts as an attempt at that target for the
-// RetryInProgress live-vs-leaked distinction.
+// anyInFlightCreateAttempt reports whether any Instance carries an in-flight
+// Create attempt. TargetRevision is deliberately ignored because an empty
+// value is a supported persisted state and the gate must remain conservative.
 func anyInFlightCreateAttempt(statuses []workload.InstanceStatus) bool {
 	for i := range statuses {
 		op := statuses[i].Operation
