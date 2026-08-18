@@ -242,6 +242,175 @@ func TestValidateCoordination_ZeroBudgetPacingRejectedStringForm(t *testing.T) {
 	}
 }
 
+// Semantic rejection matrix for group rollingUpdate budgets: negative
+// integers, non-percent strings, malformed percents, and percents outside
+// 0%-100% must all be rejected, and the error must carry the exact
+// spec.rollout.groups[i].rollingUpdate.* field path. Without this check the
+// runtime parser resolves every one of these to a zero budget.
+func TestValidateCoordination_GroupBudgetSemanticRejections(t *testing.T) {
+	cases := []struct {
+		name       string
+		surge      *intstr.IntOrString
+		unavail    *intstr.IntOrString
+		wantReason string
+		wantPath   string
+	}{
+		{"negative-int-surge", intstrPtr(intstr.FromInt(-1)), nil,
+			ReasonInvalidRollingUpdateInteger, "spec.rollout.groups[0].rollingUpdate.maxSurge"},
+		{"negative-int-unavailable", nil, intstrPtr(intstr.FromInt(-2)),
+			ReasonInvalidRollingUpdateInteger, "spec.rollout.groups[0].rollingUpdate.maxUnavailable"},
+		{"non-percent-string-surge", intstrPtr(intstr.FromString("abc")), nil,
+			ReasonInvalidRollingUpdatePercent, "spec.rollout.groups[0].rollingUpdate.maxSurge"},
+		{"plain-number-string-unavailable", nil, intstrPtr(intstr.FromString("25")),
+			ReasonInvalidRollingUpdatePercent, "spec.rollout.groups[0].rollingUpdate.maxUnavailable"},
+		{"malformed-percent-surge", intstrPtr(intstr.FromString("foo%")), nil,
+			ReasonInvalidRollingUpdatePercent, "spec.rollout.groups[0].rollingUpdate.maxSurge"},
+		{"negative-percent-unavailable", nil, intstrPtr(intstr.FromString("-25%")),
+			ReasonInvalidRollingUpdatePercent, "spec.rollout.groups[0].rollingUpdate.maxUnavailable"},
+		{"over-hundred-percent-surge", intstrPtr(intstr.FromString("150%")), nil,
+			ReasonInvalidRollingUpdatePercent, "spec.rollout.groups[0].rollingUpdate.maxSurge"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := omeNativePDSpec()
+			spec.Rollout = &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+						RollingUpdate: &v1beta1.GroupRollingUpdate{
+							MaxSurge:       tc.surge,
+							MaxUnavailable: tc.unavail,
+						},
+					},
+				},
+			}
+			err := ValidateCoordination(spec)
+			if err == nil {
+				t.Fatalf("expected rejection, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Errorf("got %v want reason %s", err, tc.wantReason)
+			}
+			if !strings.Contains(err.Error(), tc.wantPath) {
+				t.Errorf("got %v want exact path %s", err, tc.wantPath)
+			}
+		})
+	}
+}
+
+// A budget pair where BOTH values resolve to zero at runtime ("abc" parses to
+// zero, as does an explicit 0) must be rejected — otherwise the rollout has
+// neither surge nor drain headroom and stalls silently. The malformed half is
+// reported first with its exact path.
+func TestValidateCoordination_MalformedPairResolvingToZeroRejected(t *testing.T) {
+	abc := intstr.FromString("abc")
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				RollingUpdate: &v1beta1.GroupRollingUpdate{
+					MaxSurge:       &abc,
+					MaxUnavailable: &abc,
+				},
+			},
+		},
+	}
+	err := ValidateCoordination(spec)
+	if err == nil {
+		t.Fatal("malformed budget pair resolving to zero must be rejected, got nil")
+	}
+	if !strings.Contains(err.Error(), "spec.rollout.groups[0].rollingUpdate.maxSurge") {
+		t.Errorf("got %v want exact maxSurge path", err)
+	}
+}
+
+// The zero-budget pair rule uses runtime-RESOLVED values, not just literal
+// zeros: a malformed string and a negative integer both resolve to zero, so
+// the pair deadlocks even though neither is written as 0. Exercised directly
+// to pin the rule independent of the per-field checks that run before it.
+func TestValidatePacingNotZeroBudget_ResolvedZeroPairRejected(t *testing.T) {
+	abc := intstr.FromString("abc")
+	neg := intstr.FromInt(-1)
+	groups := []v1beta1.RolloutGroup{
+		{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			RollingUpdate: &v1beta1.GroupRollingUpdate{
+				MaxSurge:       &abc,
+				MaxUnavailable: &neg,
+			},
+		},
+	}
+	err := validatePacingNotZeroBudget(groups)
+	if err == nil || !strings.Contains(err.Error(), ReasonZeroBudgetPacingUnstartable) {
+		t.Errorf("resolved-zero pair: got %v want error with %s", err, ReasonZeroBudgetPacingUnstartable)
+	}
+	if !strings.Contains(err.Error(), "spec.rollout.groups[0].rollingUpdate") {
+		t.Errorf("got %v want exact rollingUpdate path", err)
+	}
+}
+
+// The field path in a budget error carries the index of the offending group,
+// not always [0].
+func TestValidateCoordination_GroupBudgetPathCarriesGroupIndex(t *testing.T) {
+	bad := intstr.FromString("150%")
+	mode := constants.OMENative
+	spec := &v1beta1.InferenceServiceSpec{
+		DeploymentMode: &mode,
+		Engine:         &v1beta1.EngineSpec{},
+		Decoder:        &v1beta1.DecoderSpec{},
+		Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+			{
+				Components:    []v1beta1.ComponentType{v1beta1.DecoderComponent},
+				RollingUpdate: &v1beta1.GroupRollingUpdate{MaxSurge: &bad},
+			},
+		}},
+	}
+	err := ValidateCoordination(spec)
+	if err == nil || !strings.Contains(err.Error(), "spec.rollout.groups[1].rollingUpdate.maxSurge") {
+		t.Errorf("got %v want path spec.rollout.groups[1].rollingUpdate.maxSurge", err)
+	}
+}
+
+// Valid budget shapes: positive integers, in-range percents, boundary
+// percents, zero on one knob only, and nil (defaulted) knobs are all accepted.
+func TestValidateCoordination_GroupBudgetValidShapesAccepted(t *testing.T) {
+	cases := []struct {
+		name    string
+		surge   *intstr.IntOrString
+		unavail *intstr.IntOrString
+	}{
+		{"positive-ints", intstrPtr(intstr.FromInt(2)), intstrPtr(intstr.FromInt(1))},
+		{"mid-percents", intstrPtr(intstr.FromString("25%")), intstrPtr(intstr.FromString("50%"))},
+		{"boundary-percents", intstrPtr(intstr.FromString("100%")), intstrPtr(intstr.FromString("100%"))},
+		{"zero-surge-percent-unavailable", intstrPtr(intstr.FromInt(0)), intstrPtr(intstr.FromString("25%"))},
+		{"zero-percent-surge-int-unavailable", intstrPtr(intstr.FromString("0%")), intstrPtr(intstr.FromInt(1))},
+		{"nil-surge-zero-unavailable", nil, intstrPtr(intstr.FromInt(0))},
+		{"zero-surge-nil-unavailable", intstrPtr(intstr.FromInt(0)), nil},
+		{"both-nil", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := omeNativePDSpec()
+			spec.Rollout = &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+						RollingUpdate: &v1beta1.GroupRollingUpdate{
+							MaxSurge:       tc.surge,
+							MaxUnavailable: tc.unavail,
+						},
+					},
+				},
+			}
+			if err := ValidateCoordination(spec); err != nil {
+				t.Errorf("unexpected error %v", err)
+			}
+		})
+	}
+}
+
 // Positive case: pacing with non-zero MaxSurge is accepted even when
 // MaxUnavailable=0 — the rollout still has surge headroom.
 func TestValidateCoordination_NonZeroSurgePacingAccepted(t *testing.T) {

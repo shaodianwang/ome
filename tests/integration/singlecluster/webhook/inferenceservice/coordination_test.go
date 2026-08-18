@@ -361,25 +361,21 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 			"CRD Maximum=100 must reject over-100 maintainRatio.tolerance")
 	})
 
-	// W-19: IntOrString CRD validation rejects garbage strings on the
-	// rollingUpdate.maxSurge field. Strings must be "<int>" or "<int>%".
-	ginkgo.It("W-19 rejects malformed MaxSurge string (CRD IntOrString)", func() {
+	// W-19: IntOrString's CRD validation is liberal — a garbage string
+	// like "abc" passes the JSON-schema layer, and the runtime resolver
+	// would collapse it to a zero budget. The webhook's semantic check
+	// rejects it with the exact field path instead.
+	ginkgo.It("W-19 rejects malformed MaxSurge string (webhook semantic check)", func() {
 		bad := intstr.FromString("abc")
 		isvc := coordISVC("coord-w19", v1beta1.RolloutGroup{
 			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 			RollingUpdate: &v1beta1.GroupRollingUpdate{MaxSurge: &bad},
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
-		// Note: IntOrString's CRD validation is liberal — strings without
-		// a numeric prefix are accepted at the JSON-schema layer. The
-		// controller defends downstream. This test pins observed
-		// behavior so we notice if K8s tightens it.
-		if err != nil {
-			Expect(err.Error()).To(Or(
-				ContainSubstring("invalid"),
-				ContainSubstring("IntOrString"),
-			))
-		}
+		Expect(err).To(HaveOccurred(),
+			"webhook must reject a maxSurge string the runtime resolver would turn into a zero budget")
+		Expect(err.Error()).To(ContainSubstring("InvalidRollingUpdatePercent"))
+		Expect(err.Error()).To(ContainSubstring("spec.rollout.groups[0].rollingUpdate.maxSurge"))
 	})
 
 	// W-20: a single 3-Component BlueGreen group is the canonical PD

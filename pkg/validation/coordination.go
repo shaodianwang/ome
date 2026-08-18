@@ -13,8 +13,6 @@ package validation
 import (
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/util/intstr"
-
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 )
@@ -72,6 +70,9 @@ func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
 		return err
 	}
 	if err := validateComponentsAreOMENative(spec, groups); err != nil {
+		return err
+	}
+	if err := validateGroupRollingUpdateBudgets(groups); err != nil {
 		return err
 	}
 	if err := validatePacingNotZeroBudget(groups); err != nil {
@@ -223,34 +224,47 @@ func validateComponentsAreOMENative(spec *v1beta1.InferenceServiceSpec, groups [
 	return nil
 }
 
-// validatePacingNotZeroBudget rejects a rollingUpdate group that explicitly sets
-// BOTH maxSurge=0 AND maxUnavailable=0: no surge headroom and no drain headroom
-// deadlocks the roll. nil (defaulted) values resolve to 25% and are not zero.
+// validateGroupRollingUpdateBudgets runs the semantic IntOrString checks
+// (integers >= 0, percent strings within 0%-100%) over every rollingUpdate
+// group's maxSurge/maxUnavailable, reporting the exact field path. The runtime
+// resolver turns malformed or negative values into a zero budget, which would
+// silently stall the roll — admission rejects them instead.
+func validateGroupRollingUpdateBudgets(groups []v1beta1.RolloutGroup) error {
+	for i := range groups {
+		ru := groups[i].RollingUpdate
+		if ru == nil {
+			continue
+		}
+		base := fmt.Sprintf("spec.rollout.groups[%d].rollingUpdate.", i)
+		if err := validateBudgetIntOrString(base+"maxSurge", ru.MaxSurge); err != nil {
+			return err
+		}
+		if err := validateBudgetIntOrString(base+"maxUnavailable", ru.MaxUnavailable); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validatePacingNotZeroBudget rejects a rollingUpdate group whose maxSurge AND
+// maxUnavailable both RESOLVE to zero budget at runtime: no surge headroom and
+// no drain headroom deadlocks the roll. Resolved semantics (not just literal
+// zeros) keep the rule correct on its own; in the ValidateCoordination flow the
+// per-field semantic checks run first, so the operator sees the more precise
+// error for malformed or negative forms. nil (defaulted) values resolve to 25%
+// and are not zero.
 func validatePacingNotZeroBudget(groups []v1beta1.RolloutGroup) error {
 	for i := range groups {
 		ru := groups[i].RollingUpdate
 		if ru == nil {
 			continue
 		}
-		if explicitZeroIntOrString(ru.MaxSurge) && explicitZeroIntOrString(ru.MaxUnavailable) {
-			return fmt.Errorf("spec.rollout.groups[%d]: maxSurge=0 AND maxUnavailable=0 deadlocks rollouts — set at least one non-zero (%s)",
+		if budgetResolvesToZero(ru.MaxSurge) && budgetResolvesToZero(ru.MaxUnavailable) {
+			return fmt.Errorf("spec.rollout.groups[%d].rollingUpdate: maxSurge and maxUnavailable both resolve to zero, which deadlocks the rollout — set at least one non-zero (%s)",
 				i, ReasonZeroBudgetPacingUnstartable)
 		}
 	}
 	return nil
-}
-
-// explicitZeroIntOrString reports whether the user explicitly set the
-// IntOrString to a zero value (literal 0 or "0" or "0%"). Nil is not zero — nil
-// means "use default" and the resolver fills in 25%.
-func explicitZeroIntOrString(v *intstr.IntOrString) bool {
-	if v == nil {
-		return false
-	}
-	if v.Type == intstr.Int {
-		return v.IntValue() == 0
-	}
-	return v.StrVal == "0" || v.StrVal == "0%"
 }
 
 func validateRollingUpdateLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpec, components []v1beta1.ComponentType) error {
