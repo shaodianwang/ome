@@ -386,6 +386,72 @@ func TestPlan_Migrate_SelectsOldestManualRecord(t *testing.T) {
 	}
 }
 
+func TestPlan_MigrationSurgeWaitsForUpdateSurge(t *testing.T) {
+	minusOne := int32(-1)
+	allocated := int32(3)
+	tests := []struct {
+		name          string
+		updateStep    string
+		surgeInstance *int32
+		wantMigrate   bool
+	}{
+		{name: "fresh record waits", updateStep: "Surge", wantMigrate: false},
+		{name: "legacy fresh record waits", updateStep: "Surge", surgeInstance: &minusOne, wantMigrate: false},
+		{name: "allocated record resumes", updateStep: "Surge", surgeInstance: &allocated, wantMigrate: true},
+		{name: "non-surge update does not block", updateStep: "InPlace", wantMigrate: true},
+		{name: "no update operation", wantMigrate: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := minimalInput(t)
+			forbidMutations(t, &input)
+			statuses := []workload.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+				{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+				{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+			}
+			if test.updateStep != "" {
+				statuses[0].Phase = workload.InstancePhaseUpdating
+				statuses[0].Operation = &workload.InstanceOperation{
+					Type: workload.InstanceOperationUpdate,
+					Step: test.updateStep,
+				}
+			}
+			input.ObservedState.InstanceStatuses = statuses
+			phase := workload.MigrationPhaseAccepted
+			if test.surgeInstance != nil && *test.surgeInstance >= 0 {
+				phase = workload.MigrationPhaseSurgePending
+			}
+			input.ObservedState.Migrations = []workload.MigrationRecord{{
+				RequestUUID:    "migration-during-update",
+				Trigger:        workload.MigrationTriggerManual,
+				Phase:          phase,
+				SourceInstance: 2,
+				SurgeInstance:  test.surgeInstance,
+			}}
+			plan := workload.ComponentPlan{
+				Component:      workload.ComponentEngine,
+				Replicas:       3,
+				MigrationMode:  workload.MigrationModeAuto,
+				UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+				Instances: []workload.InstancePlan{
+					{Index: 0, Incarnation: 1},
+					{Index: 1, Incarnation: 1},
+					{Index: 2, Incarnation: 1},
+				},
+			}
+
+			decision := planTargetOrFail(t, input, plan, updateTarget(), planSnapshot(input, nil))
+			if got := findAction(decision, workload.ActionMigrate) != nil; got != test.wantMigrate {
+				t.Errorf("Migrate selected = %v, want %v; actions=%v", got, test.wantMigrate, actionKinds(decision))
+			}
+			if test.updateStep != "" && findAction(decision, workload.ActionUpdate) == nil {
+				t.Errorf("Update continuation missing; actions=%v", actionKinds(decision))
+			}
+		})
+	}
+}
+
 // updateTarget is the target ControllerRevision the update-selection
 // tests roll toward.
 func updateTarget() *appsv1.ControllerRevision {

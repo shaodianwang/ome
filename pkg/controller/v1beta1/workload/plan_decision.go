@@ -239,7 +239,13 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	// when mode is Never.
 	if plan.MigrationMode != MigrationModeNever {
 		if rec := NextManualMigration(input.ObservedState.Migrations); rec != nil {
-			d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *rec}})
+			// A fresh migration adds one surge Instance. Let an existing update
+			// surge finish first so the two operations do not stack extra capacity.
+			// Allocated migrations always resume from their durable record.
+			allocated := rec.SurgeInstance != nil && *rec.SurgeInstance >= 0
+			if allocated || CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
+				d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *rec}})
+			}
 		}
 	}
 
