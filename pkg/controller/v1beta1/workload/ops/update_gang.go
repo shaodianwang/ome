@@ -167,11 +167,12 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 
 	if !surging {
 		surgeIdx = workload.AllocateSurgeIndex(input.ObservedState.InstanceStatuses)
-		if err := patchInstanceStatusGangSurging(ctx, input, sourceIdx, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
-			return false, fmt.Errorf("stamp gang surge source (instance=%d): %w", sourceIdx, err)
+		claimed, err := startGangSurge(ctx, input, src, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout)
+		if err != nil {
+			return false, fmt.Errorf("claim gang surge pair (source=%d target=%d): %w", sourceIdx, surgeIdx, err)
 		}
-		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
-			return false, fmt.Errorf("stamp gang surge target (instance=%d): %w", surgeIdx, err)
+		if !claimed {
+			return false, nil
 		}
 		// Reserve the index in this reconcile's snapshot so sibling updates cannot
 		// allocate the same replacement slot.

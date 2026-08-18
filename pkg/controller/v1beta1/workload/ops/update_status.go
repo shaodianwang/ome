@@ -29,7 +29,7 @@ const (
 	// GateContext.CheckSurge) can recognize in-flight surge operations
 	// by step name alone (the surge contributes an extra pod alive —
 	// the unavailability gate doesn't apply; the surge gate does).
-	updateStepSurgeDrain = "SurgeDrain"
+	updateStepSurgeDrain = workload.UpdateStepSurgeDrain
 	// updateStepSurgeDrainSettle is entered after EndpointSlice confirms
 	// the old pod is ineligible for new traffic. The controller
 	// keeps the pod alive in this step so persistent load-balancer
@@ -293,26 +293,7 @@ func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input wo
 func patchInstanceStatusGangSurging(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Phase == workload.InstancePhaseUpdating && s.Operation != nil &&
-			s.Operation.Type == workload.InstanceOperationUpdate &&
-			s.Operation.Step == updateStepSurge && s.Operation.SurgeIndex != nil &&
-			*s.Operation.SurgeIndex == surgeIdx && s.TargetRevision == targetRev {
-			return false
-		}
-		k := surgeIdx
-		s.Phase = workload.InstancePhaseUpdating
-		s.TargetRevision = targetRev
-		s.Operation = &workload.InstanceOperation{
-			ID:             fmt.Sprintf("gangsurge-%d-%d", idx, now.Unix()),
-			Type:           workload.InstanceOperationUpdate,
-			Step:           updateStepSurge,
-			SurgeIndex:     &k,
-			TargetRevision: targetRev,
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
-		}
-		return true
+		return stampGangSurgeSource(s, idx, surgeIdx, targetRev, timeout, now)
 	})
 	if err != nil {
 		return err
@@ -330,26 +311,125 @@ func patchInstanceStatusGangSurging(ctx context.Context, input workload.Reconcil
 func patchInstanceStatusGangSurgeTarget(ctx context.Context, input workload.ReconcileInput, surgeIdx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	return input.MutateInstance(ctx, surgeIdx, func(s *workload.InstanceStatus) bool {
-		if gangSurgeTargetClaimMatches(s, targetRev) {
-			return false
-		}
-		if !emptyGangSurgeTargetSlot(s) {
-			return false
-		}
-		s.Incarnation = 1
-		s.Phase = workload.InstancePhaseCreating
-		s.TargetRevision = targetRev
-		s.Operation = &workload.InstanceOperation{
-			ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepGangSurgeTarget,
-			TargetRevision: targetRev,
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
-		}
-		return true
+		return stampGangSurgeTarget(s, surgeIdx, targetRev, timeout, now)
 	})
+}
+
+func stampGangSurgeSource(s *workload.InstanceStatus, idx, surgeIdx int32, targetRev string, timeout time.Duration, now metav1.Time) bool {
+	if s.Phase == workload.InstancePhaseUpdating && s.Operation != nil &&
+		s.Operation.Type == workload.InstanceOperationUpdate &&
+		s.Operation.Step == updateStepSurge && s.Operation.SurgeIndex != nil &&
+		*s.Operation.SurgeIndex == surgeIdx && s.TargetRevision == targetRev {
+		return false
+	}
+	k := surgeIdx
+	s.Phase = workload.InstancePhaseUpdating
+	s.TargetRevision = targetRev
+	s.Operation = &workload.InstanceOperation{
+		ID:             fmt.Sprintf("gangsurge-%d-%d", idx, now.Unix()),
+		Type:           workload.InstanceOperationUpdate,
+		Step:           updateStepSurge,
+		SurgeIndex:     &k,
+		TargetRevision: targetRev,
+		StartedAt:      now,
+		LastProgressAt: now,
+		Deadline:       metav1.NewTime(now.Add(timeout)),
+	}
+	return true
+}
+
+func stampGangSurgeTarget(s *workload.InstanceStatus, surgeIdx int32, targetRev string, timeout time.Duration, now metav1.Time) bool {
+	if gangSurgeTargetClaimMatches(s, targetRev) || !emptyGangSurgeTargetSlot(s) {
+		return false
+	}
+	s.Incarnation = 1
+	s.Phase = workload.InstancePhaseCreating
+	s.TargetRevision = targetRev
+	s.Operation = &workload.InstanceOperation{
+		ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
+		Type:           workload.InstanceOperationUpdate,
+		Step:           workload.UpdateStepGangSurgeTarget,
+		TargetRevision: targetRev,
+		StartedAt:      now,
+		LastProgressAt: now,
+		Deadline:       metav1.NewTime(now.Add(timeout)),
+	}
+	return true
+}
+
+func startGangSurge(
+	ctx context.Context,
+	input workload.ReconcileInput,
+	source *workload.InstanceStatus,
+	surgeIdx int32,
+	targetRev string,
+	timeout time.Duration,
+) (bool, error) {
+	if source == nil {
+		return false, nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock == nil {
+		if err := patchInstanceStatusGangSurging(ctx, input, source.Index, surgeIdx, targetRev, timeout); err != nil {
+			return false, err
+		}
+		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, targetRev, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := validateTerminalMutationOwner(input); err != nil {
+		return false, err
+	}
+
+	now := metav1.NewTime(input.Now())
+	sourceIdentity := captureTerminalInstanceIdentity(source)
+	desiredSource := cloneTerminalStatusValue(*source)
+	stampGangSurgeSource(&desiredSource, source.Index, surgeIdx, targetRev, timeout, now)
+	desiredSourceIdentity := captureTerminalInstanceIdentity(&desiredSource)
+	desiredTarget := workload.InstanceStatus{Index: surgeIdx}
+	stampGangSurgeTarget(&desiredTarget, surgeIdx, targetRev, timeout, now)
+	desiredTargetIdentity := captureTerminalInstanceIdentity(&desiredTarget)
+	ownerUID := input.OwnerObject.GetUID()
+	committed := false
+	sourceMutation := workload.InstanceMutation{
+		Index: source.Index,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			return stampGangSurgeSource(status, source.Index, surgeIdx, targetRev, timeout, now)
+		},
+		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, found := snapshot.Instances[source.Index]
+			if !found || !sourceIdentity.matches(currentSource) {
+				return false
+			}
+			currentTarget, found := snapshot.Instances[surgeIdx]
+			return !found || emptyGangSurgeTargetSlot(&currentTarget)
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && desiredSourceIdentity.matches(*status)
+		},
+		OnCommit: func(_, _ *workload.InstanceStatus) { committed = true },
+	}
+	targetMutation := workload.InstanceMutation{
+		Index: surgeIdx,
+		Mutate: func(status *workload.InstanceStatus) bool {
+			return stampGangSurgeTarget(status, surgeIdx, targetRev, timeout, now)
+		},
+		Postcondition: func(status *workload.InstanceStatus) bool {
+			return status != nil && desiredTargetIdentity.matches(*status)
+		},
+	}
+	err := input.ApplyInstanceMutationsWithRetryBlock(ctx,
+		[]workload.InstanceMutation{sourceMutation, targetMutation}, targetRev, markRetryBlockAttemptStarted)
+	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed, nil
 }
 
 type gangSurgeTargetMarkerResolution uint8

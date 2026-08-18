@@ -190,28 +190,41 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 
 	// Ready instances are stable replicas, preferred to keep.
 	readyByIndex := map[int32]bool{}
+	statusByIndex := map[int32]InstanceStatus{}
 	for _, s := range instances {
+		statusByIndex[s.Index] = s
 		if s.Phase == InstancePhaseReady {
 			readyByIndex[s.Index] = true
 		}
 	}
 
-	// Release a gang-surge SOURCE whose replacement (the instance at its
-	// SurgeIndex) is already Ready: the live replacement now holds the slot,
-	// so pinning/counting the stale source as a steady replica would displace
-	// an already-rolled instance into scale-down — the multi-node double-roll
-	// that troughs capacity and skews RatioBalanced. Released, the superseded
-	// source falls out of the steady budget and becomes the scale-down target.
-	// AllocateSurgeIndex picks a fresh index, so a Ready instance at SurgeIndex
-	// is unambiguously this source's replacement.
+	// Release a gang source only after it entered the drain phase and its
+	// replacement was promoted on the operation's pinned revision. A fresh
+	// claim that collided with an occupied index stays pinned until the update
+	// state machine can reset and reallocate it.
 	for _, s := range instances {
 		if s.Operation == nil || s.Operation.SurgeIndex == nil {
 			continue
 		}
-		if readyByIndex[*s.Operation.SurgeIndex] {
-			delete(migrationProtected, s.Index)
-			delete(migrationSource, s.Index)
+		targetIndex := *s.Operation.SurgeIndex
+		if s.Operation.Type != InstanceOperationUpdate {
+			if readyByIndex[targetIndex] {
+				delete(migrationProtected, s.Index)
+				delete(migrationSource, s.Index)
+			}
+			continue
 		}
+		if s.Operation.Step != UpdateStepSurgeDrain {
+			continue
+		}
+		target, found := statusByIndex[targetIndex]
+		if !found || target.Phase != InstancePhaseReady || target.Operation != nil ||
+			target.TargetRevision != "" || target.RunningRevision != s.Operation.TargetRevision {
+			continue
+		}
+		delete(migrationProtected, s.Index)
+		delete(migrationProtected, targetIndex)
+		delete(migrationSource, s.Index)
 	}
 
 	sorted := make([]int32, 0, len(used))
@@ -323,24 +336,19 @@ func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 
 // updateSurgeInFlightIndices returns the indices participating in a
 // multi-pod (gang) SurgeThenDrain update — both the source (Op.Type=
-// Update with a SurgeIndex set) and the surge target (Op.Step=
-// updateStepGangSurgeTarget). Like migration surge pairs, these stay in
-// the plan past the replica cap so the replacement gang isn't scale-down-
-// deleted mid-surge and EnsurePodGroups keeps its PodGroup alive.
+// Update with a SurgeIndex set) and the status at the referenced target
+// index. Like migration surge pairs, these stay in the plan past the replica
+// cap so neither side is scale-down-deleted before the operation resolves.
 //
 // The gang source carries Op.Step=Surge so CurrentSurgeInFlight counts
 // it against MaxSurge; the SurgeIndex pointer is what distinguishes a
 // gang surge (new index) from a single-pod surge (ActiveOrdinal toggle,
 // SurgeIndex nil).
 //
-// Marker-liveness invariant: a GangSurgeTarget marker is pinned only
-// while some source instance carries a SurgeIndex operation referencing
-// it. The marker's lifecycle is owned by its source's gangSurgeUpdate;
-// once no source op points at it (the source promoted, was reset, or
-// was re-adopted after a corrective edit) the marker is an ORPHAN —
-// pinning it would leak a dead replacement gang forever. Unpinned, it
-// falls out of the plan as a scale-down extra and the scale-down batch
-// pipeline reaps its pods and clears the slot.
+// A target is pinned only while a source references it. This includes an
+// occupied target discovered during recovery: the source and occupant remain
+// intact until gangSurgeUpdate can reset the claim. An unreferenced marker is
+// left for the scale-down pipeline to reap.
 func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	referenced := map[int32]struct{}{}
@@ -354,13 +362,8 @@ func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 		}
 	}
 	for _, s := range instances {
-		if s.Operation == nil || s.Operation.Type != InstanceOperationUpdate {
-			continue
-		}
-		if s.Operation.Step == UpdateStepGangSurgeTarget || s.Operation.Step == UpdateStepGangSurgeTargetCleanup { // target (marker)
-			if _, live := referenced[s.Index]; live {
-				out[s.Index] = struct{}{}
-			}
+		if _, live := referenced[s.Index]; live {
+			out[s.Index] = struct{}{}
 		}
 	}
 	return out

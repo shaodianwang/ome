@@ -258,7 +258,6 @@ func TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects(
 					finalizes++
 					return true, nil
 				},
-				ApplyInstanceMutationsWithRetryBlock: store.apply,
 			}
 			plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 			c := legacyNewFakeClient(t)
@@ -281,6 +280,7 @@ func TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects(
 			test.prepareSource(&persistedSource)
 			store.statuses[source.Index] = persistedSource
 			input.ObservedState.InstanceStatuses = []workload.InstanceStatus{cloneTerminalStatus(persistedSource)}
+			input.ApplyInstanceMutationsWithRetryBlock = store.apply
 			latestTarget := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: test.latestRevision}}
 			done, err = gangSurgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], latestTarget)
 			if err != nil || done {

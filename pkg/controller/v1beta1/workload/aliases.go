@@ -118,6 +118,7 @@ const (
 
 	UpdateStepGangSurgeTarget        = types.UpdateStepGangSurgeTarget
 	UpdateStepGangSurgeTargetCleanup = types.UpdateStepGangSurgeTargetCleanup
+	UpdateStepSurgeDrain             = types.UpdateStepSurgeDrain
 
 	EventReasonInstanceCreated               = types.EventReasonInstanceCreated
 	EventReasonInstanceReady                 = types.EventReasonInstanceReady

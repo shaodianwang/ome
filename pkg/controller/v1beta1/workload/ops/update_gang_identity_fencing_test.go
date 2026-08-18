@@ -2,13 +2,180 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+func TestGangSurge_StaleSnapshotDoesNotClaimOccupiedTarget(t *testing.T) {
+	legacyResetExpectations(t)
+	const targetRevision = "stale-claim-engine-newrev"
+	source := workload.InstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           workload.InstancePhaseReady,
+		RunningRevision: "stale-claim-engine-oldrev",
+	}
+	occupied := workload.InstanceStatus{
+		Index:           1,
+		Incarnation:     8,
+		Phase:           workload.InstancePhaseReady,
+		RunningRevision: "unrelated-revision",
+	}
+	sourceIdentity := captureTerminalInstanceIdentity(&source)
+	occupiedIdentity := captureTerminalInstanceIdentity(&occupied)
+	store := &terminalMutationStore{
+		ownerUID: "owner-a",
+		statuses: map[int32]workload.InstanceStatus{
+			source.Index:   cloneTerminalStatus(source),
+			occupied.Index: cloneTerminalStatus(occupied),
+		},
+		retryBlock: map[string]workload.RetryBlock{
+			targetRevision: {TargetRevision: targetRevision, State: workload.RetryBlockBackoff},
+		},
+	}
+	input := gangSurgeRecoveryInput("owner-a", "stale-claim", "test-ns", store, cloneTerminalStatus(source))
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: targetRevision}}
+
+	done, err := gangSurgeUpdate(context.Background(), legacyTestDeps(legacyNewFakeClient(t)), input, plan, plan.Instances[0], target)
+	if err != nil || done {
+		t.Fatalf("stale claim: done=%v err=%v", done, err)
+	}
+	if store.writes != 0 {
+		t.Fatalf("stale claim status writes=%d want 0", store.writes)
+	}
+	if current := store.statuses[source.Index]; !sourceIdentity.matches(current) {
+		t.Fatalf("source changed without owning the target: %+v", current)
+	}
+	if current := store.statuses[occupied.Index]; !occupiedIdentity.matches(current) {
+		t.Fatalf("occupied target changed: %+v", current)
+	}
+	if block := store.retryBlock[targetRevision]; block.State != workload.RetryBlockBackoff {
+		t.Fatalf("retry block state=%q want %q", block.State, workload.RetryBlockBackoff)
+	}
+}
+
+func TestStartGangSurge_ClaimsPairInOneWrite(t *testing.T) {
+	const targetRevision = "atomic-claim-engine-newrev"
+	source := workload.InstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           workload.InstancePhaseReady,
+		RunningRevision: "atomic-claim-engine-oldrev",
+	}
+	store := &terminalMutationStore{
+		ownerUID: "owner-a",
+		statuses: map[int32]workload.InstanceStatus{source.Index: cloneTerminalStatus(source)},
+		retryBlock: map[string]workload.RetryBlock{
+			targetRevision: {TargetRevision: targetRevision, State: workload.RetryBlockBackoff},
+		},
+	}
+	input := gangSurgeRecoveryInput("owner-a", "atomic-claim", "test-ns", store, cloneTerminalStatus(source))
+
+	claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("atomic claim: claimed=%v err=%v", claimed, err)
+	}
+	if store.writes != 1 {
+		t.Fatalf("atomic claim status writes=%d want 1", store.writes)
+	}
+	persistedSource := store.statuses[source.Index]
+	if persistedSource.Operation == nil || persistedSource.Operation.Step != updateStepSurge ||
+		persistedSource.Operation.SurgeIndex == nil || *persistedSource.Operation.SurgeIndex != 1 {
+		t.Fatalf("source claim: %+v", persistedSource)
+	}
+	persistedTarget := store.statuses[1]
+	if !gangSurgeTargetMatches(&persistedTarget, targetRevision) {
+		t.Fatalf("target claim: %+v", persistedTarget)
+	}
+	if block := store.retryBlock[targetRevision]; block.State != workload.RetryBlockRetryInProgress {
+		t.Fatalf("retry block state=%q want %q", block.State, workload.RetryBlockRetryInProgress)
+	}
+}
+
+func TestStartGangSurge_RejectsAuthoritativeDrift(t *testing.T) {
+	const targetRevision = "guarded-claim-engine-newrev"
+	source := workload.InstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           workload.InstancePhaseReady,
+		RunningRevision: "guarded-claim-engine-oldrev",
+	}
+	tests := []struct {
+		name     string
+		ownerUID types.UID
+		prepare  func(map[int32]workload.InstanceStatus)
+	}{
+		{name: "owner replaced", ownerUID: "owner-b"},
+		{
+			name:     "source lifecycle changed",
+			ownerUID: "owner-a",
+			prepare: func(statuses map[int32]workload.InstanceStatus) {
+				changed := statuses[source.Index]
+				changed.Incarnation++
+				statuses[source.Index] = changed
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			statuses := map[int32]workload.InstanceStatus{source.Index: cloneTerminalStatus(source)}
+			if test.prepare != nil {
+				test.prepare(statuses)
+			}
+			authoritativeSource := statuses[source.Index]
+			before := captureTerminalInstanceIdentity(&authoritativeSource)
+			store := &terminalMutationStore{ownerUID: test.ownerUID, statuses: statuses}
+			input := gangSurgeRecoveryInput("owner-a", "guarded-claim", "test-ns", store, cloneTerminalStatus(source))
+
+			claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, time.Minute)
+			if err != nil || claimed || store.writes != 0 {
+				t.Fatalf("guarded claim: claimed=%v writes=%d err=%v", claimed, store.writes, err)
+			}
+			if current := store.statuses[source.Index]; !before.matches(current) {
+				t.Fatalf("authoritative source changed: %+v", current)
+			}
+			if _, found := store.statuses[1]; found {
+				t.Fatal("target was created after the claim guard rejected")
+			}
+		})
+	}
+}
+
+func TestStartGangSurge_WriteFailureLeavesPairUnchanged(t *testing.T) {
+	const targetRevision = "failed-claim-engine-newrev"
+	source := workload.InstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           workload.InstancePhaseReady,
+		RunningRevision: "failed-claim-engine-oldrev",
+	}
+	writeErr := errors.New("status write failed")
+	store := &terminalMutationStore{
+		ownerUID: "owner-a",
+		statuses: map[int32]workload.InstanceStatus{source.Index: cloneTerminalStatus(source)},
+		applyErr: writeErr,
+	}
+	input := gangSurgeRecoveryInput("owner-a", "failed-claim", "test-ns", store, cloneTerminalStatus(source))
+
+	claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, time.Minute)
+	if !errors.Is(err, writeErr) || claimed || store.writes != 0 {
+		t.Fatalf("failed claim: claimed=%v writes=%d err=%v", claimed, store.writes, err)
+	}
+	if current := store.statuses[source.Index]; !captureTerminalInstanceIdentity(&source).matches(current) {
+		t.Fatalf("source changed after failed write: %+v", current)
+	}
+	if _, found := store.statuses[1]; found {
+		t.Fatal("target was created after failed write")
+	}
+}
 
 func TestPatchInstanceStatusGangSurgeTarget_DoesNotOverwriteOccupiedSlot(t *testing.T) {
 	occupied := workload.InstanceStatus{

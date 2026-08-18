@@ -123,6 +123,10 @@ const UpdateStepGangSurgeTarget = "GangSurgeTarget"
 // cleanup owns its Pods and PodGroup until the marker status is removed.
 const UpdateStepGangSurgeTargetCleanup = "GangSurgeTargetCleanup"
 
+// UpdateStepSurgeDrain marks a SurgeThenDrain source whose replacement is
+// ready and whose source pods are being drained.
+const UpdateStepSurgeDrain = "SurgeDrain"
+
 // InstanceOperation is the durable recovery anchor written before any
 // destructive action against an Instance and cleared on completion.
 // Mirrors the CRD InstanceOperation field-for-field.
