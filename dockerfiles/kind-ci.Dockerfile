@@ -11,21 +11,18 @@
 #   - Go 1.25 toolchain + a pre-populated Go module cache (go test runs offline),
 #   - Rust toolchain + a pre-fetched cargo cache for pkg/xet (make xet-build
 #     runs offline; the KIND suite transitively links the xet staticlib),
-#   - docker CLI, kind, kubectl, crane, jq + build deps,
+#   - docker CLI, kind, kubectl, Helm, Python, crane, jq + build deps,
 #   - docker-loadable image tarballs under /images: kindest/node (the kind node),
 #     golang:1.25 and gcr.io/distroless/static:nonroot (the two FROM stages of
 #     tests/integration/kindutil/fake-serving/Dockerfile, which the suite
-#     `docker build`s at run time), and busybox (validation Job probe).
+#     `docker build`s at run time), and busybox (validation Job probe),
+#   - cert-manager's pinned manifest and every image referenced by it, plus the
+#     nginx image used by the OMENative eval fixtures.
 #
 # Built by generate_pipeline.py via the cf-docker-image plugin with build-context
 # "." (repo root) — so the COPY steps below see the repo. TARGETARCH is set by
 # buildx per platform.
 #
-# NOTE (iteration 1): this image has not yet been built on TW or exercised by a
-# real shard. The pieces most likely to need adjustment on first build: the
-# docker static-binary version, `go mod download all` coverage, `cargo fetch`
-# for pkg/xet, and whether the suite's `docker build` of fake-serving runs fully
-# offline against the loaded golang/distroless bases.
 ARG GO_BUILDER_IMAGE=golang:1.25
 FROM ${GO_BUILDER_IMAGE}
 
@@ -34,15 +31,18 @@ ARG DOCKER_VERSION=28.0.1
 ARG KIND_VERSION=v0.27.0
 ARG KIND_NODE_TAG=v1.32.2
 ARG CRANE_VERSION=v0.20.2
+ARG HELM_VERSION=v3.17.3
 ARG FAKE_SERVING_BUILD_IMAGE=golang:1.25
 ARG FAKE_SERVING_BASE_IMAGE=gcr.io/distroless/static:nonroot
+ARG CERT_MANAGER_VERSION=v1.16.2
+ARG EVAL_NGINX_IMAGE=nginxinc/nginx-unprivileged:1.27-alpine
 
 # System build deps the xet staticlib + CRD tooling need (mirror run_tests.sh).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      jq libssl-dev pkg-config build-essential curl ca-certificates git \
+      jq libssl-dev pkg-config build-essential curl ca-certificates git python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# docker CLI (talks to the dind sidecar at run time), kind, kubectl, crane.
+# docker CLI (talks to the dind sidecar at run time), kind, kubectl, Helm, crane.
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) CRANE_ARCH=x86_64; DOCKER_ARCH=x86_64 ;; \
@@ -56,6 +56,8 @@ RUN set -eux; \
     KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"; \
     curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KVER}/bin/linux/${TARGETARCH}/kubectl"; \
     chmod +x /usr/local/bin/kubectl; \
+    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin --strip-components=1 "linux-${TARGETARCH}/helm"; \
     curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz" \
       | tar -xz -C /usr/local/bin crane
 
@@ -85,10 +87,47 @@ RUN set -eux; mkdir -p /images; \
     crane pull --platform "linux/${TARGETARCH}" "${FAKE_SERVING_BASE_IMAGE}"     /images/fake-serving-base.tar; \
     crane pull --platform "linux/${TARGETARCH}" docker.io/library/busybox:latest /images/busybox.tar
 
-# Sanity: fail the build early if anything is missing.
-RUN go version && kind --version && kubectl version --client=true -o yaml >/dev/null \
-    && cargo --version && docker --version \
-    && test -s /images/kindest-node.tar && test -s /images/fake-serving-build.tar \
-    && test -s /images/fake-serving-base.tar && test -s /images/busybox.tar
+# The deployed eval needs cert-manager for webhook certificates and nginx for
+# its CPU-only runtime fixtures. Derive the cert-manager image set from the
+# manifest so a version change cannot leave an unbaked image behind.
+RUN set -eux; \
+    mkdir -p /eval; \
+    curl -fsSLo /eval/cert-manager.yaml \
+      "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"; \
+    grep -Fq "app.kubernetes.io/version: \"${CERT_MANAGER_VERSION}\"" /eval/cert-manager.yaml; \
+    grep -oE '^[[:space:]]+image: "?[^"[:space:]]+' /eval/cert-manager.yaml \
+      | awk '{print $2}' | tr -d '"' | sort -u > /eval/cert-manager-images.txt; \
+    test -s /eval/cert-manager-images.txt; \
+    i=0; \
+    while read -r image; do \
+      crane pull --platform "linux/${TARGETARCH}" "$image" "/images/cert-manager-${i}.tar"; \
+      i=$((i + 1)); \
+    done < /eval/cert-manager-images.txt; \
+    test "$i" -eq "$(wc -l < /eval/cert-manager-images.txt)"; \
+    crane pull --platform "linux/${TARGETARCH}" "${EVAL_NGINX_IMAGE}" /images/eval-nginx.tar
+
+# Fail the build before publication if a tool or offline archive is incomplete.
+RUN set -eux; \
+    go version; \
+    kind --version; \
+    kubectl version --client=true -o yaml >/dev/null; \
+    test "$(helm version --template '{{.Version}}')" = "${HELM_VERSION}"; \
+    python3 --version; \
+    cargo --version; \
+    docker --version; \
+    for archive in /images/kindest-node.tar /images/fake-serving-build.tar \
+      /images/fake-serving-base.tar /images/busybox.tar /images/eval-nginx.tar; do \
+      test -s "$archive"; \
+      tar -tf "$archive" >/dev/null; \
+    done; \
+    i=0; \
+    while read -r _; do \
+      archive="/images/cert-manager-${i}.tar"; \
+      test -s "$archive"; \
+      tar -tf "$archive" >/dev/null; \
+      i=$((i + 1)); \
+    done < /eval/cert-manager-images.txt; \
+    test "$i" -gt 0; \
+    test "$i" -eq "$(wc -l < /eval/cert-manager-images.txt)"
 
 WORKDIR /

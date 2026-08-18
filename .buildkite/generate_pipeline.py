@@ -111,11 +111,10 @@ IMAGES = [
     # ome-scheduler: kube-scheduler + OMEGangPack. Separate Go module
     # under scheduler/; pure-Go static binary, no xet.
     ("ome-scheduler", "ome-scheduler", "dockerfiles/ome-scheduler.Dockerfile"),
-    # kind-ci: toolchain + baked kindest/node & busybox for the GKE-backed KIND
-    # step (integration-test-kind-gke) and the offline kind validation Job. The
-    # RC cluster is egress-restricted, so this is built on TW (has egress) and
-    # mirrored to prod ECR (which the cluster can pull); at run time nothing is
-    # fetched from a public registry. See dockerfiles/kind-ci.Dockerfile.
+    # kind-ci: offline toolchain and image archives for the GKE-backed KIND
+    # suites, including cert-manager and the OMENative eval runtime fixture.
+    # It is built on TW (with egress) and mirrored to the registry reachable
+    # from the restricted GKE queue. See dockerfiles/kind-ci.Dockerfile.
     ("kind-ci", "kind-ci", "dockerfiles/kind-ci.Dockerfile"),
 ]
 
