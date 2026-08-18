@@ -136,12 +136,11 @@ var _ = ginkgo.Describe("OMENative reconciled IR teardown (KIND)", ginkgo.Ordere
 		Expect(k8sClient.Delete(suiteCtx, fix.ISVC)).To(Succeed())
 
 		// Ordering watch: each poll records, per pod, whether it was
-		// observed OUT of serving (ome.io/serving gate down, or no longer
-		// a Ready endpoint of the routed Service — Service deletion
-		// counts: nothing routes to it) while the pod object still
-		// existed un-deleted. A pod that disappears without that
-		// observation was killed while routable — the exact ordering the
-		// teardown contract forbids. The IR must be seen Terminating WITH
+		// observed OUT of serving while the pod object still existed. The
+		// serving gate remains observable while a pod is Terminating; for
+		// a live pod, removal from the routed Service also counts. A pod
+		// that disappears without either observation violates the drain
+		// contract. The IR must be seen Terminating WITH
 		// the finalizer while pods remain.
 		drainSeen := map[string]bool{}
 		gone := map[string]bool{}
@@ -167,10 +166,13 @@ var _ = ginkgo.Describe("OMENative reconciled IR teardown (KIND)", ginkgo.Ordere
 					continue
 				}
 				g.Expect(err).NotTo(HaveOccurred())
+				if !podreadiness.IsServing(pod) {
+					drainSeen[name] = true
+				}
 				if pod.DeletionTimestamp != nil {
 					continue
 				}
-				if !podreadiness.IsServing(pod) || !podPublishedReady(g, ns.Name, routedSvc, name) {
+				if !podPublishedReady(g, ns.Name, routedSvc, name) {
 					drainSeen[name] = true
 				}
 			}

@@ -1,20 +1,20 @@
 # Track A — the GKE Buildkite agent queue for `integration-test-kind-gke`
 
 This is the setup to stand up a dedicated **`gke-kind-x86`** Buildkite queue on
-the MSL GCP cluster for the sharded OMENative KIND suite. The suite already runs
+the MSL GCP cluster for the grouped OMENative KIND suite. The suite already runs
 in CI: `generate_pipeline.py` emits `integration-test-kind-gke` **by default**,
 targeting the live `gke-tpu-v7x` queue (via the per-step `kubernetes` plugin,
-which lands the job on that pool's CPU nodes). It stays `soft_fail: true` so it
-never gates merges. Disable it entirely with `GKE_KIND_ENABLED=0`; retarget it
-with `GKE_KIND_QUEUE=<queue>` once this dedicated CPU queue exists. Keep any
-queue you point it at live — a step targeting a queue with no agents hangs every
-build, and `soft_fail` doesn't help because the job never runs to fail.
+which lands the job on that pool's CPU nodes). The package step and every named
+test job gate the build. Disable the group only as an emergency measure with
+`GKE_KIND_ENABLED=0`; retarget it with `GKE_KIND_QUEUE=<queue>` once this
+dedicated CPU queue exists. Keep any queue you point it at live—a step targeting
+a queue with no agents waits indefinitely.
 
 ## Why GKE (recap)
 
 The KIND suite needs real `kind` node containers, which need bridge networking
 and writable net sysctls (`net.ipv4.ip_forward=1`, …). The TW dind forbids that
-(read-only `/proc/sys/net`), so its step is parked. **We proved** on
+(read-only `/proc/sys/net`), so the suite runs on GKE. **We proved** on
 `msl-gcp-usc1-rc-1` that a **privileged** pod there *can* boot kind offline and
 its pod networking works — so GKE is the path.
 
@@ -42,7 +42,7 @@ agent-stack-k8s controller (Deployment on the GKE cluster)
   • for each job, creates a Job pod from the queue's pod-spec-patch
         │
         ▼
-  Job pod (one per shard)
+  Job pod (one per named semantic group)
    ├─ checkout (agent-stack-k8s init): git clone mslsrc/ome via proxy
    ├─ container "container-0": image = kind-ci (prod ECR); runs
    │     sh .buildkite/run_kind_tests_gke.sh  (offline; DOCKER_HOST→dind)
@@ -55,10 +55,11 @@ agent-stack-k8s controller (Deployment on the GKE cluster)
    (not `baseline`/`restricted`) and no Gatekeeper/Policy-Controller block on
    `privileged` / `hostPath`. (We ran a privileged Job in `def-sandbox` for the
    validation, so this is likely already OK there.)
-2. **A node pool** sized for the fan-out. Each shard pod ≈ dind + kind (2 nodes)
-   + Go test compile → budget ~8–12 Gi RAM, ~4 vCPU, ~20 Gi ephemeral **per
-   pod**. For `parallelism: 8`, size for 8 concurrent pods (e.g. 8×
-   `e2-standard-8`, or fewer larger nodes; leave headroom).
+2. **A node pool** sized for the fan-out. Each job pod runs one three-node KIND
+   cluster and requests 5 vCPU, 14 GiB RAM, and 24 GiB ephemeral storage across
+   its workload and dind containers. `KIND_SPEC_GROUPS` controls the number of
+   concurrent jobs; leave room for jobs to queue when the full fan-out exceeds
+   available capacity.
 3. **Corp proxy egress** for the controller + agent to reach
    `agent.buildkite.com` (job polling) and the git remote for `mslsrc/ome`
    (checkout). Confirm the proxy endpoint/env (`HTTPS_PROXY`, `NO_PROXY`) or the
@@ -143,12 +144,9 @@ kubectl -n <agent-ns> create secret generic buildkite-agent-token \
    under `queue=gke-kind-x86` in Buildkite.
 3. Point the step at the new queue with **`GKE_KIND_QUEUE=gke-kind-x86`** in the
    `ome` pipeline env (the step is already emitted by default on `gke-tpu-v7x`).
-4. Open a PR touching `.buildkite/`; confirm the step fans into 8 jobs, each
-   runs a disjoint 9-file shard, all green. It ships `soft_fail: true` so this
-   first run doesn't gate merges.
-5. Once reliably green: flip `soft_fail: false` in `_gke_kind_step`
-   (`generate_pipeline.py`) and **delete the parked TW `integration-test-kind`
-   step**.
+4. Open a PR touching `.buildkite/`; confirm every named semantic job owns a
+   disjoint file set and all jobs pass. The package and test jobs are hard
+   gates, so any failure blocks the merge.
 
 ## How this was de-risked before the queue existed
 

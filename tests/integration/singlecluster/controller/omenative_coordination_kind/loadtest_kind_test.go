@@ -12,6 +12,8 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
+const loadRolloutTimeout = 8 * time.Minute
+
 // Behavior test H — load test that exercises RatioBalanced + the
 // MaxUnavailable gate at scale on KIND.
 //
@@ -121,7 +123,7 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 				"engine returns to full 15 serving after rollout")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
-		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		}).WithTimeout(loadRolloutTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		stop()
 	})

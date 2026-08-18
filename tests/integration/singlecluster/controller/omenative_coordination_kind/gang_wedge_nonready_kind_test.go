@@ -12,33 +12,13 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// stalledGangLifecycleJSON is fastDispositionLifecycleJSON plus a seconds-scale
-// stalledGangGracePeriod, so the partial-gang escape is reachable inside a spec
-// instead of at the 5m production default.
+// stalledGangLifecycleJSON keeps recovery paths within the test budget.
 const stalledGangLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},` +
 	`"stuckPodGracePeriod":"10s","stalledGangGracePeriod":"15s","autoMigrate":{"maxAttempts":2}}`
 
-// Gang wedge: an Instance that loses a gang member while NOT Ready.
-//
-// Root cause: https://www.internalfb.com/intern/px/p/cg1pj/. Reproduced live on
-// msl-gcp-usc1-2-tpu on 2026-08-12 with the recipe these specs encode: roll a
-// multi-pod gang, make the new revision slow to become Ready, and drain a node
-// under it while the roll is in flight.
-//
-// RecreateInstanceOnPodRestart promises "lose a pod, rebuild the whole gang".
-// It kept that promise only from Phase=Ready: DetectRestartTrigger rejected
-// every other phase, and Create's partial-Instance backfill defers to Restart
-// only when the Instance is Ready. Below Ready the missing pod was recreated
-// alone, at the SAME Incarnation, leaving the surviving sibling bound — which
-// for a gang-scheduled workload pins the scheduler to a domain that can no
-// longer hold the gang, permanently.
-//
-// A gang is most fragile exactly when it is not Ready: forming and rolling are
-// long windows (tens of minutes of cold compile on the real workload), so a
-// drain landing inside one is an ordinary coincidence rather than a rare one.
-// Field measurement on four wedged production gangs: leader and worker carried
-// identical Incarnation (74/74, 67/67, 164/164, 10/10) with the workers 4 days
-// old and the leaders ~1h — Create backfill, not whole-Instance Restart.
+// A partially materialized gang that loses a member must restart as a unit.
+// Backfilling only the missing pod can leave a surviving placement anchor that
+// prevents the gang from being scheduled together again.
 var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Ready", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 
@@ -51,11 +31,7 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// The control. Same event, Instance Ready. It establishes that the
-	// drain-shaped event recovers on its own, so a failure in the next spec is
-	// attributable to the phase and to nothing else. Live control on gke-2:
-	// Ready -> Restarting, incarnation 1 -> 2, survivor Terminating, gang back
-	// in ~3.5 min.
+	// The Ready case establishes the expected whole-gang restart behavior.
 	ginkgo.It("Ready Instance: losing a gang member restarts the whole gang", func() {
 		const name = "gw-ready"
 		configureFastDisposition()
@@ -93,10 +69,9 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// The defect. Identical event, Instance still forming.
+	// The forming case exercises the same member loss before readiness.
 	//
-	// Two conditions make this the production shape rather than a cosmetic
-	// variation, and both are set up explicitly:
+	// Two conditions make the scenario meaningful:
 	//
 	//   - the Instance must be NOT Ready when the member is lost. The startup
 	//     delay holds it out of Ready; without it the window is milliseconds and
@@ -105,15 +80,12 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 	//     survivor into a permanent anchor rather than a transient one, and it is
 	//     the discriminator the controller keys on: a gang whose replacement can
 	//     still be placed is merely slow and must NOT be recreated. Cordoning
-	//     every worker node reproduces "the domain cannot fit the remaining
-	//     member" without needing real TPU topology, and cordoning does not
-	//     evict, so the survivor stays bound exactly as it does in the field.
+	//     every worker node prevents placement without evicting the survivor.
 	ginkgo.It("Creating Instance: a stalled partial gang is recreated, not backfilled", func() {
 		const name = "gw-creating"
 		configureLifecycleConfig(stalledGangLifecycleJSON)
 		// Never reaches Ready: the startup delay holds every pod NotReady, so the
-		// Instance sits in Creating/CreatePods. This is the exact production
-		// shape -- all four wedged gangs were Phase=Creating, Operation=Create.
+		// Instance remains in Creating/CreatePods.
 		fix := newCoordFixture(ns.Name, WithISVCName(name),
 			WithoutDecoder(),
 			WithEngineWorkerSize(1),
@@ -132,6 +104,8 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 			g.Expect(insts).To(HaveLen(1))
 			g.Expect(insts[0].Phase).NotTo(Equal(v1beta1.OMENativeInstanceReady),
 				"the startup delay must hold the Instance out of Ready")
+			g.Expect(insts[0].PodCount).To(Equal(int32(2)),
+				"status must record the complete gang before testing member loss")
 			formingIncarnation = insts[0].Incarnation
 			g.Expect(boundGangPods(g, ns.Name, name)).To(Equal(2),
 				"waiting for both gang members to be bound")
@@ -165,21 +139,8 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PENDING — a known remaining gap, not a flake.
-	//
-	// The same wedge is reachable from Phase=Updating: roll a gang, make the new
-	// revision slow to become Ready, and lose a member while the roll is in
-	// flight. Reproduced live on msl-gcp-usc1-2-tpu on 2026-08-12: instance
-	// Updating/Drain at incarnation 2, leader node drained, leader Pending and
-	// worker Running at the SAME incarnation 9+ minutes later, with the
-	// scheduler reporting the production error verbatim --
-	//   pinned domain 0027bcdb... cannot fit all remaining gang members
-	//
-	// stalledGangPhase deliberately admits only Creating and Failed today.
-	// Updating is owned by the update state machine, which is mid-way through
-	// its own drain/recreate of the pod set, so routing it into a whole-Instance
-	// Restart needs the interaction between the two worked out first rather than
-	// a phase added to a list. Un-pend this spec with that change.
+	// The update state machine owns pod churn while Phase=Updating, so restart
+	// detection deliberately suppresses this case.
 	ginkgo.PIt("Updating Instance: a stalled partial gang mid-roll is recreated", func() {
 		const name = "gw-updating"
 		configureLifecycleConfig(stalledGangLifecycleJSON)

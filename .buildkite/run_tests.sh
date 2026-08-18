@@ -73,3 +73,28 @@ make test
 # the average drops below 48% the target exits non-zero and fails
 # this step.
 make coverage
+
+# Reuse the already-warm Go and Rust build caches to produce the exact-commit
+# KIND suite binary once. Consumer jobs use this bundle instead of compiling.
+echo "--- package OMENative KIND test binary ---"
+make dep-crds
+kind_artifact_stage="$(mktemp -d)"
+kind_artifact_dir=".buildkite/artifacts"
+kind_test_binary="omenative_coordination_kind.test"
+mkdir -p "$kind_artifact_stage/dep-crds" "$kind_artifact_dir"
+go test -c \
+  -o "$kind_artifact_stage/$kind_test_binary" \
+  ./tests/integration/singlecluster/controller/omenative_coordination_kind
+cp -R tests/integration/dep-crds/keda "$kind_artifact_stage/dep-crds/"
+cp -R tests/integration/dep-crds/scheduler-plugins "$kind_artifact_stage/dep-crds/"
+kind_test_sha256="$(sha256sum "$kind_artifact_stage/$kind_test_binary" | awk '{print $1}')"
+{
+  printf 'state=ready\n'
+  printf 'commit=%s\n' "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
+  printf 'goos=%s\n' "$(go env GOOS)"
+  printf 'goarch=%s\n' "$(go env GOARCH)"
+  printf 'sha256=%s\n' "$kind_test_sha256"
+} >"$kind_artifact_stage/manifest"
+tar -C "$kind_artifact_stage" -czf \
+  "$PWD/$kind_artifact_dir/omenative-kind-test.tgz" .
+rm -rf -- "$kind_artifact_stage"

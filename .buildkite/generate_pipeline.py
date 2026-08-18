@@ -11,6 +11,7 @@ Usage:
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
     BUILDKITE_COMMIT          – full commit SHA
+    BUILDKITE_BUILD_NUMBER    – pipeline-unique build number
     BUILDKITE_PULL_REQUEST    – pull request number, or "false"
     BUILDKITE_PULL_REQUEST_BASE_BRANCH – pull request base branch
     OME_PIPELINE_MODE         – pipeline to generate ("daily" or "standard")
@@ -24,8 +25,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import textwrap
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -37,6 +40,7 @@ AWS_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "588845226011")
 # policy-restricted clusters need the prod-tagged copy.
 PROD_AWS_ACCOUNT_ID = os.environ.get("PROD_AWS_ACCOUNT_ID", "168653207203")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
+BUILD_NUMBER = os.environ.get("BUILDKITE_BUILD_NUMBER", "local")
 ECR_REGISTRY = os.environ.get(
     "ECR_REGISTRY", f"{AWS_ACCOUNT_ID}.dkr.ecr.{AWS_REGION}.amazonaws.com"
 )
@@ -72,26 +76,96 @@ BUILD_QUEUE = "tw-cpu-x86"
 # its CPU node pool via the per-step kubernetes plugin. Flip GKE_KIND_QUEUE to a
 # dedicated GKE CPU queue (e.g. gke-kind-x86) once infra provisions one.
 GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-tpu-v7x")
-# Fan-out for the GKE KIND suite: N parallel pods, each running a disjoint
-# subset of the ~72 spec files (sharded by BUILDKITE_PARALLEL_JOB in
-# run_kind_tests_gke.sh). 4 → ~18 files/shard. Each shard reserves ~5 CPU /
-# 14Gi across its two containers (see _gke_kind_step), so the fan-out is bounded
-# by what the shared queue's node pool can hold concurrently, not by the file
-# count — over-sharding leaves pods Pending and stalls the build. Raise once a
-# dedicated CPU queue with real capacity exists.
-GKE_KIND_PARALLELISM = int(os.environ.get("GKE_KIND_PARALLELISM", "4"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/omenative_coordination_kind"
+EVAL_CASE_DIR = REPO_ROOT / "hack/omenative-testing/perm/isvcs"
+
+# Each group gets one three-node KIND cluster. Groups balance observed runtime
+# while keeping related specs together. Exact ownership makes a new spec fail
+# pipeline generation until it is classified.
+KIND_SPEC_GROUPS = (
+    ("foundation-lifecycle", "Foundation and lifecycle", (
+        "baseline_no_coord", "diagnostic", "lifecycle_basic", "lifecycle",
+        "single_replica", "regression", "watches",
+    )),
+    ("status-events-services", "Status, events, and services", (
+        "events", "status", "status_surface", "producer_services",
+        "producer_traffic", "peer_discovery", "multipod_rank0_service",
+        "concurrent_isvcs",
+    )),
+    ("runtime-retry-recovery", "Runtime, retry, and recovery", (
+        "bad_image", "disposition", "retry_block", "runtime_corrective_recovery",
+        "runtime_owned_runner_shape", "runtime_resolution",
+    )),
+    ("pd-topology-isolation", "PD topology and isolation", (
+        "pd", "pd_isolation", "pd_three_way", "pd_concurrent", "independent",
+    )),
+    ("bluegreen-core", "BlueGreen rollouts", (
+        "bluegreen", "bluegreen_n3", "bluegreen_inplaceonly_happy",
+        "inplace_maxunavailable",
+    )),
+    ("ratio-core", "RatioBalanced coordination", (
+        "ratiobalanced", "ratio_n3", "ratio_pause_resume",
+    )),
+    ("ratio-load", "RatioBalanced load", (
+        "loadtest",
+    )),
+    ("sequential-core", "Sequential coordination", (
+        "sequential", "n3_sequential",
+    )),
+    ("sequential-variants", "Sequential rollout variants", (
+        "sequential_n3_engine_first", "sequential_soak", "sequential_inplace",
+        "sequential_recreatepod",
+    )),
+    ("sequential-interleavings", "Sequential rollout interleavings", (
+        "sequential_pause_mid", "sequential_scale_during",
+    )),
+    ("update-core", "Core update strategies", (
+        "update", "inplace", "recreate_pod", "mixed_strategy",
+        "percomponent_surge",
+    )),
+    ("percomponent-maxsurge", "Multi-instance maxSurge", (
+        "percomponent_maxsurge_multiinstance",
+    )),
+    ("rolling-updates", "Rolling update strategies", (
+        "rolling_recreatepod", "rolling_inplace", "rolling_inplaceonly_reject",
+        "rolling_cancel_revert",
+    )),
+    ("gang-recovery", "Gang recovery and wedge", (
+        "gang_corrective_rollout", "gang_wedge_nonready",
+    )),
+    ("gang-surge-multipod", "Gang surge and multi-pod", (
+        "concurrent_gang_surge", "gang_surge_floor", "multipod_inplace",
+        "multipod_recreatepod", "multipod_surge_fallback", "topology_podgroup",
+    )),
+    ("migration-relocation", "Migration and relocation", (
+        "auto_migrate", "auto_migrate_multiinstance", "migrate", "interleave_extra",
+    )),
+    ("pause-cancel-interleavings", "Pause, cancel, and interleavings", (
+        "pause", "pause_midrollout", "inference_replica_pause",
+        "cancel_midrollout", "interleave",
+    )),
+    ("scale-transitions", "Scale transitions", (
+        "bounded_scale_down", "scale_during_rollout", "bluegreen_scale_down_during",
+    )),
+    ("deletion-disruption", "Deletion and disruption", (
+        "cleanup_lifecycle", "force_delete", "pdb_eviction", "teardown",
+        "partial_failure",
+    )),
+)
 
 
 def _truthy(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-# The GKE KIND step runs by default. It stays soft_fail (below) so an unproven
-# shard never gates merges, and GKE_QUEUE targets a live queue so the step never
-# blocks a build waiting for a nonexistent agent. Kill switch: set
+# The GKE KIND step runs by default and gates the build. GKE_QUEUE targets a
+# live queue so the step does not wait indefinitely for a nonexistent agent.
+# Kill switch: set
 # GKE_KIND_ENABLED=0 to drop the step entirely (e.g. if the queue goes away).
 # See .buildkite/README-gke-kind.md.
 GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", "1"))
+GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
@@ -259,101 +333,202 @@ def _tw_docker_plugin(
     )
 
 
-def _gke_kind_step() -> str:
-    """Emit the sharded GKE-backed KIND step (final 2-space step indent).
+def _kind_ci_image(tag: str) -> str:
+    return f"{PROD_ECR_REGISTRY}/msl_infra/kind-ci:{tag}"
 
-    Runs the omenative_coordination_kind suite on a GKE agent-stack-k8s
-    queue where kind boots (privileged dind → writable /proc/sys/net +
-    ip_forward=1). Buildkite `parallelism` fans it into N pods; each runs a
-    disjoint subset of the ~72 spec files (run_kind_tests_gke.sh partitions
-    by BUILDKITE_PARALLEL_JOB and selects with -ginkgo.focus-file). Emitted by
-    default; drop it with GKE_KIND_ENABLED=0 if the queue goes away.
 
-    The step carries its own pod via the agent-stack-k8s `kubernetes` plugin
-    (podSpecPatch): container-0 runs the offline `kind-ci` image (baked Go +
-    Rust + module/cargo caches + kindest-node/fake-serving tarballs) with
-    DOCKER_HOST pointed at a privileged `dind` sidecar. This lets it run on a
-    shared queue (e.g. gke-tpu-v7x) without a dedicated controller. Both
-    images are on prod ECR (pulled by the node's creds). The test is fully
-    offline (GOPROXY=off, docker load from /images); only git checkout needs
-    egress, which the queue's controller already provides.
-    """
-    # Pin the workload image to THIS commit wherever that image exists. The
-    # baked module cache is built from the go.mod/go.sum of the commit that
-    # produced the image, so a floating tag can pair the suite with a cache
-    # that predates its dependencies — which GOPROXY=off turns into an
-    # unresolvable import. mirror-kind-ci publishes a short-SHA tag to prod
-    # alongside latest, but only on main, so other branches fall back (the
-    # runner's module-cache preflight reports the mismatch when it matters).
-    kindci_tag = COMMIT[:8] if BRANCH == "main" else "latest"
-    kindci = f"168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/kind-ci:{kindci_tag}"
-    dind = "168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/library/docker:28-dind"
-    # container-0 runs the offline kind-ci image against a privileged dind
-    # sidecar. The podSpecPatch is deeply nested, so build it as a dict and emit
-    # it as JSON (a subset of YAML) rather than hand-indenting a block scalar.
-    #
-    # Resources are explicit on BOTH containers. Each shard boots a 3-node kind
-    # cluster (1 control-plane + 2 workers), so a BestEffort pod competing with
-    # sibling shards on one node starves the nested kubelets: multi-pod specs
-    # (gang surge, migration, cross-Component rollout) miss their Eventually
-    # deadlines while single-pod specs still pass. The dind sidecar hosts the
-    # node containers, so it carries the larger share.
-    plugins = [
-        {
-            "kubernetes": {
-                "podSpecPatch": {
-                    "containers": [
-                        {
-                            "name": "container-0",
-                            "image": kindci,
-                            "env": [
-                                {"name": "DOCKER_HOST", "value": "tcp://localhost:2375"},
-                            ],
-                            "resources": {
-                                "requests": {"cpu": "3", "memory": "8Gi", "ephemeral-storage": "8Gi"},
-                                "limits": {"cpu": "6", "memory": "12Gi", "ephemeral-storage": "16Gi"},
-                            },
-                        },
-                        {
-                            "name": "dind",
-                            "image": dind,
-                            "securityContext": {"privileged": True},
-                            "env": [{"name": "DOCKER_TLS_CERTDIR", "value": ""}],
-                            "volumeMounts": [
-                                {"name": "docker-graph", "mountPath": "/var/lib/docker"},
-                            ],
-                            "resources": {
-                                "requests": {"cpu": "2", "memory": "6Gi", "ephemeral-storage": "16Gi"},
-                                "limits": {"cpu": "4", "memory": "8Gi", "ephemeral-storage": "24Gi"},
-                            },
-                        },
-                    ],
-                    "volumes": [{"name": "docker-graph", "emptyDir": {}}],
-                }
-            }
-        }
+def _gke_kind_plugins(image: str, shared_model: bool = False) -> list[dict]:
+    """Agent-stack pod: offline runner plus a privileged Docker sidecar."""
+    runner_mounts = []
+    dind_mounts = [{"name": "docker-graph", "mountPath": "/var/lib/docker"}]
+    volumes = [{"name": "docker-graph", "emptyDir": {}}]
+    if shared_model:
+        model_mount = {"name": "eval-model", "mountPath": "/ome-eval-model"}
+        runner_mounts.append(model_mount)
+        dind_mounts.append(model_mount)
+        volumes.append({"name": "eval-model", "emptyDir": {}})
+
+    pod_spec = {
+        "containers": [
+            {
+                "name": "container-0",
+                "image": image,
+                "env": [{"name": "DOCKER_HOST", "value": "tcp://localhost:2375"}],
+                "volumeMounts": runner_mounts,
+                "resources": {
+                    "requests": {"cpu": "3", "memory": "8Gi", "ephemeral-storage": "8Gi"},
+                    "limits": {"cpu": "6", "memory": "12Gi", "ephemeral-storage": "16Gi"},
+                },
+            },
+            {
+                "name": "dind",
+                "image": f"{PROD_ECR_REGISTRY}/pt_dockerio/library/docker:28-dind",
+                "securityContext": {"privileged": True},
+                "env": [{"name": "DOCKER_TLS_CERTDIR", "value": ""}],
+                "volumeMounts": dind_mounts,
+                "resources": {
+                    "requests": {"cpu": "2", "memory": "6Gi", "ephemeral-storage": "16Gi"},
+                    "limits": {"cpu": "4", "memory": "8Gi", "ephemeral-storage": "24Gi"},
+                },
+            },
+        ],
+        "volumes": volumes,
+    }
+    pod_spec["nodeSelector"] = {"kubernetes.io/arch": "amd64"}
+    return [{"kubernetes": {"podSpecPatch": pod_spec}}]
+
+
+def _kind_spec_files() -> list[str]:
+    pattern = re.compile(r"ginkgo\.(?:Describe|DescribeTable)\(")
+    return [
+        path.name
+        for path in sorted(KIND_SUITE_DIR.glob("*_kind_test.go"))
+        if pattern.search(path.read_text())
     ]
-    return (
-        f'  - label: ":test_tube: Integration Tests (KIND on GKE)"\n'
-        f'    key: "integration-test-kind-gke"\n'
-        f"{_gh_status('integration-test-kind-gke', indent=4)}\n"
-        # soft_fail until proven green on the queue; flip off (and delete the
-        # parked TW integration-test-kind step) once it is. Paired with
-        # GKE_KIND_ENABLED so enabling doesn't immediately gate merges.
-        f"    soft_fail: true\n"
-        # Wait for the prod-ECR mirror: the step pulls kind-ci:latest, whose
-        # baked module cache is built from the go.mod/go.sum of the commit that
-        # produced it. Without this the step can start before the mirror lands
-        # and pull the previous image, which fails under GOPROXY=off on any
-        # commit that changed dependencies.
-        f'    depends_on: "mirror-kind-ci"\n'
-        f"    parallelism: {GKE_KIND_PARALLELISM}\n"
-        f"    agents:\n"
-        f'      queue: "{GKE_QUEUE}"\n'
-        f"    command: |\n"
-        f"      sh .buildkite/run_kind_tests_gke.sh\n"
-        f"    plugins: {json.dumps(plugins)}\n"
+
+
+def _kind_spec_groups() -> list[tuple[str, str, list[str]]]:
+    """Return the semantic groups after proving exact ownership of every spec."""
+    actual = set(_kind_spec_files())
+    owners: dict[str, str] = {}
+    groups = []
+    slugs = set()
+    for slug, label, stems in KIND_SPEC_GROUPS:
+        if not stems or slug in slugs:
+            raise RuntimeError(f"invalid or duplicate KIND spec group: {slug}")
+        slugs.add(slug)
+        files = [f"{stem}_kind_test.go" for stem in stems]
+        for filename in files:
+            if filename in owners:
+                raise RuntimeError(
+                    f"KIND spec {filename} belongs to both {owners[filename]} and {slug}"
+                )
+            owners[filename] = slug
+        groups.append((slug, label, files))
+
+    mapped = set(owners)
+    if missing := sorted(actual - mapped):
+        raise RuntimeError(f"unclassified KIND specs: {', '.join(missing)}")
+    if stale := sorted(mapped - actual):
+        raise RuntimeError(f"mapped KIND specs do not exist: {', '.join(stale)}")
+    return groups
+
+
+def _gke_kind_group() -> str:
+    """A small set of named semantic jobs, each with its own KIND cluster."""
+    plugins = _gke_kind_plugins(
+        _kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}")
     )
+    children = []
+    for slug, label, files in _kind_spec_groups():
+        focus = "/(" + "|".join(re.escape(filename) for filename in files) + ")$"
+        file_label = "file" if len(files) == 1 else "files"
+        children.append(
+            {
+                "label": f":test_tube: {label} ({len(files)} {file_label})",
+                "key": f"kind-gke-{slug}",
+                "depends_on": "package-kind-test-image",
+                "env": {"OME_KIND_FOCUS": focus},
+                "agents": {"queue": GKE_QUEUE},
+                "command": "sh .buildkite/run_kind_tests_gke.sh",
+                "plugins": plugins,
+            }
+        )
+    group = {
+        "group": ":test_tube: Integration Tests (KIND on GKE)",
+        "key": "integration-test-kind-gke",
+        "notify": [{"github_commit_status": {"context": "integration-test-kind-gke"}}],
+        "steps": children,
+    }
+    return _yaml_block([group], 2)
+
+
+def _package_kind_test_image_step() -> str:
+    """Put the exact Go test bundle in a commit-tagged runner image for GKE."""
+    dependencies = '    depends_on: "test"\n'
+    if BRANCH == "main":
+        dependencies = (
+            "    depends_on:\n"
+            '      - "test"\n'
+            '      - "mirror-kind-ci"\n'
+        )
+    return (
+        '  - label: ":package: Package exact Go KIND runner"\n'
+        '    key: "package-kind-test-image"\n'
+        f"{dependencies}"
+        f"{_auto_retry(indent=4)}\n"
+        "    env:\n"
+        f'      AWS_REGION: "{AWS_REGION}"\n'
+        f'      PROD_ECR_REGISTRY: "{PROD_ECR_REGISTRY}"\n'
+        "    secrets:\n"
+        '      - "PROD_ECR_AUTH_TOKEN"\n'
+        "    agents:\n"
+        f'      queue: "{BUILD_QUEUE}"\n'
+        "    command: |\n"
+        "      sh .buildkite/package_kind_test_image.sh\n"
+        "    plugins:\n"
+        f"{_tw_docker_plugin(CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=6)}\n"
+    )
+
+
+def _eval_case_groups() -> list[tuple[str, str, list[str]]]:
+    """Group every committed eval case by its stable feature/topology axes."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    seen: set[str] = set()
+    for path in sorted(EVAL_CASE_DIR.glob("*/p*.yaml")):
+        case_id = path.stem
+        if case_id in seen:
+            raise RuntimeError(f"duplicate OMENative eval case id: {case_id}")
+        seen.add(case_id)
+        header = path.read_text().splitlines()[0].lstrip("#").strip()
+        fields = dict(token.split("=", 1) for token in header.split() if "=" in token)
+        topology = fields.get("topo")
+        if not topology:
+            raise RuntimeError(f"OMENative eval case has no topo field: {path}")
+        groups.setdefault((path.parent.name, topology), []).append(case_id)
+
+    def case_number(case_id: str) -> int:
+        return int(case_id.removeprefix("p"))
+
+    return [
+        (feature, topology, sorted(cases, key=case_number))
+        for (feature, topology), cases in sorted(groups.items())
+    ]
+
+
+def _gke_eval_group() -> str:
+    """Main-only deployed OMENative eval, split into named feature/topology jobs."""
+    plugins = _gke_kind_plugins(_kind_ci_image(f"eval-{COMMIT[:8]}"), shared_model=True)
+    children = []
+    for feature, topology, cases in _eval_case_groups():
+        slug = f"{feature}-{topology}".replace("_", "-")
+        prometheus = "true" if feature in ("canary", "reject") else "false"
+        children.append(
+            {
+                "label": f":test_tube: {feature} / {topology} ({len(cases)} cases)",
+                "key": f"omenative-e2e-{slug}",
+                "depends_on": "package-kind-eval-image",
+                "timeout_in_minutes": 180,
+                "env": {
+                    "OME_KIND_PROMETHEUS_ENABLED": prometheus,
+                    "OME_EVAL_CASE_CONCURRENCY": os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"),
+                    "OME_EVAL_EXCLUSIVE_PODS": os.environ.get("GKE_EVAL_EXCLUSIVE_PODS", "64"),
+                    "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
+                },
+                "agents": {"queue": GKE_QUEUE},
+                "command": "sh .buildkite/run_omenative_eval_gke.sh "
+                + " ".join([feature, topology, *cases]),
+                "artifact_paths": ["hack/omenative-testing/perm/results/**/*"],
+                "plugins": plugins,
+            }
+        )
+    group = {
+        "group": ":test_tube: OMENative YAML E2E (KIND on GKE)",
+        "key": "omenative-e2e-kind-gke",
+        "notify": [{"github_commit_status": {"context": "omenative-e2e-kind-gke"}}],
+        "steps": children,
+    }
+    return _yaml_block([group], 2)
 
 
 def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str = "") -> str:
@@ -398,21 +573,6 @@ def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str 
 
 
 def ci_steps() -> str:
-    # The KIND step drives the TW agent's dind daemon (kind nodes run as
-    # sibling containers, not nested ones). Mounting the daemon's
-    # /var/run/docker.sock is sufficient: the in-container docker CLI
-    # reaches it at the default path. Do NOT add a second mount of the
-    # supervisor-side socket path (/data/buildkite/dind/run/docker.sock)
-    # — a step configured with it died at container start. Network mode
-    # is deliberately NOT set: the TW docker wrapper injects
-    # --network host into this container anyway, which is also what
-    # makes the apiserver port kind publishes on the dind's loopback
-    # reachable from the test process.
-    kind_plugin = _tw_docker_plugin(
-        CI_IMAGE,
-        indent=14,
-        extra_volumes=("/var/run/docker.sock:/var/run/docker.sock",),
-    )
     base = textwrap.dedent(
         f"""\
         steps:
@@ -455,6 +615,8 @@ def ci_steps() -> str:
 {_infra_retry()}
             command: |
               sh .buildkite/run_tests.sh
+            artifact_paths:
+              - ".buildkite/artifacts/omenative-kind-test.tgz"
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
@@ -474,41 +636,6 @@ def ci_steps() -> str:
               queue: "{DEFAULT_QUEUE}"
             plugins:
 {_tw_docker_plugin(CI_IMAGE, indent=14)}
-
-          - label: ":test_tube: Integration Tests (KIND)"
-            key: "integration-test-kind"
-{_gh_status("integration-test-kind")}
-            # KIND-backed suites under
-            # tests/integration/singlecluster/controller/omenative_coordination_kind/
-            # exercise rollout-coordination contracts against real
-            # kubelet + scheduler + containerd that envtest
-            # can't model (drain races, in-place
-            # patches, Sequential handoff timing, RatioBalanced gate at
-            # scale). ~30-60 min wall-clock full suite.
-            #
-            # Independent from integration-test — they run in parallel.
-            #
-            # soft_fail: the TW dind cannot run kind node containers
-            # today. Its /proc/sys is read-only, which breaks bridge
-            # networking three independent ways: kind's dual-stack `docker network create
-            # --ipv6` cannot write net.ipv6.conf.default.forwarding;
-            # veth attach to even an IPv4-only bridge cannot write the
-            # interface's disable_ipv6 sysctl; and net.ipv4.ip_forward
-            # is 0 and cannot be enabled. run_kind_tests.sh reproduces
-            # this in its first-minute preflight and exits with a FATAL
-            # naming the gap, so the parked step stays cheap and the
-            # signal stays visible. Flip to a hard fail once the
-            # Buildkite dind task (msl_infra/buildkite) gives dockerd a
-            # writable /proc/sys/net and ip_forward=1 — everything else
-            # (socket mount, docker CLI, IPv4 kind network pre-create,
-            # node-image pre-pull, BuildKit build) already works.
-            soft_fail: true
-            command: |
-              sh .buildkite/run_kind_tests.sh
-            agents:
-              queue: "{DEFAULT_QUEUE}"
-            plugins:
-{kind_plugin}
 
           - label: ":racing_car: Perf Tests"
             key: "perf-test"
@@ -605,7 +732,8 @@ def ci_steps() -> str:
     ]
     steps = base + "\n" + "\n".join(drift_checks)
     if GKE_KIND_ENABLED:
-        steps += "\n" + _gke_kind_step()
+        steps += "\n" + _package_kind_test_image_step()
+        steps += "\n" + _gke_kind_group()
     return steps
 
 
@@ -697,6 +825,31 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
     )
 
 
+def _package_kind_eval_image_step() -> str:
+    """Add exact main runtime-image archives to the offline KIND runner."""
+    return textwrap.dedent(
+        f"""\
+          - label: ":package: Package exact OMENative eval images"
+            key: "package-kind-eval-image"
+{_gh_status("package-kind-eval-image")}
+            depends_on:
+              - "mirror-kind-ci"
+              - "mirror-ome-manager"
+              - "mirror-ome-agent"
+              - "mirror-canary-metrics"
+{_auto_retry()}
+            secrets:
+              - "PROD_ECR_AUTH_TOKEN"
+            agents:
+              queue: "{BUILD_QUEUE}"
+            command: |
+              sh .buildkite/package_kind_eval_image.sh
+            plugins:
+{_tw_docker_plugin(CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=14)}
+        """
+    )
+
+
 def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
     if isinstance(depends_on, list):
         deps = "\n".join(f'              - "{d}"' for d in depends_on)
@@ -742,6 +895,8 @@ def cd_steps() -> str:
             continue
         image_keys.append(f"build-{label}")
         image_keys.append(f"mirror-{label}")
+    if BRANCH == "main" and GKE_EVAL_ENABLED:
+        parts.append(_package_kind_eval_image_step())
     for chart in CHARTS:
         if chart in ("ome-resources", "ome-scheduler", "muse"):
             # These charts stamp an image ref, so wait for the image build + mirror.
@@ -759,6 +914,8 @@ def cd_steps() -> str:
 def generate_pipeline() -> str:
     pipeline = ci_steps()
     pipeline += "\n" + cd_steps()
+    if BRANCH == "main" and GKE_EVAL_ENABLED:
+        pipeline += "\n" + _gke_eval_group()
     return pipeline
 
 

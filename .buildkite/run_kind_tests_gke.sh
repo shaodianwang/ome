@@ -1,69 +1,24 @@
 #!/bin/sh
-# GKE-sharded, OFFLINE KIND integration test step for the BuildKite pipeline.
+# Named OFFLINE KIND integration test step for the BuildKite pipeline.
 #
 # Runs the omenative_coordination_kind suite on a GKE-backed agent. The GKE RC
 # cluster has NO public egress from pods, so this script installs NOTHING at run
-# time — the whole toolchain (Go + module cache, Rust + cargo cache, kind,
-# kubectl, docker CLI, crane) and every base image are baked into the workload
-# image dockerfiles/kind-ci.Dockerfile. This script only:
+# time — KIND, kubectl, the Docker CLI, and every base image are baked into the
+# workload image dockerfiles/kind-ci.Dockerfile. This script only:
 #   1. confirms the privileged dind sidecar is reachable,
 #   2. `docker load`s the baked image tarballs into dind (kind node + the
 #      golang/distroless bases the fake-serving build needs),
-#   3. builds the xet staticlib offline (cargo cache),
-#   4. shards the spec files and runs `go test` offline (baked module cache).
-#
-# Buildkite injects, per parallel job:
-#   BUILDKITE_PARALLEL_JOB        0-based index of this job (0..N-1)
-#   BUILDKITE_PARALLEL_JOB_COUNT  total number of parallel jobs (N)
-# Both default to a single-shard run when unset.
+#   3. loads the exact-commit test binary packaged by the unit-test job,
+#   4. runs the semantic file group selected by OME_KIND_FOCUS.
 #
 # Requires the kind-ci workload image + a privileged docker:dind sidecar (see
 # .buildkite/README-gke-kind.md). /bin/sh, no bashisms.
 set -eu
 
-SUITE_DIR="tests/integration/singlecluster/controller/omenative_coordination_kind"
 IMAGES_DIR="${OME_KIND_IMAGES_DIR:-/images}"   # baked tarball dir in kind-ci
+ARTIFACT_BUNDLE="${OME_KIND_TEST_BUNDLE:-/kind-test/omenative-kind-test.tgz}"
 
-N="${BUILDKITE_PARALLEL_JOB_COUNT:-1}"
-J="${BUILDKITE_PARALLEL_JOB:-0}"
-echo "--- shard ${J} of ${N} (offline) ---"
-
-# Baked cache + offline knobs (belt-and-suspenders; the kind-ci image also sets
-# GOMODCACHE/CARGO_HOME). GOPROXY=off + CARGO_NET_OFFLINE fail FAST if something
-# wasn't baked, instead of hanging on an unreachable registry.
-export GOMODCACHE="${GOMODCACHE:-/go/pkg/mod}"
-export GOFLAGS="${GOFLAGS:--mod=mod}"
-export GOPROXY=off
-export CARGO_NET_OFFLINE=true
-
-# Module-cache preflight. The kind-ci image bakes its module cache from the
-# go.mod/go.sum present when the IMAGE was built, so a commit that changes
-# dependencies needs a rebuilt image. With GOPROXY=off the mismatch otherwise
-# surfaces as "module lookup disabled by GOPROXY=off" from deep inside a package
-# build, minutes in and after a kind cluster has been booted. Check it here, in
-# seconds, and say what is actually wrong.
-#
-# Publishing kind-ci is main-only, so a PR that changes go.mod/go.sum cannot
-# have a matching image until it merges; that case is reported as a skip rather
-# than a failure, because no change to the branch can satisfy it.
-echo "--- preflight: baked module cache covers this commit's go.sum ---"
-if ! missing="$(go mod download all 2>&1)"; then
-  echo "$missing" >&2
-  echo "" >&2
-  echo "The kind-ci image's baked module cache does not cover this commit's" >&2
-  echo "dependencies. Rebuild + mirror kind-ci from a commit whose go.mod/go.sum" >&2
-  echo "match this one, then re-run." >&2
-  case "${BUILDKITE_BRANCH:-}" in
-    main) exit 1 ;;
-    *)
-      echo "" >&2
-      echo "SKIP: kind-ci publishes on main only, so this branch cannot have a" >&2
-      echo "  matching image yet. Coverage returns once the dependency change" >&2
-      echo "  merges and kind-ci is rebuilt." >&2
-      exit 0
-      ;;
-  esac
-fi
+echo "--- named KIND group: ${OME_KIND_FOCUS:-all files} ---"
 
 cleanup_ome_clusters() {
   command -v kind >/dev/null 2>&1 || return 0
@@ -73,7 +28,47 @@ cleanup_ome_clusters() {
     esac
   done || true
 }
-trap cleanup_ome_clusters EXIT
+
+artifact_stage="$(mktemp -d)"
+cleanup() {
+  cleanup_ome_clusters
+  rm -rf -- "$artifact_stage"
+}
+trap cleanup EXIT
+
+echo "--- load exact-commit KIND test bundle ---"
+[ -s "$ARTIFACT_BUNDLE" ] || {
+  echo "FATAL: runner image has no test bundle at $ARTIFACT_BUNDLE" >&2
+  exit 1
+}
+tar -xzf "$ARTIFACT_BUNDLE" -C "$artifact_stage"
+
+manifest="$artifact_stage/manifest"
+[ -s "$manifest" ] || { echo "FATAL: test bundle has no manifest" >&2; exit 1; }
+manifest_value() {
+  sed -n "s/^$1=//p" "$manifest"
+}
+artifact_state="$(manifest_value state)"
+artifact_commit="$(manifest_value commit)"
+artifact_goos="$(manifest_value goos)"
+artifact_goarch="$(manifest_value goarch)"
+artifact_sha256="$(manifest_value sha256)"
+[ "$artifact_state" = ready ] || { echo "FATAL: test bundle is not ready" >&2; exit 1; }
+[ "$artifact_commit" = "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" ] || {
+  echo "FATAL: test bundle commit $artifact_commit does not match $BUILDKITE_COMMIT" >&2
+  exit 1
+}
+[ "$artifact_goos/$artifact_goarch" = linux/amd64 ] || {
+  echo "FATAL: test bundle platform is $artifact_goos/$artifact_goarch, expected linux/amd64" >&2
+  exit 1
+}
+kind_test_binary="$artifact_stage/omenative_coordination_kind.test"
+[ -x "$kind_test_binary" ] || chmod +x "$kind_test_binary"
+printf '%s  %s\n' "$artifact_sha256" "$kind_test_binary" | sha256sum -c -
+mkdir -p tests/integration/dep-crds/keda tests/integration/dep-crds/scheduler-plugins
+cp -R "$artifact_stage/dep-crds/keda/." tests/integration/dep-crds/keda/
+cp -R "$artifact_stage/dep-crds/scheduler-plugins/." \
+  tests/integration/dep-crds/scheduler-plugins/
 
 echo "--- docker preflight: wait for the dind sidecar ---"
 command -v docker >/dev/null 2>&1 || { echo "FATAL: docker CLI missing from kind-ci image." >&2; exit 1; }
@@ -120,12 +115,8 @@ export KIND_NODE_IMAGE
 # the loaded golang/distroless bases without attempting a registry pull.
 export DOCKER_BUILDKIT=0
 
-echo "--- kind / go / cargo versions ---"
-kind --version; go version; cargo --version
-
-echo "--- build xet staticlib (offline, cargo cache) ---"
-make xet-build
-export LD_LIBRARY_PATH="$(pwd)/pkg/xet/target/release"
+echo "--- kind version ---"
+kind --version
 
 # Delete leftover ome-* clusters from a prior job on this daemon.
 kind get clusters 2>/dev/null | while read -r c; do
@@ -134,48 +125,12 @@ kind get clusters 2>/dev/null | while read -r c; do
   esac
 done
 
-# Vendor the optional CRD YAMLs the suite installs (KEDA / Prometheus). Runs off
-# the baked module cache (GOPROXY=off).
-make dep-crds
-
-# ---------------------------------------------------------------------
-# Compute this shard's spec-file subset. Partition the spec files (those with
-# ginkgo.Describe / DescribeTable) round-robin by sorted index: file k -> shard
-# (k mod N). focus-file is a REGEX; anchor with a leading `/` and trailing `$`
-# (dot escaped) so each pattern matches exactly one file — otherwise
-# `inplace_kind_test.go` would also match `multipod_inplace_kind_test.go`.
-# ---------------------------------------------------------------------
-# OME_KIND_FOCUS: run an explicit -ginkgo.focus-file value instead of the shard
-# partition. For by-hand debugging of a single spec (e.g. the first
-# offline-shard proof); unset in normal sharded CI runs.
+echo "--- run precompiled suite (${OME_KIND_FOCUS:-all files}) ---"
 if [ -n "${OME_KIND_FOCUS:-}" ]; then
-  FOCUS_ARGS="-ginkgo.focus-file=${OME_KIND_FOCUS}"
-  SHARD_FILES=" (explicit focus: ${OME_KIND_FOCUS})"
-  echo "--- OME_KIND_FOCUS set; skipping shard partition ---"
+  "$kind_test_binary" -test.v -test.timeout=90m -ginkgo.v \
+    "-ginkgo.focus-file=${OME_KIND_FOCUS}"
 else
-  i=0
-  FOCUS_ARGS=""
-  SHARD_FILES=""
-  for f in $(grep -lE 'ginkgo\.(Describe|DescribeTable)\(' "$SUITE_DIR"/*_kind_test.go | sort); do
-    if [ "$((i % N))" -eq "$J" ]; then
-      base=$(basename "$f")
-      esc=$(printf '%s' "$base" | sed 's/\./\\./g')
-      FOCUS_ARGS="$FOCUS_ARGS -ginkgo.focus-file=/${esc}\$"
-      SHARD_FILES="$SHARD_FILES $base"
-    fi
-    i=$((i + 1))
-  done
-
-  if [ -z "$FOCUS_ARGS" ]; then
-    echo "--- shard ${J}/${N} has no spec files assigned; nothing to run ---"
-    exit 0
-  fi
+  "$kind_test_binary" -test.v -test.timeout=90m -ginkgo.v
 fi
-
-echo "--- shard ${J}/${N} spec files:${SHARD_FILES} ---"
-echo "--- go test (shard ${J}/${N}, offline) ---"
-# shellcheck disable=SC2086  # FOCUS_ARGS is a deliberate list of flags.
-go test "./${SUITE_DIR}/..." \
-  -v -timeout 90m -ginkgo.v $FOCUS_ARGS
 
 # Cluster teardown happens in the EXIT trap (cleanup_ome_clusters).

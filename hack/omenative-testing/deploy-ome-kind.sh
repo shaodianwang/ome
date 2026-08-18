@@ -126,6 +126,7 @@ if [ "$OFFLINE" -eq 1 ]; then
   fi
   require_file "${EVAL_DIR}/cert-manager.yaml"
   require_file "${EVAL_DIR}/cert-manager-images.txt"
+  require_file "${EVAL_DIR}/podgroup-crd.yaml"
   require_file "${IMAGES_DIR}/eval-nginx.tar"
   require_file "${IMAGES_DIR}/fake-serving-build.tar"
   if [ "$PROMETHEUS_ENABLED" = true ]; then
@@ -306,6 +307,13 @@ echo "--- install CRDs ---"
 helm upgrade --install ome-crd charts/ome-crd/ \
   --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace \
   --wait --timeout 180s
+
+if [ "$OFFLINE" -eq 1 ]; then
+  echo "--- install PodGroup CRD ---"
+  kubectl --context "$KCTX" apply -f "${EVAL_DIR}/podgroup-crd.yaml"
+  kubectl --context "$KCTX" wait --for=condition=Established \
+    crd/podgroups.scheduling.x-k8s.io --timeout=60s
+fi
 
 echo "--- install controller ---"
 # hub empty => `ome-manager:<tag>`, matching the loaded image exactly. Both

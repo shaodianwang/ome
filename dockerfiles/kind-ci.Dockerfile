@@ -109,6 +109,13 @@ RUN set -eux; \
     crane pull --platform "linux/${TARGETARCH}" "${EVAL_NGINX_IMAGE}" /images/eval-nginx.tar; \
     crane pull --platform "linux/${TARGETARCH}" "${EVAL_PROMETHEUS_IMAGE}" /images/eval-prometheus.tar
 
+# OME discovers optional PodGroup support once at manager startup. Bake the CRD
+# from the pinned scheduler-plugins module so deployed gang cases exercise it.
+RUN set -eux; \
+    scheduler_plugins_dir="$(go list -m -mod=readonly -f '{{.Dir}}' sigs.k8s.io/scheduler-plugins)"; \
+    cp "${scheduler_plugins_dir}/config/crd/bases/scheduling.x-k8s.io_podgroups.yaml" \
+      /eval/podgroup-crd.yaml
+
 # Fail the build before publication if a tool or offline archive is incomplete.
 RUN set -eux; \
     go version; \
@@ -124,6 +131,7 @@ RUN set -eux; \
       test -s "$archive"; \
       tar -tf "$archive" >/dev/null; \
     done; \
+    test -s /eval/podgroup-crd.yaml; \
     i=0; \
     while read -r _; do \
       archive="/images/cert-manager-${i}.tar"; \

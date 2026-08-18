@@ -151,8 +151,15 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 		// healthy source.
 		const badImage2 = "ghcr.io/ome-projects/this-image-does-not-exist:bad-held"
 
-		goodRev := freshInferenceReplica(Default, ns.Name, name, v1beta1.EngineComponent).Status.CurrentRevision
-		Expect(goodRev).NotTo(BeEmpty())
+		var goodRev string
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			goodRev = ir.Status.CurrentRevision
+			g.Expect(goodRev).NotTo(BeEmpty(),
+				"IR CurrentRevision must be promoted once the gang is Ready")
+			g.Expect(goodRev).To(Equal(ir.Status.UpdateRevision),
+				"the corrected gang must be fully promoted before the next rollout")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, name)

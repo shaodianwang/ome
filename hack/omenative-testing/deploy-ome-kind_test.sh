@@ -81,6 +81,7 @@ case "$tool" in
     ;;
   kubectl)
     case " $* " in
+      *" apply -f - "*) cat >/dev/null ;;
       *" create namespace "*) echo 'apiVersion: v1' ;;
       *" get validatingwebhookconfiguration "*) echo ZmFrZQ== ;;
       *" get endpointslices "*) echo 10.0.0.1 ;;

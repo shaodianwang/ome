@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""batch.py [--conc N] [--shard I/N] [--junit PATH] [cases...] — run many run.py cases with bounded concurrency.
+"""batch.py [--conc N] [--exclusive-pods N] [--junit PATH] [cases...] — run cases with bounded concurrency.
 
 Defaults: cases = p01..p25 (the single-Component lifecycle set), conc = 8.
 Each case runs as its own `python3 run.py <case>` subprocess (own watcher),
@@ -13,6 +13,7 @@ Examples:
   python3 batch.py p26 p50               # subset @ default conc
   python3 batch.py --shard 0/4           # CI: this shard's quarter of the set
   python3 batch.py --junit /tmp/r.xml    # CI: machine-readable per-case results
+  python3 batch.py --exclusive-pods 64   # serialize cases at/above this peak
 
 CI contract: exits nonzero when any case ends in a verdict that is neither PASS
 nor an XFAIL (parked debt). --shard partitions the case list round-robin so N
@@ -76,6 +77,42 @@ def case_header_fields(case_id):
     return fields
 
 
+def case_peak_pods(case_id):
+    """Maximum serving pods declared by the case header and ISVC worker shape.
+
+    Returns None when a multi-node shape cannot be resolved, which callers
+    treat as requiring isolated execution.
+    """
+    matches = sorted((HERE / "isvcs").glob(f"**/{case_id}.yaml"))
+    if len(matches) != 1:
+        return None
+    fields = case_header_fields(case_id)
+    topology = fields.get("topo", "")
+    documents = re.split(r"(?m)^---\s*$", matches[0].read_text())
+    isvc = next((doc for doc in documents
+                 if re.search(r"(?m)^kind:\s*InferenceService\s*$", doc)), "")
+    if not isvc:
+        return None
+
+    total = 0
+    for component, suffix in (("engine", "e"), ("decoder", "d"), ("router", "r")):
+        replicas = int(fields.get(f"ceil_{suffix}", fields.get(f"N{suffix}", "0")))
+        if replicas == 0:
+            continue
+        block_match = re.search(
+            rf"(?ms)^  {component}:\s*\n(.*?)(?=^  [A-Za-z][A-Za-z0-9_-]*:\s*(?:\n|$)|\Z)",
+            isvc,
+        )
+        block = block_match.group(1) if block_match else ""
+        inline = re.search(r"(?m)^    worker:\s*\{[^}]*\bsize:\s*(\d+)", block)
+        nested = re.search(r"(?m)^    worker:\s*\n(?:^      .*\n)*?^      size:\s*(\d+)", block)
+        worker_size = int((inline or nested).group(1)) if (inline or nested) else 0
+        if topology.endswith("-mn") and component != "router" and worker_size == 0:
+            return None
+        total += replicas * (1 + worker_size)
+    return total
+
+
 def run_one(case_id):
     feature, topo = case_category(case_id)
     log_path = HERE / "results" / RUN_TS / feature / topo / f"{case_id}.log"
@@ -121,8 +158,6 @@ def parked_debt_rows(cases):
 def latest_tsv(case_id):
     # This run's TSVs live under results/<RUN_TS>/<feature>/<topo>/.
     files = glob.glob(str(HERE / "results" / RUN_TS / "**" / f"{case_id}-*.tsv"), recursive=True)
-    if not files:  # fallback: latest across any run (e.g. re-summarizing older runs)
-        files = glob.glob(str(HERE / "results" / "**" / f"{case_id}-*.tsv"), recursive=True)
     return max(files, key=os.path.getmtime) if files else None
 
 
@@ -268,11 +303,34 @@ def write_junit(path, results, elapsed):
     ET.ElementTree(suite).write(out, encoding="utf-8", xml_declaration=True)
 
 
+def sweep_fault_artifacts():
+    """Remove only resources marked as harness-owned fault apparatus."""
+    subprocess.run(["kubectl", "-n", NS, "delete", "resourcequota",
+                    "-l", "perm.test/fault", "--ignore-not-found"], env=ENV)
+    r = subprocess.run(["kubectl", "get", "nodes", "-l", "perm.test/cordoned", "-o", "json"],
+                       env=ENV, capture_output=True, text=True)
+    if r.returncode != 0:
+        return
+    try:
+        marked = json.loads(r.stdout).get("items", [])
+    except Exception:
+        marked = []
+    for item in marked:
+        node = (item.get("metadata") or {}).get("name", "")
+        if not node:
+            continue
+        if (item.get("spec") or {}).get("unschedulable"):
+            print(f"=== sweeping leftover harness cordon: uncordon {node} ===")
+            subprocess.run(["kubectl", "uncordon", node], env=ENV)
+        subprocess.run(["kubectl", "label", "node", node, "perm.test/cordoned-"], env=ENV)
+
+
 def main():
     argv = sys.argv[1:]
     conc = 8
     shard = None
     junit_path = None
+    exclusive_pods = None
     cases = []
     i = 0
     while i < len(argv):
@@ -282,6 +340,8 @@ def main():
             shard = argv[i + 1]; i += 2
         elif argv[i] == "--junit":
             junit_path = argv[i + 1]; i += 2
+        elif argv[i] == "--exclusive-pods":
+            exclusive_pods = int(argv[i + 1]); i += 2
         else:
             cases.append(argv[i]); i += 1
     cases = expand_cases(cases)
@@ -294,20 +354,24 @@ def main():
             print(f"=== shard {shard} has no cases assigned; nothing to run ===")
             return 0
 
-    # Quota isolation: a fault=quota case creates a NAMESPACE-wide ResourceQuota
-    # sized from a live usage snapshot — run concurrently it both blocks other
-    # cases' pod admissions and mis-sizes its own headroom against their churn.
-    # Partition: everything else keeps the concurrent pool; quota cases run
-    # SERIALLY after the pool drains (quiet namespace → deterministic sizing).
-    quota_cases = [c for c in cases
-                   if str(case_header_fields(c).get("fault", "")).startswith("quota")]
-    conc_cases = [c for c in cases if c not in quota_cases]
+    def needs_exclusive_run(case_id):
+        fault = str(case_header_fields(case_id).get("fault", "")).split(":", 1)[0]
+        if fault in ("quota", "cordon", "ctrlrestart"):
+            return True
+        if exclusive_pods is None:
+            return False
+        peak = case_peak_pods(case_id)
+        return peak is None or peak >= exclusive_pods
+
+    exclusive_cases = [c for c in cases if needs_exclusive_run(c)]
+    conc_cases = [c for c in cases if c not in exclusive_cases]
 
     print(f"=== batch: {len(cases)} cases @ concurrency {conc} ===")
     print(f"    cases: {cases[0]}..{cases[-1]}  ({', '.join(cases)})")
-    if quota_cases:
-        print(f"    partition: {len(conc_cases)} concurrent, then {len(quota_cases)} fault=quota case(s) "
-              f"SERIAL after the pool drains ({', '.join(quota_cases)}) — namespace-wide ResourceQuota isolation")
+    if exclusive_cases:
+        print(f"    partition: {len(conc_cases)} concurrent, then {len(exclusive_cases)} "
+              f"cluster-wide or high-pod case(s) SERIAL after the pool drains "
+              f"({', '.join(exclusive_cases)})")
     # Apply runtime once up front so the N subprocesses don't race on it.
     # The fixtures are templates — the PVC and the ClusterBaseModel's storageUri
     # have to name NS, or the ISVC validator rejects every case.
@@ -332,6 +396,8 @@ def main():
             if len(ls) >= 2:
                 cols = ls[1].split("\t")
                 verdict = cols[16] if len(cols) > 16 else "?"
+        if rc != 0 and is_green(verdict):
+            verdict = f"PROCESS_EXIT_{rc}"
         print(f"  [{done}/{len(cases)}] {case_id} done in {secs:.0f}s  rc={rc}  verdict={verdict}")
         results[case_id] = verdict
 
@@ -340,8 +406,9 @@ def main():
             futs = {ex.submit(run_one, c): c for c in conc_cases}
             for fut in cf.as_completed(futs):
                 record(*fut.result())
-    for c in quota_cases:   # serial tail — see the partition note above
+    for c in exclusive_cases:
         record(*run_one(c))
+        sweep_fault_artifacts()
 
     print(f"\n=== all {len(cases)} cases finished in {time.time() - t0:.0f}s ===")
     summarize(cases)
@@ -358,28 +425,7 @@ def main():
         print(f"\n=== sweeping {len(leftover)} leftover ISVCs: {leftover} ===")
         subprocess.run(["kubectl", "-n", NS, "delete", "isvc", *leftover, "--wait=false"], env=ENV)
 
-    # Fault-apparatus safety sweep: a SIGKILLed run.py never ran its in-process
-    # cleanup, so its ResourceQuota / cordon can leak. Both carry harness-only
-    # markers (quota: label perm.test/fault; cordon: run.py stamps node label
-    # perm.test/cordoned=<case> at cordon time), so this sweep can never touch
-    # an operator's quota or cordon.
-    subprocess.run(["kubectl", "-n", NS, "delete", "resourcequota",
-                    "-l", "perm.test/fault", "--ignore-not-found"], env=ENV)
-    r = subprocess.run(["kubectl", "get", "nodes", "-l", "perm.test/cordoned", "-o", "json"],
-                       env=ENV, capture_output=True, text=True)
-    if r.returncode == 0:
-        try:
-            marked = json.loads(r.stdout).get("items", [])
-        except Exception:
-            marked = []
-        for it in marked:
-            node = (it.get("metadata") or {}).get("name", "")
-            if not node:
-                continue
-            if (it.get("spec") or {}).get("unschedulable"):
-                print(f"=== sweeping leftover harness cordon: uncordon {node} ===")
-                subprocess.run(["kubectl", "uncordon", node], env=ENV)
-            subprocess.run(["kubectl", "label", "node", node, "perm.test/cordoned-"], env=ENV)
+    sweep_fault_artifacts()
 
     if junit_path:
         write_junit(junit_path, results, time.time() - t0)
