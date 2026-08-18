@@ -14,18 +14,17 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// BlueGreen + RatioBalanced pacing + InPlaceIfPossible.
+// InPlaceIfPossible under BlueGreen progression with RatioBalanced pacing.
 //
-// RatioBalanced gates surge based on the live engine:decoder ratio.
-// In-place patches don't add or remove pods (UIDs preserved), so the
-// ratio stays at its baseline throughout the rollout — the
-// RatioBalanced gate should NEVER fire a deny. Combined with
-// MaxUnavailable=1 the rollout converges cleanly with the same pod
-// set throughout.
+// RatioBalanced's ratio gate is deliberately bypassed for in-place
+// strategies because each temporary drain returns the same pod. The
+// MaxUnavailable budget still limits disruption independently for each
+// Component, and in-place patches must not add, remove, or replace pods.
 //
 // Asserts:
-//   - Live engine/decoder ratio stays in the [1.5, 2.5] band at every
-//     sample (just like C-1) — in-place must not over-block.
+//   - MaxUnavailable=1 keeps engine serving >= 3 of 4 and decoder
+//     serving >= 1 of 2 throughout the rollout.
+//   - Alive counts remain exactly 4 engine and 2 decoder pods.
 //   - Both Components advance off v1; group returns to Idle.
 //   - Pod UIDs preserved (proves in-place, not recreate).
 var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", ginkgo.Ordered, func() {
@@ -39,7 +38,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("RatioBalanced + InPlace holds ratio steady and preserves pod UIDs", func() {
+	ginkgo.It("RatioBalanced + InPlace respects MaxUnavailable and preserves pod UIDs", func() {
 		tol := int32(25)
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-ratio-inplace"),
@@ -95,26 +94,27 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 				"engine CurrentRevision must be promoted before the bump")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Sampler asserts the band [1.5, 2.5] (orig 2.0 ± 25%).
+		// RatioBalanced is bypassed for in-place updates, but MaxUnavailable=1
+		// still limits each Component to one temporarily non-serving pod.
 		var samples atomic.Int64
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
 			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "perm-ratio-inplace")
 			if err != nil {
 				return
 			}
-			eng := snap.Serving(v1beta1.EngineComponent)
-			dec := snap.Serving(v1beta1.DecoderComponent)
+			engServing := snap.Serving(v1beta1.EngineComponent)
+			decServing := snap.Serving(v1beta1.DecoderComponent)
+			engAlive := snap.Alive(v1beta1.EngineComponent)
+			decAlive := snap.Alive(v1beta1.DecoderComponent)
 			samples.Add(1)
-			if dec == 0 {
-				return
-			}
-			ratio := float64(eng) / float64(dec)
-			g.Expect(ratio).To(BeNumerically(">=", 1.5),
-				"ratio %.2f (eng=%d dec=%d) below band lower 1.5 — RatioBalanced over-blocked an in-place rollout",
-				ratio, eng, dec)
-			g.Expect(ratio).To(BeNumerically("<=", 2.5),
-				"ratio %.2f (eng=%d dec=%d) above band upper 2.5",
-				ratio, eng, dec)
+			g.Expect(engServing).To(BeNumerically(">=", 3),
+				"MaxUnavailable=1 must keep >=3 of 4 engine pods serving (serving=%d alive=%d)", engServing, engAlive)
+			g.Expect(decServing).To(BeNumerically(">=", 1),
+				"MaxUnavailable=1 must keep >=1 of 2 decoder pods serving (serving=%d alive=%d)", decServing, decAlive)
+			g.Expect(engAlive).To(Equal(4),
+				"in-place must keep exactly 4 engine pods alive")
+			g.Expect(decAlive).To(Equal(2),
+				"in-place must keep exactly 2 decoder pods alive")
 		})
 		defer stop()
 
@@ -136,7 +136,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 		Expect(samples.Load()).To(BeNumerically(">=", 3),
-			"sampler observed only %d samples during the rollout; ratio band was not meaningfully checked",
+			"sampler observed only %d samples during the rollout; availability was not meaningfully checked",
 			samples.Load())
 
 		// Pod UID preservation (in-place must keep all 6 pods).
