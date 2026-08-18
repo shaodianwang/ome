@@ -74,7 +74,7 @@ func TestReconcileRetriesFinalizerConflict(t *testing.T) {
 
 			staleGet := true
 			updateCalls := 0
-			cached := interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
+			cached := interceptor.NewClient(live, interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					if staleGet && key == client.ObjectKeyFromObject(stale) {
 						if out, ok := obj.(*v1beta1.InferenceService); ok {
