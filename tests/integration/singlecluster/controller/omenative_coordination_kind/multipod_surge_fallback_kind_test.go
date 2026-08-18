@@ -6,6 +6,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -31,9 +32,8 @@ import (
 //   - A fresh instance index appears (the surged gang's index), proving a
 //     surge rather than an in-place / recreate on the original indices.
 //
-// SurgeThenDrain is the default UpdateStrategy.Type when Lifecycle is
-// unset, so this spec deliberately leaves the strategy unset (the
-// defaulter writes SurgeThenDrain at admission).
+// SurgeThenDrain is the default UpdateStrategy.Type, so this spec leaves the
+// type unset for BuildPlan to fill while explicitly configuring MaxSurge=1.
 var _ = ginkgo.Describe("permutation — multi-pod SurgeThenDrain surges a replacement gang", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -50,9 +50,17 @@ var _ = ginkgo.Describe("permutation — multi-pod SurgeThenDrain surges a repla
 			WithoutDecoder(),
 			WithEngineReplicas(2),
 			WithEngineWorkerSize(1),
-			// Lifecycle deliberately left unset — defaulter writes
-			// SurgeThenDrain. Production-shape inputs.
 			WithEngineImage("fake-serving:v1"))
+		// Set the exact one-gang surge budget asserted below. A nil budget reaches
+		// the workload layer as BudgetNoLimit and would not enforce this ceiling.
+		maxSurge := intstr.FromInt(1)
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				// Leave Type unset so BuildPlan still exercises the default
+				// SurgeThenDrain strategy, but make the surge ceiling explicit.
+				RollingUpdate: &v1beta1.RollingUpdate{MaxSurge: &maxSurge},
+			},
+		}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
