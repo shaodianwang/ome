@@ -375,7 +375,10 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 			g.Expect(k8sClient.Update(suiteCtx, current)).To(Succeed())
 		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		Eventually(func(g Gomega) {
-			g.Expect(deleteOwnedInstanceIndices(instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent))).
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(ir.Spec.Replicas).NotTo(BeNil())
+			g.Expect(*ir.Spec.Replicas).To(Equal(int32(5)))
+			g.Expect(deleteOwnedInstanceIndices(ir.Status.InstanceStatuses)).
 				To(Equal([]int32{3, 4}), "desired rebound must not cancel durable Delete ownership")
 			for _, index := range []int32{3, 4} {
 				pod := &corev1.Pod{}
