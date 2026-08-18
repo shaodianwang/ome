@@ -2645,7 +2645,6 @@ def _migrate(case_id, yaml_file, desc, hdr):
         if hint_node:
             body["hint_target_nodes"] = [hint_node]
         annos[ak] = json.dumps(body)
-    from_node = reqs[inst][2]
     if defer_rollout:
         # Mid-rotate migration: start an ISVC rollout and file the migration
         # request only once the rotation is visibly in flight.
@@ -2659,6 +2658,15 @@ def _migrate(case_id, yaml_file, desc, hdr):
             if any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
                    for p in ctx["pod_state"].values()):
                 break
+        for i, (ru, ak, fn) in reqs.items():
+            live_fn = next((p.get("node", "") for p in ctx["pod_state"].values()
+                            if p and p["alive"] and p["comp"] == mcomp
+                            and str(p.get("inst")) == i and p.get("node")), fn)
+            reqs[i] = (ru, ak, live_fn)
+            body = json.loads(annos[ak])
+            body["from_node"] = live_fn
+            annos[ak] = json.dumps(body)
+    from_node = reqs[inst][2]
     print(f"  Phase 2: migration request (mig={mig_mode}) component={mcomp} instances={req_insts}"
           + (f" hint={hint_node}" if hint_node else ""))
     rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
