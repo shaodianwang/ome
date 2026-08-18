@@ -49,6 +49,18 @@ type InferenceServiceValidator struct {
 	// SupportedPassthroughPrefixes(); test wiring may leave it empty
 	// unless explicitly exercising the rejection path.
 	KnownPassthroughPrefixes []string
+
+	// SupportedTrafficFields lists the typed spec.traffic capability
+	// tokens (pkg/constants TrafficCapability*) the active
+	// Gateway-implementation translator implements. Feeds
+	// validation.ValidateTrafficCapabilities: the reserved
+	// endpointOverride.type=Metadata is rejected while no translator
+	// declares it, and multi-header consistent hashing is rejected
+	// when the set is non-empty and lacks the capability. Empty
+	// disables the provider-specific gate (the reserved-value
+	// rejection still applies); production populates this from the
+	// active translator's SupportedTrafficFields().
+	SupportedTrafficFields []string
 }
 
 // +kubebuilder:webhook:verbs=create;update,path=/validate-ome-io-v1beta1-inferenceservice,mutating=false,failurePolicy=fail,groups=ome.io,resources=inferenceservices,versions=v1beta1,name=inferenceservice.ome-webhook-server.validator
@@ -272,6 +284,9 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 
 	// Traffic block: typed core load-balancing config + ome.io/* annotations.
 	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {
+		return allWarnings, err
+	}
+	if err := validation.ValidateTrafficCapabilities(isvc.Spec.Traffic, v.SupportedTrafficFields); err != nil {
 		return allWarnings, err
 	}
 	trafficWarnings, err := validation.ValidateTrafficAnnotations(isvc.Annotations, isvc.Spec.Traffic, v.KnownPassthroughPrefixes...)

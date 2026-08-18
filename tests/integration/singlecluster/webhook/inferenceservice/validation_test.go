@@ -288,6 +288,19 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("MissingEndpointOverrideKey"))
 	})
 
+	ginkgo.It("rejects ISVC with the reserved endpointOverride.type=Metadata", func() {
+		// No translator emits the Metadata override, so admission
+		// rejects it regardless of which translator is active.
+		isvc := trafficBaseISVC("traffic-reserved-eo-metadata", &v1beta1.TrafficSpec{
+			EndpointOverride: &v1beta1.EndpointOverrideSpec{
+				Type: v1beta1.EndpointOverrideTypeMetadata,
+			},
+		})
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("ReservedEndpointOverrideType"))
+	})
+
 	ginkgo.It("accepts ISVC with valid consistent-hash on header", func() {
 		ch := v1beta1.LoadBalancingTypeConsistentHash
 		isvc := trafficBaseISVC("traffic-ok-ch-header", &v1beta1.TrafficSpec{

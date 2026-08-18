@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -652,6 +653,10 @@ func main() {
 					// admission. Sourced from the same translator the
 					// reconciler uses so the two stay in sync.
 					KnownPassthroughPrefixes: trafficTranslator.SupportedPassthroughPrefixes(),
+					// Same sourcing for typed spec.traffic fields: the
+					// capability set gates the reserved Metadata endpoint
+					// override and multi-header hashing at admission.
+					SupportedTrafficFields: sets.List(trafficTranslator.SupportedTrafficFields()),
 				}).
 				Complete(); err != nil {
 				setupLog.Error(err, "Failed to create InferenceService webhook", "webhook", "v1beta1")

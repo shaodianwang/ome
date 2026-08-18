@@ -196,6 +196,83 @@ func TestInferenceServiceValidator_ValidateDelete(t *testing.T) {
 	}
 }
 
+// Traffic capability gate: the validator receives the active
+// translator's typed spec.traffic capability tokens and rejects intent
+// no translator can honor (reserved Metadata override) or that the
+// active translator would only partially apply (multi-header hashing).
+func TestValidateTrafficCapabilityGate(t *testing.T) {
+	trafficISVC := func(traffic *v1beta1.TrafficSpec) *v1beta1.InferenceService {
+		return &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+			Spec: v1beta1.InferenceServiceSpec{
+				Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+				Traffic: traffic,
+			},
+		}
+	}
+	consistentHash := v1beta1.LoadBalancingTypeConsistentHash
+	multiHeaderTraffic := &v1beta1.TrafficSpec{
+		Algorithm: &consistentHash,
+		ConsistentHash: &v1beta1.ConsistentHashSpec{
+			Type:    v1beta1.HashTypeHeader,
+			Headers: []v1beta1.HashHeader{{Name: "x-tenant"}, {Name: "x-session"}},
+		},
+	}
+	metadataTraffic := &v1beta1.TrafficSpec{
+		EndpointOverride: &v1beta1.EndpointOverrideSpec{
+			Type: v1beta1.EndpointOverrideTypeMetadata,
+		},
+	}
+
+	t.Run("Metadata endpoint override rejected with no capability wiring", func(t *testing.T) {
+		v := &InferenceServiceValidator{}
+		_, err := v.ValidateCreate(context.Background(), trafficISVC(metadataTraffic))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ReservedEndpointOverrideType")
+	})
+
+	t.Run("Metadata endpoint override rejected when the active translator does not declare it", func(t *testing.T) {
+		v := &InferenceServiceValidator{
+			SupportedTrafficFields: []string{constants.TrafficCapabilityEndpointOverrideHeader},
+		}
+		_, err := v.ValidateCreate(context.Background(), trafficISVC(metadataTraffic))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ReservedEndpointOverrideType")
+	})
+
+	t.Run("multi-header hash rejected when the active translator hashes one header", func(t *testing.T) {
+		v := &InferenceServiceValidator{
+			SupportedTrafficFields: []string{
+				constants.TrafficCapabilityAlgorithm,
+				constants.TrafficCapabilityHashHeader,
+			},
+		}
+		_, err := v.ValidateCreate(context.Background(), trafficISVC(multiHeaderTraffic))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "UnsupportedMultiHeaderHash")
+	})
+
+	t.Run("multi-header hash admitted when the active translator declares it", func(t *testing.T) {
+		v := &InferenceServiceValidator{
+			SupportedTrafficFields: []string{
+				constants.TrafficCapabilityAlgorithm,
+				constants.TrafficCapabilityHashHeader,
+				constants.TrafficCapabilityHashMultipleHeaders,
+			},
+		}
+		_, err := v.ValidateCreate(context.Background(), trafficISVC(multiHeaderTraffic))
+		assert.NoError(t, err)
+	})
+
+	t.Run("multi-header hash admitted when the provider is unknown (empty set)", func(t *testing.T) {
+		// The reconciler-side BackendPolicyUnsupportedFields condition
+		// covers surfacing in this configuration.
+		v := &InferenceServiceValidator{}
+		_, err := v.ValidateCreate(context.Background(), trafficISVC(multiHeaderTraffic))
+		assert.NoError(t, err)
+	})
+}
+
 // Test error paths in ValidateCreate, ValidateUpdate, ValidateDelete
 func TestValidatorErrorPaths(t *testing.T) {
 	validator := &InferenceServiceValidator{}

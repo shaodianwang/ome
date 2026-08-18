@@ -1391,7 +1391,7 @@ func schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref common.ReferenceCallback
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Headers to hash on. Required when Type=Header (one or more). Multiple headers are concatenated by the translator before hashing. Forbidden when Type is not Header.",
+							Description: "Headers to hash on. Required when Type=Header (one or more). Translators that support multi-header hashing concatenate the headers before hashing; when the active translator supports only single-header hashing, multi-header specs are rejected at admission. Forbidden when Type is not Header.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
