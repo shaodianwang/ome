@@ -1282,12 +1282,9 @@ func TestDrainServiceForPod_EmptyWhenLabelMissing(t *testing.T) {
 	}
 }
 
-// TestCanonicalImage_StripsDockerHubLibraryPrefix pins the
-// docker.io/library/ strip. Without it, in-place updates wait forever
-// on podRuntimeImagesMatch on any image the user tagged without an
-// explicit registry — the runtime stamps the fully-qualified form
-// while the spec carries the short form.
-func TestCanonicalImage_StripsDockerHubLibraryPrefix(t *testing.T) {
+// TestCanonicalImage_NormalizesDockerHubReferences covers the qualified
+// forms container runtimes report for short Docker Hub references.
+func TestCanonicalImage_NormalizesDockerHubReferences(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		in   string
@@ -1296,7 +1293,7 @@ func TestCanonicalImage_StripsDockerHubLibraryPrefix(t *testing.T) {
 		{"implicit library tag", "fake-serving:v1", "fake-serving:v1"},
 		{"runtime-stamped library tag", "docker.io/library/fake-serving:v1", "fake-serving:v1"},
 		{"explicit registry round-trip", "ghcr.io/foo/bar:v1", "ghcr.io/foo/bar:v1"},
-		{"explicit docker.io non-library", "docker.io/myuser/myimg:v1", "docker.io/myuser/myimg:v1"},
+		{"runtime-stamped namespaced tag", "docker.io/myuser/myimg:v1", "myuser/myimg:v1"},
 		{"empty string", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1342,10 +1339,13 @@ func TestUpdate_InPlaceAnnotationMutationRequiresFreshObservation(t *testing.T) 
 			},
 		},
 	}
-	spec := legacyTargetSpecImage("llama:v1")
-	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
+	spec := legacyTargetSpecImage("nginxinc/nginx-unprivileged:1.27-alpine")
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "nginxinc/nginx-unprivileged:1.27-alpine")
 	pod.Annotations = map[string]string{"release": "one"}
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Image: "llama:v1"}}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "main",
+		Image: "docker.io/nginxinc/nginx-unprivileged:1.27-alpine",
+	}}
 	c := legacyNewFakeClient(t, isvc, ir, pod)
 	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"release": "one"}})

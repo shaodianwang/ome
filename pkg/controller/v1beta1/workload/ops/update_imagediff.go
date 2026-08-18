@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -12,23 +13,16 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// canonicalImage normalizes a container image reference for the
-// runtime-vs-spec equality compare. The runtime (containerd, Docker)
-// stamps Status.ContainerStatuses[*].Image with the fully-qualified
-// form `docker.io/library/<name>:<tag>` for implicit-registry tags,
-// while spec.containers[].image stays as the user wrote it
-// (`<name>:<tag>`). String-equality on the two would always return
-// false even after kubelet has fully rolled the container, blocking
-// in-place updates forever on any image the user tagged without an
-// explicit registry. Strip the default Docker-Hub-library prefix so
-// `fake-serving:v1` and `docker.io/library/fake-serving:v1` compare
-// equal. Images with an explicit registry round-trip unchanged.
+// canonicalImage normalizes Docker Hub references for the runtime-vs-spec
+// equality compare. Container runtimes may qualify a short reference with
+// docker.io while the Pod spec retains the short form.
 func canonicalImage(img string) string {
-	const dockerHubLibraryPrefix = "docker.io/library/"
-	if len(img) > len(dockerHubLibraryPrefix) && img[:len(dockerHubLibraryPrefix)] == dockerHubLibraryPrefix {
-		return img[len(dockerHubLibraryPrefix):]
+	const dockerHubPrefix = "docker.io/"
+	if !strings.HasPrefix(img, dockerHubPrefix) {
+		return img
 	}
-	return img
+	img = strings.TrimPrefix(img, dockerHubPrefix)
+	return strings.TrimPrefix(img, "library/")
 }
 
 // podRuntimeImagesMatch is the runtime-truth signal complementing
