@@ -32,6 +32,17 @@ type CanaryStatus struct {
 	// applied).
 	ObservedTrafficWeight int32 `json:"observedTrafficWeight"`
 
+	// PromotedThrough is the ome.io/rollout-promote value the most recent step
+	// advance applied. It is stamped in the same status write as the advance —
+	// the durable record of the promotion, since metadata (the annotation) and
+	// status cannot be written atomically. While set, a lingering annotation
+	// with this value is inert (already applied; removal is retried
+	// best-effort). While the rollout is in progress it clears once the
+	// annotation is observed removed, re-arming manual promotion for later
+	// steps.
+	// +optional
+	PromotedThrough string `json:"promotedThrough,omitempty"`
+
 	// RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback)
 	// abandons a canary: it records the rejected revision hash. While set, the
 	// component is held on the stable revision and the rejected revision is NOT

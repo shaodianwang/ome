@@ -30137,6 +30137,8 @@ spec:
                     observedTrafficWeight:
                       format: int32
                       type: integer
+                    promotedThrough:
+                      type: string
                     rolledBackRevisionHash:
                       type: string
                     stableRevisionHash:

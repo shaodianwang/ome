@@ -225,6 +225,11 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if cs.StableRevisionHash == "" && in.StableRevisionHash != "" {
 		cs.StableRevisionHash = in.StableRevisionHash
 	}
+
+	// Finish any promotion whose advance already persisted: remove the applied
+	// promote annotation (best-effort) and, once it is gone, clear the durable
+	// record so manual promotion re-arms for later steps.
+	syncPromotedThrough(ctx, in, cs)
 	step := plan.Steps[cs.CurrentStep]
 
 	newCount := resolveStepNewCount(step, in.DesiredReplicas)
@@ -346,9 +351,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			// fall through to advance.
 		}
 	}
-	if err := advanceStep(ctx, in); err != nil {
-		return nil, err
-	}
+	advanceStep(in)
 	return &Result{Active: true, Stepped: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
 }
 

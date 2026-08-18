@@ -25,9 +25,13 @@ func isRollbackRequested(isvc *v1beta1.InferenceService) bool {
 
 // shouldAdvanceManual reports whether the operator promoted THIS canary revision
 // via ome.io/rollout-promote=<canaryHash>. The hash guard prevents a stale
-// promote (left over from a prior rollout) from advancing a new one.
-func shouldAdvanceManual(isvc *v1beta1.InferenceService, canaryHash string) bool {
-	return isvc.Annotations[constants.RolloutPromoteAnnotation] == canaryHash
+// promote (left over from a prior rollout) from advancing a new one. A value
+// already recorded in cs.PromotedThrough is inert: annotation removal is
+// best-effort after the advance persists, so a lingering annotation must not
+// re-apply a promotion that already advanced a step (one promote, one step).
+func shouldAdvanceManual(isvc *v1beta1.InferenceService, cs *v1beta1.CanaryStatus) bool {
+	v := isvc.Annotations[constants.RolloutPromoteAnnotation]
+	return v == cs.CanaryRevisionHash && v != cs.PromotedThrough
 }
 
 // shouldAdvanceAuto reports whether a paused step's Pause.Duration has elapsed
@@ -93,7 +97,7 @@ func evaluateStep(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 		}
 		return decHold
 	default:
-		if shouldAdvanceManual(in.ISVC, cs.CanaryRevisionHash) {
+		if shouldAdvanceManual(in.ISVC, cs) {
 			return decAdvance
 		}
 		return decHold
@@ -108,7 +112,7 @@ func evaluateStep(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 // promote annotation overrides the gate.
 func evaluateAnalysisStep(ctx context.Context, in ReconcileInputs, a *v1beta1.RolloutAnalysis, cs *v1beta1.CanaryStatus, step v1beta1.RolloutGroupStep) stepDecision {
 	// Operator override: a matching promote annotation force-advances mid-bake.
-	if shouldAdvanceManual(in.ISVC, cs.CanaryRevisionHash) {
+	if shouldAdvanceManual(in.ISVC, cs) {
 		return decAdvance
 	}
 	// Warm-up: no sampling until InitialDelay after the split first served
@@ -227,14 +231,19 @@ func toStatusMetricResults(mrs []analysis.MetricResult, now time.Time) []v1beta1
 }
 
 // advanceStep moves to the next step: increment the index, stamp the entry time
-// (Auto timing measures from here), and consume the promote annotation so it is
-// not re-applied to the next step. Consumption fails the advance (retried next
-// pass) rather than advancing on an unconsumed promote.
-func advanceStep(ctx context.Context, in ReconcileInputs) error {
-	if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutPromoteAnnotation); err != nil {
-		return err
-	}
+// (Auto timing measures from here), and record any pending promote value in
+// PromotedThrough — all one in-memory status mutation, persisted together by
+// the controller's single status flush. The annotation itself is NOT touched
+// here: metadata and status cannot be written atomically, and removing the
+// annotation before the status flush lands would lose the promote if that
+// flush then fails or the process dies. Removal happens on a later pass, after
+// the advance is durable (syncPromotedThrough); until then the recorded value
+// keeps the lingering annotation inert (see shouldAdvanceManual).
+func advanceStep(in ReconcileInputs) {
 	cs := in.ISVC.Status.Canary
+	if v, ok := in.ISVC.Annotations[constants.RolloutPromoteAnnotation]; ok {
+		cs.PromotedThrough = v
+	}
 	cs.CurrentStep++
 	cs.StepEnteredTime = &metav1.Time{Time: in.Now}
 	// Reset the per-step analysis budget + sampling state: the failure budget is
@@ -244,7 +253,28 @@ func advanceStep(ctx context.Context, in ReconcileInputs) error {
 	cs.LastEvaluationTime = nil
 	cs.LastConclusiveEvaluationTime = nil
 	cs.MetricResults = nil
-	return nil
+}
+
+// syncPromotedThrough converges the durable promote record with the live
+// annotation, on passes AFTER the advance it records has persisted. While the
+// applied annotation lingers, retry its removal — best-effort: a failure
+// leaves it inert (it matches PromotedThrough) for the next pass. Once the
+// annotation is observed gone, clear the record so a later promote of the
+// same revision is honored again. The clear waits for observed absence
+// because a stale cache can re-show the annotation after removal; clearing
+// while it is still visible would re-apply the promotion.
+func syncPromotedThrough(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatus) {
+	if cs.PromotedThrough == "" {
+		return
+	}
+	v, ok := in.ISVC.Annotations[constants.RolloutPromoteAnnotation]
+	if !ok {
+		cs.PromotedThrough = ""
+		return
+	}
+	if v == cs.PromotedThrough {
+		_ = consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutPromoteAnnotation)
+	}
 }
 
 // consumeAnnotation removes an operator command annotation, persisting the

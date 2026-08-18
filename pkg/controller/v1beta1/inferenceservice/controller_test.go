@@ -609,14 +609,15 @@ func TestUpdateStatusFlushesCoordinationWrites(t *testing.T) {
 }
 
 // TestUpdateStatusPersistsCanaryStepDespiteStaleCache reproduces the
-// manual-canary promote wedge. advanceStep first does a durable metadata
-// patch (consuming ome.io/rollout-promote) that bumps the ISVC
-// resourceVersion, then increments status.canary.currentStep in memory for
-// the same status flush. If updateStatus reads its optimistic-lock base
-// from the informer cache — which still holds the pre-patch
-// resourceVersion — the status write 409s, RetryOnConflict re-reads the
-// same stale cache and exhausts, and the step increment is lost while the
-// annotation is already gone. The rollout then wedges at Paused step 0.
+// manual-canary promote wedge. Durable metadata patches (the canary
+// engine's deferred promote-annotation removal, or any external
+// annotator) bump the ISVC resourceVersion between reconciles, while
+// status.canary.currentStep rides the controller's deferred status flush.
+// If updateStatus reads its optimistic-lock base from the informer
+// cache — which still holds the pre-patch resourceVersion — the status
+// write 409s, RetryOnConflict re-reads the same stale cache and exhausts,
+// and the step increment is dropped. The rollout then wedges at Paused
+// step 0.
 //
 // The retry base must come from the authoritative reader (APIReader), not
 // the cache, so the write lands on the live resourceVersion. This test
@@ -666,10 +667,9 @@ func TestUpdateStatusPersistsCanaryStepDespiteStaleCache(t *testing.T) {
 	staleCache := &v1beta1.InferenceService{}
 	g.Expect(live.Get(context.TODO(), nn, staleCache)).NotTo(gomega.HaveOccurred())
 
-	// Simulate advanceStep's consumeAnnotation: a durable metadata write
-	// removing the promote annotation, which bumps the live resourceVersion
-	// past what the cache holds. Status (currentStep) is untouched here — it
-	// rides the in-memory desiredService below.
+	// A durable metadata write removes the promote annotation, bumping the
+	// live resourceVersion past what the cache holds. Status (currentStep) is
+	// untouched here — it rides the in-memory desiredService below.
 	bumped := staleCache.DeepCopy()
 	delete(bumped.Annotations, constants.RolloutPromoteAnnotation)
 	g.Expect(live.Update(context.TODO(), bumped)).NotTo(gomega.HaveOccurred())
@@ -694,15 +694,16 @@ func TestUpdateStatusPersistsCanaryStepDespiteStaleCache(t *testing.T) {
 		Recorder:  record.NewFakeRecorder(10),
 	}
 
-	// desiredService is the in-memory ISVC after advanceStep: the promote
-	// annotation is gone and currentStep has advanced to 1.
+	// desiredService is the in-memory ISVC after the canary advance:
+	// currentStep has advanced to 1 with the applied promote recorded in the
+	// same status mutation.
 	desired := staleCache.DeepCopy()
-	delete(desired.Annotations, constants.RolloutPromoteAnnotation)
 	desired.Status.Canary.CurrentStep = 1
+	desired.Status.Canary.PromotedThrough = canaryHash
 
 	err := reconciler.updateStatus(desired, constants.OMENative)
 	g.Expect(err).NotTo(gomega.HaveOccurred(),
-		"status flush must not lose an optimistic-lock race to advanceStep's own annotation patch")
+		"status flush must not lose an optimistic-lock race to a concurrent metadata patch")
 
 	// The authoritative store must show the advanced step. Pre-fix, the
 	// retry base came from the stale cache, so the write 409'd and
@@ -712,6 +713,8 @@ func TestUpdateStatusPersistsCanaryStepDespiteStaleCache(t *testing.T) {
 	g.Expect(persisted.Status.Canary).NotTo(gomega.BeNil())
 	g.Expect(persisted.Status.Canary.CurrentStep).To(gomega.Equal(int32(1)),
 		"canary step advance must persist to the live apiserver despite the stale cache")
+	g.Expect(persisted.Status.Canary.PromotedThrough).To(gomega.Equal(canaryHash),
+		"the applied promote record must land in the same status write as the advance")
 }
 
 func TestDetermineDeploymentModes(t *testing.T) {

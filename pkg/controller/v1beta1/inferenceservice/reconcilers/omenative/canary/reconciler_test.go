@@ -2,6 +2,7 @@ package canary
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,7 +13,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func i32(v int32) *int32 { return &v }
@@ -105,8 +108,8 @@ func TestReconcile_ManualPromoteAdvances(t *testing.T) {
 	if isvc.Status.Canary.CurrentStep != 1 {
 		t.Fatalf("promote should advance to step 1, got %d", isvc.Status.Canary.CurrentStep)
 	}
-	if _, still := isvc.Annotations[constants.RolloutPromoteAnnotation]; still {
-		t.Fatal("promote annotation should be consumed on advance")
+	if isvc.Status.Canary.PromotedThrough != "new" {
+		t.Fatalf("the advance must record the applied promote value in status, got %q", isvc.Status.Canary.PromotedThrough)
 	}
 }
 
@@ -397,17 +400,88 @@ func TestReconcile_RetargetResetsAnalysisState(t *testing.T) {
 	}
 }
 
-// TestReconcile_PromoteConsumptionPersisted pins that consuming the promote
-// annotation is durable: the controller persists only the status subresource,
-// so without an explicit metadata patch the annotation survives on the
-// apiserver and one promote advances EVERY subsequent step of the canary.
-func TestReconcile_PromoteConsumptionPersisted(t *testing.T) {
-	steps := []v1beta1.RolloutGroupStep{
+// threeStep is a plan with two manual (bare-pause) steps before the final 100%
+// step, so a second manual promotion is required mid-rollout.
+func threeStep() []v1beta1.RolloutGroupStep {
+	return []v1beta1.RolloutGroupStep{
 		{Capacity: intstr.FromString("50%"), Traffic: 25, Pause: &v1beta1.RolloutPause{}},
 		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
 		{Capacity: intstr.FromString("100%"), Traffic: 100},
 	}
-	isvc := canaryISVC(steps, nil)
+}
+
+// TestReconcile_PromoteConsumptionPersisted pins the durable promote sequence:
+// the advancing pass records the promote in status and writes NO metadata (the
+// annotation must outlive the pass — removing it before the status flush is
+// durable would lose the promote if that flush fails); the next pass removes
+// the annotation on the apiserver while the recorded value keeps it from
+// advancing a second step; once the annotation is observed gone the record
+// clears, re-arming manual promotion.
+func TestReconcile_PromoteConsumptionPersisted(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Client = c
+	// Pass 1: the promote advances one step in-memory; the apiserver metadata is
+	// untouched — the durable record of the promotion is status, not the
+	// annotation removal.
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("promote should advance one step, got %d", isvc.Status.Canary.CurrentStep)
+	}
+	if isvc.Status.Canary.PromotedThrough != "new" {
+		t.Fatalf("the advance must record the applied promote, got %q", isvc.Status.Canary.PromotedThrough)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := stored.Annotations[constants.RolloutPromoteAnnotation]; !present {
+		t.Fatal("the advancing pass must not remove the annotation before the advance is durable")
+	}
+
+	// Pass 2: the advance is durable (status carried over); the lingering
+	// annotation is inert and is now removed on the apiserver.
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("one promote must advance one step only, got %d", isvc.Status.Canary.CurrentStep)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutPromoteAnnotation]; still {
+		t.Fatal("promote consumption must be persisted to the apiserver, not just in-memory")
+	}
+
+	// Pass 3: the annotation is observed gone → the record clears (rides the
+	// status flush), and the step still holds.
+	isvc.Annotations = stored.Annotations
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("clearing the record must not advance, got %d", isvc.Status.Canary.CurrentStep)
+	}
+	if isvc.Status.Canary.PromotedThrough != "" {
+		t.Fatalf("the record must clear once the annotation is observed gone, got %q", isvc.Status.Canary.PromotedThrough)
+	}
+}
+
+// TestReconcile_PromoteSurvivesLostStatusWrite pins the lose-forever fix: the
+// step advance rides the controller's deferred status write, which can be lost
+// (conflict-retry exhaustion, or the process dying before the flush). Because
+// the advancing pass leaves the annotation on the apiserver, replaying the
+// reconcile from the pre-advance persisted state re-applies the promote
+// instead of holding Paused forever.
+func TestReconcile_PromoteSurvivesLostStatusWrite(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
 	isvc.Namespace = "ns"
 	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
@@ -418,19 +492,145 @@ func TestReconcile_PromoteConsumptionPersisted(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if isvc.Status.Canary.CurrentStep != 1 {
-		t.Fatalf("promote should advance one step, got %d", isvc.Status.Canary.CurrentStep)
+		t.Fatalf("promote should advance in-memory, got %d", isvc.Status.Canary.CurrentStep)
+	}
+
+	// The status flush never lands: rebuild the reconcile state from what IS
+	// persisted — annotations from the apiserver, status from before the pass.
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	replay := canaryISVC(threeStep(), nil)
+	replay.Namespace = "ns"
+	replay.Annotations = stored.Annotations
+	rin := baseInputs(replay, map[string]int32{"new": 2, "old": 2})
+	rin.Client = c
+	if _, err := Reconcile(context.Background(), rin); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if replay.Status.Canary == nil || replay.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("the promote must survive a lost status write and re-advance, got %+v", replay.Status.Canary)
+	}
+	if replay.Status.Canary.PromotedThrough != "new" {
+		t.Fatalf("the replayed advance must record the promote, got %q", replay.Status.Canary.PromotedThrough)
+	}
+}
+
+// TestReconcile_LingeringPromoteDoesNotDoubleAdvance pins the other half of the
+// crash window: the advance persisted (step + PromotedThrough) but the process
+// died before the annotation was removed. The next reconcile must treat the
+// lingering annotation as already applied — no second advance — and complete
+// the removal on the apiserver.
+func TestReconcile_LingeringPromoteDoesNotDoubleAdvance(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "new",
+		CurrentStep:        1,
+		PromotedThrough:    "new",
+		StepEnteredTime:    &metav1.Time{Time: time.Unix(1000, 0)},
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Client = c
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("a lingering applied promote must not advance again, got step %d", isvc.Status.Canary.CurrentStep)
 	}
 	stored := &v1beta1.InferenceService{}
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
 		t.Fatal(err)
 	}
 	if _, still := stored.Annotations[constants.RolloutPromoteAnnotation]; still {
-		t.Fatal("promote consumption must be persisted to the apiserver, not just in-memory")
+		t.Fatal("the lingering annotation must be removed on the apiserver")
 	}
-	// A fresh pass over the reloaded (apiserver) annotations must hold at step 1.
-	isvc.Annotations = stored.Annotations
+}
+
+// TestReconcile_RepromoteAdvancesNextManualStep pins re-arming: once a
+// promotion fully settles (annotation removed, record cleared), a fresh
+// promote — necessarily carrying the SAME canary hash — must advance the next
+// manual step rather than being mistaken for the previous promotion's leftover.
+func TestReconcile_RepromoteAdvancesNextManualStep(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Client = c
+	// Promote settles over three passes: advance, remove annotation, clear record.
+	for i := 0; i < 3; i++ {
+		if _, err := Reconcile(context.Background(), in); err != nil {
+			t.Fatalf("Reconcile pass %d: %v", i, err)
+		}
+	}
+	if isvc.Status.Canary.CurrentStep != 1 || isvc.Status.Canary.PromotedThrough != "" {
+		t.Fatalf("promotion should be settled at step 1 with a cleared record, got %+v", isvc.Status.Canary)
+	}
+
+	// The operator promotes the next step with the same hash value.
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
 	if _, err := Reconcile(context.Background(), in); err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 2 {
+		t.Fatalf("a fresh promote after settling must advance the next step, got %d", isvc.Status.Canary.CurrentStep)
+	}
+}
+
+// TestReconcile_ConsumeFailureDoesNotAbort pins that annotation removal is
+// best-effort: a failing metadata patch must not error the reconcile or
+// disturb the already-durable advance; the removal is simply retried on a
+// later pass, and the lingering annotation stays inert meanwhile.
+func TestReconcile_ConsumeFailureDoesNotAbort(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "new",
+		CurrentStep:        1,
+		PromotedThrough:    "new",
+		StepEnteredTime:    &metav1.Time{Time: time.Unix(1000, 0)},
+	}
+	base := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+	failing := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+			return errors.New("injected patch failure")
+		},
+	})
+
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Client = failing
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("a failed annotation removal must not abort the reconcile: %v", err)
+	}
+	if !res.Active || isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("the durable advance must be undisturbed, got step %d res %+v", isvc.Status.Canary.CurrentStep, res)
+	}
+	if isvc.Status.Canary.PromotedThrough != "new" {
+		t.Fatalf("the record must survive a failed removal (it keeps the annotation inert), got %q", isvc.Status.Canary.PromotedThrough)
+	}
+	if _, present := isvc.Annotations[constants.RolloutPromoteAnnotation]; !present {
+		t.Fatal("a failed removal must keep the annotation (retried next pass)")
+	}
+
+	// A later pass with a healthy client converges: annotation removed durably.
+	in.Client = base
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutPromoteAnnotation]; still {
+		t.Fatal("the retried removal must land on the apiserver")
 	}
 	if isvc.Status.Canary.CurrentStep != 1 {
 		t.Fatalf("one promote must advance one step only, got %d", isvc.Status.Canary.CurrentStep)
