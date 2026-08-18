@@ -1,4 +1,4 @@
-# p85: MN engine leader+1w N=4 max=6 SurgeThenDrain maxSurge=2 (two gang surges in flight)  Ne=8 Nd=0 Nr=0 ceil_e=10 ceil_d=0 ceil_r=0 topo=engine-mn
+# p85: MN engine leader+1w N=8 max=11 SurgeThenDrain maxSurge=3 (three gang surges in flight)  Ne=8 Nd=0 Nr=0 ceil_e=11 ceil_d=0 ceil_r=0 topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p85 }
@@ -7,8 +7,8 @@ spec:
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
   engine:
     minReplicas: 8
-    maxReplicas: 6
+    maxReplicas: 11
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }
-    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 3, maxUnavailable: 0 } } }

@@ -43,8 +43,20 @@ collect_diagnostics() {
 finish() {
   status=$?
   trap - EXIT
+  set +e
   collect_diagnostics
   kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
+  if command -v buildkite-agent >/dev/null 2>&1; then
+    results_archive="${results_root}.tgz"
+    if tar -C "$(dirname "$results_root")" -czf "$results_archive" "$(basename "$results_root")"; then
+      if ! buildkite-agent artifact upload "$results_archive"; then
+        echo "WARNING: result artifact upload failed; the batch summary and any failed case logs remain in this job log" >&2
+      fi
+      rm -f -- "$results_archive"
+    else
+      echo "WARNING: could not package eval result artifacts" >&2
+    fi
+  fi
   rm -rf -- "$tmp_dir"
   exit "$status"
 }

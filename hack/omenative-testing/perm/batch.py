@@ -126,6 +126,23 @@ def run_one(case_id):
     return case_id, proc.returncode, time.time() - t0
 
 
+def print_failure_logs(case_ids):
+    """Include failed subprocess output in the CI log when artifacts are unavailable."""
+    print("\n" + "=" * 90)
+    print("FAILED CASE LOGS")
+    print("=" * 90)
+    for case_id in case_ids:
+        feature, topo = case_category(case_id)
+        log_path = HERE / "results" / RUN_TS / feature / topo / f"{case_id}.log"
+        print(f"\n--- {case_id}: {log_path.relative_to(HERE)} ---")
+        try:
+            content = log_path.read_text(errors="replace")
+        except OSError as exc:
+            print(f"(unable to read case log: {exc.strerror or 'unknown error'})")
+            continue
+        print(content, end="" if content.endswith("\n") else "\n")
+
+
 def parked_debt_rows(cases):
     """(case, kind, ref, desc) for every notimpl=1 / infeasible=1 case in the
     sweep — the XFAIL debt ledger. notimpl refs the linked GitHub issue (the
@@ -435,6 +452,7 @@ def main():
     if failed:
         print(f"\n=== FAILED {len(failed)}/{len(results)}: "
               f"{', '.join(f'{c}={results[c]}' for c in failed)} ===")
+        print_failure_logs(failed)
         return 1
     print(f"\n=== all {len(results)} case(s) green ===")
     return 0

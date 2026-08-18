@@ -518,7 +518,6 @@ def _gke_eval_group() -> str:
                 "agents": {"queue": GKE_QUEUE},
                 "command": "sh .buildkite/run_omenative_eval_gke.sh "
                 + " ".join([feature, topology, *cases]),
-                "artifact_paths": ["hack/omenative-testing/perm/results/**/*"],
                 "plugins": plugins,
             }
         )

@@ -1,4 +1,4 @@
-# p84: MN engine leader+1w N=4 SurgeThenDrain (scale: 4 gang Instances)  Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 topo=engine-mn
+# p84: MN engine leader+1w N=8 SurgeThenDrain (scale: 8 gang Instances)  Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p84 }
@@ -7,7 +7,7 @@ spec:
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
   engine:
     minReplicas: 8
-    maxReplicas: 5
+    maxReplicas: 9
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }

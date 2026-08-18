@@ -1,4 +1,4 @@
-# p93: MN engine leader+2w N=4 RecreatePod maxUnavail=2 (two 3-pod gangs recreate at once)  Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 topo=engine-mn
+# p93: MN engine leader+2w N=8 RecreatePod maxUnavail=2 (two 3-pod gangs recreate at once)  Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p93 }

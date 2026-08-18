@@ -417,8 +417,8 @@ for topo in ["engine", "pd"]:
           comps_for(topo, lifecycle(strat="RecreatePod", surge=0, unavail=u)),
           **nds(topo), **ceils(topo, N), topo=topo, co="none")
 for topo in ["engine-mn", "pd-mn"]:
-    for rpol in ["None", "AllPodReady"]:
-        C("edge", f"ReadyPolicy={rpol} {topo}", comps_for(topo, lifecycle(ready=rpol)),
+    for rpol in [None, "AllPodReady"]:
+        C("edge", f"ReadyPolicy={rpol or 'default'} {topo}", comps_for(topo, lifecycle(ready=rpol)),
           **nds(topo), **ceils(topo, N + 1), topo=topo, co="none")
 for grace, marknr in [(0, None), (10, None), (None, False), (10, False)]:
     C("edge", f"in-place grace={grace} markNotReady={marknr} engine InPlaceIfPossible",

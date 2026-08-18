@@ -117,6 +117,7 @@ def _flow(d):
 # v1 pacing dicts; _coord_groups translates ratioTolerancePercent -> maintainRatio.tolerance
 # and folds maxUnavailable into rollingUpdate. PerComponent is the v2 default (no knob).
 RB = {"type": "RatioBalanced", "ratioTolerancePercent": 25, "maxUnavailable": 1}
+RB5 = {"type": "RatioBalanced", "ratioTolerancePercent": 5, "maxUnavailable": 1}
 RB10 = {"type": "RatioBalanced", "ratioTolerancePercent": 10, "maxUnavailable": 1}  # tight band (multi-node p53 analog)
 PC = {"type": "PerComponent", "maxUnavailable": 1}
 RTR = C("router", 2, 2, 0, "SurgeThenDrain", 1, 0)   # router: single-pod control
@@ -168,11 +169,11 @@ COMBOS = [
     # Tight-band / small-N gang surge — the multi-node analogs of the single-pod
     # p53 (tol=10) / p55 (N=1) surge-deadlock candidates. If the RatioBalanced
     # surge tiebreaker false-deadlocks a legitimate transient gang surge (1
-    # surge at N=4 = 25% > 2*tol=20%), these catch it on the production (gang)
+    # surge at N=8 = 12.5% > 2*tol=10%), these catch it on the production (gang)
     # path. p82 isolates the N=1 gang surge with no coordination.
-    ("p80", "PD MN e+d leader+1w N=4 RatioBalanced tol=10 STD (tight band gang surge — p53 gang analog)",
-     [C("engine", 4, 5, 1, "SurgeThenDrain", 1, 0), C("decoder", 4, 5, 1, "SurgeThenDrain", 1, 0), RTR],
-     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB10)),
+    ("p80", "PD MN e+d leader+1w N=8 RatioBalanced tol=5 STD (tight band gang surge — p53 gang analog)",
+     [C("engine", 8, 9, 1, "SurgeThenDrain", 1, 0), C("decoder", 8, 9, 1, "SurgeThenDrain", 1, 0), RTR],
+     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB5)),
     ("p81", "PD MN e+d leader+1w N=1 RatioBalanced STD (minimal gang surge — p55 gang analog)",
      [C("engine", 1, 2, 1, "SurgeThenDrain", 1, 0), C("decoder", 1, 2, 1, "SurgeThenDrain", 1, 0), RTR],
      dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB)),
@@ -193,13 +194,13 @@ COMBOS = [
      [C("engine", 2, 3, 2, "SurgeThenDrain", 1, 0), C("decoder", 2, 3, 2, "SurgeThenDrain", 1, 0), RTR],
      dict(policy="BlueGreen", members=["engine", "decoder"])),
 
-    # Scale: more gang Instances + multiple surges in flight (maxSurge=2).
-    ("p84", "MN engine leader+1w N=4 SurgeThenDrain (scale: 4 gang Instances)",
-     [C("engine", 4, 5, 1, "SurgeThenDrain", 1, 0)], None),
-    ("p85", "MN engine leader+1w N=4 max=6 SurgeThenDrain maxSurge=2 (two gang surges in flight)",
-     [C("engine", 4, 6, 1, "SurgeThenDrain", 2, 0)], None),
-    ("p93", "MN engine leader+2w N=4 RecreatePod maxUnavail=2 (two 3-pod gangs recreate at once)",
-     [C("engine", 4, 4, 2, "RecreatePod", 0, 2)], None),
+    # Scale: more gang Instances + multiple surges in flight.
+    ("p84", "MN engine leader+1w N=8 SurgeThenDrain (scale: 8 gang Instances)",
+     [C("engine", 8, 9, 1, "SurgeThenDrain", 1, 0)], None),
+    ("p85", "MN engine leader+1w N=8 max=11 SurgeThenDrain maxSurge=3 (three gang surges in flight)",
+     [C("engine", 8, 11, 1, "SurgeThenDrain", 3, 0)], None),
+    ("p93", "MN engine leader+2w N=8 RecreatePod maxUnavail=2 (two 3-pod gangs recreate at once)",
+     [C("engine", 8, 8, 2, "RecreatePod", 0, 2)], None),
     ("p95", "PD MN e+d leader+1w N=3 RatioBalanced STD (odd-N gang surge)",
      [C("engine", 3, 4, 1, "SurgeThenDrain", 1, 0), C("decoder", 3, 4, 1, "SurgeThenDrain", 1, 0), RTR],
      dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=RB)),
