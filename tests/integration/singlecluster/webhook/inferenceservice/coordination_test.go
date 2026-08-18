@@ -478,6 +478,50 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
+
+	// W-25: a canary step capacity the runtime resolver cannot parse would
+	// silently stage zero new pods while the step sends it traffic. Admission
+	// rejects it, naming the exact steps[i].capacity field path.
+	ginkgo.It("W-25 rejects a canary step with malformed capacity → CanaryInvalid", func() {
+		isvc := v1beta1testing.MakeInferenceService("coord-w25", "isvc-webhook").
+			Model(coordCBMName).Runtime(coordCSRName).
+			DeploymentMode(constants.OMENative).
+			Engine(omeNativeEngine()).
+			Obj()
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+					{Capacity: intstr.FromString("abc"), Traffic: 10},
+					{Capacity: intstr.FromString("100%"), Traffic: 100},
+				}},
+			}},
+		}
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonCanaryInvalid))
+		Expect(err.Error()).To(ContainSubstring("spec.rollout.groups[0].canary.steps[0].capacity"))
+	})
+
+	// W-26: the well-formed percent canary plan keeps admitting — strict
+	// capacity parsing must not reject the forms the resolver handles.
+	ginkgo.It("W-26 accepts a canary plan with percent capacities", func() {
+		isvc := v1beta1testing.MakeInferenceService("coord-w26", "isvc-webhook").
+			Model(coordCBMName).Runtime(coordCSRName).
+			DeploymentMode(constants.OMENative).
+			Engine(omeNativeEngine()).
+			Obj()
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+					{Capacity: intstr.FromString("25%"), Traffic: 10},
+					{Capacity: intstr.FromString("100%"), Traffic: 100},
+				}},
+			}},
+		}
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+	})
 })
 
 // ---------- UPDATE-path specs ----------
