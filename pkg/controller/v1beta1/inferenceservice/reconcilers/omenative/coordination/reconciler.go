@@ -77,6 +77,12 @@ type ReconcileInputs struct {
 	// GitOps). Zero (absent config) disables the band and preserves the
 	// exact prior write-on-any-diff behavior.
 	TrafficWeightDeadbandPercent int32
+
+	// DefaultRatioTolerancePercent fills maintainRatio.tolerance for groups
+	// that omit it, per the operator's coordination config. There is
+	// intentionally NO in-code default: nil (absent config) means a group
+	// that omits tolerance rolls with no drift bound.
+	DefaultRatioTolerancePercent *int32
 }
 
 // Result reports what the coordination layer did this reconcile. The
@@ -125,7 +131,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	groups := ResolveGroups(in.ISVC.Spec.Rollout)
+	groups := ResolveGroups(in.ISVC.Spec.Rollout, GroupDefaults{RatioTolerancePercent: in.DefaultRatioTolerancePercent})
 	result := &Result{}
 
 	// Bind a logger keyed to the ISVC so every downstream V(1)

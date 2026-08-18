@@ -44,6 +44,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	omenativecore "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -325,7 +326,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// escalation is disabled and wedged teardowns are left alone.
 	forceDeletePolicy := r.resolveForceDeletePolicy(log)
 
-	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, stuckPodGrace, autoMigrateBudget)
+	// Resolve the operator-configured coordination group defaults (e.g. the
+	// ratio tolerance fill) so the update gate resolves groups exactly like
+	// the ISVC-side coordination reconciler.
+	coordDefaults := r.resolveCoordinationGroupDefaults(log)
+
+	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, stuckPodGrace, autoMigrateBudget, coordDefaults)
 	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
@@ -916,6 +922,28 @@ func (r *Reconciler) resolveForceDeletePolicy(log logr.Logger) *workload.ForceDe
 		return nil
 	}
 	return policy
+}
+
+// resolveCoordinationGroupDefaults loads the operator-configured group
+// resolution fill-ins (coordination.defaultRatioTolerancePercent) from the
+// operator ConfigMap. Absent or unloadable config resolves to the zero
+// value — a group that omits maintainRatio.tolerance then rolls with no
+// drift bound — with one V(1) log; there is never a silent in-code
+// fallback tolerance.
+func (r *Reconciler) resolveCoordinationGroupDefaults(log logr.Logger) coordination.GroupDefaults {
+	if r.Clientset == nil {
+		log.V(1).Info("coordination group defaults unresolved: no clientset wired; unfilled knobs use their unconfigured behavior")
+		return coordination.GroupDefaults{}
+	}
+	cfg, err := controllerconfig.NewCoordinationConfigCached(r.ConfigCache, r.Clientset)
+	if err != nil {
+		log.V(1).Info("coordination group defaults unresolved: coordination config load failed; unfilled knobs use their unconfigured behavior", "error", err.Error())
+		return coordination.GroupDefaults{}
+	}
+	if cfg == nil {
+		return coordination.GroupDefaults{}
+	}
+	return coordination.GroupDefaults{RatioTolerancePercent: cfg.DefaultRatioTolerancePercent}
 }
 
 // resolveTeardownDeadline loads lifecycle.teardown.deadline from the

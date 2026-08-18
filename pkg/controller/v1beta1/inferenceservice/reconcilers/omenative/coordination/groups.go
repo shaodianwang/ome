@@ -44,12 +44,27 @@ type ResolvedGroup struct {
 	Soak time.Duration
 }
 
+// GroupDefaults carries the operator-configured fill-in values applied while
+// resolving spec.rollout groups. The zero value means "nothing configured":
+// each knob degrades to its documented unconfigured behavior instead of a
+// baked-in literal.
+type GroupDefaults struct {
+	// RatioTolerancePercent fills MaintainRatio.Tolerance when a group sets
+	// maintainRatio but omits the tolerance (the coordination block of the
+	// operator's ConfigMap supplies the value). Nil means unconfigured: an
+	// omitted tolerance resolves to nil and the ratio guard enforces no
+	// drift bound.
+	RatioTolerancePercent *int32
+}
+
 // ResolveGroups turns spec.rollout into a slice of ResolvedGroups in declaration
 // order, for the COORDINATION-style progressions only (blueGreen / rollingUpdate).
 // Canary groups are driven by the canary engine, not coordination, so they are
 // skipped here. Returns nil when no rollout (or no coordination-style group) is
-// declared.
-func ResolveGroups(spec *v1beta1.RolloutSpec) []ResolvedGroup {
+// declared. defaults carries the operator-configured fill-ins; callers without
+// access to operator configuration pass the zero value and get the documented
+// unconfigured behavior.
+func ResolveGroups(spec *v1beta1.RolloutSpec, defaults GroupDefaults) []ResolvedGroup {
 	if spec == nil || len(spec.Groups) == 0 {
 		return nil
 	}
@@ -59,7 +74,7 @@ func ResolveGroups(spec *v1beta1.RolloutSpec) []ResolvedGroup {
 		if g.Canary != nil {
 			continue // canary groups are the canary engine's responsibility
 		}
-		out = append(out, resolveGroup(i, g))
+		out = append(out, resolveGroup(i, g, defaults))
 	}
 	// v2 ordered groups roll one at a time, in list order. When the rollout is a
 	// run of single-Component blueGreen groups, that is exactly v1 Sequential —
@@ -67,7 +82,7 @@ func ResolveGroups(spec *v1beta1.RolloutSpec) []ResolvedGroup {
 	// state machine (per-Component blue-green surge, soak, hold-the-rest) drives
 	// them. (Mixed-progression / multi-Component ordered groups don't collapse and
 	// run independently for now — general cross-group ordering is a follow-on.)
-	if seq, ok := collapseSequential(out); ok {
+	if seq, ok := collapseSequential(out, defaults); ok {
 		return []ResolvedGroup{seq}
 	}
 	return out
@@ -77,7 +92,7 @@ func ResolveGroups(spec *v1beta1.RolloutSpec) []ResolvedGroup {
 // (the v2 spelling of v1 Sequential) into one Sequential ResolvedGroup whose Order
 // is the Components in list order. Returns (zero,false) when the list isn't a pure
 // single-Component-blueGreen sequence — those groups keep their own resolution.
-func collapseSequential(groups []ResolvedGroup) (ResolvedGroup, bool) {
+func collapseSequential(groups []ResolvedGroup, defaults GroupDefaults) (ResolvedGroup, bool) {
 	if len(groups) < 2 {
 		return ResolvedGroup{}, false
 	}
@@ -102,7 +117,7 @@ func collapseSequential(groups []ResolvedGroup) (ResolvedGroup, bool) {
 		Components: append([]v1beta1.ComponentType(nil), order...),
 		Policy:     v1beta1.CoordinationPolicySequential,
 		Order:      order,
-		Pacing:     pacingWithDefaults(nil),
+		Pacing:     pacingWithDefaults(nil, defaults),
 		Soak:       soak,
 	}, true
 }
@@ -112,7 +127,7 @@ func collapseSequential(groups []ResolvedGroup) (ResolvedGroup, bool) {
 // the resolved policy is BlueGreen or RollingUpdate — Sequential-across-Components
 // is now expressed as separate ordered groups, not a policy. MaintainRatio maps to
 // RatioBalanced pacing.
-func resolveGroup(idx int, g *v1beta1.RolloutGroup) ResolvedGroup {
+func resolveGroup(idx int, g *v1beta1.RolloutGroup, defaults GroupDefaults) ResolvedGroup {
 	components := dedupComponents(g.Components)
 	out := ResolvedGroup{
 		Name:       strconv.Itoa(idx),
@@ -134,7 +149,7 @@ func resolveGroup(idx int, g *v1beta1.RolloutGroup) ResolvedGroup {
 		// the Sequential state machine.
 		out.Policy = v1beta1.CoordinationPolicyBlueGreen
 	}
-	out.Pacing = groupPacing(g, len(components))
+	out.Pacing = groupPacing(g, len(components), defaults)
 	return out
 }
 
@@ -144,7 +159,9 @@ func resolveGroup(idx int, g *v1beta1.RolloutGroup) ResolvedGroup {
 // (blueGreen included) because the engine's ratio guard keys on
 // Pacing.Type==RatioBalanced, not the policy — mapping it only for rollingUpdate
 // would leave a blueGreen group's guard inert. Ignored on single-Component groups.
-func groupPacing(g *v1beta1.RolloutGroup, componentCount int) v1beta1.CoordinationPacing {
+// An explicit Tolerance (including 0) is copied verbatim; an omitted Tolerance is
+// left nil for pacingWithDefaults to fill from the operator-configured default.
+func groupPacing(g *v1beta1.RolloutGroup, componentCount int, defaults GroupDefaults) v1beta1.CoordinationPacing {
 	in := &v1beta1.CoordinationPacing{}
 	if g.RollingUpdate != nil {
 		in.MaxSurge = g.RollingUpdate.MaxSurge
@@ -152,17 +169,20 @@ func groupPacing(g *v1beta1.RolloutGroup, componentCount int) v1beta1.Coordinati
 	}
 	if g.MaintainRatio != nil && componentCount >= 2 {
 		in.Type = v1beta1.CoordinationPacingRatioBalanced
-		t := g.MaintainRatio.Tolerance
-		in.RatioTolerancePercent = &t
+		if g.MaintainRatio.Tolerance != nil {
+			t := *g.MaintainRatio.Tolerance
+			in.RatioTolerancePercent = &t
+		}
 	}
-	return pacingWithDefaults(in)
+	return pacingWithDefaults(in, defaults)
 }
 
-// pacingWithDefaults applies the pacing default fills (25% surge,
-// 25% unavailable, PerComponent type, 5% ratio tolerance for
-// RatioBalanced). Callers can rely on the returned struct having
-// every relevant field populated to its documented default.
-func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPacing {
+// pacingWithDefaults applies the pacing default fills (25% surge, 25%
+// unavailable, PerComponent type, and — for RatioBalanced — the
+// operator-configured ratio tolerance). The ratio tolerance has no in-code
+// fallback: when the group omits it and the operator configured no default,
+// RatioTolerancePercent stays nil and the ratio guard enforces no drift bound.
+func pacingWithDefaults(in *v1beta1.CoordinationPacing, defaults GroupDefaults) v1beta1.CoordinationPacing {
 	out := v1beta1.CoordinationPacing{}
 	if in != nil {
 		out = *in.DeepCopy()
@@ -181,8 +201,9 @@ func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPaci
 		// MaxUnavailableBudget math.
 		out.MaxUnavailable = utils.PtrIntOrStringFromString("25%")
 	}
-	if out.Type == v1beta1.CoordinationPacingRatioBalanced && out.RatioTolerancePercent == nil {
-		t := int32(5)
+	if out.Type == v1beta1.CoordinationPacingRatioBalanced &&
+		out.RatioTolerancePercent == nil && defaults.RatioTolerancePercent != nil {
+		t := *defaults.RatioTolerancePercent
 		out.RatioTolerancePercent = &t
 	}
 	return out

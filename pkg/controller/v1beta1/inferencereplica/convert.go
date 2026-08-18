@@ -108,7 +108,12 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // relocation budget of the terminal-failure disposition (zero disables
 // the relocation branch). Both resolved ONCE per reconcile by the caller
 // from the operator lifecycle config.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, stuckPodGrace time.Duration, autoMigrateBudget int32) workload.ReconcileInput {
+//
+// coordDefaults carries the operator-configured group resolution
+// fill-ins (from the coordination config), likewise resolved ONCE per
+// reconcile by the caller; the zero value means unconfigured and each
+// knob uses its documented unconfigured behavior.
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, stuckPodGrace time.Duration, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -204,7 +209,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// cross-Component coordination against a cache-lagged peer would
 		// admit a rollout the peer's real state forbids.
 		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-			return coordination.EvaluateUpdateGate(ctx, r.APIReader, parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
+			return coordination.EvaluateUpdateGate(ctx, r.APIReader, parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
 		}
 	}
 	// The migration audit ledger (history) lives on the user-facing

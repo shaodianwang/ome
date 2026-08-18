@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -646,7 +647,7 @@ func TestCreate_MidBatchFailureRollsBackAPINormalizedStatus(t *testing.T) {
 		Clock:        clk,
 		Expectations: workload.NewExpectations(),
 	}
-	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0)
+	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0, coordination.GroupDefaults{})
 	podBatchSize := int32(3)
 	input.ScaleUpPodBatchSize = &podBatchSize
 	plan, err := workload.BuildPlan(input.Key.Component, input.DesiredSpec, input.ObservedState)
@@ -800,7 +801,7 @@ func TestBuildReconcileInput_AtomicInstanceAndRetryBlockMutationOneWrite(t *test
 	wantBlock := *storedBefore.Status.RetryBlocks[0].DeepCopy()
 	wantBlock.State = v1beta1.RetryBlockRetryInProgress
 	r := &Reconciler{Client: c, APIReader: c}
-	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0)
+	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0, coordination.GroupDefaults{})
 	g.Expect(input.ApplyInstanceMutationsWithRetryBlock).NotTo(gomega.BeNil(),
 		"the production IR input must expose the atomic status capability")
 

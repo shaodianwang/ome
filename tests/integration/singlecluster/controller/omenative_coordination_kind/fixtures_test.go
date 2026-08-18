@@ -50,7 +50,7 @@ func translateCoordGroupToV2(g v1beta1.RolloutCoordinationGroup) []v1beta1.Rollo
 				if g.Pacing.RatioTolerancePercent != nil {
 					tol = *g.Pacing.RatioTolerancePercent
 				}
-				maintain = &v1beta1.MaintainRatio{Tolerance: tol}
+				maintain = &v1beta1.MaintainRatio{Tolerance: &tol}
 			}
 		}
 		return []v1beta1.RolloutGroup{{

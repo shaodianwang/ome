@@ -25717,8 +25717,6 @@ spec:
                                 maximum: 100
                                 minimum: 0
                                 type: integer
-                            required:
-                              - tolerance
                             type: object
                           order:
                             items:

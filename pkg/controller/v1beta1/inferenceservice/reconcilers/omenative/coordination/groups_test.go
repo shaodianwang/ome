@@ -6,18 +6,19 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 func TestResolveGroups_NilSpecReturnsNil(t *testing.T) {
-	if got := ResolveGroups(nil); got != nil {
+	if got := ResolveGroups(nil, GroupDefaults{}); got != nil {
 		t.Errorf("nil spec: got %+v want nil", got)
 	}
 }
 
 func TestResolveGroups_EmptyGroupsReturnsNil(t *testing.T) {
-	if got := ResolveGroups(&v1beta1.RolloutSpec{}); got != nil {
+	if got := ResolveGroups(&v1beta1.RolloutSpec{}, GroupDefaults{}); got != nil {
 		t.Errorf("empty Groups: got %+v want nil", got)
 	}
 }
@@ -31,7 +32,7 @@ func TestResolveGroups_AppliesPacingDefaults(t *testing.T) {
 			},
 		},
 	}
-	groups := ResolveGroups(spec)
+	groups := ResolveGroups(spec, GroupDefaults{})
 	if len(groups) != 1 {
 		t.Fatalf("groups: got %d want 1", len(groups))
 	}
@@ -60,7 +61,7 @@ func TestResolveGroups_NoProgressionDefaultsBlueGreen(t *testing.T) {
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}},
 		},
 	}
-	groups := ResolveGroups(spec)
+	groups := ResolveGroups(spec, GroupDefaults{})
 	if len(groups) != 1 {
 		t.Fatalf("groups: got %d want 1", len(groups))
 	}
@@ -82,7 +83,7 @@ func TestResolveGroups_NoProgressionPairCollapsesSequential(t *testing.T) {
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}},
 		},
 	}
-	groups := ResolveGroups(spec)
+	groups := ResolveGroups(spec, GroupDefaults{})
 	if len(groups) != 1 {
 		t.Fatalf("expected one collapsed group, got %d: %+v", len(groups), groups)
 	}
@@ -99,19 +100,19 @@ func TestResolveGroups_RatioBalancedTolerancePropagates(t *testing.T) {
 	// v2: cross-Component ratio guarding is expressed via MaintainRatio on a
 	// multi-Component group; it maps to RatioBalanced pacing for both
 	// rollingUpdate (this test) and blueGreen (see
-	// TestResolveGroups_MaintainRatioOnBlueGreen). The admission-time default of
-	// 5 is applied by the CRD validation rule, not by resolveGroup, so the
-	// unit-level fixture sets the tolerance explicitly.
+	// TestResolveGroups_MaintainRatioOnBlueGreen). An explicit tolerance is
+	// copied verbatim; the omitted-tolerance fills are covered by
+	// TestResolveGroups_ToleranceDefaultResolution.
 	spec := &v1beta1.RolloutSpec{
 		Groups: []v1beta1.RolloutGroup{
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				RollingUpdate: &v1beta1.GroupRollingUpdate{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 			},
 		},
 	}
-	g := ResolveGroups(spec)[0]
+	g := ResolveGroups(spec, GroupDefaults{})[0]
 	if g.Pacing.RatioTolerancePercent == nil {
 		t.Fatalf("RatioTolerancePercent: got nil want 5")
 	}
@@ -132,11 +133,11 @@ func TestResolveGroups_MaintainRatioOnBlueGreen(t *testing.T) {
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				BlueGreen:     &v1beta1.GroupBlueGreen{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 7},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(7))},
 			},
 		},
 	}
-	g := ResolveGroups(spec)[0]
+	g := ResolveGroups(spec, GroupDefaults{})[0]
 	if g.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
 		t.Fatalf("Pacing.Type: got %q want RatioBalanced", g.Pacing.Type)
 	}
@@ -155,13 +156,61 @@ func TestResolveGroups_MaintainRatioIgnoredOnSingleComponent(t *testing.T) {
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent},
 				BlueGreen:     &v1beta1.GroupBlueGreen{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 7},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(7))},
 			},
 		},
 	}
-	g := ResolveGroups(spec)[0]
+	g := ResolveGroups(spec, GroupDefaults{})[0]
 	if g.Pacing.Type != v1beta1.CoordinationPacingPerComponent {
 		t.Errorf("single-Component maintainRatio: got %q want PerComponent (ignored)", g.Pacing.Type)
+	}
+}
+
+func TestResolveGroups_ToleranceDefaultResolution(t *testing.T) {
+	// The effective ratio tolerance follows a strict precedence: an explicit
+	// per-group tolerance (including 0) wins; an omitted tolerance takes the
+	// operator-configured default; with neither, it stays nil — the ratio
+	// guard then enforces no drift bound rather than a baked-in number.
+	mkSpec := func(tolerance *int32) *v1beta1.RolloutSpec {
+		return &v1beta1.RolloutSpec{
+			Groups: []v1beta1.RolloutGroup{{
+				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				BlueGreen:     &v1beta1.GroupBlueGreen{},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tolerance},
+			}},
+		}
+	}
+	cases := []struct {
+		name      string
+		tolerance *int32
+		defaults  GroupDefaults
+		want      *int32
+	}{
+		{name: "omitted with configured default", tolerance: nil,
+			defaults: GroupDefaults{RatioTolerancePercent: ptr.To(int32(9))}, want: ptr.To(int32(9))},
+		{name: "omitted without configured default", tolerance: nil,
+			defaults: GroupDefaults{}, want: nil},
+		{name: "explicit zero beats configured default", tolerance: ptr.To(int32(0)),
+			defaults: GroupDefaults{RatioTolerancePercent: ptr.To(int32(9))}, want: ptr.To(int32(0))},
+		{name: "explicit value beats configured default", tolerance: ptr.To(int32(7)),
+			defaults: GroupDefaults{RatioTolerancePercent: ptr.To(int32(9))}, want: ptr.To(int32(7))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := ResolveGroups(mkSpec(tc.tolerance), tc.defaults)[0]
+			if g.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
+				t.Fatalf("Pacing.Type: got %q want RatioBalanced", g.Pacing.Type)
+			}
+			got := g.Pacing.RatioTolerancePercent
+			switch {
+			case tc.want == nil && got != nil:
+				t.Errorf("RatioTolerancePercent: got %d want nil", *got)
+			case tc.want != nil && got == nil:
+				t.Errorf("RatioTolerancePercent: got nil want %d", *tc.want)
+			case tc.want != nil && got != nil && *got != *tc.want:
+				t.Errorf("RatioTolerancePercent: got %d want %d", *got, *tc.want)
+			}
+		})
 	}
 }
 
@@ -178,7 +227,7 @@ func TestResolveGroups_DedupComponentsWithinGroup(t *testing.T) {
 			},
 		},
 	}
-	g := ResolveGroups(spec)[0]
+	g := ResolveGroups(spec, GroupDefaults{})[0]
 	if len(g.Components) != 2 {
 		t.Errorf("dedup: got %d components want 2", len(g.Components))
 	}
@@ -204,7 +253,7 @@ func TestResolveGroups_PreservesUserSuppliedPacing(t *testing.T) {
 			},
 		},
 	}
-	g := ResolveGroups(spec)[0]
+	g := ResolveGroups(spec, GroupDefaults{})[0]
 	if g.Pacing.MaxSurge.IntValue() != 5 {
 		t.Errorf("MaxSurge preserved: got %+v want 5", g.Pacing.MaxSurge)
 	}
@@ -220,7 +269,7 @@ func TestMembershipFor_FindsComponentsAcrossGroups(t *testing.T) {
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 			{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 		},
-	})
+	}, GroupDefaults{})
 	if g, ok := MembershipFor(groups, v1beta1.EngineComponent); !ok || g.Policy != v1beta1.CoordinationPolicyBlueGreen {
 		t.Errorf("engine: got (%+v, %v) want BlueGreen", g, ok)
 	}
@@ -234,7 +283,7 @@ func TestMembershipFor_UnknownComponentReturnsFalse(t *testing.T) {
 		Groups: []v1beta1.RolloutGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 		},
-	})
+	}, GroupDefaults{})
 	if _, ok := MembershipFor(groups, v1beta1.DecoderComponent); ok {
 		t.Errorf("decoder should not be a member")
 	}
@@ -289,7 +338,7 @@ func TestCollapseSequential_LastGroupSoakIgnored(t *testing.T) {
 			{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}, Soak: &metav1.Duration{Duration: 10 * time.Minute}},
 		},
 	}
-	g := ResolveGroups(spec)
+	g := ResolveGroups(spec, GroupDefaults{})
 	if len(g) != 1 || g[0].Policy != v1beta1.CoordinationPolicySequential {
 		t.Fatalf("expected one collapsed Sequential group, got %+v", g)
 	}

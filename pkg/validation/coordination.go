@@ -3,8 +3,9 @@
 // Webhook-level admission rules for the coordination-style progressions
 // (blueGreen / rollingUpdate) on spec.rollout.groups[]: per-group structural
 // checks (valid components, order subset), cross-group checks (a Component
-// appears in at most one group; a group references a declared Component; groups
-// are OMENative), pacing zero-budget, and the RollingUpdate lockstep on update.
+// appears in at most one group; every group member is a declared Component;
+// groups are OMENative), pacing zero-budget, and the RollingUpdate lockstep on
+// update.
 // The one-of progression shape and order⊆components are also enforced by the CRD
 // CEL rules; these are the value-level mirrors plus the cross-group rules CEL
 // can't express. Canary groups are validated by ValidateCanary.
@@ -12,6 +13,7 @@ package validation
 
 import (
 	"fmt"
+	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 
@@ -26,6 +28,7 @@ const (
 	ReasonInvalidComponentInCoordinationGroup    = "InvalidComponentInCoordinationGroup"
 	ReasonCoordinationRequiresOMENative          = "CoordinationRequiresOMENative"
 	ReasonRatioToleranceTooHigh                  = "RatioToleranceTooHigh"
+	ReasonRatioToleranceOutOfRange               = "RatioToleranceOutOfRange"
 	ReasonOrphanCoordinationGroup                = "OrphanCoordinationGroup"
 	ReasonInvalidCoordinationOrder               = "InvalidCoordinationOrder"
 	ReasonRollingUpdateLockstepViolation         = "RollingUpdateLockstepViolation"
@@ -88,6 +91,9 @@ func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
 	if err := validateGroupRollingUpdateBudgets(groups); err != nil {
 		return err
 	}
+	if err := validateRatioToleranceRange(groups); err != nil {
+		return err
+	}
 	if err := validatePacingNotZeroBudget(groups); err != nil {
 		return err
 	}
@@ -120,13 +126,13 @@ func CoordinationRatioToleranceWarning(spec *v1beta1.InferenceServiceSpec) strin
 	groups := spec.GetRolloutGroups()
 	for i := range groups {
 		mr := groups[i].MaintainRatio
-		if mr == nil {
+		if mr == nil || mr.Tolerance == nil {
 			continue
 		}
-		if mr.Tolerance > ratioToleranceWarningThreshold {
+		if *mr.Tolerance > ratioToleranceWarningThreshold {
 			return fmt.Sprintf(
 				"spec.rollout.groups[%d].maintainRatio.tolerance=%d effectively disables ratio enforcement (>%d) (%s)",
-				i, mr.Tolerance, ratioToleranceWarningThreshold, ReasonRatioToleranceTooHigh)
+				i, *mr.Tolerance, ratioToleranceWarningThreshold, ReasonRatioToleranceTooHigh)
 		}
 	}
 	return ""
@@ -196,26 +202,32 @@ func validateNoDuplicateMembership(groups []v1beta1.RolloutGroup) error {
 	return nil
 }
 
+// validateOrphanGroups requires EVERY Component named by a group to be declared
+// on the InferenceService. A group member without a declared Component can never
+// produce a live replica, so the group's rollout could never complete — the
+// error names the group index and each missing member so the operator can fix
+// the exact gap.
 func validateOrphanGroups(spec *v1beta1.InferenceServiceSpec, groups []v1beta1.RolloutGroup) error {
 	declared := declaredComponents(spec)
 	for i := range groups {
-		anyDeclared := false
+		var missing []string
 		for _, c := range groups[i].Components {
-			if _, ok := declared[c]; ok {
-				anyDeclared = true
-				break
+			if _, ok := declared[c]; !ok {
+				missing = append(missing, fmt.Sprintf("%q", c))
 			}
 		}
-		if !anyDeclared {
-			return fmt.Errorf("spec.rollout.groups[%d]: no component in this group is declared on the InferenceService (%s)",
-				i, ReasonOrphanCoordinationGroup)
+		if len(missing) > 0 {
+			return fmt.Errorf("spec.rollout.groups[%d]: component(s) %s not declared on the InferenceService (%s)",
+				i, strings.Join(missing, ", "), ReasonOrphanCoordinationGroup)
 		}
 	}
 	return nil
 }
 
 // validateComponentsAreOMENative requires every Component in a coordination-style
-// group to declare OMENative. Canary groups are checked in ValidateCanary.
+// group to declare OMENative. Canary groups are checked in ValidateCanary. An
+// undeclared member resolves to an empty mode and fails here too — the orphan
+// check runs first, so its more specific error normally wins.
 func validateComponentsAreOMENative(spec *v1beta1.InferenceServiceSpec, groups []v1beta1.RolloutGroup) error {
 	modeFor := omenativeDeploymentModeMap(spec)
 	for i := range groups {
@@ -224,11 +236,7 @@ func validateComponentsAreOMENative(spec *v1beta1.InferenceServiceSpec, groups [
 			continue
 		}
 		for _, c := range g.Components {
-			declared, ok := modeFor[c]
-			if !ok {
-				continue // not declared — handled by the orphan check
-			}
-			if declared != string(constants.OMENative) {
+			if declared := modeFor[c]; declared != string(constants.OMENative) {
 				return fmt.Errorf("spec.rollout.groups[%d]: component %q has deploymentMode=%q; coordination requires OMENative (%s)",
 					i, c, declared, ReasonCoordinationRequiresOMENative)
 			}
@@ -254,6 +262,24 @@ func validateGroupRollingUpdateBudgets(groups []v1beta1.RolloutGroup) error {
 		}
 		if err := validateBudgetIntOrString(base+"maxUnavailable", ru.MaxUnavailable); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateRatioToleranceRange is the value-level mirror of the CRD's
+// Minimum=0/Maximum=100 bounds on maintainRatio.tolerance, for callers that
+// bypass schema validation. Nil (omitted) is valid — the operator-configured
+// default applies at resolution.
+func validateRatioToleranceRange(groups []v1beta1.RolloutGroup) error {
+	for i := range groups {
+		mr := groups[i].MaintainRatio
+		if mr == nil || mr.Tolerance == nil {
+			continue
+		}
+		if *mr.Tolerance < 0 || *mr.Tolerance > 100 {
+			return fmt.Errorf("spec.rollout.groups[%d]: maintainRatio.tolerance=%d must be between 0 and 100 (%s)",
+				i, *mr.Tolerance, ReasonRatioToleranceOutOfRange)
 		}
 	}
 	return nil

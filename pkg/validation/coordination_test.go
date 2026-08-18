@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -73,6 +74,157 @@ func TestValidateCoordination_OrphanGroup(t *testing.T) {
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonOrphanCoordinationGroup) {
 		t.Errorf("orphan group: got %v want %s", err, ReasonOrphanCoordinationGroup)
+	}
+}
+
+func TestValidateCoordination_GroupMembership(t *testing.T) {
+	// Every component named by a group must be declared on the ISVC. The
+	// error names the group index and each missing member (quoted), so a
+	// partially-declared group cannot slip through on the strength of the
+	// members that do exist.
+	cases := []struct {
+		name        string
+		spec        *v1beta1.InferenceServiceSpec
+		components  []v1beta1.ComponentType
+		wantErr     bool
+		wantSubstrs []string
+		notSubstrs  []string
+	}{
+		{
+			name:        "fully undeclared group",
+			spec:        omeNativeEngineOnlySpec(),
+			components:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.RouterComponent},
+			wantErr:     true,
+			wantSubstrs: []string{"groups[0]", `"decoder"`, `"router"`, ReasonOrphanCoordinationGroup},
+		},
+		{
+			name:        "partially undeclared group",
+			spec:        omeNativeEngineOnlySpec(),
+			components:  []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			wantErr:     true,
+			wantSubstrs: []string{"groups[0]", `"decoder"`, ReasonOrphanCoordinationGroup},
+			notSubstrs:  []string{`"engine"`},
+		},
+		{
+			name:       "fully declared group",
+			spec:       omeNativePDSpec(),
+			components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			wantErr:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.spec.Rollout = &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{Components: tc.components, BlueGreen: &v1beta1.GroupBlueGreen{}},
+				},
+			}
+			err := ValidateCoordination(tc.spec)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected rejection, got nil")
+			}
+			for _, s := range tc.wantSubstrs {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q missing %q", err.Error(), s)
+				}
+			}
+			for _, s := range tc.notSubstrs {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("error %q should not name declared member %q", err.Error(), s)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateCoordination_MembershipErrorNamesGroupIndex(t *testing.T) {
+	// With multiple groups the error must point at the offending group's
+	// index, not the first group.
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+			{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.RouterComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		},
+	}
+	err := ValidateCoordination(spec)
+	if err == nil || !strings.Contains(err.Error(), "groups[1]") || !strings.Contains(err.Error(), `"router"`) {
+		t.Errorf("got %v want error naming groups[1] and \"router\"", err)
+	}
+}
+
+func TestValidateCoordination_UndeclaredMemberFailsModeCheckToo(t *testing.T) {
+	// The OMENative-mode check does not skip undeclared members: an
+	// undeclared component resolves to an empty mode and fails the check.
+	// (Through the public entry point the orphan check fires first; this
+	// pins the mode check's own behavior for defense in depth.)
+	spec := omeNativeEngineOnlySpec()
+	groups := []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+	}
+	err := validateComponentsAreOMENative(spec, groups)
+	if err == nil || !strings.Contains(err.Error(), ReasonCoordinationRequiresOMENative) {
+		t.Errorf("undeclared member: got %v want %s", err, ReasonCoordinationRequiresOMENative)
+	}
+}
+
+func TestValidateCoordination_ToleranceRange(t *testing.T) {
+	// Value-level mirror of the CRD Minimum=0/Maximum=100 bounds. Omitted
+	// (nil) is valid — the operator-configured default applies at
+	// resolution — and explicit 0 stays a valid, distinct request.
+	cases := []struct {
+		name      string
+		tolerance *int32
+		wantErr   bool
+	}{
+		{name: "omitted", tolerance: nil, wantErr: false},
+		{name: "explicit zero", tolerance: ptr.To(int32(0)), wantErr: false},
+		{name: "normal", tolerance: ptr.To(int32(25)), wantErr: false},
+		{name: "upper bound", tolerance: ptr.To(int32(100)), wantErr: false},
+		{name: "negative", tolerance: ptr.To(int32(-1)), wantErr: true},
+		{name: "over 100", tolerance: ptr.To(int32(101)), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := omeNativePDSpec()
+			spec.Rollout = &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					BlueGreen:     &v1beta1.GroupBlueGreen{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tc.tolerance},
+				}},
+			}
+			err := ValidateCoordination(spec)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), ReasonRatioToleranceOutOfRange) {
+					t.Errorf("got %v want error with %s", err, ReasonRatioToleranceOutOfRange)
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCoordinationRatioToleranceWarning_OmittedToleranceEmpty(t *testing.T) {
+	// maintainRatio with no tolerance defers to the operator-configured
+	// default; the webhook cannot know that value, so it must not warn.
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{{
+			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			BlueGreen:     &v1beta1.GroupBlueGreen{},
+			MaintainRatio: &v1beta1.MaintainRatio{},
+		}},
+	}
+	if w := CoordinationRatioToleranceWarning(spec); w != "" {
+		t.Errorf("omitted tolerance: got %q want empty", w)
 	}
 }
 
@@ -148,7 +300,7 @@ func TestValidateCoordination_RatioBalancedWithBlueGreenAccepted(t *testing.T) {
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				BlueGreen:     &v1beta1.GroupBlueGreen{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 			},
 		},
 	}
@@ -503,7 +655,7 @@ func TestValidateCoordination_RatioBalancedWithZeroBudgetNotRejected(t *testing.
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				BlueGreen:     &v1beta1.GroupBlueGreen{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 			},
 		},
 	}
@@ -559,7 +711,7 @@ func TestCoordinationRatioToleranceWarning_AboveThreshold(t *testing.T) {
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				BlueGreen:     &v1beta1.GroupBlueGreen{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 80},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(80))},
 			},
 		},
 	}
@@ -576,7 +728,7 @@ func TestCoordinationRatioToleranceWarning_BelowThresholdEmpty(t *testing.T) {
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				BlueGreen:     &v1beta1.GroupBlueGreen{},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 			},
 		},
 	}

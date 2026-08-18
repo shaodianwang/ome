@@ -648,6 +648,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Reader:                       r.APIReader,
 		Recorder:                     r.Recorder,
 		TrafficWeightDeadbandPercent: coordinationConfig.TrafficWeightDeadbandPercent,
+		DefaultRatioTolerancePercent: coordinationConfig.DefaultRatioTolerancePercent,
 		ComponentDeploymentModes:     componentDeploymentModes,
 		ComponentRunnerPorts:         componentRunnerPorts,
 	}); err != nil {

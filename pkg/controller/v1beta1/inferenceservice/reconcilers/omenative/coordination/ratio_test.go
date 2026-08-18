@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -165,6 +166,30 @@ func TestEvaluateSurge_AlreadySkewedRejectsAnyFurtherSurge(t *testing.T) {
 	}
 	if d.AllowedSurgeDelta != 0 {
 		t.Errorf("rejected surge should produce zero delta: got %d", d.AllowedSurgeDelta)
+	}
+}
+
+func TestEvaluateSurge_NilToleranceDisablesDriftBound(t *testing.T) {
+	// A RatioBalanced pacing whose tolerance never resolved (group omitted it
+	// and the operator configured no default) has no band to enforce: the
+	// guard admits the surge instead of inventing a bound. Same skewed state
+	// as the rejection test above — only the nil tolerance differs.
+	pacing := v1beta1.CoordinationPacing{
+		Type: v1beta1.CoordinationPacingRatioBalanced,
+	}
+	state := RatioState{
+		Original: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  40,
+			v1beta1.DecoderComponent: 20,
+		},
+		NewPods: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  15,
+			v1beta1.DecoderComponent: 5,
+		},
+	}
+	d := EvaluateSurge(pacing, state, v1beta1.EngineComponent, 5)
+	if d.SkewRejected || d.AllowedSurgeDelta != 5 {
+		t.Errorf("nil tolerance must disable the drift bound: got %+v want AllowedSurgeDelta=5", d)
 	}
 }
 
@@ -361,7 +386,7 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 				}},
 			},
 		},
@@ -490,7 +515,7 @@ func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 				}},
 			},
 		},
@@ -518,7 +543,7 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},
 		},
@@ -596,7 +621,7 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},
 		},
@@ -657,7 +682,7 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},
 		},
@@ -711,9 +736,9 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 // = 25% of engine). Caller sets Status.Components.
 //
 // v2: cross-Component ratio guarding rides on MaintainRatio on a
-// multi-Component rollingUpdate group (resolveGroup only honors
-// MaintainRatio on rollingUpdate). A nil tolerance maps to the v1 default
-// of 5.
+// multi-Component rollingUpdate group. A nil argument makes the fixture
+// spell out tolerance 5 explicitly (the value production resolves from
+// operator configuration).
 func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 	tol := int32(5)
 	if tolerance != nil {
@@ -725,7 +750,7 @@ func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},
 		},
@@ -1135,7 +1160,7 @@ func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},
 		},
@@ -1194,7 +1219,7 @@ func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	client := fakeClientForISVC(isvc)
 
-	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil, GroupDefaults{},
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Errorf("SurgeThenDrain RatioBalanced 4:4 must be allowed (no deadlock); got denied: %s", reason)
 	}
@@ -1215,7 +1240,7 @@ func mkRatioProgressFixture(tol, origE, newE, origD, newD int32) *v1beta1.Infere
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},
 		},
@@ -1312,7 +1337,7 @@ func TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isvc := mkRatioProgressFixture(tc.tol, tc.origE, tc.newE, tc.origD, tc.newD)
 			client := fakeClientForISVC(isvc)
-			allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, tc.comp, nil,
+			allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, tc.comp, nil, GroupDefaults{},
 				workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 			if allowed != tc.wantAllowed {
 				t.Errorf("allowed=%v want %v (reason=%q)", allowed, tc.wantAllowed, reason)
@@ -1487,7 +1512,7 @@ func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 	isvc.Spec.Rollout.Groups[0].RollingUpdate.MaxUnavailable = &mu
 	client := fakeClientForISVC(isvc)
 
-	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil, GroupDefaults{},
 		workloadtypes.UpdateStrategyRecreatePod, 0, 0); !allowed {
 		t.Errorf("RecreatePod on symmetric 4:4 (MaxUnavailable=3) must be allowed via the tiebreaker; got denied: %s", reason)
 	}
@@ -1558,7 +1583,7 @@ func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFl
 	// RatioBalanced pacing is expressed as MaintainRatio on the
 	// rollingUpdate group; PerComponent is the absence of MaintainRatio.
 	if pacingType == v1beta1.CoordinationPacingRatioBalanced {
-		group.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: 25}
+		group.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(25))}
 	}
 
 	decoderInstances := make([]v1beta1.OMENativeInstanceStatus, 0, decoderSurgesInFlight)
@@ -1611,7 +1636,7 @@ func TestDecoderSurgeBudget_RatioBalanced(t *testing.T) {
 	// peak 5.
 	isvc, decInsts := mkPDGroupSurge(v1beta1.CoordinationPacingRatioBalanced, 0)
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
-	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Fatalf("RatioBalanced: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
 	}
@@ -1622,7 +1647,7 @@ func TestDecoderSurgeBudget_RatioBalanced(t *testing.T) {
 	// peak 4, the first-surge assertion above would already have failed.)
 	isvc, decInsts = mkPDGroupSurge(v1beta1.CoordinationPacingRatioBalanced, 1)
 	client = fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
-	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); allowed {
 		t.Fatalf("RatioBalanced: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
 	}
@@ -1635,14 +1660,14 @@ func TestDecoderSurgeBudget_RatioBalanced(t *testing.T) {
 func TestDecoderSurgeBudget_PerComponent(t *testing.T) {
 	isvc, decInsts := mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 0)
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
-	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Fatalf("PerComponent: decoder's FIRST surge (→ peak N+1=5) must be allowed; got denied: %s", reason)
 	}
 
 	isvc, decInsts = mkPDGroupSurge(v1beta1.CoordinationPacingPerComponent, 1)
 	client = fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
-	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
+	if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); allowed {
 		t.Fatalf("PerComponent: decoder's SECOND surge (would be peak 6 > maxSurge=1 budget) must be denied; got allowed (reason=%s)", reason)
 	}
@@ -1662,7 +1687,7 @@ func TestDecoderSurgeBudget_InWakeUpDeltaGatesSecondSurge(t *testing.T) {
 		isvc, decInsts := mkPDGroupSurge(pt, 0)
 		client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.DecoderComponent: decInsts})
 		// inFlightSurge=1 → CheckSurge projects 0+1+1 = 2 > budget 1.
-		if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil,
+		if allowed, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
 			workloadtypes.UpdateStrategySurgeThenDrain, 1, 0); allowed {
 			t.Errorf("pacing=%s: a second decoder surge in one wake-up (inFlightSurge=1, budget=1) must be denied; got allowed (reason=%s)", pt, reason)
 		}
@@ -1703,7 +1728,7 @@ func mkGangSurgeFixture() (*v1beta1.InferenceService, []v1beta1.OMENativeInstanc
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 25},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(25))},
 				}},
 			},
 		},
@@ -1810,7 +1835,7 @@ func mkGangSurgeDrainedFixture() (*v1beta1.InferenceService, []v1beta1.OMENative
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 25},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(25))},
 				}},
 			},
 		},

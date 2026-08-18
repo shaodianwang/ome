@@ -990,3 +990,35 @@ func TestNewCoordinationConfigCached(t *testing.T) {
 		assert.Equal(t, int32(10), cfg.TrafficWeightDeadbandPercent)
 	})
 }
+
+// TestCoordinationConfigDefaultRatioTolerance verifies the ratio-tolerance
+// default distinguishes configured (pointer set, zero included) from absent
+// (nil — a group that omits tolerance rolls with no drift bound).
+func TestCoordinationConfigDefaultRatioTolerance(t *testing.T) {
+	load := func(t *testing.T, payload string) *CoordinationConfig {
+		clientset, _ := countingClientset(t, map[string]string{
+			CoordinationConfigName: payload,
+		})
+		cache := &ConfigCache{ttl: 30 * time.Second, now: func() time.Time { return time.Unix(0, 0) }}
+		cfg, err := NewCoordinationConfigCached(cache, clientset)
+		require.NoError(t, err)
+		return cfg
+	}
+
+	t.Run("configured value parses to a pointer", func(t *testing.T) {
+		cfg := load(t, `{"trafficWeightDeadbandPercent":0,"defaultRatioTolerancePercent":5}`)
+		require.NotNil(t, cfg.DefaultRatioTolerancePercent)
+		assert.Equal(t, int32(5), *cfg.DefaultRatioTolerancePercent)
+	})
+
+	t.Run("configured zero stays distinguishable from absent", func(t *testing.T) {
+		cfg := load(t, `{"defaultRatioTolerancePercent":0}`)
+		require.NotNil(t, cfg.DefaultRatioTolerancePercent)
+		assert.Equal(t, int32(0), *cfg.DefaultRatioTolerancePercent)
+	})
+
+	t.Run("absent key resolves to nil", func(t *testing.T) {
+		cfg := load(t, `{"trafficWeightDeadbandPercent":0}`)
+		assert.Nil(t, cfg.DefaultRatioTolerancePercent)
+	})
+}

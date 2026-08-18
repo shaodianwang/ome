@@ -149,7 +149,10 @@ type CoordinationPacing struct {
 	// starting_ratio ± this percent, and resumes once the pools
 	// rebalance. Example: a group that starts 2:1 with a value of 5 holds
 	// the live proportion between 1.9:1 and 2.1:1. For three or more
-	// components every pair is checked. Default: 5 (i.e. 5%).
+	// components every pair is checked. When nil, the operator-configured
+	// default (the coordination block of the operator's ConfigMap) applies
+	// at resolution; unresolved (nil after resolution) means no drift
+	// bound is enforced.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100

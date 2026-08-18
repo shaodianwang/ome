@@ -297,11 +297,13 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 				Soak: soak,
 			}
 			if pc.pacingType == v1beta1.CoordinationPacingRatioBalanced {
-				tol := int32(5) // v2 MaintainRatio default
+				// The fixture spells the tolerance explicitly (production
+				// resolves an omitted tolerance from operator config).
+				tol := int32(5)
 				if pc.ratioTol != nil {
 					tol = *pc.ratioTol
 				}
-				g.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: tol}
+				g.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: &tol}
 			}
 			groups = []v1beta1.RolloutGroup{g}
 		case v1beta1.CoordinationPolicySequential:

@@ -96,11 +96,13 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 		// satisfied (no peer to skew against).
 		return RatioDecision{AllowedSurgeDelta: proposedDelta, Reason: "single-component group"}
 	}
-	tolerance := int32(5)
-	if pacing.RatioTolerancePercent != nil {
-		tolerance = *pacing.RatioTolerancePercent
+	if pacing.RatioTolerancePercent == nil {
+		// No tolerance resolved: the group omitted it and the operator
+		// configured no default. There is no band to enforce, so the guard
+		// admits the step rather than inventing a bound.
+		return RatioDecision{AllowedSurgeDelta: proposedDelta, Reason: "no ratio tolerance resolved; drift bound disabled"}
 	}
-	band := float64(tolerance) / 100.0
+	band := float64(*pacing.RatioTolerancePercent) / 100.0
 
 	// Project against live Serving counts. Falls back to NewPods for
 	// backward compat with callers that haven't populated Serving yet.

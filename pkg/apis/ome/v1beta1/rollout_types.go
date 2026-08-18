@@ -196,10 +196,14 @@ type GroupRollingUpdate struct {
 // cross-Component replica ratio observed at rollout start (e.g. prefill:decode).
 type MaintainRatio struct {
 	// Tolerance is the maximum percentage drift from the starting ratio. A roll
-	// step that would exceed it is paused until the pools rebalance. Default 5.
+	// step that would exceed it is paused until the pools rebalance. An explicit
+	// 0 means zero drift. When omitted, the operator-configured default (the
+	// coordination block of the operator's ConfigMap) applies; if the operator
+	// configures no default either, the group rolls with no drift bound.
+	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
-	Tolerance int32 `json:"tolerance"`
+	Tolerance *int32 `json:"tolerance,omitempty"`
 }
 
 // RolloutPause holds a rollout at a step boundary; its meaning depends on the

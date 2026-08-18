@@ -9,6 +9,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 // canarySpec builds a spec with a single engine-component canary group carrying
@@ -422,7 +423,7 @@ func TestValidateCanary_MaintainRatioRejected(t *testing.T) {
 		Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
 			{
 				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
 				Canary:        &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{final}},
 			},
 		}},

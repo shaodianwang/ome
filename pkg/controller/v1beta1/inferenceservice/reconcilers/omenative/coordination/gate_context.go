@@ -70,7 +70,18 @@ type GateContext struct {
 // The gate methods read authoritative InferenceReplica status via ctx and
 // reads. A nil reads degrades every read to "no observation yet" (see the
 // GateContext.Reads doc); it does not fall back to isvc.Status.Components.
+//
+// Resolution runs without operator-configured group defaults; callers with
+// access to operator configuration (the dispatcher) use
+// ResolveGateContextWithDefaults so config-driven fills (e.g. the ratio
+// tolerance) reach the gates.
 func ResolveGateContext(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) GateContext {
+	return ResolveGateContextWithDefaults(ctx, reads, isvc, component, GroupDefaults{})
+}
+
+// ResolveGateContextWithDefaults is ResolveGateContext with the
+// operator-configured group defaults applied during group resolution.
+func ResolveGateContextWithDefaults(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, defaults GroupDefaults) GateContext {
 	if isvc == nil {
 		return GateContext{
 			Component:    component,
@@ -80,7 +91,7 @@ func ResolveGateContext(ctx context.Context, reads client.Reader, isvc *v1beta1.
 			Reads:        reads,
 		}
 	}
-	groups := ResolveGroups(isvc.Spec.Rollout)
+	groups := ResolveGroups(isvc.Spec.Rollout, defaults)
 	if len(groups) == 0 {
 		return GateContext{
 			ISVC:         isvc,

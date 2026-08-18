@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -126,8 +127,9 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// The same-target update retry policy is nil: the Update pass never
 	// runs in teardown, and neither does the escalation pass (zero grace
 	// / zero relocation budget — wedge escalation belongs to the Delete
-	// pipeline's lifecycle.forceDelete).
-	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, 0, 0)
+	// pipeline's lifecycle.forceDelete). Coordination group defaults are
+	// likewise irrelevant: teardown never consults the update gate.
+	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, 0, 0, coordination.GroupDefaults{})
 	input.Teardown = true
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval

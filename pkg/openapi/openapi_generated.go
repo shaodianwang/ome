@@ -1460,7 +1460,7 @@ func schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref common.ReferenceCallback
 					},
 					"ratioTolerancePercent": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RatioTolerancePercent bounds how far the components in a RatioBalanced group may drift from their starting proportion during a roll. The ratio is taken larger-pool : smaller-pool, so it is direction-independent — prefill:decode and decode:prefill are the same constraint — and is anchored to the counts observed when the roll began. A surge OR drain is paused whenever a step would push any component pair's live serving proportion outside starting_ratio ± this percent, and resumes once the pools rebalance. Example: a group that starts 2:1 with a value of 5 holds the live proportion between 1.9:1 and 2.1:1. For three or more components every pair is checked. Default: 5 (i.e. 5%).",
+							Description: "RatioTolerancePercent bounds how far the components in a RatioBalanced group may drift from their starting proportion during a roll. The ratio is taken larger-pool : smaller-pool, so it is direction-independent — prefill:decode and decode:prefill are the same constraint — and is anchored to the counts observed when the roll began. A surge OR drain is paused whenever a step would push any component pair's live serving proportion outside starting_ratio ± this percent, and resumes once the pools rebalance. Example: a group that starts 2:1 with a value of 5 holds the live proportion between 1.9:1 and 2.1:1. For three or more components every pair is checked. When nil, the operator-configured default (the coordination block of the operator's ConfigMap) applies at resolution; unresolved (nil after resolution) means no drift bound is enforced.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -5008,14 +5008,12 @@ func schema_pkg_apis_ome_v1beta1_MaintainRatio(ref common.ReferenceCallback) com
 				Properties: map[string]spec.Schema{
 					"tolerance": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Tolerance is the maximum percentage drift from the starting ratio. A roll step that would exceed it is paused until the pools rebalance. Default 5.",
-							Default:     0,
+							Description: "Tolerance is the maximum percentage drift from the starting ratio. A roll step that would exceed it is paused until the pools rebalance. An explicit 0 means zero drift. When omitted, the operator-configured default (the coordination block of the operator's ConfigMap) applies; if the operator configures no default either, the group rolls with no drift bound.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 				},
-				Required: []string{"tolerance"},
 			},
 		},
 	}

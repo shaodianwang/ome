@@ -46,7 +46,8 @@ data:
 
   coordination: |-
     {
-      "trafficWeightDeadbandPercent": {{ .Values.ome.controller.coordination.trafficWeightDeadbandPercent | default 0 }}
+      "trafficWeightDeadbandPercent": {{ .Values.ome.controller.coordination.trafficWeightDeadbandPercent | default 0 }}{{- if hasKey .Values.ome.controller.coordination "defaultRatioTolerancePercent" }},
+      "defaultRatioTolerancePercent": {{ .Values.ome.controller.coordination.defaultRatioTolerancePercent }}{{- end }}
     }
 
   {{- with .Values.ome.controller.lifecycle }}

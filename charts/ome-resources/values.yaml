@@ -176,6 +176,12 @@ ome:
       # continuous churn at large pod counts; a sustained ratio change still
       # exceeds the band and converges.
       trafficWeightDeadbandPercent: 0
+      # Default maintainRatio.tolerance (percent) applied when a rollout group
+      # sets maintainRatio but omits the tolerance. An explicit per-group value
+      # (including 0) always wins. Remove the key to leave the default
+      # unconfigured — a group that omits tolerance then rolls with no drift
+      # bound.
+      defaultRatioTolerancePercent: 5
     # podDisruptionBudget configures pod-level availability policies by mode.
     # Omitting rawDeployment keeps the chart default; set rawDeployment: null
     # to disable it.

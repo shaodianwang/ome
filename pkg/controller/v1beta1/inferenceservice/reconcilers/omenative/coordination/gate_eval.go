@@ -48,19 +48,23 @@ import (
 //
 // Reads authoritative InferenceReplica status via the provided context and
 // reader. recorder may be nil (the event is best-effort observability).
+// defaults carries the operator-configured group fill-ins (e.g. the ratio
+// tolerance default) so the gates see the same resolved groups as the
+// coordination reconciler.
 func EvaluateUpdateGate(
 	ctx context.Context,
 	reads client.Reader,
 	isvc *v1beta1.InferenceService,
 	component v1beta1.ComponentType,
 	recorder record.EventRecorder,
+	defaults GroupDefaults,
 	strategy workloadtypes.UpdateStrategyType,
 	inFlightSurge, inFlightUnavail int32,
 ) (allowed bool, denyReason string) {
-	// ResolveGateContext is paid once so the shared prelude (ResolveGroups +
+	// The gate context is resolved once so the shared prelude (ResolveGroups +
 	// MembershipFor + nil-isvc / no-coord short-circuit) runs once instead of
 	// four times -- see the coordination.GateContext docs.
-	gateCtx := ResolveGateContext(ctx, reads, isvc, component)
+	gateCtx := ResolveGateContextWithDefaults(ctx, reads, isvc, component, defaults)
 
 	inPlace := strategy == workloadtypes.UpdateStrategyInPlaceIfPossible ||
 		strategy == workloadtypes.UpdateStrategyInPlaceOnly

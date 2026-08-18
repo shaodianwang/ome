@@ -280,6 +280,15 @@ type CoordinationConfig struct {
 	// write-on-any-diff behavior, so eventual correctness is never traded away
 	// silently.
 	TrafficWeightDeadbandPercent int32 `json:"trafficWeightDeadbandPercent,omitempty"`
+
+	// DefaultRatioTolerancePercent fills spec.rollout.groups[].maintainRatio
+	// .tolerance when a group sets maintainRatio but omits the tolerance. An
+	// explicit per-group tolerance (including 0) always wins. There is
+	// intentionally NO in-code default — the value is supplied via the
+	// inferenceservice-config ConfigMap (set by the Helm chart / GitOps).
+	// Nil (absent config) means unconfigured: a group that omits tolerance
+	// then rolls with no drift bound, never a silently baked-in number.
+	DefaultRatioTolerancePercent *int32 `json:"defaultRatioTolerancePercent,omitempty"`
 }
 
 // +kubebuilder:object:generate=false

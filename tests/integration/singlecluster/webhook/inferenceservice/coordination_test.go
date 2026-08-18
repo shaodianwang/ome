@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -290,7 +291,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					BlueGreen:     &v1beta1.GroupBlueGreen{},
-					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 75},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(75))},
 				}},
 			},
 		}
@@ -342,7 +343,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		isvc := coordISVC("coord-w17", v1beta1.RolloutGroup{
 			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 			BlueGreen:     &v1beta1.GroupBlueGreen{},
-			MaintainRatio: &v1beta1.MaintainRatio{Tolerance: -5},
+			MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(-5))},
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred(),
@@ -354,7 +355,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		isvc := coordISVC("coord-w18", v1beta1.RolloutGroup{
 			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 			BlueGreen:     &v1beta1.GroupBlueGreen{},
-			MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 150},
+			MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(150))},
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred(),
@@ -434,6 +435,59 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(validation.ReasonOrphanCoordinationGroup))
+	})
+
+	// W-22a: partial membership — one group member is declared (engine), the
+	// other (decoder) is not. The group must be rejected member-by-member, and
+	// the error must name the group index and the missing Component so the
+	// operator can fix the exact gap.
+	ginkgo.It("W-22a rejects group whose members are only partially declared → OrphanCoordinationGroup", func() {
+		isvc := v1beta1testing.MakeInferenceService("coord-w22a", "isvc-webhook").
+			Model(coordCBMName).Runtime(coordCSRName).
+			DeploymentMode(constants.OMENative).
+			Engine(omeNativeEngine()).
+			Obj()
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+			}},
+		}
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonOrphanCoordinationGroup))
+		Expect(err.Error()).To(ContainSubstring("groups[0]"))
+		Expect(err.Error()).To(ContainSubstring("decoder"))
+	})
+
+	// W-18a: maintainRatio with the tolerance omitted is a valid spelling —
+	// the CRD no longer requires the field, and the operator-configured
+	// default applies at resolution.
+	ginkgo.It("W-18a accepts maintainRatio with tolerance omitted (CRD optional)", func() {
+		isvc := coordISVC("coord-w18a", v1beta1.RolloutGroup{
+			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			BlueGreen:     &v1beta1.GroupBlueGreen{},
+			MaintainRatio: &v1beta1.MaintainRatio{},
+		})
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+	})
+
+	// W-18b: explicit tolerance 0 is a valid, distinct request (zero drift),
+	// not a stand-in for "use the default".
+	ginkgo.It("W-18b accepts explicit maintainRatio.tolerance=0", func() {
+		isvc := coordISVC("coord-w18b", v1beta1.RolloutGroup{
+			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			BlueGreen:     &v1beta1.GroupBlueGreen{},
+			MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(0))},
+		})
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx,
+			client.ObjectKey{Namespace: isvc.Namespace, Name: isvc.Name}, got)).To(Succeed())
+		Expect(got.Spec.Rollout.Groups[0].MaintainRatio.Tolerance).NotTo(BeNil(),
+			"explicit 0 must round-trip as a set field, distinguishable from omitted")
+		Expect(*got.Spec.Rollout.Groups[0].MaintainRatio.Tolerance).To(Equal(int32(0)))
 	})
 
 	// W-23: a group with NO progression set (no canary/blueGreen/rollingUpdate)
@@ -857,6 +911,7 @@ var _ = ginkgo.Describe("validation reason constant stability", func() {
 		Expect(validation.ReasonInvalidComponentInCoordinationGroup).To(Equal("InvalidComponentInCoordinationGroup"))
 		Expect(validation.ReasonCoordinationRequiresOMENative).To(Equal("CoordinationRequiresOMENative"))
 		Expect(validation.ReasonRatioToleranceTooHigh).To(Equal("RatioToleranceTooHigh"))
+		Expect(validation.ReasonRatioToleranceOutOfRange).To(Equal("RatioToleranceOutOfRange"))
 		Expect(validation.ReasonOrphanCoordinationGroup).To(Equal("OrphanCoordinationGroup"))
 		Expect(validation.ReasonInvalidCoordinationOrder).To(Equal("InvalidCoordinationOrder"))
 		Expect(validation.ReasonSequentialDuplicateOrder).To(Equal("SequentialDuplicateOrder"))
