@@ -40,6 +40,9 @@ type ReconcileInputs struct {
 	ISVC               *v1beta1.InferenceService
 	Component          v1beta1.ComponentType
 	CanaryRevisionHash string
+	// StableRevisionHash is the stable revision for the canary's component:
+	// the persisted status identity when one exists, otherwise the observed
+	// non-canary revision (which seeds the persisted identity at canary start).
 	StableRevisionHash string
 	DesiredReplicas    int32
 	PerRevisionPods    map[string]int32
@@ -122,7 +125,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			// observed target (in.CanaryRevisionHash) reports stable — that is the
 			// revision we're holding on, not a new target. Exclude both the stable
 			// revision and the rejected revision itself.
-			stableHash := otherRevision(in.PerRevisionPods, cs.RolledBackRevisionHash)
+			stableHash := stableHashFor(cs, in.PerRevisionPods, cs.RolledBackRevisionHash)
 			if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.RolledBackRevisionHash && in.CanaryRevisionHash != stableHash {
 				if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutRollbackAnnotation); err != nil {
 					return nil, err
@@ -150,7 +153,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// failed revision is cs.CanaryRevisionHash; exclude it and the stable revision
 	// (the observed target reports stable while no canary pods remain).
 	if cs != nil && in.ISVC.Status.Components[in.Component].RolloutPhase == v1beta1.RolloutPhaseFailed {
-		stableHash := otherRevision(in.PerRevisionPods, cs.CanaryRevisionHash)
+		stableHash := stableHashFor(cs, in.PerRevisionPods, cs.CanaryRevisionHash)
 		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash && in.CanaryRevisionHash != stableHash {
 			resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
 			// fall through: start a fresh canary toward the new target.
@@ -199,10 +202,19 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 		in.ISVC.Status.Canary = &v1beta1.CanaryStatus{
 			CanaryRevisionHash: in.CanaryRevisionHash,
+			StableRevisionHash: in.StableRevisionHash,
 			CurrentStep:        0,
 			StepEnteredTime:    &metav1.Time{Time: in.Now},
 		}
 		cs = in.ISVC.Status.Canary
+	}
+
+	// Backfill a missing stable identity from the observed stable revision (a
+	// canary re-armed after a completed one, or a status recorded before the
+	// identity was persisted). Once set it is never re-inferred: the live pod
+	// set stops naming the pre-canary stable as revisions retarget and drain.
+	if cs.StableRevisionHash == "" && in.StableRevisionHash != "" {
+		cs.StableRevisionHash = in.StableRevisionHash
 	}
 	step := plan.Steps[cs.CurrentStep]
 
@@ -281,6 +293,9 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			// a step-0 partition. ObservedTrafficWeight stays 100 (all on canary).
 			cs.CurrentStep = int32(len(plan.Steps))
 			cs.ObservedTrafficWeight = 100
+			// The canary revision is the stable revision now: drop the pre-canary
+			// identity so it cannot leak into a later rollout's rollback target.
+			cs.StableRevisionHash = ""
 			return &Result{Active: true, Complete: true, Partition: 0}, nil
 		}
 		return &Result{Active: true, Partition: 0, RequeueAfter: reconcileRequeue}, nil
@@ -322,11 +337,26 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 // dropping ALL prior-canary state (analysis failure budget, sampling
 // timestamps, metric results, rollback hold, observed traffic) — carrying any
 // of it over would let a stale failure budget roll back the new revision.
+// StableRevisionHash is the one field PRESERVED: a mid-canary retarget does
+// not change which revision was stable when the rollout began, and dropping
+// it would make a later rollback target the partially-rolled intermediate.
 func resetCanaryStatus(cs *v1beta1.CanaryStatus, hash string, now time.Time) {
 	*cs = v1beta1.CanaryStatus{
 		CanaryRevisionHash: hash,
+		StableRevisionHash: cs.StableRevisionHash,
 		StepEnteredTime:    &metav1.Time{Time: now},
 	}
+}
+
+// stableHashFor resolves the stable revision hash for rollback decisions: the
+// persisted status identity when present (it survives retargets and the
+// stable pods' drain), otherwise inferred from the live pod set — the
+// fallback for canary statuses recorded before the identity was persisted.
+func stableHashFor(cs *v1beta1.CanaryStatus, pods map[string]int32, rejectedHash string) string {
+	if cs != nil && cs.StableRevisionHash != "" {
+		return cs.StableRevisionHash
+	}
+	return otherRevision(pods, rejectedHash)
 }
 
 // reconcileRollback drives the component back to the stable revision and holds
@@ -336,7 +366,7 @@ func resetCanaryStatus(cs *v1beta1.CanaryStatus, hash string, now time.Time) {
 // While they drain → RollingBack; once gone → RolledBack (held until a different
 // target appears).
 func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
-	stableHash := otherRevision(in.PerRevisionPods, cs.RolledBackRevisionHash)
+	stableHash := stableHashFor(cs, in.PerRevisionPods, cs.RolledBackRevisionHash)
 	applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, 0)
 	if in.PerRevisionPods[cs.RolledBackRevisionHash] > 0 {
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRollingBack)

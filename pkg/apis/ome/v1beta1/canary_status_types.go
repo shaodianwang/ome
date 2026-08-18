@@ -11,6 +11,14 @@ type CanaryStatus struct {
 	// +optional
 	CanaryRevisionHash string `json:"canaryRevisionHash,omitempty"`
 
+	// StableRevisionHash is the revision hash that was serving as stable when
+	// the canary began — the rollback target. It is preserved across mid-canary
+	// retargets so a rollback always returns to the pre-canary stable revision,
+	// never to a partially-rolled intermediate. Cleared when the canary
+	// completes (the canary revision becomes the new stable).
+	// +optional
+	StableRevisionHash string `json:"stableRevisionHash,omitempty"`
+
 	// CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.
 	CurrentStep int32 `json:"currentStep"`
 

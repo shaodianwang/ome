@@ -125,13 +125,21 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	// The stable revision threaded to the executor: the persisted status
+	// identity when present — it survives a mid-canary retarget and the stable
+	// pods' eventual drain — otherwise inferred from the live pod set (first
+	// sight of a new canary, or a status recorded before it was persisted).
+	stableHash := otherRevision(pods, canaryHash)
+	if sc := d.ISVC.Status.Canary; sc != nil && sc.StableRevisionHash != "" {
+		stableHash = sc.StableRevisionHash
+	}
 	res, err := Reconcile(ctx, ReconcileInputs{
 		Client:                   d.Client,
 		Reader:                   d.Reader,
 		ISVC:                     d.ISVC,
 		Component:                primary,
 		CanaryRevisionHash:       canaryHash,
-		StableRevisionHash:       otherRevision(pods, canaryHash),
+		StableRevisionHash:       stableHash,
 		DesiredReplicas:          componentReplicas(d.ISVC, primary),
 		PerRevisionPods:          readyRev[primary],
 		SecondaryCapacityReady:   secondaryReady,
@@ -153,7 +161,15 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// them — signaling only the primary leaves the engine/decoder serving the
 	// rejected revision behind the rolled-back router.
 	for _, comp := range configuredComponents(d.ISVC) {
-		if err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, comp, res.RolledBack); err != nil {
+		// The persisted stable identity is recorded through the primary (the
+		// step machine's Component). Revision hashes are per-Component, so it
+		// can never name a secondary's revision — secondaries resolve their
+		// rollback target from their own revision history instead.
+		persistedStable := ""
+		if comp == primary && d.ISVC.Status.Canary != nil {
+			persistedStable = d.ISVC.Status.Canary.StableRevisionHash
+		}
+		if err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, comp, persistedStable, res.RolledBack); err != nil {
 			return 0, err
 		}
 	}
@@ -165,8 +181,9 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 // reconcileRollbackSignal sets (rolledBack) or clears one Component IR's
 // Spec.Pacing.RollbackToRevision. When rolling back it points at the STABLE
 // pre-canary ControllerRevision so the IR reconciler overrides its desired
-// template with that revision and rolls every Instance back to it. Idempotent —
-// only writes on a change.
+// template with that revision and rolls every Instance back to it. stableHash
+// is the persisted stable identity for this Component ("" when none is
+// recorded). Idempotent — only writes on a change.
 //
 // The target is resolved from the IR's ControllerRevision history, NOT from
 // ir.Status.CurrentRevision: CurrentRevision is promoted to the canary revision
@@ -177,7 +194,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 // FIRST step. Echoing CurrentRevision back would then tell the IR to "roll back"
 // to the canary revision it is already on — a no-op — so the canary pods never
 // drain and the rollback wedges in RollingBack forever.
-func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, rolledBack bool) error {
+func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, stableHash string, rolledBack bool) error {
 	if c == nil || reads == nil {
 		return nil
 	}
@@ -199,7 +216,7 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 		if err != nil {
 			return err
 		}
-		stable, err := stableRevisionName(ctx, reads, isvc, comp, rejected)
+		stable, err := stableRevisionName(ctx, reads, isvc, comp, rejected, stableHash)
 		if err != nil {
 			return err
 		}
@@ -226,20 +243,24 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 }
 
 // stableRevisionName resolves the ControllerRevision name of the stable,
-// pre-canary revision for a Component: the highest-numbered ControllerRevision
-// in the Component's history whose revision hash is NOT the rejected (canary)
-// hash. The canary is the latest spec target so it owns the highest .Revision;
-// the stable revision the canary rolled away from is the next-highest. Returns
-// "" when no non-canary revision is in history (nothing to roll back to).
+// pre-canary revision for a Component. With a persisted stable identity
+// (stableHash) the match is exact: the ControllerRevision carrying that hash,
+// or "" when it is no longer retained — never a guess, so a rollback after an
+// A→B→C retarget targets A, not the newest partially-rolled intermediate.
+// Without one, it falls back to ordering inference: the highest-numbered
+// ControllerRevision in the Component's history whose revision hash is NOT
+// the rejected (canary) hash — the canary is the latest spec target so it
+// owns the highest .Revision. Returns "" when nothing resolves (better no
+// signal than the wrong one).
 //
 // Reading the history is what makes the rollback target survive the canary's
 // forward roll — once every Instance is on the canary revision, neither the IR
 // status nor the live pod set still names the stable revision, but its
 // ControllerRevision is retained.
-func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, rejectedHash string) (string, error) {
-	// Without a known rejected (canary) hash we can't tell the stable revision
-	// apart from the canary, so don't guess — better no signal than the wrong one.
-	if rejectedHash == "" {
+func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, rejectedHash, stableHash string) (string, error) {
+	// Without either a persisted stable identity or a known rejected (canary)
+	// hash the stable revision is indistinguishable from the canary: don't guess.
+	if stableHash == "" && rejectedHash == "" {
 		return "", nil
 	}
 	list := &appsv1.ControllerRevisionList{}
@@ -250,6 +271,16 @@ func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.
 	})
 	if err := reads.List(ctx, list, client.InNamespace(isvc.Namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
 		return "", err
+	}
+	if stableHash != "" {
+		want := query.RevisionFromHash(stableHash)
+		for i := range list.Items {
+			cr := &list.Items[i]
+			if query.RevisionOf(cr).Same(want) {
+				return cr.Name, nil
+			}
+		}
+		return "", nil
 	}
 	bestName := ""
 	var bestRev int64

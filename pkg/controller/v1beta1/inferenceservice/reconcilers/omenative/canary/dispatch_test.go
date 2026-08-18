@@ -530,6 +530,94 @@ func TestDispatch_PDRouterRollbackTargetsStable(t *testing.T) {
 	}
 }
 
+// TestDispatch_RollbackTargetsPersistedStableAfterRetarget pins the
+// controller-side rollback resolution: after a stable-A → partial-B →
+// retarget-C sequence, the rollback signal must point the IR at A's
+// ControllerRevision — the persisted stable identity — even though B is both
+// the most-populated live non-canary revision AND the highest-numbered
+// non-rejected ControllerRevision (every inference-based resolution names B).
+func TestDispatch_RollbackTargetsPersistedStableAfterRetarget(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "rt1"}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+			{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+			{Capacity: intstr.FromString("100%"), Traffic: 100},
+		}},
+	}}}
+	// Mid-canary toward C after the retarget: the persisted stable is A.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:    "revC",
+		StableRevisionHash:    "revA",
+		CurrentStep:           0,
+		ObservedTrafficWeight: 50,
+	}
+	objs := []runtime.Object{isvc, ir(ns, "rt1", v1beta1.EngineComponent, "revC"),
+		canaryPod(ns, "rt1", "engine", "revA", "rt1-engine-0"),
+		canaryPod(ns, "rt1", "engine", "revB", "rt1-engine-1"),
+		canaryPod(ns, "rt1", "engine", "revB", "rt1-engine-2"),
+		canaryPod(ns, "rt1", "engine", "revC", "rt1-engine-3"),
+		canaryControllerRevision(ns, "rt1", "engine", "revA", 1),
+		canaryControllerRevision(ns, "rt1", "engine", "revB", 2),
+		canaryControllerRevision(ns, "rt1", "engine", "revC", 3),
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
+	ctx := context.Background()
+
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}); err != nil {
+		t.Fatalf("Dispatch (rollback) error: %v", err)
+	}
+	if isvc.Status.Canary.RolledBackRevisionHash != "revC" {
+		t.Fatalf("rollback should reject C, got %+v", isvc.Status.Canary)
+	}
+	gotIR := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "rt1-engine"}, gotIR); err != nil {
+		t.Fatal(err)
+	}
+	if gotIR.Spec.Pacing == nil || gotIR.Spec.Pacing.RollbackToRevision == nil ||
+		*gotIR.Spec.Pacing.RollbackToRevision != "rt1-engine-revA" {
+		t.Fatalf("rollback must target the persisted stable A, got pacing=%+v", gotIR.Spec.Pacing)
+	}
+	tr := isvc.Status.Components[v1beta1.EngineComponent].Traffic
+	wantStable := coordination.PerRevisionServiceName("rt1", v1beta1.EngineComponent, "revA")
+	if len(tr) != 1 || tr[0].Percent != 100 || tr[0].RevisionName != wantStable {
+		t.Fatalf("rollback traffic must go 100%% to %s, got %+v", wantStable, tr)
+	}
+}
+
+// TestStableRevisionName_PersistedIdentity pins the resolution order: an
+// exact match on the persisted stable hash wins over revision ordering; a
+// persisted identity whose ControllerRevision is no longer retained resolves
+// to NO target (never a guess); and the ordering inference still serves
+// statuses that carry no persisted identity.
+func TestStableRevisionName_PersistedIdentity(t *testing.T) {
+	ns := "default"
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "sr1"}}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		canaryControllerRevision(ns, "sr1", "engine", "revA", 1),
+		canaryControllerRevision(ns, "sr1", "engine", "revB", 2),
+		canaryControllerRevision(ns, "sr1", "engine", "revC", 3),
+	).Build()
+	ctx := context.Background()
+
+	got, err := stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, "revC", "revA")
+	if err != nil || got != "sr1-engine-revA" {
+		t.Fatalf("persisted identity must resolve exactly: got %q err=%v", got, err)
+	}
+	got, err = stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, "revC", "")
+	if err != nil || got != "sr1-engine-revB" {
+		t.Fatalf("no persisted identity → highest non-rejected: got %q err=%v", got, err)
+	}
+	got, err = stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, "revC", "gone0000")
+	if err != nil || got != "" {
+		t.Fatalf("persisted identity not retained → no target (no guessing), got %q err=%v", got, err)
+	}
+}
+
 // TestRollbackSignal_TransientReadKeepsTarget pins that a transient IR read
 // failure inside the rollback path surfaces as an error instead of being read
 // as "no canary target" — which resolved an empty rejected hash, computed no
@@ -559,7 +647,7 @@ func TestRollbackSignal_TransientReadKeepsTarget(t *testing.T) {
 		},
 	}).Build()
 
-	if err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, true); err == nil {
+	if err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, "", true); err == nil {
 		t.Fatal("a transient IR read during a rollback hold must surface an error, not be swallowed")
 	}
 	got := &v1beta1.InferenceReplica{}

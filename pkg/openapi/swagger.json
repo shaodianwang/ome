@@ -341,6 +341,10 @@
           "description": "RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback) abandons a canary: it records the rejected revision hash. While set, the component is held on the stable revision and the rejected revision is NOT retried — even after the annotation is cleared. The rollout re-arms only when a different target revision appears (a fresh spec change / fix).",
           "type": "string"
         },
+        "stableRevisionHash": {
+          "description": "StableRevisionHash is the revision hash that was serving as stable when the canary began — the rollback target. It is preserved across mid-canary retargets so a rollback always returns to the pre-canary stable revision, never to a partially-rolled intermediate. Cleared when the canary completes (the canary revision becomes the new stable).",
+          "type": "string"
+        },
         "stepEnteredTime": {
           "description": "StepEnteredTime is when CurrentStep was entered. Auto promotion measures Pause.Duration from this timestamp.",
           "$ref": "#/definitions/v1.Time"

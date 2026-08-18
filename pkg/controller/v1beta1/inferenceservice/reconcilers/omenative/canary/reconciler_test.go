@@ -8,6 +8,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -615,6 +616,137 @@ func TestReconcile_AnalysisFailedIsSticky(t *testing.T) {
 	}
 	if phaseOf(isvc) == v1beta1.RolloutPhaseFailed {
 		t.Fatal("re-armed canary must leave the parked Failed phase, still Failed")
+	}
+}
+
+// TestReconcile_InitCapturesStableIdentity pins that first sight of a new
+// canary persists which revision was stable at that moment — the rollback
+// target must not depend on later, mutable observations.
+func TestReconcile_InitCapturesStableIdentity(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 0, "old": 4}))
+	if isvc.Status.Canary == nil || isvc.Status.Canary.StableRevisionHash != "old" {
+		t.Fatalf("init must capture the stable revision identity, got %+v", isvc.Status.Canary)
+	}
+}
+
+// TestReconcile_RetargetRollbackReturnsToOriginalStable pins the retarget
+// contract: stable A → partial canary B → retarget C → rollback returns to A.
+// The stable identity is the persisted status value, never re-inferred from
+// live pods (B's pods outnumber A's here, so an inference would name B).
+func TestReconcile_RetargetRollbackReturnsToOriginalStable(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+
+	// Canary toward B initializes while A serves: stable identity A captured.
+	inB := baseInputs(isvc, map[string]int32{"revB": 0, "revA": 4})
+	inB.CanaryRevisionHash = "revB"
+	inB.StableRevisionHash = "revA"
+	Reconcile(context.Background(), inB)
+	if got := isvc.Status.Canary.StableRevisionHash; got != "revA" {
+		t.Fatalf("init must persist stable identity A, got %q", got)
+	}
+
+	// B partially rolls; the 50% split serves (traffic shifted).
+	inB = baseInputs(isvc, map[string]int32{"revB": 2, "revA": 2})
+	inB.CanaryRevisionHash = "revB"
+	inB.StableRevisionHash = "revA"
+	Reconcile(context.Background(), inB)
+	if isvc.Status.Canary.ObservedTrafficWeight != 50 {
+		t.Fatalf("setup: traffic should have shifted to the B split, got %+v", isvc.Status.Canary)
+	}
+
+	// Retarget to C mid-canary. The observed stable input names B (the
+	// most-populated live non-canary revision) — the persisted A must win.
+	inC := baseInputs(isvc, map[string]int32{"revC": 0, "revB": 3, "revA": 1})
+	inC.CanaryRevisionHash = "revC"
+	inC.StableRevisionHash = "revB"
+	Reconcile(context.Background(), inC)
+	cs := isvc.Status.Canary
+	if cs.CanaryRevisionHash != "revC" || cs.CurrentStep != 0 {
+		t.Fatalf("retarget must restart toward C, got %+v", cs)
+	}
+	if cs.StableRevisionHash != "revA" {
+		t.Fatalf("retarget must preserve the original stable identity A, got %q", cs.StableRevisionHash)
+	}
+
+	// Rollback of C: traffic must return 100% to A, not to B.
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	inRB := baseInputs(isvc, map[string]int32{"revC": 2, "revB": 3, "revA": 1})
+	inRB.CanaryRevisionHash = "revC"
+	inRB.StableRevisionHash = "revB"
+	res, _ := Reconcile(context.Background(), inRB)
+	if !res.RolledBack || isvc.Status.Canary.RolledBackRevisionHash != "revC" {
+		t.Fatalf("rollback must reject C, got res=%+v cs=%+v", res, isvc.Status.Canary)
+	}
+	tr := isvc.Status.Components[v1beta1.EngineComponent].Traffic
+	wantStable := coordination.PerRevisionServiceName("svc", v1beta1.EngineComponent, "revA")
+	if len(tr) != 1 || tr[0].Percent != 100 || tr[0].RevisionName != wantStable {
+		t.Fatalf("rollback must route 100%% to the original stable %s, got %+v", wantStable, tr)
+	}
+}
+
+// TestReconcile_RollbackTargetSurvivesRestart pins the durability contract:
+// the stable identity lives in the status subresource, so a rollback decided
+// by a freshly restarted controller — holding only the persisted status and
+// live observations, no in-memory history — still returns to the original
+// stable revision.
+func TestReconcile_RollbackTargetSurvivesRestart(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	// The status as re-read from the apiserver after a restart: mid-canary
+	// toward C following an earlier A→B→C retarget.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:    "revC",
+		StableRevisionHash:    "revA",
+		CurrentStep:           0,
+		ObservedTrafficWeight: 50,
+	}
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	in := baseInputs(isvc, map[string]int32{"revC": 2, "revB": 3, "revA": 1})
+	in.CanaryRevisionHash = "revC"
+	in.StableRevisionHash = "revB" // the live-pod inference names B; persisted A must win
+	res, _ := Reconcile(context.Background(), in)
+	if !res.RolledBack {
+		t.Fatalf("expected rollback, got %+v", res)
+	}
+	tr := isvc.Status.Components[v1beta1.EngineComponent].Traffic
+	wantStable := coordination.PerRevisionServiceName("svc", v1beta1.EngineComponent, "revA")
+	if len(tr) != 1 || tr[0].Percent != 100 || tr[0].RevisionName != wantStable {
+		t.Fatalf("a restart must not lose the rollback target: want 100%% to %s, got %+v", wantStable, tr)
+	}
+}
+
+// TestReconcile_CompleteClearsStableIdentity pins the identity lifecycle end:
+// completion clears the persisted stable hash (the canary revision IS stable
+// now), and a later canary re-armed from the done sentinel captures its own
+// stable from what is serving at that point.
+func TestReconcile_CompleteClearsStableIdentity(t *testing.T) {
+	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "revB",
+		StableRevisionHash: "revA",
+		CurrentStep:        0,
+		StepEnteredTime:    &metav1.Time{Time: time.Unix(1000, 0)},
+	}
+	in := baseInputs(isvc, map[string]int32{"revB": 4})
+	in.CanaryRevisionHash = "revB"
+	in.StableRevisionHash = "" // A fully drained; nothing left to observe
+	res, _ := Reconcile(context.Background(), in)
+	if !res.Complete {
+		t.Fatalf("expected completion, got %+v", res)
+	}
+	if isvc.Status.Canary.StableRevisionHash != "" {
+		t.Fatalf("completion must clear the stable identity, got %q", isvc.Status.Canary.StableRevisionHash)
+	}
+
+	// A new canary toward C re-arms from the done sentinel: its stable is B
+	// (what serves now), captured from the observed stable revision.
+	in2 := baseInputs(isvc, map[string]int32{"revC": 0, "revB": 4})
+	in2.CanaryRevisionHash = "revC"
+	in2.StableRevisionHash = "revB"
+	Reconcile(context.Background(), in2)
+	cs := isvc.Status.Canary
+	if cs.CanaryRevisionHash != "revC" || cs.StableRevisionHash != "revB" {
+		t.Fatalf("re-armed canary must capture B as its stable, got %+v", cs)
 	}
 }
 

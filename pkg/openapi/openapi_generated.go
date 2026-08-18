@@ -629,6 +629,13 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 							Format:      "",
 						},
 					},
+					"stableRevisionHash": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StableRevisionHash is the revision hash that was serving as stable when the canary began — the rollback target. It is preserved across mid-canary retargets so a rollback always returns to the pre-canary stable revision, never to a partially-rolled intermediate. Cleared when the canary completes (the canary revision becomes the new stable).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"currentStep": {
 						SchemaProps: spec.SchemaProps{
 							Description: "CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.",
