@@ -178,11 +178,18 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]ComponentObservation, error) {
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
-		// Static spec partition, resolved the same way as
-		// buildComponentObservation. Needed both to carry Partition and to
-		// compute AtDesiredShape below so activeSequentialComponent can
-		// release a converged staged Component here.
-		partition := staticPartitionFor(isvc, c)
+		// Effective partition from the projected IR spec (the merged
+		// ISVC↔runtime lifecycle the workload controller stages Instances
+		// at), resolved the same way as buildGroupObservation. Needed both
+		// to carry Partition and to compute AtDesiredShape below so
+		// activeSequentialComponent can release a converged staged
+		// Component here — including one staged at a runtime-inherited
+		// partition the raw ISVC never shows. A read error fails closed,
+		// same as the status read below.
+		partition, err := irprojector.ComponentIRPartition(ctx, reads, isvc.Namespace, isvc.Name, c)
+		if err != nil {
+			return nil, err
+		}
 		obs := ComponentObservation{Component: c, Partition: partition}
 		summary, err := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
 		if err != nil {

@@ -118,7 +118,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("sequential-variants", "Sequential rollout variants", (
         "sequential_n3_engine_first", "sequential_soak", "sequential_inplace",
-        "sequential_recreatepod",
+        "sequential_recreatepod", "runtime_partition_sequential",
     )),
     ("sequential-interleavings", "Sequential rollout interleavings", (
         "sequential_pause_mid", "sequential_scale_during",

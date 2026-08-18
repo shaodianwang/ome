@@ -568,10 +568,18 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 			return GroupObservation{}, err
 		}
 		// ResolveGroups excludes canary groups, so every Component here is
-		// coordination-owned and reads its static spec partition. Canary-owned
-		// Components never reach this loop (they leave Partition 0, driven by
-		// the canary reconciler's own EffectivePartition path).
-		partition := staticPartitionFor(isvc, c)
+		// coordination-owned and reads the effective partition from the
+		// projected IR spec — the merged ISVC↔runtime lifecycle the workload
+		// controller stages Instances at. A runtime-inherited partition is
+		// invisible on the raw ISVC, so reading the ISVC here would treat a
+		// legitimately staged Component as an incomplete rollout forever.
+		// Canary-owned Components never reach this loop (they leave
+		// Partition 0, driven by the canary reconciler's own
+		// EffectivePartition path).
+		partition, err := irprojector.ComponentIRPartition(ctx, reads, isvc.Namespace, isvc.Name, c)
+		if err != nil {
+			return GroupObservation{}, err
+		}
 		obs.Components[c] = buildComponentObservation(summary, c, perRevisionPods[c], partition)
 	}
 	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
@@ -624,39 +632,6 @@ func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta
 		v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
 		summary.UpdateRevision, partition, summary.Replicas)
 	return out
-}
-
-// staticPartitionFor returns the Component's static
-// updateStrategy.rollingUpdate.partition from the ISVC spec (0 when unset).
-// Total: a nil Component / lifecycle / updateStrategy / rollingUpdate / partition
-// at any level resolves to 0.
-func staticPartitionFor(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) int32 {
-	if isvc == nil {
-		return 0
-	}
-	var ext *v1beta1.ComponentExtensionSpec
-	switch c {
-	case v1beta1.EngineComponent:
-		if isvc.Spec.Engine != nil {
-			ext = &isvc.Spec.Engine.ComponentExtensionSpec
-		}
-	case v1beta1.DecoderComponent:
-		if isvc.Spec.Decoder != nil {
-			ext = &isvc.Spec.Decoder.ComponentExtensionSpec
-		}
-	case v1beta1.RouterComponent:
-		if isvc.Spec.Router != nil {
-			ext = &isvc.Spec.Router.ComponentExtensionSpec
-		}
-	}
-	if ext == nil || ext.Lifecycle == nil || ext.Lifecycle.UpdateStrategy == nil {
-		return 0
-	}
-	ru := ext.Lifecycle.UpdateStrategy.RollingUpdate
-	if ru == nil || ru.Partition == nil {
-		return 0
-	}
-	return *ru.Partition
 }
 
 // collectFailedInstanceIndices returns the indices of every Instance

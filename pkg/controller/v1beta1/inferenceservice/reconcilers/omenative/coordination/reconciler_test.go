@@ -1121,6 +1121,61 @@ func TestBuildComponentObservation_AtDesiredShapeWithStaticPartition(t *testing.
 	}
 }
 
+func TestBuildGroupObservation_PartitionFromProjectedIRSpec(t *testing.T) {
+	// The effective partition comes from the projected IR spec (the
+	// merged ISVC↔runtime lifecycle). The raw ISVC here carries no
+	// lifecycle at all — modeling a partition inherited from the
+	// ServingRuntime — yet the observation must still stage the
+	// Component at partition 2 and report AtDesiredShape once
+	// (Replicas-2) instances are Ready on the target and 2 held
+	// instances are Ready on the prior revision.
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"},
+	}
+	const target = "isvc-engine-bbbb"
+	const prior = "isvc-engine-aaaa"
+	instances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: prior},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: prior},
+		{Index: 2, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: target},
+		{Index: 3, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: target},
+	}
+	partition := int32(2)
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Spec: v1beta1.InferenceReplicaSpec{
+			Lifecycle: &v1beta1.LifecycleSpec{
+				UpdateStrategy: &v1beta1.UpdateStrategy{
+					RollingUpdate: &v1beta1.RollingUpdate{Partition: &partition},
+				},
+			},
+		},
+		Status: v1beta1.InferenceReplicaStatus{
+			Replicas:         4,
+			CurrentRevision:  prior,
+			UpdateRevision:   target,
+			InstanceStatuses: instances,
+		},
+	}
+	c := testClient(engineIR)
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
+	engineObs := obs.Components[v1beta1.EngineComponent]
+	if engineObs.Partition != 2 {
+		t.Fatalf("Partition must come from the projected IR spec; got %d want 2", engineObs.Partition)
+	}
+	if !engineObs.AtDesiredShape {
+		t.Fatalf("staged shape at the IR-spec partition must report AtDesiredShape=true; got %+v", engineObs)
+	}
+}
+
 func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T) {
 	// End-to-end: a Failed Instance flows through buildComponentObservation
 	// into the BlueGreen state machine, which returns Phase=Failed for

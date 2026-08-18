@@ -536,26 +536,18 @@ func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
 	}
 }
 
-// setStaticPartition stamps the Component's
-// spec.<component>.lifecycle.updateStrategy.rollingUpdate.partition —
-// the path staticPartitionFor reads. Only Decoder is needed by the
-// tests here, but the switch keeps it symmetric.
-func setStaticPartition(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, partition int32) {
-	ext := &v1beta1.ComponentExtensionSpec{
-		Lifecycle: &v1beta1.LifecycleSpec{
-			UpdateStrategy: &v1beta1.UpdateStrategy{
-				RollingUpdate: &v1beta1.RollingUpdate{Partition: &partition},
-			},
+// withIRSpecPartition stamps the projected
+// spec.lifecycle.updateStrategy.rollingUpdate.partition on a fake IR —
+// the effective-partition field the gate reads. The projector fills it
+// from the merged ISVC↔runtime lifecycle, so an IR carrying it with no
+// matching ISVC-side lifecycle models a runtime-inherited partition.
+func withIRSpecPartition(ir *v1beta1.InferenceReplica, partition int32) *v1beta1.InferenceReplica {
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{Partition: &partition},
 		},
 	}
-	switch c {
-	case v1beta1.DecoderComponent:
-		isvc.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: *ext}
-	case v1beta1.EngineComponent:
-		isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: *ext}
-	case v1beta1.RouterComponent:
-		isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: *ext}
-	}
+	return ir
 }
 
 // seqReadyIR builds an InferenceReplica whose status models `replicas`
@@ -639,18 +631,20 @@ func TestCheckSequentialGate_MomentOfBump_SteadyStateInstances(t *testing.T) {
 // converged to its staged shape, AtDesiredShape must be computed and the
 // gate must release the next Component.
 func TestCheckSequentialGate_StagedPartitionReleasesNext(t *testing.T) {
+	// The partition lives only on the projected IR spec — the raw ISVC
+	// carries no lifecycle at all, modeling a partition inherited from
+	// the ServingRuntime. The gate must still recognize the staged shape.
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	isvc.Generation = 3
-	// Static partition=1 on decoder: 3 of 4 roll to NEW, 1 held on OLD.
-	setStaticPartition(isvc, v1beta1.DecoderComponent, 1)
 
 	cl := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
 		// Decoder: genuine revisionSkew (target rev2 recorded), converged
 		// to the staged shape — 3 instances on rev2, 1 held on rev1.
+		// Effective partition=1: 3 of 4 roll to NEW, 1 held on OLD.
 		func() *v1beta1.InferenceReplica {
 			ir := seqReadyIR("seq-isvc", v1beta1.DecoderComponent, "rev1", "rev2", "rev2", 4, 3)
 			ir.Status.InstanceStatuses[3].RunningRevision = "seq-isvc-decoder-rev1" // held
-			return ir
+			return withIRSpecPartition(ir, 1)
 		}(),
 		// Engine: also bumped to rev2, nothing rolled yet.
 		seqReadyIR("seq-isvc", v1beta1.EngineComponent, "rev1", "rev2", "rev1", 4, 3),
@@ -733,22 +727,13 @@ func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
 // --- Sequential handoff on desired-shape convergence ---
 
 // mkSequentialFixtureEngineFirst returns an ISVC with a Sequential run
-// [engine, decoder] (engine first in Order) and a static
-// rollingUpdate.partition on the engine Component, so the gate's own
-// observation computes engine AtDesiredShape from a partitioned target.
-func mkSequentialFixtureEngineFirst(name string, enginePartition int32) *v1beta1.InferenceService {
-	p := enginePartition
+// [engine, decoder] (engine first in Order). The engine's partition is
+// stamped on its fake IR spec (withIRSpecPartition) — the effective
+// value the gate reads — so the ISVC itself carries no lifecycle.
+func mkSequentialFixtureEngineFirst(name string) *v1beta1.InferenceService {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Engine: &v1beta1.EngineSpec{
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					Lifecycle: &v1beta1.LifecycleSpec{
-						UpdateStrategy: &v1beta1.UpdateStrategy{
-							RollingUpdate: &v1beta1.RollingUpdate{Partition: &p},
-						},
-					},
-				},
-			},
+			Engine:  &v1beta1.EngineSpec{},
 			Decoder: &v1beta1.DecoderSpec{},
 			Rollout: &v1beta1.RolloutSpec{
 				Groups: []v1beta1.RolloutGroup{
@@ -766,7 +751,7 @@ func mkSequentialFixtureEngineFirst(name string, enginePartition int32) *v1beta1
 // the desired-shape convergence check reads (Replicas + InstanceStatuses)
 // on top of the revision names. Namespace is empty to match the
 // namespace-less fixtures ComponentIRStatus reads with isvc.Namespace="".
-func seqIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHash string, replicas int32, insts []v1beta1.OMENativeInstanceStatus) client.Object {
+func seqIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHash string, replicas int32, insts []v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplica {
 	return &v1beta1.InferenceReplica{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: isvcName + "-" + string(c),
@@ -795,12 +780,12 @@ func TestCheckSequentialGate_StagedLeaderHandsOffToNext(t *testing.T) {
 	// (without the AtDesiredShape release the gate would return
 	// "Sequential waiting on engine" forever).
 	const name = "seq-isvc"
-	isvc := mkSequentialFixtureEngineFirst(name, 1)
+	isvc := mkSequentialFixtureEngineFirst(name)
 	client := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
-		seqIR(name, v1beta1.EngineComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
+		withIRSpecPartition(seqIR(name, v1beta1.EngineComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.EngineComponent, "NEW")},
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.EngineComponent, "OLD")},
-		}),
+		}), 1),
 		seqIR(name, v1beta1.DecoderComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
@@ -821,12 +806,12 @@ func TestCheckSequentialGate_UnconvergedLeaderStillBlocks(t *testing.T) {
 	// instance is still Updating on OLD, none on NEW). It must STILL be the
 	// active/blocking Component; decoder's gate stays denied.
 	const name = "seq-isvc"
-	isvc := mkSequentialFixtureEngineFirst(name, 1)
+	isvc := mkSequentialFixtureEngineFirst(name)
 	client := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
-		seqIR(name, v1beta1.EngineComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
+		withIRSpecPartition(seqIR(name, v1beta1.EngineComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: revName(name, v1beta1.EngineComponent, "OLD")},
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.EngineComponent, "OLD")},
-		}),
+		}), 1),
 		seqIR(name, v1beta1.DecoderComponent, "OLD", "NEW", 2, []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: revName(name, v1beta1.DecoderComponent, "OLD")},

@@ -267,22 +267,25 @@ func validatePacingNotZeroBudget(groups []v1beta1.RolloutGroup) error {
 	return nil
 }
 
+// validateRollingUpdateLockstep enforces the all-together contract of a
+// rollingUpdate group on update: if any grouped Component's revision-affecting
+// spec changed, every grouped Component's must have changed. The compare
+// covers the full revision-affecting view (componentRevisionSpecChanged), not
+// just container images — an env, command, resource, volume, label, or
+// annotation change re-renders the pod template and rolls the Component
+// exactly like an image bump, so it must obey the same group contract.
 func validateRollingUpdateLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpec, components []v1beta1.ComponentType) error {
-	oldImages := componentImages(oldSpec, components)
-	newImages := componentImages(newSpec, components)
-	anyChanged := false
-	allChanged := true
+	var changed, unchanged []v1beta1.ComponentType
 	for _, c := range components {
-		o, n := oldImages[c], newImages[c]
-		if o != n {
-			anyChanged = true
+		if componentRevisionSpecChanged(oldSpec, newSpec, c) {
+			changed = append(changed, c)
 		} else {
-			allChanged = false
+			unchanged = append(unchanged, c)
 		}
 	}
-	if anyChanged && !allChanged {
-		return fmt.Errorf("spec.rollout: rollingUpdate group requires all components to bump together (%s)",
-			ReasonRollingUpdateLockstepViolation)
+	if len(changed) > 0 && len(unchanged) > 0 {
+		return fmt.Errorf("spec.rollout: rollingUpdate group requires all components to bump together; changed %v but not %v (%s)",
+			changed, unchanged, ReasonRollingUpdateLockstepViolation)
 	}
 	return nil
 }
@@ -327,66 +330,6 @@ func omenativeDeploymentModeMap(spec *v1beta1.InferenceServiceSpec) map[v1beta1.
 		out[v1beta1.RouterComponent] = resolveComponentDeploymentMode(spec.Router.Annotations, spec.DeploymentMode)
 	}
 	return out
-}
-
-// componentImages returns the container image per Component in `components`.
-// Runner.Image takes precedence over the first PodSpec container image.
-func componentImages(spec *v1beta1.InferenceServiceSpec, components []v1beta1.ComponentType) map[v1beta1.ComponentType]string {
-	out := map[v1beta1.ComponentType]string{}
-	if spec == nil {
-		return out
-	}
-	for _, c := range components {
-		var img string
-		switch c {
-		case v1beta1.EngineComponent:
-			if spec.Engine != nil {
-				img = engineRunnerOrPodSpecImage(spec.Engine)
-			}
-		case v1beta1.DecoderComponent:
-			if spec.Decoder != nil {
-				img = decoderRunnerOrPodSpecImage(spec.Decoder)
-			}
-		case v1beta1.RouterComponent:
-			if spec.Router != nil {
-				img = routerRunnerOrPodSpecImage(spec.Router)
-			}
-		}
-		if img != "" {
-			out[c] = img
-		}
-	}
-	return out
-}
-
-func engineRunnerOrPodSpecImage(e *v1beta1.EngineSpec) string {
-	if e.Runner != nil && e.Runner.Image != "" {
-		return e.Runner.Image
-	}
-	if len(e.PodSpec.Containers) > 0 {
-		return e.PodSpec.Containers[0].Image
-	}
-	return ""
-}
-
-func decoderRunnerOrPodSpecImage(d *v1beta1.DecoderSpec) string {
-	if d.Runner != nil && d.Runner.Image != "" {
-		return d.Runner.Image
-	}
-	if len(d.PodSpec.Containers) > 0 {
-		return d.PodSpec.Containers[0].Image
-	}
-	return ""
-}
-
-func routerRunnerOrPodSpecImage(r *v1beta1.RouterSpec) string {
-	if r.Runner != nil && r.Runner.Image != "" {
-		return r.Runner.Image
-	}
-	if len(r.PodSpec.Containers) > 0 {
-		return r.PodSpec.Containers[0].Image
-	}
-	return ""
 }
 
 // rolloutCollapsesToSequential mirrors the engine's collapseSequential: the

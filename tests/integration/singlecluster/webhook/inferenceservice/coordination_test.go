@@ -567,9 +567,10 @@ func createBaselineISVC(name string, groups ...v1beta1.RolloutGroup) *v1beta1.In
 }
 
 // withEngineRunner attaches a Runner block carrying the given image. The
-// validator's RollingUpdate lockstep check reads spec.Engine.Runner.Image
-// (not PodSpec.Containers[0].Image), so update tests asserting on
-// lockstep must populate the Runner field.
+// validator's RollingUpdate lockstep check compares the whole
+// revision-affecting Component view — Runner, PodSpec, leader/worker
+// overrides, pod-template labels/annotations — so a Runner-side image bump
+// is one of several surfaces the update tests exercise.
 func withEngineRunner(isvc *v1beta1.InferenceService, image string) {
 	isvc.Spec.Engine.Runner = &v1beta1.RunnerSpec{Container: corev1.Container{
 		Name: "ome-container", Image: image,
@@ -590,10 +591,8 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 
 	// WU-1: RollingUpdate lockstep is the marquee update rule. Bump
 	// engine Runner.Image WITHOUT bumping decoder → rejected with
-	// the dedicated lockstep reason. The validator reads
-	// spec.Engine.Runner.Image (see componentImages in
-	// pkg/validation/coordination.go), so the test seeds Runner on
-	// both Components at v1 then mutates only engine to v2.
+	// the dedicated lockstep reason. The test seeds Runner on both
+	// Components at v1 then mutates only engine to v2.
 	ginkgo.It("WU-1 rejects RollingUpdate image bump on one Component only → RollingUpdateLockstepViolation", func() {
 		isvc := coordISVC("coord-wu1", pmGroup())
 		withEngineRunner(isvc, "ghcr.io/test/runtime:v1")
@@ -611,8 +610,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 	})
 
 	// WU-1a: RollingUpdate lockstep catches image bumps via either
-	// Runner.Image OR PodSpec.Containers[0].Image. componentImages
-	// reads Runner first and falls back to PodSpec — both surfaces
+	// Runner.Image OR PodSpec.Containers[0].Image — both surfaces
 	// produce the same lockstep signal so users can't accidentally
 	// escape the validator by setting the image via PodSpec.
 	ginkgo.It("WU-1a catches RollingUpdate bump via PodSpec.Containers[0].Image", func() {
@@ -621,6 +619,36 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 		err := k8sClient.Update(suiteCtx, got)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateLockstepViolation))
+	})
+
+	// WU-1b: lockstep is not an image-string compare — ANY
+	// revision-affecting change to one grouped Component (here an
+	// env-only bump with both images unchanged) re-renders that
+	// Component's pod template and must trip the same rejection.
+	ginkgo.It("WU-1b rejects RollingUpdate env-only bump on one Component", func() {
+		got := createBaselineISVC("coord-wu1b", pmGroup())
+		got.Spec.Engine.PodSpec.Containers[0].Env = append(
+			got.Spec.Engine.PodSpec.Containers[0].Env,
+			corev1.EnvVar{Name: "CONFIG_VERSION", Value: "2"},
+		)
+		err := k8sClient.Update(suiteCtx, got)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateLockstepViolation))
+	})
+
+	// WU-1c: the same env bump applied to BOTH grouped Components
+	// satisfies lockstep and is admitted.
+	ginkgo.It("WU-1c accepts RollingUpdate env bump on both Components", func() {
+		got := createBaselineISVC("coord-wu1c", pmGroup())
+		got.Spec.Engine.PodSpec.Containers[0].Env = append(
+			got.Spec.Engine.PodSpec.Containers[0].Env,
+			corev1.EnvVar{Name: "CONFIG_VERSION", Value: "2"},
+		)
+		got.Spec.Decoder.PodSpec.Containers[0].Env = append(
+			got.Spec.Decoder.PodSpec.Containers[0].Env,
+			corev1.EnvVar{Name: "CONFIG_VERSION", Value: "2"},
+		)
+		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
 	// WU-2: BlueGreen has no lockstep restriction. Both Components can
@@ -714,26 +742,19 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
-	// WU-9: RollingUpdate lockstep when Runner field is missing on a
-	// Component. componentImages returns "" for both → "" != ""
-	// evaluates symmetric, so an update that touches the (also nil)
-	// runner side stays accepted as a no-op. Pin so a future
-	// refactor that starts treating nil-runner as a distinct value
-	// gets caught.
-	ginkgo.It("WU-9 RollingUpdate with nil Runner on both sides treats image as empty (symmetric)", func() {
-		// Build without Runner field (componentImages reads
-		// spec.Engine.Runner.Image; PodSpec.Containers[0].Image is a
-		// different path). Coordination tests use PodSpec containers,
-		// so changing the container image WITHOUT a Runner block is
-		// invisible to the RollingUpdate lockstep check.
+	// WU-9: a nil Runner does not exempt a Component from lockstep. The
+	// compare covers the whole revision-affecting view, so adding a
+	// sidecar container to ONE grouped Component's PodSpec is a one-sided
+	// revision bump and is rejected even though no Runner block exists on
+	// either side.
+	ginkgo.It("WU-9 rejects one-sided PodSpec change with nil Runner on both sides", func() {
 		got := createBaselineISVC("coord-wu9", pmGroup())
 		got.Spec.Engine.PodSpec.Containers = append(got.Spec.Engine.PodSpec.Containers, corev1.Container{
 			Name: "sidecar", Image: "ghcr.io/test/sidecar:v1",
 		})
-		// engine.PodSpec changed, but engine.Runner is still nil → empty
-		// image, decoder.Runner is also nil → empty image, anyChanged
-		// stays false. Webhook accepts.
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		err := k8sClient.Update(suiteCtx, got)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateLockstepViolation))
 	})
 
 	// WU-10: Changing a Component's deploymentMode annotation off
