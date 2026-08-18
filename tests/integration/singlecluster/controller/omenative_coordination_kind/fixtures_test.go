@@ -402,13 +402,12 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	cbm := kindfix.StandardClusterBaseModel(o.cbmName, kindfix.StandardModelStorageURI)
 	csr := kindfix.StandardClusterServingRuntime(o.csrName)
 
-	// Engine. Minimum-viable spec with deploymentMode annotation only
-	// — no OMENative subspec and no explicit MinReplicas. The defaulter
-	// fills in OMENative defaults during reconciliation; an explicit
-	// subspec in the fixture appeared to interfere with runtime
-	// resolution in early experiments. Tests that need a non-default
-	// strategy/policy can set it via WithEngineAnnotation or by
-	// editing the returned ISVC before Create.
+	// Engine. Minimum-viable spec with deploymentMode annotation only — no
+	// lifecycle block and no explicit MinReplicas. These controller-only KIND
+	// suites do not run admission webhooks; unset lifecycle policies are
+	// resolved by the workload planner. Tests that need a non-default
+	// strategy or policy can set it via an option or by editing the returned
+	// ISVC before Create.
 	engineAnnots := map[string]string{
 		constants.DeploymentMode: string(constants.OMENative),
 	}
@@ -434,10 +433,9 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 		engine.ComponentExtensionSpec.MinReplicas = &mr
 	}
 	if o.engineWorkerSize > 0 {
-		// Multi-pod gang. Leader + N workers per Instance — the
-		// admission defaulter wires both halves of the pairing and
-		// the OMENative reconciler stamps `ome.io/pod-ordinal` on
-		// every pod (leader=0, workers=1..Size).
+		// Multi-pod gang. The fixture wires Leader + N workers per Instance;
+		// the OMENative reconciler stamps `ome.io/pod-ordinal` on every pod
+		// (leader=0, workers=1..Size).
 		size := o.engineWorkerSize
 		engine.Leader = &v1beta1.LeaderSpec{
 			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{

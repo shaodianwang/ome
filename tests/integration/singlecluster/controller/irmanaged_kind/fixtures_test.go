@@ -57,7 +57,7 @@ func withUpdateStrategy(t v1beta1.UpdateStrategyType) irFixtureOption {
 
 // newIRFixture builds a minimum-viable single-Component (engine-only)
 // OMENative ISVC plus its CBM/CSR. Default strategy is left UNSET so the
-// defaulter stamps SurgeThenDrain (the affected path).
+// workload planner resolves it to SurgeThenDrain (the affected path).
 func newIRFixture(namespace string, opts ...irFixtureOption) *irFixture {
 	o := &irFixtureOpts{
 		isvcName:       "ir-isvc",

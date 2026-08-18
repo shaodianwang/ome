@@ -62,11 +62,11 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// MinReplicas=0 currently creates 1 pod — defaulter promotes 0 → 1
-	// because the single-pod alpha doesn't support scale-to-zero.
+	// MinReplicas=0 currently creates 1 pod because the IR adapter treats a
+	// non-positive replica value as the default of 1; admission is not involved.
 	// Locked in here so a future fix (whether enforcing 0 or
 	// documenting the 0→1 promotion) is deliberate.
-	ginkgo.It("MinReplicas=0 currently creates 1 pod (defaulter promotes 0 → 1)", func() {
+	ginkgo.It("MinReplicas=0 currently creates 1 pod (IR adapter defaults 0 → 1)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mr0-isvc"),
 			WithoutDecoder(),
 			WithEngineReplicas(0),

@@ -43,6 +43,14 @@ var _ = ginkgo.Describe("Runtime-owned runner shape", ginkgo.Ordered, func() {
 			WithISVCName(isvcName),
 			WithEngineImage("fake-serving:v1"),
 			WithoutDecoder())
+		// Seed UpdateStrategy.Type, the shape-independent admission default this
+		// merge test needs. Shape-dependent policies remain unset so the runtime's
+		// multi-pod values remain authoritative.
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type: v1beta1.UpdateStrategySurgeThenDrain,
+			},
+		}
 		fix.CSR.Spec.EngineConfig = &v1beta1.EngineSpec{
 			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 				Lifecycle: &v1beta1.LifecycleSpec{

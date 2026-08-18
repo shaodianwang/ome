@@ -65,8 +65,8 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 		// ordinal 0 — the pod UID at ordinal 0 disappears, a new UID
 		// appears at ordinal 1. (Pattern matches update_kind_test.go's
 		// env-var SurgeThenDrain spec, which already pins this dispatch.)
-		// No explicit Lifecycle override needed — the defaulter stamps
-		// SurgeThenDrain.
+		// No explicit Lifecycle override is needed: the workload planner
+		// resolves an unset strategy to SurgeThenDrain.
 
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
