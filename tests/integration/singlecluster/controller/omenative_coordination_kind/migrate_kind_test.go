@@ -389,6 +389,7 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 
 		ginkgo.By("waiting for the source pod Ready and discovering its node")
 		var sourceNode string
+		var sourceRevision string
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "affinity-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
@@ -403,6 +404,7 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			}, pod)).To(Succeed())
 			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
 			sourceNode = pod.Spec.NodeName
+			sourceRevision = insts[0].RunningRevision
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("editing the ISVC to add an Affinity pinning to the discovered node")
@@ -424,16 +426,16 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Wait for the affinity edit to be reflected back into a Ready
-		// running revision (the controller will Restart the pod with
-		// the new affinity).
+		// Wait for the affinity edit to produce a new Ready running revision.
+		// Merely waiting for Ready can observe the old revision before reconciliation.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "affinity-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle).NotTo(BeNil())
 			insts := instanceStatuses(g, ns.Name, "affinity-isvc", v1beta1.EngineComponent)
-			g.Expect(insts).NotTo(BeEmpty())
+			g.Expect(insts).To(HaveLen(1))
 			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(insts[0].RunningRevision).NotTo(Equal(sourceRevision))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("sending a migration request whose FromNode matches the pinned host")
