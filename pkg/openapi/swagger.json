@@ -2719,7 +2719,7 @@
           "$ref": "#/definitions/v1beta1.MigrationPolicy"
         },
         "readyPolicy": {
-          "description": "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods.",
+          "description": "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods. None is accepted only for single-pod Instances, where it is equivalent to AllPodReady; admission rejects None on multi-pod OMENative Components because per-pod readiness reporting is not supported.",
           "type": "string"
         },
         "restartPolicy": {

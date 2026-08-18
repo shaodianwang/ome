@@ -404,7 +404,10 @@ type LifecycleSpec struct {
 	UpdateStrategy *UpdateStrategy `json:"updateStrategy,omitempty"`
 
 	// ReadyPolicy controls how Instance-level readiness is aggregated from
-	// the underlying pods.
+	// the underlying pods. None is accepted only for single-pod Instances,
+	// where it is equivalent to AllPodReady; admission rejects None on
+	// multi-pod OMENative Components because per-pod readiness reporting
+	// is not supported.
 	// +optional
 	ReadyPolicy *InstanceReadyPolicy `json:"readyPolicy,omitempty"`
 
@@ -535,8 +538,11 @@ const (
 	// InstanceReadyPolicyAllPodReady reports the Instance Ready only when
 	// every pod in the Instance has Ready=True. Default for multi-pod Instances.
 	InstanceReadyPolicyAllPodReady InstanceReadyPolicy = "AllPodReady"
-	// InstanceReadyPolicyNone disables Instance-level aggregation; pods
-	// are reported individually.
+	// InstanceReadyPolicyNone is accepted only for single-pod Instances,
+	// where it is behaviorally identical to AllPodReady. Admission rejects
+	// it on multi-pod OMENative Components: per-pod readiness reporting is
+	// not supported, so multi-pod readiness is always the AllPodReady
+	// aggregation.
 	InstanceReadyPolicyNone InstanceReadyPolicy = "None"
 )
 

@@ -80,6 +80,11 @@ func (v *InferenceServiceValidator) ValidateCreate(ctx context.Context, obj runt
 	if err := validateAddedMigrationRequests(nil, isvc); err != nil {
 		return nil, err
 	}
+	// old=nil: CREATE rejects every multi-pod OMENative Component that
+	// sets lifecycle.readyPolicy=None.
+	if err := validateMultiPodReadyPolicyNone(nil, isvc); err != nil {
+		return nil, err
+	}
 	return v.validateInferenceService(ctx, isvc)
 }
 
@@ -101,6 +106,9 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 		return nil, err
 	}
 	if err := validateAddedMigrationRequests(oldIsvc, isvc); err != nil {
+		return nil, err
+	}
+	if err := validateMultiPodReadyPolicyNone(oldIsvc, isvc); err != nil {
 		return nil, err
 	}
 	return v.validateInferenceService(ctx, isvc)

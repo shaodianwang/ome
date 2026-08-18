@@ -4846,7 +4846,7 @@ func schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref common.ReferenceCallback) com
 					},
 					"readyPolicy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods.",
+							Description: "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods. None is accepted only for single-pod Instances, where it is equivalent to AllPodReady; admission rejects None on multi-pod OMENative Components because per-pod readiness reporting is not supported.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
