@@ -336,3 +336,11 @@ const CompositePhaseSequentialFailed = "Sequential.Failed"
 // RolloutCoordinationReady is the InferenceServiceStatus condition
 // type for coordination readiness. True when every group is Idle.
 const RolloutCoordinationReady = "RolloutCoordinationReady"
+
+// CoordinationAdvisory is the InferenceServiceStatus condition type for
+// the "multiple OMENative Components but no coordination group" hint.
+// True (active) records that the advisory applies; it is the "already
+// advised" memory so the ConsiderCoordinationGroup event fires once on
+// transition, not every reconcile. Not a dependent of the Ready
+// conditionSet, so it never affects overall readiness.
+const CoordinationAdvisory = "CoordinationAdvisory"

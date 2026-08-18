@@ -1,6 +1,7 @@
 package coordination
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -128,6 +129,55 @@ func ClearRolloutCoordinationReady(isvc *v1beta1.InferenceService) {
 		Type:   apis.ConditionType(v1beta1.RolloutCoordinationReady),
 		Status: corev1.ConditionTrue,
 		Reason: "NoCoordinationGroups",
+	})
+}
+
+// SetCoordinationAdvisory stamps the CoordinationAdvisory status condition
+// (Status=True) when an ISVC has >=2 OMENative Components but no
+// spec.rollout.coordination group. The condition is the "already advised"
+// memory: callers emit the one-shot ConsiderCoordinationGroup event only
+// when this returns true (the transition into the advisory state), never
+// every reconcile. Returns false (no event, no status write) when the
+// condition is already True, so the steady state neither re-emits the event
+// nor re-PATCHes status.
+func SetCoordinationAdvisory(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) bool {
+	if isvc == nil {
+		return false
+	}
+	existing := isvc.Status.GetCondition(apis.ConditionType(v1beta1.CoordinationAdvisory))
+	if existing != nil && existing.Status == corev1.ConditionTrue {
+		return false
+	}
+	isvc.Status.SetCondition(apis.ConditionType(v1beta1.CoordinationAdvisory), &apis.Condition{
+		Type:   apis.ConditionType(v1beta1.CoordinationAdvisory),
+		Status: corev1.ConditionTrue,
+		Reason: "NoCoordinationGroup",
+		Message: fmt.Sprintf(
+			"%d OMENative Components (%v) roll independently; declare a spec.rollout.coordination group to coordinate them",
+			len(components), components),
+	})
+	return true
+}
+
+// ClearCoordinationAdvisory resolves the CoordinationAdvisory condition once
+// the ISVC no longer warrants it — a coord group was declared, or it dropped
+// below 2 coordinated Components. Acts only when the condition exists and is
+// not already resolved, so it neither adds a spurious condition to an ISVC
+// that never tripped the advisory nor re-PATCHes status every reconcile.
+// Resolving re-arms the one-shot event: if the group is later removed, the
+// advisory (and its event) fires again.
+func ClearCoordinationAdvisory(isvc *v1beta1.InferenceService) {
+	if isvc == nil {
+		return
+	}
+	existing := isvc.Status.GetCondition(apis.ConditionType(v1beta1.CoordinationAdvisory))
+	if existing == nil || existing.Status == corev1.ConditionFalse {
+		return
+	}
+	isvc.Status.SetCondition(apis.ConditionType(v1beta1.CoordinationAdvisory), &apis.Condition{
+		Type:   apis.ConditionType(v1beta1.CoordinationAdvisory),
+		Status: corev1.ConditionFalse,
+		Reason: "CoordinationDeclaredOrNotApplicable",
 	})
 }
 

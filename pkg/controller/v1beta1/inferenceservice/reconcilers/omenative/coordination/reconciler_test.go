@@ -1037,6 +1037,49 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 	}
 }
 
+func TestReconcile_ConsiderCoordinationGroupEventFiresOnceAcrossReconciles(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{
+				constants.DeploymentMode: string(constants.OMENative),
+			},
+		},
+	}
+	rec := record.NewFakeRecorder(10)
+	c := testClient()
+	countAdvisory := func() int {
+		n := 0
+		for _, e := range drainEvents(rec) {
+			if contains(e, EventReasonConsiderCoordinationGroup) {
+				n++
+			}
+		}
+		return n
+	}
+	// First reconcile: transition into the advisory state -> event fires once.
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if got := countAdvisory(); got != 1 {
+		t.Fatalf("expected exactly 1 %s event on first reconcile; got %d",
+			EventReasonConsiderCoordinationGroup, got)
+	}
+	// Second reconcile, same ISVC (CoordinationAdvisory condition now set):
+	// the one-shot event must NOT re-fire — this is the fix for the runaway
+	// per-reconcile event count.
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if got := countAdvisory(); got != 0 {
+		t.Errorf("advisory event must not re-fire once the CoordinationAdvisory condition is set; got %d", got)
+	}
+}
+
 // --- buildComponentObservation per-Instance failure rollup ---
 
 func TestBuildComponentObservation_NoStatusReturnsZero(t *testing.T) {

@@ -177,12 +177,22 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// no spec.rollout.coordination block declared. Default behavior rolls
 	// each Component independently, which can break PD pairs or
 	// shared-state workloads. Operator may want a coord group.
-	// K8s event recorder aggregates by (reason, involvedObject) so
-	// repeated firings collapse to one event with a count.
-	if len(componentsTouched) >= 2 && len(groups) == 0 && in.Recorder != nil {
-		in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonConsiderCoordinationGroup,
-			"InferenceService has %d OMENative Components (%v) but no spec.rollout.coordination block declared; consider adding a coord group to define rollout behavior across them",
-			len(componentsTouched), componentsTouched)
+	//
+	// Emit the event ONCE, on the transition into this state, tracked by
+	// the CoordinationAdvisory status condition. Firing it every reconcile
+	// (the previous behavior) relied on event aggregation collapsing to one
+	// object, but the aggregated count still climbed unboundedly and the
+	// Event was re-PATCHed every loop — alarming noise plus apiserver write
+	// load on the hot path. Clearing the condition when a group is later
+	// declared (or the Component count drops) re-arms the one-shot event.
+	if len(componentsTouched) >= 2 && len(groups) == 0 {
+		if SetCoordinationAdvisory(in.ISVC, componentsTouched) && in.Recorder != nil {
+			in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonConsiderCoordinationGroup,
+				"InferenceService has %d OMENative Components (%v) but no spec.rollout.coordination block declared; consider adding a coord group to define rollout behavior across them",
+				len(componentsTouched), componentsTouched)
+		}
+	} else {
+		ClearCoordinationAdvisory(in.ISVC)
 	}
 
 	// Cached client carries the OMENative Pod field index — useIndex=true takes
