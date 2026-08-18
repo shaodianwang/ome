@@ -762,19 +762,17 @@ def _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now):
                     _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
                              f"{comp}/{idx} Phase=Failed while all {len(alive)} live pod(s) are Ready+serving")
             elif phase == "Ready":
-                # Ready-without-pods must read the IR's OWN readyPodCount, not
+                # Ready-without-pods reads the IR's own podCount, not
                 # the watcher's separately-collected pod_state. The two are
                 # independent data sources with independent lag: under slow
                 # concurrent scheduling the watcher's pod stream trails the IR,
                 # so comparing IR-phase against watcher-pods fires "Ready but I
                 # see no pod" for indices whose pod exists from the apiserver's
-                # view — a harness split-brain, not a product lie. The genuine
-                # lie is the IR being internally inconsistent: phase=Ready while
-                # its own readyPodCount is 0.
-                if int(ist.get("readyPodCount", 0)) == 0:
+                # view — a harness split-brain, not a product lie.
+                if int(ist.get("podCount", 0)) == 0:
                     key = ("A", "ready-without-pods", comp, idx)
                     _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
-                             f"{comp}/{idx} Phase=Ready while the IR's own readyPodCount is 0")
+                             f"{comp}/{idx} Phase=Ready while the IR's own podCount is 0")
 
 
 # Selector keys the watcher can evaluate against its pod records. Keys every

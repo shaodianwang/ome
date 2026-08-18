@@ -5903,7 +5903,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 					},
 					"readyPodCount": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ReadyPodCount is the number of pods reporting Ready=True.",
+							Description: "ReadyPodCount is retained for API compatibility. OMENative derives readiness from Pods and does not persist this field.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -5924,7 +5924,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 					},
 					"scheduledPodCount": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScheduledPodCount is the number of pods with Spec.NodeName set.",
+							Description: "ScheduledPodCount is retained for API compatibility. OMENative derives scheduling state from Pods and does not persist this field.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -5943,7 +5943,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "NodesOccupied is the set of node names hosting pods of this Instance.",
+							Description: "NodesOccupied is retained for API compatibility. OMENative reads current placement from Pods and does not persist this field.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

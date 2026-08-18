@@ -19,7 +19,7 @@ import (
 // Coverage already in status_surface_kind_test.go and skipped here:
 //   - Component.ObservedGeneration tracks ISVC.metadata.generation
 //   - per-Instance Conditions populate the AllPods* triad
-//   - per-Instance PodCount/ReadyPodCount/AvailablePodCount counters
+//   - retained per-Instance PodCount/AvailablePodCount counters and derived readiness
 var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

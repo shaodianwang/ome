@@ -88,7 +88,7 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("per-Instance counters converge with the live pod set (engine MinReplicas=2)", func() {
+	ginkgo.It("retained per-Instance counters and derived readiness converge (engine MinReplicas=2)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("counter-isvc"),
 			WithEngineReplicas(2),
 			WithEngineImage("fake-serving:v1"))
@@ -104,8 +104,12 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 			for i, s := range insts {
 				g.Expect(s.PodCount).To(Equal(int32(1)),
 					"InstanceStatus[%d].PodCount must be 1 (single-pod runner)", i)
-				g.Expect(s.ReadyPodCount).To(Equal(int32(1)),
-					"InstanceStatus[%d].ReadyPodCount must be 1 at Ready", i)
+				g.Expect(s.ReadyPodCount).To(BeZero(),
+					"InstanceStatus[%d].ReadyPodCount is derived from Pods and must not be persisted", i)
+				g.Expect(s.ScheduledPodCount).To(BeZero(),
+					"InstanceStatus[%d].ScheduledPodCount is derived from Pods and must not be persisted", i)
+				g.Expect(s.NodesOccupied).To(BeNil(),
+					"InstanceStatus[%d].NodesOccupied is derived from Pods and must not be persisted", i)
 				g.Expect(s.AvailablePodCount).To(Equal(int32(1)),
 					"InstanceStatus[%d].AvailablePodCount must be 1 at Ready", i)
 			}

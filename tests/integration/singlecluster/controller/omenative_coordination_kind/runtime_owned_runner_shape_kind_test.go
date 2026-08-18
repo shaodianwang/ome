@@ -103,7 +103,12 @@ var _ = ginkgo.Describe("Runtime-owned runner shape", ginkgo.Ordered, func() {
 			}
 			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
 			if len(ir.Status.InstanceStatuses) == 1 {
-				g.Expect(ir.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				status := ir.Status.InstanceStatuses[0]
+				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(status.PodCount).To(Equal(int32(3)))
+				g.Expect(status.ReadyPodCount).To(BeZero())
+				g.Expect(status.ScheduledPodCount).To(BeZero())
+				g.Expect(status.NodesOccupied).To(BeNil())
 			}
 
 			pods := listOMENativePods(g, ns.Name, isvcName)

@@ -3355,7 +3355,7 @@
           "$ref": "#/definitions/v1beta1.InstanceTermination"
         },
         "nodesOccupied": {
-          "description": "NodesOccupied is the set of node names hosting pods of this Instance.",
+          "description": "NodesOccupied is retained for API compatibility. OMENative reads current placement from Pods and does not persist this field.",
           "type": "array",
           "items": {
             "type": "string",
@@ -3378,7 +3378,7 @@
           "format": "int32"
         },
         "readyPodCount": {
-          "description": "ReadyPodCount is the number of pods reporting Ready=True.",
+          "description": "ReadyPodCount is retained for API compatibility. OMENative derives readiness from Pods and does not persist this field.",
           "type": "integer",
           "format": "int32"
         },
@@ -3387,7 +3387,7 @@
           "type": "string"
         },
         "scheduledPodCount": {
-          "description": "ScheduledPodCount is the number of pods with Spec.NodeName set.",
+          "description": "ScheduledPodCount is retained for API compatibility. OMENative derives scheduling state from Pods and does not persist this field.",
           "type": "integer",
           "format": "int32"
         },

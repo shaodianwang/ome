@@ -122,7 +122,8 @@ type OMENativeInstanceStatus struct {
 	// +optional
 	PodCount int32 `json:"podCount,omitempty"`
 
-	// ReadyPodCount is the number of pods reporting Ready=True.
+	// ReadyPodCount is retained for API compatibility. OMENative derives
+	// readiness from Pods and does not persist this field.
 	// +optional
 	ReadyPodCount int32 `json:"readyPodCount,omitempty"`
 
@@ -140,7 +141,8 @@ type OMENativeInstanceStatus struct {
 	// +optional
 	AvailablePodCount int32 `json:"availablePodCount,omitempty"`
 
-	// ScheduledPodCount is the number of pods with Spec.NodeName set.
+	// ScheduledPodCount is retained for API compatibility. OMENative derives
+	// scheduling state from Pods and does not persist this field.
 	// +optional
 	ScheduledPodCount int32 `json:"scheduledPodCount,omitempty"`
 
@@ -151,7 +153,8 @@ type OMENativeInstanceStatus struct {
 	// +optional
 	Admitted bool `json:"admitted,omitempty"`
 
-	// NodesOccupied is the set of node names hosting pods of this Instance.
+	// NodesOccupied is retained for API compatibility. OMENative reads current
+	// placement from Pods and does not persist this field.
 	// +optional
 	// +listType=set
 	NodesOccupied []string `json:"nodesOccupied,omitempty"`

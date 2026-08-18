@@ -20,7 +20,7 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-func TestEmptyGangSurgeTargetSlotRejectsInlineObservationResidue(t *testing.T) {
+func TestEmptyGangSurgeTargetSlotIgnoresPodDerivedObservations(t *testing.T) {
 	if !emptyGangSurgeTargetSlot(&workload.InstanceStatus{Index: 7}) {
 		t.Fatal("zero-valued row should be an empty surge target slot")
 	}
@@ -28,20 +28,44 @@ func TestEmptyGangSurgeTargetSlotRejectsInlineObservationResidue(t *testing.T) {
 		t.Fatal("nil row should not be an empty surge target slot")
 	}
 
-	tests := []struct {
+	for _, test := range []struct {
 		name   string
 		mutate func(*workload.InstanceStatus)
 	}{
 		{name: "ready pods", mutate: func(status *workload.InstanceStatus) { status.ReadyPodCount = 1 }},
 		{name: "scheduled pods", mutate: func(status *workload.InstanceStatus) { status.ScheduledPodCount = 1 }},
 		{name: "occupied nodes", mutate: func(status *workload.InstanceStatus) { status.NodesOccupied = []string{"node-a"} }},
-	}
-	for _, test := range tests {
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			status := &workload.InstanceStatus{Index: 7}
 			test.mutate(status)
+			if !emptyGangSurgeTargetSlot(status) {
+				t.Fatalf("pod-derived %s should not own an empty surge target slot", test.name)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*workload.InstanceStatus)
+	}{
+		{name: "incarnation", mutate: func(status *workload.InstanceStatus) { status.Incarnation = 1 }},
+		{name: "phase", mutate: func(status *workload.InstanceStatus) { status.Phase = workload.InstancePhaseReady }},
+		{name: "running revision", mutate: func(status *workload.InstanceStatus) { status.RunningRevision = "revision-a" }},
+		{name: "target revision", mutate: func(status *workload.InstanceStatus) { status.TargetRevision = "revision-b" }},
+		{name: "operation", mutate: func(status *workload.InstanceStatus) { status.Operation = &workload.InstanceOperation{} }},
+		{name: "pod count", mutate: func(status *workload.InstanceStatus) { status.PodCount = 1 }},
+		{name: "serving pods", mutate: func(status *workload.InstanceStatus) { status.ServingPodCount = 1 }},
+		{name: "available pods", mutate: func(status *workload.InstanceStatus) { status.AvailablePodCount = 1 }},
+		{name: "admission", mutate: func(status *workload.InstanceStatus) { status.Admitted = true }},
+		{name: "conditions", mutate: func(status *workload.InstanceStatus) { status.Conditions = []metav1.Condition{{Type: "Ready"}} }},
+		{name: "last failure", mutate: func(status *workload.InstanceStatus) { status.LastFailure = &workload.InstanceTermination{} }},
+	} {
+		t.Run("rejects "+test.name, func(t *testing.T) {
+			status := &workload.InstanceStatus{Index: 7}
+			test.mutate(status)
 			if emptyGangSurgeTargetSlot(status) {
-				t.Fatalf("row with %s was accepted as an empty surge target slot", test.name)
+				t.Fatalf("retained %s must keep ownership of the surge target slot", test.name)
 			}
 		})
 	}

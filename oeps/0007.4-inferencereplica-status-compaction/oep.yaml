@@ -31,15 +31,9 @@ milestone:
   beta: "TBD"
   stable: "TBD"
 
-# Compaction is selected through inferenceservice-config. An absent setting
-# means Preserve: existing objects keep their committed representation and new
-# objects begin InlineV1. No binary feature-gate default is introduced.
+# The three removable observations are no longer part of the persisted status
+# contract. This is a storage invariant rather than a configurable policy.
 feature-gates: []
-disable-supported: true
+disable-supported: false
 
-metrics:
-  - ome_omenative_ir_status_bytes
-  - ome_omenative_ir_status_derived_mismatch_total
-  - ome_omenative_ir_observation_duration_seconds
-  - ome_omenative_ir_observation_errors_total
-  - ome_omenative_ir_status_representation_objects
+metrics: []

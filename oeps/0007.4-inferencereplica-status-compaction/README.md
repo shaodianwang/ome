@@ -1,5 +1,12 @@
 # OEP-0007.4: Compact OMENative InferenceReplica Status
 
+> **Decision amendment (2026-08-17).** This revision replaces the proposed
+> configurable per-object migration protocol with one persistence contract.
+> OMENative accepts existing values for the three removable fields but never
+> treats them as authoritative and omits them from every new IR status write.
+> There is no storage marker, migration mode, rehydration path, or dedicated
+> storage-compatibility release.
+
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)
@@ -20,18 +27,18 @@
 - [Proposal](#proposal)
   - [The contract](#the-contract)
   - [Persist the lifecycle journal; derive the live observation](#persist-the-lifecycle-journal-derive-the-live-observation)
-  - [First compact representation](#first-compact-representation)
+  - [Compact persisted row](#compact-persisted-row)
   - [Preserve published summaries](#preserve-published-summaries)
   - [Preserve read authority](#preserve-read-authority)
   - [Do not add Pod labels or annotations](#do-not-add-pod-labels-or-annotations)
-  - [Configuration and representation marker](#configuration-and-representation-marker)
+  - [Unconditional storage contract](#unconditional-storage-contract)
   - [Status ownership](#status-ownership)
 - [Design Details](#design-details)
   - [Preserve decision and publication epochs](#preserve-decision-and-publication-epochs)
   - [The PodCount prior-snapshot exception](#the-podcount-prior-snapshot-exception)
   - [Future columnar representation](#future-columnar-representation)
   - [Consumer migration](#consumer-migration)
-  - [Upgrade, downgrade, and mixed-version safety](#upgrade-downgrade-and-mixed-version-safety)
+  - [Upgrade boundary](#upgrade-boundary)
   - [Failure semantics](#failure-semantics)
   - [API and operator compatibility](#api-and-operator-compatibility)
   - [Implementation sequence](#implementation-sequence)
@@ -40,7 +47,7 @@
   - [Differential and unit tests](#differential-and-unit-tests)
   - [Lifecycle and recovery tests](#lifecycle-and-recovery-tests)
   - [Consumer parity tests](#consumer-parity-tests)
-  - [Fault and upgrade tests](#fault-and-upgrade-tests)
+  - [Persistence and upgrade tests](#persistence-and-upgrade-tests)
   - [Size and performance tests](#size-and-performance-tests)
   - [KIND tests](#kind-tests)
 - [Graduation Criteria](#graduation-criteria)
@@ -52,16 +59,18 @@
 ## Summary
 
 **Tl;dr:** for OMENative—OME's direct Pod-management mode—keep each
-InferenceReplica's crash-recovery journal, stop copying three current Pod
-observations into every replica row, and prove old/new decision parity before
-the compact writer is allowed to ship.
+InferenceReplica's crash-recovery journal, but stop persisting three current Pod
+observations in every Instance row. Workload code derives those observations
+from the Pod snapshot it already owns, and every OME-owned IR status write
+enforces the same smaller storage contract.
 
 One `InferenceReplica` (IR) owns one `InferenceService` (ISVC)
 Component—engine, decoder, or router—and one Instance is a single replica made
 of either one Pod or an atomic leader/worker gang.
 OEP-0007.3 records an approximately 505 KiB IR status at 1,000 Instances and an
 approximately 1 MiB status at 2,000 Instances; the exact measurement fixture is
-not checked in and must be reproduced by this OEP's first implementation PR.
+now checked in as `status_size_v1.csv` with real Go API types and named workload
+shapes.
 Every status update sends the complete object through the API server and etcd,
 so richer failure or migration state can exhaust the remaining headroom even
 after OEP-0007.3 reduces write count.
@@ -79,7 +88,7 @@ This OEP separates those two jobs without adding another CRD:
 2. Epoch-scoped in-memory observations combine those durable records with the
    Pod and EndpointSlice snapshots already taken by the decision and
    publication paths. The proposal does not collapse them into one newer view.
-3. The first compact representation stops serializing three fields whose
+3. The compact persistence contract stops serializing three fields whose
    consumers can be served at the same observation epoch without the row copy:
    `readyPodCount`, `scheduledPodCount`, and `nodesOccupied`.
 4. `podCount`, `servingPodCount`, and `availablePodCount` remain persisted in
@@ -91,20 +100,22 @@ This OEP separates those two jobs without adding another CRD:
 6. Per-Instance `admitted` remains persisted. Status-only row removal and
    teardown can bypass deferred observation, so a count cannot be decremented
    safely after the admitted row disappears.
-7. Compaction is opt-in through `inferenceservice-config`, and its writer is
-   blocked until the compatibility release, differential tests, downgrade
-   procedure, and raw-status API contract are approved.
+7. The storage rule is unconditional: existing values of the three removable
+   fields are ignored and the next successful status write removes them. The
+   fields remain optional in the API so old objects and clients still decode.
 8. A later lossless columnar format may range-encode the retained logical rows
    and store only exceptional operations or failures per index. That can save
    substantially more, but it is a separate representation proof rather than a
    reason to infer durable or prior-snapshot state from current Pods.
 
-The intended invariant is narrow: lifecycle decisions, rollout ordering,
-placement, autoscaling, Conditions, Kubernetes Event emission, revision
-retention, and recovery must remain identical, including which observation
-epoch feeds a decision. The intentional API differences are the raw GET shape
-and representation marker, plus raw IR watch timing when only an omitted field
-changes.
+The intended invariant is narrow: for controller-produced state, lifecycle
+decisions, rollout ordering, placement, autoscaling, Conditions, Kubernetes
+Event emission, revision retention, and recovery must remain identical,
+including which observation epoch feeds a decision. The intentional API
+differences are the raw GET shape and raw IR watch timing when only an omitted
+field changes. Once any compact write succeeds, rollback to an older writer is
+unsupported: a pre-migration reader misinterprets the absence, while a
+reader-compatible writer can regrow the oversized payload.
 
 ## Motivation
 
@@ -135,11 +146,13 @@ requests faster.
 ### Goals
 
 1. **Reduce the serialized IR status materially at 2,000+ Instances.** The
-   first compact format targets the three proven fields; an exact byte gate
-   is established by the measurement PR described below.
-2. **Preserve every current control-plane decision.** Create, Update, Restart,
-   Migrate, Delete, rollout coordination, placement, autoscaling, and revision
-   retention must receive semantically identical inputs.
+   first compact format targets the three proven fields; the checked-in
+   measurement gate requires at least 30% reduction for steady singletons and
+   50% for steady eight-Pod gangs at 2,000 Instances.
+2. **Preserve every current control-plane decision for valid state.** Create,
+   Update, Restart, Migrate, Delete, rollout coordination, placement,
+   autoscaling, and revision retention must receive semantically identical
+   inputs for controller-produced rows.
 3. **Preserve crash recovery through zero-Pod windows.** Operation ownership,
    incarnation, canonical ordinal, revision identity, failure evidence, retry
    authority, and migration state remain durable on the IR.
@@ -149,12 +162,11 @@ requests faster.
    `InferenceService -> InferenceReplica -> Pod`.
 6. **Avoid moving etcd bytes from one object to another without benefit.** No
    counter or lifecycle-history annotations are copied onto Pods.
-7. **Make upgrade and rollback explicit.** Compact writes begin only after all
-   readers understand both representations. Release A is the guaranteed
-   rollback floor; rolling back farther is allowed only if rehydration succeeds.
-8. **Keep configuration outside the binary.** Storage mode comes from the
-   existing `inferenceservice-config` ConfigMap; absent configuration retains
-   the current representation.
+7. **Make the upgrade boundary explicit.** Compact writes may begin only after
+   every eligible manager is decision-compatible with absent observations. No
+   older writer is a supported rollback target afterward.
+8. **Use one storage contract.** Field omission is an invariant, not a tunable
+   lifecycle policy, so it has no feature gate or ConfigMap mode.
 
 ### Non-Goals
 
@@ -162,7 +174,7 @@ requests faster.
    healthy-row values or range-encoding them could save much more, but changes
    the persisted representation of index, incarnation, revision-retention, and
    total-loss recovery state. Dense compact rows are the conservative boundary.
-   A lossless columnar candidate is evaluated below and in the measurement PR.
+   A lossless columnar candidate remains future work.
 2. **Removing `podCount` in the first version.** Its prior published value is a
    recovery input in addition to its current-observation use.
 3. **Removing per-Instance `admitted`.** Placement reads the row set after any
@@ -200,14 +212,16 @@ requests faster.
   containing both the durable lifecycle record and the objects observed by one
   existing controller path. It is not a new Kubernetes object or a universal
   reconcile snapshot.
-- **InlineV1 representation:** the current legacy format, where live
-  per-Instance fields are copied inline into IR status.
-- **DerivedV1 representation:** the first compact format, where
-  `readyPodCount`, `scheduledPodCount`, and `nodesOccupied` are
-  omitted from each Instance row. Prior-snapshot decision fields remain inline.
+- **Legacy stored shape:** an IR written before this change, where live
+  per-Instance observations may still be copied inline into status. Their
+  presence carries no authority after the consumer migration.
+- **Compact persisted shape:** the sole shape written by the amended
+  controller. It omits `readyPodCount`, `scheduledPodCount`, and
+  `nodesOccupied` from each Instance row while retaining prior-snapshot decision
+  fields. This is not a versioned representation.
 - **Columnar representation:** a possible later format that losslessly groups
   equal durable and prior-snapshot values by canonical index ranges. This is a
-  design candidate, not a selected schema or representation marker.
+  design candidate, not a selected schema.
 - **Decision epoch:** the status and object observations available before the
   current reconcile starts effects. Some existing gates deliberately consume
   values published by the prior reconcile.
@@ -257,29 +271,29 @@ The strongest observed evidence is the OEP-0007.3 measurement:
 | 1,000 | approximately 505 KiB |
 | 2,000 | approximately 1 MiB |
 
-The repository's existing 2,000-entry unit test is not a sufficient size
-baseline. It serializes a Creating shape and asserts only that the complete
-object is below 1.5 MiB. That value is a test constant, not a verified limit for
-every deployment. The applicable API-server/etcd request budget and required
-headroom are **TBD** in the measurement PR. The current test also omits steady
-gang placement, failure messages, mixed revisions, and migrations.
+PR #1056 added real-type fixtures for steady singletons and gangs, Create,
+in-place and surge updates, Delete, Kueue admission, realistic and large
+failures, and migration-heavy status. The checked-in golden attributes each
+field family's bytes and includes the full normalized status-update request;
+the envtest suite also captures API-server managed-fields behavior.
 
-A provisional JSON row model gives the likely first-order benefit. It uses
-representative revision/node strings and excludes Kubernetes object metadata,
-and the representation marker. It is **not** a
-complete IR size measurement or graduation evidence; the implementation must
-replace it with Go fixtures using the real types and full update request.
+Removing only the three fields and adding no per-object metadata gives these
+steady-state numbers:
 
-| Modeled 2,000-Instance row set | InlineV1 row bytes | DerivedV1 row bytes; admission and prior-snapshot counters retained | Estimated row-byte reduction |
+| Normalized 2,000-Instance request | Legacy bytes | Compact bytes | Reduction |
 | --- | ---: | ---: | ---: |
-| Single-Pod Instances | 463,430 B | approximately 323,430 B | approximately 140,000 B (30.2%) |
-| Eight-Pod gangs on eight distinct nodes | 631,430 B | approximately 323,430 B | approximately 308,000 B (48.8%) |
+| Single-Pod Instances | 490,520 B | 324,520 B | 166,000 B (33.84%) |
+| Eight-Pod gangs on eight distinct nodes | 840,902 B | 324,902 B | 516,000 B (61.36%) |
+
+The compact values are the golden's normalized legacy request minus its
+`pod_observation_marginal_bytes`; the direct contract adds no per-object field.
 
 The percentage changes with name lengths, optional fields, topology, and
 failures. The useful conclusion is bounded: the three fields are a material
 steady-state fraction, especially `nodesOccupied` for multi-node gangs. The
 audit does **not** support a claim that the first safe singleton cut removes a
-majority of the complete object.
+majority of the complete object. These fixtures are regression gates, not a
+universal API-server or etcd size limit.
 
 ### Top-level field audit
 
@@ -300,7 +314,7 @@ offers little size benefit and would break published contracts.
 | `updateRevision` | No | Keep. It exists before target Pods and drives coordination and retry authority. |
 | `collisionCount` | No | Keep. It is the monotonic ControllerRevision hash salt. |
 | `labelSelector` | Deterministic, but required in status | Keep for the Kubernetes scale subresource. |
-| `instanceStatuses` | Only in steady state | Keep dense compact lifecycle rows in DerivedV1. |
+| `instanceStatuses` | Only in steady state | Keep dense compact lifecycle rows. |
 | `retryBlocks` | No | Keep. They are restart-safe retry authority and are currently bounded to the live target plus limited history. |
 | `migrations` | No | Keep. Nonterminal entries are authoritative resumable work. |
 | `conditions` | No | Keep. `LastTransitionTime` is durable coordination state for Sequential soak. |
@@ -324,20 +338,20 @@ placement.
 The verdicts below are the safe first-version boundary, not a claim that every
 retained field is irreducible forever.
 
-| Field | Current source and consumer | Zero-Pod risk | DerivedV1 disposition |
+| Field | Current source and consumer | Zero-Pod risk | Compact persistence disposition |
 | --- | --- | --- | --- |
 | `index` | Pod label in steady state; planner key, sparse migration identity | Operations and relocated indices outlive Pods | Keep on every dense row. |
 | `incarnation` | Pod label in steady state; identity fencing and restart | Increment is committed before old Pods disappear | Keep. |
 | `phase` | Lifecycle state machine | Pod health cannot identify operation ownership | Keep. |
 | `runningRevision` | Pod revision hash in steady state; rollout and revision GC | In-place labels advance before promotion; old CR must survive zero Pods | Keep. |
 | `targetRevision` | Update intent and identity guards | Exists before replacement Pods | Keep; already omitted in steady state. |
-| `podCount` | Current Pod list; aggregate classifiers | Previous value proves the last published gang view was complete | **Keep in DerivedV1.** |
-| `readyPodCount` | `ContainersReady=True`; publication rollups, raw diagnostics, and the empty surge-slot integrity guard read it | No readiness decision needs its prior value; the integrity guard rejects nonzero legacy residue | Derive for internal rollups; stop serializing only after the raw diagnostic contract is replaced or deprecated. |
-| `servingPodCount` | `ContainersReady=True` and `ome.io/serving=True`; prior value drives failed-update exemption and RatioBalanced gang-peak accounting | Re-deriving current state advances decisions relative to today's deferred publisher | **Keep in DerivedV1.** |
-| `availablePodCount` | Ready, nonterminating EndpointSlice target; prior value gates migration tail | Re-deriving current EndpointSlices can advance migration by one reconcile | **Keep in DerivedV1.** |
+| `podCount` | Current Pod list; aggregate classifiers | Previous value proves the last published gang view was complete | **Keep persisted.** |
+| `readyPodCount` | `ContainersReady=True`; publication rollups, raw diagnostics, and the empty surge-slot integrity guard read it | No readiness decision needs its prior value; the integrity guard rejects nonzero legacy residue | Derive for internal rollups; stop serializing. Pod queries replace the raw diagnostic cache. |
+| `servingPodCount` | `ContainersReady=True` and `ome.io/serving=True`; prior value drives failed-update exemption and RatioBalanced gang-peak accounting | Re-deriving current state advances decisions relative to today's deferred publisher | **Keep persisted.** |
+| `availablePodCount` | Ready, nonterminating EndpointSlice target; prior value gates migration tail | Re-deriving current EndpointSlices can advance migration by one reconcile | **Keep persisted.** |
 | `scheduledPodCount` | `Pod.spec.nodeName != ""`; the empty surge-slot integrity guard checks zero | No historical meaning outside that legacy-row integrity check | Derive; stop serializing. |
-| `admitted` | Pods exist and none carries a scheduling gate; placement counts the current row set | Row removal/teardown may bypass publication, so a scalar aggregate can remain stale | **Keep in DerivedV1.** |
-| `nodesOccupied` | Sorted unique `Pod.spec.nodeName` values; raw diagnostics and the empty surge-slot integrity guard read it | Current node observation only; migration history lives elsewhere | Derive; stop serializing only after the raw migration/debug query is replaced or deprecated. |
+| `admitted` | Pods exist and none carries a scheduling gate; placement counts the current row set | Row removal/teardown may bypass publication, so a scalar aggregate can remain stale | **Keep persisted.** |
+| `nodesOccupied` | Sorted unique `Pod.spec.nodeName` values; raw diagnostics and the empty surge-slot integrity guard read it | Current node observation only; migration history lives elsewhere | Derive; stop serializing. Pod queries replace the raw migration/debug cache. |
 | `conditions` | No production writer found; the empty gang-surge-slot integrity predicate requires it to be empty | Legacy values may exist | Preserve on read and deprecate separately; normally omitted. |
 | `operation` | Write-ahead lifecycle journal | Primary crash-recovery anchor | Keep. |
 | `activeOrdinal` | Pod ordinal when unambiguous; canonical surge slot | Ambiguous with two Pods and absent with zero Pods | Keep. |
@@ -365,7 +379,7 @@ source/target pairing, and migration correlation.
 `retryCount` has no current production writer, and `fromNode` and
 `hintTargetNodes` are legacy round-trip fields rather than the current
 migration source of truth. They still participate in the terminal operation
-identity guard. DerivedV1 therefore preserves all three. They are normally
+identity guard. The compact contract therefore preserves all three. They are normally
 empty, so removing their schema would save no ordinary object bytes and would
 be an independent compatibility change.
 
@@ -400,7 +414,7 @@ scheduling gates, runtime and container health, and the controller-managed
 serving condition. EndpointSlices provide current traffic membership. A
 ControllerRevision maps the revision hash to immutable template content.
 
-No additional Pod metadata is required for the three DerivedV1 fields.
+No additional Pod metadata is required to derive the three removable fields.
 
 ### Where Pod derivation fails
 
@@ -433,19 +447,19 @@ writes begin.
 | Consumer | What it reads today | Required compact source |
 | --- | --- | --- |
 | Workload planner and operations | Dense lifecycle rows plus some copied live counters | Durable rows plus the correct decision-epoch view; destructive checks stay live. |
-| Create batch rollback | Whole-row equality indirectly includes all three publication-only fields | Compare every retained transition-ownership field; preserve current InlineV1 observations while restoring prior lifecycle state. |
+| Create batch rollback | Whole-row equality indirectly includes all three publication-only fields | Compare every retained transition-ownership field; preserve transient observations while restoring prior lifecycle state. |
 | IR aggregate and conditions | Per-Instance counters, phases, revisions, failures | Publication-epoch observation plus durable rows; persist identical top-level values. |
 | ISVC IR projector | Top-level counts, revisions, conditions | Unchanged. It intentionally does not mirror per-Instance rows. |
-| RatioBalanced / surge gates | Top-level serving count, Operation steps, prior per-Instance serving peak | Unchanged persisted serving values in DerivedV1. A later format needs an equivalent persisted predicate before removing them. |
+| RatioBalanced / surge gates | Top-level serving count, Operation steps, prior per-Instance serving peak | Unchanged persisted serving values. A later format needs an equivalent persisted predicate before removing them. |
 | Sequential coordination | Generation/revision skew, dense Instance shape, Ready transition time | Durable rows and unchanged top-level condition. |
 | Canary | Current and update revisions | Unchanged. |
 | HPA/KEDA `/scale` | `replicas` and `labelSelector` | Unchanged. |
 | Multi-cluster placement | Per-Instance `admitted`, failed phase, and top-level `readyReplicas` for Split accounting and endpoint weight | Unchanged durable rows and top-level summaries. No remote Pod informer or aggregate migration. |
 | ControllerRevision GC | Current/update and every Instance running/target revision | Unchanged durable union. |
-| Internal performance invariant harness | Per-Instance `readyPodCount` to avoid comparing two independently lagging watches | Must receive the approved diagnostic replacement; this is part of the raw-status blocker, not “just a test” to delete. |
+| Internal performance invariant harness | Per-Instance `readyPodCount` to avoid comparing two independently lagging watches | Read retained `podCount` and Phase atomically from the same IR object version. |
 | KIND and operator-driven migration | KIND reads `Pod.spec.nodeName`; external clients may use `nodesOccupied[0]` to supply `fromNode` | Keep the Pod query and define the external diagnostic contract. Migration's existing live validation remains authoritative. |
-| Test admitters and integration fixtures | Direct per-Instance `admitted` reads/writes and assertions on the three removable fields | Admission fixtures stay unchanged; assert live Pod facts where epoch coupling is not required. Keep explicit InlineV1/DerivedV1 coverage. |
-| Operators using raw IR YAML | All serialized fields | Preserve mode remains available; DerivedV1 intentionally omits three fields. |
+| Test admitters and integration fixtures | Direct per-Instance `admitted` reads/writes and assertions on the three removable fields | Admission fixtures stay unchanged; assert live Pod facts where epoch coupling is not required. |
+| Operators using raw IR YAML | All serialized fields | The three fields are absent after the next successful IR status write; query Pods for the current facts. |
 
 The placement row is important. OEP-0018.2 deliberately avoids remote Pod
 informers. Retaining `admitted` on each durable row preserves that boundary
@@ -465,7 +479,7 @@ mechanical refactor:
    Stored status is correct, but an in-memory caller can observe the prior
    value. Compaction must not accidentally mix this bug fix with representation
    changes; it deserves a standalone behavior decision and test.
-4. **`minReadySeconds` is not enforced by availability.** DerivedV1 reproduces
+4. **`minReadySeconds` is not enforced by availability.** Compaction reproduces
    current EndpointSlice behavior exactly.
 5. **Several existing retention values are hardcoded.** Examples include
    `defaultRevisionRetention=10`, `maxHistoricalRetryBlocks=3`, the audit
@@ -483,23 +497,25 @@ mechanical refactor:
 
 ### The contract
 
-When DerivedV1 is enabled:
+For every OME-owned IR status write:
 
 1. The IR controller MUST keep durable lifecycle state separate from live
    Pod/EndpointSlice facts and MUST preserve the current decision and
    publication observation epochs.
 2. Every lifecycle, rollout, placement, retention, and aggregate decision MUST
-   be equivalent to InlineV1 for the same supported
-   sequence of status, cache, and live-read states—not merely for a perfectly
-   synchronized fixture. Conversion MUST reject a legacy row whose compacted
-   fields violate the aggregation invariants defined below.
+   remain equivalent for the same supported sequence of controller-produced
+   status, cache, and live-read states—not merely for a perfectly synchronized
+   fixture. Values in the three removable fields are caches. An impossible
+   hand-edited combination is normalized rather than treated as lifecycle
+   authority.
 3. The IR MUST continue persisting dense Instance rows with `index`,
    `incarnation`, `phase`, `runningRevision`, `targetRevision`, `podCount`,
    `servingPodCount`, `availablePodCount`, `admitted`, `operation`,
    `activeOrdinal`, `lastFailure`, per-Instance Conditions, and any other
    non-compacted legacy fields already present.
-4. The IR MUST NOT persist new values for `readyPodCount`,
-   `scheduledPodCount`, or `nodesOccupied` in DerivedV1.
+4. The IR MUST NOT persist `readyPodCount`, `scheduledPodCount`, or
+   `nodesOccupied`. Existing values are accepted on read, ignored for decisions,
+   and removed by the next successful status write.
 5. The IR MUST continue publishing all existing top-level aggregate,
    revision, selector, retry, migration, and condition fields with identical
    semantics.
@@ -513,22 +529,20 @@ When DerivedV1 is enabled:
    one controller pass, but it MUST NOT pretend that the IR and ISVC reconcilers
    share process-local snapshots.
 9. Status writer ownership and conflict-retry boundaries MUST remain unchanged.
-   Every status write family MUST preserve or normalize the object's declared
-   representation so a non-aggregate write cannot regrow compacted fields.
+   Every status write family MUST clear the three fields from the freshly read
+   conflict-retry candidate so a non-aggregate write cannot regrow them.
    Compaction adds no Pod-to-status controller and no writer owned by the ISVC
    controller.
 10. Pods MUST NOT receive copied counter, operation, or history annotations for
     this design.
-11. A compact writer MUST NOT ship until the compatibility and operator API
-    questions in this OEP are closed.
-12. Empty-slot and terminal-finalization predicates MUST be representation
-    aware. InlineV1 objects retain the current field-by-field predicate.
-    DerivedV1 keeps every existing durable, `podCount`, serving, availability,
-    Condition, admission, and failure check; only the three omitted checks
-    disappear. The
-    retained prior-published `podCount` remains the occupancy guard because
-    conversion first proves that any omitted nonzero observation implies a
-    nonzero `podCount`, as current aggregation guarantees.
+11. This persistence invariant MUST NOT have a feature gate, ConfigMap mode, or
+    per-object marker. It is not a user-selectable lifecycle policy.
+12. The empty gang-surge-slot predicate MUST ignore exactly the three removable
+    fields while retaining every other existing check. Terminal finalization
+    keeps its existing lifecycle-owned identity and MUST NOT acquire a
+    dependency on the removable caches. Controller-produced rows already
+    guarantee that any nonzero removable observation implies a nonzero
+    `podCount`; a hand-edited cache value does not own lifecycle work.
 
 ### Persist the lifecycle journal; derive the live observation
 
@@ -537,15 +551,19 @@ truth. Conceptually:
 
 ```text
 ComponentObservation
-  durable[index] -> reconcile-entry IR InstanceStatus row
+  durable[index] -> IR InstanceStatus row at this observation's read epoch
   live[index]    -> Pods, counts, serving/admission/node facts
   availablePods  -> EndpointSlice target set
 ```
 
+Decision observations use the reconcile-entry rows. Publication observations
+use the fresh IR rows re-read inside the existing status conflict-retry
+boundary.
+
 Consumers must ask for the class of fact they need. For example:
 
-- Restart asks the durable row whether the last publication saw a complete gang and
-  compares it with the current live Pod set.
+- Restart asks the durable row whether the last publication saw a complete
+  gang and compares it with the current live Pod set.
 - Publication asks the live view how many desired Pods are ContainersReady;
   pre-effect decisions continue reading the prior persisted serving and
   availability values where they do today.
@@ -556,9 +574,10 @@ Consumers must ask for the class of fact they need. For example:
 This explicit split prevents a current count from overwriting a prior-snapshot
 decision input in memory.
 
-### First compact representation
+### Compact persisted row
 
-DerivedV1 deliberately keeps the list dense. A steady row remains roughly:
+The compact contract deliberately keeps the list dense. A steady row remains
+roughly:
 
 ```yaml
 - index: 42
@@ -572,16 +591,15 @@ DerivedV1 deliberately keeps the list dense. A steady row remains roughly:
 ```
 
 Transition rows additionally carry target revision, Operation, failure, or
-ordinal state exactly as today. The three DerivedV1 fields are absent.
+ordinal state exactly as today. The three removable fields are absent.
 
-DerivedV1 is a storage representation, not a signal to replace live facts with
-zero in memory. The publication path computes the complete transient row,
-derives top-level summaries, then clears the three fields only on the
-persistence candidate. It compares that normalized candidate—not
-the transient full row—with the status re-read by the existing conflict-retry
-closure before deciding to write. Otherwise Ready and UpdatedReady would
-collapse to zero, or every steady
-reconcile would see the temporary fields as a false status delta.
+The compact shape is a persistence rule, not a signal to replace live facts
+with zero in memory. The publication path computes the complete transient row,
+derives top-level summaries, then clears the three fields on the persistence
+candidate. It compares that normalized candidate—not the transient full
+row—with the status re-read by the existing conflict-retry closure before
+deciding to write. Otherwise Ready and UpdatedReady would collapse to zero, or
+every steady reconcile would see the temporary fields as a false status delta.
 
 Why stop here? Dense lifecycle rows preserve existing planner cardinality,
 sparse-index handling, total-loss identity, and revision retention. A later
@@ -644,94 +662,32 @@ Pod metadata is the wrong durability boundary for lifecycle history:
 - Delete intent must survive after the last Pod.
 - Recreate deliberately passes through zero Pods.
 - A gang cannot atomically patch every member.
-- The member carrying a marker can be the member that disappears.
+- The member carrying copied history can be the member that disappears.
 - A surge cannot atomically flip a “canonical” label between two Pods.
 
 Copying state to Pods would add writes, move bytes rather than remove them, and
 still lose the recovery record during deletion.
 
-### Configuration and representation marker
+### Unconditional storage contract
 
-The existing `inferenceservice-config` ConfigMap gains an `omenativeStatus`
-block with one field:
+The three fields are optional API compatibility fields, not a selectable
+storage format. The manager accepts old IRs that still contain them, but every
+status persistence path clears them from the fresh conflict-retry candidate
+before calling the API. The first successful write therefore moves an object
+to the compact shape as part of its ordinary lifecycle; no fleet sweep or
+special conversion reconcile is needed.
 
-```json
-{
-  "instanceObservationMigration": "Preserve"
-}
-```
+This rule has no ConfigMap value, feature gate, status marker, schema preflight,
+or rehydration path. Those mechanisms would create a second state machine for a
+distinction that workload decisions no longer observe. The absence of a switch
+is deliberate: omitting redundant cache fields is the status storage contract,
+not a user-facing behavior default.
 
-Allowed values are:
-
-- `Preserve`: preserve each IR's current representation and do not initiate a
-  conversion. A new IR starts InlineV1.
-- `DerivedV1`: preserve existing DerivedV1 objects and convert InlineV1 objects
-  to DerivedV1 as they reconcile.
-- `Rehydrate`: preserve existing InlineV1 objects and convert DerivedV1 objects
-  back to InlineV1 as they reconcile.
-
-Release A accepts Preserve and Rehydrate but rejects DerivedV1 activation;
-Release B adds permission to initiate compact conversion. In either release,
-ordinary status writes preserve the object's committed representation.
-
-An absent ConfigMap block means Preserve; the binary does not invent a storage
-conversion. The initial Helm value explicitly renders `Preserve`. Invalid
-values prevent manager startup rather than silently selecting a mode.
-
-IR status gains `status.instanceObservationStorage`, which records the format
-actually committed on that object. The first marker value is `DerivedV1`;
-absence means InlineV1, and rehydration removes the marker. Changing the marker
-and clearing or rehydrating the three fields happens in one conflict-retried
-status update, so readers never infer format from a partially converted row.
-
-Conversion is a publication-epoch operation, not a side effect of an unrelated
-lifecycle mutation. Before clearing a legacy row, it verifies the normal
-aggregation invariants: `podCount` is nonnegative; ready and scheduled counts
-are nonnegative and no greater than `podCount`; and a nonempty `nodesOccupied`
-implies `podCount>0` and contains no more entries than the Pod count. An
-anomalous row fails conversion and stays InlineV1 for diagnosis. This keeps the
-DerivedV1 empty-slot predicate equivalent to the legacy predicate for
-controller-produced rows instead of silently normalizing possibly meaningful
-corrupt state.
-
-The mode is loaded once at manager startup. The Helm ConfigMap checksum rolls
-manager Pods when the value changes; a direct ConfigMap edit takes effect only
-after a manager restart. This startup-only contract avoids some replicas
-dynamically changing mode while others keep a stale value. Preserve is
-non-reversing, so old-configuration and new-configuration leaders cannot
-oscillate an object during a rolling activation.
-
-Preserve is also a mandatory barrier between the two converting modes. The
-supported reversal is `DerivedV1 -> Preserve` followed by a completed manager
-rollout, then `Preserve -> Rehydrate` and another rollout. A direct
-DerivedV1-to-Rehydrate rollout is unsupported because an old compacting leader
-could reconvert an object just rehydrated by a new leader. The reverse direction
-uses the same barrier.
-
-A DerivedV1 or Rehydrate startup MUST preflight the served IR CRD schema and
-verify that `status.instanceObservationStorage` is declared with the expected
-schema. If not, startup fails before any IR status write. Structural-schema
-pruning can otherwise accept an update, erase the marker, and leave a compact
-object that looks InlineV1.
-
-Concretely, the manager reads the `inferencereplicas.ome.io` CRD through the
-apiextensions client and walks the served `v1beta1` OpenAPI status properties.
-It requires a string marker whose accepted values include `DerivedV1`; checking
-the property name alone is insufficient. The marker must be optional—not in the
-schema's `required` set—because absence means InlineV1. The preflight also
-verifies that the three legacy
-row fields remain optional: Ready and Scheduled are `int32`, and NodesOccupied
-is an array of strings. Rehydrate must not silently prune them. Failure to read
-the CRD, a
-missing served version, or an incompatible property is a startup error in
-DerivedV1/Rehydrate mode. The chart grants the manager read-only `get` access to
-that CRD. Preserve
-performs the same check best-effort; if the schema or permission is absent
-during an emergency binary-first start, it remains legacy-only and writes
-no marker. It may reconcile marker-absent InlineV1 objects, but any object that
-already carries `DerivedV1` or an unknown nonempty marker fails closed before a
-status write or external effect until the schema can be verified. It never
-treats an observed compact marker as InlineV1.
+Legacy values are not validated before removal. For controller-produced rows,
+normal aggregation already guarantees that Ready and Scheduled are between zero
+and `podCount`, and that occupied nodes imply Pods. A hand-edited or stale cache
+value does not become durable lifecycle evidence merely because it was stored.
+The retained fields remain the authority for transition ownership and recovery.
 
 ### Status ownership
 
@@ -747,13 +703,11 @@ but production code has multiple write families inside that ownership boundary:
 | Gang and workload aggregate Conditions | Workload gang/state-machine code | Dedicated IR condition mutator and its conflict retry |
 | Terminal row removal and teardown | IR/workload teardown logic | Dedicated IR row-removal and teardown status mutators |
 
-Every path that can call `Status().Update` MUST pass through one representation
-normalizer, or an audited equivalent with the same tests. On a DerivedV1 object
-it clears the three compacted fields before write; on an InlineV1 object it
-preserves them. An ordinary lifecycle write never changes the marker;
-conversion or rehydration occurs only in the dedicated publication boundary
-requested by the startup mode. This prevents a RetryBlock or migration-only
-write from accidentally regrowing compacted data.
+Every path that can call `Status().Update` MUST pass through one persistence
+normalizer, or an audited equivalent with the same tests. The normalizer clears
+the three removable fields on every write. Applying it inside each existing
+conflict-retry boundary prevents a RetryBlock or migration-only update from
+regrowing data copied from the freshly read object.
 
 The ISVC controller, Pod watcher, placement controller, and any new controller
 remain read-only for IR status; a second writer would recreate the status
@@ -773,12 +727,12 @@ reconcile into one universal snapshot.
    `servingPodCount`, and `availablePodCount` remain prior observations.
 2. The **publication epoch** runs in the existing deferred aggregate tail after
    effects. It lists cached Pods and EndpointSlices, computes all current
-   counters, persists the fields retained by the object's representation, and
+   counters, persists the retained fields, and
    publishes unchanged top-level summaries.
 
 The epochs share counter formulas and indexing helpers, not necessarily object
 snapshots. The IR reconciler and ISVC coordination reconciler are separate
-passes and cannot share process-local memory. DerivedV1 therefore retains
+passes and cannot share process-local memory. The compact contract therefore retains
 per-Instance serving and availability for RatioBalanced and migration instead
 of adding another coordination Pod LIST or changing their observation time.
 
@@ -808,7 +762,7 @@ list, the first predicate becomes false and Restart never repairs the gang.
 overwrites it on each pass. Its safety value comes from preserving the existing
 decision-before-publication ordering.
 
-DerivedV1 therefore retains `podCount` with its current write ordering. A later
+The compact contract therefore retains `podCount` with its current write ordering. A later
 format may replace the accidental dual use with an explicit per-Incarnation
 “materialized” latch, but only after:
 
@@ -822,7 +776,7 @@ That later change is not required to deliver the first material saving.
 ### Future columnar representation
 
 A range-encoded representation is a promising way to remove the repeated JSON
-keys and values that remain after DerivedV1. In a 500-Instance steady state,
+keys and values that remain after direct compaction. In a 500-Instance steady state,
 for example, membership, Phase, RunningRevision, and Incarnation often contain
 long runs of the same value, while only a small number of indices carry an
 Operation, LastFailure, Condition, or nondefault active ordinal.
@@ -871,30 +825,28 @@ The example is illustrative, not a selected API. A follow-up design must prove:
 6. lossless round trips for zero-Pod windows, sparse migrated indices, every
    operation step, failures, Conditions, admission, and prior-snapshot fields,
    with unambiguous precedence between grouped columns and exceptional entries;
-7. full decision, Event, recovery, upgrade, and downgrade parity, plus raw API
-   compatibility and approved-contract gates equivalent to DerivedV1; and
+7. full decision, Event, recovery, upgrade, and downgrade parity, plus an
+   explicit raw API contract and storage-version strategy; and
 8. measured best- and worst-case sizes. Randomly distributed values can defeat
    range compression, so the format needs a deterministic fallback rather than
    assuming the steady-state example is representative.
 
-The first measurement PR will compare this candidate with InlineV1 and
-DerivedV1 using the same real fixtures. If the additional reduction justifies
-the representation complexity, a follow-up OEP may supersede DerivedV1 before
-its writer ships instead of forcing operators through two storage migrations.
-This OEP does not assign a marker name or authorize columnar writes.
+The checked-in measurement fixtures provide the dense legacy and compact
+baselines for a future comparison; they do not implement or measure this
+candidate. A follow-up OEP must define the columnar migration and rollback
+contract and add its measurements. This OEP does not authorize columnar writes.
 
 ### Consumer migration
 
 Internal migration follows these rules:
 
 1. **Workload core:** accept durable and live observations separately. No
-   operation reads a compacted raw status field directly except the audited
-   empty-slot predicate described below.
+   operation reads a removable raw status field directly.
 2. **Aggregation:** compute the same top-level counters from the live view plus
-   durable revision/phase state. In DerivedV1 it still persists serving and
-   availability, but not the three compacted fields.
+   durable revision/phase state. It still persists serving and availability,
+   but not the three removable fields.
 3. **Coordination:** continue using top-level aggregates, durable Operations,
-   and persisted per-Instance serving values. DerivedV1 adds no Pod LIST to the
+   and persisted per-Instance serving values. Compaction adds no Pod LIST to the
    ISVC reconciliation path.
 4. **Placement:** continue counting per-Instance `admitted` from the current row
    set. No fallback, remote Pod informer, or observation-epoch change is added.
@@ -904,118 +856,47 @@ Internal migration follows these rules:
 6. **ISVC projection, canary, and autoscaling:** continue reading the same
    top-level fields.
 
-Raw access to one of the three fields outside the observation builder is a
-review blocker after migration, with one allowlisted exception:
-`emptyGangSurgeTargetSlotForRepresentation` evaluates the fresh status inside
-the conflict-retried mutation. It checks all three fields for InlineV1 and the
-validated retained-`podCount` implication for DerivedV1. A repository check or
-focused static test SHOULD make any other direct reader visible.
+A raw value influencing a production decision outside the observation builder
+is a review blocker. Wire conversion, transient snapshot cloning, create
+rollback, and persistence clearing may copy the fields but cannot treat them as
+authority; a focused repository test allowlists those mechanical accesses. The
+empty gang-surge-slot predicate ignores the fields while retaining every other
+existing check.
 
-The mutation adapter exposes the freshly read top-level representation through
-`InstanceMutationSnapshot` on every conflict attempt. Empty-slot validation is
-a batch precondition that reads that marker and the indexed row from the same
-snapshot; it does not capture the reconcile-entry marker in a closure. The
-adapter must rebuild both after a conflict before it evaluates the precondition
-again.
+### Upgrade boundary
 
-### Upgrade, downgrade, and mixed-version safety
+The minimum supported forward-upgrade predecessor contains the observation seam
+from PR #1061 and the consumer migration from PR #1066. Its lifecycle consumers
+derive the three observations from the workload observation, except that its
+empty gang-surge-slot guard still contains redundant cache checks dominated by
+`podCount` on controller-produced rows. An older leader therefore makes the same
+decisions on supported state even though it may temporarily repopulate the
+fields. The next compact write removes them again.
 
-Compact writes require a bridge release. The safe sequence is:
+That mixed-writer window is logically safe but not storage-safe for an IR whose
+legacy shape already exceeds the configured request limit. At that scale, an
+older leader can fail while trying to regrow the larger payload. Operators must
+finish the manager rollout without allowing an older writer to regain
+leadership after the first compact write. The compact writer itself can still
+shrink such an object because its outgoing request omits the three fields.
 
-1. **Release A—reader bridge.** Install the additive CRD schema, then roll every
-   workload-cluster manager and control-plane placement manager to a binary
-   that reads both formats. In Preserve mode, every write keeps the object's
-   existing format, and A cannot initiate compact conversion. A can explicitly
-   rehydrate a DerivedV1 object at the publication boundary for rollback. It
-   compares decisions from the old and new read paths while objects remain
-   InlineV1. The legacy path remains authoritative; shadow evaluation emits no
-   status write, Kubernetes Event, or external action.
-2. **Prove parity.** Run the differential, KIND, performance, and fleet
-   observation gates. Any decision mismatch blocks compaction.
-3. **Close the raw-status contract.** API owners approve either deprecation of
-   the three observation fields with documented replacement queries or a
-   reconstructed diagnostic surface. Until then, no compact writer ships.
-4. **Release B—compact writer.** Roll every manager to a compact-capable binary
-   while configuration remains Preserve. Only after every possible leader in
-   the control plane and every participating workload cluster can read
-   DerivedV1 may the operator select DerivedV1 on a workload cluster.
-5. **Enable deliberately.** The controller converts each IR atomically and
-   reports remaining InlineV1/DerivedV1 object counts.
+A normal rolling upgrade from any earlier binary is unsafe. Such a binary may
+become leader after a compact write and interpret absent fields as authoritative
+zeros before publication repopulates them. If the reader-compatible baseline
+has not been deployed, operators must use a non-overlapping manager upgrade that
+prevents the old binary from regaining leadership after the first new manager
+starts writing status.
 
-Release A's shadow comparison is broader than `workload.Plan`. `Plan` does not
-own execute-time coordination gates or every per-Instance Create and Update
-admission decision. The bridge therefore introduces a side-effect-free decision
-trace at each existing effect-authorization branch. The normalized trace
-contains the action family, Instance identity and revision, allow or deny
-result, and stable reason category; it contains no Pod payload or unbounded
-diagnostic text.
+Rollback is unsupported once any compact status write succeeds. A pre-migration
+reader can interpret absent fields as authoritative zeros, while the
+reader-compatible predecessor still regrows the larger payload and can hit the
+same request limit that prompted this OEP. There is no marker that can prove
+which objects were compacted and no rehydration operation. This one-way boundary
+is the explicit cost of avoiding a second storage-migration state machine.
 
-At each branch, the InlineV1 and DerivedV1 evaluators receive the same
-reconcile-entry status, the same cached or authoritative object snapshot, and
-the same resolved external-gate context—not the same final gate decision. A
-lister or `ResolveGateContext` call runs once at its current point in the
-execute loop. Pure gate checks then evaluate that immutable context separately
-with each trace's strategy and in-flight counts; only the InlineV1 evaluation
-may record gate metrics or Events. Release A refactors the current `UpdateGate`
-adapter to expose that separation. Shadow evaluation does not repeat reads or
-reorder earlier effects. The InlineV1 trace alone authorizes the effect. A
-difference is recorded before that effect and the legacy execution continues.
-Tests map every Pod, PodGroup, status, placement, and revision effect site to a
-trace point and cover early divergence where a later gate is never reached. A
-zero mismatch result is not a valid enablement signal unless this effect-site
-coverage check passes.
-
-Rollback rules:
-
-- Before rolling the binary from Release B to A, complete a Release B rollout
-  in Preserve mode. Release A rejects DerivedV1 activation but safely reads and
-  preserves already-compact objects while configured Preserve.
-- Rolling back to a pre-A binary is unsafe while any DerivedV1 IR exists.
-  From Release A Preserve, roll A in Rehydrate mode and allow it to convert
-  objects. A larger InlineV1 status can receive the same 413/size rejection that
-  motivated compaction. If any IR cannot rehydrate, return A to Preserve and
-  stop there. If all succeed, complete another A Preserve rollout before the
-  fleet-wide verification and downgrade. Pre-A rollback is conditional, not
-  guaranteed.
-- One representation target is attempted per IR reconcile, with the existing
-  bounded conflict retry around its atomic status update. Fleet conversion is
-  bounded by the controller's configured worker concurrency. Manager startup
-  naturally enqueues existing IRs through informer Add events; no unbounded
-  per-reconcile fleet sweep is added.
-
-CRD ordering is also explicit. The additive schema lands before a binary writes
-the representation marker. A Preserve-only binary-first
-start may observe legacy objects but MUST NOT enable compaction; a DerivedV1 or
-Rehydrate start against the old schema fails the preflight. Real-apiserver tests
-must cover old structural-schema pruning rather than relying on fake clients.
-
-DerivedV1 and Rehydrate modes require leader election on every participating
-manager and fail startup when it is disabled. Leader election prevents
-simultaneous active reconcilers, but it does not make a mixed-version manager
-set safe: an older Pod can become leader after a newer one dies. Therefore the
-“every possible leader is bridge-capable” prerequisite is load-bearing.
-
-The additive CRD schema is part of the rollback floor. Operators MUST NOT
-downgrade it while any DerivedV1 object exists: pruning the marker would make a
-compact row look InlineV1. Pre-A binary or CRD downgrade requires a fleet-wide
-zero-DerivedV1 proof across every cluster that can contain an IR. Release A
-provides an operator-invoked, one-shot downgrade verifier; it is release
-tooling, not a controller reconcile path. In a standalone installation its
-target is the current cluster. In a multi-cluster installation it checks the
-current cluster and every registered workload cluster, using the placement
-control plane's registered credentials for remote targets.
-
-For each target, the verifier first performs an authoritative GET of the served
-IR CRD and applies the same optional-marker schema checks as manager startup. A
-missing or incompatible marker schema blocks verification because structural
-pruning could otherwise hide a stored marker. Only then does it perform a
-paginated, authoritative IR LIST; every object must have an absent marker.
-Release A extends the remote multicluster-access role with read-only `get` and
-`list` on IRs and resource-scoped `get` on the IR CRD, and verifies those
-credentials in upgrade tests; no remote write verb is added. Cached counts and
-metrics are observability only and cannot authorize downgrade. A CRD or LIST
-failure, unreachable cluster, unknown marker, or authorization failure blocks
-the downgrade.
+No CRD ordering is required because this OEP adds no field. The three legacy
+fields stay optional in the served schema so both old stored objects and old
+client payloads decode; the controller simply stops publishing them.
 
 ### Failure semantics
 
@@ -1024,79 +905,62 @@ the downgrade.
 | Cached Pod or EndpointSlice LIST fails | Return an error; retain the prior published observation and start no decision that depends on fabricated zeros. |
 | Live destructive LIST fails | Fail closed exactly as today; perform no external effect. |
 | Pod has missing/malformed identity labels | Preserve existing orphan/fencing behavior; do not bucket it into a guessed Instance. |
-| Status conversion conflicts | Re-read, rebuild against the fresh durable status, and retry the complete conversion. |
-| Legacy row violates conversion invariants | Leave the object InlineV1, report the invariant, and continue lifecycle reconciliation with InlineV1 semantics. |
-| Unknown representation marker | Fail closed and surface an unsupported-format error; never interpret it as InlineV1 or DerivedV1. |
-| Manager crashes during InlineV1 -> DerivedV1 conversion | The single committed status update leaves either complete format, never a mixed marker/row set. |
+| Status update conflicts | Re-read, rebuild against the fresh durable status, clear the three fields again, and retry the complete mutation. |
 | Manager crashes after compact status but before an effect | Durable Operation and identity fields resume the same work. |
 | EndpointSlice lags Pod readiness | Publish the same temporarily lower availability as the current implementation. |
 | Remote placement cannot read an IR | Fail/retry according to its current semantics; do not infer admission from missing data. |
-| Status update is rejected for size | Surface the error and preserve durable work. DerivedV1 reduces the common shape but does not claim to bound unbounded diagnostics or migrations. |
+| Status update is rejected for size | Surface the error and preserve durable work. Compaction reduces the common shape but does not claim to bound unbounded diagnostics or migrations. |
 
 ### API and operator compatibility
 
 There is an unavoidable limit to the “zero behavior change” claim: removing
 serialized bytes changes a raw API GET. An operator who reads
 `instanceStatuses[42].nodesOccupied` will no longer find that field in
-DerivedV1, even though the same current node remains on the Pod. A change only
-to an omitted field may also stop producing an IR status write and watch event
-when no retained aggregate changes. Internal controllers must be proven
-independent of that event; external watch behavior belongs to the API decision.
+persisted status after the next write, even though the same current node remains
+on the Pod. A change only to an omitted field may also stop producing an IR
+status write and watch event when no retained aggregate changes. Internal
+controllers must be independent of that event.
 
 This OEP therefore makes two narrower guarantees:
 
-1. **Workload and control-plane behavior is identical.** No create, delete,
-   drain, rollout, placement, autoscaling, condition transition, Kubernetes
-   Event emission, or recovery decision changes.
-2. **Existing installations do not compact implicitly.** Preserve remains the
-   initial configured mode; it writes no marker and removes no row field.
+1. **Workload and control-plane behavior is identical for controller-produced
+   state.** No create, delete, drain, rollout, placement, autoscaling, condition
+   transition, Kubernetes Event emission, or recovery decision changes.
+2. **The raw observation API changes deliberately.** The three fields are
+   compatibility-only caches, and field-only IR watch events are not preserved.
 
-The CRD fields remain optional and accepted during the compatibility window.
-DerivedV1 stops writing them; it does not immediately remove them from OpenAPI
-or generated clients. That preserves decoding of old objects and allows
-rehydration, but callers must still handle their absence on a compact object.
-Generated Go, Rust, and Python/OpenAPI client compatibility therefore belongs
-in the API test matrix rather than being assumed from successful decoding alone.
+The CRD fields remain optional in OpenAPI and generated clients so old objects
+and payloads decode. Callers must handle their absence. Current readiness comes
+from `ContainersReady=True`, scheduling from a nonempty `Pod.spec.nodeName`, and
+node occupancy from the unique nonempty `spec.nodeName` values of the
+Instance's Pods.
 
-Before a DerivedV1 writer ships, reviewers must choose one of two operator
-contracts:
-
-- declare the three per-Instance fields an internal, deprecated cache and provide
-  documented Pod queries; or
-- provide a read-only diagnostic surface that reconstructs the same view.
-
-The chosen contract must cover both GET shape and watch-event expectations.
-Claiming that a smaller stored object has a byte-identical raw API would be
-false, so provisional approval of this OEP authorizes the bridge and
-measurement work only. It does not authorize compact writes while this decision
-is open.
+No reconstructed status surface is introduced. Operators that need these live
+facts query Pods, which are already the authoritative source. This is the API
+tradeoff that buys the status reduction; claiming byte-identical raw GET or
+watch behavior would be false.
 
 ### Implementation sequence
 
 The work is split so each PR has one reviewable responsibility:
 
-1. **Measurement and fixtures.** Add named, reproducible size attribution for
-   steady singletons, gangs, creates, updates, deletes, failures, and
-   migrations using real API types and complete status-update request bodies.
-   Compare the lossless columnar candidate against InlineV1 and DerivedV1 before
-   committing to a production writer. No behavior change.
-2. **Observation seam.** Make the durable-plus-live inputs explicit while
-   preserving separate decision/publication epochs and each path's source and
-   owner-filtering scope. Keep InlineV1 writes and differential-test old/new
+1. **Measurement and fixtures (landed in PR #1056).** Add named, reproducible
+   size attribution for steady singletons, gangs, creates, updates, deletes,
+   failures, and migrations using real API types and complete status-update
+   request bodies. Compare legacy and compact dense rows.
+2. **Observation seam (landed in PR #1061).** Make the durable-plus-live inputs
+   explicit while preserving separate decision/publication epochs and each
+   path's source and owner-filtering scope. Differential-test old and new
    decisions.
-3. **Consumer migration.** Move every production reader of the three removable
-   fields to the correct epoch-scoped view. Retained prior-snapshot and
-   admission fields, placement behavior, and InlineV1 writes stay unchanged.
-4. **Release A compatibility bridge.** Add the schema, marker, startup-loaded
-   configuration, dual-format readers, writer-family normalizer, explicit
-   rehydration, and low-cardinality telemetry. Preserve remains configured and
-   A rejects DerivedV1 activation.
-5. **API approval.** Close the raw GET/watch contract and document its
-   replacement before compact writes are reviewable.
-6. **Release B DerivedV1 writer.** Stop serializing the three fields only after
-   all prior gates pass. This PR changes persistence mechanics, not lifecycle
-   policy.
-7. **Optional later proposals.** Decide sparse rows, explicit materialization,
+3. **Consumer migration (landed in PR #1066).** Move decision consumers to the
+   correct epoch-scoped view. Its empty-slot predicate retains redundant cache
+   checks that are decision-equivalent on controller-produced rows. Retained
+   prior-snapshot and admission fields and placement behavior stay unchanged.
+4. **Unconditional compact writer.** Remove those last redundant empty-slot
+   checks and route every status writer family through one persistence boundary
+   that clears the three fields. Keep the transient publication observation
+   available for same-pass aggregation.
+5. **Optional later proposals.** Decide sparse rows, explicit materialization,
    diagnostic bounds, and migration queue bounds independently.
 
 Each production-code PR must keep its diff focused. Large differential test
@@ -1105,26 +969,14 @@ small persistence-mechanics change in the PR description.
 
 ### Observability
 
-Metrics use low-cardinality labels such as representation, observation epoch,
-and component type; they do not label by IR name or namespace:
-
-- `ome_omenative_ir_status_bytes`: a histogram of complete serialized
-  status-update request bytes, split by representation. It MUST reuse bytes
-  already produced by the write path or transport instrumentation rather than
-  add a second full serialization on the reconcile hot path.
-- `ome_omenative_ir_status_derived_mismatch_total`: shadow comparison mismatch,
-  labeled by decision family. Any nonzero value blocks enablement.
-- `ome_omenative_ir_observation_duration_seconds`: time to build an
-  epoch-scoped observation.
-- `ome_omenative_ir_observation_errors_total`: failed Pod or EndpointSlice
-  observations by source.
-- `ome_omenative_ir_status_representation_objects`: cluster-level object count
-  by representation, with no object identity label.
-
-Conversion and rehydration errors must be visible in existing reconcile error
-telemetry and Events. The representation count lets operators observe migration
-progress without creating per-object metric cardinality; only the authoritative
-one-shot verifier can authorize a downgrade.
+This mechanics change adds no runtime metric. Existing
+`ome_isvc_status_update_total{controller="ir",result=...}` telemetry continues
+to report outcomes for the IR status paths it already instruments, and
+reconcile errors continue to surface through the existing controller logs.
+Size and allocation evidence comes from the checked-in fixtures, envtest suite,
+and benchmarks rather than a second serialization on the reconcile hot path.
+No per-object storage-migration metric is needed because this design adds no
+storage-migration state machine.
 
 ## Test Plan
 
@@ -1132,8 +984,10 @@ one-shot verifier can authorize a downgrade.
 
 Build paired fixtures at both observation epochs:
 
-1. a full prior InlineV1 status plus current Pods/EndpointSlices; and
-2. the equivalent DerivedV1 durable status plus the same current objects.
+1. a legacy status carrying values in the three removable fields plus current
+   Pods/EndpointSlices; and
+2. the equivalent durable status with those fields absent plus the same current
+   objects.
 
 The persisted counters MUST intentionally lead and lag the current objects in
 both directions. In particular, include prior-serving/current-not-serving,
@@ -1143,11 +997,11 @@ decision/publication boundary that keeps `podCount`, `servingPodCount`, and
 `availablePodCount` persisted.
 
 The three removable fields also lead and lag their current Pod facts in both
-directions, including a changed node set. For conversion-eligible,
-controller-produced rows, their old values must influence no control decision
-other than the explicitly equivalent empty-slot predicate, while the
-publication result remains identical. Anomalous rows stay InlineV1 and are
-covered by rejection tests instead of this equivalence claim.
+directions, including a changed node set. For controller-produced combinations,
+their old values must influence no control decision, while the publication
+result remains identical. Test impossible cache combinations, such as
+`podCount=0` with a nonzero Ready count, separately to prove deterministic
+normalization rather than old/new decision parity.
 
 For each pair, assert identical:
 
@@ -1158,11 +1012,10 @@ For each pair, assert identical:
 - ISVC projection and rollout-coordination observations;
 - ControllerRevision retention set.
 
-Decision-trace tests enumerate every effect-authorization site, including the
+Differential tests cover every effect-authorization site, including the
 execute-time coordination gate and per-Instance Create and Update admission.
-They prove that shadowing performs no second LIST, gate call, Event, status
-write, or external effect, and that a mismatch is reported before the legacy
-effect proceeds. `workload.Plan` coverage alone is not sufficient.
+`workload.Plan` coverage alone is not sufficient because it does not own every
+execute-time gate.
 
 Cover zero, one, and N Instances; single-Pod and eight-Pod gangs; dense and
 sparse indices; terminating, duplicate, malformed, foreign, and stale-
@@ -1180,10 +1033,10 @@ Tests must verify each field formula independently:
 - Admitted = nonempty Pod bucket and no admission gate;
 - Nodes = sorted unique nonempty node names.
 
-Conversion tests cover every valid boundary value and reject anomalous legacy
-rows such as `podCount=0` with Ready, Scheduled, or Nodes nonzero.
-Focused tests pin equivalent empty gang-surge-slot selection before and after a
-valid conversion.
+Persistence-boundary tests start with nonzero removable fields and prove that
+every writer family clears them on the fresh conflict-retry object. Focused
+tests prove that empty gang-surge-slot selection ignores exactly those three
+fields while preserving every other existing check.
 
 ### Lifecycle and recovery tests
 
@@ -1207,7 +1060,8 @@ At minimum:
 
 Crash/restart tests stop immediately before and after every durable status write
 and every Pod/PodGroup effect, then reconstruct a new reconciler from persisted
-objects. The DerivedV1 and InlineV1 outcomes must match.
+objects. Outcomes must match whether the starting IR contains legacy cache
+values or already has the compact shape.
 
 ### Consumer parity tests
 
@@ -1221,14 +1075,14 @@ Test the complete consumer matrix:
   terminal failure;
 - `/scale`, HPA/KEDA selector behavior, and print columns;
 - the internal performance harness's Ready-without-Pods invariant through the
-  approved diagnostic contract;
+  retained `podCount` from the same IR object version as Phase;
 - performance test admitters and real-Kueue multi-cluster fixtures;
 - revision retention during mixed-revision zero-Pod transitions.
 
 Placement tests continue counting current per-Instance `admitted` values. Pin
 the admitted-row removal, teardown, and failed-publication cases that make a
-separate scalar count unsafe; InlineV1 and DerivedV1 must return the same Single,
-All, and Split decisions.
+separate scalar count unsafe; legacy cache residue and compact rows must return
+the same Single, All, and Split decisions.
 
 Event-liveness tests also isolate changes that affect only an omitted field:
 
@@ -1242,7 +1096,7 @@ change any parent ISVC control decision, traffic decision, placement result,
 Condition, or Event. This turns the static consumer audit into a regression gate
 for the IR-to-ISVC watch edge.
 
-### Fault and upgrade tests
+### Persistence and upgrade tests
 
 Inject:
 
@@ -1250,53 +1104,39 @@ Inject:
 - Pod, EndpointSlice, IR, and ControllerRevision read errors;
 - 409 conflicts, 413 rejections, 429 throttling, 5xx responses, and context
   cancellation;
-- malformed labels and changed owner UID;
-- crash during representation conversion and rehydration.
+- malformed labels and changed owner UID; and
+- a crash immediately before and after a compact status write.
 
 Upgrade tests exercise:
 
-- old full object -> Release A -> Release B DerivedV1;
-- DerivedV1 -> Release B Preserve rollout -> Release A Preserve rollback;
-- DerivedV1 -> successful rehydration -> pre-A rollback for a fixture that fits;
-- rehydration rejected with 413, which leaves DerivedV1 intact and stops the
-  rollback at Release A;
-- leader handoff during Preserve-to-DerivedV1 and Preserve-to-Rehydrate
-  rollouts, with a completed Preserve barrier before reversal;
-- DerivedV1 and Rehydrate startup with leader election disabled, which must
-  fail before any status write;
-- control-plane placement and workload-cluster manager version skew;
-- CRD-first startup and Preserve-only binary-first startup with compaction
-  disabled;
-- DerivedV1/Rehydrate startup against the old CRD, which must fail preflight;
-- missing CRD-read RBAC and wrong marker schemas (required, wrong type, or
-  missing enum value), including Preserve allowing InlineV1 but blocking an
-  observed compact object;
-- real-apiserver structural-schema pruning behavior, not only fake clients;
-- attempted CRD downgrade with any DerivedV1 object, plus a fleet-wide
-  authoritative-LIST zero-DerivedV1 proof that ignores cached/metric counts and
-  blocks on an unreachable workload cluster or any LIST page failure;
-- the one-shot verifier in standalone and multi-cluster target sets, including
-  current-schema validation, remote IR `get,list` and resource-scoped CRD `get`
-  credentials, pagination, unknown markers, authorization failure, and the
-  zero-object cluster case;
-- old stored optional fields and legacy operation fields.
+- an old stored object with all three fields populated, followed by each status
+  writer family;
+- a bounded object passing between two reader-compatible managers while one
+  writer still publishes the legacy shape, proving decision safety and final
+  convergence;
+- an oversized legacy object whose older writer is rejected, followed by a
+  successful compact write and completion of the rollout without returning
+  leadership to the older writer;
+- old optional fields and legacy Operation fields decoding through the current
+  schema and generated clients.
 
-Every status writer family gets a representation-preservation test: single and
+The release notes state that rollback to any older writer is unsupported after
+a compact write. There is no automated downgrade path to test.
+
+Every status writer family gets a persistence-boundary test: single and
 batch Instance mutation, standalone RetryBlock mutation, migration accept,
 phase mutation, import/prune sync, and automatic-relocation outcome, collision
 count, current-revision promotion, aggregate publication, the dedicated gang
-Condition writer, terminal row removal, and teardown. A
-DerivedV1 object must never regrow the three fields; an InlineV1 object must not
-lose them; only the publication conversion path may change the marker. Repeated
-reconciles after conversion must be idempotent and must not create a status
-write storm.
+Condition writer, terminal row removal, and teardown. None may persist the three
+fields. Repeated reconciles after compaction must be idempotent and must not
+create a status write storm.
 
 Every case asserts no unintended Pod create, drain, patch, delete, PodGroup
 delete, placement win, or revision sweep.
 
 ### Size and performance tests
 
-Measure serialized bytes by field family at 0, 1, 100, 1,000, and 2,000
+Measure serialized bytes by field family at 0, 1, 100, 1,000, 2,000, and 5,000
 Instances for:
 
 - steady singleton;
@@ -1308,12 +1148,16 @@ Instances for:
 - realistic and intentionally large LastFailure;
 - migration-heavy status.
 
-Record current versus DerivedV1 bytes for the complete serialized IR
-status-update request, including realistic spec, metadata, and managed fields;
-also record bytes per write, write count, Pod/EndpointSlice LIST count, decoded
-object count, reconcile CPU, allocation, and peak memory. The measurement PR
-sets the exact acceptance threshold from named fixtures; the controller binary
-does not contain an object-size magic value.
+Record legacy versus compact bytes for the complete normalized IR status-update
+request with realistic spec and metadata. The checked-in golden omits
+API-server-generated managed fields so it remains deterministic; envtest
+separately records the actual request and served-object managed-fields behavior.
+Also record bytes per write, write count, Pod/EndpointSlice LIST count, decoded
+object count, reconcile CPU, allocation, and peak memory. At 5,000 Instances,
+the checked-in normalized steady-state gate caps the compact singleton and gang
+requests at 825,000 bytes and requires at least 400,000 bytes/30% singleton
+reduction and 1,250,000 bytes/50% gang reduction. The controller binary does not
+contain an object-size magic value.
 
 Read-count tests assert:
 
@@ -1328,10 +1172,11 @@ Read-count tests assert:
 The existing OMENative KIND suite is authoritative for kubelet and
 EndpointSlice timing. Focused tests cover partial gang loss, recreate, in-place,
 surge, migration, DeleteOwned scale-down, Kueue gating, Sequential soak, and
-RatioBalanced behavior under both representations.
+RatioBalanced behavior with compact persistence.
 
-The repository should also run a 2,000-Instance synthetic/fake-client size test.
-Before Beta, run a real scale trial with 2,000 single-Pod Instances and a gang
+The envtest suite also sends a complete 2,000-Instance status request through a
+real API server and verifies the served object and managed fields. Before Beta,
+run a real scale trial with 2,000 single-Pod Instances and a gang
 shape whose total Pod count is at least comparable. The exact larger gang trial
 is recorded by the measurement milestone rather than invented here.
 
@@ -1340,38 +1185,35 @@ is recorded by the measurement milestone rather than invented here.
 ### Alpha
 
 - The measurement fixtures and field attribution are checked in.
-- Release A reads both representations and preserves each object's committed
-  representation on ordinary writes; it cannot initiate DerivedV1.
 - Every internal consumer of a removable field uses the correct epoch-scoped
   observation; admission and placement remain on the durable row set.
-- Differential tests report zero decision mismatches across the complete unit
-  matrix.
-- Focused KIND lifecycle tests pass in InlineV1 mode.
+- Every IR status writer family clears the three fields from its fresh
+  conflict-retry candidate.
+- Differential tests report no decision mismatch across the complete
+  valid-state matrix, including stale legacy cache values. Separate tests cover
+  normalization of impossible hand-edited combinations.
+- Focused KIND lifecycle tests pass with compact persistence.
 - Admitted-row removal and teardown prove identical placement behavior.
-- The raw GET/watch contract is closed before Release B is approved.
+- API documentation identifies the fields as compatibility-only caches and points
+  operators to Pods for current observations.
 
 ### Beta
 
-- DerivedV1 is opt-in and has passed the full required test suite.
-- Focused KIND tests pass in both modes.
 - A 2,000-Instance scale trial demonstrates the approved size reduction and
   headroom for the named bounded singleton, gang, transition, failure, and
   migration fixtures. Unbounded diagnostics and migration queues are reported
   separately rather than covered by this claim.
 - No reconcile path performs more Pod or EndpointSlice LISTs than its current
   counterpart, and placement opens no remote Pod informer.
-- Upgrade and Release A rollback are automated and tested. Rehydration is
-  proven for fixtures that fit; a 413 is proven to stop pre-A rollback safely
-  at Release A.
-- Shadow mismatch metrics remain zero during the agreed observation window.
-- The approved operator/debug API replacement is documented and tested.
+- A forward rollout from the reader-compatible predecessor is tested at both a
+  bounded size and a size where the legacy writer is rejected, including final
+  convergence without returning leadership to the older writer.
+- The unsupported rollback boundary is included in release documentation.
 
 ### Stable
 
 - Fleet soak shows no lifecycle, rollout, placement, autoscaling, or revision
   retention regression.
-- The team decides whether DerivedV1 becomes the rendered chart mode; no binary
-  default is added.
 - Remaining growth risks—unbounded diagnostics and nonterminal migrations—have
   explicit accepted follow-ups or documented bounds.
 - Any proposal to make Instance rows sparse has its own recovery proof and is
@@ -1383,21 +1225,19 @@ is recorded by the measurement milestone rather than invented here.
    type and test complexity. The current code already has two meanings in one
    struct; making them explicit trades hidden coupling for visible structure.
 2. **Raw compact status is less convenient for debugging.** Operators must read
-   Pods or an approved derived diagnostic surface for the three
-   fields.
-3. **Dense lifecycle rows remain O(N).** DerivedV1 materially reduces the
+   Pods for the three fields.
+3. **Dense lifecycle rows remain O(N).** Direct compaction materially reduces the
    coefficient but does not make IR status O(1).
 4. **Top-level status still rewrites the complete IR object.** Kubernetes status
    update semantics still carry dense durable rows. This proposal reduces bytes,
    not the fundamental whole-object update model.
 5. **The first format does not bound every shape.** Large LastFailure text and
    unbounded nonterminal migrations can still exceed the object limit.
-6. **Rollout takes two releases.** That delay is the cost of a real downgrade
-   bridge; skipping it would make a leader rollback capable of destructive
-   misreads.
-7. **Raw watch timing changes in DerivedV1.** A node or scheduling observation
+6. **Rollback has a hard floor.** After the first compact write, a binary that
+   treats the three fields as authoritative cannot safely become leader.
+7. **Raw watch timing changes.** A node or scheduling observation
    that changes no retained aggregate may no longer cause an IR status event.
-   The API contract must resolve this before compact writes ship.
+   Consumers that need those changes must watch Pods.
 
 ## Alternatives
 
@@ -1418,7 +1258,7 @@ is recorded by the measurement milestone rather than invented here.
    lossless schema, canonical range validation, bounded decoding, full
    conversion/rollback support, and a raw API decision. The future columnar
    section records the proof boundary rather than treating it as rejected.
-6. **Remove `podCount` with the other counters.** Rejected for DerivedV1. It
+6. **Remove `podCount` with the other counters.** Rejected for this compaction. It
    breaks partial gang loss before Ready unless an explicit durable
    materialization latch lands first.
 7. **Replace per-Instance `admitted` with one scalar count.** Deferred. Under
@@ -1442,36 +1282,27 @@ is recorded by the measurement milestone rather than invented here.
 
 ## Open Questions
 
-1. **Is the raw per-Instance observation a supported operator API?** Before
-   any DerivedV1 writer ships, reviewers must choose deprecation plus documented
-   queries or a reconstructed diagnostic surface, including watch-event
-   expectations. Owner: API reviewers; Release A bridge work may proceed while
-   this is open, Release B may not.
-2. **What exact byte gate should Beta enforce?** The measurement PR must record
-   named, reproducible InlineV1 and DerivedV1 full-request fixtures, then
-   propose a reduction and headroom threshold. Owner: implementation author;
-   required before the compact-writer PR.
-3. **Should `podCount` be replaced later by an explicit materialization latch?**
+1. **What real-cluster headroom should Beta require?** The checked-in byte gates
+   protect the normalized fixtures, but they do not define a universal
+   API-server or etcd limit. The scale trial must record its configured limits,
+   maximum observed request, and remaining headroom. Owner: implementation
+   author; required before Beta.
+2. **Should `podCount` be replaced later by an explicit materialization latch?**
    Only if the clearer invariant and any extra savings justify schema and
-   migration complexity. Owner: OMENative maintainers; not required for
-   DerivedV1.
-4. **How should full failure diagnostics be bounded without losing operator
+   migration complexity. Owner: OMENative maintainers; not required for this
+   compaction.
+3. **How should full failure diagnostics be bounded without losing operator
    access or changing retry reasons?** Options include a configured length
    bound, a bounded audit ledger, or a separate sharded diagnostic resource.
    This OEP does not pick one.
-5. **How should queued and stuck nonterminal migrations be bounded?** Terminal
+4. **How should queued and stuck nonterminal migrations be bounded?** Terminal
    retention does not solve that queue. Any cap, rejection, or expiry is a
    lifecycle policy and must be config-driven.
-6. **What observation window is sufficient before opt-in enablement?** Define
-   the cluster count, workload mix, and duration for a zero-mismatch Release A
-   soak. Owner: approvers; record it in `latest-milestone` before Beta.
-7. **Should a lossless columnar format supersede DerivedV1 before Release B?**
+5. **Should a lossless columnar format replace the dense compact rows later?**
    Use the common measurement fixtures to compare reduction, worst-case growth,
-   CPU/allocation cost, operability, and migration complexity. Avoid shipping
-   two persisted formats merely because DerivedV1 was designed first. Owner:
-   OMENative and API maintainers; requires a follow-up OEP or an approved
-   revision of this proposal before any columnar writer.
+   CPU/allocation cost, operability, and migration complexity. Owner: OMENative
+   and API maintainers; requires a follow-up OEP before any columnar writer.
 
-The next action is the measurement-and-fixtures PR. It changes no behavior and
-turns the provisional size estimates into the acceptance gates for the reader
-bridge; this OEP applies only to OMENative InferenceReplicas.
+The next action belongs to the OMENative maintainers: land the unconditional
+persistence boundary and its writer-family regression tests. This OEP applies
+only to OMENative InferenceReplicas.

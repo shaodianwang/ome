@@ -218,8 +218,8 @@ func dumpDiag(tick int, ns, isvcName string) {
 			if is.Operation != nil {
 				op = fmt.Sprintf("{type=%s step=%s target=%s}", is.Operation.Type, is.Operation.Step, is.Operation.TargetRevision)
 			}
-			fmt.Fprintf(w, "    inst[%d] phase=%s runningRev=%s activeOrd=%d podCount=%d readyPodCount=%d inc=%d op=%s\n",
-				is.Index, is.Phase, is.RunningRevision, is.ActiveOrdinal, is.PodCount, is.ReadyPodCount, is.Incarnation, op)
+			fmt.Fprintf(w, "    inst[%d] phase=%s runningRev=%s activeOrd=%d podCount=%d inc=%d op=%s\n",
+				is.Index, is.Phase, is.RunningRevision, is.ActiveOrdinal, is.PodCount, is.Incarnation, op)
 		}
 	} else {
 		fmt.Fprintf(w, "  IR %s-engine: NOT FOUND\n", isvcName)

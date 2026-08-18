@@ -518,7 +518,7 @@ func buildMutateInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 			}
 			*slot = v1beta1convert.InstanceStatusFromWorkload(w)
 			fresh.Status.InstanceStatuses = insts
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -771,7 +771,7 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 				return nil
 			}
 			statusWriteAttempted = true
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -988,7 +988,7 @@ func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1bet
 				return nil
 			}
 			fresh.Status.CurrentRevision = targetName
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1078,7 +1078,7 @@ func buildMutateRetryBlock(c client.Client, reads client.Reader, ir *v1beta1.Inf
 				return nil
 			}
 			fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1189,7 +1189,7 @@ func buildRemoveInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 				return nil
 			}
 			fresh.Status.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1248,7 +1248,7 @@ func buildWriteAggregateCondition(c client.Client, reads client.Reader, ir *v1be
 				return nil
 			}
 			apimeta.SetStatusCondition(&fresh.Status.Conditions, cond)
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}

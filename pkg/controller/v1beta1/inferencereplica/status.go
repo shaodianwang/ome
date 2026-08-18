@@ -205,6 +205,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			fresh.Status.UpdatedReadyReplicas = counters.UpdatedReadyReplicas
 			fresh.Status.UpdateRevision = target.Name
 		}
+		clearPodDerivedInstanceObservations(fresh)
 
 		fresh.Status.ObservedGeneration = fresh.Generation
 		fresh.Status.LabelSelector = irLabelSelectorString(fresh.Spec.ParentRef.Name, fresh.Spec.Component)
@@ -236,7 +237,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return nil
 		}
 
-		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
 				ownerUnavailable = true
@@ -245,10 +246,8 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return fmt.Errorf("aggregateAndWriteStatus: update IR status: %w", err)
 		}
 
-		// Mirror the just-committed Component-level fields, per-Instance
-		// counters, and Conditions onto the caller's in-memory IR snapshot
-		// so downstream callers in the same reconcile pass observe the
-		// post-write state.
+		// Mirror committed Component fields and Conditions together with the
+		// transient publication counters needed by the rest of this pass.
 		mirrorBack(ir, fresh, publication)
 		obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultSuccess)
 		return nil

@@ -469,9 +469,8 @@ func restoreInstanceStatusGangSurgeTarget(
 func emptyGangSurgeTargetSlot(status *workload.InstanceStatus) bool {
 	return status != nil && status.Incarnation == 0 && status.Phase == workload.InstancePhaseEmpty &&
 		status.RunningRevision == "" && status.TargetRevision == "" && status.Operation == nil &&
-		status.PodCount == 0 && status.ReadyPodCount == 0 && status.ServingPodCount == 0 &&
-		status.AvailablePodCount == 0 && status.ScheduledPodCount == 0 && !status.Admitted &&
-		len(status.NodesOccupied) == 0 && len(status.Conditions) == 0 && status.LastFailure == nil
+		status.PodCount == 0 && status.ServingPodCount == 0 && status.AvailablePodCount == 0 &&
+		!status.Admitted && len(status.Conditions) == 0 && status.LastFailure == nil
 }
 
 func sameRestoredGangSurgeTarget(current, desired *workload.InstanceStatus) bool {

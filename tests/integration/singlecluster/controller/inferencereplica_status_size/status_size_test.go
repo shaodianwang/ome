@@ -38,87 +38,74 @@ type sizeMeasurement struct {
 	persistedManagedFieldsEntries int
 }
 
-type lifecycleMeasurements struct {
-	steadyInline    sizeMeasurement
-	projectDerived  sizeMeasurement
-	steadyDerived   sizeMeasurement
-	rehydrateInline sizeMeasurement
-	finalInline     sizeMeasurement
+type persistenceMeasurements struct {
+	steadyLegacy  sizeMeasurement
+	compactWrite  sizeMeasurement
+	steadyCompact sizeMeasurement
 }
 
 var _ = ginkgo.Describe("complete InferenceReplica status update size", func() {
-	ginkgo.It("measures a 2,000-Instance representation lifecycle on each object", func() {
+	ginkgo.It("measures 2,000-Instance legacy and compact API requests", func() {
 		for _, topology := range []struct {
 			name                       string
 			podsPerInstance            int32
 			minimumSteadyReduction     int
-			minimumProjectionReduction int
+			minimumFirstWriteReduction int
+			requireManagedFields       bool
 		}{
-			{name: "singleton", podsPerInstance: 1, minimumSteadyReduction: 25, minimumProjectionReduction: 10},
-			{name: "eight-pod-gang", podsPerInstance: 8, minimumSteadyReduction: 50, minimumProjectionReduction: 50},
+			{name: "singleton", podsPerInstance: 1, minimumSteadyReduction: 25, minimumFirstWriteReduction: 10, requireManagedFields: true},
+			{name: "eight-pod-gang", podsPerInstance: 8, minimumSteadyReduction: 50, minimumFirstWriteReduction: 50},
 		} {
-			measurements := measureRepresentationLifecycle(
+			measurements := measurePersistence(
 				fixtureInferenceReplica("status-"+topology.name, topology.podsPerInstance),
 			)
-			assertLifecycleAcceptance(
+			assertPersistenceAcceptance(
 				topology.name,
 				measurements,
 				topology.minimumSteadyReduction,
-				topology.minimumProjectionReduction,
+				topology.minimumFirstWriteReduction,
+				topology.requireManagedFields,
 			)
-			logLifecycleMeasurements(topology.name, measurements)
+			logPersistenceMeasurements(topology.name, measurements)
 		}
 	})
 })
 
-func measureRepresentationLifecycle(ir *v1beta1.InferenceReplica) lifecycleMeasurements {
+func measurePersistence(ir *v1beta1.InferenceReplica) persistenceMeasurements {
 	ginkgo.GinkgoHelper()
 
-	inlineStatus := ir.Status.DeepCopy()
+	legacyStatus := ir.Status.DeepCopy()
 	gomega.Expect(k8sClient.Create(suiteCtx, ir)).To(gomega.Succeed())
 	key := client.ObjectKeyFromObject(ir)
 
 	live := getInferenceReplica(key)
-	live.Status = *inlineStatus.DeepCopy()
+	live.Status = *legacyStatus.DeepCopy()
 
 	// The warm-up produces the status-subresource managed-fields entry that
 	// the first measured steady-state update carries in its complete body.
 	gomega.Expect(k8sClient.Status().Update(suiteCtx, live)).To(gomega.Succeed())
 
-	steadyInline := captureStatusUpdate(getInferenceReplica(key))
+	steadyLegacy := captureStatusUpdate(getInferenceReplica(key), false)
 
-	inlineForProjection := getInferenceReplica(key)
-	inlineManagedFieldsBytes := encodedManagedFieldsBytes(inlineForProjection)
-	applyTestOnlyDerivedProjection(&inlineForProjection.Status)
-	projectDerived := captureStatusUpdate(inlineForProjection)
-	gomega.Expect(projectDerived.requestManagedFieldsBytes).To(gomega.Equal(inlineManagedFieldsBytes),
-		"the projection request must carry the live Inline managedFields")
+	compactCandidate := getInferenceReplica(key)
+	legacyManagedFieldsBytes := encodedManagedFieldsBytes(compactCandidate)
+	applyCompactPersistence(&compactCandidate.Status)
+	compactWrite := captureStatusUpdate(compactCandidate, true)
+	gomega.Expect(compactWrite.requestManagedFieldsBytes).To(gomega.Equal(legacyManagedFieldsBytes),
+		"the compact request must carry any managedFields retained by the legacy object")
 
-	derived := getInferenceReplica(key)
-	assertDerivedProjection(derived.Status, *inlineStatus)
-	steadyDerived := captureStatusUpdate(derived)
+	compact := getInferenceReplica(key)
+	assertCompactStatus(compact.Status, *legacyStatus)
+	steadyCompact := captureStatusUpdate(compact, true)
 
-	derivedForRehydrate := getInferenceReplica(key)
-	derivedManagedFieldsBytes := encodedManagedFieldsBytes(derivedForRehydrate)
-	derivedForRehydrate.Status = *inlineStatus.DeepCopy()
-	rehydrateInline := captureStatusUpdate(derivedForRehydrate)
-	gomega.Expect(rehydrateInline.requestManagedFieldsBytes).To(gomega.Equal(derivedManagedFieldsBytes),
-		"the rehydrate request must carry the live Derived managedFields")
-
-	finalInlineObject := getInferenceReplica(key)
-	expectStatusJSONEqual(finalInlineObject.Status, *inlineStatus)
-	finalInline := captureStatusUpdate(finalInlineObject)
-
-	return lifecycleMeasurements{
-		steadyInline:    steadyInline,
-		projectDerived:  projectDerived,
-		steadyDerived:   steadyDerived,
-		rehydrateInline: rehydrateInline,
-		finalInline:     finalInline,
+	return persistenceMeasurements{
+		steadyLegacy:  steadyLegacy,
+		compactWrite:  compactWrite,
+		steadyCompact: steadyCompact,
 	}
 }
 
-func captureStatusUpdate(ir *v1beta1.InferenceReplica) sizeMeasurement {
+func captureStatusUpdate(ir *v1beta1.InferenceReplica, expectCompact bool) sizeMeasurement {
 	ginkgo.GinkgoHelper()
 
 	key := client.ObjectKeyFromObject(ir)
@@ -136,6 +123,9 @@ func captureStatusUpdate(ir *v1beta1.InferenceReplica) sizeMeasurement {
 	gomega.Expect(request.contentLength).To(gomega.Equal(int64(len(request.body))))
 	gomega.Expect(request.body).To(gomega.Equal(encodeStatusRequest(wantRequestObject)))
 	assertCompleteRequestObject(request.body, wantRequestObject)
+	if expectCompact {
+		assertPodDerivedFieldsOmitted(request.body)
+	}
 
 	persisted := getInferenceReplica(key)
 	gomega.Expect(persisted.Spec).To(gomega.Equal(wantRequestObject.Spec))
@@ -143,6 +133,9 @@ func captureStatusUpdate(ir *v1beta1.InferenceReplica) sizeMeasurement {
 
 	served := getRawInferenceReplica(suiteCtx, key)
 	assertCompleteServedObject(served, persisted)
+	if expectCompact {
+		assertPodDerivedFieldsOmitted(served)
+	}
 
 	return sizeMeasurement{
 		requestBytes:                  len(request.body),
@@ -154,6 +147,23 @@ func captureStatusUpdate(ir *v1beta1.InferenceReplica) sizeMeasurement {
 	}
 }
 
+func assertPodDerivedFieldsOmitted(body []byte) {
+	ginkgo.GinkgoHelper()
+
+	var object struct {
+		Status struct {
+			InstanceStatuses []map[string]json.RawMessage `json:"instanceStatuses"`
+		} `json:"status"`
+	}
+	gomega.Expect(json.Unmarshal(body, &object)).To(gomega.Succeed())
+	for index, status := range object.Status.InstanceStatuses {
+		for _, field := range []string{"readyPodCount", "scheduledPodCount", "nodesOccupied"} {
+			gomega.Expect(status).NotTo(gomega.HaveKey(field),
+				"InstanceStatus[%d] must omit %s from compact JSON", index, field)
+		}
+	}
+}
+
 func getInferenceReplica(key client.ObjectKey) *v1beta1.InferenceReplica {
 	ginkgo.GinkgoHelper()
 
@@ -162,9 +172,7 @@ func getInferenceReplica(key client.ObjectKey) *v1beta1.InferenceReplica {
 	return ir
 }
 
-// applyTestOnlyDerivedProjection models the proposed representation without
-// adding an API marker or changing production serialization behavior.
-func applyTestOnlyDerivedProjection(status *v1beta1.InferenceReplicaStatus) {
+func applyCompactPersistence(status *v1beta1.InferenceReplicaStatus) {
 	for i := range status.InstanceStatuses {
 		status.InstanceStatuses[i].ReadyPodCount = 0
 		status.InstanceStatuses[i].ScheduledPodCount = 0
@@ -172,12 +180,17 @@ func applyTestOnlyDerivedProjection(status *v1beta1.InferenceReplicaStatus) {
 	}
 }
 
-func assertDerivedProjection(got, inline v1beta1.InferenceReplicaStatus) {
+func assertCompactStatus(got, legacy v1beta1.InferenceReplicaStatus) {
 	ginkgo.GinkgoHelper()
 
-	want := inline.DeepCopy()
-	applyTestOnlyDerivedProjection(want)
+	want := legacy.DeepCopy()
+	applyCompactPersistence(want)
 	expectStatusJSONEqual(got, *want)
+	encoded, err := json.Marshal(got)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	for _, field := range []string{"readyPodCount", "scheduledPodCount", "nodesOccupied"} {
+		gomega.Expect(string(encoded)).NotTo(gomega.ContainSubstring(`"` + field + `"`))
+	}
 }
 
 func expectStatusJSONEqual(got, want v1beta1.InferenceReplicaStatus) {
@@ -190,42 +203,44 @@ func expectStatusJSONEqual(got, want v1beta1.InferenceReplicaStatus) {
 	gomega.Expect(gotJSON).To(gomega.Equal(wantJSON))
 }
 
-func assertLifecycleAcceptance(topology string, measurements lifecycleMeasurements, minimumSteadyReduction, minimumProjectionReduction int) {
+func assertPersistenceAcceptance(topology string, measurements persistenceMeasurements, minimumSteadyReduction, minimumFirstWriteReduction int, requireManagedFields bool) {
 	ginkgo.GinkgoHelper()
 
-	inline := measurements.steadyInline
-	derived := measurements.steadyDerived
-	gomega.Expect(derived.requestBytes).To(gomega.BeNumerically("<", inline.requestBytes),
-		"%s steady projection must reduce the complete status PUT body", topology)
-	gomega.Expect(derived.servedObjectBytes).To(gomega.BeNumerically("<", inline.servedObjectBytes),
-		"%s steady projection must reduce the complete served object", topology)
-	gomega.Expect((inline.requestBytes-derived.requestBytes)*100).To(
-		gomega.BeNumerically(">=", inline.requestBytes*minimumSteadyReduction),
-		"%s steady projection must meet the named reduction gate", topology)
-	gomega.Expect(measurements.projectDerived.requestBytes).To(gomega.BeNumerically("<", inline.requestBytes),
-		"%s projection must reduce the request while carrying prior Inline managedFields", topology)
-	gomega.Expect((inline.requestBytes-measurements.projectDerived.requestBytes)*100).To(
-		gomega.BeNumerically(">=", inline.requestBytes*minimumProjectionReduction),
-		"%s conversion projection must meet the named reduction gate", topology)
-	gomega.Expect(measurements.finalInline.requestBytes).To(gomega.BeNumerically(">", derived.requestBytes),
-		"%s rehydrated Inline steady state must restore the larger representation", topology)
+	legacy := measurements.steadyLegacy
+	compact := measurements.steadyCompact
+	gomega.Expect(compact.requestBytes).To(gomega.BeNumerically("<", legacy.requestBytes),
+		"%s compact persistence must reduce the complete status PUT body", topology)
+	gomega.Expect(compact.servedObjectBytes).To(gomega.BeNumerically("<", legacy.servedObjectBytes),
+		"%s compact persistence must reduce the complete served object", topology)
+	gomega.Expect((legacy.requestBytes-compact.requestBytes)*100).To(
+		gomega.BeNumerically(">=", legacy.requestBytes*minimumSteadyReduction),
+		"%s steady compact status must meet the named reduction gate", topology)
+	if requireManagedFields {
+		gomega.Expect(legacy.persistedManagedFieldsEntries).To(gomega.BeNumerically(">", 0),
+			"%s legacy fixture must retain managedFields so their request cost is exercised", topology)
+		gomega.Expect(measurements.compactWrite.requestManagedFieldsEntries).To(gomega.BeNumerically(">", 0),
+			"%s compact request must carry the retained legacy managedFields", topology)
+	}
+	gomega.Expect(measurements.compactWrite.requestBytes).To(gomega.BeNumerically("<", legacy.requestBytes),
+		"%s first compact request must be smaller than the steady legacy request", topology)
+	gomega.Expect((legacy.requestBytes-measurements.compactWrite.requestBytes)*100).To(
+		gomega.BeNumerically(">=", legacy.requestBytes*minimumFirstWriteReduction),
+		"%s first compact write must meet the named reduction gate", topology)
 }
 
-func logLifecycleMeasurements(topology string, measurements lifecycleMeasurements) {
+func logPersistenceMeasurements(topology string, measurements persistenceMeasurements) {
 	ginkgo.GinkgoHelper()
 
 	for _, stage := range []struct {
 		name        string
 		measurement sizeMeasurement
 	}{
-		{name: "steady-inline", measurement: measurements.steadyInline},
-		{name: "project-derived", measurement: measurements.projectDerived},
-		{name: "steady-derived", measurement: measurements.steadyDerived},
-		{name: "rehydrate-inline", measurement: measurements.rehydrateInline},
-		{name: "final-inline", measurement: measurements.finalInline},
+		{name: "steady-legacy", measurement: measurements.steadyLegacy},
+		{name: "compact-write", measurement: measurements.compactWrite},
+		{name: "steady-compact", measurement: measurements.steadyCompact},
 	} {
 		ginkgo.GinkgoWriter.Printf(
-			"IR status lifecycle topology=%s replicas=%d stage=%s request=%d request_managed_fields=%d request_managed_field_entries=%d served=%d persisted_managed_fields=%d persisted_managed_field_entries=%d\n",
+			"IR status persistence topology=%s replicas=%d stage=%s request=%d request_managed_fields=%d request_managed_field_entries=%d served=%d persisted_managed_fields=%d persisted_managed_field_entries=%d\n",
 			topology,
 			fixtureReplicas,
 			stage.name,

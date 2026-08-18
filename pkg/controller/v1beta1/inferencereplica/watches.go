@@ -194,9 +194,8 @@ func managedByOMENativePredicate() predicate.Predicate {
 //     edge-triggered InstanceReadyTimeout park/restart on Kueue gate-exit
 //     (a gate-removal update changes only SchedulingGates, Phase stays
 //     Pending, so without this it would be dropped).
-//   - Spec.NodeName — feeds CountScheduledPods / UniqueNodes →
-//     Status.ScheduledPodCount / NodesOccupied (a scheduler bind sets
-//     NodeName with Phase still Pending).
+//   - Spec.NodeName — feeds the current scheduling and placement
+//     observation (a scheduler bind sets NodeName with Phase still Pending).
 //   - OwnerReferences — enqueueOwner target.
 //   - The OMENative routing labels (managed-by, isvc, component,
 //     instance-index, revision-hash) the handler keys the expectations

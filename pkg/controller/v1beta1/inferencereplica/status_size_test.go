@@ -29,11 +29,10 @@ import (
 const (
 	measurementCurrentRevision = "example-engine-6d8f7b9c"
 	measurementUpdateRevision  = "example-engine-a3e129d4"
-	measurementDerivedMarker   = "DerivedV1"
 	measurementLargeMessageLen = 1024
 )
 
-var measurementInstanceCounts = []int32{0, 1, 100, 1000, 2000}
+var measurementInstanceCounts = []int32{0, 1, 100, 1000, 2000, 5000}
 
 var (
 	measurementEncoderOnce sync.Once
@@ -75,38 +74,42 @@ var statusSizeFixtures = []statusSizeFixture{
 }
 
 type statusSizeMeasurement struct {
-	fixture                   string
-	instances                 int32
-	normalizedInlineBytes     int
-	normalizedDerivedBytes    int
-	inlineStatusBytes         int
-	derivedStatusBytes        int
-	instanceRowsBytes         int
-	readyPodCountBytes        int
-	scheduledPodCountBytes    int
-	nodesOccupiedBytes        int
-	liveObservationBytes      int
-	representationMarkerBytes int
-	operationBytes            int
-	lastFailureBytes          int
-	migrationsBytes           int
-	reductionBytes            int
+	fixture                string
+	instances              int32
+	observedRequestBytes   int
+	persistedRequestBytes  int
+	observedStatusBytes    int
+	persistedStatusBytes   int
+	instanceRowsBytes      int
+	readyPodCountBytes     int
+	scheduledPodCountBytes int
+	nodesOccupiedBytes     int
+	podObservationBytes    int
+	operationBytes         int
+	lastFailureBytes       int
+	migrationsBytes        int
+	reductionBytes         int
 }
 
-func TestInferenceReplicaStatusSizeProjectionDropsExactlyThreeFields(t *testing.T) {
-	inline := newStatusSizeIR(statusSizeFixtures[1], 1)
-	inline.Status.InstanceStatuses[0] = fullyPopulatedInstanceStatus(0)
-	original := inline.DeepCopy()
+func TestInferenceReplicaStatusSizeCompactionDropsExactlyThreeFields(t *testing.T) {
+	observed := newStatusSizeIR(statusSizeFixtures[1], 1)
+	observed.Status.InstanceStatuses[0] = fullyPopulatedInstanceStatus(0)
+	original := observed.DeepCopy()
 
-	derived := projectDerivedV1(inline)
-	want := inline.DeepCopy()
-	clearDerivedV1Fields(want)
-
-	if diff := cmp.Diff(want, derived); diff != "" {
-		t.Fatalf("DerivedV1 projection changed fields outside the three live observations (-want +got):\n%s", diff)
+	persisted := observed.DeepCopy()
+	clearPodDerivedInstanceObservations(persisted)
+	want := observed.DeepCopy()
+	for i := range want.Status.InstanceStatuses {
+		want.Status.InstanceStatuses[i].ReadyPodCount = 0
+		want.Status.InstanceStatuses[i].ScheduledPodCount = 0
+		want.Status.InstanceStatuses[i].NodesOccupied = nil
 	}
-	if diff := cmp.Diff(original, inline); diff != "" {
-		t.Fatalf("projection mutated the InlineV1 source (-want +got):\n%s", diff)
+
+	if diff := cmp.Diff(want, persisted); diff != "" {
+		t.Fatalf("status compaction changed fields outside the three Pod-derived observations (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(original, observed); diff != "" {
+		t.Fatalf("status compaction mutated its source fixture (-want +got):\n%s", diff)
 	}
 }
 
@@ -122,29 +125,29 @@ func TestInferenceReplicaStatusSizeNormalizedFixtures(t *testing.T) {
 	}
 }
 
-func TestInferenceReplicaStatusSizeNormalizedAcceptance(t *testing.T) {
+func TestInferenceReplicaStatusSizeNormalizedSteadyStateAcceptance(t *testing.T) {
 	const (
-		instances                 = int32(2000)
-		maxNormalizedDerivedBytes = 330_000
+		instances                   = int32(5000)
+		maxNormalizedPersistedBytes = 825_000
 	)
 	tests := []struct {
 		fixture             statusSizeFixture
 		minReductionBytes   int
 		minReductionPercent float64
 	}{
-		{fixture: statusSizeFixtures[0], minReductionBytes: 140_000, minReductionPercent: 30},
-		{fixture: statusSizeFixtures[1], minReductionBytes: 350_000, minReductionPercent: 50},
+		{fixture: statusSizeFixtures[0], minReductionBytes: 400_000, minReductionPercent: 30},
+		{fixture: statusSizeFixtures[1], minReductionBytes: 1_250_000, minReductionPercent: 50},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture.name, func(t *testing.T) {
 			measurement := measureStatusSize(t, tt.fixture, instances)
-			if measurement.normalizedDerivedBytes > maxNormalizedDerivedBytes {
-				t.Fatalf("normalized DerivedV1 projection = %d bytes, want at most %d", measurement.normalizedDerivedBytes, maxNormalizedDerivedBytes)
+			if measurement.persistedRequestBytes > maxNormalizedPersistedBytes {
+				t.Fatalf("normalized persisted request = %d bytes, want at most %d", measurement.persistedRequestBytes, maxNormalizedPersistedBytes)
 			}
 			if measurement.reductionBytes < tt.minReductionBytes {
 				t.Fatalf("request reduction = %d bytes, want at least %d", measurement.reductionBytes, tt.minReductionBytes)
 			}
-			percent := float64(measurement.reductionBytes) * 100 / float64(measurement.normalizedInlineBytes)
+			percent := float64(measurement.reductionBytes) * 100 / float64(measurement.observedRequestBytes)
 			if percent < tt.minReductionPercent {
 				t.Fatalf("request reduction = %.2f%%, want at least %.2f%%", percent, tt.minReductionPercent)
 			}
@@ -160,29 +163,30 @@ func BenchmarkInferenceReplicaStatusNormalizedJSON(b *testing.B) {
 		statusSizeFixtures[9],
 	}
 	for _, fixture := range fixtures {
-		inline := newStatusSizeIR(fixture, 2000)
-		derived := projectDerivedV1(inline)
-		for _, representation := range []struct {
+		observed := newStatusSizeIR(fixture, 2000)
+		persisted := observed.DeepCopy()
+		clearPodDerivedInstanceObservations(persisted)
+		for _, state := range []struct {
 			name   string
 			object *v1beta1.InferenceReplica
 		}{
-			{name: "InlineV1", object: inline},
-			{name: "DerivedV1Projection", object: derived},
+			{name: "Observed", object: observed},
+			{name: "Persisted", object: persisted},
 		} {
-			body, err := marshalStatusUpdateBody(representation.object, false)
+			body, err := marshalStatusUpdateBody(state.object)
 			if err != nil {
 				b.Fatalf("marshal benchmark fixture: %v", err)
 			}
-			b.Run(fixture.name+"/"+representation.name+"/marshal", func(b *testing.B) {
+			b.Run(fixture.name+"/"+state.name+"/marshal", func(b *testing.B) {
 				b.ReportAllocs()
 				b.SetBytes(int64(len(body)))
 				for range b.N {
-					if _, err := marshalStatusUpdateBody(representation.object, false); err != nil {
+					if _, err := marshalStatusUpdateBody(state.object); err != nil {
 						b.Fatal(err)
 					}
 				}
 			})
-			b.Run(fixture.name+"/"+representation.name+"/unmarshal", func(b *testing.B) {
+			b.Run(fixture.name+"/"+state.name+"/unmarshal", func(b *testing.B) {
 				b.ReportAllocs()
 				b.SetBytes(int64(len(body)))
 				for range b.N {
@@ -209,40 +213,46 @@ func collectStatusSizeMeasurements(t *testing.T) []statusSizeMeasurement {
 
 func measureStatusSize(t *testing.T, fixture statusSizeFixture, instances int32) statusSizeMeasurement {
 	t.Helper()
-	inline := newStatusSizeIR(fixture, instances)
-	derived := projectDerivedV1(inline)
-	if len(inline.ManagedFields) != 0 || len(derived.ManagedFields) != 0 {
+	observed := newStatusSizeIR(fixture, instances)
+	persisted := observed.DeepCopy()
+	clearPodDerivedInstanceObservations(persisted)
+	if len(observed.ManagedFields) != 0 || len(persisted.ManagedFields) != 0 {
 		t.Fatal("normalized fixtures must omit API-server-generated managedFields")
 	}
 
-	inlineRequest := mustMarshalStatusUpdateBody(t, inline, false)
-	derivedRequest := mustMarshalStatusUpdateBody(t, derived, true)
-	inlineStatus := mustMarshalStatus(t, &inline.Status, false)
-	derivedStatus := mustMarshalStatus(t, &derived.Status, true)
-	rows, err := json.Marshal(inline.Status.InstanceStatuses)
+	observedRequest := mustMarshalStatusUpdateBody(t, observed)
+	persistedRequest := mustMarshalStatusUpdateBody(t, persisted)
+	observedStatus := mustMarshalStatus(t, &observed.Status)
+	persistedStatus := mustMarshalStatus(t, &persisted.Status)
+	rows, err := json.Marshal(observed.Status.InstanceStatuses)
 	if err != nil {
 		t.Fatalf("marshal InstanceStatuses: %v", err)
 	}
-	withoutMarker := mustMarshalStatusUpdateBody(t, derived, false)
-	readyBytes, scheduledBytes, nodesBytes, observationBytes := liveObservationRequestBytes(t, inline)
+	readyBytes, scheduledBytes, nodesBytes, observationBytes := podObservationRequestBytes(t, observed)
+	reductionBytes := len(observedRequest) - len(persistedRequest)
+	if observationBytes != readyBytes+scheduledBytes+nodesBytes {
+		t.Fatalf("Pod-derived observation marginal bytes = %d, want exact field sum %d", observationBytes, readyBytes+scheduledBytes+nodesBytes)
+	}
+	if reductionBytes != observationBytes {
+		t.Fatalf("persisted request reduction = %d bytes, want exact three-field reduction %d", reductionBytes, observationBytes)
+	}
 
 	measurement := statusSizeMeasurement{
-		fixture:                   fixture.name,
-		instances:                 instances,
-		normalizedInlineBytes:     len(inlineRequest),
-		normalizedDerivedBytes:    len(derivedRequest),
-		inlineStatusBytes:         len(inlineStatus),
-		derivedStatusBytes:        len(derivedStatus),
-		instanceRowsBytes:         len(rows),
-		readyPodCountBytes:        readyBytes,
-		scheduledPodCountBytes:    scheduledBytes,
-		nodesOccupiedBytes:        nodesBytes,
-		liveObservationBytes:      observationBytes,
-		representationMarkerBytes: len(derivedRequest) - len(withoutMarker),
-		operationBytes:            marginalRequestBytes(t, inline, clearOperations),
-		lastFailureBytes:          marginalRequestBytes(t, inline, clearLastFailures),
-		migrationsBytes:           marginalRequestBytes(t, inline, clearMigrations),
-		reductionBytes:            len(inlineRequest) - len(derivedRequest),
+		fixture:                fixture.name,
+		instances:              instances,
+		observedRequestBytes:   len(observedRequest),
+		persistedRequestBytes:  len(persistedRequest),
+		observedStatusBytes:    len(observedStatus),
+		persistedStatusBytes:   len(persistedStatus),
+		instanceRowsBytes:      len(rows),
+		readyPodCountBytes:     readyBytes,
+		scheduledPodCountBytes: scheduledBytes,
+		nodesOccupiedBytes:     nodesBytes,
+		podObservationBytes:    observationBytes,
+		operationBytes:         marginalRequestBytes(t, observed, clearOperations),
+		lastFailureBytes:       marginalRequestBytes(t, observed, clearLastFailures),
+		migrationsBytes:        marginalRequestBytes(t, observed, clearMigrations),
+		reductionBytes:         reductionBytes,
 	}
 	return measurement
 }
@@ -254,43 +264,41 @@ func renderStatusSizeCSV(t *testing.T, measurements []statusSizeMeasurement) str
 	header := []string{
 		"fixture",
 		"instances",
-		"normalized_inline_request_bytes",
-		"normalized_derived_request_bytes",
-		"inline_status_json_bytes",
-		"derived_status_json_bytes",
+		"normalized_observed_request_bytes",
+		"normalized_persisted_request_bytes",
+		"observed_status_json_bytes",
+		"persisted_status_json_bytes",
 		"instance_rows_total_bytes",
 		"ready_pod_count_marginal_bytes",
 		"scheduled_pod_count_marginal_bytes",
 		"nodes_occupied_marginal_bytes",
-		"live_observation_marginal_bytes",
-		"representation_marker_bytes",
+		"pod_observation_marginal_bytes",
 		"operation_marginal_bytes",
 		"last_failure_marginal_bytes",
 		"top_level_migrations_marginal_bytes",
-		"normalized_reduction_bytes",
-		"normalized_reduction_percent",
+		"persisted_reduction_bytes",
+		"persisted_reduction_percent",
 	}
 	if err := w.Write(header); err != nil {
 		t.Fatalf("write CSV header: %v", err)
 	}
 	for _, m := range measurements {
 		percent := float64(0)
-		if m.normalizedInlineBytes > 0 {
-			percent = float64(m.reductionBytes) * 100 / float64(m.normalizedInlineBytes)
+		if m.observedRequestBytes > 0 {
+			percent = float64(m.reductionBytes) * 100 / float64(m.observedRequestBytes)
 		}
 		record := []string{
 			m.fixture,
 			strconv.FormatInt(int64(m.instances), 10),
-			strconv.Itoa(m.normalizedInlineBytes),
-			strconv.Itoa(m.normalizedDerivedBytes),
-			strconv.Itoa(m.inlineStatusBytes),
-			strconv.Itoa(m.derivedStatusBytes),
+			strconv.Itoa(m.observedRequestBytes),
+			strconv.Itoa(m.persistedRequestBytes),
+			strconv.Itoa(m.observedStatusBytes),
+			strconv.Itoa(m.persistedStatusBytes),
 			strconv.Itoa(m.instanceRowsBytes),
 			strconv.Itoa(m.readyPodCountBytes),
 			strconv.Itoa(m.scheduledPodCountBytes),
 			strconv.Itoa(m.nodesOccupiedBytes),
-			strconv.Itoa(m.liveObservationBytes),
-			strconv.Itoa(m.representationMarkerBytes),
+			strconv.Itoa(m.podObservationBytes),
 			strconv.Itoa(m.operationBytes),
 			strconv.Itoa(m.lastFailureBytes),
 			strconv.Itoa(m.migrationsBytes),
@@ -621,18 +629,6 @@ func measurementTime() metav1.Time {
 	return metav1.NewTime(time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC))
 }
 
-func projectDerivedV1(inline *v1beta1.InferenceReplica) *v1beta1.InferenceReplica {
-	derived := inline.DeepCopy()
-	clearDerivedV1Fields(derived)
-	return derived
-}
-
-func clearDerivedV1Fields(ir *v1beta1.InferenceReplica) {
-	clearReadyPodCount(ir)
-	clearScheduledPodCount(ir)
-	clearNodesOccupied(ir)
-}
-
 func clearReadyPodCount(ir *v1beta1.InferenceReplica) {
 	for index := range ir.Status.InstanceStatuses {
 		ir.Status.InstanceStatuses[index].ReadyPodCount = 0
@@ -669,72 +665,54 @@ func clearMigrations(ir *v1beta1.InferenceReplica) {
 
 func marginalRequestBytes(t *testing.T, ir *v1beta1.InferenceReplica, clear func(*v1beta1.InferenceReplica)) int {
 	t.Helper()
-	before := len(mustMarshalStatusUpdateBody(t, ir, false))
+	before := len(mustMarshalStatusUpdateBody(t, ir))
 	without := ir.DeepCopy()
 	clear(without)
-	after := len(mustMarshalStatusUpdateBody(t, without, false))
+	after := len(mustMarshalStatusUpdateBody(t, without))
 	if after > before {
 		t.Fatalf("clearing a status field grew the request from %d to %d bytes", before, after)
 	}
 	return before - after
 }
 
-func liveObservationRequestBytes(t *testing.T, ir *v1beta1.InferenceReplica) (ready, scheduled, nodes, combined int) {
+func podObservationRequestBytes(t *testing.T, ir *v1beta1.InferenceReplica) (ready, scheduled, nodes, combined int) {
 	t.Helper()
 	projected := ir.DeepCopy()
-	before := len(mustMarshalStatusUpdateBody(t, projected, false))
+	before := len(mustMarshalStatusUpdateBody(t, projected))
 	initial := before
 
 	clearReadyPodCount(projected)
-	after := len(mustMarshalStatusUpdateBody(t, projected, false))
+	after := len(mustMarshalStatusUpdateBody(t, projected))
 	ready = before - after
 	before = after
 
 	clearScheduledPodCount(projected)
-	after = len(mustMarshalStatusUpdateBody(t, projected, false))
+	after = len(mustMarshalStatusUpdateBody(t, projected))
 	scheduled = before - after
 	before = after
 
 	clearNodesOccupied(projected)
-	after = len(mustMarshalStatusUpdateBody(t, projected, false))
+	after = len(mustMarshalStatusUpdateBody(t, projected))
 	nodes = before - after
 	combined = initial - after
 	return ready, scheduled, nodes, combined
 }
 
-func mustMarshalStatusUpdateBody(t *testing.T, ir *v1beta1.InferenceReplica, derivedMarker bool) []byte {
+func mustMarshalStatusUpdateBody(t *testing.T, ir *v1beta1.InferenceReplica) []byte {
 	t.Helper()
-	body, err := marshalStatusUpdateBody(ir, derivedMarker)
+	body, err := marshalStatusUpdateBody(ir)
 	if err != nil {
 		t.Fatalf("marshal status update body: %v", err)
 	}
 	return body
 }
 
-func marshalStatusUpdateBody(ir *v1beta1.InferenceReplica, derivedMarker bool) ([]byte, error) {
+func marshalStatusUpdateBody(ir *v1beta1.InferenceReplica) ([]byte, error) {
 	encoder, err := statusUpdateEncoder()
 	if err != nil {
 		return nil, err
 	}
-	body, err := runtime.Encode(encoder, ir)
-	if err != nil || !derivedMarker {
-		return body, err
-	}
-	newline := len(body) > 0 && body[len(body)-1] == '\n'
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(body, &object); err != nil {
-		return nil, fmt.Errorf("decode request object: %w", err)
-	}
-	status, err := addDerivedMarker(object["status"])
-	if err != nil {
-		return nil, err
-	}
-	object["status"] = status
-	body, err = json.Marshal(object)
-	if err == nil && newline {
-		body = append(body, '\n')
-	}
-	return body, err
+	return runtime.Encode(encoder, ir)
 }
 
 func statusUpdateEncoder() (runtime.Encoder, error) {
@@ -754,33 +732,11 @@ func statusUpdateEncoder() (runtime.Encoder, error) {
 	return measurementEncoder, measurementEncoderErr
 }
 
-func mustMarshalStatus(t *testing.T, status *v1beta1.InferenceReplicaStatus, derivedMarker bool) []byte {
+func mustMarshalStatus(t *testing.T, status *v1beta1.InferenceReplicaStatus) []byte {
 	t.Helper()
 	body, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
 	}
-	if !derivedMarker {
-		return body
-	}
-	body, err = addDerivedMarker(body)
-	if err != nil {
-		t.Fatalf("add DerivedV1 marker: %v", err)
-	}
 	return body
-}
-
-func addDerivedMarker(statusBody []byte) ([]byte, error) {
-	status := make(map[string]json.RawMessage)
-	if len(statusBody) > 0 {
-		if err := json.Unmarshal(statusBody, &status); err != nil {
-			return nil, fmt.Errorf("decode status: %w", err)
-		}
-	}
-	marker, err := json.Marshal(measurementDerivedMarker)
-	if err != nil {
-		return nil, fmt.Errorf("encode representation marker: %w", err)
-	}
-	status["instanceObservationStorage"] = marker
-	return json.Marshal(status)
 }

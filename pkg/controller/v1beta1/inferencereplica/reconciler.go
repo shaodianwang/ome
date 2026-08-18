@@ -1112,7 +1112,7 @@ func (r *Reconciler) stampAutoRelocationSuccess(ctx context.Context, ir *v1beta1
 		if !changed {
 			return nil
 		}
-		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}
@@ -1511,7 +1511,7 @@ func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.Inferen
 			next = *fresh.Status.CollisionCount + 1
 		}
 		fresh.Status.CollisionCount = &next
-		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}

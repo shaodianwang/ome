@@ -299,7 +299,7 @@ func appendMigrationStatus(ctx context.Context, c client.Client, reads client.Re
 			}
 		}
 		fresh.Status.Migrations = append(fresh.Status.Migrations, entry)
-		if err := c.Status().Update(ctx, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}
@@ -447,7 +447,7 @@ func buildMutateMigration(c client.Client, reads client.Reader, ir *v1beta1.Infe
 			// The subject key is fixed: a callback cannot re-key the entry.
 			w.RequestUUID = requestUUID
 			fresh.Status.Migrations[pos] = migrationFromWorkload(w)
-			if err := c.Status().Update(ctx, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workload.ErrStatusOwnerGone
 				}
@@ -579,7 +579,7 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 			wrote = true
 			return nil
 		}
-		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}

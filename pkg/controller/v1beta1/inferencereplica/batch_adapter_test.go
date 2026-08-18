@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,7 @@ func newCountingStatusClient(t *testing.T, failFirst int, objs ...client.Object)
 	writes := new(int)
 	funcs := interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			assertCompactInferenceReplicaWrite(t, obj)
 			*writes++
 			if *writes <= failFirst {
 				return apierrors.NewConflict(
@@ -61,6 +63,28 @@ func newCountingStatusClient(t *testing.T, failFirst int, objs ...client.Object)
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		WithInterceptorFuncs(funcs).
 		Build(), writes
+}
+
+func assertCompactInferenceReplicaWrite(t *testing.T, obj client.Object) {
+	t.Helper()
+	ir, ok := obj.(*v1beta1.InferenceReplica)
+	if !ok {
+		return
+	}
+	for _, status := range ir.Status.InstanceStatuses {
+		if status.ReadyPodCount != 0 || status.ScheduledPodCount != 0 || status.NodesOccupied != nil {
+			t.Fatalf("status write for Instance %d persisted Pod-derived observations: %+v", status.Index, status)
+		}
+	}
+	body, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatalf("marshal status write: %v", err)
+	}
+	for _, field := range []string{"readyPodCount", "scheduledPodCount", "nodesOccupied"} {
+		if strings.Contains(string(body), `"`+field+`"`) {
+			t.Fatalf("status write serialized compatibility field %q", field)
+		}
+	}
 }
 
 func newFailingStatusClient(t *testing.T, objs ...client.Object) (client.Client, *int) {
@@ -300,6 +324,12 @@ func fullyPopulatedInstanceStatus(idx int32) v1beta1.OMENativeInstanceStatus {
 	}
 }
 
+func clearPodDerivedStatusForTest(status *v1beta1.OMENativeInstanceStatus) {
+	status.ReadyPodCount = 0
+	status.ScheduledPodCount = 0
+	status.NodesOccupied = nil
+}
+
 func instanceStatusAt(t *testing.T, ir *v1beta1.InferenceReplica, idx int32) v1beta1.OMENativeInstanceStatus {
 	t.Helper()
 	for _, status := range ir.Status.InstanceStatuses {
@@ -344,7 +374,7 @@ func TestBuildApplyInstanceMutations_OneWriteForBatch(t *testing.T) {
 		"committed slots must be mirrored onto the in-memory IR")
 }
 
-func TestBuildApplyInstanceMutations_PreservesEveryUntouchedField(t *testing.T) {
+func TestBuildApplyInstanceMutations_PreservesEveryRetainedField(t *testing.T) {
 	g := gomega.NewWithT(t)
 	original := fullyPopulatedInstanceStatus(7)
 	ir := baselineIR("llama-engine", "prod", 8)
@@ -359,10 +389,11 @@ func TestBuildApplyInstanceMutations_PreservesEveryUntouchedField(t *testing.T) 
 
 	want := *before.Status.InstanceStatuses[0].DeepCopy()
 	want.Phase = v1beta1.OMENativeInstanceFailed
+	clearPodDerivedStatusForTest(&want)
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}, got)).To(gomega.Succeed())
 	g.Expect(got.Status.InstanceStatuses).To(gomega.Equal([]v1beta1.OMENativeInstanceStatus{want}),
-		"the adapter must preserve counters, admission, topology, conditions, ordinals, failure diagnostics, and every operation field")
+		"the adapter must preserve retained counters, lifecycle state, conditions, ordinals, failure diagnostics, and every operation field")
 	g.Expect(ir.Status.InstanceStatuses).To(gomega.Equal(got.Status.InstanceStatuses),
 		"the in-memory mirror must contain the same complete committed status")
 }
@@ -398,7 +429,9 @@ func TestBuildApplyInstanceMutations_DuplicateIndexMutationsCompose(t *testing.T
 	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1), "duplicate mutations must not append duplicate slots")
 	status := got.Status.InstanceStatuses[0]
 	g.Expect(status.PodCount).To(gomega.Equal(original.PodCount + 2))
-	g.Expect(status.ReadyPodCount).To(gomega.Equal(original.PodCount + 2))
+	g.Expect(status.ReadyPodCount).To(gomega.BeZero())
+	g.Expect(status.ScheduledPodCount).To(gomega.BeZero())
+	g.Expect(status.NodesOccupied).To(gomega.BeNil())
 	g.Expect(status.Phase).To(gomega.Equal(v1beta1.OMENativeInstanceReady))
 	g.Expect(status.Operation.RetryCount).To(gomega.Equal(original.Operation.RetryCount + 1))
 	g.Expect(ir.Status.InstanceStatuses).To(gomega.Equal(got.Status.InstanceStatuses))
@@ -672,10 +705,13 @@ func TestBuildApplyInstanceMutations_MixedChangesWriteOnceWithoutPhantomSlots(t 
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}, got)).To(gomega.Succeed())
 	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(3))
-	g.Expect(instanceStatusAt(t, got, 0)).To(gomega.Equal(instanceStatusAt(t, before, 0)),
-		"an existing no-op slot must remain byte-for-byte intact")
+	wantUnchanged := instanceStatusAt(t, before, 0)
+	clearPodDerivedStatusForTest(&wantUnchanged)
+	g.Expect(instanceStatusAt(t, got, 0)).To(gomega.Equal(wantUnchanged),
+		"an existing no-op slot keeps every retained field")
 	wantChanged := instanceStatusAt(t, before, 1)
 	wantChanged.Phase = v1beta1.OMENativeInstanceFailed
+	clearPodDerivedStatusForTest(&wantChanged)
 	g.Expect(instanceStatusAt(t, got, 1)).To(gomega.Equal(wantChanged))
 	g.Expect(instanceStatusAt(t, got, 2)).To(gomega.Equal(v1beta1.OMENativeInstanceStatus{
 		Index:       2,
@@ -685,7 +721,10 @@ func TestBuildApplyInstanceMutations_MixedChangesWriteOnceWithoutPhantomSlots(t 
 	for _, status := range got.Status.InstanceStatuses {
 		g.Expect(status.Index).NotTo(gomega.Equal(int32(7)), "a declined missing-slot mutation must not append a phantom")
 	}
-	g.Expect(ir.Status.InstanceStatuses).To(gomega.Equal(got.Status.InstanceStatuses))
+	mirrored := ir.DeepCopy()
+	clearPodDerivedInstanceObservations(mirrored)
+	g.Expect(mirrored.Status.InstanceStatuses).To(gomega.Equal(got.Status.InstanceStatuses),
+		"the in-memory mirror may retain transient observations but must match every persisted field")
 }
 
 // TestBuildApplyInstanceMutations_NoChangeZeroWrites pins the no-op
@@ -959,10 +998,11 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_MixedRestoreAndRemoveOneWrite
 
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
-	g.Expect(got.Status.InstanceStatuses).To(gomega.Equal([]v1beta1.OMENativeInstanceStatus{
-		v1beta1convert.InstanceStatusFromWorkload(restored),
-		storedBefore.Status.InstanceStatuses[2],
-	}))
+	wantRestored := v1beta1convert.InstanceStatusFromWorkload(restored)
+	clearPodDerivedStatusForTest(&wantRestored)
+	wantUntouched := storedBefore.Status.InstanceStatuses[2]
+	clearPodDerivedStatusForTest(&wantUntouched)
+	g.Expect(got.Status.InstanceStatuses).To(gomega.Equal([]v1beta1.OMENativeInstanceStatus{wantRestored, wantUntouched}))
 	g.Expect(ir.Status.InstanceStatuses).To(gomega.Equal(got.Status.InstanceStatuses),
 		"a committed removal must replace the complete in-memory slice")
 }

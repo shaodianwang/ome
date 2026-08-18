@@ -164,14 +164,25 @@ func TestPublicationObservation_Admitted(t *testing.T) {
 		"Instance 2 has no pods yet → Admitted=false")
 }
 
-func TestAggregateAndWriteStatusPreservesSamePassAdmittedMirrorSemantics(t *testing.T) {
+func TestAggregateAndWriteStatusPersistsCompactRowsAndMirrorsCurrentObservations(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("model-engine", "default", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
 		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+		ReadyPodCount: 9, ScheduledPodCount: 9, NodesOccupied: []string{"legacy-node"},
 	}}
 	pod := podForIR(ir, 0, "default", 0, true, true)
+	pod.Spec.NodeName = "node-a"
 	r, stored := newReconciler(t, ir, pod)
+	statusWrites := 0
+	r.Client = interceptor.NewClient(stored.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			assertCompactInferenceReplicaWrite(t, obj)
+			statusWrites++
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	})
+	r.APIReader = r.Client
 	plan := workload.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
@@ -184,10 +195,28 @@ func TestAggregateAndWriteStatusPreservesSamePassAdmittedMirrorSemantics(t *test
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(stored.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
 	g.Expect(got.Status.InstanceStatuses[0].Admitted).To(gomega.BeTrue())
+	g.Expect(got.Status.InstanceStatuses[0].PodCount).To(gomega.Equal(int32(1)))
+	g.Expect(got.Status.InstanceStatuses[0].ServingPodCount).To(gomega.Equal(int32(1)))
+	g.Expect(got.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.BeZero())
+	g.Expect(got.Status.InstanceStatuses[0].ScheduledPodCount).To(gomega.BeZero())
+	g.Expect(got.Status.InstanceStatuses[0].NodesOccupied).To(gomega.BeNil())
+	g.Expect(got.Status.ReadyReplicas).To(gomega.Equal(int32(1)),
+		"component readiness is computed from the current Pod observation")
 	g.Expect(ir.Status.InstanceStatuses[0].Admitted).To(gomega.BeFalse(),
 		"the caller snapshot retains its reconcile-entry admission value")
-	g.Expect(ir.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.Equal(int32(1)),
-		"ordinary publication counters remain mirrored into the caller snapshot")
+	g.Expect(ir.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.Equal(int32(1)))
+	g.Expect(ir.Status.InstanceStatuses[0].ScheduledPodCount).To(gomega.Equal(int32(1)))
+	g.Expect(ir.Status.InstanceStatuses[0].NodesOccupied).To(gomega.Equal([]string{"node-a"}),
+		"same-pass observations remain available without being persisted")
+
+	rvAfterCompaction := got.ResourceVersion
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), got.DeepCopy(), plan, nil)).To(gomega.Succeed())
+	steady := &v1beta1.InferenceReplica{}
+	g.Expect(stored.Get(context.Background(), client.ObjectKeyFromObject(ir), steady)).To(gomega.Succeed())
+	g.Expect(steady.ResourceVersion).To(gomega.Equal(rvAfterCompaction),
+		"a steady compact publication must perform zero status writes")
+	g.Expect(statusWrites).To(gomega.Equal(1),
+		"legacy compaction writes once and the steady compact pass writes nothing")
 }
 
 func TestMirrorInstanceCountersUsesTransientPublicationIntersection(t *testing.T) {
@@ -566,7 +595,7 @@ func TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods(t *testing.T
 		},
 	}
 	// Live pod is ContainersReady + serving (post-recreate, pre-Phase
-	// bump). The aggregator must populate ReadyPodCount=1 from this.
+	// bump). The aggregator computes readiness directly from this pod.
 	pod0 := podForIR(ir, 0, "default", 0, true, true)
 	// EndpointSlice published — kube-proxy has picked the pod up so
 	// AvailableReplicas can also reach 1.
@@ -586,8 +615,8 @@ func TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods(t *testing.T
 		"ReadyReplicas must reflect live pod state during recreate (Phase=Updating but pod ContainersReady)")
 	g.Expect(got.Status.AvailableReplicas).To(gomega.Equal(int32(1)),
 		"AvailableReplicas must match ReadyReplicas when EndpointSlice publishes the pod Ready")
-	g.Expect(got.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.Equal(int32(1)),
-		"per-Instance ReadyPodCount must be populated from the live pod (not the stale 0)")
+	g.Expect(got.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.BeZero(),
+		"per-Instance readiness is derived rather than persisted")
 }
 
 // TestAggregateStatus_RecreatePath_OldPodCountsReadyDuringDrain pins
@@ -741,6 +770,7 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 	ir := baselineIR("model-engine", "default", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
 		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+		ReadyPodCount: 3, ScheduledPodCount: 3, NodesOccupied: []string{"legacy-node"},
 	}}
 	pod := podForIR(ir, 0, "default", 0, true, true)
 	slice := sliceForIRPod(ir, pod, true)
@@ -758,6 +788,7 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 			return c.List(ctx, list, opts...)
 		},
 		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			assertCompactInferenceReplicaWrite(t, obj)
 			statusWrites++
 			if statusWrites == 1 {
 				latest := &v1beta1.InferenceReplica{}
@@ -769,8 +800,12 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 					ID: "delete-0", Type: v1beta1.InstanceOperationDelete, Step: "Drain",
 				}
 				latest.Status.InstanceStatuses[0].RunningRevision = "rev-target"
+				latest.Status.InstanceStatuses[0].ReadyPodCount = 5
+				latest.Status.InstanceStatuses[0].ScheduledPodCount = 5
+				latest.Status.InstanceStatuses[0].NodesOccupied = []string{"concurrent-node"}
 				latest.Status.InstanceStatuses = append(latest.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
 					Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-target",
+					ReadyPodCount: 2, ScheduledPodCount: 2, NodesOccupied: []string{"concurrent-node"},
 				})
 				if err := c.SubResource(subresource).Update(ctx, latest); err != nil {
 					return err
@@ -809,6 +844,11 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
 	g.Expect(got.Status.InstanceStatuses[0].Operation.ID).To(gomega.Equal("delete-0"))
 	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(2))
+	for _, status := range got.Status.InstanceStatuses {
+		g.Expect(status.ReadyPodCount).To(gomega.BeZero())
+		g.Expect(status.ScheduledPodCount).To(gomega.BeZero())
+		g.Expect(status.NodesOccupied).To(gomega.BeNil())
+	}
 	g.Expect(got.Status.Replicas).To(gomega.Equal(int32(2)))
 	g.Expect(got.Status.UpdatedReplicas).To(gomega.Equal(int32(2)))
 	g.Expect(got.Status.UpdatedReadyReplicas).To(gomega.Equal(int32(1)))
