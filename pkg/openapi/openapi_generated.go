@@ -132,7 +132,7 @@ func schema_pkg_apis_ome_v1beta1_AnalysisMetric(ref common.ReferenceCallback) co
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "AnalysisMetric is one success condition: a PromQL query whose scalar result is compared against Threshold with Operator. A multi-series result is reduced by max (the worst series) before comparison.",
+				Description: "AnalysisMetric is one success condition: a PromQL query whose scalar result is compared against Threshold with Operator. A multi-series result is reduced to the worst series for the operator before comparison — the maximum for LT/LTE, the minimum for GT/GTE — so the metric passes only when every series passes.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"name": {
@@ -145,7 +145,7 @@ func schema_pkg_apis_ome_v1beta1_AnalysisMetric(ref common.ReferenceCallback) co
 					},
 					"query": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Query is a PromQL expression, templated with the rollout's revision context before execution. Available variables: {{.Namespace}}, {{.ISVCName}}, {{.Component}}, {{.CanaryService}}, {{.StableService}}, {{.CanaryRevision}}, {{.StableRevision}}. The query must reduce to a single value.",
+							Description: "Query is a PromQL expression, templated with the rollout's revision context before execution. Available variables: {{.Namespace}}, {{.ISVCName}}, {{.Component}}, {{.CanaryService}}, {{.StableService}}, {{.CanaryRevision}}, {{.StableRevision}}. A result with multiple series is reduced to the worst series for Operator before comparison.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",

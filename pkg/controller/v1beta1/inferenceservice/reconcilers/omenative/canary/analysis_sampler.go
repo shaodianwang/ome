@@ -2,8 +2,13 @@ package canary
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +31,7 @@ func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.Roll
 	addr := in.BundledPrometheusAddress
 	var token string
 	var headers map[string]string
+	var authRef *corev1.SecretKeySelector
 	if src := in.Prometheus; src != nil { // canary-level shared source
 		if src.ServerAddress != "" {
 			addr = src.ServerAddress
@@ -35,6 +41,7 @@ func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.Roll
 		// spec-owned map to another goroutine, breaking the snapshot invariant.
 		headers = maps.Clone(src.Headers)
 		if src.AuthRef != nil {
+			authRef = src.AuthRef
 			t, err := resolveBearerToken(ctx, in.Reader, in.ISVC.Namespace, src.AuthRef)
 			if err != nil {
 				return SampleRequest{}, fmt.Errorf("resolve bearer token: %w", err)
@@ -49,6 +56,7 @@ func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.Roll
 			Component: string(in.Component),
 			Revision:  in.CanaryRevisionHash,
 			Step:      step,
+			PlanHash:  analysisFingerprint(a, addr, headers, authRef, token),
 		},
 		ServerAddress: addr,
 		BearerToken:   token,
@@ -67,6 +75,45 @@ func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.Roll
 		Analysis:     a.DeepCopy(),
 		QueryTimeout: in.QueryTimeout,
 	}, nil
+}
+
+// analysisFingerprint is a SHA-256 identity of one effective analysis request:
+// the step's checks (the full RolloutAnalysis spec) plus the resolved source
+// (server address, headers, auth Secret reference, and a digest of the resolved
+// token — never the raw secret material). It keys the sample cache and its
+// in-flight dedup, so any edit to the plan or its source changes the key: the
+// edited plan kicks a fresh query instead of consuming a result produced under
+// the previous configuration, and the superseded entry ages out unread. The
+// fingerprint is an internal cache key only, never surfaced in status or logs.
+func analysisFingerprint(a *v1beta1.RolloutAnalysis, addr string, headers map[string]string, authRef *corev1.SecretKeySelector, token string) string {
+	h := sha256.New()
+	// Length-prefix every field so adjacent values cannot collide across field
+	// boundaries ("ab"+"c" vs "a"+"bc"). Hash writes never fail.
+	field := func(s string) {
+		fmt.Fprintf(h, "%d:", len(s))
+		_, _ = io.WriteString(h, s)
+	}
+	spec, err := json.Marshal(a)
+	if err != nil {
+		// RolloutAnalysis is a plain API struct and always marshals; fall back to a
+		// verbose print so the fingerprint still tracks the spec if that ever breaks.
+		spec = fmt.Appendf(nil, "%#v", a)
+	}
+	field(string(spec))
+	field(addr)
+	for _, k := range slices.Sorted(maps.Keys(headers)) {
+		field(k)
+		field(headers[k])
+	}
+	if authRef != nil {
+		field(authRef.Name)
+		field(authRef.Key)
+	}
+	// A digest, not the token: a rotated credential must invalidate results, but
+	// raw secret material must never feed a value that could be logged or compared.
+	tokenDigest := sha256.Sum256([]byte(token))
+	field(hex.EncodeToString(tokenDigest[:]))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // resolveBearerToken reads the token value from the referenced Secret key in the

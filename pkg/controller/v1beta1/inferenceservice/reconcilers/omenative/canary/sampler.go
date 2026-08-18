@@ -14,14 +14,19 @@ import (
 )
 
 // SampleKey identifies one analysis sampling target: a specific step of a
-// specific canary revision of one Component. Old keys (a finished step/revision)
-// stop being read and age out of the cache.
+// specific canary revision of one Component, under a specific effective analysis
+// request (PlanHash). PlanHash fingerprints the checks plus the resolved source
+// (address, headers, auth), so editing any of them changes the key: the edited
+// plan starts a fresh query instead of consuming a cached or in-flight result
+// produced under the old configuration. Old keys (a finished step/revision, or
+// a superseded plan) stop being read and age out of the cache.
 type SampleKey struct {
 	Namespace string
 	ISVCName  string
 	Component string
 	Revision  string
 	Step      int32
+	PlanHash  string
 }
 
 // SampleRequest is a fully-snapshotted query the background eval runs WITHOUT

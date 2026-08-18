@@ -157,6 +157,54 @@ func TestSampler_FreshnessSince(t *testing.T) {
 	}
 }
 
+// TestSampler_PlanEditIsolation: keys differing only in PlanHash are fully
+// isolated — a Get under the edited plan neither dedups against the old plan's
+// in-flight query nor consumes its (late) result, so a stale completion can only
+// ever be read under the plan that produced it.
+func TestSampler_PlanEditIsolation(t *testing.T) {
+	events := make(chan event.GenericEvent, 4)
+	releaseOld := make(chan struct{})
+	var calls int32
+	s := NewSampler(func(_ context.Context, req SampleRequest) analysis.Result {
+		atomic.AddInt32(&calls, 1)
+		if req.Key.PlanHash == "old" {
+			<-releaseOld // the old plan's query is slow; it lands after the edit
+			return analysis.Result{Outcome: analysis.Pass}
+		}
+		return analysis.Result{Outcome: analysis.Fail}
+	}, events, 4, time.Minute)
+
+	oldKey := SampleKey{ISVCName: "svc", Revision: "rev", Step: 1, PlanHash: "old"}
+	newKey := oldKey
+	newKey.PlanHash = "new"
+
+	if _, _, ok := s.Get(SampleRequest{Key: oldKey}, time.Time{}); ok {
+		t.Fatal("first Get should miss")
+	}
+	// The plan is edited while the old query is in flight: the new key must kick
+	// its OWN query, not dedup against the old one.
+	if _, _, ok := s.Get(SampleRequest{Key: newKey}, time.Time{}); ok {
+		t.Fatal("edited-plan Get should miss, not consume the old plan's state")
+	}
+	<-events // the new plan's query (not blocked) lands first
+	res, _, ok := s.Get(SampleRequest{Key: newKey}, time.Time{})
+	if !ok || res.Outcome != analysis.Fail {
+		t.Fatalf("edited plan should see its own result (Fail), got ok=%v outcome=%v", ok, res.Outcome)
+	}
+
+	close(releaseOld)
+	<-events // the old plan's late completion lands under the old key only
+	if res, _, ok := s.Get(SampleRequest{Key: newKey}, time.Time{}); !ok || res.Outcome != analysis.Fail {
+		t.Fatalf("stale old-plan Pass must not surface under the edited plan, got ok=%v outcome=%v", ok, res.Outcome)
+	}
+	if res, _, ok := s.Get(SampleRequest{Key: oldKey}, time.Time{}); !ok || res.Outcome != analysis.Pass {
+		t.Fatalf("old plan's result stays under its own key, got ok=%v outcome=%v", ok, res.Outcome)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly one query per plan (2 total), got %d", got)
+	}
+}
+
 // TestSampler_EvictsStale: a cached entry older than the TTL is evicted on access,
 // so a subsequent Get re-queries.
 func TestSampler_EvictsStale(t *testing.T) {

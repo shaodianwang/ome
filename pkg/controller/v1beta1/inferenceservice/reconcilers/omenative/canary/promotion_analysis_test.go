@@ -7,6 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -178,5 +179,71 @@ func TestEvaluateAnalysisStep(t *testing.T) {
 				t.Errorf("AnalysisFailedChecks = %d, want %d", tt.cs.AnalysisFailedChecks, tt.wantFailed)
 			}
 		})
+	}
+}
+
+// TestEvaluateAnalysisStep_StalePlanResultNotConsumed drives the step gate
+// against a real Sampler: a passing result that a since-edited plan's query
+// produces late must never advance the edited plan — the edited plan holds,
+// runs its own query, and consumes only its own result.
+func TestEvaluateAnalysisStep_StalePlanResultNotConsumed(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	const canaryHash = "rev-canary"
+	step := v1beta1.RolloutGroupStep{Capacity: intstr.FromString("50%"), Traffic: 50}
+	newPlan := func(threshold string) *v1beta1.RolloutAnalysis {
+		return &v1beta1.RolloutAnalysis{
+			Interval:     metav1.Duration{Duration: time.Minute},
+			FailureLimit: 3,
+			Metrics:      []v1beta1.AnalysisMetric{{Name: "err", Query: "q", Operator: v1beta1.ComparisonLTE, Threshold: threshold}},
+		}
+	}
+	const oldThreshold, editedThreshold = "0.05", "0.01"
+
+	events := make(chan event.GenericEvent, 4)
+	releaseOld := make(chan struct{})
+	// The original plan's query is slow and would PASS; any other plan's query
+	// completes immediately and FAILS.
+	s := NewSampler(func(_ context.Context, req SampleRequest) analysis.Result {
+		if req.Analysis.Metrics[0].Threshold == oldThreshold {
+			<-releaseOld
+			return analysis.Result{Outcome: analysis.Pass, Metrics: []analysis.MetricResult{{Name: "err", Passed: true}}}
+		}
+		return analysis.Result{Outcome: analysis.Fail, Metrics: []analysis.MetricResult{{Name: "err"}}}
+	}, events, 4, time.Minute)
+	s.now = func() time.Time { return now }
+
+	cs := &v1beta1.CanaryStatus{CanaryRevisionHash: canaryHash, StepEnteredTime: &metav1.Time{Time: now}}
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"}}
+	isvc.Status.Canary = cs
+	in := ReconcileInputs{
+		ISVC:                     isvc,
+		Component:                v1beta1.EngineComponent,
+		CanaryRevisionHash:       canaryHash,
+		Now:                      now,
+		Sampler:                  s,
+		BundledPrometheusAddress: "http://prometheus.example.com:9090",
+	}
+
+	// The original plan kicks its (slow) query and holds.
+	if got := evaluateAnalysisStep(context.Background(), in, newPlan(oldThreshold), cs, step); got != decHold {
+		t.Fatalf("original plan should hold while its query is in flight, got %v", got)
+	}
+	// The plan is edited, then the old query lands with a Pass.
+	close(releaseOld)
+	<-events
+	// The stale Pass must not advance the edited plan: it holds and kicks a
+	// fresh query, consuming nothing.
+	if got := evaluateAnalysisStep(context.Background(), in, newPlan(editedThreshold), cs, step); got != decHold {
+		t.Fatalf("stale Pass from the old plan must not advance the edited plan, got %v", got)
+	}
+	if cs.LastEvaluationTime != nil {
+		t.Fatal("edited plan must not have consumed any sample yet")
+	}
+	<-events // the edited plan's own query lands (Fail)
+	if got := evaluateAnalysisStep(context.Background(), in, newPlan(editedThreshold), cs, step); got != decHold {
+		t.Fatalf("edited plan should hold on its own first failure (limit 3), got %v", got)
+	}
+	if cs.AnalysisFailedChecks != 1 {
+		t.Fatalf("edited plan should have consumed its OWN failing sample, AnalysisFailedChecks = %d", cs.AnalysisFailedChecks)
 	}
 }

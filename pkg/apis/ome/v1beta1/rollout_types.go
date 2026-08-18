@@ -285,8 +285,9 @@ type AnalysisPrometheus struct {
 }
 
 // AnalysisMetric is one success condition: a PromQL query whose scalar result is
-// compared against Threshold with Operator. A multi-series result is reduced by
-// max (the worst series) before comparison.
+// compared against Threshold with Operator. A multi-series result is reduced to
+// the worst series for the operator before comparison — the maximum for LT/LTE,
+// the minimum for GT/GTE — so the metric passes only when every series passes.
 type AnalysisMetric struct {
 	// Name identifies the metric in status and events; unique within Metrics.
 	Name string `json:"name"`
@@ -294,7 +295,8 @@ type AnalysisMetric struct {
 	// Query is a PromQL expression, templated with the rollout's revision context
 	// before execution. Available variables: {{.Namespace}}, {{.ISVCName}},
 	// {{.Component}}, {{.CanaryService}}, {{.StableService}}, {{.CanaryRevision}},
-	// {{.StableRevision}}. The query must reduce to a single value.
+	// {{.StableRevision}}. A result with multiple series is reduced to the worst
+	// series for Operator before comparison.
 	Query string `json:"query"`
 
 	// Operator is the comparison applied as "result <Operator> Threshold" to

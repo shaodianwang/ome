@@ -60,8 +60,11 @@ func Evaluate(ctx context.Context, q Querier, a *v1beta1.RolloutAnalysis, tc Tem
 			res.Metrics = append(res.Metrics, mr)
 			continue
 		}
-		val, err := q.Query(ctx, query)
-		if err != nil {
+		vals, err := q.Query(ctx, query)
+		if err != nil || len(vals) == 0 {
+			if err == nil {
+				err = ErrNoData
+			}
 			mr.Message = queryErrMessage(err)
 			anyInconclusive = true
 			res.Metrics = append(res.Metrics, mr)
@@ -77,6 +80,7 @@ func Evaluate(ctx context.Context, q Querier, a *v1beta1.RolloutAnalysis, tc Tem
 			continue
 		}
 
+		val := worstValue(vals, m.Operator)
 		mr.Value = strconv.FormatFloat(val, 'g', 6, 64)
 		mr.Passed = compare(val, m.Operator, threshold)
 		if !mr.Passed {
@@ -94,6 +98,27 @@ func Evaluate(ctx context.Context, q Querier, a *v1beta1.RolloutAnalysis, tc Tem
 		res.Outcome = Pass
 	}
 	return res
+}
+
+// worstValue selects the series value hardest to pass for op, so a multi-series
+// vector passes only when EVERY series passes: the maximum for upper-bound
+// conditions (LT/LTE — e.g. the pod with the highest error rate), the minimum
+// for lower-bound conditions (GT/GTE — e.g. the pod with the lowest success
+// rate). An unknown operator never passes compare, so its pick is immaterial;
+// it takes the maximum. vals must be non-empty.
+func worstValue(vals []float64, op v1beta1.ComparisonOperator) float64 {
+	lowerBound := op == v1beta1.ComparisonGT || op == v1beta1.ComparisonGTE
+	worst := vals[0]
+	for _, v := range vals[1:] {
+		if lowerBound {
+			if v < worst {
+				worst = v
+			}
+		} else if v > worst {
+			worst = v
+		}
+	}
+	return worst
 }
 
 // compare reports whether "val <op> threshold" holds, i.e. the metric is healthy.

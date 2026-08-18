@@ -21,11 +21,13 @@ import (
 // and a divide-by-zero +Inf must not be read as "infinitely bad."
 var ErrNoData = errors.New("prometheus query returned no usable data")
 
-// Querier runs an instant PromQL query and reduces it to a single scalar. It is
-// the only component in this package that performs network I/O; everything layered
-// above it (Evaluate) is pure and tested with a fake Querier.
+// Querier runs an instant PromQL query and returns every usable value it
+// produced (one per series for a vector). Selecting which value to compare is
+// operator-dependent, so it belongs to Evaluate, not here. Querier is the only
+// component in this package that performs network I/O; everything layered above
+// it (Evaluate) is pure and tested with a fake Querier.
 type Querier interface {
-	Query(ctx context.Context, promQL string) (float64, error)
+	Query(ctx context.Context, promQL string) ([]float64, error)
 }
 
 // NewQuerier builds a Querier against serverAddress. A non-empty bearerToken is
@@ -50,55 +52,52 @@ type promQuerier struct {
 	clock clock.Clock
 }
 
-// Query runs an instant query at the current time and reduces the result. A
-// transport error is returned verbatim (the caller maps it to INCONCLUSIVE);
-// query warnings are ignored.
-func (p *promQuerier) Query(ctx context.Context, promQL string) (float64, error) {
+// Query runs an instant query at the current time and extracts the usable
+// values. A transport error is returned verbatim (the caller maps it to
+// INCONCLUSIVE); query warnings are ignored.
+func (p *promQuerier) Query(ctx context.Context, promQL string) ([]float64, error) {
 	val, _, err := p.api.Query(ctx, promQL, p.clock.Now())
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return reduce(val)
+	return usableValues(val)
 }
 
-// reduce collapses a Prometheus result to one scalar: a scalar passes through; a
-// vector reduces to the MAX across series (the worst pod — the most conservative
-// reading for a safety gate); a result with no usable value (empty, or all
-// NaN/Inf) is ErrNoData; a string result is parsed as a float. Any other type is
-// an error.
-func reduce(v model.Value) (float64, error) {
+// usableValues extracts every comparable value from a Prometheus result: a
+// scalar yields one value; a vector yields one value per series (NaN/Inf series
+// are skipped — see unusable); a string result is parsed as a float. A result
+// with no usable value (empty, or all NaN/Inf) is ErrNoData. Any other type is
+// an error. All series are kept so the evaluator can pick the worst one for the
+// metric's comparison operator.
+func usableValues(v model.Value) ([]float64, error) {
 	switch t := v.(type) {
 	case *model.Scalar:
 		f := float64(t.Value)
 		if unusable(f) {
-			return 0, ErrNoData
+			return nil, ErrNoData
 		}
-		return f, nil
+		return []float64{f}, nil
 	case model.Vector:
-		max := math.Inf(-1)
-		found := false
+		vals := make([]float64, 0, len(t))
 		for _, s := range t {
 			f := float64(s.Value)
 			if unusable(f) {
 				continue
 			}
-			found = true
-			if f > max {
-				max = f
-			}
+			vals = append(vals, f)
 		}
-		if !found {
-			return 0, ErrNoData
+		if len(vals) == 0 {
+			return nil, ErrNoData
 		}
-		return max, nil
+		return vals, nil
 	case *model.String:
 		f, err := strconv.ParseFloat(t.Value, 64)
 		if err != nil {
-			return 0, fmt.Errorf("non-numeric string result %q", t.Value)
+			return nil, fmt.Errorf("non-numeric string result %q", t.Value)
 		}
-		return f, nil
+		return []float64{f}, nil
 	default:
-		return 0, fmt.Errorf("unsupported prometheus result type %T (expected scalar or vector)", v)
+		return nil, fmt.Errorf("unsupported prometheus result type %T (expected scalar or vector)", v)
 	}
 }
 
