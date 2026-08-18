@@ -104,6 +104,9 @@ KIND_SPEC_GROUPS = (
         "bluegreen", "bluegreen_n3", "bluegreen_inplaceonly_happy",
         "inplace_maxunavailable",
     )),
+    ("canary-rollouts", "Canary rollouts", (
+        "canary_retarget_rollback",
+    )),
     ("ratio-core", "RatioBalanced coordination", (
         "ratiobalanced", "ratio_n3", "ratio_pause_resume",
     )),
