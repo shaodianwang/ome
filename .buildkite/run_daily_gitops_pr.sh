@@ -132,6 +132,9 @@ The controller and omeAgent image tags are also pinned to \`$SHORT_SHA\` in both
 - RC connectivity passed
 - BaseModel metadata extraction through ome-agent passed
 - One CPU OMENative InferenceService became Ready through ome-scheduler
+- One production-shaped, two-node TPU gang became Ready with its engine pods using default-scheduler
+- One production-shaped, two-node TPU gang became Ready with its engine pods using ome-scheduler
+- Both TPU routers used default-scheduler
 - Build: $BUILD_URL
 
 This PR does not merge automatically. Merging it allows Argo CD to reconcile the tested release.

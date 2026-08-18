@@ -1,0 +1,43 @@
+# CI uses this ephemeral fixture to exercise and time the production two-node
+# TPU serving flow. CI applies it explicitly, waits for Ready, records the
+# elapsed time, and then deletes it.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: ome-rc-tpu-smoke
+  namespace: omenative-eval
+  annotations:
+    ome.io/deploymentMode: OMENative
+  labels:
+    app.kubernetes.io/part-of: omenative-eval
+spec:
+  deploymentMode: OMENative
+  engine:
+    # One replica with one worker is one two-node TPU gang. The topology key
+    # keeps both hosts on the same physical 2x2x2 TPU partition.
+    topologyKey: cloud.google.com/gke-tpu-partition-2x2x2-id
+    leader:
+      runner:
+        name: ome-container
+    lifecycle:
+      instanceReadyTimeout: 4h0m0s
+      migrationPolicy:
+        mode: Auto
+      readyPolicy: AllPodReady
+      restartPolicy: RecreateInstanceOnPodRestart
+      updateStrategy:
+        inPlaceUpdateStrategy:
+          gracePeriodSeconds: 30
+          markNotReadyDuringLifecycle: true
+        type: RecreatePod
+    minReplicas: 1
+    maxReplicas: 1
+    worker:
+      size: 1
+      runner:
+        name: ome-container
+  router:
+    minReplicas: 1
+    maxReplicas: 1
+  runtime:
+    name: ome-rc-tpu-smoke

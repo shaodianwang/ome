@@ -1,0 +1,46 @@
+# CI uses this ephemeral fixture to exercise the production two-node TPU
+# serving flow with only the engine gang opted into ome-scheduler. The router
+# intentionally remains on the cluster's default scheduler.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: ome-rc-tpu-smoke-ome-scheduler
+  namespace: omenative-eval
+  annotations:
+    ome.io/deploymentMode: OMENative
+  labels:
+    app.kubernetes.io/part-of: omenative-eval
+spec:
+  deploymentMode: OMENative
+  engine:
+    # The component-level scheduler name is folded into both the leader and
+    # worker pod templates. It does not affect the router.
+    schedulerName: ome-scheduler
+    # One replica with one worker is one two-node TPU gang. The topology key
+    # keeps both hosts on the same physical 2x2x2 TPU partition.
+    topologyKey: cloud.google.com/gke-tpu-partition-2x2x2-id
+    leader:
+      runner:
+        name: ome-container
+    lifecycle:
+      instanceReadyTimeout: 4h0m0s
+      migrationPolicy:
+        mode: Auto
+      readyPolicy: AllPodReady
+      restartPolicy: RecreateInstanceOnPodRestart
+      updateStrategy:
+        inPlaceUpdateStrategy:
+          gracePeriodSeconds: 30
+          markNotReadyDuringLifecycle: true
+        type: RecreatePod
+    minReplicas: 1
+    maxReplicas: 1
+    worker:
+      size: 1
+      runner:
+        name: ome-container
+  router:
+    minReplicas: 1
+    maxReplicas: 1
+  runtime:
+    name: ome-rc-tpu-smoke

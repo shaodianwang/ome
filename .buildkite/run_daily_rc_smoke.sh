@@ -2,6 +2,10 @@
 # One-replica CPU smoke test against the Argo-managed OME RC control plane.
 set -eu
 
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
+# shellcheck source=.buildkite/daily_rc_common.sh
+. "$SCRIPT_DIR/daily_rc_common.sh"
+
 NAMESPACE="${DAILY_RC_SMOKE_NAMESPACE:-omenative-eval}"
 SMOKE_NAME="${DAILY_RC_SMOKE_NAME:-ome-rc-daily-smoke}"
 ARTIFACT_DIR="artifacts/daily-rc-smoke"
@@ -18,33 +22,10 @@ esac
 
 buildkite-agent meta-data get daily-candidate-b64 \
   | base64 -d >"$ARTIFACT_DIR/candidate.json"
-EXPECTED_MANAGER="$(jq -er '.images["ome-manager"]' "$ARTIFACT_DIR/candidate.json")"
-EXPECTED_AGENT="$(jq -er '.images["ome-agent"]' "$ARTIFACT_DIR/candidate.json")"
-EXPECTED_SCHEDULER="$(jq -er '.images["ome-scheduler"]' "$ARTIFACT_DIR/candidate.json")"
+daily_rc_load_candidate "$ARTIFACT_DIR/candidate.json"
 EXPECTED_CRD_CHART="$(jq -er '.charts["ome-crd"]' "$ARTIFACT_DIR/candidate.json")"
-EXPECTED_RESOURCES_CHART="$(jq -er '.charts["ome-resources"]' "$ARTIFACT_DIR/candidate.json")"
-EXPECTED_SCHEDULER_CHART="$(jq -er '.charts["ome-scheduler"]' "$ARTIFACT_DIR/candidate.json")"
 
-SA_DIR="/var/run/secrets/kubernetes.io/serviceaccount"
-test -s "$SA_DIR/token"
-test -s "$SA_DIR/ca.crt"
-test -n "${KUBERNETES_SERVICE_HOST:-}"
-test -n "${KUBERNETES_SERVICE_PORT:-}"
-
-KUBE_TMP="$(mktemp -d)"
-KUBECONFIG="$KUBE_TMP/kubeconfig"
-export KUBECONFIG
-
-case "$KUBERNETES_SERVICE_HOST" in
-  *:*) API_SERVER="https://[${KUBERNETES_SERVICE_HOST}]:${KUBERNETES_SERVICE_PORT}" ;;
-  *) API_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" ;;
-esac
-TOKEN="$(cat "$SA_DIR/token")"
-kubectl config set-cluster rc --server="$API_SERVER" --certificate-authority="$SA_DIR/ca.crt" --embed-certs=true >/dev/null
-kubectl config set-credentials daily-rc --token="$TOKEN" >/dev/null
-kubectl config set-context daily-rc --cluster=rc --user=daily-rc --namespace="$NAMESPACE" >/dev/null
-kubectl config use-context daily-rc >/dev/null
-unset TOKEN
+daily_rc_setup_kubeconfig "$NAMESPACE"
 
 record() {
   printf '%s\n' "$*" | tee -a "$REPORT"
@@ -99,7 +80,7 @@ finish() {
   REPORT_B64="$(base64 <"$REPORT" | tr -d '\n')"
   buildkite-agent meta-data set daily-rc-smoke-b64 "$REPORT_B64" 2>/dev/null || true
   unset REPORT_B64
-  rm -rf "$KUBE_TMP"
+  daily_rc_cleanup_kubeconfig
   exit "$status"
 }
 trap finish EXIT INT TERM
@@ -113,34 +94,6 @@ require_permission() {
   fi
 }
 
-read_live_release() {
-  live_manager="$(kubectl -n ome get deployment ome-controller-manager -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
-  live_scheduler="$(kubectl -n ome get deployment ome-scheduler -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
-  live_agent="$(kubectl -n ome get configmap inferenceservice-config -o json 2>/dev/null \
-    | jq -r '.data.omeAgent | fromjson | .image' 2>/dev/null || true)"
-  manager_available="$(kubectl -n ome get deployment ome-controller-manager -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
-  scheduler_available="$(kubectl -n ome get deployment ome-scheduler -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
-}
-
-live_release_matches_candidate() {
-  [ "$live_manager" = "$EXPECTED_MANAGER" ] \
-    && [ "$live_scheduler" = "$EXPECTED_SCHEDULER" ] \
-    && [ "$live_agent" = "$EXPECTED_AGENT" ] \
-    && [ "${manager_available:-0}" -gt 0 ] \
-    && [ "${scheduler_available:-0}" -gt 0 ]
-}
-
-assert_live_release_matches_candidate() {
-  read_live_release
-  if ! live_release_matches_candidate; then
-    echo "RC release changed while the smoke test was running" >&2
-    printf 'expected manager=%s scheduler=%s agent=%s\n' "$EXPECTED_MANAGER" "$EXPECTED_SCHEDULER" "$EXPECTED_AGENT" >&2
-    printf 'live manager=%s scheduler=%s agent=%s\n' "$live_manager" "$live_scheduler" "$live_agent" >&2
-    return 1
-  fi
-  record "release-images-final: manager=$live_manager scheduler=$live_scheduler agent=$live_agent"
-}
-
 echo "--- verify scoped smoke permissions"
 for resource in persistentvolumeclaims jobs.batch basemodels.ome.io servingruntimes.ome.io inferenceservices.ome.io; do
   require_permission get "$resource"
@@ -152,22 +105,9 @@ echo "--- wait for RC to run the discovered release"
 record "candidate-chart: ome-crd=$EXPECTED_CRD_CHART"
 record "candidate-chart: ome-resources=$EXPECTED_RESOURCES_CHART"
 record "candidate-chart: ome-scheduler=$EXPECTED_SCHEDULER_CHART"
-deadline=$(( $(date +%s) + 900 ))
-while :; do
-  read_live_release
-  if live_release_matches_candidate; then
-    break
-  fi
-  if [ "$(date +%s)" -ge "$deadline" ]; then
-    echo "RC did not converge to the discovered release within 15 minutes" >&2
-    printf 'expected manager=%s scheduler=%s agent=%s\n' "$EXPECTED_MANAGER" "$EXPECTED_SCHEDULER" "$EXPECTED_AGENT" >&2
-    printf 'live manager=%s scheduler=%s agent=%s\n' "$live_manager" "$live_scheduler" "$live_agent" >&2
-    exit 1
-  fi
-  printf 'waiting: manager=%s scheduler=%s agent=%s\n' "$live_manager" "$live_scheduler" "$live_agent"
-  sleep 15
-done
+daily_rc_wait_for_live_release 900
 record "release-images: manager=$live_manager scheduler=$live_scheduler agent=$live_agent"
+record "release-charts: resources=$live_resources_chart scheduler=$live_scheduler_chart"
 
 echo "--- remove any stale fixed-name fixture"
 cleanup_resources
@@ -363,5 +303,7 @@ kubectl -n "$NAMESPACE" wait --for=condition=Ready pod \
 kubectl -n "$NAMESPACE" wait --for=condition=Ready \
   "inferenceservice/${SMOKE_NAME}" --timeout=5m
 record "inferenceservice: Ready replicas=1 scheduler=ome-scheduler pods=$(printf '%s' "$workload_pods" | tr '\n' ',')"
-assert_live_release_matches_candidate
+daily_rc_assert_live_release_matches_candidate
+record "release-images-final: manager=$live_manager scheduler=$live_scheduler agent=$live_agent"
+record "release-charts-final: resources=$live_resources_chart scheduler=$live_scheduler_chart"
 record "result: PASS"

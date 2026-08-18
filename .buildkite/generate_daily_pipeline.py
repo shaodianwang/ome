@@ -66,9 +66,41 @@ def generate_pipeline() -> str:
       sh .buildkite/run_daily_rc_smoke.sh
     plugins: {json.dumps(_rc_plugin())}
 """
+    tpu_default_scheduler_smoke = f"""  - label: ":chip: RC TPU default-scheduler smoke"
+    key: "daily-rc-tpu-smoke"
+    depends_on: "daily-discovery"
+    timeout_in_minutes: 270
+    concurrency: 1
+    concurrency_group: "ome/rc-daily-tpu-smoke"
+    agents:
+      queue: "{GKE_QUEUE}"
+    command: |
+      sh .buildkite/run_daily_rc_tpu_smoke.sh
+    plugins: {json.dumps(_rc_plugin())}
+"""
+    tpu_ome_scheduler_smoke = f"""  - label: ":chip: RC TPU OME-scheduler smoke"
+    key: "daily-rc-tpu-ome-scheduler-smoke"
+    depends_on: "daily-discovery"
+    timeout_in_minutes: 270
+    concurrency: 1
+    concurrency_group: "ome/rc-daily-tpu-ome-scheduler-smoke"
+    env:
+      DAILY_RC_TPU_SMOKE_NAME: "ome-rc-tpu-smoke-ome-scheduler"
+      DAILY_RC_TPU_FIXTURE: ".buildkite/fixtures/rc-tpu-smoke-ome-scheduler-isvc.yaml"
+      DAILY_RC_TPU_EXPECTED_ENGINE_SCHEDULER: "ome-scheduler"
+      DAILY_RC_TPU_METADATA_KEY: "daily-rc-tpu-ome-scheduler-smoke-b64"
+    agents:
+      queue: "{GKE_QUEUE}"
+    command: |
+      sh .buildkite/run_daily_rc_tpu_smoke.sh
+    plugins: {json.dumps(_rc_plugin())}
+"""
     promotion = f"""  - label: ":github: Open GitOps promotion PR"
     key: "daily-gitops-pr"
-    depends_on: "daily-rc-smoke"
+    depends_on:
+      - "daily-rc-smoke"
+      - "daily-rc-tpu-smoke"
+      - "daily-rc-tpu-ome-scheduler-smoke"
     timeout_in_minutes: 15
     secrets:
       - "GH_TOKEN"
@@ -79,7 +111,13 @@ def generate_pipeline() -> str:
     plugins:
 {common._tw_docker_plugin(common.CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=6)}
 """
-    return discovery + smoke + promotion
+    return (
+        discovery
+        + smoke
+        + tpu_default_scheduler_smoke
+        + tpu_ome_scheduler_smoke
+        + promotion
+    )
 
 
 def main() -> None:
