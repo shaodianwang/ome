@@ -90,7 +90,17 @@ func (v *InferenceServiceValidator) ValidateCreate(ctx context.Context, obj runt
 	if err := validateMultiPodReadyPolicyNone(nil, isvc); err != nil {
 		return nil, err
 	}
-	return v.validateInferenceService(ctx, isvc)
+	warnings, err := v.validateInferenceService(ctx, isvc)
+	if err != nil {
+		return warnings, err
+	}
+	// Rollout-ordering enforceability runs after the structural rules so
+	// the more specific rejections (duplicate order entry, foreign order
+	// Component, ...) keep precedence over the blanket ordering rejection.
+	if err := validation.ValidateRolloutOrderingEnforced(&isvc.Spec); err != nil {
+		return warnings, err
+	}
+	return warnings, nil
 }
 
 func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
@@ -122,7 +132,18 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 	if err := validateMultiPodReadyPolicyNone(oldIsvc, isvc); err != nil {
 		return nil, err
 	}
-	return v.validateInferenceService(ctx, isvc)
+	warnings, err := v.validateInferenceService(ctx, isvc)
+	if err != nil {
+		return warnings, err
+	}
+	// Ratcheted rollout-ordering enforceability: applied only when this
+	// update changes spec.rollout, so stored objects keep reconciling.
+	// Runs after the structural rules so the more specific rejections keep
+	// precedence (parity with the CREATE path).
+	if err := validation.ValidateRolloutOrderingEnforcedUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
+		return warnings, err
+	}
+	return warnings, nil
 }
 
 // validateAddedMigrationRequests validates every migration-request

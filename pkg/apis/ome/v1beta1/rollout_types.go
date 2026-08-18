@@ -20,10 +20,13 @@ type RolloutSpec struct {
 	// one-at-a-time, put each in its own group, in order — a group needs only its
 	// components; the progression may be omitted and defaults to blueGreen.
 	//
-	// Cross-group sequencing is currently enforced only for a run of
-	// single-Component blueGreen groups (the classic one-at-a-time shape); mixed
-	// progressions and multi-Component ordered groups roll concurrently on their
-	// disjoint Components today — the general group sequencer is a follow-on.
+	// Cross-group sequencing is enforced only for a run of single-Component
+	// blueGreen groups (the classic one-at-a-time shape). Admission rejects any
+	// other multi-group list — a rollingUpdate, canary, or multi-Component group
+	// in an ordered list would run concurrently, and an ordering the engine does
+	// not enforce is rejected rather than accepted. The rejection applies on
+	// create and on any update that changes spec.rollout, so stored objects
+	// keep reconciling until their rollout is next edited.
 	//
 	// Only meaningful for OMENative-managed Components.
 	// +optional
@@ -52,11 +55,12 @@ type RolloutGroup struct {
 	Components []ComponentType `json:"components"`
 
 	// Order optionally pins the sequence in which this group's Components roll.
-	// It is honored today only when the group resolves to the internal Sequential
-	// path (a run of single-Component groups); on a multi-Component blueGreen,
-	// rollingUpdate, or canary group the Components currently advance together and
-	// Order is not yet applied as a surge sequence. Ignored on single-Component
-	// groups. Must reference only Components in this group.
+	// No progression applies it — the Components in a group advance together —
+	// so admission rejects a non-empty order (on create and on any update that
+	// changes spec.rollout) rather than accept a sequence the engine does not
+	// enforce. To roll Components one at a time, declare one single-Component
+	// blueGreen group per Component, in the desired list order. Must reference
+	// only Components in this group.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=3

@@ -518,6 +518,41 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
+
+	// W-27: a mixed-progression multi-group list promises "decoder completes
+	// before engine begins", but only a pure run of single-Component blueGreen
+	// groups is sequenced — the mix would run concurrently, so admission
+	// rejects it instead of accepting an order it does not enforce.
+	ginkgo.It("W-27 rejects mixed-progression multi-group list → GroupOrderingNotHonored", func() {
+		isvc := coordISVC("coord-w27",
+			v1beta1.RolloutGroup{
+				Components:    []v1beta1.ComponentType{v1beta1.DecoderComponent},
+				RollingUpdate: &v1beta1.GroupRollingUpdate{},
+			},
+			v1beta1.RolloutGroup{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+			},
+		)
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonGroupOrderingNotHonored))
+	})
+
+	// W-28: a well-formed (dup-free subset) Order still names a sequence no
+	// progression applies — the group's Components advance together — so
+	// admission rejects it rather than let the operator believe decoder rolls
+	// first.
+	ginkgo.It("W-28 rejects group with order set → OrderNotHonored", func() {
+		isvc := coordISVC("coord-w28", v1beta1.RolloutGroup{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			BlueGreen:  &v1beta1.GroupBlueGreen{},
+			Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		})
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonOrderNotHonored))
+	})
 })
 
 // ---------- UPDATE-path specs ----------
@@ -786,6 +821,31 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — spec.r
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(validation.ReasonCoordinationRequiresOMENative))
 	})
+
+	// WU-11: the rollout-ordering rules ratchet on update — they fire only
+	// when the write changes spec.rollout. An update that rewrites a valid
+	// sequenced run into a mixed-progression list is exactly such a write and
+	// must be rejected; the sequenced baseline itself was admitted at create.
+	// (The grandfathering half — an untouched unenforced rollout passing —
+	// is proven at the unit level: admission rejects unenforced shapes at
+	// create, so no such stored baseline can be produced in this suite.)
+	ginkgo.It("WU-11 rejects update that changes rollout into a mixed-progression list → GroupOrderingNotHonored", func() {
+		got := createBaselineISVC("coord-wu11",
+			v1beta1.RolloutGroup{
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+			},
+			v1beta1.RolloutGroup{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+			},
+		)
+		got.Spec.Rollout.Groups[0].RollingUpdate = &v1beta1.GroupRollingUpdate{}
+		got.Spec.Rollout.Groups[0].BlueGreen = nil
+		err := k8sClient.Update(suiteCtx, got)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonGroupOrderingNotHonored))
+	})
 })
 
 // Sanity-check the validation reason strings are stable. A constant
@@ -800,6 +860,8 @@ var _ = ginkgo.Describe("validation reason constant stability", func() {
 		Expect(validation.ReasonOrphanCoordinationGroup).To(Equal("OrphanCoordinationGroup"))
 		Expect(validation.ReasonInvalidCoordinationOrder).To(Equal("InvalidCoordinationOrder"))
 		Expect(validation.ReasonSequentialDuplicateOrder).To(Equal("SequentialDuplicateOrder"))
+		Expect(validation.ReasonGroupOrderingNotHonored).To(Equal("GroupOrderingNotHonored"))
+		Expect(validation.ReasonOrderNotHonored).To(Equal("OrderNotHonored"))
 	})
 
 	// Defensive: the assertion-helper format strings reference the

@@ -585,6 +585,226 @@ func TestCoordinationRatioToleranceWarning_BelowThresholdEmpty(t *testing.T) {
 	}
 }
 
+// --- Rollout-ordering enforceability ---
+
+func TestValidateRolloutOrderingEnforced_NilSpecAndNoGroupsOK(t *testing.T) {
+	if err := ValidateRolloutOrderingEnforced(nil); err != nil {
+		t.Errorf("nil spec: unexpected error %v", err)
+	}
+	if err := ValidateRolloutOrderingEnforced(&v1beta1.InferenceServiceSpec{}); err != nil {
+		t.Errorf("no rollout: unexpected error %v", err)
+	}
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{}}
+	if err := ValidateRolloutOrderingEnforced(spec); err != nil {
+		t.Errorf("empty groups: unexpected error %v", err)
+	}
+}
+
+// A pure run of single-Component blueGreen groups is the one multi-group shape
+// whose list order the engine enforces — it must stay accepted, in both the
+// explicit-blueGreen and the omitted-progression spelling.
+func TestValidateRolloutOrderingEnforced_SingleComponentBlueGreenRunAccepted(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}},
+	}}
+	if err := ValidateRolloutOrderingEnforced(spec); err != nil {
+		t.Errorf("two-group run: unexpected error %v", err)
+	}
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}},
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}},
+	}}
+	if err := ValidateRolloutOrderingEnforced(spec); err != nil {
+		t.Errorf("three-group run: unexpected error %v", err)
+	}
+}
+
+// A single group makes no cross-group ordering promise, so every progression
+// shape stays accepted as long as it carries no Order.
+func TestValidateRolloutOrderingEnforced_SingleGroupShapesAccepted(t *testing.T) {
+	cases := map[string]v1beta1.RolloutGroup{
+		"multi-Component blueGreen": {
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			BlueGreen:  &v1beta1.GroupBlueGreen{},
+		},
+		"multi-Component rollingUpdate": {
+			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			RollingUpdate: &v1beta1.GroupRollingUpdate{},
+		},
+		"single-Component rollingUpdate": {
+			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent},
+			RollingUpdate: &v1beta1.GroupRollingUpdate{},
+		},
+		"canary": {
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			Canary:     &v1beta1.GroupCanary{},
+		},
+	}
+	for name, g := range cases {
+		spec := omeNativePDSpec()
+		spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{g}}
+		if err := ValidateRolloutOrderingEnforced(spec); err != nil {
+			t.Errorf("%s (single group): unexpected error %v", name, err)
+		}
+	}
+}
+
+// Mixed-progression lists promise an order that runs concurrently: blueGreen
+// followed by rollingUpdate, and rollingUpdate followed by canary.
+func TestValidateRolloutOrderingEnforced_MixedProgressionListRejected(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, RollingUpdate: &v1beta1.GroupRollingUpdate{}},
+	}}
+	err := ValidateRolloutOrderingEnforced(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonGroupOrderingNotHonored) {
+		t.Errorf("blueGreen then rollingUpdate: got %v want %s", err, ReasonGroupOrderingNotHonored)
+	}
+
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, RollingUpdate: &v1beta1.GroupRollingUpdate{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Canary: &v1beta1.GroupCanary{}},
+	}}
+	err = ValidateRolloutOrderingEnforced(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonGroupOrderingNotHonored) {
+		t.Errorf("rollingUpdate then canary: got %v want %s", err, ReasonGroupOrderingNotHonored)
+	}
+}
+
+func TestValidateRolloutOrderingEnforced_MultiComponentGroupInListRejected(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.Router = &v1beta1.RouterSpec{}
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+	}}
+	err := ValidateRolloutOrderingEnforced(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonGroupOrderingNotHonored) {
+		t.Errorf("multi-Component group in ordered list: got %v want %s", err, ReasonGroupOrderingNotHonored)
+	}
+	if err != nil && !strings.Contains(err.Error(), "groups[0]") {
+		t.Errorf("error should name the offending group: got %q", err.Error())
+	}
+}
+
+// A canary group can never be part of the collapsed run (the canary engine
+// drives it independently), so mixing one into a multi-group list breaks the
+// promised order.
+func TestValidateRolloutOrderingEnforced_CanaryInListRejected(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Canary: &v1beta1.GroupCanary{}},
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+	}}
+	err := ValidateRolloutOrderingEnforced(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonGroupOrderingNotHonored) {
+		t.Errorf("canary in ordered list: got %v want %s", err, ReasonGroupOrderingNotHonored)
+	}
+}
+
+// Order is rejected on every shape it could be written on — no progression
+// applies it.
+func TestValidateRolloutOrderingEnforced_OrderRejected(t *testing.T) {
+	cases := map[string]v1beta1.RolloutGroup{
+		"multi-Component blueGreen": {
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			BlueGreen:  &v1beta1.GroupBlueGreen{},
+			Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		},
+		"multi-Component rollingUpdate": {
+			Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			RollingUpdate: &v1beta1.GroupRollingUpdate{},
+			Order:         []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		},
+		"canary": {
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			Canary:     &v1beta1.GroupCanary{},
+			Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		},
+		"single-Component (trivial order)": {
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			BlueGreen:  &v1beta1.GroupBlueGreen{},
+			Order:      []v1beta1.ComponentType{v1beta1.EngineComponent},
+		},
+	}
+	for name, g := range cases {
+		spec := omeNativePDSpec()
+		spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{g}}
+		err := ValidateRolloutOrderingEnforced(spec)
+		if err == nil || !strings.Contains(err.Error(), ReasonOrderNotHonored) {
+			t.Errorf("%s with order: got %v want %s", name, err, ReasonOrderNotHonored)
+		}
+	}
+}
+
+// Ratchet: an update that does not touch spec.rollout is admitted even when
+// the stored rollout carries an unenforced shape, so existing objects keep
+// reconciling.
+func TestValidateRolloutOrderingEnforcedUpdate_UntouchedRolloutAdmitted(t *testing.T) {
+	unenforced := &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, RollingUpdate: &v1beta1.GroupRollingUpdate{}},
+	}}
+	oldSpec := omeNativePDSpecWithImages("v1", "v1")
+	oldSpec.Rollout = unenforced
+	newSpec := omeNativePDSpecWithImages("v2", "v2") // image bump, rollout untouched
+	newSpec.Rollout = unenforced.DeepCopy()
+	if err := ValidateRolloutOrderingEnforcedUpdate(oldSpec, newSpec); err != nil {
+		t.Errorf("untouched rollout: unexpected error %v", err)
+	}
+}
+
+// Ratchet: any update that changes spec.rollout must land on an enforced
+// shape — including an edit that swaps one unenforced shape for another.
+func TestValidateRolloutOrderingEnforcedUpdate_ChangedRolloutRejected(t *testing.T) {
+	oldSpec := omeNativePDSpec()
+	newSpec := omeNativePDSpec()
+	newSpec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, RollingUpdate: &v1beta1.GroupRollingUpdate{}},
+	}}
+	err := ValidateRolloutOrderingEnforcedUpdate(oldSpec, newSpec)
+	if err == nil || !strings.Contains(err.Error(), ReasonGroupOrderingNotHonored) {
+		t.Errorf("added unenforced rollout: got %v want %s", err, ReasonGroupOrderingNotHonored)
+	}
+
+	oldSpec = omeNativePDSpec()
+	oldSpec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}, Order: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent}},
+	}}
+	newSpec = omeNativePDSpec()
+	newSpec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}, Order: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}},
+	}}
+	err = ValidateRolloutOrderingEnforcedUpdate(oldSpec, newSpec)
+	if err == nil || !strings.Contains(err.Error(), ReasonOrderNotHonored) {
+		t.Errorf("edited order: got %v want %s", err, ReasonOrderNotHonored)
+	}
+}
+
+// Ratchet: an update that changes the rollout INTO an enforced shape passes —
+// the ratchet only blocks writes that keep or introduce unenforced ordering.
+func TestValidateRolloutOrderingEnforcedUpdate_ChangedToEnforcedAccepted(t *testing.T) {
+	oldSpec := omeNativePDSpec()
+	oldSpec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, RollingUpdate: &v1beta1.GroupRollingUpdate{}},
+	}}
+	newSpec := omeNativePDSpec()
+	newSpec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+		{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+		{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+	}}
+	if err := ValidateRolloutOrderingEnforcedUpdate(oldSpec, newSpec); err != nil {
+		t.Errorf("corrected rollout: unexpected error %v", err)
+	}
+}
+
 // Test fixtures.
 
 func omeNativePDSpec() *v1beta1.InferenceServiceSpec {

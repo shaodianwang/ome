@@ -13,6 +13,8 @@ package validation
 import (
 	"fmt"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 )
@@ -37,6 +39,17 @@ const (
 	// multi-Component, or rollingUpdate group, nor on a rollout that does not
 	// collapse to Sequential.
 	ReasonSoakNotHonored = "SoakNotHonored"
+	// ReasonGroupOrderingNotHonored flags a multi-group rollout whose list
+	// order the engine would silently ignore. groups[] promises group N
+	// completes before group N+1 begins, but the engine enforces that only
+	// for a run of single-Component blueGreen groups; any other multi-group
+	// list runs concurrently on its disjoint Components.
+	ReasonGroupOrderingNotHonored = "GroupOrderingNotHonored"
+	// ReasonOrderNotHonored flags a non-empty groups[i].order. No current
+	// progression applies Order as a surge sequence — the Components in a
+	// group advance together — so accepting it would promise a sequence
+	// that never happens.
+	ReasonOrderNotHonored = "OrderNotHonored"
 )
 
 // ratioToleranceWarningThreshold is the upper bound the validator considers
@@ -376,4 +389,71 @@ func validateSoakOnlyWhenSequenced(groups []v1beta1.RolloutGroup) error {
 		}
 	}
 	return nil
+}
+
+// ValidateRolloutOrderingEnforced rejects rollout shapes that promise an
+// ordering the engine does not enforce, mirroring the Soak rule: an ordering
+// the engine would silently drop is rejected rather than accepted. Two rules:
+//
+//   - A non-empty groups[i].order is rejected on every group — no current
+//     progression applies Order as a surge sequence.
+//   - A multi-group list is accepted only when it is a pure run of
+//     single-Component blueGreen groups (the shape that collapses to the
+//     Sequential state machine, the one path that enforces cross-group
+//     order). Any other multi-group list — a rollingUpdate, canary, or
+//     multi-Component group in the mix — runs concurrently.
+//
+// Runs on create; updates apply it through the
+// ValidateRolloutOrderingEnforcedUpdate ratchet.
+func ValidateRolloutOrderingEnforced(spec *v1beta1.InferenceServiceSpec) error {
+	groups := spec.GetRolloutGroups()
+	if len(groups) == 0 {
+		return nil
+	}
+	for i := range groups {
+		if len(groups[i].Order) > 0 {
+			return fmt.Errorf("spec.rollout.groups[%d]: order is not applied by any progression — the Components in a group advance together; to roll Components one at a time, declare one single-Component blueGreen group per Component, in the desired sequence (%s)",
+				i, ReasonOrderNotHonored)
+		}
+	}
+	if len(groups) < 2 {
+		return nil // a single group makes no cross-group ordering promise
+	}
+	for i := range groups {
+		g := &groups[i]
+		var shape string
+		switch {
+		case g.Canary != nil:
+			shape = "a canary group"
+		case g.RollingUpdate != nil:
+			shape = "a rollingUpdate group"
+		case len(g.Components) != 1:
+			shape = "a multi-Component group"
+		default:
+			continue
+		}
+		return fmt.Errorf("spec.rollout.groups: groups[] is ordered (group N completes before group N+1 begins), but that is enforced only for a run of single-Component blueGreen groups; groups[%d] is %s, so the groups would run concurrently and the declared order would be dropped (%s)",
+			i, shape, ReasonGroupOrderingNotHonored)
+	}
+	return nil
+}
+
+// ValidateRolloutOrderingEnforcedUpdate is the update-time ratchet for
+// ValidateRolloutOrderingEnforced: the rules apply only when the update
+// changes spec.rollout. An update that leaves the rollout untouched is
+// admitted regardless of shape, so a stored object carrying an unenforced
+// shape keeps reconciling (and stays mutable) until its rollout is next
+// edited.
+func ValidateRolloutOrderingEnforcedUpdate(oldSpec, newSpec *v1beta1.InferenceServiceSpec) error {
+	var oldRollout, newRollout *v1beta1.RolloutSpec
+	if oldSpec != nil {
+		oldRollout = oldSpec.Rollout
+	}
+	if newSpec != nil {
+		newRollout = newSpec.Rollout
+	}
+	if apiequality.Semantic.DeepEqual(oldRollout, newRollout) {
+		return nil
+	}
+	return ValidateRolloutOrderingEnforced(newSpec)
 }
