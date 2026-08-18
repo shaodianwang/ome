@@ -14,19 +14,43 @@
 #   OME_KIND_CLUSTER   KIND cluster name           (default: ome-eval-kind)
 #   OME_TEST_NS        namespace for the fixtures  (default: sandbox)
 #   OME_NAMESPACE      namespace OME is installed into (default: ome)
-#   OME_IMAGE_TAG      tag for the built image     (default: kind-local)
+#   OME_IMAGE_TAG      local build/lookup tag      (default: kind-local)
 #   CERT_MANAGER_VERSION  cert-manager release to install (default below)
 #
 # Images are built locally and loaded into the cluster's nodes, never pushed.
 # global.hub is set empty so the chart renders bare `ome-manager:<tag>` /
-# `ome-agent:<tag>` references that resolve to the loaded images; the tag must
-# not be `latest`, or the kubelet's default pull policy would try to fetch it
-# from a registry.
+# `ome-agent:<tag>` references that resolve to the loaded images. The deploy tag
+# is derived from both image IDs: a reused cluster therefore gets a new
+# controller pod template when either local image changes. The tag is never
+# `latest`, so the kubelet does not try to fetch it from a registry.
 #
 # ome-agent is required, not optional: the ClusterBaseModel is PVC-backed, and
 # the PVC path always runs a metadata-extraction Job built from the omeAgent
 # image to validate the model. There is no annotation or flag that skips it, so
 # the model never leaves In_Transit without a pullable agent image.
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "FATAL: sha256sum or shasum is required to derive the deploy tag" >&2
+    return 1
+  fi
+}
+
+deploy_tag_from_image_ids() {
+  local manager_id="$1" agent_id="$2" digest
+  digest="$(printf '%s\n%s\n' "$manager_id" "$agent_id" | sha256_stdin)"
+  printf 'kind-%s\n' "$digest"
+}
+
+# Keep the content-derived tag helper directly testable without executing a
+# cluster deployment when this file is sourced.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -35,7 +59,7 @@ cd "$REPO_ROOT"
 CLUSTER="${OME_KIND_CLUSTER:-ome-eval-kind}"
 NS="${OME_TEST_NS:-sandbox}"
 OME_NS="${OME_NAMESPACE:-ome}"
-TAG="${OME_IMAGE_TAG:-kind-local}"
+BUILD_TAG="${OME_IMAGE_TAG:-kind-local}"
 # The controller chart renders a cert-manager Certificate + Issuer for the
 # webhook serving cert and offers no alternative, so cert-manager is a hard
 # prerequisite rather than an option. Pinned, and overridable.
@@ -58,8 +82,8 @@ kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || {
   echo "FATAL: no KIND cluster named $CLUSTER (create it first)" >&2; exit 1; }
 
 KCTX="kind-${CLUSTER}"
-MANAGER_IMAGE="ome-manager:${TAG}"
-AGENT_IMAGE="ome-agent:${TAG}"
+MANAGER_BUILD_IMAGE="ome-manager:${BUILD_TAG}"
+AGENT_BUILD_IMAGE="ome-agent:${BUILD_TAG}"
 RENDER="hack/omenative-testing/perm/runtime_fixtures.py"
 
 # `kind load docker-image` reads the image through `docker save`, which under
@@ -71,19 +95,39 @@ NODE_PLATFORM="linux/$(docker info --format '{{.Architecture}}' 2>/dev/null \
 
 kind_load() {
   local image="$1" archive
-  archive="$(mktemp -t kindload).tar"
+  archive="$(mktemp "${TMPDIR:-/tmp}/kindload.XXXXXX")"
   docker save --platform "$NODE_PLATFORM" "$image" -o "$archive"
   kind load image-archive "$archive" --name "$CLUSTER"
   rm -f "$archive"
 }
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
-  echo "--- build ${MANAGER_IMAGE} ---"
-  docker build -f dockerfiles/manager.Dockerfile -t "$MANAGER_IMAGE" .
+  echo "--- build ${MANAGER_BUILD_IMAGE} ---"
+  docker build -f dockerfiles/manager.Dockerfile -t "$MANAGER_BUILD_IMAGE" .
   # Compiles the Rust xet staticlib before the Go binary; slow on a cold cache.
-  echo "--- build ${AGENT_IMAGE} ---"
-  docker build -f dockerfiles/ome-agent.Dockerfile -t "$AGENT_IMAGE" .
+  echo "--- build ${AGENT_BUILD_IMAGE} ---"
+  docker build -f dockerfiles/ome-agent.Dockerfile -t "$AGENT_BUILD_IMAGE" .
 fi
+
+if ! MANAGER_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$MANAGER_BUILD_IMAGE" 2>/dev/null)"; then
+  echo "FATAL: local image ${MANAGER_BUILD_IMAGE} not found" >&2
+  echo "       omit --skip-build or set OME_IMAGE_TAG to an existing image tag" >&2
+  exit 1
+fi
+if ! AGENT_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$AGENT_BUILD_IMAGE" 2>/dev/null)"; then
+  echo "FATAL: local image ${AGENT_BUILD_IMAGE} not found" >&2
+  echo "       omit --skip-build or set OME_IMAGE_TAG to an existing image tag" >&2
+  exit 1
+fi
+
+DEPLOY_TAG="$(deploy_tag_from_image_ids "$MANAGER_IMAGE_ID" "$AGENT_IMAGE_ID")"
+MANAGER_IMAGE="ome-manager:${DEPLOY_TAG}"
+AGENT_IMAGE="ome-agent:${DEPLOY_TAG}"
+docker image tag "$MANAGER_BUILD_IMAGE" "$MANAGER_IMAGE"
+docker image tag "$AGENT_BUILD_IMAGE" "$AGENT_IMAGE"
+echo "--- deploy image set ${DEPLOY_TAG} ---"
+echo "    manager: ${MANAGER_IMAGE_ID}"
+echo "    agent:   ${AGENT_IMAGE_ID}"
 
 echo "--- load images into ${CLUSTER} ---"
 kind_load "$MANAGER_IMAGE"
@@ -105,7 +149,9 @@ helm upgrade --install ome-crd charts/ome-crd/ \
   --wait --timeout 180s
 
 echo "--- install controller ---"
-# hub empty => `ome-manager:<tag>`, matching the loaded image exactly.
+# hub empty => `ome-manager:<tag>`, matching the loaded image exactly. Both
+# chart image tags use the common content-derived deploy tag so an agent-only
+# rebuild also changes the controller Deployment template on a reused cluster.
 # model-agent is an externally-published image this cluster cannot pull, and the
 # eval does not exercise it: the fixtures back their ClusterBaseModel with a PVC.
 # The chart defaults to 3 controller replicas at 2 CPU / 4Gi requests each,
@@ -115,8 +161,8 @@ echo "--- install controller ---"
 HELM_ARGS=(
   --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace
   --set global.hub=""
-  --set ome.controller.tag="$TAG"
-  --set ome.omeAgent.tag="$TAG"
+  --set ome.controller.tag="$DEPLOY_TAG"
+  --set ome.omeAgent.tag="$DEPLOY_TAG"
   --set modelAgent.enabled=false
   --set ome.controller.replicaCount=1
   --set ome.controller.resources.requests.cpu=500m

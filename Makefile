@@ -641,8 +641,14 @@ kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor,
 	cp -f "$$KUEUE_DIR/config/components/crd/bases/"*.yaml $(DEP_CRDS_DIR)/kueue/ ; \
 	echo "✅ Vendored Kueue CRDs to $(DEP_CRDS_DIR)/kueue/"
 
+.PHONY: test-kindutil-unit
+test-kindutil-unit: ## 🧪 Run KIND framework tests that do not require Docker
+	@GOTOOLCHAIN=$(GOTOOLCHAIN) $(GO_CMD) test ./tests/integration/kindutil \
+		-run '^Test(DeployOME|ShouldApplyCRDs)' -count=1
+	@bash hack/omenative-testing/deploy-ome-kind_test.sh
+
 .PHONY: integration-test
-integration-test: fmt vet manifests envtest dep-crds xet-build ## 🧪 Run integration tests
+integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-unit ## 🧪 Run integration tests
 	@echo "🧪 Running integration tests..."
 	@# xet-build is a prerequisite because the tests/ root suite builds
 	@# cmd/ome-agent, which links the xet staticlib via cgo
@@ -658,8 +664,9 @@ integration-test: fmt vet manifests envtest dep-crds xet-build ## 🧪 Run integ
 	@#     packages, NOT Ginkgo suites (they do not import ginkgo, so its
 	@#     flags are unregistered). -ginkgo.trace below would error with
 	@#     `flag provided but not defined: -ginkgo.trace` and fail the
-	@#     binary before any test runs. tests/perf/* runs in its own CI step
-	@#     via the `test-perf` target (the scale harness + rangespec check).
+	@#     binary before any test runs. The Docker-free kindutil tests run via
+	@#     test-kindutil-unit; tests/perf/* runs in its own CI step via the
+	@#     `test-perf` target (the scale harness + rangespec check).
 	@#   - tests/integration/.../*_kind  — KIND-backed suites (real
 	@#     kubelet via Docker): omenative_coordination_kind, irmanaged_kind,
 	@#     rawdeployment_kind, omenative_perm_kind. Run locally via the
@@ -810,6 +817,24 @@ test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real ku
 		go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
 		-v -timeout 90m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ KIND integration tests passed"
+
+.PHONY: test-kind-eval
+OME_EVAL_NAMESPACE ?= sandbox
+test-kind-eval: dep-crds ## 🧪 Run migrated OMENative eval cases against a chart-installed OME
+	@echo "🧪 Running deployed OME eval tests..."
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ docker is not reachable. Deployed OME eval tests need a running Docker daemon."; \
+		exit 1; \
+	}
+	@OME_TEST_NS=$${OME_TEST_NS:-$(OME_EVAL_NAMESPACE)} \
+		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
+		go test ./tests/integration/singlecluster/e2e/omenative_eval_kind/... \
+		-count=1 -v -timeout 60m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
+	@echo "✅ Deployed OME eval tests passed"
 
 .PHONY: test-kind-irmanaged
 test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)

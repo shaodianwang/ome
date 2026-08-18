@@ -31,7 +31,8 @@ type SuiteOpts struct {
 
 	// CRDPaths lists relative-to-repo-root paths to CRD YAML
 	// directories (or single files) to apply at suite startup.
-	// Empty == use the default config/crd/full.
+	// For an in-process suite, empty uses config/crd/full. For a deployed
+	// suite, empty skips CRD installation because the OME chart owns its CRDs.
 	CRDPaths []string
 
 	// Scheme is the runtime.Scheme the in-process manager registers.
@@ -45,6 +46,14 @@ type SuiteOpts struct {
 	// shared between envtest and KIND suites without modification.
 	// nil == skip controller startup (smoke-test pattern).
 	Setup ManagerSetup
+
+	// Deployed runs the suite against a real OME install instead of an
+	// in-process manager. Mutually exclusive with Setup: the two would
+	// otherwise reconcile the same objects and fight.
+	//
+	// CRDPaths carries only optional dependency CRDs in this mode. The chart
+	// owns the OME CRDs.
+	Deployed *DeployedOME
 }
 
 // SuiteState is the shared, cross-spec state every KIND-backed
@@ -106,9 +115,10 @@ func Suite() *SuiteState {
 //  2. Creates (or reuses) the KIND cluster
 //  3. Builds + kind-loads the requested images
 //  4. Applies CRDs
-//  5. Starts the in-process controller manager (if Setup is set)
-//  6. Stores SuiteState so test code can call Suite()
-//  7. Tears down on TestMain exit (cluster delete honors KIND_KEEP_CLUSTER=1)
+//  5. Installs OME (if Deployed is set)
+//  6. Starts the in-process controller manager (if Setup is set)
+//  7. Stores SuiteState so test code can call Suite()
+//  8. Tears down on TestMain exit (cluster delete honors KIND_KEEP_CLUSTER=1)
 //
 // Caller wires t.Run / ginkgo.RunSpecs themselves — RunKindSuite
 // only sets up shared state. Mirrors framework.RunSuite's contract
@@ -120,6 +130,10 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	}
 	if opts.Scheme == nil {
 		opts.Scheme = BaseScheme()
+	}
+	if opts.Setup != nil && opts.Deployed != nil {
+		t.Fatal("RunKindSuite: Setup and Deployed are mutually exclusive — " +
+			"an in-process manager and a deployed one would reconcile the same objects")
 	}
 
 	SetupLogger()
@@ -141,8 +155,16 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 		t.Fatalf("RunKindSuite: BuildAndLoadImages: %v", err)
 	}
 
-	if err := ApplyCRDs(ctx, cfg, opts.CRDPaths); err != nil {
-		t.Fatalf("RunKindSuite: ApplyCRDs: %v", err)
+	if shouldApplyCRDs(opts) {
+		if err := ApplyCRDs(ctx, cfg, opts.CRDPaths); err != nil {
+			t.Fatalf("RunKindSuite: ApplyCRDs: %v", err)
+		}
+	}
+
+	// After the optional CRDs: a deployed controller discovers them at startup,
+	// so installing OME first would have it decide they are absent.
+	if err := deployOME(ctx, opts.ClusterName, opts.Deployed); err != nil {
+		t.Fatalf("RunKindSuite: %v", err)
 	}
 
 	c, err := client.New(cfg, client.Options{Scheme: opts.Scheme})
@@ -173,6 +195,10 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	t.Cleanup(func() { setActiveSuite(nil) })
 
 	return state
+}
+
+func shouldApplyCRDs(opts SuiteOpts) bool {
+	return opts.Deployed == nil || len(opts.CRDPaths) > 0
 }
 
 // RestartManager stops the suite's in-process manager, waits for it to exit,
