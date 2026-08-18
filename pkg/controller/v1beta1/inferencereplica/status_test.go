@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,7 +51,7 @@ func materializeInlinePublicationStatuses(t *testing.T, insts []v1beta1.OMENativ
 // per-Instance projection: handed a (status slice, by-index pod
 // map, available-pod set) tuple, it stamps each Instance's per-pod
 // counters off the live pod state. This is the load-bearing step that
-// lets the downstream workload.CountReadyInstances classifier see the
+// lets the downstream publication classifier see the
 // real pod state instead of a Phase-only proxy.
 //
 // Regression guard: an IR aggregator that never populates per-Instance
@@ -187,6 +188,38 @@ func TestAggregateAndWriteStatusPreservesSamePassAdmittedMirrorSemantics(t *test
 		"the caller snapshot retains its reconcile-entry admission value")
 	g.Expect(ir.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.Equal(int32(1)),
 		"ordinary publication counters remain mirrored into the caller snapshot")
+}
+
+func TestMirrorInstanceCountersUsesTransientPublicationIntersection(t *testing.T) {
+	g := gomega.NewWithT(t)
+	status := &v1beta1.InferenceReplicaStatus{InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+		{Index: 3, Phase: v1beta1.OMENativeInstanceDeleting, Admitted: true, PodCount: 9, NodesOccupied: []string{"old-node"}},
+		{Index: 9, Phase: v1beta1.OMENativeInstanceReady, PodCount: 7, ReadyPodCount: 6},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
+	}}
+	publication := []workload.InstanceStatus{
+		{Index: 1, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ScheduledPodCount: 1, AvailablePodCount: 1, NodesOccupied: []string{"node-a"}},
+		{Index: 3, PodCount: 2, ReadyPodCount: 2, NodesOccupied: []string{"superseded"}},
+		{Index: 3, PodCount: 4, ReadyPodCount: 3, ServingPodCount: 2, ScheduledPodCount: 4, AvailablePodCount: 1},
+		{Index: 7, PodCount: 1, ReadyPodCount: 1},
+	}
+
+	mirrorInstanceCounters(status, publication)
+
+	g.Expect(status.InstanceStatuses[0]).To(gomega.Equal(v1beta1.OMENativeInstanceStatus{
+		Index: 3, Phase: v1beta1.OMENativeInstanceDeleting, Admitted: true,
+		PodCount: 4, ReadyPodCount: 3, ServingPodCount: 2, ScheduledPodCount: 4, AvailablePodCount: 1,
+	}), "the last duplicate publication row wins without changing lifecycle or admission")
+	g.Expect(status.InstanceStatuses[1]).To(gomega.Equal(v1beta1.OMENativeInstanceStatus{
+		Index: 9, Phase: v1beta1.OMENativeInstanceReady, PodCount: 7, ReadyPodCount: 6,
+	}), "caller-only rows remain untouched")
+	g.Expect(status.InstanceStatuses[2].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceUpdating))
+	g.Expect(status.InstanceStatuses[2].NodesOccupied).To(gomega.Equal([]string{"node-a"}))
+
+	publication[0].NodesOccupied[0] = "mutated"
+	g.Expect(status.InstanceStatuses[2].NodesOccupied).To(gomega.Equal([]string{"node-a"}),
+		"mirrored node slices must not alias the transient publication")
+	mirrorInstanceCounters(nil, publication)
 }
 
 // TestAggregateStatus_AvailableReplicas_MatchesReadyWithEndpointSlices
@@ -568,7 +601,7 @@ func TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods(t *testing.T
 // Setup: Instance Phase=Updating, drain step in progress. The
 // canonical pod still carries ContainersReady=True. The aggregator
 // must observe the pod state and count it Ready off
-// CountReadyInstances' surge-tolerant classifier.
+// surge-tolerant readiness classifier.
 func TestAggregateStatus_RecreatePath_OldPodCountsReadyDuringDrain(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
@@ -735,6 +768,10 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 				latest.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
 					ID: "delete-0", Type: v1beta1.InstanceOperationDelete, Step: "Drain",
 				}
+				latest.Status.InstanceStatuses[0].RunningRevision = "rev-target"
+				latest.Status.InstanceStatuses = append(latest.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+					Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-target",
+				})
 				if err := c.SubResource(subresource).Update(ctx, latest); err != nil {
 					return err
 				}
@@ -761,7 +798,8 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 		}},
 	}
 
-	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, plan, nil)).To(gomega.Succeed())
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev-target"}}
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, plan, target)).To(gomega.Succeed())
 	g.Expect(statusWrites).To(gomega.Equal(2))
 	g.Expect(podLists).To(gomega.Equal(1), "the publication Pod observation is captured outside conflict retry")
 	g.Expect(endpointSliceLists).To(gomega.Equal(1), "the publication availability observation is captured outside conflict retry")
@@ -770,6 +808,10 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 	g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceDeleting))
 	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
 	g.Expect(got.Status.InstanceStatuses[0].Operation.ID).To(gomega.Equal("delete-0"))
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(2))
+	g.Expect(got.Status.Replicas).To(gomega.Equal(int32(2)))
+	g.Expect(got.Status.UpdatedReplicas).To(gomega.Equal(int32(2)))
+	g.Expect(got.Status.UpdatedReadyReplicas).To(gomega.Equal(int32(1)))
 }
 
 func TestAggregateAndWriteStatus_RebasesAfterAdjacentLifecycleWrite(t *testing.T) {

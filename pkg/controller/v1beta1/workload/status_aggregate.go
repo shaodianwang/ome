@@ -232,9 +232,8 @@ func DesiredFor(desiredByIdx map[int32]int32, idx int32, observedPodCount int32)
 	return observedPodCount
 }
 
-// InstanceMeetsThreshold is the shared classifier the Count*Instances
-// helpers use: an Instance counts when at least its desired pod count
-// of pods satisfy the relevant predicate (Ready / Serving / Available).
+// InstanceMeetsThreshold classifies an Instance when at least its desired pod
+// count satisfies the relevant Ready, Serving, or Available predicate.
 //
 // Surge-tolerant: a naive `observed == PodCount` would mis-classify
 // mid-surge Instances as not-Ready the whole time the +1 surge pod is
@@ -250,23 +249,6 @@ func InstanceMeetsThreshold(observedPodCount, observedSatisfying, desired int32)
 		return observedSatisfying == observedPodCount
 	}
 	return observedSatisfying >= desired
-}
-
-// CountReadyInstances counts Instances whose desired-many pods are
-// ContainersReady=True. See InstanceMeetsThreshold for the
-// surge-tolerant semantic.
-//
-// Operates on workload.InstanceStatus so both adapters share the
-// same classifier without converting back to a v1beta1 shape.
-func CountReadyInstances(insts []InstanceStatus, desiredByIdx map[int32]int32) int32 {
-	var n int32
-	for _, s := range insts {
-		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
-		if InstanceMeetsThreshold(s.PodCount, s.ReadyPodCount, desired) {
-			n++
-		}
-	}
-	return n
 }
 
 // CountServingInstances counts Instances whose desired-many pods are
@@ -297,25 +279,6 @@ func CountAvailableInstances(insts []InstanceStatus, desiredByIdx map[int32]int3
 		}
 	}
 	return n
-}
-
-// CountUpdatedInstances returns (UpdatedReplicas, UpdatedReadyReplicas)
-// for Instances on targetRevName. UpdatedReadyReplicas adds the Ready
-// gate — what HPA's scale-aware rollout pacing reads. The Ready check
-// shares the same surge-tolerant classifier as CountReadyInstances.
-func CountUpdatedInstances(insts []InstanceStatus, targetRevName string, desiredByIdx map[int32]int32) (updated, updatedReady int32) {
-	tgt := query.RevisionFromName(targetRevName)
-	for _, s := range insts {
-		if !query.RevisionFromName(s.RunningRevision).Same(tgt) {
-			continue
-		}
-		updated++
-		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
-		if InstanceMeetsThreshold(s.PodCount, s.ReadyPodCount, desired) {
-			updatedReady++
-		}
-	}
-	return updated, updatedReady
 }
 
 // ReachedDesiredShape reports whether insts have converged to the desired
@@ -454,9 +417,7 @@ type InstanceCounters struct {
 	NodesOccupied     []string
 }
 
-// ComponentCounters is the field-level result of
-// ComputeComponentCounters. The aggregator caller maps the fields onto
-// the per-Component status block.
+// ComponentCounters is the field-level Component publication result.
 type ComponentCounters struct {
 	Replicas             int32
 	ReadyReplicas        int32
@@ -466,24 +427,35 @@ type ComponentCounters struct {
 	UpdatedReadyReplicas int32
 }
 
-// ComputeComponentCounters computes the Component-level counter set
-// from the per-Instance statuses (already populated with per-Instance
-// counters by CountersForInstance + caller assignment) and the desired
-// per-Instance pod count map. When targetRevName is non-empty, the
-// Updated* fields are also computed; an empty targetRevName leaves
-// them at zero (the caller is responsible for not writing them in
-// that case).
-func ComputeComponentCounters(insts []InstanceStatus, desiredByIdx map[int32]int32, targetRevName string) ComponentCounters {
-	out := ComponentCounters{
-		Replicas:          int32(len(insts)),
-		ReadyReplicas:     CountReadyInstances(insts, desiredByIdx),
-		ServingReplicas:   CountServingInstances(insts, desiredByIdx),
-		AvailableReplicas: CountAvailableInstances(insts, desiredByIdx),
+// TakeInlineV1Publication consumes the owned rows, overlays the publication
+// observation, and computes Component counters from that same observation.
+// Only durable identity and revision fields participate from the stored rows.
+func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]int32, targetRevName string) ([]InstanceStatus, ComponentCounters, error) {
+	var counters ComponentCounters
+	target := query.RevisionFromName(targetRevName)
+	statuses, err := o.takeInlineV1Statuses(func(index int32, runningRevision string, current InstanceCounters) {
+		desired := DesiredFor(desiredByIdx, index, current.PodCount)
+		if InstanceMeetsThreshold(current.PodCount, current.ReadyPodCount, desired) {
+			counters.ReadyReplicas++
+		}
+		if InstanceMeetsThreshold(current.PodCount, current.ServingPodCount, desired) {
+			counters.ServingReplicas++
+		}
+		if InstanceMeetsThreshold(current.PodCount, current.AvailablePodCount, desired) {
+			counters.AvailableReplicas++
+		}
+		if targetRevName != "" && query.RevisionFromName(runningRevision).Same(target) {
+			counters.UpdatedReplicas++
+			if InstanceMeetsThreshold(current.PodCount, current.ReadyPodCount, desired) {
+				counters.UpdatedReadyReplicas++
+			}
+		}
+	})
+	if err != nil {
+		return nil, ComponentCounters{}, err
 	}
-	if targetRevName != "" {
-		out.UpdatedReplicas, out.UpdatedReadyReplicas = CountUpdatedInstances(insts, targetRevName, desiredByIdx)
-	}
-	return out
+	counters.Replicas = int32(len(statuses))
+	return statuses, counters, nil
 }
 
 // String formats InstanceCounters for debug output.

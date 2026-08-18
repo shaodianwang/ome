@@ -137,20 +137,24 @@ func (o *ComponentObservation) InlineV1Statuses() ([]InstanceStatus, error) {
 		return nil, err
 	}
 	out := cloneInstanceStatusSlice(o.persisted)
-	o.overlayInlineV1(out)
+	o.overlayInlineV1(out, nil)
 	return out, nil
 }
 
 // TakeInlineV1Statuses consumes the owned rows and overlays publication facts
 // without allocating another full status slice.
 func (o *ComponentObservation) TakeInlineV1Statuses() ([]InstanceStatus, error) {
+	return o.takeInlineV1Statuses(nil)
+}
+
+func (o *ComponentObservation) takeInlineV1Statuses(observe func(int32, string, InstanceCounters)) ([]InstanceStatus, error) {
 	if err := o.validatePublication(); err != nil {
 		return nil, err
 	}
 	out := o.persisted
 	o.persisted = nil
 	o.consumed = true
-	o.overlayInlineV1(out)
+	o.overlayInlineV1(out, observe)
 	return out, nil
 }
 
@@ -165,9 +169,12 @@ func (o *ComponentObservation) validatePublication() error {
 	return nil
 }
 
-func (o *ComponentObservation) overlayInlineV1(out []InstanceStatus) {
+func (o *ComponentObservation) overlayInlineV1(out []InstanceStatus, observe func(int32, string, InstanceCounters)) {
 	for i := range out {
 		current, _ := o.CurrentCounters(out[i].Index)
+		if observe != nil {
+			observe(out[i].Index, out[i].RunningRevision, current)
+		}
 		out[i].PodCount = current.PodCount
 		out[i].ReadyPodCount = current.ReadyPodCount
 		out[i].ServingPodCount = current.ServingPodCount

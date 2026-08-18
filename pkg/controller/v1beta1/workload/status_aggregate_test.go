@@ -724,33 +724,49 @@ func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
 	}
 }
 
-// TestComputeComponentCounters pins the entry-point aggregation
-// contract: counts Replicas off the slice length, runs the four
-// surge-tolerant counters, and conditionally fills Updated* when a
-// targetRevName is supplied.
-func TestComputeComponentCounters(t *testing.T) {
-	insts := []workload.InstanceStatus{
+func TestTakeInlineV1PublicationCountersIgnorePersistedObservationFields(t *testing.T) {
+	persisted := []workload.InstanceStatus{
 		{Index: 0, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, AvailablePodCount: 1, RunningRevision: "rev-a"},
 		{Index: 1, PodCount: 1, ReadyPodCount: 0, ServingPodCount: 0, AvailablePodCount: 0, RunningRevision: "rev-b"},
 	}
 	desired := map[int32]int32{0: 1, 1: 1}
 
-	// No target → Updated* zeroed.
-	got := workload.ComputeComponentCounters(insts, desired, "")
-	if got.Replicas != 2 {
-		t.Errorf("Replicas: got %d want 2", got.Replicas)
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "without target revision"},
+		{name: "with target revision", target: "rev-a"},
 	}
-	if got.ReadyReplicas != 1 || got.ServingReplicas != 1 || got.AvailableReplicas != 1 {
-		t.Errorf("counters: %+v", got)
-	}
-	if got.UpdatedReplicas != 0 || got.UpdatedReadyReplicas != 0 {
-		t.Errorf("Updated* should be zero with empty target: %+v", got)
-	}
-
-	// With target=rev-a → only inst-0 is on target, both Updated and UpdatedReady.
-	got = workload.ComputeComponentCounters(insts, desired, "rev-a")
-	if got.UpdatedReplicas != 1 || got.UpdatedReadyReplicas != 1 {
-		t.Errorf("rev-a Updated*: got (%d,%d) want (1,1)", got.UpdatedReplicas, got.UpdatedReadyReplicas)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation, err := workload.NewOwnedPublicationObservation(
+				append([]workload.InstanceStatus(nil), persisted...),
+				workload.NewCachedSelectorPodObservation(nil, nil),
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("NewOwnedPublicationObservation: %v", err)
+			}
+			statuses, got, err := observation.TakeInlineV1Publication(desired, test.target)
+			if err != nil {
+				t.Fatalf("TakeInlineV1Publication: %v", err)
+			}
+			if got.Replicas != 2 || got.ReadyReplicas != 0 || got.ServingReplicas != 0 || got.AvailableReplicas != 0 {
+				t.Errorf("current counters must come from the empty Pod observation: %+v", got)
+			}
+			if test.target == "" && (got.UpdatedReplicas != 0 || got.UpdatedReadyReplicas != 0) {
+				t.Errorf("Updated* should be zero with empty target: %+v", got)
+			}
+			if test.target != "" && (got.UpdatedReplicas != 1 || got.UpdatedReadyReplicas != 0) {
+				t.Errorf("rev-a Updated*: got (%d,%d) want (1,0)", got.UpdatedReplicas, got.UpdatedReadyReplicas)
+			}
+			for _, status := range statuses {
+				if status.PodCount != 0 || status.ReadyPodCount != 0 || status.ServingPodCount != 0 || status.AvailablePodCount != 0 {
+					t.Errorf("status %d retained stale observation fields: %+v", status.Index, status)
+				}
+			}
+		})
 	}
 }
 

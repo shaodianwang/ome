@@ -603,8 +603,12 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 				g.Expect(insts).To(HaveLen(1))
 				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				srcIdx = insts[0].Index
-				g.Expect(insts[0].NodesOccupied).NotTo(BeEmpty())
-				node = insts[0].NodesOccupied[0]
+				pod := &corev1.Pod{}
+				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+					Namespace: ns.Name, Name: fmt.Sprintf("seq-isvc-engine-%d-default-0", srcIdx),
+				}, pod)).To(Succeed())
+				g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
+				node = pod.Spec.NodeName
 			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 			reqUUID := uuid.NewString()

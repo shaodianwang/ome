@@ -169,26 +169,25 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if err != nil {
 			return fmt.Errorf("aggregateAndWriteStatus: build publication observation: %w", err)
 		}
-		insts, err := observation.TakeInlineV1Statuses()
-		if err != nil {
-			return fmt.Errorf("aggregateAndWriteStatus: consume publication observation: %w", err)
-		}
-		for i := range fresh.Status.InstanceStatuses {
-			fresh.Status.InstanceStatuses[i].PodCount = insts[i].PodCount
-			fresh.Status.InstanceStatuses[i].ReadyPodCount = insts[i].ReadyPodCount
-			fresh.Status.InstanceStatuses[i].ServingPodCount = insts[i].ServingPodCount
-			fresh.Status.InstanceStatuses[i].AvailablePodCount = insts[i].AvailablePodCount
-			fresh.Status.InstanceStatuses[i].ScheduledPodCount = insts[i].ScheduledPodCount
-			fresh.Status.InstanceStatuses[i].Admitted = insts[i].Admitted
-			fresh.Status.InstanceStatuses[i].NodesOccupied = insts[i].NodesOccupied
-		}
-
-		// Component-level counters consume the transient publication rows.
 		var targetName string
 		if target != nil {
 			targetName = target.Name
 		}
-		counters := workload.ComputeComponentCounters(insts, desiredByIdx, targetName)
+		publication, counters, err := observation.TakeInlineV1Publication(desiredByIdx, targetName)
+		if err != nil {
+			return fmt.Errorf("aggregateAndWriteStatus: consume publication observation: %w", err)
+		}
+		for i := range fresh.Status.InstanceStatuses {
+			fresh.Status.InstanceStatuses[i].PodCount = publication[i].PodCount
+			fresh.Status.InstanceStatuses[i].ReadyPodCount = publication[i].ReadyPodCount
+			fresh.Status.InstanceStatuses[i].ServingPodCount = publication[i].ServingPodCount
+			fresh.Status.InstanceStatuses[i].AvailablePodCount = publication[i].AvailablePodCount
+			fresh.Status.InstanceStatuses[i].ScheduledPodCount = publication[i].ScheduledPodCount
+			fresh.Status.InstanceStatuses[i].Admitted = publication[i].Admitted
+			fresh.Status.InstanceStatuses[i].NodesOccupied = publication[i].NodesOccupied
+		}
+
+		// Component-level counters consume the same publication observation.
 		fresh.Status.Replicas = counters.Replicas
 		fresh.Status.ServingReplicas = counters.ServingReplicas
 		// ReadyReplicas + AvailableReplicas use the publication
@@ -233,7 +232,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		// triggers nothing downstream. The in-memory mirror below still
 		// runs so callers in this pass observe the fresh counters.
 		if equality.Semantic.DeepEqual(*before, fresh.Status) {
-			mirrorBack(ir, fresh)
+			mirrorBack(ir, fresh, publication)
 			return nil
 		}
 
@@ -250,7 +249,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		// counters, and Conditions onto the caller's in-memory IR snapshot
 		// so downstream callers in the same reconcile pass observe the
 		// post-write state.
-		mirrorBack(ir, fresh)
+		mirrorBack(ir, fresh, publication)
 		obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultSuccess)
 		return nil
 	}); err != nil {
@@ -279,15 +278,10 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	return r.reconcileHeldDeadlines(ctx, ir, byIndex, plan.Paused, plan.InstanceReadyTimeout)
 }
 
-// mirrorBack copies the just-computed Component-level fields and
-// per-Instance pod counters from `fresh` onto the caller's in-memory IR
-// snapshot so downstream callers in the same reconcile pass observe the
-// post-compute state — regardless of whether a Status().Update was
-// actually issued. Matches the mirror pattern in mirrorInstanceStatus /
-// mirrorComponentRevisionFields on the ISVC side. The lifecycle fields
-// (Phase, Operation, Incarnation, RunningRevision, TargetRevision) stay
-// owned by the workload per-op writers and are left untouched.
-func mirrorBack(ir, fresh *v1beta1.InferenceReplica) {
+// mirrorBack copies Component fields and transient publication counters onto
+// the caller's in-memory IR. Lifecycle fields remain owned by workload
+// operations and are left untouched.
+func mirrorBack(ir, fresh *v1beta1.InferenceReplica, publication []workload.InstanceStatus) {
 	ir.Status.Replicas = fresh.Status.Replicas
 	ir.Status.ReadyReplicas = fresh.Status.ReadyReplicas
 	ir.Status.ServingReplicas = fresh.Status.ServingReplicas
@@ -298,14 +292,8 @@ func mirrorBack(ir, fresh *v1beta1.InferenceReplica) {
 	ir.Status.CurrentRevision = fresh.Status.CurrentRevision
 	ir.Status.ObservedGeneration = fresh.Status.ObservedGeneration
 	ir.Status.LabelSelector = fresh.Status.LabelSelector
-	// Mirror the per-Instance pod counters too so downstream callers
-	// reading ir.Status.InstanceStatuses observe the fresh per-pod
-	// state, not the stale snapshot from when the reconcile started.
-	// Per-pod counter freshness flows through the irprojector rollup
-	// onto ISVC.status.components[X].omenative.instanceStatuses, so
-	// `kubectl describe isvc` shows the same per-Instance numbers
-	// the IR controller just observed.
-	mirrorInstanceCounters(&ir.Status, fresh.Status.InstanceStatuses)
+	// The transient publication view is the source for same-pass derived fields.
+	mirrorInstanceCounters(&ir.Status, publication)
 	// Conditions: deep-copy the just-computed slice so callers reading
 	// IR.Status.Conditions in the same reconcile pass observe the
 	// post-compute set without sharing a backing array.
@@ -377,38 +365,29 @@ func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) worklo
 	}
 }
 
-// mirrorInstanceCounters copies the per-Instance pod counter fields
-// (PodCount / ReadyPodCount / ServingPodCount / ScheduledPodCount /
-// AvailablePodCount / NodesOccupied) from the just-committed
-// InstanceStatuses onto the caller's in-memory IR. Matched on Index
-// so a parallel mutator that inserted or removed an Instance between
-// the Get and Update doesn't end up writing counters onto the wrong
-// slot. The lifecycle fields (Phase, Operation, Incarnation,
-// RunningRevision, TargetRevision, ActiveOrdinal) are owned by the
-// workload per-op writers, not the aggregator — leaving them
-// untouched on the mirror avoids clobbering an in-flight per-op
-// write.
-func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, fresh []v1beta1.OMENativeInstanceStatus) {
+// mirrorInstanceCounters copies transient Pod counters by Instance index.
+// Lifecycle and admission fields remain untouched.
+func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, publication []workload.InstanceStatus) {
 	if status == nil {
 		return
 	}
-	freshByIdx := make(map[int32]v1beta1.OMENativeInstanceStatus, len(fresh))
-	for _, s := range fresh {
-		freshByIdx[s.Index] = s
+	publicationByIdx := make(map[int32]workload.InstanceStatus, len(publication))
+	for _, instance := range publication {
+		publicationByIdx[instance.Index] = instance
 	}
 	for i := range status.InstanceStatuses {
 		s := &status.InstanceStatuses[i]
-		f, ok := freshByIdx[s.Index]
+		observed, ok := publicationByIdx[s.Index]
 		if !ok {
 			continue
 		}
-		s.PodCount = f.PodCount
-		s.ReadyPodCount = f.ReadyPodCount
-		s.ServingPodCount = f.ServingPodCount
-		s.ScheduledPodCount = f.ScheduledPodCount
-		s.AvailablePodCount = f.AvailablePodCount
-		if f.NodesOccupied != nil {
-			s.NodesOccupied = append([]string(nil), f.NodesOccupied...)
+		s.PodCount = observed.PodCount
+		s.ReadyPodCount = observed.ReadyPodCount
+		s.ServingPodCount = observed.ServingPodCount
+		s.ScheduledPodCount = observed.ScheduledPodCount
+		s.AvailablePodCount = observed.AvailablePodCount
+		if observed.NodesOccupied != nil {
+			s.NodesOccupied = append([]string(nil), observed.NodesOccupied...)
 		} else {
 			s.NodesOccupied = nil
 		}

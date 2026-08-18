@@ -11,6 +11,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T) {
@@ -103,6 +104,9 @@ func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T
 	if _, err := observation.TakeInlineV1Statuses(); err == nil {
 		t.Fatal("publication observation was consumed twice")
 	}
+	if _, _, err := observation.TakeInlineV1Publication(nil, ""); err == nil {
+		t.Fatal("publication counters accepted a consumed observation")
+	}
 }
 
 func TestComponentObservationProvenanceAndEpochGuard(t *testing.T) {
@@ -131,6 +135,9 @@ func TestComponentObservationProvenanceAndEpochGuard(t *testing.T) {
 	}
 	if _, err := observation.InlineV1Statuses(); err == nil {
 		t.Fatal("decision observation materialized publication rows")
+	}
+	if _, _, err := observation.TakeInlineV1Publication(nil, ""); err == nil {
+		t.Fatal("decision observation produced publication counters")
 	}
 	if !reflect.DeepEqual(observation.PersistedStatuses(), persisted) {
 		t.Fatalf("persisted status projection changed")
@@ -226,17 +233,20 @@ func TestPublicationObservationPreservesNilStatusSlice(t *testing.T) {
 }
 
 var benchmarkObservationRows []workload.InstanceStatus
+var benchmarkComponentCounters workload.ComponentCounters
 
 func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 	for _, podsPerInstance := range []int{1, 8} {
 		persisted := make([]workload.InstanceStatus, 2000)
 		byInstance := make(map[int32][]*corev1.Pod, len(persisted))
 		available := make(map[string]struct{}, len(persisted)*podsPerInstance)
+		desired := make(map[int32]int32, len(persisted))
 		for index := range persisted {
 			persisted[index] = workload.InstanceStatus{
 				Index: int32(index), Incarnation: 1, Phase: workload.InstancePhaseReady,
 				RunningRevision: "revision-a",
 			}
+			desired[int32(index)] = int32(podsPerInstance)
 			for ordinal := 0; ordinal < podsPerInstance; ordinal++ {
 				name := fmt.Sprintf("pod-%04d-%02d", index, ordinal)
 				pod := observationPod(name, fmt.Sprintf("node-%02d", ordinal), true, true, false)
@@ -262,6 +272,40 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 			}
 		})
 
+		b.Run(fmt.Sprintf("2000x%d/owned-with-counters", podsPerInstance), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				owned := append([]workload.InstanceStatus(nil), persisted...)
+				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available)
+				if err != nil {
+					b.Fatal(err)
+				}
+				rows, counters, err := observation.TakeInlineV1Publication(desired, "revision-a")
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkObservationRows = rows
+				benchmarkComponentCounters = counters
+			}
+		})
+
+		b.Run(fmt.Sprintf("2000x%d/legacy-owned-with-counters", podsPerInstance), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				owned := append([]workload.InstanceStatus(nil), persisted...)
+				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available)
+				if err != nil {
+					b.Fatal(err)
+				}
+				rows, err := observation.TakeInlineV1Statuses()
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkObservationRows = rows
+				benchmarkComponentCounters = legacyObservationComponentCounters(rows, desired, "revision-a")
+			}
+		})
+
 		b.Run(fmt.Sprintf("2000x%d/copy", podsPerInstance), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
@@ -278,6 +322,30 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 			}
 		})
 	}
+}
+
+func legacyObservationComponentCounters(instances []workload.InstanceStatus, desiredByIdx map[int32]int32, targetRevision string) workload.ComponentCounters {
+	counters := workload.ComponentCounters{Replicas: int32(len(instances))}
+	target := query.RevisionFromName(targetRevision)
+	for _, instance := range instances {
+		desired := workload.DesiredFor(desiredByIdx, instance.Index, instance.PodCount)
+		if workload.InstanceMeetsThreshold(instance.PodCount, instance.ReadyPodCount, desired) {
+			counters.ReadyReplicas++
+		}
+		if workload.InstanceMeetsThreshold(instance.PodCount, instance.ServingPodCount, desired) {
+			counters.ServingReplicas++
+		}
+		if workload.InstanceMeetsThreshold(instance.PodCount, instance.AvailablePodCount, desired) {
+			counters.AvailableReplicas++
+		}
+		if targetRevision != "" && query.RevisionFromName(instance.RunningRevision).Same(target) {
+			counters.UpdatedReplicas++
+			if workload.InstanceMeetsThreshold(instance.PodCount, instance.ReadyPodCount, desired) {
+				counters.UpdatedReadyReplicas++
+			}
+		}
+	}
+	return counters
 }
 
 func observationPod(name, node string, ready, serving, gated bool) *corev1.Pod {

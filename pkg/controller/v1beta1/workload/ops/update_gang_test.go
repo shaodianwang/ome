@@ -20,6 +20,33 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
+func TestEmptyGangSurgeTargetSlotRejectsInlineObservationResidue(t *testing.T) {
+	if !emptyGangSurgeTargetSlot(&workload.InstanceStatus{Index: 7}) {
+		t.Fatal("zero-valued row should be an empty surge target slot")
+	}
+	if emptyGangSurgeTargetSlot(nil) {
+		t.Fatal("nil row should not be an empty surge target slot")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*workload.InstanceStatus)
+	}{
+		{name: "ready pods", mutate: func(status *workload.InstanceStatus) { status.ReadyPodCount = 1 }},
+		{name: "scheduled pods", mutate: func(status *workload.InstanceStatus) { status.ScheduledPodCount = 1 }},
+		{name: "occupied nodes", mutate: func(status *workload.InstanceStatus) { status.NodesOccupied = []string{"node-a"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := &workload.InstanceStatus{Index: 7}
+			test.mutate(status)
+			if emptyGangSurgeTargetSlot(status) {
+				t.Fatalf("row with %s was accepted as an empty surge target slot", test.name)
+			}
+		})
+	}
+}
+
 // gangSurgePod fabricates a surge-gang pod at the given instance index +
 // runner ordinal with the OMENative selector labels LiveListPodsForInstance
 // filters on.

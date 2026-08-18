@@ -7,6 +7,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -22,6 +23,20 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+type countingPodReader struct {
+	client.Reader
+	lists int
+	err   error
+}
+
+func (r *countingPodReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	r.lists++
+	if r.err != nil {
+		return r.err
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
 
 // vfnFixture builds the input + deps + plan a validateFromNode test
 // reads — a single-pod engine workload selecting pods labelled with
@@ -99,6 +114,35 @@ func TestValidateFromNode_MismatchRejected(t *testing.T) {
 	}
 	if mismatch == "" {
 		t.Errorf("expected mismatch reason")
+	}
+}
+
+func TestValidateFromNodeUsesAuthoritativePodsAndFailsClosed(t *testing.T) {
+	deps, input, plan := vfnFixture(t, vfnPod("stale-node"))
+	liveDeps, _, _ := vfnFixture(t, vfnPod("live-node"))
+	reader := &countingPodReader{Reader: liveDeps.Client}
+	deps.APIReader = reader
+	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+		Index: 0, NodesOccupied: []string{"persisted-node"},
+	}}
+
+	mismatch, defer_, err := validateFromNode(context.Background(), deps, input, plan, 0, "live-node")
+	if err != nil || defer_ || mismatch != "" {
+		t.Fatalf("authoritative Pod node should pass: mismatch=%q defer=%v err=%v", mismatch, defer_, err)
+	}
+	if reader.lists != 1 {
+		t.Fatalf("authoritative Pod lists: got %d want 1", reader.lists)
+	}
+
+	failure := errors.New("list failed")
+	reader = &countingPodReader{Reader: liveDeps.Client, err: failure}
+	deps.APIReader = reader
+	mismatch, defer_, err = validateFromNode(context.Background(), deps, input, plan, 0, "live-node")
+	if !errors.Is(err, failure) || defer_ || mismatch != "" {
+		t.Fatalf("authoritative read failure must fail closed: mismatch=%q defer=%v err=%v", mismatch, defer_, err)
+	}
+	if reader.lists != 1 {
+		t.Fatalf("failed authoritative Pod lists: got %d want 1", reader.lists)
 	}
 }
 

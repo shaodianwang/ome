@@ -332,12 +332,12 @@ retained field is irreducible forever.
 | `runningRevision` | Pod revision hash in steady state; rollout and revision GC | In-place labels advance before promotion; old CR must survive zero Pods | Keep. |
 | `targetRevision` | Update intent and identity guards | Exists before replacement Pods | Keep; already omitted in steady state. |
 | `podCount` | Current Pod list; aggregate classifiers | Previous value proves the last published gang view was complete | **Keep in DerivedV1.** |
-| `readyPodCount` | `ContainersReady=True`; publication rollups and raw diagnostic checks read it | No control-plane prior-snapshot use | Derive for internal rollups; stop serializing only after the raw diagnostic contract is replaced or deprecated. |
+| `readyPodCount` | `ContainersReady=True`; publication rollups, raw diagnostics, and the empty surge-slot integrity guard read it | No readiness decision needs its prior value; the integrity guard rejects nonzero legacy residue | Derive for internal rollups; stop serializing only after the raw diagnostic contract is replaced or deprecated. |
 | `servingPodCount` | `ContainersReady=True` and `ome.io/serving=True`; prior value drives failed-update exemption and RatioBalanced gang-peak accounting | Re-deriving current state advances decisions relative to today's deferred publisher | **Keep in DerivedV1.** |
 | `availablePodCount` | Ready, nonterminating EndpointSlice target; prior value gates migration tail | Re-deriving current EndpointSlices can advance migration by one reconcile | **Keep in DerivedV1.** |
-| `scheduledPodCount` | `Pod.spec.nodeName != ""` | No historical meaning | Derive; stop serializing. |
+| `scheduledPodCount` | `Pod.spec.nodeName != ""`; the empty surge-slot integrity guard checks zero | No historical meaning outside that legacy-row integrity check | Derive; stop serializing. |
 | `admitted` | Pods exist and none carries a scheduling gate; placement counts the current row set | Row removal/teardown may bypass publication, so a scalar aggregate can remain stale | **Keep in DerivedV1.** |
-| `nodesOccupied` | Sorted unique `Pod.spec.nodeName` values; a KIND migration workflow uses it to choose `fromNode` | Current node observation only; migration history lives elsewhere | Derive; stop serializing only after the raw migration/debug query is replaced or deprecated. |
+| `nodesOccupied` | Sorted unique `Pod.spec.nodeName` values; raw diagnostics and the empty surge-slot integrity guard read it | Current node observation only; migration history lives elsewhere | Derive; stop serializing only after the raw migration/debug query is replaced or deprecated. |
 | `conditions` | No production writer found; the empty gang-surge-slot integrity predicate requires it to be empty | Legacy values may exist | Preserve on read and deprecate separately; normally omitted. |
 | `operation` | Write-ahead lifecycle journal | Primary crash-recovery anchor | Keep. |
 | `activeOrdinal` | Pod ordinal when unambiguous; canonical surge slot | Ambiguous with two Pods and absent with zero Pods | Keep. |
@@ -433,6 +433,7 @@ writes begin.
 | Consumer | What it reads today | Required compact source |
 | --- | --- | --- |
 | Workload planner and operations | Dense lifecycle rows plus some copied live counters | Durable rows plus the correct decision-epoch view; destructive checks stay live. |
+| Create batch rollback | Whole-row equality indirectly includes all three publication-only fields | Compare every retained transition-ownership field; preserve current InlineV1 observations while restoring prior lifecycle state. |
 | IR aggregate and conditions | Per-Instance counters, phases, revisions, failures | Publication-epoch observation plus durable rows; persist identical top-level values. |
 | ISVC IR projector | Top-level counts, revisions, conditions | Unchanged. It intentionally does not mirror per-Instance rows. |
 | RatioBalanced / surge gates | Top-level serving count, Operation steps, prior per-Instance serving peak | Unchanged persisted serving values in DerivedV1. A later format needs an equivalent persisted predicate before removing them. |
@@ -442,7 +443,7 @@ writes begin.
 | Multi-cluster placement | Per-Instance `admitted`, failed phase, and top-level `readyReplicas` for Split accounting and endpoint weight | Unchanged durable rows and top-level summaries. No remote Pod informer or aggregate migration. |
 | ControllerRevision GC | Current/update and every Instance running/target revision | Unchanged durable union. |
 | Internal performance invariant harness | Per-Instance `readyPodCount` to avoid comparing two independently lagging watches | Must receive the approved diagnostic replacement; this is part of the raw-status blocker, not “just a test” to delete. |
-| KIND and operator-driven migration | `nodesOccupied[0]` can supply the request's `fromNode` | Read `Pod.spec.nodeName` through the approved diagnostic/query contract. Migration's existing live validation remains authoritative. |
+| KIND and operator-driven migration | KIND reads `Pod.spec.nodeName`; external clients may use `nodesOccupied[0]` to supply `fromNode` | Keep the Pod query and define the external diagnostic contract. Migration's existing live validation remains authoritative. |
 | Test admitters and integration fixtures | Direct per-Instance `admitted` reads/writes and assertions on the three removable fields | Admission fixtures stay unchanged; assert live Pod facts where epoch coupling is not required. Keep explicit InlineV1/DerivedV1 coverage. |
 | Operators using raw IR YAML | All serialized fields | Preserve mode remains available; DerivedV1 intentionally omits three fields. |
 

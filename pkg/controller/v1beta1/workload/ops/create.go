@@ -475,7 +475,7 @@ func (transition *statusTransition) rollbackMutation() (workload.InstanceMutatio
 	}
 	committed := *transition.current
 	matchesCommitted := func(status *workload.InstanceStatus) bool {
-		return reflect.DeepEqual(*status, committed)
+		return sameCreateTransitionOwnerState(*status, committed)
 	}
 	if transition.previous == nil {
 		return workload.InstanceMutation{
@@ -491,10 +491,34 @@ func (transition *statusTransition) rollbackMutation() (workload.InstanceMutatio
 			if !matchesCommitted(status) {
 				return false
 			}
-			*status = previous
+			restoreCreateTransitionState(status, previous)
 			return true
 		},
 	}, true
+}
+
+// sameCreateTransitionOwnerState compares the state that can authorize a
+// Create rollback. Publication-only Pod observations do not own the lifecycle
+// transition and may advance independently.
+func sameCreateTransitionOwnerState(current, committed workload.InstanceStatus) bool {
+	current.ReadyPodCount = 0
+	current.ScheduledPodCount = 0
+	current.NodesOccupied = nil
+	committed.ReadyPodCount = 0
+	committed.ScheduledPodCount = 0
+	committed.NodesOccupied = nil
+	return reflect.DeepEqual(current, committed)
+}
+
+func restoreCreateTransitionState(status *workload.InstanceStatus, previous workload.InstanceStatus) {
+	previous.ReadyPodCount = status.ReadyPodCount
+	previous.ScheduledPodCount = status.ScheduledPodCount
+	if status.NodesOccupied != nil {
+		previous.NodesOccupied = append([]string(nil), status.NodesOccupied...)
+	} else {
+		previous.NodesOccupied = nil
+	}
+	*status = previous
 }
 
 func scaleUpPodBatchAdmits(limit *int32, selectedPods, candidatePods int32) bool {
