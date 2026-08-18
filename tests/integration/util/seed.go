@@ -57,7 +57,8 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 }`,
 		"lifecycle": `{
   "scaleUpPodBatchSize": 100,
-  "scaleDownPodBatchSize": 100
+  "scaleDownPodBatchSize": 100,
+  "revisionHistoryLimit": 10
 }`,
 		"omeAgent": `{
   "image": "ghcr.io/test/ome-agent:test",

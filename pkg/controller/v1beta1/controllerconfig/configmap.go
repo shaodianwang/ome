@@ -338,6 +338,15 @@ type LifecycleConfig struct {
 	// force-delete and teardown deadlines still schedule their exact wake-ups.
 	// There is intentionally no in-code default.
 	ScaleDownRequeueInterval *string `json:"scaleDownRequeueInterval,omitempty"`
+	// RevisionHistoryLimit is the operator-level cap on non-live
+	// ControllerRevisions retained per InferenceReplica when the parent
+	// InferenceService does not set the ome.io/revision-history-limit
+	// annotation. Live revisions are never deleted regardless of the cap.
+	// There is intentionally NO in-code default — the value is supplied via
+	// the inferenceservice-config ConfigMap (Helm chart / GitOps). Absent
+	// means unconfigured: without a per-ISVC annotation the retention sweep
+	// prunes nothing, never a silent fallback to a baked-in number.
+	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 }
 
 // PodBatchSizes contains the process-scoped OMENative scale settings loaded
@@ -557,6 +566,22 @@ func (c *LifecycleConfig) ToScaleDownRequeueInterval() (time.Duration, error) {
 		return 0, fmt.Errorf("invalid lifecycle.scaleDownRequeueInterval: must be > 0, got %s", interval)
 	}
 	return interval, nil
+}
+
+// ToRevisionHistoryLimit validates the configured non-live revision
+// retention cap. A nil LifecycleConfig or absent field means
+// unconfigured (nil, nil) — the caller prunes nothing rather than
+// fabricating a default. Explicit zero or negative values are invalid;
+// callers treat invalid config as unconfigured.
+func (c *LifecycleConfig) ToRevisionHistoryLimit() (*int32, error) {
+	if c == nil || c.RevisionHistoryLimit == nil {
+		return nil, nil
+	}
+	if *c.RevisionHistoryLimit <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.revisionHistoryLimit: must be > 0, got %d", *c.RevisionHistoryLimit)
+	}
+	limit := *c.RevisionHistoryLimit
+	return &limit, nil
 }
 
 func positivePodBatchSize(field string, configured *int32) (*int32, error) {

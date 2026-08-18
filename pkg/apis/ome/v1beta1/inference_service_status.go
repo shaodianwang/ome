@@ -134,21 +134,27 @@ type ComponentStatusSpec struct {
 	// +kubebuilder:validation:Enum=Stable;Canarying;BlueGreenStandby;Pending;Paused;Promoting;RollingBack;RolledBack;Failed
 	RolloutPhase RolloutPhase `json:"rolloutPhase,omitempty"`
 
-	// LatestReadyRevision names the most recent ControllerRevision
-	// whose pods reached Ready. Equal to LatestRolledoutRevision once
-	// the rollout completes; set ahead of it during in-flight rollouts.
+	// LatestReadyRevision is the per-revision Service name
+	// (`<isvc>-<component>-rev-<hash>`) fronting the most recent
+	// revision whose pods reached Ready. Equal to
+	// LatestRolledoutRevision once the rollout completes; set ahead of
+	// it during in-flight rollouts.
 	// +optional
 	LatestReadyRevision string `json:"latestReadyRevision,omitempty"`
 
-	// LatestRolledoutRevision names the most recent ControllerRevision
+	// LatestRolledoutRevision is the per-revision Service name
+	// (`<isvc>-<component>-rev-<hash>`) of the most recent revision
 	// that fully owns this Component's traffic (i.e., the rollout has
 	// completed). Drives the consumer-side HTTPRoute backendRef.
 	// +optional
 	LatestRolledoutRevision string `json:"latestRolledoutRevision,omitempty"`
 
-	// PreviousRolledoutRevision names the prior rolled-out
-	// ControllerRevision, retained for diagnosis and traffic
-	// reference during partial rollbacks.
+	// PreviousRolledoutRevision is the per-revision Service name
+	// (`<isvc>-<component>-rev-<hash>`) of the revision that fully
+	// owned this Component's traffic immediately before
+	// LatestRolledoutRevision; recorded when LatestRolledoutRevision
+	// advances. Retained for diagnosis and traffic reference during
+	// partial rollbacks.
 	// +optional
 	PreviousRolledoutRevision string `json:"previousRolledoutRevision,omitempty"`
 

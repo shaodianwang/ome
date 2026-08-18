@@ -432,6 +432,60 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("InvalidDuration"))
 	})
 
+	ginkgo.It("rejects ome.io/revision-history-limit zero (InvalidPositiveIntValue)", func() {
+		isvc := v1beta1testing.MakeInferenceService("isvc-rhl-zero", "isvc-webhook").
+			Annotation(constants.RevisionHistoryLimitAnnotation, "0").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("InvalidPositiveIntValue"))
+	})
+
+	ginkgo.It("rejects ome.io/revision-history-limit negative (InvalidPositiveIntValue)", func() {
+		isvc := v1beta1testing.MakeInferenceService("isvc-rhl-negative", "isvc-webhook").
+			Annotation(constants.RevisionHistoryLimitAnnotation, "-1").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("InvalidPositiveIntValue"))
+	})
+
+	ginkgo.It("rejects ome.io/revision-history-limit non-integer (InvalidIntValue)", func() {
+		isvc := v1beta1testing.MakeInferenceService("isvc-rhl-garbage", "isvc-webhook").
+			Annotation(constants.RevisionHistoryLimitAnnotation, "many").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("InvalidIntValue"))
+	})
+
+	ginkgo.It("accepts a positive ome.io/revision-history-limit", func() {
+		isvc := v1beta1testing.MakeInferenceService("isvc-rhl-valid", "isvc-webhook").
+			Annotation(constants.RevisionHistoryLimitAnnotation, "1").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+
+		err := k8sClient.Create(suiteCtx, isvc)
+		if err != nil {
+			// Model lookup may fail; a valid limit must not produce a
+			// hard annotation rejection.
+			Expect(err.Error()).NotTo(ContainSubstring("InvalidPositiveIntValue"))
+			Expect(err.Error()).NotTo(ContainSubstring("InvalidIntValue"))
+		} else {
+			ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+		}
+	})
+
 	ginkgo.It("accepts ome.io/rollout-promote as a known annotation", func() {
 		// rollout-promote is a recognized ome.io/* traffic annotation; a
 		// well-formed value must not produce a hard admission rejection.

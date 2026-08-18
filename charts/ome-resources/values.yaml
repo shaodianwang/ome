@@ -215,6 +215,15 @@ ome:
       # due. Malformed or non-positive durations prevent manager startup. Helm
       # rolls the manager when this value changes.
       scaleDownRequeueInterval: 5s
+      # revisionHistoryLimit caps how many non-live ControllerRevisions the
+      # InferenceReplica controller retains per (InferenceService, Component)
+      # when the ISVC does not set the ome.io/revision-history-limit
+      # annotation (the annotation, a positive integer, always wins). Live
+      # revisions — current, target, and every per-Instance running/target
+      # revision — are never deleted regardless of the limit. The OME binary
+      # has NO built-in default: removing this field disables pruning
+      # entirely for ISVCs without the annotation (revisions accumulate).
+      revisionHistoryLimit: 10
       # updateRetry bounds automatic same-target update retries (RetryBlock).
       # A rollout that fails toward an UNCHANGED target revision backs off
       # exponentially (initialDelay * multiplier^(attempt-1), capped at

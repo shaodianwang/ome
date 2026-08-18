@@ -34,7 +34,9 @@ package irprojector
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -371,6 +373,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.Runners = runnersFromParams(p)
 	ir.Spec.Lifecycle = lifecycleFromComponentExt(p.ComponentExt)
 	ir.Spec.Paused = p.ISVC.Annotations[constants.PausedRolloutAnnotation] == "true"
+	ir.Spec.RevisionHistoryLimit = revisionHistoryLimitFromISVC(p.ISVC)
 	// Project the resolved gang co-location key verbatim. The IR
 	// controller reads it to auto-generate the worker→leader podAffinity
 	// for multi-node Components; nil is a no-op there.
@@ -602,6 +605,25 @@ func templateObjectMeta(p Params) metav1.ObjectMeta {
 		Labels:      labels,
 		Annotations: annotations,
 	}
+}
+
+// revisionHistoryLimitFromISVC projects the operator-facing
+// ome.io/revision-history-limit ISVC annotation onto the IR Spec. The
+// admission webhook rejects non-integer and non-positive values, so a
+// malformed value here (written before the webhook was active, or
+// bypassing it) projects as nil — the IR controller then falls back to
+// the operator-level config default instead of honoring a bad value.
+func revisionHistoryLimitFromISVC(isvc *v1beta1.InferenceService) *int32 {
+	raw, ok := isvc.Annotations[constants.RevisionHistoryLimitAnnotation]
+	if !ok {
+		return nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > math.MaxInt32 {
+		return nil
+	}
+	v := int32(n)
+	return &v
 }
 
 // lifecycleFromComponentExt deep-copies the LifecycleSpec when set

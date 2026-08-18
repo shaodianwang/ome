@@ -57,6 +57,13 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			name: "valid revision history limit",
+			annotations: map[string]string{
+				constants.RevisionHistoryLimitAnnotation: "1",
+			},
+			wantOK: true,
+		},
 
 		// Type-coercion failures.
 		{
@@ -95,6 +102,27 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 				constants.RetryOnAnnotation:       "5xx,,reset",
 			},
 			wantContains: "InvalidRetryOn",
+		},
+		{
+			name: "revision history limit not an int",
+			annotations: map[string]string{
+				constants.RevisionHistoryLimitAnnotation: "many",
+			},
+			wantContains: "InvalidIntValue",
+		},
+		{
+			name: "revision history limit zero",
+			annotations: map[string]string{
+				constants.RevisionHistoryLimitAnnotation: "0",
+			},
+			wantContains: "InvalidPositiveIntValue",
+		},
+		{
+			name: "revision history limit negative",
+			annotations: map[string]string{
+				constants.RevisionHistoryLimitAnnotation: "-3",
+			},
+			wantContains: "InvalidPositiveIntValue",
 		},
 		{
 			name: "promote target negative",

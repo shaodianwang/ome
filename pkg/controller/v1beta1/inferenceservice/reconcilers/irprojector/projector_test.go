@@ -215,6 +215,45 @@ func TestEnsureInferenceReplica_ProjectsPauseAnnotationAndClearsOnRemoval(t *tes
 		"removing the parent annotation must clear the projected circuit breaker")
 }
 
+// TestEnsureInferenceReplica_ProjectsRevisionHistoryLimit pins the
+// annotation → IR Spec projection for the retention cap: a positive
+// ome.io/revision-history-limit on the parent ISVC lands on
+// Spec.RevisionHistoryLimit, removal clears it (falls back to the
+// operator-level config default), and a malformed or non-positive value
+// projects as nil instead of being honored.
+func TestEnsureInferenceReplica_ProjectsRevisionHistoryLimit(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Annotations = map[string]string{constants.RevisionHistoryLimitAnnotation: "3"}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	key := types.NamespacedName{Name: "llama-engine", Namespace: "prod"}
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.Spec.RevisionHistoryLimit).To(gomega.HaveValue(gomega.Equal(int32(3))),
+		"a positive annotation value must project onto Spec.RevisionHistoryLimit")
+
+	delete(isvc.Annotations, constants.RevisionHistoryLimitAnnotation)
+	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	cleared := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, cleared)).To(gomega.Succeed())
+	g.Expect(cleared.Spec.RevisionHistoryLimit).To(gomega.BeNil(),
+		"removing the annotation must clear the projection (config default applies)")
+
+	for _, bad := range []string{"0", "-1", "many"} {
+		isvc.Annotations = map[string]string{constants.RevisionHistoryLimitAnnotation: bad}
+		_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		out := &v1beta1.InferenceReplica{}
+		g.Expect(c.Get(context.Background(), key, out)).To(gomega.Succeed())
+		g.Expect(out.Spec.RevisionHistoryLimit).To(gomega.BeNil(),
+			"malformed or non-positive annotation value %q must project as nil, never be honored", bad)
+	}
+}
+
 // TestEnsureInferenceReplica_Update_PreservesGeneration pins the
 // update path: the projector emits the same IR Spec on a second
 // invocation, so the apiserver-side Generation should NOT bump (no

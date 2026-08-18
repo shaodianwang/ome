@@ -23,6 +23,7 @@ type trafficAnnotationKind int
 const (
 	kindUnknown trafficAnnotationKind = iota
 	kindInt
+	kindPositiveInt // int >= 1
 	kindDuration
 	kindBool
 	kindRetryOnList
@@ -56,7 +57,7 @@ var trafficAnnotationKinds = map[string]trafficAnnotationKind{
 	// Operational.
 	constants.ManagedByConflictAckedAnnotation: kindBool,
 	constants.RolloutReadyTimeoutAnnotation:    kindDuration,
-	constants.RevisionHistoryLimitAnnotation:   kindInt,
+	constants.RevisionHistoryLimitAnnotation:   kindPositiveInt,
 	constants.RolloutPromoteAnnotation:         kindPromoteTarget,
 	constants.RolloutRollbackAnnotation:        kindBool,
 }
@@ -147,6 +148,14 @@ func validateAnnotationValue(key, value string, kind trafficAnnotationKind) erro
 	case kindInt:
 		if _, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("annotation %q value %q is not a valid integer (InvalidIntValue): %w", key, value, err)
+		}
+	case kindPositiveInt:
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("annotation %q value %q is not a valid integer (InvalidIntValue): %w", key, value, err)
+		}
+		if n < 1 {
+			return fmt.Errorf("annotation %q value %q must be a positive integer (>= 1) (InvalidPositiveIntValue)", key, value)
 		}
 	case kindDuration:
 		if _, err := time.ParseDuration(value); err != nil {

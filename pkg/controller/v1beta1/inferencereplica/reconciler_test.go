@@ -1797,13 +1797,16 @@ func newReconcilerWithGrace(t *testing.T, grace time.Duration, objs ...client.Ob
 func TestReconcile_StatusWriteFailureStillSweepsRevisions(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
+	// Retention rides the per-IR spec limit so the sweep is configured
+	// without wiring a clientset.
+	ir.Spec.RevisionHistoryLimit = ptr.To(int32(testRevisionRetention))
 
 	liveCR := seedControllerRevision(ir, "live", 1)
 	ir.Status.CurrentRevision = liveCR.Name
 
 	const extra = 5
-	nonLive := make([]*appsv1.ControllerRevision, 0, defaultRevisionRetention+extra)
-	for i := 0; i < defaultRevisionRetention+extra; i++ {
+	nonLive := make([]*appsv1.ControllerRevision, 0, testRevisionRetention+extra)
+	for i := 0; i < testRevisionRetention+extra; i++ {
 		nonLive = append(nonLive, seedControllerRevision(ir, fmt.Sprintf("nonlive%02d", i), int64(i+2)))
 	}
 	objs := []client.Object{ir, liveCR}

@@ -47,10 +47,15 @@ var (
 	// Failed. Duration string (e.g. "15m"). Default: 15m.
 	RolloutReadyTimeoutAnnotation = OMEAPIGroupName + "/rollout-ready-timeout"
 
-	// RevisionHistoryLimitAnnotation overrides the default number of
-	// non-active revisions per Component retained before garbage
-	// collection (in addition to LatestRolledoutRevision and
-	// PreviousRolledoutRevision). Default: 3.
+	// RevisionHistoryLimitAnnotation caps the number of non-live
+	// ControllerRevisions retained per Component before garbage
+	// collection. Must be a positive integer (rejected at admission
+	// otherwise). Live revisions — current, target, and every
+	// per-Instance running/target revision — are never deleted
+	// regardless of the limit. Overrides the operator-level
+	// lifecycle.revisionHistoryLimit value from the
+	// inferenceservice-config ConfigMap; when neither is set, no
+	// revisions are pruned.
 	RevisionHistoryLimitAnnotation = OMEAPIGroupName + "/revision-history-limit"
 
 	// RolloutPromoteAnnotation is the operator verb that advances a paused

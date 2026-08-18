@@ -1278,21 +1278,21 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"latestReadyRevision": {
 						SchemaProps: spec.SchemaProps{
-							Description: "LatestReadyRevision names the most recent ControllerRevision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
+							Description: "LatestReadyRevision is the per-revision Service name (`<isvc>-<component>-rev-<hash>`) fronting the most recent revision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"latestRolledoutRevision": {
 						SchemaProps: spec.SchemaProps{
-							Description: "LatestRolledoutRevision names the most recent ControllerRevision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
+							Description: "LatestRolledoutRevision is the per-revision Service name (`<isvc>-<component>-rev-<hash>`) of the most recent revision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"previousRolledoutRevision": {
 						SchemaProps: spec.SchemaProps{
-							Description: "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reference during partial rollbacks.",
+							Description: "PreviousRolledoutRevision is the per-revision Service name (`<isvc>-<component>-rev-<hash>`) of the revision that fully owned this Component's traffic immediately before LatestRolledoutRevision; recorded when LatestRolledoutRevision advances. Retained for diagnosis and traffic reference during partial rollbacks.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -3489,6 +3489,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							Description: "Paused, when true, stops the InferenceReplica controller from initiating any new Update / Restart / Create operations. In-flight operations resume on unpause.",
 							Type:        []string{"boolean"},
 							Format:      "",
+						},
+					},
+					"revisionHistoryLimit": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RevisionHistoryLimit caps how many non-live ControllerRevisions the InferenceReplica controller retains for this replica, projected by the InferenceService controller from the parent ISVC's ome.io/revision-history-limit annotation. Live revisions (CurrentRevision / UpdateRevision and every per-Instance running/target revision) are never deleted regardless of the limit. Nil falls back to the operator-level lifecycle.revisionHistoryLimit config; when that is also absent, no revisions are pruned.",
+							Type:        []string{"integer"},
+							Format:      "int32",
 						},
 					},
 				},

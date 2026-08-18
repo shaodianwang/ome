@@ -661,11 +661,11 @@
           "$ref": "#/definitions/v1beta1.ComponentAutoscalerStatus"
         },
         "latestReadyRevision": {
-          "description": "LatestReadyRevision names the most recent ControllerRevision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
+          "description": "LatestReadyRevision is the per-revision Service name (`\u003cisvc\u003e-\u003ccomponent\u003e-rev-\u003chash\u003e`) fronting the most recent revision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
           "type": "string"
         },
         "latestRolledoutRevision": {
-          "description": "LatestRolledoutRevision names the most recent ControllerRevision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
+          "description": "LatestRolledoutRevision is the per-revision Service name (`\u003cisvc\u003e-\u003ccomponent\u003e-rev-\u003chash\u003e`) of the most recent revision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
           "type": "string"
         },
         "lifecycle": {
@@ -673,7 +673,7 @@
           "$ref": "#/definitions/v1beta1.LifecycleStatus"
         },
         "previousRolledoutRevision": {
-          "description": "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reference during partial rollbacks.",
+          "description": "PreviousRolledoutRevision is the per-revision Service name (`\u003cisvc\u003e-\u003ccomponent\u003e-rev-\u003chash\u003e`) of the revision that fully owned this Component's traffic immediately before LatestRolledoutRevision; recorded when LatestRolledoutRevision advances. Retained for diagnosis and traffic reference during partial rollbacks.",
           "type": "string"
         },
         "restURL": {
@@ -1918,6 +1918,11 @@
         },
         "replicas": {
           "description": "Replicas is the desired Instance count. The HPA / KEDA scale subresource writes this field. Defaults to 1 when omitted.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "revisionHistoryLimit": {
+          "description": "RevisionHistoryLimit caps how many non-live ControllerRevisions the InferenceReplica controller retains for this replica, projected by the InferenceService controller from the parent ISVC's ome.io/revision-history-limit annotation. Live revisions (CurrentRevision / UpdateRevision and every per-Instance running/target revision) are never deleted regardless of the limit. Nil falls back to the operator-level lifecycle.revisionHistoryLimit config; when that is also absent, no revisions are pruned.",
           "type": "integer",
           "format": "int32"
         },

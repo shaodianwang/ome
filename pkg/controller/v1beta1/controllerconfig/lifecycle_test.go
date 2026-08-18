@@ -392,6 +392,51 @@ func TestLifecycleConfig_ToScaleUpPodBatchSize(t *testing.T) {
 	}
 }
 
+// TestLifecycleConfig_ToRevisionHistoryLimit pins the field-specific
+// contract: absent configuration is unconfigured (the retention sweep
+// prunes nothing rather than fabricating a default), a positive cap
+// passes through as a value copy, and an explicitly non-positive value
+// is invalid (the caller treats it as unconfigured).
+func TestLifecycleConfig_ToRevisionHistoryLimit(t *testing.T) {
+	t.Run("nil config is unconfigured", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		limit, err := cfg.ToRevisionHistoryLimit()
+		require.NoError(t, err)
+		assert.Nil(t, limit)
+	})
+
+	t.Run("absent field is unconfigured", func(t *testing.T) {
+		cfg := &LifecycleConfig{}
+		limit, err := cfg.ToRevisionHistoryLimit()
+		require.NoError(t, err)
+		assert.Nil(t, limit)
+	})
+
+	t.Run("positive value passes through as a copy", func(t *testing.T) {
+		configured := int32(10)
+		cfg := &LifecycleConfig{RevisionHistoryLimit: &configured}
+		limit, err := cfg.ToRevisionHistoryLimit()
+		require.NoError(t, err)
+		require.NotNil(t, limit)
+		assert.Equal(t, int32(10), *limit)
+
+		// The conversion returns a value copy, not an alias into the parsed
+		// ConfigMap object that a cached reader may share with other callers.
+		configured = 42
+		assert.Equal(t, int32(10), *limit)
+	})
+
+	for _, configured := range []int32{0, -1} {
+		configured := configured
+		t.Run(fmt.Sprintf("rejects %d", configured), func(t *testing.T) {
+			cfg := &LifecycleConfig{RevisionHistoryLimit: &configured}
+			limit, err := cfg.ToRevisionHistoryLimit()
+			assert.Error(t, err)
+			assert.Nil(t, limit)
+		})
+	}
+}
+
 // TestUpdateRetryConfig_ToPolicy pins the validation contract: the chart
 // defaults convert 1:1, and every violation is an error (the caller
 // treats an invalid policy as unconfigured — fail-safe Held — rather

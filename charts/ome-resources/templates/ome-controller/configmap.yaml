@@ -61,6 +61,9 @@ data:
   {{- if hasKey . "scaleDownRequeueInterval" }}
   {{- $fields = append $fields (dict "scaleDownRequeueInterval" .scaleDownRequeueInterval) }}
   {{- end }}
+  {{- if hasKey . "revisionHistoryLimit" }}
+  {{- $fields = append $fields (dict "revisionHistoryLimit" .revisionHistoryLimit) }}
+  {{- end }}
   {{- with .updateRetry }}
   {{- $fields = append $fields (dict "updateRetry" (dict "maxAttempts" .maxAttempts "initialDelay" .initialDelay "maxDelay" .maxDelay "multiplier" .multiplier)) }}
   {{- end }}

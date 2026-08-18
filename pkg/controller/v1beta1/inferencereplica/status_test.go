@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1024,12 +1025,15 @@ func TestReconcile_GenerationChangeRequeuesBeforeDeferredEffects(t *testing.T) {
 			stale := baselineIR("llama-engine", "prod", 1)
 			stale.Finalizers = []string{TeardownFinalizer}
 			stale.Spec.Paused = true
+			// Retention is configured (per-IR spec limit) so the sweep
+			// WOULD trim the fence if the deferred pass wrongly ran it.
+			stale.Spec.RevisionHistoryLimit = ptr.To(int32(testRevisionRetention))
 			liveObject := stale.DeepCopy()
 			liveObject.Generation++
 
 			objects := []client.Object{liveObject}
 			oldestRevision := ""
-			for i := 0; i < defaultRevisionRetention+2; i++ {
+			for i := 0; i < testRevisionRetention+2; i++ {
 				revision := seedControllerRevision(liveObject, fmt.Sprintf("fence%02d", i), int64(i+1))
 				if i == 0 {
 					oldestRevision = revision.Name

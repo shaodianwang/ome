@@ -652,6 +652,10 @@ spec:
                 replicas:
                   format: int32
                   type: integer
+                revisionHistoryLimit:
+                  format: int32
+                  minimum: 1
+                  type: integer
                 runners:
                   items:
                     properties:

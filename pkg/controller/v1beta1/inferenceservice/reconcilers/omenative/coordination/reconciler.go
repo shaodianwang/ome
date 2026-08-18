@@ -515,10 +515,17 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 			cs.LatestReadyRevision = PerRevisionServiceName(isvc.Name, c, latestHash)
 		}
 		// LatestRolledoutRevision advances to the per-revision Service
-		// name once the rollout is at 100% on a single revision.
+		// name once the rollout is at 100% on a single revision. The
+		// prior value is demoted to PreviousRolledoutRevision on a real
+		// advance so consumers can identify the immediately-prior
+		// rolled-out revision during diagnosis and partial rollbacks.
 		if len(hashes) == 1 {
 			for hash := range hashes {
-				cs.LatestRolledoutRevision = PerRevisionServiceName(isvc.Name, c, hash)
+				rolledOut := PerRevisionServiceName(isvc.Name, c, hash)
+				if cs.LatestRolledoutRevision != "" && cs.LatestRolledoutRevision != rolledOut {
+					cs.PreviousRolledoutRevision = cs.LatestRolledoutRevision
+				}
+				cs.LatestRolledoutRevision = rolledOut
 			}
 		}
 		isvc.Status.Components[c] = cs

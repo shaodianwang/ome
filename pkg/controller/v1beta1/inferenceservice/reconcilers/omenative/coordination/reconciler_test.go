@@ -685,6 +685,65 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 	}
 }
 
+// TestReconcile_PreviousRolledoutRecordedOnAdvance pins the rolled-out
+// identifier contract across two completed rollouts: when the traffic
+// converges to 100% on a NEW revision, LatestRolledoutRevision advances
+// to the new per-revision Service name and the prior value is demoted
+// to PreviousRolledoutRevision. A repeat observation of the SAME
+// converged revision must not shift Previous.
+func TestReconcile_PreviousRolledoutRecordedOnAdvance(t *testing.T) {
+	isvc := testOMENativeISVC()
+
+	reconcileWith := func(hash string) {
+		t.Helper()
+		engineIR := &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-engine", Namespace: isvc.Namespace},
+			Status: v1beta1.InferenceReplicaStatus{
+				UpdateRevision: isvc.Name + "-engine-" + hash,
+			},
+		}
+		c := testClient(buildPod(isvc, v1beta1.EngineComponent, hash, 0), engineIR)
+		if _, err := Reconcile(context.Background(), ReconcileInputs{
+			ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+			ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent),
+		}); err != nil {
+			t.Fatalf("reconcile with hash %s: unexpected error: %v", hash, err)
+		}
+	}
+
+	// First rollout completes on hashA.
+	reconcileWith("hasha")
+	cs := isvc.Status.Components[v1beta1.EngineComponent]
+	if got, want := cs.LatestRolledoutRevision, "llama-engine-rev-hasha"; got != want {
+		t.Fatalf("after first rollout: LatestRolledoutRevision=%q want %q", got, want)
+	}
+	if cs.PreviousRolledoutRevision != "" {
+		t.Fatalf("after first rollout: PreviousRolledoutRevision=%q want empty (no prior rollout)", cs.PreviousRolledoutRevision)
+	}
+
+	// Second rollout completes on hashB: Latest advances, Previous
+	// records the immediately-prior rolled-out revision.
+	reconcileWith("hashb")
+	cs = isvc.Status.Components[v1beta1.EngineComponent]
+	if got, want := cs.LatestRolledoutRevision, "llama-engine-rev-hashb"; got != want {
+		t.Fatalf("after second rollout: LatestRolledoutRevision=%q want %q", got, want)
+	}
+	if got, want := cs.PreviousRolledoutRevision, "llama-engine-rev-hasha"; got != want {
+		t.Fatalf("after second rollout: PreviousRolledoutRevision=%q want %q", got, want)
+	}
+
+	// Re-observing the same converged revision must not shift Previous
+	// onto the current Latest.
+	reconcileWith("hashb")
+	cs = isvc.Status.Components[v1beta1.EngineComponent]
+	if got, want := cs.PreviousRolledoutRevision, "llama-engine-rev-hasha"; got != want {
+		t.Fatalf("after repeat observation: PreviousRolledoutRevision=%q want %q (must not self-demote)", got, want)
+	}
+	if got, want := cs.LatestRolledoutRevision, "llama-engine-rev-hashb"; got != want {
+		t.Fatalf("after repeat observation: LatestRolledoutRevision=%q want %q", got, want)
+	}
+}
+
 // singleEngineGroup returns a minimal RolloutSpec that opts the engine
 // Component into a rollout group. (v1's Independent policy is gone in v2;
 // a lone single-Component blueGreen group is the minimal opt-in that

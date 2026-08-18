@@ -137,6 +137,19 @@ type InferenceReplicaSpec struct {
 	// In-flight operations resume on unpause.
 	// +optional
 	Paused bool `json:"paused,omitempty"`
+
+	// RevisionHistoryLimit caps how many non-live ControllerRevisions
+	// the InferenceReplica controller retains for this replica,
+	// projected by the InferenceService controller from the parent
+	// ISVC's ome.io/revision-history-limit annotation. Live revisions
+	// (CurrentRevision / UpdateRevision and every per-Instance
+	// running/target revision) are never deleted regardless of the
+	// limit. Nil falls back to the operator-level
+	// lifecycle.revisionHistoryLimit config; when that is also absent,
+	// no revisions are pruned.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 }
 
 // ParentReference holds the InferenceService owner reference info.

@@ -19,7 +19,9 @@ import (
 // Uses a synthetic env-var to drive per-bump PodSpec drift (which
 // produces a distinct ControllerRevision hash without needing a 5-tag
 // image build matrix). The controller must converge on the final spec
-// and the non-live CRs must be GC'd under defaultRevisionRetention.
+// and the non-live CRs must be GC'd under the config-driven retention
+// limit (lifecycle.revisionHistoryLimit, 10 in the suite's seeded
+// inferenceservice-config).
 var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -86,9 +88,10 @@ var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(BeEmpty())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// CR count stays under the retention cap. defaultRevisionRetention
-		// is 10 non-live + the live one(s) — bound is < 15 to leave headroom
-		// for in-flight transition states the cleanup hasn't caught yet.
+		// CR count stays under the retention cap. The seeded config's
+		// lifecycle.revisionHistoryLimit is 10 non-live + the live one(s) —
+		// bound is < 15 to leave headroom for in-flight transition states
+		// the cleanup hasn't caught yet.
 		Eventually(func(g Gomega) {
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
@@ -96,7 +99,7 @@ var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(len(crs.Items)).To(BeNumerically("<=", 15),
-				"INT-5: CR retention cap exceeded; got %d CRs (defaultRevisionRetention=10 non-live)", len(crs.Items))
+				"INT-5: CR retention cap exceeded; got %d CRs (seeded lifecycle.revisionHistoryLimit=10 non-live)", len(crs.Items))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })
