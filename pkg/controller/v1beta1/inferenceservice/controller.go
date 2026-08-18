@@ -109,6 +109,8 @@ const (
 	InferenceServiceNotReadyState InferenceServiceState = "InferenceServiceNotReady"
 )
 
+const inferenceServiceFinalizer = "inferenceservice.finalizers"
+
 // InferenceServiceReconciler reconciles an InferenceService object
 type InferenceServiceReconciler struct {
 	client.Client
@@ -206,33 +208,29 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	deploymentMode := isvcutils.GetDeploymentMode(annotations, deployConfig)
 	log.V(1).Info("InferenceService deployment mode resolved", "deploymentMode", deploymentMode)
 
-	// name of our custom finalizer
-	finalizerName := "inferenceservice.finalizers"
-
 	// examine DeletionTimestamp to determine if object is under deletion
 	if isvc.ObjectMeta.DeletionTimestamp.IsZero() {
 		// The object is not being deleted, so if it does not have our finalizer,
 		// then lets add the finalizer and update the object. This is equivalent
 		// registering our finalizer.
-		if !controllerutil.ContainsFinalizer(isvc, finalizerName) {
-			controllerutil.AddFinalizer(isvc, finalizerName)
-			if err := r.Update(context.Background(), isvc); err != nil {
-				// Race window: between top-of-reconcile Get and this
-				// Update, the ISVC may have been deleted (NotFound) or
-				// transitioned into deletion (Conflict / "Operation
-				// cannot be fulfilled" with a UID precondition
-				// mismatch). Either way we no longer need the
-				// finalizer — drop the work cleanly instead of
-				// returning the error and triggering a retry storm.
-				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+		if !controllerutil.ContainsFinalizer(isvc, inferenceServiceFinalizer) {
+			controllerutil.AddFinalizer(isvc, inferenceServiceFinalizer)
+			if err := r.Update(ctx, isvc); err != nil {
+				// A conflict means another writer advanced the object after
+				// this reconcile read it. Requeue so the next pass applies the
+				// finalizer to a fresh object.
+				if apierrors.IsNotFound(err) {
 					return ctrl.Result{}, nil
+				}
+				if apierrors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
 				}
 				return ctrl.Result{}, err
 			}
 		}
 	} else {
 		// The object is being deleted
-		if controllerutil.ContainsFinalizer(isvc, finalizerName) {
+		if controllerutil.ContainsFinalizer(isvc, inferenceServiceFinalizer) {
 			// Drop this ISVC's OMENative coordination + canary metric series so
 			// the per-(namespace,isvc) vectors do not leak unbounded after
 			// teardown. Idempotent and runs on the finalizer-bearing delete pass.
@@ -240,10 +238,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			canary.DeleteForISVC(isvc.Namespace, isvc.Name)
 
 			// remove our finalizer from the list and update it.
-			controllerutil.RemoveFinalizer(isvc, finalizerName)
-			if err := r.Update(context.Background(), isvc); err != nil {
-				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			controllerutil.RemoveFinalizer(isvc, inferenceServiceFinalizer)
+			if err := r.Update(ctx, isvc); err != nil {
+				if apierrors.IsNotFound(err) {
 					return ctrl.Result{}, nil
+				}
+				if apierrors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
 				}
 				return ctrl.Result{}, err
 			}
