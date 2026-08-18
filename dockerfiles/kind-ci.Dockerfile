@@ -17,7 +17,7 @@
 #     tests/integration/kindutil/fake-serving/Dockerfile, which the suite
 #     `docker build`s at run time), and busybox (validation Job probe),
 #   - cert-manager's pinned manifest and every image referenced by it, plus the
-#     nginx image used by the OMENative eval fixtures.
+#     nginx and Prometheus images used by the OMENative eval fixtures.
 #
 # Built by generate_pipeline.py via the cf-docker-image plugin with build-context
 # "." (repo root) — so the COPY steps below see the repo. TARGETARCH is set by
@@ -36,6 +36,7 @@ ARG FAKE_SERVING_BUILD_IMAGE=golang:1.25
 ARG FAKE_SERVING_BASE_IMAGE=gcr.io/distroless/static:nonroot
 ARG CERT_MANAGER_VERSION=v1.16.2
 ARG EVAL_NGINX_IMAGE=nginxinc/nginx-unprivileged:1.27-alpine
+ARG EVAL_PROMETHEUS_IMAGE=prom/prometheus:v3.0.1
 
 # System build deps the xet staticlib + CRD tooling need (mirror run_tests.sh).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -87,9 +88,10 @@ RUN set -eux; mkdir -p /images; \
     crane pull --platform "linux/${TARGETARCH}" "${FAKE_SERVING_BASE_IMAGE}"     /images/fake-serving-base.tar; \
     crane pull --platform "linux/${TARGETARCH}" docker.io/library/busybox:latest /images/busybox.tar
 
-# The deployed eval needs cert-manager for webhook certificates and nginx for
-# its CPU-only runtime fixtures. Derive the cert-manager image set from the
-# manifest so a version change cannot leave an unbaked image behind.
+# The deployed eval needs cert-manager for webhook certificates, nginx for its
+# CPU-only runtime fixtures, and Prometheus for metric-analysis cases. Derive
+# the cert-manager image set from the manifest so a version change cannot leave
+# an unbaked image behind.
 RUN set -eux; \
     mkdir -p /eval; \
     curl -fsSLo /eval/cert-manager.yaml \
@@ -104,7 +106,8 @@ RUN set -eux; \
       i=$((i + 1)); \
     done < /eval/cert-manager-images.txt; \
     test "$i" -eq "$(wc -l < /eval/cert-manager-images.txt)"; \
-    crane pull --platform "linux/${TARGETARCH}" "${EVAL_NGINX_IMAGE}" /images/eval-nginx.tar
+    crane pull --platform "linux/${TARGETARCH}" "${EVAL_NGINX_IMAGE}" /images/eval-nginx.tar; \
+    crane pull --platform "linux/${TARGETARCH}" "${EVAL_PROMETHEUS_IMAGE}" /images/eval-prometheus.tar
 
 # Fail the build before publication if a tool or offline archive is incomplete.
 RUN set -eux; \
@@ -116,7 +119,8 @@ RUN set -eux; \
     cargo --version; \
     docker --version; \
     for archive in /images/kindest-node.tar /images/fake-serving-build.tar \
-      /images/fake-serving-base.tar /images/busybox.tar /images/eval-nginx.tar; do \
+      /images/fake-serving-base.tar /images/busybox.tar /images/eval-nginx.tar \
+      /images/eval-prometheus.tar; do \
       test -s "$archive"; \
       tar -tf "$archive" >/dev/null; \
     done; \

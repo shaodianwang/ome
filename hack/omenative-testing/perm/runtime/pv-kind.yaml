@@ -1,0 +1,18 @@
+# KIND nodes share this path through an extraMount in the cluster config. The
+# static RWX volume lets migration and cordon cases move model-backed pods
+# between nodes while the regular cluster fixture keeps its configured storage.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ome-coordtest-noop-pv
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: 1Gi
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ome-eval-shared
+  hostPath:
+    path: ${OME_EVAL_PV_HOST_PATH}
+    type: DirectoryOrCreate

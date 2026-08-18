@@ -16,6 +16,13 @@
 #   OME_NAMESPACE      namespace OME is installed into (default: ome)
 #   OME_IMAGE_TAG      local build/lookup tag      (default: kind-local)
 #   CERT_MANAGER_VERSION  cert-manager release to install (default below)
+#   OME_KIND_OFFLINE   use only baked artifacts     (default: false)
+#   OME_KIND_IMAGES_DIR  baked image archives       (default: /images)
+#   OME_KIND_EVAL_DIR    baked eval manifests       (default: /eval)
+#   OME_KIND_PREBUILT_BASE  base for offline images (default: golang:1.25)
+#   OME_KIND_PROMETHEUS_ENABLED  install Prometheus  (default: true)
+#   OME_KIND_PROMETHEUS_REPOSITORY  Prometheus repository (default: chart value)
+#   OME_KIND_PROMETHEUS_TAG  Prometheus tag            (default: chart value)
 #
 # Images are built locally and loaded into the cluster's nodes, never pushed.
 # global.hub is set empty so the chart renders bare `ome-manager:<tag>` /
@@ -64,6 +71,12 @@ BUILD_TAG="${OME_IMAGE_TAG:-kind-local}"
 # webhook serving cert and offers no alternative, so cert-manager is a hard
 # prerequisite rather than an option. Pinned, and overridable.
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
+IMAGES_DIR="${OME_KIND_IMAGES_DIR:-/images}"
+EVAL_DIR="${OME_KIND_EVAL_DIR:-/eval}"
+PREBUILT_BASE="${OME_KIND_PREBUILT_BASE:-golang:1.25}"
+PROMETHEUS_REPOSITORY="${OME_KIND_PROMETHEUS_REPOSITORY:-prom/prometheus}"
+PROMETHEUS_TAG="${OME_KIND_PROMETHEUS_TAG:-v3.0.1}"
+PROMETHEUS_IMAGE="${PROMETHEUS_REPOSITORY}:${PROMETHEUS_TAG}"
 SKIP_BUILD=0
 
 while [ $# -gt 0 ]; do
@@ -75,16 +88,72 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for tool in docker kind helm kubectl; do
+for tool in docker kind helm kubectl python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool not on PATH" >&2; exit 1; }
 done
-kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || {
-  echo "FATAL: no KIND cluster named $CLUSTER (create it first)" >&2; exit 1; }
 
 KCTX="kind-${CLUSTER}"
 MANAGER_BUILD_IMAGE="ome-manager:${BUILD_TAG}"
 AGENT_BUILD_IMAGE="ome-agent:${BUILD_TAG}"
 RENDER="hack/omenative-testing/perm/runtime_fixtures.py"
+METRICS_IMAGE="$(python3 "$RENDER" --kind --value OME_EVAL_METRICS_IMAGE)"
+
+case "${OME_KIND_OFFLINE:-false}" in
+  1|true|TRUE|yes|YES) OFFLINE=1 ;;
+  0|false|FALSE|no|NO|"") OFFLINE=0 ;;
+  *) echo "FATAL: OME_KIND_OFFLINE must be true or false" >&2; exit 2 ;;
+esac
+case "${OME_KIND_PROMETHEUS_ENABLED:-true}" in
+  1|true|TRUE|yes|YES) PROMETHEUS_ENABLED=true ;;
+  0|false|FALSE|no|NO) PROMETHEUS_ENABLED=false ;;
+  *) echo "FATAL: OME_KIND_PROMETHEUS_ENABLED must be true or false" >&2; exit 2 ;;
+esac
+
+require_file() {
+  [ -s "$1" ] || { echo "FATAL: required offline artifact is missing: $1" >&2; exit 1; }
+}
+
+CERT_IMAGES=()
+NGINX_IMAGE=""
+if [ "$OFFLINE" -eq 1 ]; then
+  if [ "$SKIP_BUILD" -eq 0 ]; then
+    for tool in cargo go make; do
+      command -v "$tool" >/dev/null 2>&1 || {
+        echo "FATAL: $tool not on PATH for offline image builds" >&2
+        exit 1
+      }
+    done
+  fi
+  require_file "${EVAL_DIR}/cert-manager.yaml"
+  require_file "${EVAL_DIR}/cert-manager-images.txt"
+  require_file "${IMAGES_DIR}/eval-nginx.tar"
+  require_file "${IMAGES_DIR}/fake-serving-build.tar"
+  if [ "$PROMETHEUS_ENABLED" = true ]; then
+    require_file "${IMAGES_DIR}/eval-prometheus.tar"
+  fi
+  grep -Fq "app.kubernetes.io/version: \"${CERT_MANAGER_VERSION}\"" \
+    "${EVAL_DIR}/cert-manager.yaml" || {
+      echo "FATAL: baked cert-manager manifest is not ${CERT_MANAGER_VERSION}" >&2
+      exit 1
+    }
+  mapfile -t CERT_IMAGES < <(sed '/^[[:space:]]*$/d' "${EVAL_DIR}/cert-manager-images.txt")
+  [ "${#CERT_IMAGES[@]}" -gt 0 ] || {
+    echo "FATAL: baked cert-manager image list is empty" >&2
+    exit 1
+  }
+  for i in "${!CERT_IMAGES[@]}"; do
+    require_file "${IMAGES_DIR}/cert-manager-${i}.tar"
+  done
+  NGINX_IMAGE="$(python3 "$RENDER" --kind --value OME_EVAL_NGINX_IMAGE)"
+  [ -n "$NGINX_IMAGE" ] || {
+    echo "FATAL: runtime renderer returned an empty nginx image" >&2
+    exit 1
+  }
+  echo "--- offline mode: using baked artifacts ---"
+fi
+
+kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || {
+  echo "FATAL: no KIND cluster named $CLUSTER (create it first)" >&2; exit 1; }
 
 # `kind load docker-image` reads the image through `docker save`, which under
 # Docker's containerd image store emits a multi-platform index whose other
@@ -101,12 +170,74 @@ kind_load() {
   rm -f "$archive"
 }
 
-if [ "$SKIP_BUILD" -eq 0 ]; then
+ensure_prebuilt_base() {
+  if ! docker image inspect "$PREBUILT_BASE" >/dev/null 2>&1; then
+    docker load -i "${IMAGES_DIR}/fake-serving-build.tar" >/dev/null
+  fi
+  docker image inspect "$PREBUILT_BASE" >/dev/null 2>&1 || {
+    echo "FATAL: baked archive did not provide ${PREBUILT_BASE}" >&2
+    exit 1
+  }
+}
+
+build_prebuilt_image() (
+  set -e
+  local image="$1" package="$2" binary="$3" run_user="$4" stage
+  shift 4
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/ome-prebuilt.XXXXXX")"
+  trap 'rm -rf -- "$stage"' EXIT
+
+  echo "--- compile ${package} ---"
+  CGO_ENABLED=1 GOTOOLCHAIN=local GOPROXY=off \
+    go build -trimpath -o "${stage}/${binary}" "$package"
+  ln -s "$binary" "${stage}/entrypoint"
+  for extra in "$@"; do
+    cp "$extra" "${stage}/$(basename "$extra")"
+  done
+
+  echo "--- package ${image} ---"
+  DOCKER_BUILDKIT=0 docker build --pull=false --network=none \
+    -f dockerfiles/kind-prebuilt.Dockerfile \
+    --build-arg "BASE_IMAGE=${PREBUILT_BASE}" \
+    --build-arg "RUN_USER=${run_user}" \
+    -t "$image" "$stage"
+)
+
+build_canary_metrics_image() (
+  set -e
+  local stage
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/ome-metrics.XXXXXX")"
+  trap 'rm -rf -- "$stage"' EXIT
+
+  echo "--- compile canary metrics fixture ---"
+  (
+    cd hack/omenative-testing/metrics-server
+    CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=off \
+      go build -trimpath -o "${stage}/canary-metrics" .
+  )
+  ln -s canary-metrics "${stage}/entrypoint"
+  DOCKER_BUILDKIT=0 docker build --pull=false --network=none \
+    -f dockerfiles/kind-prebuilt.Dockerfile \
+    --build-arg BASE_IMAGE=scratch \
+    --build-arg RUN_USER=65532:65532 \
+    -t "$METRICS_IMAGE" "$stage"
+)
+
+if [ "$SKIP_BUILD" -eq 0 ] && [ "$OFFLINE" -eq 1 ]; then
+  ensure_prebuilt_base
+  CARGO_NET_OFFLINE=true GOTOOLCHAIN=local GOPROXY=off make xet-build
+  build_prebuilt_image "$MANAGER_BUILD_IMAGE" ./cmd/manager manager 65532:65532
+  build_prebuilt_image "$AGENT_BUILD_IMAGE" ./cmd/ome-agent ome-agent 0:0 \
+    config/ome-agent/ome-agent.yaml
+  build_canary_metrics_image
+elif [ "$SKIP_BUILD" -eq 0 ]; then
   echo "--- build ${MANAGER_BUILD_IMAGE} ---"
   docker build -f dockerfiles/manager.Dockerfile -t "$MANAGER_BUILD_IMAGE" .
   # Compiles the Rust xet staticlib before the Go binary; slow on a cold cache.
   echo "--- build ${AGENT_BUILD_IMAGE} ---"
   docker build -f dockerfiles/ome-agent.Dockerfile -t "$AGENT_BUILD_IMAGE" .
+  echo "--- build ${METRICS_IMAGE} ---"
+  docker build -f dockerfiles/canary-metrics.Dockerfile -t "$METRICS_IMAGE" .
 fi
 
 if ! MANAGER_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$MANAGER_BUILD_IMAGE" 2>/dev/null)"; then
@@ -132,16 +263,44 @@ echo "    agent:   ${AGENT_IMAGE_ID}"
 echo "--- load images into ${CLUSTER} ---"
 kind_load "$MANAGER_IMAGE"
 kind_load "$AGENT_IMAGE"
+if docker image inspect "$METRICS_IMAGE" >/dev/null 2>&1; then
+  kind_load "$METRICS_IMAGE"
+elif [ "$OFFLINE" -eq 1 ]; then
+  echo "FATAL: local image ${METRICS_IMAGE} not found" >&2
+  exit 1
+fi
 
 echo "--- create namespace ${NS} ---"
 kubectl --context "$KCTX" create namespace "$NS" --dry-run=client -o yaml \
   | kubectl --context "$KCTX" apply -f -
 
 echo "--- install cert-manager ${CERT_MANAGER_VERSION} ---"
-kubectl --context "$KCTX" apply -f \
-  "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+if [ "$OFFLINE" -eq 1 ]; then
+  for i in "${!CERT_IMAGES[@]}"; do
+    docker load -i "${IMAGES_DIR}/cert-manager-${i}.tar" >/dev/null
+    docker image inspect "${CERT_IMAGES[$i]}" >/dev/null 2>&1 || {
+      echo "FATAL: cert-manager archive ${i} did not provide ${CERT_IMAGES[$i]}" >&2
+      exit 1
+    }
+    kind_load "${CERT_IMAGES[$i]}"
+  done
+  kubectl --context "$KCTX" apply -f "${EVAL_DIR}/cert-manager.yaml"
+else
+  kubectl --context "$KCTX" apply -f \
+    "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+fi
 kubectl --context "$KCTX" -n cert-manager wait --for=condition=Available \
   deployment --all --timeout=300s
+
+if [ "$OFFLINE" -eq 1 ] && [ "$PROMETHEUS_ENABLED" = true ]; then
+  echo "--- side-load ${PROMETHEUS_IMAGE} ---"
+  docker load -i "${IMAGES_DIR}/eval-prometheus.tar" >/dev/null
+  docker image inspect "$PROMETHEUS_IMAGE" >/dev/null 2>&1 || {
+    echo "FATAL: baked Prometheus archive did not provide ${PROMETHEUS_IMAGE}" >&2
+    exit 1
+  }
+  kind_load "$PROMETHEUS_IMAGE"
+fi
 
 echo "--- install CRDs ---"
 helm upgrade --install ome-crd charts/ome-crd/ \
@@ -164,6 +323,9 @@ HELM_ARGS=(
   --set ome.controller.tag="$DEPLOY_TAG"
   --set ome.omeAgent.tag="$DEPLOY_TAG"
   --set modelAgent.enabled=false
+  --set prometheus.enabled="$PROMETHEUS_ENABLED"
+  --set prometheus.image.repository="$PROMETHEUS_REPOSITORY"
+  --set prometheus.image.tag="$PROMETHEUS_TAG"
   --set ome.controller.replicaCount=1
   --set ome.controller.resources.requests.cpu=500m
   --set ome.controller.resources.requests.memory=512Mi
@@ -224,8 +386,7 @@ CONVERGE_ARGS=(--wait --timeout 300s)
 if helm upgrade --help 2>&1 | grep -q -- '--force-conflicts'; then
   CONVERGE_ARGS+=(--force-conflicts)
 else
-  echo "WARNING: this helm has no --force-conflicts; pass 2 may fail on the" >&2
-  echo "         cainjector-owned caBundle field. Helm 3.17+ is required." >&2
+  echo "    helm has no --force-conflicts; using its default upgrade path"
 fi
 helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${CONVERGE_ARGS[@]}"
 
@@ -233,19 +394,47 @@ helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${CONVERGE_A
 # storageUri all have to name $NS, because a pod cannot mount a PVC from
 # another namespace and the ISVC validator rejects a model that points at one.
 echo "--- side-load the fixture images ---"
-while read -r image; do
-  [ -n "$image" ] || continue
-  if docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >/dev/null 2>&1; then
-    kind_load "$image"
-    echo "    loaded ${image}"
-  else
-    # canary-metrics lives in a private registry with no public equivalent.
-    echo "WARNING: cannot obtain ${image}; cases needing it will fail to start" >&2
-  fi
-done < <(python3 "$RENDER" --kind --images)
+if [ "$OFFLINE" -eq 1 ]; then
+  docker load -i "${IMAGES_DIR}/eval-nginx.tar" >/dev/null
+  docker image inspect "$NGINX_IMAGE" >/dev/null 2>&1 || {
+    echo "FATAL: baked nginx archive did not provide ${NGINX_IMAGE}" >&2
+    exit 1
+  }
+  kind_load "$NGINX_IMAGE"
+  while read -r image; do
+    [ -n "$image" ] || continue
+    case "$image" in
+      *nginxinc/nginx-unprivileged:*)
+        docker image tag "$NGINX_IMAGE" "$image"
+        kind_load "$image"
+        ;;
+      *)
+        echo "FATAL: no offline source for case image ${image}" >&2
+        exit 1
+        ;;
+    esac
+  done < <(python3 "$RENDER" --case-images)
+else
+  while read -r image; do
+    [ -n "$image" ] || continue
+    if docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >/dev/null 2>&1; then
+      kind_load "$image"
+      echo "    loaded ${image}"
+    else
+      # canary-metrics lives in a private registry with no public equivalent.
+      echo "WARNING: cannot obtain ${image}; cases needing it will fail to start" >&2
+    fi
+  done < <(python3 "$RENDER" --kind --images)
+fi
+
+echo "--- seed the eval model fixture in ${NS} ---"
+OME_TEST_NS="$NS" python3 "$RENDER" --kind --stage bootstrap \
+  | kubectl --context "$KCTX" -n "$NS" apply -f -
+kubectl --context "$KCTX" -n "$NS" wait --for=condition=Complete \
+  job/ome-coordtest-noop-seed --timeout=300s
 
 echo "--- apply eval runtime fixtures into ${NS} ---"
-OME_TEST_NS="$NS" python3 "$RENDER" --kind \
+OME_TEST_NS="$NS" python3 "$RENDER" --kind --stage resources \
   | kubectl --context "$KCTX" -n "$NS" apply -f -
 
 # The PVC path always runs a metadata-extraction Job, and the ISVC validator

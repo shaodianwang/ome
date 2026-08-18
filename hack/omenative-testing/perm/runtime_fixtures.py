@@ -17,14 +17,30 @@ survive rendering untouched.
 
 Usage:
     python3 runtime_fixtures.py [--kind] > rendered.yaml
+    python3 runtime_fixtures.py --kind --stage bootstrap > bootstrap.yaml
+    python3 runtime_fixtures.py --kind --stage resources > resources.yaml
+    python3 runtime_fixtures.py --kind --value OME_EVAL_NGINX_IMAGE
+    python3 runtime_fixtures.py --case-images
     python3 runtime_fixtures.py --kind | kubectl apply -n sandbox -f -
 """
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
 RUNTIME_DIR = Path(__file__).resolve().parent / "runtime"
+CASE_DIR = Path(__file__).resolve().parent / "isvcs"
+
+STAGE_ALL = "all"
+STAGE_BOOTSTRAP = "bootstrap"
+STAGE_RESOURCES = "resources"
+STAGES = (STAGE_ALL, STAGE_BOOTSTRAP, STAGE_RESOURCES)
+
+# The PVC must exist and the seed Job must finish before the ClusterBaseModel
+# starts its metadata-extraction Job.
+BOOTSTRAP_FIXTURES = ("pvc-and-seed.yaml",)
+KIND_BOOTSTRAP_FIXTURES = ("pv-kind.yaml",)
 
 # Defaults target the shared GKE eval cluster.
 DEFAULTS = {
@@ -39,17 +55,18 @@ DEFAULTS = {
     "OME_EVAL_METRICS_IMAGE": (
         "168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/canary-metrics:latest"
     ),
+    "OME_EVAL_PV_HOST_PATH": "/ome-eval-model",
 }
 
-# A single-node KIND cluster has no arch to select for, only the default
-# local-path storage class (which is ReadWriteOnce), and no pull credentials
-# for the private registry — so the public upstream image is used and
-# side-loaded with `kind load`.
+# KIND has no arch to select for and no pull credentials for the private
+# registry. Its static RWX volume is backed by a path mounted into every node;
+# fixture images are built or side-loaded with `kind load`.
 KIND_OVERRIDES = {
-    "OME_EVAL_STORAGE_CLASS": "standard",
-    "OME_EVAL_PVC_ACCESS_MODE": "ReadWriteOnce",
+    "OME_EVAL_STORAGE_CLASS": "ome-eval-shared",
+    "OME_EVAL_PVC_ACCESS_MODE": "ReadWriteMany",
     "OME_EVAL_NODE_ARCH": "",
     "OME_EVAL_NGINX_IMAGE": "nginxinc/nginx-unprivileged:1.27-alpine",
+    "OME_EVAL_METRICS_IMAGE": "canary-metrics:kind-local",
 }
 
 
@@ -82,24 +99,47 @@ def render_text(text, values):
     return text
 
 
-def render(kind=False):
-    """Return every runtime fixture rendered and joined as one YAML stream."""
+def fixture_paths(stage=STAGE_ALL, kind=False):
+    """Return fixture paths in their dependency-safe application order."""
+    if stage not in STAGES:
+        raise ValueError("unknown fixture stage %r; expected one of %s" %
+                         (stage, ", ".join(STAGES)))
+
+    bootstrap_names = set(BOOTSTRAP_FIXTURES)
+    kind_names = set(KIND_BOOTSTRAP_FIXTURES)
+    bootstrap = []
+    if kind:
+        bootstrap.extend(RUNTIME_DIR / name for name in KIND_BOOTSTRAP_FIXTURES)
+    bootstrap.extend(RUNTIME_DIR / name for name in BOOTSTRAP_FIXTURES)
+    resources = [
+        path for path in sorted(RUNTIME_DIR.glob("*.yaml"))
+        if path.name not in bootstrap_names and path.name not in kind_names
+    ]
+    if stage == STAGE_BOOTSTRAP:
+        return bootstrap
+    if stage == STAGE_RESOURCES:
+        return resources
+    return bootstrap + resources
+
+
+def render(kind=False, stage=STAGE_ALL):
+    """Return the selected fixture stage as one rendered YAML stream."""
     values = resolve(kind=kind)
     docs = [
         render_text(path.read_text(), values)
-        for path in sorted(RUNTIME_DIR.glob("*.yaml"))
+        for path in fixture_paths(stage, kind=kind)
     ]
     return "\n---\n".join(docs)
 
 
-def images(kind=False):
+def images(kind=False, stage=STAGE_ALL):
     """The container images the rendered fixtures reference, deduplicated.
 
     A KIND cluster has to side-load these, so the caller needs the resolved
     list rather than a copy of it that can drift from the fixtures.
     """
     seen = []
-    for line in render(kind=kind).splitlines():
+    for line in render(kind=kind, stage=stage).splitlines():
         stripped = line.strip()
         if stripped.startswith("image:"):
             image = stripped.split(":", 1)[1].strip()
@@ -108,17 +148,56 @@ def images(kind=False):
     return seen
 
 
+def case_images():
+    """Container image references embedded directly in case manifests."""
+    seen = []
+    for path in sorted(CASE_DIR.glob("**/*.yaml")):
+        for line in path.read_text().splitlines():
+            match = re.match(r"^\s*image:\s*[\"']?([^\"'\s]+)", line)
+            if match is None:
+                match = re.search(r"(?:^|\s)img=([^\s]+)", line)
+            if match is not None and match.group(1) not in seen:
+                seen.append(match.group(1))
+    return seen
+
+
+def resolved_value(token, kind=False):
+    """Return one resolved fixture token or raise KeyError if it is unknown."""
+    values = resolve(kind=kind)
+    if token not in values:
+        raise KeyError(token)
+    return values[token]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--kind", action="store_true",
                     help="render for a local KIND cluster")
-    ap.add_argument("--images", action="store_true",
-                    help="list the referenced images instead of the YAML")
+    output = ap.add_mutually_exclusive_group()
+    output.add_argument("--images", action="store_true",
+                        help="list the referenced images instead of the YAML")
+    output.add_argument("--case-images", action="store_true",
+                        help="list images embedded directly in case manifests")
+    output.add_argument("--value", metavar="TOKEN",
+                        help="print one resolved token value")
+    ap.add_argument("--stage", choices=STAGES, default=STAGE_ALL,
+                    help="render all fixtures or one deployment stage")
     args = ap.parse_args()
-    if args.images:
-        sys.stdout.write("".join(i + "\n" for i in images(kind=args.kind)))
+    if args.value:
+        try:
+            value = resolved_value(args.value, kind=args.kind)
+        except KeyError:
+            ap.error("unknown token %s; expected one of %s" %
+                     (args.value, ", ".join(sorted(DEFAULTS))))
+        sys.stdout.write(value + "\n")
+    elif args.case_images:
+        sys.stdout.write("".join(image + "\n" for image in case_images()))
+    elif args.images:
+        sys.stdout.write("".join(
+            i + "\n" for i in images(kind=args.kind, stage=args.stage)
+        ))
     else:
-        sys.stdout.write(render(kind=args.kind))
+        sys.stdout.write(render(kind=args.kind, stage=args.stage))
 
 
 if __name__ == "__main__":
