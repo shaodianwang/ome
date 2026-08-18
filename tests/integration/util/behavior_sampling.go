@@ -37,7 +37,11 @@ import (
 func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval time.Duration, sampleFn func(g gomega.Gomega)) int {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	g := gomega.NewWithT(failHandlerAdapter{})
+	// Wire Gomega directly to Ginkgo's fail handler so Gomega's callerSkip
+	// reaches Ginkgo unchanged. Routing through a testing.T-style Fatalf
+	// adapter discards that offset and reports every sampler failure at the
+	// adapter instead of the original assertion in sampleFn.
+	g := gomega.NewGomega(ginkgo.Fail)
 	count := 0
 	for {
 		select {
@@ -200,16 +204,4 @@ func (s *PodSnapshot) OnRevision(component v1beta1.ComponentType, revisionHash s
 		}
 	}
 	return n
-}
-
-// failHandlerAdapter routes gomega failures inside SampleDuringRollout
-// through ginkgo.Fail so a sample-level violation fails the surrounding
-// It block. Callers running SampleDuringRollout in a goroutine should
-// `defer ginkgo.GinkgoRecover()` so the Fail call lands on the right
-// spec instead of crashing the process.
-type failHandlerAdapter struct{}
-
-func (failHandlerAdapter) Helper() {}
-func (failHandlerAdapter) Fatalf(format string, args ...interface{}) {
-	ginkgo.Fail(fmt.Sprintf(format, args...))
 }
