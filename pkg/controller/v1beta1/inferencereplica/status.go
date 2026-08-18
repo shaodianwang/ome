@@ -91,36 +91,10 @@ const (
 	ReasonNoReplicas = "NoReplicas"
 )
 
-// aggregateAndWriteStatus computes the per-IR aggregate counters
-// (Replicas / ReadyReplicas / ServingReplicas / AvailableReplicas /
-// UpdatedReplicas / UpdatedReadyReplicas), stamps ObservedGeneration +
-// LabelSelector, and stamps UpdateRevision off the target
-// ControllerRevision. It is observability-only: it reads CurrentRevision
-// (for the Ready condition) but never writes it — the reconciler's
-// deferred promotion step (buildPromoteCurrentRevision, invoked before
-// this aggregator) owns that write.
-//
-// Per-Instance pod counters (PodCount / ReadyPodCount /
-// ServingPodCount / AvailablePodCount / ScheduledPodCount /
-// NodesOccupied) are recomputed here from the live pod set, mirroring
-// the omenative direct path's AggregateAndWriteStatus. The workload
-// per-op writers (Create's patchInstanceStatusReady, Update's
-// promotion, etc.) own the lifecycle fields (Phase, Operation,
-// Incarnation, RunningRevision, TargetRevision); this aggregator owns
-// the observability fields (per-pod counters + Component-level
-// rollups). Without populating the per-Instance pod counters, the
-// downstream workload.CountReadyInstances / CountUpdatedInstances
-// would read zero ReadyPodCount everywhere, leaving ReadyReplicas
-// stuck at 0 even after a recreated pod flips containers-ready.
-//
-// Reuses workload.ComputeComponentCounters directly — same shape, same
-// semantics as the ISVC adapter, so the dual-write window can
-// byte-compare the two status surfaces.
-//
-// target may be nil when DesiredSpec.PodSpec is nil (no rendered
-// template — webhook-rejected today; defensive nil-guard kept). When
-// target is nil revision pointers are left untouched; counters still
-// run.
+// aggregateAndWriteStatus publishes cached Pod and EndpointSlice facts over
+// freshly read lifecycle rows, then computes the IR summaries and conditions.
+// Lifecycle fields and CurrentRevision retain their dedicated writers. A nil
+// target leaves revision pointers untouched while counters still publish.
 func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.InferenceReplica, plan workload.ComponentPlan, target *appsv1.ControllerRevision) error {
 	if r.Client == nil {
 		return fmt.Errorf("aggregateAndWriteStatus: nil client")
@@ -150,6 +124,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		return fmt.Errorf("aggregateAndWriteStatus: list pods: %w", err)
 	}
 	byIndex := query.BucketPodsByInstanceIdx(pods)
+	podObservation := workload.NewCachedSelectorPodObservation(pods, byIndex)
 	serviceName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, component)
 	availableByPod, err := workload.AvailablePodSet(ctx, r.Client, ir.Namespace, serviceName)
 	if err != nil {
@@ -186,19 +161,29 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		// DeepEquals its prior snapshot.
 		before := fresh.Status.DeepCopy()
 
-		// Per-Instance pod counters from the live pod buckets. Same
-		// shape the omenative direct path uses (status_aggregate.go
-		// lines 83-93). Without this step the downstream
-		// workload.CountReadyInstances reads zero ReadyPodCount on every
-		// Instance — leaving ReadyReplicas at 0 even when a recreated
-		// pod is alive and ContainersReady, because the aggregator
-		// never observed the pod's live state.
-		populateInstancePodCounters(fresh.Status.InstanceStatuses, byIndex, availableByPod)
+		observation, err := workload.NewOwnedPublicationObservation(
+			v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses),
+			podObservation,
+			availableByPod,
+		)
+		if err != nil {
+			return fmt.Errorf("aggregateAndWriteStatus: build publication observation: %w", err)
+		}
+		insts, err := observation.TakeInlineV1Statuses()
+		if err != nil {
+			return fmt.Errorf("aggregateAndWriteStatus: consume publication observation: %w", err)
+		}
+		for i := range fresh.Status.InstanceStatuses {
+			fresh.Status.InstanceStatuses[i].PodCount = insts[i].PodCount
+			fresh.Status.InstanceStatuses[i].ReadyPodCount = insts[i].ReadyPodCount
+			fresh.Status.InstanceStatuses[i].ServingPodCount = insts[i].ServingPodCount
+			fresh.Status.InstanceStatuses[i].AvailablePodCount = insts[i].AvailablePodCount
+			fresh.Status.InstanceStatuses[i].ScheduledPodCount = insts[i].ScheduledPodCount
+			fresh.Status.InstanceStatuses[i].Admitted = insts[i].Admitted
+			fresh.Status.InstanceStatuses[i].NodesOccupied = insts[i].NodesOccupied
+		}
 
-		insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
-
-		// Component-level counters from per-Instance state (now with
-		// fresh per-pod counters populated above).
+		// Component-level counters consume the transient publication rows.
 		var targetName string
 		if target != nil {
 			targetName = target.Name
@@ -206,23 +191,14 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		counters := workload.ComputeComponentCounters(insts, desiredByIdx, targetName)
 		fresh.Status.Replicas = counters.Replicas
 		fresh.Status.ServingReplicas = counters.ServingReplicas
-		// ReadyReplicas + AvailableReplicas use the workload counters
-		// directly now that per-Instance pod counters are populated
-		// from live pods above. The surge-tolerant classifier
+		// ReadyReplicas + AvailableReplicas use the publication
+		// observation above. The surge-tolerant classifier
 		// (InstanceMeetsThreshold) means an Instance with the canonical
 		// pod ContainersReady is counted even mid-surge or mid-drain,
-		// matching the omenative direct path byte-for-byte. The prior
-		// Phase-only fallback (countReadyInstancesByPhase) under-
-		// counted during recreate/SurgeThenDrain transitions: Phase
-		// stays Updating until the workload pipeline stamps Ready, but
-		// the live pod can be serving traffic in the interim — and the
-		// IR's Ready rollup must reflect serving truth, not the
-		// lifecycle bookkeeping phase.
+		// while availability follows EndpointSlice membership.
 		//
-		// AvailableReplicas mirrors ReadyReplicas at v1 — no
-		// minReadySeconds gating field exists on InferenceReplicaSpec
-		// or LifecycleSpec today. When one is added, AvailableReplicas
-		// would lag ReadyReplicas by that grace period.
+		// InferenceReplicaSpec.MinReadySeconds is not applied by this
+		// availability calculation.
 		fresh.Status.ReadyReplicas = counters.ReadyReplicas
 		fresh.Status.AvailableReplicas = counters.AvailableReplicas
 		if target != nil {
@@ -437,57 +413,6 @@ func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, fresh []v1be
 			s.NodesOccupied = nil
 		}
 	}
-}
-
-// populateInstancePodCounters refreshes the per-Instance observability
-// fields (PodCount / ReadyPodCount / ServingPodCount /
-// ScheduledPodCount / AvailablePodCount / NodesOccupied) from the
-// live pod set bucketed by Instance index. The per-pod counters feed
-// the workload.CountReadyInstances / CountUpdatedInstances /
-// CountAvailableInstances classifiers — without populating them the
-// downstream rollups read zero on every Instance even when the
-// underlying pods are alive and ContainersReady.
-//
-// Mirrors the omenative direct path's per-Instance counter loop
-// (omenative/status_aggregate.go:83-93) byte-for-byte. The IR adapter
-// uses workload.Count* helpers directly via workload.CountReadyPods
-// / CountServingPods / etc., which is the same primitive set the
-// direct path's local wrappers delegate to — so the two adapters
-// produce byte-identical per-Instance counters off the same pod set.
-//
-// availableByPod is the AvailablePodSet (pod names appearing as Ready
-// non-terminating endpoints in the headless Service's EndpointSlices).
-// Empty map is OK — every Instance's AvailablePodCount drops to 0,
-// which is the correct semantic when EndpointSlices haven't yet caught
-// up with a fresh pod's Ready transition.
-//
-// Instance entries with no matching pods get all-zero counters —
-// that's the correct semantic for an Instance whose pods haven't been
-// created yet (Pending phase) or have all been deleted (post-drain,
-// pre-recreate Phase B).
-func populateInstancePodCounters(insts []v1beta1.OMENativeInstanceStatus, byIndex map[int32][]*corev1.Pod, availableByPod map[string]struct{}) {
-	for i := range insts {
-		s := &insts[i]
-		instPods := byIndex[s.Index]
-		s.PodCount = int32(len(instPods))
-		s.ReadyPodCount = workload.CountReadyPods(instPods)
-		s.ServingPodCount = workload.CountServingPods(instPods)
-		s.ScheduledPodCount = workload.CountScheduledPods(instPods)
-		s.AvailablePodCount = workload.CountAvailablePods(instPods, availableByPod)
-		s.NodesOccupied = workload.UniqueNodes(instPods)
-		s.Admitted = len(instPods) > 0 && !anyAdmissionGated(instPods)
-	}
-}
-
-// anyAdmissionGated reports whether any pod still carries an admission
-// scheduling gate (Kueue has not admitted the workload yet).
-func anyAdmissionGated(pods []*corev1.Pod) bool {
-	for _, p := range pods {
-		if workload.PodAdmissionGated(p) {
-			return true
-		}
-	}
-	return false
 }
 
 // hasFailedInstance reports whether at least one Instance has been

@@ -245,9 +245,11 @@ var ErrStatusOwnerGone = errors.New("status owner is gone")
 var ErrStatusMutationPrecondition = errors.New("status mutation precondition failed")
 
 // ComponentPodSnapshot is one authoritative Component Pod LIST represented
-// both as the complete set and as per-Instance buckets. The two views share
-// Pod pointers and are immutable for the lifetime of a reconcile pass.
+// both as the complete set and as per-Instance buckets. OwnerUID identifies
+// the controller owner that filtered the set. The two views share Pod pointers
+// and are immutable for the lifetime of a reconcile pass.
 type ComponentPodSnapshot struct {
+	OwnerUID   k8stypes.UID
 	Pods       []*corev1.Pod
 	ByInstance map[int32][]*corev1.Pod
 }

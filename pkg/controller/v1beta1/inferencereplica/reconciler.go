@@ -516,6 +516,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				invalid, query.LabelInstanceIdx)
 		}
 		input.AuthoritativePods = &workload.ComponentPodSnapshot{
+			OwnerUID:   ir.UID,
 			Pods:       owned,
 			ByInstance: query.BucketPodsByInstanceIdx(owned),
 		}
@@ -749,7 +750,11 @@ func (r *Reconciler) reconcileStaleSinglePodGroups(
 			return false, fmt.Errorf("InferenceReplica reconciler: observe pods for stale PodGroup cleanup: %w", err)
 		}
 		owned := podsControlledBy(pods, ir.UID)
-		input.AuthoritativePods = &workload.ComponentPodSnapshot{Pods: owned, ByInstance: query.BucketPodsByInstanceIdx(owned)}
+		input.AuthoritativePods = &workload.ComponentPodSnapshot{
+			OwnerUID:   ir.UID,
+			Pods:       owned,
+			ByInstance: query.BucketPodsByInstanceIdx(owned),
+		}
 	}
 	if invalid := invalidInstanceIndexPodCount(input.AuthoritativePods.Pods); invalid > 0 {
 		return false, fmt.Errorf(

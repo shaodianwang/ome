@@ -29,10 +29,26 @@ func PruneSupersededRetryBlocksForTest(ctx context.Context, input ReconcileInput
 // pre-materialized for both read sources, so tests supply the bucketed
 // pods without a client.
 func SnapshotWithPodsForTest(input ReconcileInput, byIdx map[int32][]*corev1.Pod) *ObservedSnapshot {
+	return SnapshotWithDistinctPodsForTest(input, byIdx, byIdx)
+}
+
+// SnapshotWithDistinctPodsForTest keeps the API-reader and cache views
+// separate so tests can model informer lag.
+func SnapshotWithDistinctPodsForTest(input ReconcileInput, liveByIdx, cachedByIdx map[int32][]*corev1.Pod) *ObservedSnapshot {
+	live, err := NewDecisionObservation(input.ObservedState.InstanceStatuses,
+		NewAPIReaderSelectorPodObservation(nil, liveByIdx))
+	if err != nil {
+		panic(err)
+	}
+	cached, err := NewDecisionObservation(input.ObservedState.InstanceStatuses,
+		NewCachedSelectorPodObservation(nil, cachedByIdx))
+	if err != nil {
+		panic(err)
+	}
 	return &ObservedSnapshot{
 		input:  input,
 		insts:  input.ObservedState.InstanceStatuses,
-		live:   memoBuckets{done: true, buckets: byIdx},
-		cached: memoBuckets{done: true, buckets: byIdx},
+		live:   memoObservation{done: true, observation: live},
+		cached: memoObservation{done: true, observation: cached},
 	}
 }

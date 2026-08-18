@@ -9,6 +9,7 @@ import (
 
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,10 +26,28 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// TestPopulateInstancePodCounters_StampsLivePodState pins the
-// per-Instance counter writer: handed a (status slice, by-index pod
+func materializeInlinePublicationStatuses(t *testing.T, insts []v1beta1.OMENativeInstanceStatus, byIndex map[int32][]*corev1.Pod, availableByPod map[string]struct{}) []v1beta1.OMENativeInstanceStatus {
+	t.Helper()
+	observation, err := workload.NewOwnedPublicationObservation(
+		v1beta1convert.InstanceStatusSliceToWorkload(insts),
+		workload.NewCachedSelectorPodObservation(nil, byIndex),
+		availableByPod,
+	)
+	if err != nil {
+		t.Fatalf("build publication observation: %v", err)
+	}
+	statuses, err := observation.TakeInlineV1Statuses()
+	if err != nil {
+		t.Fatalf("materialize publication status: %v", err)
+	}
+	return v1beta1convert.InstanceStatusSliceFromWorkload(statuses)
+}
+
+// TestPublicationObservation_StampsLivePodState pins the
+// per-Instance projection: handed a (status slice, by-index pod
 // map, available-pod set) tuple, it stamps each Instance's per-pod
 // counters off the live pod state. This is the load-bearing step that
 // lets the downstream workload.CountReadyInstances classifier see the
@@ -39,7 +58,7 @@ import (
 // even when the underlying pods are ContainersReady. This test pins
 // the exact counter-write contract so a future refactor can't silently
 // drop it.
-func TestPopulateInstancePodCounters_StampsLivePodState(t *testing.T) {
+func TestPublicationObservation_StampsLivePodState(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 2)
 	pod0 := podForIR(ir, 0, "default", 0, true, true)
@@ -62,7 +81,7 @@ func TestPopulateInstancePodCounters_StampsLivePodState(t *testing.T) {
 	}
 	availableByPod := map[string]struct{}{pod0.Name: {}}
 
-	populateInstancePodCounters(insts, byIndex, availableByPod)
+	insts = materializeInlinePublicationStatuses(t, insts, byIndex, availableByPod)
 
 	g.Expect(insts[0].PodCount).To(gomega.Equal(int32(1)),
 		"Instance 0 has 1 live pod")
@@ -83,19 +102,19 @@ func TestPopulateInstancePodCounters_StampsLivePodState(t *testing.T) {
 		"Instance 1's pod is not in the available set")
 }
 
-// TestPopulateInstancePodCounters_EmptyPodSet pins the no-pods edge
+// TestPublicationObservation_EmptyPodSet pins the no-pods edge
 // case: an Instance with zero matching pods (e.g., post-drain pre-
 // recreate, scale-down victim mid-delete) must end up with all-zero
 // counters. Catches a future bug where the loop accidentally retains
 // stale counter values from a prior reconcile.
-func TestPopulateInstancePodCounters_EmptyPodSet(t *testing.T) {
+func TestPublicationObservation_EmptyPodSet(t *testing.T) {
 	g := gomega.NewWithT(t)
 	insts := []v1beta1.OMENativeInstanceStatus{
 		// Stale stamps from a prior reconcile when this Instance had pods.
 		{Index: 0, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, AvailablePodCount: 1,
 			NodesOccupied: []string{"node-x"}},
 	}
-	populateInstancePodCounters(insts, map[int32][]*corev1.Pod{}, map[string]struct{}{})
+	insts = materializeInlinePublicationStatuses(t, insts, map[int32][]*corev1.Pod{}, map[string]struct{}{})
 
 	g.Expect(insts[0].PodCount).To(gomega.BeZero())
 	g.Expect(insts[0].ReadyPodCount).To(gomega.BeZero())
@@ -105,12 +124,12 @@ func TestPopulateInstancePodCounters_EmptyPodSet(t *testing.T) {
 		"NodesOccupied must round-trip nil ↔ nil rather than nil ↔ empty-slice")
 }
 
-// TestPopulateInstancePodCounters_Admitted verifies the Admitted signal
+// TestPublicationObservation_Admitted verifies the Admitted signal
 // is computed correctly: true when the Instance has pods and none carry
 // an admission scheduling gate (Kueue has granted quota), false while
 // gated/queued or before pods exist. Used by the multi-cluster control
 // plane to decide the fan-out race winner.
-func TestPopulateInstancePodCounters_Admitted(t *testing.T) {
+func TestPublicationObservation_Admitted(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 3)
 
@@ -134,7 +153,7 @@ func TestPopulateInstancePodCounters_Admitted(t *testing.T) {
 		// 2: no entry (zero pods)
 	}
 
-	populateInstancePodCounters(insts, byIndex, nil)
+	insts = materializeInlinePublicationStatuses(t, insts, byIndex, nil)
 
 	g.Expect(insts[0].Admitted).To(gomega.BeTrue(),
 		"Instance 0 has a pod and it is not admission-gated → Admitted=true")
@@ -142,6 +161,32 @@ func TestPopulateInstancePodCounters_Admitted(t *testing.T) {
 		"Instance 1's pod still carries the Kueue admission gate → Admitted=false")
 	g.Expect(insts[2].Admitted).To(gomega.BeFalse(),
 		"Instance 2 has no pods yet → Admitted=false")
+}
+
+func TestAggregateAndWriteStatusPreservesSamePassAdmittedMirrorSemantics(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("model-engine", "default", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}}
+	pod := podForIR(ir, 0, "default", 0, true, true)
+	r, stored := newReconciler(t, ir, pod)
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, plan, nil)).To(gomega.Succeed())
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(stored.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses[0].Admitted).To(gomega.BeTrue())
+	g.Expect(ir.Status.InstanceStatuses[0].Admitted).To(gomega.BeFalse(),
+		"the caller snapshot retains its reconcile-entry admission value")
+	g.Expect(ir.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.Equal(int32(1)),
+		"ordinary publication counters remain mirrored into the caller snapshot")
 }
 
 // TestAggregateStatus_AvailableReplicas_MatchesReadyWithEndpointSlices
@@ -656,6 +701,75 @@ func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, afterSecond)).To(gomega.Succeed())
 	g.Expect(afterSecond.ResourceVersion).To(gomega.Equal(rvAfterFirst),
 		"a no-op aggregateAndWriteStatus pass must perform ZERO writes (ResourceVersion unchanged)")
+}
+
+func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("model-engine", "default", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}}
+	pod := podForIR(ir, 0, "default", 0, true, true)
+	slice := sliceForIRPod(ir, pod, true)
+	podLists := 0
+	endpointSliceLists := 0
+	statusWrites := 0
+	funcs := interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *corev1.PodList:
+				podLists++
+			case *discoveryv1.EndpointSliceList:
+				endpointSliceLists++
+			}
+			return c.List(ctx, list, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			statusWrites++
+			if statusWrites == 1 {
+				latest := &v1beta1.InferenceReplica{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
+					return err
+				}
+				latest.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceDeleting
+				latest.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+					ID: "delete-0", Type: v1beta1.InstanceOperationDelete, Step: "Drain",
+				}
+				if err := c.SubResource(subresource).Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: "ome.io", Resource: "inferencereplicas"},
+					obj.GetName(), errors.New("conflict"))
+			}
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(ir, pod, slice).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithIndex(&corev1.Pod{}, query.OMENativePodIndexField, query.OMENativePodIndexExtractor).
+		WithInterceptorFuncs(funcs).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Log: logf.Log.WithName("test"), Expectations: workload.NewExpectations()}
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, plan, nil)).To(gomega.Succeed())
+	g.Expect(statusWrites).To(gomega.Equal(2))
+	g.Expect(podLists).To(gomega.Equal(1), "the publication Pod observation is captured outside conflict retry")
+	g.Expect(endpointSliceLists).To(gomega.Equal(1), "the publication availability observation is captured outside conflict retry")
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceDeleting))
+	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
+	g.Expect(got.Status.InstanceStatuses[0].Operation.ID).To(gomega.Equal("delete-0"))
 }
 
 func TestAggregateAndWriteStatus_RebasesAfterAdjacentLifecycleWrite(t *testing.T) {

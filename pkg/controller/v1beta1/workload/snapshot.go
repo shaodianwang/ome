@@ -24,17 +24,9 @@ type InstanceEvidence struct {
 	DeadlinePassed bool
 }
 
-// ObservedSnapshot is the single observation for one reconcile. Pods are
-// read per source (live = APIReader for destructive planning; cached =
-// informer for non-destructive planning) LAZILY and MEMOIZED, so the
-// snapshot preserves the current pipeline's read count and read source
-// exactly — a source is Listed at most once, and only when a pass actually
-// needs it (never eagerly, which would add a live List to every reconcile
-// and load the apiserver on large clusters). Evidence is derived on demand
-// from the cached-read pods — evidence informs a status transition, not a
-// pod-destructive action, and the grace/deadline windows it feeds dwarf
-// informer lag, so the cache-served read keeps the escalation pass off the
-// apiserver hot path.
+// ObservedSnapshot owns the decision-epoch observations for one reconcile.
+// Cache and API-reader views remain independent, lazy, and memoized. Evidence
+// uses the cache view; destructive planning uses the live-read view.
 //
 // Not safe for concurrent use — one snapshot per reconcile goroutine.
 type ObservedSnapshot struct {
@@ -43,15 +35,15 @@ type ObservedSnapshot struct {
 	component ComponentType
 	insts     []InstanceStatus
 
-	live   memoBuckets
-	cached memoBuckets
+	live   memoObservation
+	cached memoObservation
 }
 
-// memoBuckets memoizes one pod-List-and-bucket result (value + error).
-type memoBuckets struct {
-	done    bool
-	buckets map[int32][]*corev1.Pod
-	err     error
+// memoObservation memoizes one Pod observation and its read result.
+type memoObservation struct {
+	done        bool
+	observation ComponentObservation
+	err         error
 }
 
 // NewObservedSnapshot builds the snapshot; pods are materialized lazily on
@@ -60,30 +52,67 @@ func NewObservedSnapshot(deps Deps, input ReconcileInput, component ComponentTyp
 	return &ObservedSnapshot{deps: deps, input: input, component: component, insts: insts}
 }
 
-// LivePods returns the Component's pods bucketed by instance from the LIVE
-// (APIReader) source — the destructive-safe read the restart pass uses.
-// Memoized: at most one live List per reconcile.
-func (s *ObservedSnapshot) LivePods(ctx context.Context) (map[int32][]*corev1.Pod, error) {
+// LiveObservation returns the decision-epoch destructive-read view. Its source
+// records the cached-client fallback when no API reader is configured.
+func (s *ObservedSnapshot) LiveObservation(ctx context.Context) (ComponentObservation, error) {
 	if !s.live.done {
+		var pods PodObservation
 		if s.input.AuthoritativePods != nil {
-			s.live.buckets = s.input.AuthoritativePods.ByInstance
+			scope := PodObservationScopeUnknown
+			if s.input.AuthoritativePods.OwnerUID != "" && s.input.OwnerObject != nil &&
+				s.input.AuthoritativePods.OwnerUID == s.input.OwnerObject.GetUID() {
+				scope = PodObservationScopeOwnerUID
+			}
+			pods = newPodObservation(
+				PodObservationSourceAPIReader,
+				scope,
+				s.input.AuthoritativePods.Pods,
+				s.input.AuthoritativePods.ByInstance,
+			)
 		} else {
-			s.live.buckets, s.live.err = liveBucketPods(ctx, s.deps, s.input, s.component)
+			pods, s.live.err = liveObservePods(ctx, s.deps, s.input, s.component)
+		}
+		if s.live.err == nil {
+			s.live.observation, s.live.err = NewDecisionObservation(s.insts, pods)
 		}
 		s.live.done = true
 	}
-	return s.live.buckets, s.live.err
+	return s.live.observation, s.live.err
+}
+
+// CachedObservation returns the decision-epoch cache observation.
+func (s *ObservedSnapshot) CachedObservation(ctx context.Context) (ComponentObservation, error) {
+	if !s.cached.done {
+		pods, err := cachedObservePods(ctx, s.deps, s.input, s.component)
+		s.cached.err = err
+		if err == nil {
+			s.cached.observation, s.cached.err = NewDecisionObservation(s.insts, pods)
+		}
+		s.cached.done = true
+	}
+	return s.cached.observation, s.cached.err
+}
+
+// LivePods returns the Component's pods bucketed by instance from the live-read
+// role used by destructive planning.
+// Memoized: at most one live List per reconcile.
+func (s *ObservedSnapshot) LivePods(ctx context.Context) (map[int32][]*corev1.Pod, error) {
+	observation, err := s.LiveObservation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return observation.pods.byInstance, nil
 }
 
 // CachedPods returns the Component's pods bucketed by instance from the
 // CACHED (informer) source — the non-destructive read the update pass uses.
 // Memoized: at most one cached List per reconcile.
 func (s *ObservedSnapshot) CachedPods(ctx context.Context) (map[int32][]*corev1.Pod, error) {
-	if !s.cached.done {
-		s.cached.buckets, s.cached.err = cachedBucketPods(ctx, s.deps, s.input, s.component)
-		s.cached.done = true
+	observation, err := s.CachedObservation(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return s.cached.buckets, s.cached.err
+	return observation.pods.byInstance, nil
 }
 
 // EvidenceFor returns the per-instance failure evidence for idx, derived

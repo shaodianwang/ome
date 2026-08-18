@@ -27,7 +27,6 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -517,33 +516,31 @@ func foldRetryAfter(res ctrl.Result, retryAfter time.Duration) ctrl.Result {
 	return res
 }
 
-// liveBucketPods does ONE live List of the Component's pods and buckets
-// them by Instance index. The restart pass uses the live reader because
-// restart is destructive and must not act on a stale cache — the same
-// read source DetectRestartTrigger used per-Instance, hoisted to once per
-// reconcile.
-func liveBucketPods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (map[int32][]*corev1.Pod, error) {
-	// Live reader (APIReader) has no Pod field index — useIndex=false skips
-	// the doomed MatchingFields probe so this is exactly ONE live List.
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, component, false)
-	if err != nil {
-		return nil, err
+// liveObservePods performs the selector-scoped live-role List.
+func liveObservePods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
+	// The API reader has no Pod field index. useIndex=false preserves one List
+	// for this role, including its cached-client fallback.
+	reader := deps.Reader()
+	source := PodObservationSourceAPIReader
+	if deps.APIReader == nil {
+		source = PodObservationSourceCache
 	}
-	return query.BucketPodsByInstanceIdx(pods), nil
+	pods, err := query.ListOMENativePodsByName(ctx, reader, input.Key.Namespace, input.Key.OwnerName, component, false)
+	if err != nil {
+		return PodObservation{}, err
+	}
+	return newPodObservation(source, PodObservationScopeSelector, pods, nil), nil
 }
 
-// cachedBucketPods does ONE cached List of the Component's pods and
-// buckets them by Instance index. The update pass uses the cached reader —
-// the same non-destructive read source DetectUpdateTrigger / Update used
-// per-Instance, hoisted to once per reconcile.
-func cachedBucketPods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (map[int32][]*corev1.Pod, error) {
+// cachedObservePods performs the selector-scoped cache List.
+func cachedObservePods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
 	// Cached client has the OMENative Pod field index — useIndex=true takes
 	// the index fast path instead of scanning every cached pod.
 	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component, true)
 	if err != nil {
-		return nil, err
+		return PodObservation{}, err
 	}
-	return query.BucketPodsByInstanceIdx(pods), nil
+	return NewCachedSelectorPodObservation(pods, nil), nil
 }
 
 // ExtraInstanceIndices returns InstanceStatus indices the plan no

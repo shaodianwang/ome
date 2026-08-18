@@ -425,8 +425,21 @@ func CountersForInstance(pods []*corev1.Pod, availableByPod map[string]struct{})
 		ServingPodCount:   CountServingPods(pods),
 		ScheduledPodCount: CountScheduledPods(pods),
 		AvailablePodCount: CountAvailablePods(pods, availableByPod),
+		Admitted:          instancePodsAdmitted(pods),
 		NodesOccupied:     UniqueNodes(pods),
 	}
+}
+
+func instancePodsAdmitted(pods []*corev1.Pod) bool {
+	if len(pods) == 0 {
+		return false
+	}
+	for _, pod := range pods {
+		if PodAdmissionGated(pod) {
+			return false
+		}
+	}
+	return true
 }
 
 // InstanceCounters is the field-level result of CountersForInstance.
@@ -437,6 +450,7 @@ type InstanceCounters struct {
 	ServingPodCount   int32
 	ScheduledPodCount int32
 	AvailablePodCount int32
+	Admitted          bool
 	NodesOccupied     []string
 }
 

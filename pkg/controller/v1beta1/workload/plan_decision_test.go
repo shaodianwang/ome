@@ -2,6 +2,7 @@ package workload_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -390,6 +391,119 @@ func TestPlan_Migrate_SelectsOldestManualRecord(t *testing.T) {
 func updateTarget() *appsv1.ControllerRevision {
 	return &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+}
+
+func TestPlan_RemovableInlineFieldsDoNotChangeDecision(t *testing.T) {
+	target := updateTarget()
+	plan := workload.ComponentPlan{
+		Component:     workload.ComponentEngine,
+		Replicas:      1,
+		RestartPolicy: workload.RestartPolicyRecreateInstance,
+		Instances: []workload.InstancePlan{{
+			Index: 0, Incarnation: 1,
+			Runners: []workload.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}},
+		}},
+	}
+	podA := enginePod("llama-70b", "prod", 0)
+	podB := enginePod("llama-70b", "prod", 0)
+	podB.Name += "-worker"
+	staleCachedPod := podA.DeepCopy()
+	staleCachedPod.Spec.Containers[0].Image = "test:v0"
+	cached := map[int32][]*corev1.Pod{0: {staleCachedPod}}
+
+	tests := []struct {
+		name         string
+		live         map[int32][]*corev1.Pod
+		inlineFields workload.InstanceStatus
+		wantActions  []workload.ActionKind
+	}{
+		{
+			name: "persisted observation leads partial live gang",
+			live: map[int32][]*corev1.Pod{0: {podA}},
+			inlineFields: workload.InstanceStatus{
+				ReadyPodCount: 2, ScheduledPodCount: 2, NodesOccupied: []string{"node-a", "node-b"},
+			},
+			wantActions: []workload.ActionKind{workload.ActionRestart, workload.ActionUpdate, workload.ActionCreate},
+		},
+		{
+			name: "persisted observation trails complete live gang",
+			live: map[int32][]*corev1.Pod{0: {podA, podB}},
+			inlineFields: workload.InstanceStatus{
+				ReadyPodCount: 1, ScheduledPodCount: 1, NodesOccupied: []string{"node-a"},
+			},
+			wantActions: []workload.ActionKind{workload.ActionUpdate, workload.ActionCreate},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			withoutFields := minimalInput(t)
+			forbidMutations(t, &withoutFields)
+			withoutFields.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+				Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, PodCount: 2,
+			}}
+			withFields := minimalInput(t)
+			forbidMutations(t, &withFields)
+			row := withoutFields.ObservedState.InstanceStatuses[0]
+			row.ReadyPodCount = test.inlineFields.ReadyPodCount
+			row.ScheduledPodCount = test.inlineFields.ScheduledPodCount
+			row.NodesOccupied = test.inlineFields.NodesOccupied
+			withFields.ObservedState.InstanceStatuses = []workload.InstanceStatus{row}
+
+			withoutDecision := planTargetOrFail(t, withoutFields, plan, target,
+				workload.SnapshotWithDistinctPodsForTest(withoutFields, test.live, cached))
+			withDecision := planTargetOrFail(t, withFields, plan, target,
+				workload.SnapshotWithDistinctPodsForTest(withFields, test.live, cached))
+			if !reflect.DeepEqual(withoutDecision, withDecision) {
+				t.Fatalf("removable fields changed the full decision\nwithout values: %#v\nwith values:    %#v", withoutDecision, withDecision)
+			}
+			if got := actionKinds(withoutDecision); !kindsEqual(got, test.wantActions) {
+				t.Fatalf("ordered actions = %v, want %v", got, test.wantActions)
+			}
+		})
+	}
+}
+
+func TestPlanObservationReadFailureFailsClosed(t *testing.T) {
+	wantErr := errors.New("pod observation failed")
+	funcs := interceptor.Funcs{
+		List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+			return wantErr
+		},
+	}
+	failing := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithInterceptorFuncs(funcs).Build()
+	healthy := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
+	tests := []struct {
+		name     string
+		liveFail bool
+		target   *appsv1.ControllerRevision
+	}{
+		{name: "live restart observation", liveFail: true},
+		{name: "cached update observation", target: updateTarget()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := minimalInput(t)
+			forbidMutations(t, &input)
+			input.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+				Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-revision",
+			}}
+			plan := minimalPlan()
+			deps := workload.Deps{Client: failing, APIReader: healthy}
+			if test.liveFail {
+				plan.RestartPolicy = workload.RestartPolicyRecreateInstance
+				deps.Client, deps.APIReader = healthy, failing
+			}
+			snapshot := workload.NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
+
+			decision, err := workload.Plan(context.Background(), input, plan, test.target, snapshot)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("Plan error = %v, want %v", err, wantErr)
+			}
+			if !reflect.DeepEqual(decision, workload.Decision{}) {
+				t.Fatalf("failed observation returned a partial decision: %#v", decision)
+			}
+		})
 	}
 }
 

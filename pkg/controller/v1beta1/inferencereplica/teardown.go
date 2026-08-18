@@ -148,6 +148,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 			invalid, query.LabelInstanceIdx)
 	}
 	input.AuthoritativePods = &workload.ComponentPodSnapshot{
+		OwnerUID:   ir.UID,
 		Pods:       ownedPods,
 		ByInstance: query.BucketPodsByInstanceIdx(ownedPods),
 	}
