@@ -131,25 +131,25 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 // InstanceStatus.RunningRevision advances — so per-revision Service
 // routing, drain (drain.IsPodDrained), and stuck-pod detection
 // (HasWedgedPodAgainstCurrent), which all key on this label, treat the
-// rolled pod as the PREVIOUS revision. Idempotent: no patch is issued when
-// the label already matches (or targetHash is empty).
-func patchPodRevisionHashLabel(ctx context.Context, c client.Client, pod *corev1.Pod, targetHash string) error {
+// rolled pod as the PREVIOUS revision. Returns whether a patch was issued;
+// matching labels and empty target hashes are no-ops.
+func patchPodRevisionHashLabel(ctx context.Context, c client.Client, pod *corev1.Pod, targetHash string) (bool, error) {
 	if pod == nil {
-		return fmt.Errorf("patchPodRevisionHashLabel: nil pod")
+		return false, fmt.Errorf("patchPodRevisionHashLabel: nil pod")
 	}
 	if targetHash == "" || pod.Labels[query.LabelRevisionHash] == targetHash {
-		return nil
+		return false, nil
 	}
 	raw, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{"labels": map[string]string{query.LabelRevisionHash: targetHash}},
 	})
 	if err != nil {
-		return fmt.Errorf("marshal revision-hash label patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return false, fmt.Errorf("marshal revision-hash label patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
-		return fmt.Errorf("patch pod %s/%s revision-hash label: %w", pod.Namespace, pod.Name, err)
+		return false, fmt.Errorf("patch pod %s/%s revision-hash label: %w", pod.Namespace, pod.Name, err)
 	}
-	return nil
+	return true, nil
 }
 
 // annotationsDiff computes the patch values that reconcile a pod's
@@ -201,27 +201,27 @@ func annotationsDiff(podAnnotations, previousTargetAnnotations, newTargetAnnotat
 // metadata.annotations to reconcile it toward the target revision's
 // PodMeta. previousTargetAnnotations is the running revision's PodMeta
 // (used to compute which keys OMENative owns and is allowed to
-// delete). Idempotent — no patch is issued when the diff is empty.
+// delete). Returns whether a patch was issued; an empty diff is a no-op.
 // Without this reconcile, in-place updates would leave
 // pod.metadata.annotations stuck at the value the pod was created
 // with, so spec.{component}.annotations edits during an
 // in-place-eligible rollout would never reach the pod.
-func patchPodAnnotations(ctx context.Context, c client.Client, pod *corev1.Pod, previousTargetAnnotations, newTargetAnnotations map[string]string) error {
+func patchPodAnnotations(ctx context.Context, c client.Client, pod *corev1.Pod, previousTargetAnnotations, newTargetAnnotations map[string]string) (bool, error) {
 	if pod == nil {
-		return fmt.Errorf("patchPodAnnotations: nil pod")
+		return false, fmt.Errorf("patchPodAnnotations: nil pod")
 	}
 	diff := annotationsDiff(pod.Annotations, previousTargetAnnotations, newTargetAnnotations)
 	if len(diff) == 0 {
-		return nil
+		return false, nil
 	}
 	raw, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{"annotations": diff},
 	})
 	if err != nil {
-		return fmt.Errorf("marshal annotation patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return false, fmt.Errorf("marshal annotation patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
-		return fmt.Errorf("patch pod %s/%s annotations: %w", pod.Namespace, pod.Name, err)
+		return false, fmt.Errorf("patch pod %s/%s annotations: %w", pod.Namespace, pod.Name, err)
 	}
-	return nil
+	return true, nil
 }

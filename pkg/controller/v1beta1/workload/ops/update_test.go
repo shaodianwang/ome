@@ -257,6 +257,7 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
 		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+	legacyStampPodRevisionHash(t, c, pod, tcr.Name)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -459,6 +460,7 @@ func TestUpdate_InPlace_InjectedSidecar_Converges(t *testing.T) {
 	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
 		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+	legacyStampPodRevisionHash(t, c, pod, tcr.Name)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -1322,6 +1324,138 @@ func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
 	if !podRuntimeImagesMatch(pod, target) {
 		t.Errorf("expected match between spec %q and runtime %q after canonicalImage normalization",
 			target.Containers[0].Image, pod.Status.ContainerStatuses[0].Image)
+	}
+}
+
+// TestUpdate_InPlaceAnnotationMutationRequiresFreshObservation verifies that
+// an annotation-only rollout remains Updating for the pass that patches pod
+// metadata. Ready promotion is allowed only after a fresh pod observation
+// confirms the metadata and revision label.
+func TestUpdate_InPlaceAnnotationMutationRequiresFreshObservation(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: legacyBoolPtr(false),
+			},
+		},
+	}
+	spec := legacyTargetSpecImage("llama:v1")
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Annotations = map[string]string{"release": "one"}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Image: "llama:v1"}}
+	c := legacyNewFakeClient(t, isvc, ir, pod)
+	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"release": "one"}})
+	target := legacyEnsureTargetCRWithMeta(t, c, isvc, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"release": "two"}})
+	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
+		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
+
+	done, err := Update(context.Background(), legacyTestDeps(c), legacyTestInput(isvc, c, workload.ComponentEngine), plan, plan.Instances[0], target, spec)
+	if err != nil {
+		t.Fatalf("first Update: %v", err)
+	}
+	if done {
+		t.Fatal("first Update returned done=true after issuing metadata patches")
+	}
+
+	gotPod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), gotPod); err != nil {
+		t.Fatalf("get pod after first Update: %v", err)
+	}
+	if got := gotPod.Annotations["release"]; got != "two" {
+		t.Errorf("release annotation: got %q want %q", got, "two")
+	}
+	wantHash := query.RevisionHashFromControllerRevisionName(target.Name)
+	if got := gotPod.Labels[query.LabelRevisionHash]; got != wantHash {
+		t.Errorf("revision hash: got %q want %q", got, wantHash)
+	}
+	firstStatus := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if firstStatus.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("phase after metadata patch: got %q want Updating", firstStatus.Phase)
+	}
+	if firstStatus.RunningRevision == target.Name {
+		t.Errorf("RunningRevision advanced before a fresh pod observation")
+	}
+
+	done, err = Update(context.Background(), legacyTestDeps(c), legacyTestInput(isvc, c, workload.ComponentEngine), plan, plan.Instances[0], target, spec)
+	if err != nil {
+		t.Fatalf("second Update: %v", err)
+	}
+	if !done {
+		t.Fatal("second Update returned done=false after observing converged metadata")
+	}
+	secondStatus := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if secondStatus.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("phase after fresh observation: got %q want Ready", secondStatus.Phase)
+	}
+	if secondStatus.RunningRevision != target.Name {
+		t.Errorf("RunningRevision: got %q want %q", secondStatus.RunningRevision, target.Name)
+	}
+}
+
+// TestUpdate_InPlaceAnnotationMutationRestoresServingOnFreshObservation
+// verifies that a drained pod remains out of rotation during the metadata
+// mutation pass and returns to service on the converged pass.
+func TestUpdate_InPlaceAnnotationMutationRestoresServingOnFreshObservation(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
+			},
+		},
+	}
+	spec := legacyTargetSpecImage("llama:v1")
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Annotations = map[string]string{"release": "one"}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Image: "llama:v1"}}
+	serviceName := query.PerRevisionServiceName(isvc.Name, workload.ComponentEngine, testRevisionHashLegacy)
+	slice := legacySliceWithEndpoint(isvc.Namespace, "engine-revision", serviceName, pod, false)
+	c := legacyNewFakeClient(t, isvc, ir, pod, slice)
+	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"release": "one"}})
+	target := legacyEnsureTargetCRWithMeta(t, c, isvc, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"release": "two"}})
+	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
+		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+
+	done, err := Update(context.Background(), legacyTestDeps(c), legacyTestInput(isvc, c, workload.ComponentEngine), plan, plan.Instances[0], target, spec)
+	if err != nil {
+		t.Fatalf("first Update: %v", err)
+	}
+	if done {
+		t.Fatal("first Update returned done=true after issuing metadata patches")
+	}
+	gotPod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), gotPod); err != nil {
+		t.Fatalf("get pod after first Update: %v", err)
+	}
+	if podreadiness.IsServing(gotPod) {
+		t.Error("pod returned to service in the metadata mutation pass")
+	}
+
+	done, err = Update(context.Background(), legacyTestDeps(c), legacyTestInput(isvc, c, workload.ComponentEngine), plan, plan.Instances[0], target, spec)
+	if err != nil {
+		t.Fatalf("second Update: %v", err)
+	}
+	if !done {
+		t.Fatal("second Update returned done=false after observing converged metadata")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), gotPod); err != nil {
+		t.Fatalf("get pod after second Update: %v", err)
+	}
+	if !podreadiness.IsServing(gotPod) {
+		t.Error("pod did not return to service after fresh convergence observation")
+	}
+	status := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if status.Phase != v1beta1.OMENativeInstanceReady || status.RunningRevision != target.Name {
+		t.Errorf("status after convergence: phase=%q runningRevision=%q", status.Phase, status.RunningRevision)
 	}
 }
 

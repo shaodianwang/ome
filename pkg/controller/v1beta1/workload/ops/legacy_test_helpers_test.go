@@ -425,6 +425,20 @@ func legacyEnsureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.Inference
 	return legacyEnsureTargetCRWithMeta(t, c, isvc, spec, nil)
 }
 
+// legacyStampPodRevisionHash makes a pod fixture represent a fully observed
+// in-place rollout at the supplied ControllerRevision.
+func legacyStampPodRevisionHash(t *testing.T, c client.Client, pod *corev1.Pod, revisionName string) {
+	t.Helper()
+	fresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), fresh); err != nil {
+		t.Fatalf("get pod for revision hash: %v", err)
+	}
+	fresh.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(revisionName)
+	if err := c.Update(context.Background(), fresh); err != nil {
+		t.Fatalf("stamp pod revision hash: %v", err)
+	}
+}
+
 // legacyEnsureTargetCRWithMeta is legacyEnsureTargetCR's PodMeta-aware
 // sibling. Captures user-intent annotations via meta so the in-place
 // annotation-propagation regression tests can verify those values

@@ -105,12 +105,10 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	// re-mark NotServing and requeue. Live reader so a stale serving=False
 	// view doesn't fail the recheck open.
 	//
-	// The annotation patch piggybacks on this loop: per-pod, after a
-	// successful (or no-op) image patch, reconcile annotations toward
-	// the target. Annotations apply immediately (no kubelet roll needed),
-	// so we don't need to gate convergence on them — but they MUST land
-	// before we mark Ready or operators see an out-of-date pod.
-	patched := false
+	// The metadata patches piggyback on this loop. Any issued mutation
+	// ends the pass so convergence and status promotion use a fresh pod
+	// observation.
+	mutated := false
 	for _, pod := range pods {
 		needsImagePatch := !podImagesMatch(pod, targetSpec)
 		if markNotReady && needsImagePatch {
@@ -135,21 +133,24 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 				return false, fmt.Errorf("patch images (instance=%d, pod=%s): %w", inst.Index, pod.Name, perr)
 			}
 			if issued {
-				patched = true
+				mutated = true
 			}
 		}
-		if err := patchPodAnnotations(ctx, deps.Client, pod, previousAnnotations, targetAnnotations); err != nil {
+		annotationsPatched, err := patchPodAnnotations(ctx, deps.Client, pod, previousAnnotations, targetAnnotations)
+		if err != nil {
 			return false, fmt.Errorf("patch annotations (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
+		mutated = mutated || annotationsPatched
 		// Restamp the revision-hash label so the in-place-rolled pod is
 		// recognized as the target revision by per-revision Service routing,
 		// drain, and stuck-pod detection (all keyed on this label). Idempotent.
-		if err := patchPodRevisionHashLabel(ctx, deps.Client, pod, query.RevisionOf(target).Hash()); err != nil {
+		revisionHashPatched, err := patchPodRevisionHashLabel(ctx, deps.Client, pod, query.RevisionOf(target).Hash())
+		if err != nil {
 			return false, fmt.Errorf("patch revision-hash label (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
+		mutated = mutated || revisionHashPatched
 	}
-	if patched {
-		// Kubelet needs another pass to roll the containers.
+	if mutated {
 		return false, nil
 	}
 
