@@ -55,17 +55,17 @@ var (
 
 	// RolloutPromoteAnnotation is the operator verb that advances a paused
 	// canary step under Manual promotion (canary with neither auto nor
-	// analysis set). Value: the canary revision
-	// hash (copied from status.canary.canaryRevisionHash) — the hash guards
-	// against promoting a stale revision; "full" is also accepted. The
+	// analysis set). Value: the canary revision hash (copied from
+	// status.canary.canaryRevisionHash) — the hash guards against promoting
+	// a stale revision, and admission rejects any other value. The
 	// controller clears the annotation after consuming it. No-op when
 	// spec.rollout.groups[].canary is unset.
 	RolloutPromoteAnnotation = OMEAPIGroupName + "/rollout-promote"
 
 	// RolloutRollbackAnnotation is the operator verb for instant
-	// rollback. Value: "true". Traffic shifts to 100% old, new
-	// revision drains after scaleDownDelaySeconds. Controller clears
-	// the annotation after consuming it.
+	// rollback. Value: "true" ("false" is identical to absence). Traffic
+	// shifts to 100% old, new revision drains after scaleDownDelaySeconds.
+	// Controller clears the annotation after consuming it.
 	RolloutRollbackAnnotation = OMEAPIGroupName + "/rollout-rollback"
 
 	// PausedRolloutAnnotation, set to "true" on the InferenceService,

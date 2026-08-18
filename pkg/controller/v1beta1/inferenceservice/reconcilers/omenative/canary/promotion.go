@@ -14,10 +14,13 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 )
 
-// isRollbackRequested reports whether the operator set ome.io/rollout-rollback.
+// isRollbackRequested reports whether the operator requested rollback via
+// ome.io/rollout-rollback. Only the value "true" is a request: the annotation
+// is a documented boolean whose "false" is identical to absence, and any other
+// value (possible via direct writes that bypass admission) must not trigger a
+// production rollback.
 func isRollbackRequested(isvc *v1beta1.InferenceService) bool {
-	_, ok := isvc.Annotations[constants.RolloutRollbackAnnotation]
-	return ok
+	return isvc.Annotations[constants.RolloutRollbackAnnotation] == "true"
 }
 
 // shouldAdvanceManual reports whether the operator promoted THIS canary revision

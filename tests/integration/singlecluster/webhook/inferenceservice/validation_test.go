@@ -451,6 +451,21 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		}
 	})
 
+	ginkgo.It("rejects ome.io/rollout-promote=full (InvalidRolloutPromoteTarget)", func() {
+		// The canary executor promotes only by exact revision-hash match, so a
+		// "full" target could never take effect; admission rejects it outright
+		// rather than accepting a command that silently does nothing.
+		isvc := v1beta1testing.MakeInferenceService("isvc-promote-full", "isvc-webhook").
+			Annotation(constants.RolloutPromoteAnnotation, "full").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("InvalidRolloutPromoteTarget"))
+	})
+
 	// Explicit-pin admission validation. Three rejections
 	// happen at the webhook so misconfigured pins never reach the controller:
 	// AutoSync conflict, wrong runtime in the name, wrong scope prefix.

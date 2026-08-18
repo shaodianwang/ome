@@ -26,7 +26,7 @@ const (
 	kindDuration
 	kindBool
 	kindRetryOnList
-	kindPromoteTarget // int >= 0 or "full"
+	kindPromoteTarget // canary revision hash
 )
 
 // trafficAnnotationKinds is the authoritative classifier for every
@@ -172,14 +172,11 @@ func validateAnnotationValue(key, value string, kind trafficAnnotationKind) erro
 			}
 		}
 	case kindPromoteTarget:
-		// The canary manual-promote verb expects the canary revision hash (the
-		// value copied from status.canary.canaryRevisionHash); "full" is also
-		// accepted. See promotion.shouldAdvanceManual.
-		if value == "full" {
-			return nil
-		}
+		// The canary manual-promote verb only ever matches the exact canary
+		// revision hash (promotion.shouldAdvanceManual), so admission accepts
+		// nothing else — any other value would sit on the object doing nothing.
 		if !isRevisionHashToken(value) {
-			return fmt.Errorf("annotation %q value %q must be a canary revision hash (lowercase alphanumeric, from status.canary.canaryRevisionHash) or \"full\" (InvalidRolloutPromoteTarget)", key, value)
+			return fmt.Errorf("annotation %q value %q must be the canary revision hash to promote, copied from status.canary.canaryRevisionHash (lowercase alphanumeric, at least 6 chars); \"full\" is not a supported promotion target (InvalidRolloutPromoteTarget)", key, value)
 		}
 	}
 	return nil

@@ -44,13 +44,6 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name: "valid promote target full",
-			annotations: map[string]string{
-				constants.RolloutPromoteAnnotation: "full",
-			},
-			wantOK: true,
-		},
-		{
 			name: "valid promote target revision hash",
 			annotations: map[string]string{
 				constants.RolloutPromoteAnnotation: "e5d6f79d",
@@ -114,6 +107,16 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 			name: "promote target garbage",
 			annotations: map[string]string{
 				constants.RolloutPromoteAnnotation: "next",
+			},
+			wantContains: "InvalidRolloutPromoteTarget",
+		},
+		{
+			// The executor only ever matches the exact canary revision hash, so a
+			// "full" promotion could never take effect — reject it at admission
+			// instead of accepting a command that silently does nothing.
+			name: "promote target full is rejected",
+			annotations: map[string]string{
+				constants.RolloutPromoteAnnotation: "full",
 			},
 			wantContains: "InvalidRolloutPromoteTarget",
 		},

@@ -750,6 +750,239 @@ func TestReconcile_CompleteClearsStableIdentity(t *testing.T) {
 	}
 }
 
+// TestReconcile_GlobalPauseFreezesStepMachine pins the observe-only contract of
+// ome.io/rollout-paused=true: an elapsed timed pause must not advance the step,
+// no traffic intent is written, the phase is untouched, and a pending promote
+// annotation is neither honored nor consumed while paused.
+func TestReconcile_GlobalPauseFreezesStepMachine(t *testing.T) {
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: 30 * time.Minute}}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+	isvc := canaryISVC(steps, nil)
+	t0 := time.Unix(100000, 0)
+	entered := t0.Add(-40 * time.Minute) // timed pause elapsed long ago
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:    "new",
+		CurrentStep:           0,
+		ObservedTrafficWeight: 50,
+		StepEnteredTime:       &metav1.Time{Time: entered},
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhasePaused)
+	isvc.Annotations = map[string]string{
+		constants.PausedRolloutAnnotation:  "true",
+		constants.RolloutPromoteAnnotation: "new",
+	}
+
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Now = t0
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !res.Active {
+		t.Fatalf("paused mid-flight canary must report Active, got %+v", res)
+	}
+	if isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("paused canary must not advance (timed pause elapsed, promote pending), step=%d", isvc.Status.Canary.CurrentStep)
+	}
+	if !isvc.Status.Canary.StepEnteredTime.Time.Equal(entered) {
+		t.Fatalf("paused canary must not touch StepEnteredTime: was %v, now %v", entered, isvc.Status.Canary.StepEnteredTime.Time)
+	}
+	if len(isvc.Status.Components[v1beta1.EngineComponent].Traffic) != 0 {
+		t.Fatal("paused canary must not write traffic intent")
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
+		t.Fatalf("paused canary must not change the phase, got %q", phaseOf(isvc))
+	}
+	if _, still := isvc.Annotations[constants.RolloutPromoteAnnotation]; !still {
+		t.Fatal("paused canary must not consume the promote annotation")
+	}
+	if res.Partition != 2 { // step 0: 50% of 4 → 2 new, partition 2 (unchanged)
+		t.Fatalf("paused canary must echo the current step's partition 2, got %d", res.Partition)
+	}
+
+	// Clearing the pause resumes the SAME step with its clocks intact: the timed
+	// pause elapsed relative to the untouched StepEnteredTime, so the step
+	// advances on the first unpaused pass.
+	delete(isvc.Annotations, constants.PausedRolloutAnnotation)
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("resume must continue from the frozen step with timers intact, step=%d", isvc.Status.Canary.CurrentStep)
+	}
+}
+
+// TestReconcile_GlobalPauseDoesNotArmRollback pins that a rollback command
+// arriving while globally paused is deferred, not executed: no rollback state
+// is armed and the annotation survives to be honored after the pause clears.
+func TestReconcile_GlobalPauseDoesNotArmRollback(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, ObservedTrafficWeight: 50}
+	isvc.Annotations = map[string]string{
+		constants.PausedRolloutAnnotation:   "true",
+		constants.RolloutRollbackAnnotation: "true",
+	}
+	res, err := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2, "old": 2}))
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RolledBack || isvc.Status.Canary.RolledBackRevisionHash != "" {
+		t.Fatalf("paused canary must not arm a rollback, got res=%+v status=%+v", res, isvc.Status.Canary)
+	}
+	if _, still := isvc.Annotations[constants.RolloutRollbackAnnotation]; !still {
+		t.Fatal("paused canary must not consume the rollback annotation")
+	}
+}
+
+// TestReconcile_GlobalPausePreservesRollbackHold pins the other rollback
+// direction: a rollback already in progress is neither cleared nor re-armed
+// while paused — the result keeps echoing RolledBack so the controller leaves
+// the IR's RollbackToRevision signal in place, and a new target revision
+// appearing mid-pause does not start a fresh canary.
+func TestReconcile_GlobalPausePreservesRollbackHold(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", RolledBackRevisionHash: "new", CurrentStep: 0}
+	isvc.Annotations = map[string]string{
+		constants.PausedRolloutAnnotation:   "true",
+		constants.RolloutRollbackAnnotation: "true",
+	}
+	in := baseInputs(isvc, map[string]int32{"old": 4})
+	in.CanaryRevisionHash = "v3" // a new target that would normally re-arm
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !res.RolledBack {
+		t.Fatalf("paused rollback hold must keep echoing RolledBack, got %+v", res)
+	}
+	if isvc.Status.Canary.RolledBackRevisionHash != "new" || isvc.Status.Canary.CanaryRevisionHash != "new" {
+		t.Fatalf("paused rollback hold must not re-arm toward the new target, got %+v", isvc.Status.Canary)
+	}
+	if _, still := isvc.Annotations[constants.RolloutRollbackAnnotation]; !still {
+		t.Fatal("paused rollback hold must not consume the rollback annotation")
+	}
+	if len(isvc.Status.Components[v1beta1.EngineComponent].Traffic) != 0 {
+		t.Fatal("paused rollback hold must not write traffic intent")
+	}
+}
+
+// TestReconcile_GlobalPauseDoesNotStartCanary pins pause-before-start: a new
+// target appearing while paused must not initialize the state machine (that
+// would stamp step timers mid-pause); the canary starts once the pause clears.
+func TestReconcile_GlobalPauseDoesNotStartCanary(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Annotations = map[string]string{constants.PausedRolloutAnnotation: "true"}
+	res, err := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 0, "old": 4}))
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.Active {
+		t.Fatalf("paused not-started canary must stay inactive, got %+v", res)
+	}
+	if isvc.Status.Canary != nil {
+		t.Fatal("paused canary must not initialize status")
+	}
+}
+
+// TestReconcile_RollbackFalseOrGarbageIgnored pins the boolean contract of
+// ome.io/rollout-rollback: only "true" requests a rollback. "false" is
+// documented as identical to absence, and any other value (reachable via
+// direct writes that bypass admission) must not roll back production.
+func TestReconcile_RollbackFalseOrGarbageIgnored(t *testing.T) {
+	for _, value := range []string{"false", "yes", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			isvc := canaryISVC(twoStep(), nil)
+			isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, ObservedTrafficWeight: 50}
+			isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: value}
+			res, err := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2, "old": 2}))
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if res.RolledBack || isvc.Status.Canary.RolledBackRevisionHash != "" {
+				t.Fatalf("rollback=%q must be treated as absent, got res=%+v status=%+v", value, res, isvc.Status.Canary)
+			}
+			if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
+				t.Fatalf("canary should keep progressing normally (hold at the manual step), got %q", phaseOf(isvc))
+			}
+		})
+	}
+}
+
+// TestReconcile_FinalStepManualPauseHoldsUntilPromote pins the final-step gate:
+// a trailing bare Pause holds completion at 100% traffic until the operator
+// promotes the exact canary hash, and the promote is consumed at completion.
+func TestReconcile_FinalStepManualPauseHoldsUntilPromote(t *testing.T) {
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100, Pause: &v1beta1.RolloutPause{}},
+	}
+	isvc := canaryISVC(steps, nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 1, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
+
+	in := baseInputs(isvc, map[string]int32{"new": 4})
+	res, _ := Reconcile(context.Background(), in)
+	if res.Complete || phaseOf(isvc) != v1beta1.RolloutPhasePromoting {
+		t.Fatalf("manual final step must hold (Promoting) without a promote, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
+	if int(isvc.Status.Canary.CurrentStep) != 1 {
+		t.Fatalf("held final step must not move, step=%d", isvc.Status.Canary.CurrentStep)
+	}
+
+	// A stale promote (wrong hash) must not complete the final step either.
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "someoldhash"}
+	res, _ = Reconcile(context.Background(), in)
+	if res.Complete {
+		t.Fatalf("a stale promote must not complete the final step, got %+v", res)
+	}
+
+	// The matching promote completes, and is consumed at the completion edge.
+	isvc.Annotations[constants.RolloutPromoteAnnotation] = "new"
+	res, _ = Reconcile(context.Background(), in)
+	if !res.Complete || phaseOf(isvc) != v1beta1.RolloutPhaseStable {
+		t.Fatalf("matching promote must complete the final step, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
+	if int(isvc.Status.Canary.CurrentStep) != len(steps) {
+		t.Fatalf("completion must mark the done sentinel, step=%d", isvc.Status.Canary.CurrentStep)
+	}
+	if _, still := isvc.Annotations[constants.RolloutPromoteAnnotation]; still {
+		t.Fatal("the promote that opened the final gate must be consumed on completion")
+	}
+}
+
+// TestReconcile_FinalStepTimedPauseWaits pins the timed variant of the
+// final-step gate: a trailing Pause with a Duration holds completion for that
+// duration, anchored to the moment 100% traffic shifts (Promoting entry).
+func TestReconcile_FinalStepTimedPauseWaits(t *testing.T) {
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: 10 * time.Minute}}},
+	}
+	isvc := canaryISVC(steps, nil)
+	// Entered the final step long ago; the timed gate anchors to the traffic
+	// shift (the first capacity-met pass), not to step entry.
+	t0 := time.Unix(100000, 0)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 1, StepEnteredTime: &metav1.Time{Time: t0.Add(-time.Hour)}}
+
+	in := baseInputs(isvc, map[string]int32{"new": 4})
+	in.Now = t0 // traffic shifts here → the 10m window starts now
+	res, _ := Reconcile(context.Background(), in)
+	if res.Complete || phaseOf(isvc) != v1beta1.RolloutPhasePromoting {
+		t.Fatalf("timed final step must hold when the window starts, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
+	in.Now = t0.Add(5 * time.Minute)
+	res, _ = Reconcile(context.Background(), in)
+	if res.Complete {
+		t.Fatalf("timed final step must hold within its window, got %+v", res)
+	}
+	in.Now = t0.Add(11 * time.Minute)
+	res, _ = Reconcile(context.Background(), in)
+	if !res.Complete || phaseOf(isvc) != v1beta1.RolloutPhaseStable {
+		t.Fatalf("timed final step must complete after its window, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
+}
+
 // TestReconcile_CapacityGateFailedIsSticky pins the same parked-terminal contract
 // for the capacity-gate Failed path: a step whose canary pods never become Ready
 // escalates to Failed after the ready-timeout and then STAYS Failed. While held

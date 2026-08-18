@@ -111,6 +111,15 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		cs.CurrentStep = 0
 	}
 
+	// Global pause (ome.io/rollout-paused=true): the operator froze the rollout.
+	// Observe only — no step advance, no traffic or phase write, no annotation
+	// consumption, no rollback arm/clear, and no state-machine (re)initialization.
+	// Step timers are left untouched, so clearing the pause resumes the current
+	// step with its clocks intact.
+	if in.ISVC.Annotations[constants.PausedRolloutAnnotation] == "true" {
+		return pausedResult(cs, plan, in.DesiredReplicas), nil
+	}
+
 	// Rollback (ome.io/rollout-rollback): abandon the canary and return the
 	// component to the stable revision, then HOLD there rejecting the rolled-back
 	// revision. The revert itself is driven by the controller — seeing
@@ -269,10 +278,13 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
 		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePromoting)
-		// Analysis also gates the final 100% step: validate at full traffic before
-		// committing. A breach within the drain window still rolls back; an
-		// inconclusive stall parks Failed. Manual/timed steps skip straight to the drain.
-		if stepIsAnalysis(step) {
+		// The final 100% step honors the same gate as intermediate steps: analysis
+		// validates at full traffic (a breach within the drain window still rolls
+		// back; an inconclusive stall parks Failed), a bare Pause holds completion
+		// for an explicit promote, and a timed Pause holds for its duration —
+		// anchored, like the drain window, to the moment 100% traffic shifts. An
+		// ungated step proceeds straight to the drain.
+		if stepGated(step) {
 			switch evaluateStep(ctx, in, cs, step) {
 			case decRollback:
 				cs.RolledBackRevisionHash = cs.CanaryRevisionHash
@@ -283,10 +295,17 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			case decHold:
 				return &Result{Active: true, Partition: 0, RequeueAfter: stepRequeue(step)}, nil
 			case decAdvance:
-				// passed at 100% — fall through to the drain window + completion.
+				// gate passed at 100% — fall through to the drain window + completion.
 			}
 		}
 		if drainElapsed(cs, plan, in.Now) {
+			// A promote that opens the final gate stays live through the drain
+			// window (the gate re-evaluates every pass until completion), so it is
+			// consumed at the completion edge. Consumption failure retries
+			// completion rather than completing with a live promote.
+			if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutPromoteAnnotation); err != nil {
+				return nil, err
+			}
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
 			// Mark done (sentinel), don't clear: keeps EffectivePartition at
 			// partition 0 so the old revision drains instead of being re-held by
@@ -331,6 +350,25 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return nil, err
 	}
 	return &Result{Active: true, Stepped: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
+}
+
+// pausedResult reports a globally-paused canary's state without mutating it.
+// The rollback signal echoes persisted status so the controller neither arms
+// nor clears the IR's RollbackToRevision while paused, and the partition
+// echoes the current step so the staged split stays where it is.
+func pausedResult(cs *v1beta1.CanaryStatus, plan *v1beta1.GroupCanary, desiredReplicas int32) *Result {
+	// Not started, or already done: inactive. A pause must not initialize the
+	// state machine (initialization stamps the step timers) — a canary toward a
+	// target that appeared while paused starts once the pause clears.
+	if cs == nil || int(cs.CurrentStep) >= len(plan.Steps) {
+		return &Result{Active: false}
+	}
+	if cs.RolledBackRevisionHash != "" {
+		return &Result{Active: true, RolledBack: true, RequeueAfter: reconcileRequeue}
+	}
+	step := plan.Steps[cs.CurrentStep]
+	partition := partitionForNewCount(desiredReplicas, resolveStepNewCount(step, desiredReplicas))
+	return &Result{Active: true, Partition: partition, RequeueAfter: reconcileRequeue}
 }
 
 // resetCanaryStatus re-arms the state machine at step 0 toward a new target,
