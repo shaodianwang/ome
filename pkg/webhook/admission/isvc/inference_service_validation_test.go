@@ -10,6 +10,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -3086,6 +3087,276 @@ func TestValidateCreate_MigrationRequestAnnotations(t *testing.T) {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
 			}
+		})
+	}
+}
+
+// =============================================================================
+// REPLICA BOUNDS + POD DISRUPTION BUDGET VALIDATION TESTS
+// =============================================================================
+
+// componentExtISVC builds a minimal valid ISVC whose engine skips
+// runtime/model resolution (explicit runtime ref with autoSync=false plus a
+// full runner config), so per-Component extension checks are exercised in
+// isolation. mutate applies the per-case component fields.
+func componentExtISVC(mutate func(isvc *v1beta1.InferenceService)) *v1beta1.InferenceService {
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+		Spec: v1beta1.InferenceServiceSpec{
+			Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime", AutoSync: boolPtr(false)},
+			Engine: &v1beta1.EngineSpec{
+				Runner: &v1beta1.RunnerSpec{Container: v1.Container{Image: "test-image:latest"}},
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(isvc)
+	}
+	return isvc
+}
+
+// runCreateAndUpdate asserts the same admission outcome for both the
+// create and the update webhook paths (old object is a valid baseline).
+func runCreateAndUpdate(t *testing.T, newIsvc *v1beta1.InferenceService, errMsg string) {
+	t.Helper()
+	v := &InferenceServiceValidator{}
+	oldIsvc := componentExtISVC(nil)
+	ops := []struct {
+		name string
+		run  func() error
+	}{
+		{"create", func() error {
+			_, err := v.ValidateCreate(context.Background(), newIsvc)
+			return err
+		}},
+		{"update", func() error {
+			_, err := v.ValidateUpdate(context.Background(), oldIsvc, newIsvc)
+			return err
+		}},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			err := op.run()
+			if errMsg == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), errMsg)
+			}
+		})
+	}
+}
+
+func TestInferenceService_ComponentReplicaBoundsValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(isvc *v1beta1.InferenceService)
+		errMsg string // empty = expect admission
+	}{
+		{
+			name: "engine negative minReplicas rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinReplicas = intPtr(-1)
+			},
+			errMsg: "spec.engine.minReplicas must be >= 0",
+		},
+		{
+			name: "engine explicit maxReplicas below 1 rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MaxReplicas = -1
+			},
+			errMsg: "spec.engine.maxReplicas must be >= 1",
+		},
+		{
+			name: "engine minReplicas greater than maxReplicas rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinReplicas = intPtr(5)
+				isvc.Spec.Engine.MaxReplicas = 2
+			},
+			errMsg: "spec.engine.minReplicas (5) must be <= maxReplicas (2)",
+		},
+		{
+			name: "decoder negative minReplicas rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(-2)},
+				}
+			},
+			errMsg: "spec.decoder.minReplicas must be >= 0",
+		},
+		{
+			name: "decoder minReplicas greater than maxReplicas rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(4), MaxReplicas: 3},
+				}
+			},
+			errMsg: "spec.decoder.minReplicas (4) must be <= maxReplicas (3)",
+		},
+		{
+			name: "router negative minReplicas rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Router = &v1beta1.RouterSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(-1)},
+				}
+			},
+			errMsg: "spec.router.minReplicas must be >= 0",
+		},
+		{
+			name: "router explicit maxReplicas below 1 rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Router = &v1beta1.RouterSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MaxReplicas: -3},
+				}
+			},
+			errMsg: "spec.router.maxReplicas must be >= 1",
+		},
+		{
+			name: "router minReplicas greater than maxReplicas rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Router = &v1beta1.RouterSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(2), MaxReplicas: 1},
+				}
+			},
+			errMsg: "spec.router.minReplicas (2) must be <= maxReplicas (1)",
+		},
+		{
+			name: "valid engine bounds accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinReplicas = intPtr(1)
+				isvc.Spec.Engine.MaxReplicas = 3
+			},
+		},
+		{
+			name: "valid decoder bounds accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(2), MaxReplicas: 4},
+				}
+			},
+		},
+		{
+			name: "valid router bounds accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Router = &v1beta1.RouterSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1), MaxReplicas: 2},
+				}
+			},
+		},
+		{
+			name: "engine minReplicas above unset maxReplicas accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				// MaxReplicas zero value means "not set"; the min<=max
+				// check must not treat it as an explicit bound of 0.
+				isvc.Spec.Engine.MinReplicas = intPtr(5)
+			},
+		},
+		{
+			name: "engine minReplicas zero stays legal for scale-to-zero",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinReplicas = intPtr(0)
+				// KEDA opt-in satisfies the separate scale-to-zero gate;
+				// the bounds check itself must admit minReplicas=0.
+				isvc.Annotations = map[string]string{
+					constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runCreateAndUpdate(t, componentExtISVC(tt.mutate), tt.errMsg)
+		})
+	}
+}
+
+func TestInferenceService_ComponentPodDisruptionBudgetValidation(t *testing.T) {
+	budget := func(v intstr.IntOrString) *intstr.IntOrString { return &v }
+
+	tests := []struct {
+		name   string
+		mutate func(isvc *v1beta1.InferenceService)
+		errMsg string // empty = expect admission
+	}{
+		{
+			name: "engine with both budgets rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinAvailable = budget(intstr.FromInt(1))
+				isvc.Spec.Engine.MaxUnavailable = budget(intstr.FromInt(1))
+			},
+			errMsg: "spec.engine.minAvailable and spec.engine.maxUnavailable cannot both be set",
+		},
+		{
+			name: "decoder with both budgets rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						MinAvailable:   budget(intstr.FromString("50%")),
+						MaxUnavailable: budget(intstr.FromInt(1)),
+					},
+				}
+			},
+			errMsg: "spec.decoder.minAvailable and spec.decoder.maxUnavailable cannot both be set",
+		},
+		{
+			name: "router with both budgets rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Router = &v1beta1.RouterSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						MinAvailable:   budget(intstr.FromInt(2)),
+						MaxUnavailable: budget(intstr.FromString("25%")),
+					},
+				}
+			},
+			errMsg: "spec.router.minAvailable and spec.router.maxUnavailable cannot both be set",
+		},
+		{
+			name: "engine minAvailable percentage above 100 rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinAvailable = budget(intstr.FromString("150%"))
+			},
+			errMsg: "spec.engine.minAvailable must be a non-negative integer or a percentage",
+		},
+		{
+			name: "engine negative maxUnavailable rejected",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MaxUnavailable = budget(intstr.FromInt(-1))
+			},
+			errMsg: "spec.engine.maxUnavailable must be a non-negative integer or a percentage",
+		},
+		{
+			name: "engine minAvailable alone accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MinAvailable = budget(intstr.FromInt(1))
+			},
+		},
+		{
+			name: "engine maxUnavailable alone accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Engine.MaxUnavailable = budget(intstr.FromString("25%"))
+			},
+		},
+		{
+			name: "decoder and router with one budget each accepted",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						MinAvailable: budget(intstr.FromInt(1)),
+					},
+				}
+				isvc.Spec.Router = &v1beta1.RouterSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						MaxUnavailable: budget(intstr.FromInt(1)),
+					},
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runCreateAndUpdate(t, componentExtISVC(tt.mutate), tt.errMsg)
 		})
 	}
 }

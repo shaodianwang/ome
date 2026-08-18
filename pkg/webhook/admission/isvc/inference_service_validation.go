@@ -278,6 +278,19 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	if err := validation.ValidateScaleToZero(isvc); err != nil {
 		return allWarnings, err
 	}
+	// Per-Component replica bounds: negative minReplicas, explicit
+	// maxReplicas < 1, and minReplicas > maxReplicas are rejected with
+	// the exact spec field path.
+	if err := validateComponentReplicaBounds(isvc); err != nil {
+		return allWarnings, err
+	}
+	// Per-Component disruption budget shape: minAvailable and
+	// maxUnavailable are mutually exclusive on a Kubernetes
+	// PodDisruptionBudget, so the pair is rejected before the controller
+	// ever builds an invalid child PDB.
+	if err := validateComponentPodDisruptionBudgets(isvc); err != nil {
+		return allWarnings, err
+	}
 	if err := validation.ValidatePlacement(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
@@ -629,6 +642,68 @@ func isvcAutoscalerChecks(isvc *v1beta1.InferenceService) []validation.Component
 		})
 	}
 	return checks
+}
+
+// componentExtensionCheck names one declared Component's
+// ComponentExtensionSpec so per-Component field checks can report the
+// exact spec path (e.g. "spec.engine").
+type componentExtensionCheck struct {
+	name string
+	ext  *v1beta1.ComponentExtensionSpec
+}
+
+// isvcComponentExtensions projects each declared Component (Engine,
+// Decoder, Router) into the per-Component slice consumed by the
+// replica-bounds and disruption-budget checks. Nil Components are
+// skipped so an absent Component never produces a spurious error.
+func isvcComponentExtensions(isvc *v1beta1.InferenceService) []componentExtensionCheck {
+	var checks []componentExtensionCheck
+	if isvc.Spec.Engine != nil {
+		checks = append(checks, componentExtensionCheck{"engine", &isvc.Spec.Engine.ComponentExtensionSpec})
+	}
+	if isvc.Spec.Decoder != nil {
+		checks = append(checks, componentExtensionCheck{"decoder", &isvc.Spec.Decoder.ComponentExtensionSpec})
+	}
+	if isvc.Spec.Router != nil {
+		checks = append(checks, componentExtensionCheck{"router", &isvc.Spec.Router.ComponentExtensionSpec})
+	}
+	return checks
+}
+
+// validateComponentReplicaBounds checks MinReplicas / MaxReplicas
+// sanity for every declared Component. MaxReplicas is a non-pointer
+// int with no explicit "unset" marker — the zero value means the
+// operator omitted it — so 0 skips the max-side checks instead of
+// being rejected as < 1. MinReplicas=0 stays legal here; the
+// scale-to-zero gate is a separate validator.
+func validateComponentReplicaBounds(isvc *v1beta1.InferenceService) error {
+	for _, c := range isvcComponentExtensions(isvc) {
+		var max *int
+		if c.ext.MaxReplicas != 0 {
+			max = &c.ext.MaxReplicas
+		}
+		if err := validation.ValidateReplicaBounds(c.ext.MinReplicas, max); err != nil {
+			// ValidateReplicaBounds messages begin with the offending
+			// field name, so prefixing the Component path yields the
+			// exact field path (e.g. "spec.engine.minReplicas must be >= 0").
+			return fmt.Errorf("spec.%s.%w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// validateComponentPodDisruptionBudgets validates each declared
+// Component's disruption budget: minAvailable and maxUnavailable are
+// mutually exclusive (a Kubernetes PodDisruptionBudget accepts at most
+// one) and each value must be a non-negative integer or a 0-100%
+// percentage. Errors name the exact spec field path.
+func validateComponentPodDisruptionBudgets(isvc *v1beta1.InferenceService) error {
+	for _, c := range isvcComponentExtensions(isvc) {
+		if err := validation.ValidatePodDisruptionBudget("spec."+c.name, c.ext.MinAvailable, c.ext.MaxUnavailable); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // modelRequiresCacheProvider reports whether the model is sharded
