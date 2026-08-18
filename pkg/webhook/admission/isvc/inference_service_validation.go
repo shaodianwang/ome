@@ -75,6 +75,11 @@ func (v *InferenceServiceValidator) ValidateCreate(ctx context.Context, obj runt
 	if err := validateLegacyAutoscalerFieldsFromCtx(ctx); err != nil {
 		return nil, err
 	}
+	// CREATE validates the policy outright; the update-time ratchet lives
+	// in ValidateUpdate, which has the prior object.
+	if err := validation.ValidateScalingPolicy(isvc.Spec.ScalingPolicy, "spec.scalingPolicy"); err != nil {
+		return nil, err
+	}
 	// old=nil: every migration-request annotation present at CREATE is
 	// an add and gets validated (parity with the update path).
 	if err := validateAddedMigrationRequests(nil, isvc); err != nil {
@@ -103,6 +108,12 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 		return nil, err
 	}
 	if err := validation.ValidateCoordinationUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
+		return nil, err
+	}
+	// Ratchet: only a newly-set or changed scaling policy is validated,
+	// so a stored object carrying a rejected mode keeps accepting
+	// unrelated spec updates.
+	if err := validation.ValidateScalingPolicyUpdate(oldIsvc.Spec.ScalingPolicy, isvc.Spec.ScalingPolicy, "spec.scalingPolicy"); err != nil {
 		return nil, err
 	}
 	if err := validateAddedMigrationRequests(oldIsvc, isvc); err != nil {

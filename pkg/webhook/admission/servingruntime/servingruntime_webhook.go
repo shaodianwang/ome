@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -57,6 +58,20 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Denied(err.Error())
 	}
 
+	// Scaling-policy modes no controller applies are rejected before the
+	// disabled-shortcut so a disabled runtime cannot store a policy the
+	// update ratchet would then treat as pre-existing on re-enable.
+	oldSRPolicy := func() (*v1beta1.ScalingPolicy, error) {
+		old := &v1beta1.ServingRuntime{}
+		if err := sr.Decoder.DecodeRaw(req.OldObject, old); err != nil {
+			return nil, err
+		}
+		return old.Spec.ScalingPolicy, nil
+	}
+	if resp := validateRuntimeScalingPolicy(req, servingRuntime.Spec.ScalingPolicy, oldSRPolicy); resp != nil {
+		return *resp
+	}
+
 	existing := &v1beta1.ServingRuntimeList{}
 	if err := sr.Client.List(context.TODO(), existing, client.InNamespace(servingRuntime.Namespace)); err != nil {
 		log.Error(err, "Failed to get serving runtime list", "namespace", servingRuntime.Namespace)
@@ -104,6 +119,19 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 	}
 	if err := validateClusterRuntimeInheritance(ctx, csr.Client, clusterServingRuntime); err != nil {
 		return admission.Denied(err.Error())
+	}
+
+	// Scaling-policy check placement mirrors ServingRuntime.Handle: before
+	// the disabled-shortcut so the ratchet cannot be seeded while disabled.
+	oldCSRPolicy := func() (*v1beta1.ScalingPolicy, error) {
+		old := &v1beta1.ClusterServingRuntime{}
+		if err := csr.Decoder.DecodeRaw(req.OldObject, old); err != nil {
+			return nil, err
+		}
+		return old.Spec.ScalingPolicy, nil
+	}
+	if resp := validateRuntimeScalingPolicy(req, clusterServingRuntime.Spec.ScalingPolicy, oldCSRPolicy); resp != nil {
+		return *resp
 	}
 
 	existing := &v1beta1.ClusterServingRuntimeList{}
@@ -205,6 +233,37 @@ func validateServingRuntimePriority(newSpec, existingSpec *v1beta1.ServingRuntim
 				return fmt.Errorf(InvalidPriorityError, newModelFormat.Name)
 			}
 		}
+	}
+	return nil
+}
+
+// validateRuntimeScalingPolicy runs the shared not-implemented
+// scaling-mode rejection against a runtime's ScalingPolicy default with
+// ratchet semantics: CREATE validates the policy outright; UPDATE
+// validates only a newly-set or changed policy, so a stored runtime
+// carrying a rejected mode keeps accepting unrelated updates.
+// decodeOldPolicy extracts the prior policy from req.OldObject and is
+// invoked only on UPDATE with a non-empty old payload. Returns nil when
+// admitted, otherwise the response to send.
+func validateRuntimeScalingPolicy(req admission.Request, newPolicy *v1beta1.ScalingPolicy, decodeOldPolicy func() (*v1beta1.ScalingPolicy, error)) *admission.Response {
+	deny := func(err error) *admission.Response {
+		resp := admission.Denied(err.Error())
+		return &resp
+	}
+	if req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
+		oldPolicy, err := decodeOldPolicy()
+		if err != nil {
+			log.Error(err, "Failed to decode prior runtime for scaling-policy validation", "name", req.Name, "namespace", req.Namespace)
+			resp := admission.Errored(http.StatusBadRequest, err)
+			return &resp
+		}
+		if err := validation.ValidateScalingPolicyUpdate(oldPolicy, newPolicy, "spec.scalingPolicy"); err != nil {
+			return deny(err)
+		}
+		return nil
+	}
+	if err := validation.ValidateScalingPolicy(newPolicy, "spec.scalingPolicy"); err != nil {
+		return deny(err)
 	}
 	return nil
 }
