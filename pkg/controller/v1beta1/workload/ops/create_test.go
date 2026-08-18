@@ -1066,10 +1066,11 @@ func TestCreate_RecreateInstance_DefersNonReadyPartialGang(t *testing.T) {
 	}
 }
 
-// The mirror case: an Instance whose pod set was never observed complete
-// is still being materialized, and Create must finish the job. Without
-// this the deference would strand every interrupted birth and scale-up.
-func TestCreate_RecreateInstance_MaterializesUnfinishedGang(t *testing.T) {
+// Once CreatePods is committed, an interrupted gang is repaired by Restart
+// as one unit. Create must not backfill the missing member at the old
+// incarnation even when the latest published PodCount reflects only the
+// survivor.
+func TestCreate_RecreateInstance_DefersInterruptedGangMaterialization(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	ir := seedMaterializedGang(isvc, v1beta1.OMENativeInstanceCreating, 1)
@@ -1086,8 +1087,8 @@ func TestCreate_RecreateInstance_MaterializesUnfinishedGang(t *testing.T) {
 	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
 		t.Fatalf("list pods: %v", err)
 	}
-	if len(pods.Items) != 2 {
-		t.Fatalf("Create must finish materializing a gang that was never complete: got %d pod(s), want 2", len(pods.Items))
+	if len(pods.Items) != 1 {
+		t.Fatalf("Create must defer an interrupted gang to Restart: got %d pod(s), want 1", len(pods.Items))
 	}
 }
 

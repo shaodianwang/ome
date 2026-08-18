@@ -109,17 +109,11 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 	return false, ""
 }
 
-// instanceLostGangMember reports whether a multi-pod Instance whose pod
-// set was once observed complete is now missing a member, and no other
-// operation owns its pod churn. Shared with Create's deference guard so
-// the two passes cannot disagree about who repairs a partial gang.
-//
-// The materialization term is what separates "lost a member" from "not
-// built yet": Create stamps the status before it renders any pod, so a
-// bare count comparison is trivially true at birth and at every
-// scale-up, and Restart would thrash against Create. Observed PodCount
-// is the durable record that the set was whole, and it is recomputed
-// from a live List on every reconcile.
+// instanceLostGangMember reports whether a committed multi-pod Instance is
+// missing a member and no other operation owns its pod churn. Create commits
+// CreatePods before issuing Pod creates, so an interrupted partial create is
+// safely repaired as a whole Instance. Failed also proves that an attempt ran;
+// unrecognized or operation-free states use PodCount as a legacy fallback.
 //
 // Requiring a survivor (len(pods) > 0) confines this to partial loss —
 // the shape where the survivors hold capacity the replacement needs.
@@ -157,7 +151,8 @@ func instanceLostGangMember(input workload.ReconcileInput, plan workload.Compone
 	if s.Operation != nil && s.Operation.Type != workload.InstanceOperationCreate {
 		return "", false
 	}
-	if s.PodCount < expected {
+	createCommitted := s.Operation != nil && s.Operation.Step == createStepCreatePods
+	if !createCommitted && s.Phase != workload.InstancePhaseFailed && s.PodCount < expected {
 		return "", false
 	}
 	live := 0

@@ -194,7 +194,8 @@ func TestCreate_BatchedFreshStartsHonorConfiguredCapAndCommitBeforePods(t *testi
 		}
 		idx := int32(idx64)
 		status, ok := recorder.statuses[idx]
-		if !ok || status.Phase != workload.InstancePhaseCreating || status.Operation == nil || status.Operation.Type != workload.InstanceOperationCreate {
+		if !ok || status.Phase != workload.InstancePhaseCreating || status.Operation == nil ||
+			status.Operation.Type != workload.InstanceOperationCreate || status.Operation.Step != "CreatePods" {
 			return fmt.Errorf("pod %s created before its Creating intent was committed: %+v", pod.Name, status)
 		}
 		recorder.events = append(recorder.events, fmt.Sprintf("pod:%d", idx))

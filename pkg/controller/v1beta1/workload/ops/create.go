@@ -23,6 +23,10 @@ import (
 // readiness when an Instance is still coming up.
 const CreateRequeueInterval = 5 * time.Second
 
+// createStepCreatePods is the write-ahead marker for a committed Instance
+// materialization. The status mutation is persisted before any Pod create.
+const createStepCreatePods = "CreatePods"
+
 // Create drives Create / Scale-Up toward each desired Instance.
 // Multi-pass:
 //
@@ -926,7 +930,7 @@ func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Dur
 		s.Operation = &workload.InstanceOperation{
 			ID:             fmt.Sprintf("create-%d-%d", idx, now.Unix()),
 			Type:           workload.InstanceOperationCreate,
-			Step:           "CreatePods",
+			Step:           createStepCreatePods,
 			StartedAt:      now,
 			LastProgressAt: now,
 			Deadline:       metav1.NewTime(now.Add(timeout)),

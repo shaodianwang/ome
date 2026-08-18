@@ -524,6 +524,46 @@ func gangLossPods(n int) []*corev1.Pod {
 	return pods
 }
 
+func TestDetectRestartTrigger_GangMemberLossAfterPodCountRefresh(t *testing.T) {
+	status := workload.InstanceStatus{
+		Index:           0,
+		Incarnation:     74,
+		Phase:           workload.InstancePhaseCreating,
+		PodCount:        2,
+		RunningRevision: gangLossRevision,
+		TargetRevision:  gangLossRevision,
+		Operation: &workload.InstanceOperation{
+			Type: workload.InstanceOperationCreate,
+			Step: "CreatePods",
+		},
+	}
+	plan := workload.ComponentPlan{
+		Component:     workload.ComponentEngine,
+		RestartPolicy: workload.RestartPolicyRecreateInstance,
+	}
+	inst := workload.InstancePlan{Index: 0, Incarnation: 74, Runners: []workload.RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: 1},
+	}}
+
+	input := gangLossInput(status)
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, gangLossPods(2)); needs {
+		t.Fatalf("complete gang unexpectedly needs restart: %q", reason)
+	}
+
+	// Publication derives PodCount from the current Pod list. The CreatePods
+	// operation remains the durable proof that materialization was committed.
+	status.PodCount = 1
+	input = gangLossInput(status)
+	needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, gangLossPods(1))
+	if !needs {
+		t.Fatal("member loss must survive the PodCount refresh from 2 to 1")
+	}
+	if !strings.Contains(reason, "gang member lost") {
+		t.Fatalf("restart reason = %q, want gang member loss", reason)
+	}
+}
+
 func TestDetectRestartTrigger_GangMemberLossBelowReady(t *testing.T) {
 	// The production shape: a Create-owned Instance at a frozen incarnation
 	// whose RunningRevision already equals its target.
@@ -560,27 +600,58 @@ func TestDetectRestartTrigger_GangMemberLossBelowReady(t *testing.T) {
 		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
 		want: true,
 	}, {
-		// The deadline disposition parks a wedged Instance here with no
-		// Operation, and nothing else ever revisits it.
-		name: "failed with no operation fires",
+		// Failed proves the attempt ran even after publication refreshes the
+		// current count and the completed operation has been cleared.
+		name: "failed with no operation survives count refresh",
 		status: workload.InstanceStatus{
-			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseFailed, PodCount: 2,
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseFailed, PodCount: 1,
 			RunningRevision: gangLossRevision, TargetRevision: gangLossRevision,
 		},
 		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
 		want: true,
 	}, {
-		// Create stamps the status before it renders any pod, so a bare
-		// count comparison is true at birth. The materialization term is
-		// what keeps Restart from thrashing against Create there.
-		name:   "birth is silent",
+		name:   "committed birth with one survivor fires",
 		status: createOwned(workload.InstancePhaseCreating, 0),
 		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
-		want: false,
+		want: true,
 	}, {
-		name:   "partially materialized is silent",
+		name:   "current published count does not erase commit",
 		status: createOwned(workload.InstancePhaseCreating, 1),
 		live:   1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: true,
+	}, {
+		name: "legacy incomplete status is not proven materialized",
+		status: workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseCreating, PodCount: 1,
+			RunningRevision: gangLossRevision, TargetRevision: gangLossRevision,
+		},
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: false,
+	}, {
+		name: "legacy complete status uses count fallback",
+		status: workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhaseCreating, PodCount: 2,
+			RunningRevision: gangLossRevision, TargetRevision: gangLossRevision,
+		},
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: true,
+	}, {
+		name: "unknown create step retains legacy complete-count proof",
+		status: func() workload.InstanceStatus {
+			status := createOwned(workload.InstancePhaseCreating, 2)
+			status.Operation.Step = ""
+			return status
+		}(),
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
+		want: true,
+	}, {
+		name: "unknown create step with incomplete count is not a commit marker",
+		status: func() workload.InstanceStatus {
+			status := createOwned(workload.InstancePhaseCreating, 1)
+			status.Operation.Step = ""
+			return status
+		}(),
+		live: 1, expected: 2, policy: workload.RestartPolicyRecreateInstance,
 		want: false,
 	}, {
 		// Nothing survives to strand a replacement; Create's fresh-start
