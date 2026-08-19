@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import {
@@ -319,9 +319,12 @@ describe("runtimeReference", () => {
 });
 
 describe("toFeed", () => {
-  const now = Math.floor(Date.now() / 1000);
+  afterEach(() => vi.restoreAllMocks());
 
   it("chooses icon/tone by kind and action, with relative time", () => {
+    const now = Math.floor(Date.now() / 1000);
+    vi.spyOn(Date, "now").mockReturnValue(now * 1000);
+
     const [applied] = toFeed([
       { cluster: "cw", kind: "InferenceService", name: "x", action: "applied", at: now - 3600 },
     ]);
