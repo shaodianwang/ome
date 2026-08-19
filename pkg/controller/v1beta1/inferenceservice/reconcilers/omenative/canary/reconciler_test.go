@@ -86,6 +86,55 @@ func TestReconcile_CapacityGatePending(t *testing.T) {
 	}
 }
 
+func TestReconcile_CapacityUsesReadyInstanceCount(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		step           int32
+		readyPods      int32
+		readyInstances int32
+	}{
+		{name: "half-capacity-instance-shortfall", step: 0, readyPods: 16, readyInstances: 3},
+		{name: "full-capacity-instance-shortfall", step: 1, readyPods: 16, readyInstances: 7},
+		{name: "pod-readiness-shortfall", step: 0, readyPods: 3, readyInstances: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := canaryISVC(twoStep(), nil)
+			isvc.Status.Canary = &v1beta1.CanaryStatus{
+				CanaryRevisionHash: "new",
+				StableRevisionHash: "old",
+				CurrentStep:        tc.step,
+			}
+			in := baseInputs(isvc, map[string]int32{"new": tc.readyPods, "old": 8})
+			in.DesiredReplicas = 8
+			in.ReadyCanaryInstances = i32(tc.readyInstances)
+
+			if _, err := Reconcile(context.Background(), in); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+				t.Fatalf("pods=%d instances=%d must not satisfy step %d, got %q", tc.readyPods, tc.readyInstances, tc.step, phaseOf(isvc))
+			}
+		})
+	}
+}
+
+func TestReconcile_InitialConvergenceUsesReadyInstanceCount(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	in := baseInputs(isvc, map[string]int32{"new": 16, "old": 8})
+	in.DesiredReplicas = 8
+	in.ReadyCanaryInstances = i32(3)
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary == nil {
+		t.Fatal("three ready Instances must not look fully converged despite 16 ready pods")
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("initial step must wait for four ready Instances, got %q", phaseOf(isvc))
+	}
+}
+
 func TestReconcile_CanaryingPaused(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2}))
