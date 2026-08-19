@@ -139,7 +139,10 @@ func (ss *ServingSidecarInjector) getServingSidecarEnvs(fineTunedWeightFTStrateg
 		{Name: constants.AgentAuthTypeEnvVarKey, Value: ss.AuthType},
 		{Name: constants.AgentCompartmentIDEnvVarKey, Value: ss.CompartmentId},
 		{Name: constants.AgentRegionEnvVarKey, Value: ss.Region},
-		{Name: constants.AgentFineTunedWeightInfoFilePath, Value: constants.AgentFineTunedWeightInfoFilePath},
+		// The weight-info file path is intentionally not injected: the agent
+		// reads it from its own config file, and an env var here would
+		// override that value for every pod. The directory envs below are
+		// injected because they must match the mounts created above.
 		{Name: constants.AgentUnzippedFineTunedWeightDirectory, Value: filepath.Join(constants.ModelDefaultMountPathPrefix, fineTunedWeightFTStrategy)},
 		{Name: constants.AgentZippedFineTunedWeightDirectory, Value: constants.FineTunedWeightDownloadMountPath},
 	}

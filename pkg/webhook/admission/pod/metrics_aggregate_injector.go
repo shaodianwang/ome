@@ -52,11 +52,14 @@ func setMetricAggregationEnvVarsAndPorts(pod *v1.Pod) {
 		if path, ok := pod.ObjectMeta.Annotations[constants.ContainerPrometheusPathKey]; ok {
 			omeContainerPromPath = path
 		}
-		pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env,
-			v1.EnvVar{Name: constants.ContainerPrometheusMetricsPortEnvVarKey, Value: omeContainerPromPort},
-			v1.EnvVar{Name: constants.ContainerPrometheusMetricsPathEnvVarKey, Value: omeContainerPromPath},
-			v1.EnvVar{Name: constants.QueueProxyAggregatePrometheusMetricsPortEnvVarKey, Value: strconv.Itoa(constants.QueueProxyAggregatePrometheusMetricsPort)},
-		)
+		// Update-if-exists like the port injection below: the webhook is
+		// registered with reinvocationPolicy=IfNeeded, so this may run more
+		// than once on the same pod and must not stack duplicates.
+		pod.Spec.Containers[i].Env = utils.MergeEnvs(pod.Spec.Containers[i].Env, []v1.EnvVar{
+			{Name: constants.ContainerPrometheusMetricsPortEnvVarKey, Value: omeContainerPromPort},
+			{Name: constants.ContainerPrometheusMetricsPathEnvVarKey, Value: omeContainerPromPath},
+			{Name: constants.QueueProxyAggregatePrometheusMetricsPortEnvVarKey, Value: strconv.Itoa(constants.QueueProxyAggregatePrometheusMetricsPort)},
+		})
 		pod.Spec.Containers[i].Ports = utils.AppendPortIfNotExists(pod.Spec.Containers[i].Ports, v1.ContainerPort{
 			Name:          constants.AggregateMetricsPortName,
 			ContainerPort: int32(constants.QueueProxyAggregatePrometheusMetricsPort),
