@@ -197,7 +197,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 	// Cached client carries the OMENative Pod field index — useIndex=true takes
 	// the index fast path instead of scanning the whole informer store per Component.
-	perRevisionPods, perRevisionReadyPods, perRevisionRouting, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
+	perRevisionPods, perRevisionReadyPods, perRevisionRouting, _, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
 	}
@@ -400,18 +400,20 @@ func collectOMENativeComponents(modes map[v1beta1.ComponentType]constants.Deploy
 // false for the live API reader (canary capacity gate — the apiserver has no
 // custom Pod field selector). Both modes return the identical pod set; useIndex
 // only picks how the set is fetched.
-func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, useIndex bool) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]RevisionRoutingSelector, error) {
+func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, useIndex bool) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]RevisionRoutingSelector, map[v1beta1.ComponentType][]*corev1.Pod, error) {
 	total := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	ready := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	routing := make(map[v1beta1.ComponentType]map[string]RevisionRoutingSelector, len(components))
+	observedPods := make(map[v1beta1.ComponentType][]*corev1.Pod, len(components))
 	if reads == nil {
-		return total, ready, routing, nil
+		return total, ready, routing, observedPods, nil
 	}
 	for _, c := range components {
 		pods, err := query.ListOMENativePodsByName(ctx, reads, isvc.Namespace, isvc.Name, v1beta1convert.ComponentTypeToWorkload(c), useIndex)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
+			return nil, nil, nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
 		}
+		observedPods[c] = pods
 		byHash := make(map[string]int32, 4)
 		readyByHash := make(map[string]int32, 4)
 		routingByHash := make(map[string]RevisionRoutingSelector, 4)
@@ -441,7 +443,7 @@ func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1be
 		ready[c] = readyByHash
 		routing[c] = routingByHash
 	}
-	return total, ready, routing, nil
+	return total, ready, routing, observedPods, nil
 }
 
 // podReadyAndServing reports whether a pod is currently serving traffic: Running,
@@ -541,15 +543,6 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		isvc.Status.Components[c] = cs
 	}
 	return nil
-}
-
-// latestRevisionHash preserves the error-swallowing shape consumed by
-// the exported LatestRevisionHash shim (canary executor). Coordination's
-// own traffic writer uses latestRevisionHashChecked so a read error
-// fails the reconcile instead of fabricating an empty latest hash.
-func latestRevisionHash(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) string {
-	hash, _ := latestRevisionHashChecked(ctx, reads, namespace, isvcName, c)
-	return hash
 }
 
 // latestRevisionHashChecked returns the ControllerRevision hash this

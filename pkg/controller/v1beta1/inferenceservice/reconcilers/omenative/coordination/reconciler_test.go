@@ -555,9 +555,8 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 			},
 		},
 	}
-	// Create IR objects with UpdateRevision so latestRevisionHash
-	// recovers the per-Component hash (matches the steady-state shape
-	// the IR controller commits to Status).
+	// Each Component IR identifies the revision that its traffic status
+	// treats as latest.
 	engineIR := &v1beta1.InferenceReplica{
 		ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-engine", Namespace: isvc.Namespace},
 		Status: v1beta1.InferenceReplicaStatus{
@@ -1734,7 +1733,7 @@ func TestObservePerRevisionPods_TotalVsReady(t *testing.T) {
 		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 2, true),  // serving
 		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 3, false), // exists, not serving yet
 	}
-	total, ready, _, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, []v1beta1.ComponentType{v1beta1.EngineComponent}, true)
+	total, ready, _, _, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, []v1beta1.ComponentType{v1beta1.EngineComponent}, true)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods: %v", err)
 	}
@@ -1763,7 +1762,7 @@ func TestObservePerRevisionPods_DetectsRoutingSelectorPerRevision(t *testing.T) 
 		buildRunnerPod(isvc, v1beta1.EngineComponent, "mixed-ordinal", 7, v1beta1.RunnerNameWorker, ""),
 	}
 
-	_, _, routing, err := observePerRevisionPods(
+	_, _, routing, _, err := observePerRevisionPods(
 		context.Background(),
 		testClient(objs...),
 		isvc,
@@ -1806,11 +1805,11 @@ func TestObservePerRevisionPods_IndexParityWithLabelPath(t *testing.T) {
 	}
 	comps := []v1beta1.ComponentType{v1beta1.EngineComponent}
 
-	totalIdx, readyIdx, routingIdx, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, true)
+	totalIdx, readyIdx, routingIdx, _, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, true)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods(useIndex=true): %v", err)
 	}
-	totalLbl, readyLbl, routingLbl, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, false)
+	totalLbl, readyLbl, routingLbl, _, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, false)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods(useIndex=false): %v", err)
 	}

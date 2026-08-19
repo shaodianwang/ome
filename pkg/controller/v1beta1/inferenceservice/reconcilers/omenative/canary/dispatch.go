@@ -65,22 +65,22 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	}
 	// Observe per-revision pods for EVERY configured component (not just the
 	// primary): the canary stages capacity on all of them, so the gate must wait
-	// on all of them before shifting traffic. perRev is TOTAL pods (used to ensure
-	// per-revision Services + pick the stable revision); readyRev is the READY
-	// (serving) subset — the capacity gate MUST use ready so traffic never shifts
-	// onto canary pods that exist but are not serving yet.
+	// on all of them before shifting traffic. perRev supplies revision presence
+	// and routing Service inputs. readyRev keeps Pod readiness in every capacity
+	// gate; IR runner topology groups those Pods into complete Instances.
 	// d.Reader is the live API reader (no Pod field index) — useIndex=false skips
 	// the doomed MatchingFields probe and goes straight to the label-selector List.
-	perRev, readyRev, routingRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC), false)
+	perRev, readyRev, routingRev, observedPods, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC), false)
 	if err != nil {
 		return 0, err
 	}
 	pods := perRev[primary]
 
-	canaryHash, err := canaryTargetHash(ctx, d.Reader, d.ISVC, primary)
+	revisions, err := observeCanaryRevisions(ctx, d.Reader, d.ISVC, primary)
 	if err != nil {
 		return 0, err
 	}
+	canaryHash := revisions.targetHash
 
 	// Ensure the per-revision Services the canary references, for EVERY Component
 	// in the canary group — not just the primary. The downstream weighted-route
@@ -116,22 +116,46 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		}
 	}
 
+	// Revision names and counters from an older IR generation describe a
+	// different desired workload. Wait for one internally consistent snapshot.
+	if !revisions.statusFresh {
+		return reconcileRequeue, nil
+	}
+
+	// A live non-current revision can appear before the IR status publishes its
+	// new target. Wait for that revision pair so their roles cannot be inverted.
+	if revisions.fromIR && revisions.currentHash != "" && revisions.currentHash == canaryHash &&
+		otherRevision(pods, canaryHash) != "" &&
+		(d.ISVC.Status.Canary == nil || d.ISVC.Status.Canary.StableRevisionHash == "") {
+		return reconcileRequeue, nil
+	}
+
 	now := d.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
 
-	secondaryReady, err := secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary)
+	secondaryReady, secondaryFresh, err := secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, observedPods, primary)
 	if err != nil {
 		return 0, err
 	}
-	// The stable revision threaded to the executor: the persisted status
-	// identity when present — it survives a mid-canary retarget and the stable
-	// pods' eventual drain — otherwise inferred from the live pod set (first
-	// sight of a new canary, or a status recorded before it was persisted).
-	stableHash := otherRevision(pods, canaryHash)
+	if !secondaryFresh {
+		return reconcileRequeue, nil
+	}
+	// The IR revision pair authoritatively assigns current=stable and
+	// update=canary while the two revisions are distinct.
+	stableHash := ""
+	if revisions.currentHash != canaryHash {
+		stableHash = revisions.currentHash
+	}
 	if sc := d.ISVC.Status.Canary; sc != nil && sc.StableRevisionHash != "" {
-		stableHash = sc.StableRevisionHash
+		// A distinct authoritative current revision can repair an active canary
+		// whose persisted stable and target identities are the same.
+		if revisions.fromIR && revisions.currentHash != "" && revisions.currentHash != canaryHash && sc.StableRevisionHash == canaryHash {
+			stableHash = revisions.currentHash
+		} else {
+			stableHash = sc.StableRevisionHash
+		}
 	}
 	res, err := Reconcile(ctx, ReconcileInputs{
 		Client:                   d.Client,
@@ -140,6 +164,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		Component:                primary,
 		CanaryRevisionHash:       canaryHash,
 		StableRevisionHash:       stableHash,
+		ReadyCanaryInstances:     revisions.readyTargetInstanceCount(observedPods[primary]),
 		DesiredReplicas:          componentReplicas(d.ISVC, primary),
 		PerRevisionPods:          readyRev[primary],
 		SecondaryCapacityReady:   secondaryReady,
@@ -331,12 +356,11 @@ func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 }
 
 // secondaryCapacityReady reports whether every NON-primary Component's canary
-// pods have reached that Component's current-step newCount. The step machine and
-// external traffic run through the primary, but traffic must not shift until
-// EVERY Component's canary capacity is up — otherwise a Ready router (primary)
-// can advance the step while the engine/decoder canary pods behind it are still
-// coming up. True when there are no secondaries (single-component canary). The
-// step index mirrors EffectivePartition so the gate matches the staged partition.
+// Instances have reached that Component's current-step newCount. The step
+// machine and external traffic run through the primary, but traffic must not
+// shift until EVERY Component's canary capacity is up — otherwise a Ready router
+// can advance while the engine/decoder canary pods are still coming up. True
+// when there are no secondaries. The step index mirrors EffectivePartition.
 //
 // Each secondary gates on ITS OWN canary target hash (revision hashes are
 // per-Component, so the primary's hash never names a secondary's pods). A
@@ -344,13 +368,13 @@ func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 // resolves to the only revision present — so there is nothing to stage and it is
 // treated as ready, rather than blocking the rollout forever.
 //
-// readyPerRev must be the READY (serving) per-revision counts — not total — so a
-// secondary's pods that merely exist don't satisfy the gate prematurely. perRev
-// (total) is used only to detect whether a secondary has a roll in progress.
-func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, primary v1beta1.ComponentType) (bool, error) {
+// IR runner topology provides the gang-safe ready Instance count. readyPerRev
+// keeps ready Pods as a required capacity signal. perRev detects a live peer
+// revision while an equal current/target pair settles.
+func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, observedPods map[v1beta1.ComponentType][]*corev1.Pod, primary v1beta1.ComponentType) (bool, bool, error) {
 	g := isvc.Spec.GetCanaryGroup()
 	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
-		return true, nil
+		return true, true, nil
 	}
 	plan := g.Canary
 	idx := int32(0)
@@ -368,55 +392,154 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 		if c == primary {
 			continue
 		}
-		secHash, err := canaryTargetHash(ctx, reads, isvc, c)
+		revisions, err := observeCanaryRevisions(ctx, reads, isvc, c)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
-		// No canary revision distinct from the stable one → the secondary was not
-		// bumped; nothing to stage, so don't block. otherRevision is empty when the
-		// secondary has a single revision present (its canary hash == the only one).
-		if secHash == "" || otherRevision(perRev[c], secHash) == "" {
+		if !revisions.statusFresh {
+			return false, false, nil
+		}
+		secHash := revisions.targetHash
+		if secHash == "" {
 			continue
 		}
-		if readyPerRev[c][secHash] < resolveStepNewCount(step, componentReplicas(isvc, c)) {
-			return false, nil
+		// Equal current and target revisions mean this Component was not bumped.
+		// A live peer revision is allowed to disappear before the gate releases.
+		if revisions.currentHash == secHash {
+			if otherRevision(perRev[c], secHash) == "" {
+				continue
+			}
+			return false, true, nil
+		}
+		readyInstances := revisions.readyTargetInstanceCount(observedPods[c])
+		readyCapacity := readyCapacityCount(readyPerRev[c][secHash], readyInstances)
+		if readyCapacity < resolveStepNewCount(step, componentReplicas(isvc, c)) {
+			return false, true, nil
 		}
 	}
-	return true, nil
+	return true, true, nil
 }
 
-// canaryTargetHash returns the revision hash the canary is rolling toward for a
-// Component. It reads the authoritative InferenceReplica status — the workload
-// object whose RollingUpdate.Partition the canary drives — rather than the
-// ISVC's aggregated lifecycle status. In the IR-managed path the projector
-// refreshes that ISVC aggregate only later in the same reconcile, after Dispatch
-// runs, so at dispatch time it still names the pre-roll (stable) revision;
-// reading it would point the canary at the wrong revision and wedge the capacity
-// gate on an empty pod bucket. Falls back to the ISVC lifecycle aggregate for
-// the legacy path, where no IR exists and the in-reconcile status aggregation
-// has already run by the time the canary dispatches.
-//
-// Only a NotFound IR reads as "no IR" (legacy fallback). Any other Get error
-// must surface: swallowing a transient read into an empty hash would, during a
-// rollback hold, clear RollbackToRevision and resume the rollout toward the
-// rejected revision.
-func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (string, error) {
+type observedCanaryRevisions struct {
+	currentHash string
+	targetHash  string
+	runners     []v1beta1.Runner
+	fromIR      bool
+	statusFresh bool
+}
+
+// readyTargetInstanceCount counts target Instances whose complete declared
+// runner set is PodReady. Runner ordinals prevent duplicate Pods from filling a
+// multi-pod gang's missing role. A non-IR observation returns nil.
+func (r observedCanaryRevisions) readyTargetInstanceCount(pods []*corev1.Pod) *int32 {
+	if !r.fromIR {
+		return nil
+	}
+	ready := int32(0)
+	if r.targetHash == "" || len(r.runners) == 0 {
+		return &ready
+	}
+	required := make(map[v1beta1.RunnerName]int32, len(r.runners))
+	for _, runner := range r.runners {
+		if runner.Size < 1 {
+			return &ready
+		}
+		if _, duplicate := required[runner.Name]; duplicate {
+			return &ready
+		}
+		required[runner.Name] = runner.Size
+	}
+
+	readyPods := make(map[int32]map[v1beta1.RunnerName]map[int32]struct{})
+	for _, pod := range pods {
+		if pod == nil || pod.Labels[query.LabelRevisionHash] != r.targetHash || !coordination.PodReadyAndServing(pod) {
+			continue
+		}
+		index, ok := query.InstanceIdxFromLabels(pod)
+		if !ok {
+			continue
+		}
+		runner := v1beta1.RunnerName(pod.Labels[query.LabelRunner])
+		size, known := required[runner]
+		if !known {
+			continue
+		}
+		ordinal, ok := query.PodOrdinalFromLabels(pod)
+		if !ok {
+			continue
+		}
+		if ordinal < 0 || (size == 1 && ordinal > 1) || (size > 1 && ordinal >= size) {
+			continue
+		}
+		if readyPods[index] == nil {
+			readyPods[index] = make(map[v1beta1.RunnerName]map[int32]struct{}, len(required))
+		}
+		if readyPods[index][runner] == nil {
+			readyPods[index][runner] = make(map[int32]struct{})
+		}
+		readyPods[index][runner][ordinal] = struct{}{}
+	}
+	for _, byRunner := range readyPods {
+		complete := true
+		for runner, size := range required {
+			if int32(len(byRunner[runner])) < size {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			ready++
+		}
+	}
+	return &ready
+}
+
+// observeCanaryRevisions reads the current and target hashes from one IR
+// snapshot. The pair assigns stable and canary roles without relying on pod
+// population, whose new-revision pods can precede the IR status update. A
+// missing IR or empty revision pair is not authoritative and leaves statusFresh
+// false so the caller waits without mutating rollout state.
+func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (observedCanaryRevisions, error) {
 	if reads != nil {
 		ir := &v1beta1.InferenceReplica{}
 		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, c)}
 		switch err := reads.Get(ctx, key, ir); {
 		case err == nil:
-			if name := ir.Status.UpdateRevision; name != "" {
-				return query.RevisionFromName(name).Hash(), nil
+			currentHash := query.RevisionFromName(ir.Status.CurrentRevision).Hash()
+			targetHash := query.RevisionFromName(ir.Status.UpdateRevision).Hash()
+			if targetHash == "" {
+				targetHash = currentHash
 			}
-			if name := ir.Status.CurrentRevision; name != "" {
-				return query.RevisionFromName(name).Hash(), nil
+			statusFresh := ir.Status.ObservedGeneration == ir.Generation
+			if !statusFresh {
+				return observedCanaryRevisions{
+					currentHash: currentHash,
+					targetHash:  targetHash,
+					runners:     ir.Spec.Runners,
+					fromIR:      true,
+					statusFresh: false,
+				}, nil
+			}
+			if targetHash != "" {
+				return observedCanaryRevisions{
+					currentHash: currentHash,
+					targetHash:  targetHash,
+					runners:     ir.Spec.Runners,
+					fromIR:      true,
+					statusFresh: true,
+				}, nil
 			}
 		case !apierrors.IsNotFound(err):
-			return "", err
+			return observedCanaryRevisions{}, err
 		}
 	}
-	return coordination.LatestRevisionHash(ctx, reads, isvc, c), nil
+	return observedCanaryRevisions{}, nil
+}
+
+// canaryTargetHash returns the revision hash the canary is rolling toward.
+func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (string, error) {
+	revisions, err := observeCanaryRevisions(ctx, reads, isvc, c)
+	return revisions.targetHash, err
 }
 
 // primaryComponent is the externally-routed Component the canary group drives its

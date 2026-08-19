@@ -27,10 +27,9 @@ const failedRequeue = 5 * time.Minute
 const defaultReadyTimeout = 15 * time.Minute
 
 // ReconcileInputs is the subset of state the canary executor needs. It mirrors
-// coordination.ReconcileInputs. PerRevisionPods is observed serving pod counts
-// keyed by revision hash for the canary's component (populated by the
-// controller). DesiredReplicas is the component's desired replica count. Now is
-// the reconcile clock (injectable for tests).
+// coordination.ReconcileInputs. DesiredReplicas and ReadyCanaryInstances are
+// Instance counts; PerRevisionPods supplies ready serving Pod counts and the
+// capacity fallback when the exact Instance count is unavailable.
 type ReconcileInputs struct {
 	Client client.Client
 	// Reader is the live API reader for one-off reads of types the manager does
@@ -44,11 +43,15 @@ type ReconcileInputs struct {
 	// the persisted status identity when one exists, otherwise the observed
 	// non-canary revision (which seeds the persisted identity at canary start).
 	StableRevisionHash string
-	DesiredReplicas    int32
-	PerRevisionPods    map[string]int32
+	// ReadyCanaryInstances is the count of complete PodReady target Instances,
+	// resolved from the IR's runner topology. nil uses PerRevisionPods.
+	ReadyCanaryInstances *int32
+	DesiredReplicas      int32
+	PerRevisionPods      map[string]int32
 	// SecondaryCapacityReady is true when every NON-primary component's canary
-	// pods have reached that component's step newCount (PD). The primary's own
-	// capacity is checked via PerRevisionPods. Single-component canaries pass true.
+	// Instances have reached that component's step newCount. The primary uses its
+	// exact complete-PodReady target Instance count. Single-component canaries
+	// pass true.
 	SecondaryCapacityReady bool
 	Now                    time.Time
 	// Sampler reads analysis metric results without blocking the reconcile: a miss
@@ -65,6 +68,19 @@ type ReconcileInputs struct {
 	BundledPrometheusAddress string
 	// QueryTimeout bounds one background sampling pass (controllerconfig canaryAnalysis).
 	QueryTimeout time.Duration
+}
+
+// The ready Pod count bounds the exact ready Instance count and remains the
+// fallback for direct callers that do not provide topology-aware observation.
+func readyCapacityCount(readyPods int32, readyInstances *int32) int32 {
+	if readyInstances != nil && *readyInstances < readyPods {
+		return *readyInstances
+	}
+	return readyPods
+}
+
+func readyCanaryCapacity(in ReconcileInputs) int32 {
+	return readyCapacityCount(in.PerRevisionPods[in.CanaryRevisionHash], in.ReadyCanaryInstances)
 }
 
 // stepSampler is the analysis-sampling seam the executor calls. Production wires
@@ -118,6 +134,12 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// step with its clocks intact.
 	if in.ISVC.Annotations[constants.PausedRolloutAnnotation] == "true" {
 		return pausedResult(cs, plan, in.DesiredReplicas), nil
+	}
+	// Stable and canary identities must remain distinct. The controller supplies
+	// the IR's current revision when it can repair an invalid persisted pair.
+	if cs != nil && cs.CanaryRevisionHash != "" && cs.StableRevisionHash == cs.CanaryRevisionHash &&
+		in.StableRevisionHash != "" && in.StableRevisionHash != cs.CanaryRevisionHash {
+		cs.StableRevisionHash = in.StableRevisionHash
 	}
 
 	// Bind an active canary to the IR's authoritative target before handling
@@ -210,7 +232,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// or when the target isn't known yet — so adding a canary to an
 	// already-rolled-out ISVC is a no-op, not a phantom rollout.
 	if cs == nil {
-		if in.CanaryRevisionHash == "" || in.PerRevisionPods[in.CanaryRevisionHash] >= in.DesiredReplicas {
+		if in.CanaryRevisionHash == "" || readyCanaryCapacity(in) >= in.DesiredReplicas {
 			if in.CanaryRevisionHash != "" && in.DesiredReplicas > 0 {
 				setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
 			}
@@ -248,7 +270,8 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// pods behind it are still coming up). If the gate stays unsatisfied past the
 	// ready-timeout, escalate to Failed instead of polling Pending forever — the
 	// stable revision keeps serving since no traffic has shifted.
-	if in.PerRevisionPods[in.CanaryRevisionHash] < newCount || !in.SecondaryCapacityReady {
+	readyCanary := readyCanaryCapacity(in)
+	if readyCanary < newCount || !in.SecondaryCapacityReady {
 		// Anchor the ready-timeout to the start of THIS capacity wait: re-stamp
 		// StepEnteredTime on entering Pending. Anchoring on the untouched step
 		// entry would let a long bake (analysis / pause) eat the whole budget and
