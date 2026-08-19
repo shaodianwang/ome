@@ -1939,6 +1939,130 @@ def soften_expected_fail(hdr, verdict, checks):
     return verdict
 
 
+def _print_failure_snapshot(case_id, hdr, ctx):
+    """Print compact controller state for actionable canary/migration failures."""
+    if hdr.get("mode") not in ("canary", "migrate"):
+        return
+
+    isvc_result = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
+    ir_result = kubectl("-n", NS, "get", "inferencereplicas", "-l",
+                        f"ome.io/inferenceservice={case_id}", "-o", "json")
+    pod_result = kubectl("-n", NS, "get", "pods", "-l",
+                         f"ome.io/inferenceservice={case_id}", "-o", "json")
+    try:
+        isvc = json.loads(isvc_result.stdout) if isvc_result.returncode == 0 else {}
+    except Exception:
+        isvc = {}
+    try:
+        irs = (json.loads(ir_result.stdout).get("items", [])
+               if ir_result.returncode == 0 else [])
+    except Exception:
+        irs = []
+    try:
+        pods = (json.loads(pod_result.stdout).get("items", [])
+                if pod_result.returncode == 0 else [])
+    except Exception:
+        pods = []
+
+    status = isvc.get("status") or {}
+    components = {}
+    for component, component_status in sorted((status.get("components") or {}).items()):
+        lifecycle = component_status.get("lifecycle") or {}
+        components[component] = {
+            "rolloutPhase": component_status.get("rolloutPhase"),
+            "traffic": component_status.get("traffic"),
+            "currentRevision": lifecycle.get("currentRevision"),
+            "updateRevision": lifecycle.get("updateRevision"),
+            "readyReplicas": lifecycle.get("readyReplicas"),
+            "updatedReplicas": lifecycle.get("updatedReplicas"),
+        }
+
+    replicas = []
+    for ir in sorted(irs, key=lambda item: str((item.get("spec") or {}).get("component", ""))):
+        ir_status = ir.get("status") or {}
+        replicas.append({
+            "component": (ir.get("spec") or {}).get("component"),
+            "generation": (ir.get("metadata") or {}).get("generation"),
+            "observedGeneration": ir_status.get("observedGeneration"),
+            "currentRevision": ir_status.get("currentRevision"),
+            "updateRevision": ir_status.get("updateRevision"),
+            "conditions": ir_status.get("conditions"),
+            "migrations": ir_status.get("migrations"),
+            "instances": [
+                {
+                    "index": instance.get("index"),
+                    "phase": instance.get("phase"),
+                    "incarnation": instance.get("incarnation"),
+                    "runningRevision": instance.get("runningRevision"),
+                    "targetRevision": instance.get("targetRevision"),
+                    "operation": instance.get("operation"),
+                    "lastFailure": instance.get("lastFailure"),
+                }
+                for instance in ir_status.get("instanceStatuses", [])
+            ],
+        })
+
+    pod_revisions = defaultdict(lambda: defaultdict(lambda: {"total": 0, "ready": 0}))
+    for pod in ctx.get("pod_state", {}).values():
+        if not pod or not pod.get("alive"):
+            continue
+        bucket = pod_revisions[str(pod.get("comp"))][pod.get("hash") or "<empty>"]
+        bucket["total"] += 1
+        bucket["ready"] += int(bool(pod.get("ready")))
+
+    live_pod_revisions = defaultdict(
+        lambda: defaultdict(lambda: {"total": 0, "podReady": 0, "containersReady": 0}))
+    not_ready_pods = []
+    for pod in pods:
+        metadata = pod.get("metadata") or {}
+        labels = metadata.get("labels") or {}
+        pod_status = pod.get("status") or {}
+        conditions = {
+            condition.get("type"): condition.get("status")
+            for condition in pod_status.get("conditions", [])
+            if condition.get("type")
+        }
+        container_statuses = pod_status.get("containerStatuses") or []
+        pod_ready = conditions.get("Ready") == "True"
+        containers_ready = bool(container_statuses) and all(
+            container.get("ready") for container in container_statuses)
+        component = labels.get("component") or "<empty>"
+        revision = labels.get(REV_LABEL) or "<empty>"
+        bucket = live_pod_revisions[component][revision]
+        bucket["total"] += 1
+        bucket["podReady"] += int(pod_ready)
+        bucket["containersReady"] += int(containers_ready)
+        if not pod_ready:
+            not_ready_pods.append({
+                "name": metadata.get("name"),
+                "component": component,
+                "instance": labels.get("ome.io/instance-index"),
+                "runner": labels.get("ome.io/runner"),
+                "revision": revision,
+                "phase": pod_status.get("phase"),
+                "deleting": bool(metadata.get("deletionTimestamp")),
+                "conditions": conditions,
+            })
+
+    snapshot = {
+        "observedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "canary": status.get("canary"),
+        "components": components,
+        "inferenceReplicas": replicas,
+        "podRevisions": {
+            component: dict(sorted(revisions.items()))
+            for component, revisions in sorted(pod_revisions.items())
+        },
+        "livePodRevisions": {
+            component: dict(sorted(revisions.items()))
+            for component, revisions in sorted(live_pod_revisions.items())
+        },
+        "notReadyPods": sorted(not_ready_pods, key=lambda pod: str(pod.get("name"))),
+    }
+    print("\n=== FAILURE SNAPSHOT ===")
+    print(json.dumps(snapshot, indent=2, sort_keys=True))
+
+
 def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     """Common finalize: infeasible-soften, print, cleanup, write_result."""
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
@@ -1952,6 +2076,8 @@ def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     # an expected failure, so they re-harden an XFAIL back to FAIL/INFRA-FAIL.
     verdict = invariant_checks(ctx.get("inv"), verdict, notes, checks)
     verdict = _fault_finalize(ctx.get("fault"), verdict, notes, checks)
+    if verdict in ("FAIL", "INFRA-FAIL"):
+        _print_failure_snapshot(case_id, hdr, ctx)
     _stop_watcher(ctx)
     # Teardown gate runs AFTER the infeasible/notimpl softening: a cleanup
     # that doesn't converge is never an expected failure, so it re-hardens

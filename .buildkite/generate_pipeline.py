@@ -514,7 +514,7 @@ def _gke_eval_group() -> str:
     for feature, topology, cases in _eval_case_groups():
         slug = f"{feature}-{topology}".replace("_", "-")
         prometheus = "true" if feature in ("canary", "reject") else "false"
-        pod_budget = configured_pod_budget or ("42" if feature == "canary" else "64")
+        pod_budget = configured_pod_budget or ("35" if feature == "canary" else "64")
         if feature == "canary":
             pod_budget = os.environ.get("GKE_EVAL_CANARY_POD_BUDGET", pod_budget)
         children.append(
