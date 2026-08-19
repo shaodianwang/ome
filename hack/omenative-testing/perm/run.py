@@ -3410,6 +3410,18 @@ def _canary_primary(ctx):
     return ""
 
 
+def _canary_command_state(canary, current_hash, old_hashes, promoted_step):
+    """Resolve the live target and whether an operator command is safe to issue."""
+    observed_hash = canary.get("canaryRevisionHash") or None
+    changed = bool(observed_hash and observed_hash != current_hash)
+    if changed:
+        current_hash = observed_hash
+        promoted_step = -1
+    target_ready = bool(current_hash and current_hash not in old_hashes)
+    promote_ready = target_ready and not canary.get("promotedThrough")
+    return current_hash, promoted_step, target_ready, promote_ready, changed
+
+
 def _canary(case_id, yaml_file, desc, hdr):
     """Canary rollout (OEP-0017 v2). The ISVC ships a spec.rollout.groups[] canary
     group in the initial apply; once rev A is Ready we bump the primary component's revision to
@@ -3518,7 +3530,12 @@ def _canary(case_id, yaml_file, desc, hdr):
         can = st.get("canary") or {}
         if phase:
             phases.add(phase)
-        canary_hash = canary_hash or can.get("canaryRevisionHash") or None
+        previous_canary_hash = canary_hash
+        canary_hash, promoted_step, canary_target_ready, promote_ready, target_changed = \
+            _canary_command_state(can, canary_hash, ctx["old_hashes"], promoted_step)
+        if target_changed and previous_canary_hash:
+            print(f"    canary target changed {previous_canary_hash} -> {canary_hash}; "
+                  "re-arming manual promotion")
         if can.get("metricResults"):
             saw_metrics = True
         step = can.get("currentStep")
@@ -3530,16 +3547,19 @@ def _canary(case_id, yaml_file, desc, hdr):
         # Rollback probe: once the canary is in progress, request a rollback. The
         # canary reverts every Instance to the stable revision and HOLDS there
         # (RolledBack), rejecting the rolled-back revision.
-        if do_rollback and not rollback_set and phase in ("Canarying", "Paused"):
+        if (do_rollback and not rollback_set and canary_target_ready and
+                phase in ("Canarying", "Paused")):
             rollback_set = True
             kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
             print("    set ome.io/rollout-rollback=true (expect: drain to stable -> RolledBack)")
         rejected = can.get("rolledBackRevisionHash") or rejected
 
         # Manual promotion: promote at EACH paused step (multi-step plans pause
-        # more than once; advanceStep consumes the annotation). Skipped when rolling
-        # back — the rollback drives the rollout instead of a promote.
-        if policy == "manual" and not do_rollback and phase == "Paused" and canary_hash and step is not None and step > promoted_step:
+        # more than once). Wait for the prior durable promotion record to clear
+        # before reusing the same target hash at another step.
+        should_promote = (policy == "manual" and not do_rollback and phase == "Paused" and
+                          canary_hash and promote_ready and step is not None and step > promoted_step)
+        if should_promote:
             rr = kubectl("-n", NS, "annotate", "isvc", case_id,
                          f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
             if rr.returncode != 0:

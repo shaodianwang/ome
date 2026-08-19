@@ -113,5 +113,28 @@ class InitialRolloutSettlementTest(unittest.TestCase):
                 self.assertFalse(settled, detail)
 
 
+class CanaryCommandStateTest(unittest.TestCase):
+    def test_initial_stable_revision_is_not_commandable(self):
+        got = run._canary_command_state(
+            {"canaryRevisionHash": "stable"}, None, {"stable"}, 4)
+        self.assertEqual(("stable", -1, False, False, True), got)
+
+    def test_new_live_target_rearms_manual_promotion(self):
+        got = run._canary_command_state(
+            {"canaryRevisionHash": "new"}, "stable", {"stable"}, 0)
+        self.assertEqual(("new", -1, True, True, True), got)
+
+    def test_next_step_waits_for_durable_promote_cleanup(self):
+        got = run._canary_command_state(
+            {"canaryRevisionHash": "new", "promotedThrough": "new"},
+            "new", {"stable"}, 0)
+        self.assertEqual(("new", 0, True, False, False), got)
+
+    def test_same_target_is_reusable_after_promote_cleanup(self):
+        got = run._canary_command_state(
+            {"canaryRevisionHash": "new"}, "new", {"stable"}, 0)
+        self.assertEqual(("new", 0, True, True, False), got)
+
+
 if __name__ == "__main__":
     unittest.main()
