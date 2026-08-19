@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -877,7 +878,8 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 	}
 	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 
-	// Pass 2: flip v3 surge pod ContainersReady so Phase 1 advances to Phase 2.
+	// Pass 2: ContainersReady enables the serving gate, but the v2 source
+	// remains until kubelet reports the replacement PodReady.
 	rev3Surge.Status.Conditions = []corev1.PodCondition{
 		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
 		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
@@ -886,33 +888,38 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 		t.Fatalf("flip v3 surge ContainersReady: %v", err)
 	}
 	if _, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], rev3, []*corev1.Pod{v2Pod, rev3Surge}); err != nil {
-		t.Fatalf("pass 2 (drain + delete v2): %v", err)
+		t.Fatalf("pass 2 (enable v3 serving): %v", err)
 	}
-	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
-
-	// The v2 pod should be deleted.
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(v2Pod), &corev1.Pod{}); err == nil {
-		t.Errorf("v2 pod should be deleted after Phase 2 drain, but still exists")
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(v2Pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("v2 pod was removed before v3 became PodReady: %v", err)
 	}
 
-	// Pass 3: v3 surge promoted.
+	// Pass 3: PodReady confirms v3 is in rotation, so v2 may drain.
 	rev3SurgeFresh := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev3SurgeName}, rev3SurgeFresh); err != nil {
 		t.Fatalf("re-read v3 surge: %v", err)
 	}
-	rev3SurgeFresh.Status.Conditions = []corev1.PodCondition{
-		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
-		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
-	}
+	rev3SurgeFresh.Status.Conditions = append(rev3SurgeFresh.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodReady, Status: corev1.ConditionTrue,
+	})
 	if err := c.Status().Update(context.Background(), rev3SurgeFresh); err != nil {
-		t.Fatalf("flip v3 surge Serving: %v", err)
+		t.Fatalf("flip v3 surge PodReady: %v", err)
 	}
+	if _, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], rev3, []*corev1.Pod{v2Pod, rev3SurgeFresh}); err != nil {
+		t.Fatalf("pass 3 (drain + delete v2): %v", err)
+	}
+	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(v2Pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Errorf("v2 pod should be deleted after v3 became PodReady: %v", err)
+	}
+
+	// Pass 4: v3 surge promoted.
 	done, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], rev3, []*corev1.Pod{rev3SurgeFresh})
 	if err != nil {
-		t.Fatalf("pass 3 (promote): %v", err)
+		t.Fatalf("pass 4 (promote): %v", err)
 	}
 	if !done {
-		t.Fatalf("pass 3 should return done=true after promote")
+		t.Fatalf("pass 4 should return done=true after promote")
 	}
 
 	// Final assertions.
@@ -1099,6 +1106,75 @@ func TestSurgeUpdate_Phase1WaitsForSurgeReady(t *testing.T) {
 		if cond.Type == query.ServingConditionType && cond.Status != corev1.ConditionTrue {
 			t.Errorf("old pod's serving gate was flipped prematurely: %+v", cond)
 		}
+	}
+}
+
+// TestSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady verifies that
+// source overlap is preserved until kubelet reports the replacement ready.
+func TestSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
+	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
+	surgePod := surgePodAtOrdinal(isvc, 0, 1, 1, true, false)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "llama-70b-engine-rev-v2hash",
+			Namespace: isvc.Namespace,
+		},
+	}
+	surgePod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(target.Name)
+	c := legacyNewFakeClient(t, isvc, ir, oldPod, surgePod, target)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := surgePlan()
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, target.Name, plan.InstanceReadyTimeout); err != nil {
+		t.Fatalf("pre-stamp: %v", err)
+	}
+
+	done, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], target, []*corev1.Pod{oldPod, surgePod})
+	if err != nil {
+		t.Fatalf("surgeUpdate before PodReady: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false before replacement PodReady")
+	}
+
+	freshOld := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), freshOld); err != nil {
+		t.Fatalf("source missing before replacement PodReady: %v", err)
+	}
+	if !podreadiness.IsServing(freshOld) {
+		t.Fatalf("source left rotation before replacement PodReady")
+	}
+	freshSurge := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(surgePod), freshSurge); err != nil {
+		t.Fatalf("get replacement: %v", err)
+	}
+	if !podreadiness.IsServing(freshSurge) {
+		t.Fatalf("replacement serving gate was not enabled")
+	}
+	if podreadiness.IsPodReady(freshSurge) {
+		t.Fatalf("replacement unexpectedly PodReady")
+	}
+	status := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if status.Operation == nil || status.Operation.Step != updateStepSurge {
+		t.Fatalf("operation advanced before replacement PodReady: %+v", status.Operation)
+	}
+
+	freshSurge.Status.Conditions = append(freshSurge.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodReady, Status: corev1.ConditionTrue,
+	})
+	if err := c.Status().Update(context.Background(), freshSurge); err != nil {
+		t.Fatalf("mark replacement PodReady: %v", err)
+	}
+	done, err = surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], target, []*corev1.Pod{freshOld, freshSurge})
+	if err != nil {
+		t.Fatalf("surgeUpdate after PodReady: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false while deleting source")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("source was not deleted after replacement PodReady: %v", err)
 	}
 }
 

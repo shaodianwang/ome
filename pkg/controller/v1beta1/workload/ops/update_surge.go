@@ -29,11 +29,11 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //
 //	Phase 1 (Surge):   Op{Step=Surge}. Create the surge pod at
 //	                   ordinal=1-ActiveOrdinal with target revision.
-//	                   Wait surge pod ContainersReady.
-//	Phase 2 (Drain):   Op.Step=SurgeDrain. Mark surge pod serving=True
-//	                   (joins LB rotation). Mark old pod
-//	                   serving=False (leaves rotation). Wait
-//	                   drain.IsPodDrained on per-revision routed Service.
+//	                   Wait ContainersReady, mark it serving, then wait
+//	                   for PodReady.
+//	Phase 2 (Drain):   Op.Step=SurgeDrain. Mark the old pod serving=False
+//	                   (leaves rotation). Wait drain.IsPodDrained on the
+//	                   per-revision routed Service.
 //	Phase 3 (Settle):  Op.Step=SurgeDrainSettle. Keep the old pod alive
 //	                   for the configured grace period so persistent
 //	                   connections age out, then delete it.
@@ -275,8 +275,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		return false, nil
 	}
 
-	// Phase 2: surge is Ready. Promote it to serving (joins rotation),
-	// then drain the old pod.
+	// ContainersReady permits enabling the serving gate. PodReady is
+	// observed below before the source leaves rotation.
 	for _, pod := range surgePods {
 		if podreadiness.IsServing(pod) {
 			continue
@@ -287,6 +287,13 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	}
 
 	if len(oldPods) > 0 {
+		// Keep the source in rotation until kubelet has incorporated the
+		// replacement's serving gate into PodReady.
+		for _, pod := range surgePods {
+			if !podreadiness.IsPodReady(pod) {
+				return false, nil
+			}
+		}
 		// Transition Step Surge → Drain once. Subsequent passes idempotency-
 		// skip inside the helper.
 		if err := patchInstanceStatusSurgeStepDrain(ctx, input, inst.Index); err != nil {
