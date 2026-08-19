@@ -108,7 +108,7 @@ KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p pat
 
 `KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` forwards the envtest kube-apiserver/etcd stdout+stderr into test logs when debugging control-plane startup failures.
 
-**KIND suite** (`omenative_coordination_kind/`) — real kubelet + scheduler + containerd via Docker. Authoritative for: cross-Component rollout coordination, pod-lifecycle timing (drain races, recreate ordering, in-place patch convergence), per-revision Service convergence, Sequential handoff timing, RatioBalanced gate at scale, ImagePullBackOff failure escalation, pod-UID rotation, migration, PD-disaggregated topologies. ~30 spec files, ~5 min/file wall-clock.
+**KIND suite** (`omenative_coordination_kind/`) — real kubelet + scheduler + containerd via Docker. Authoritative for: cross-Component rollout coordination, pod-lifecycle timing (drain races, recreate ordering, in-place patch convergence), per-revision Service convergence, Sequential handoff timing, RatioBalanced gate at scale, ImagePullBackOff failure escalation, pod-UID rotation, migration, PD-disaggregated topologies. ~80 spec files, ~5 min/file wall-clock.
 
 ```sh
 make test-kind                                       # full suite (~30-60 min)
@@ -134,6 +134,8 @@ KIND_KEEP_CLUSTER=true \
 KIND specs use generous timeouts (`kindShortTimeout=30s`, `kindMediumTimeout=2m`, `kindLongTimeout=5m`) and a 100ms poll interval — tuned for real kubelet latency, not envtest microseconds.
 
 CI runs the suite through the hard-gating `integration-test-kind-gke` group. The unit-test lane compiles one exact-commit test binary, and named semantic jobs run disjoint file groups in separate three-node KIND clusters on GKE agents. The TW dind cannot provide the bridge networking KIND requires.
+
+**Every new KIND spec file must be classified** into a group in `KIND_SPEC_GROUPS` in `.buildkite/generate_pipeline.py` — the generator enforces exact ownership and rejects unowned (or stale) specs, so an unclassified `*_kind_test.go` fails pipeline generation for every build. Validate locally with `python3 -m unittest discover -s .buildkite -p 'test_*.py'` before pushing.
 
 **Multi-cluster real-Kueue suite** (`tests/integration/multicluster/`, gated by `OME_MC_REALKUEUE=1`) — validates OEP-0018 single-active placement against a *real* Kueue admission stack. The default `make integration-test` runs this suite's **sim** path (`admitDerivedOn`); with the env gate it stands up 1 control-plane + 2 member envtest apiservers in one process, each member running a full OME manager + Kueue (core controllers + scheduler + pod webhook), and drives fan-out → real quota-gated admission → race → loser-sweep for real (no kubelet — admission = Kueue scheduling-gate removal). Run it via:
 

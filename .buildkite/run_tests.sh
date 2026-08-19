@@ -13,8 +13,15 @@ set -eu
 #   - jq: required by `make manifests` CRD post-processing.
 #   - libssl-dev / pkg-config / build-essential: needed to link libxet.
 #   - curl + ca-certificates: bootstraps rustup.
+#   - python3: runs the .buildkite generator unit tests below.
 apt-get update
-apt-get install -y --no-install-recommends jq libssl-dev pkg-config build-essential curl ca-certificates
+apt-get install -y --no-install-recommends jq libssl-dev pkg-config build-essential curl ca-certificates python3
+
+# Pipeline-generator unit tests (KIND spec classification enforcement
+# and shard emission, including the focus regexes that decide which
+# spec files each KIND shard runs). Cheap, so they run first.
+echo "--- .buildkite generator unit tests ---"
+python3 -m unittest discover -s .buildkite -p 'test_*.py' -v
 
 # Rust toolchain for `pkg/xet` (CGo wrapper around a Rust staticlib).
 # cmd/manager transitively links libxet, so the "no-xet" target still
