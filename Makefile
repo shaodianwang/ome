@@ -687,8 +687,13 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/') ; \
-	$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/|/integration/multicluster$$') ; \
+		$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
+	@# The multicluster suite owns three envtest control planes. Run it after the
+	@# package-parallel suites so periodic cross-apiserver assertions get a
+	@# responsive API server rather than competing with every suite's startup.
+	@$(TEST_ENV) go test -v -timeout=20m ./tests/integration/multicluster/... \
+		$(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
 # Perf scenario selection. Defaults to the baseline (large, for beefy/local
