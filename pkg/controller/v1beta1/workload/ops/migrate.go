@@ -322,6 +322,13 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		freshStamp = true
 	}
 
+	// The plan releases the source index once the surge is promoted
+	// Ready, so a completion-tail pass may no longer find the source's
+	// plan entry. The surge entry carries the identical Runner layout
+	// (the surge mirrors the source by construction), so either entry
+	// proves the gang shape.
+	gang = gang || isMultiPodInstance(plan, surgeIdx)
+
 	// A gang surge stamped its surge status THIS pass, but the IR
 	// reconciler's EnsurePodGroups already ran with the pre-stamp plan (no
 	// surge index yet) — so the surge PodGroup doesn't exist. Requeue so
@@ -420,11 +427,25 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	surgeRunners := []workload.RunnerPlan{{Name: "default", Size: 1}}
 	var sourceExcludedNodes []string
 	if gang {
+		mirrored := false
 		for i := range plan.Instances {
 			if plan.Instances[i].Index == sourceIdx {
 				surgeRunners = append([]workload.RunnerPlan(nil), plan.Instances[i].Runners...)
 				sourceExcludedNodes = plan.Instances[i].ExcludedNodes
+				mirrored = true
 				break
+			}
+		}
+		if !mirrored {
+			// The source's plan entry is gone (released after surge
+			// promotion); mirror the layout from the surge's own entry so
+			// the tail keeps computing the gang-shaped desired pod set
+			// instead of collapsing to the single-pod fallback above.
+			for i := range plan.Instances {
+				if plan.Instances[i].Index == surgeIdx {
+					surgeRunners = append([]workload.RunnerPlan(nil), plan.Instances[i].Runners...)
+					break
+				}
 			}
 		}
 	} else {
