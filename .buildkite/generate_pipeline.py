@@ -506,10 +506,17 @@ def _eval_case_groups() -> list[tuple[str, str, list[str]]]:
 def _gke_eval_group() -> str:
     """Main-only deployed OMENative eval, split into named feature/topology jobs."""
     plugins = _gke_kind_plugins(_kind_ci_image(f"eval-{COMMIT[:8]}"), shared_model=True)
+    configured_pod_budget = (
+        os.environ.get("GKE_EVAL_POD_BUDGET")
+        or os.environ.get("GKE_EVAL_EXCLUSIVE_PODS")
+    )
     children = []
     for feature, topology, cases in _eval_case_groups():
         slug = f"{feature}-{topology}".replace("_", "-")
         prometheus = "true" if feature in ("canary", "reject") else "false"
+        pod_budget = configured_pod_budget or ("42" if feature == "canary" else "64")
+        if feature == "canary":
+            pod_budget = os.environ.get("GKE_EVAL_CANARY_POD_BUDGET", pod_budget)
         children.append(
             {
                 "label": f":test_tube: {feature} / {topology} ({len(cases)} cases)",
@@ -519,7 +526,7 @@ def _gke_eval_group() -> str:
                 "env": {
                     "OME_KIND_PROMETHEUS_ENABLED": prometheus,
                     "OME_EVAL_CASE_CONCURRENCY": os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"),
-                    "OME_EVAL_EXCLUSIVE_PODS": os.environ.get("GKE_EVAL_EXCLUSIVE_PODS", "64"),
+                    "OME_EVAL_POD_BUDGET": pod_budget,
                     "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
                 },
                 "agents": {"queue": GKE_QUEUE},
