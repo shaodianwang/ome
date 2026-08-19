@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""batch.py [--conc N] [--exclusive-pods N] [--junit PATH] [cases...] — run cases with bounded concurrency.
+"""batch.py [--conc N] [--pod-budget N] [--junit PATH] [cases...] — run cases with bounded concurrency.
 
 Defaults: cases = p01..p25 (the single-Component lifecycle set), conc = 8.
 Each case runs as its own `python3 run.py <case>` subprocess (own watcher),
@@ -13,7 +13,7 @@ Examples:
   python3 batch.py p26 p50               # subset @ default conc
   python3 batch.py --shard 0/4           # CI: this shard's quarter of the set
   python3 batch.py --junit /tmp/r.xml    # CI: machine-readable per-case results
-  python3 batch.py --exclusive-pods 64   # serialize cases at/above this peak
+  python3 batch.py --pod-budget 64       # cap concurrent declared peak pods
 
 CI contract: exits nonzero when any case ends in a verdict that is neither PASS
 nor an XFAIL (parked debt). --shard partitions the case list round-robin so N
@@ -124,6 +124,33 @@ def run_one(case_id):
             stdout=log, stderr=subprocess.STDOUT, env=ENV, cwd=str(HERE),
         )
     return case_id, proc.returncode, time.time() - t0
+
+
+def run_concurrent_cases(cases, concurrency, pod_budget, case_peaks, record, runner=run_one):
+    """Run a case pool while respecting worker and declared-pod limits."""
+    pending = [(case_id, case_peaks.get(case_id) or 0) for case_id in cases]
+    active = {}
+    active_pods = 0
+
+    with cf.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        while pending or active:
+            while pending and len(active) < concurrency:
+                selected = next((idx for idx, (_, peak) in enumerate(pending)
+                                 if pod_budget is None or active_pods + peak <= pod_budget), None)
+                if selected is None:
+                    break
+                case_id, peak = pending.pop(selected)
+                future = executor.submit(runner, case_id)
+                active[future] = peak
+                active_pods += peak
+
+            if not active:
+                raise RuntimeError("no case fits the configured pod budget")
+
+            completed, _ = cf.wait(active, return_when=cf.FIRST_COMPLETED)
+            for future in completed:
+                active_pods -= active.pop(future)
+                record(*future.result())
 
 
 def print_failure_logs(case_ids):
@@ -347,7 +374,7 @@ def main():
     conc = 8
     shard = None
     junit_path = None
-    exclusive_pods = None
+    pod_budget = None
     cases = []
     i = 0
     while i < len(argv):
@@ -357,8 +384,8 @@ def main():
             shard = argv[i + 1]; i += 2
         elif argv[i] == "--junit":
             junit_path = argv[i + 1]; i += 2
-        elif argv[i] == "--exclusive-pods":
-            exclusive_pods = int(argv[i + 1]); i += 2
+        elif argv[i] in ("--pod-budget", "--exclusive-pods"):
+            pod_budget = int(argv[i + 1]); i += 2
         else:
             cases.append(argv[i]); i += 1
     cases = expand_cases(cases)
@@ -375,15 +402,17 @@ def main():
         fault = str(case_header_fields(case_id).get("fault", "")).split(":", 1)[0]
         if fault in ("quota", "cordon", "ctrlrestart"):
             return True
-        if exclusive_pods is None:
+        if pod_budget is None:
             return False
-        peak = case_peak_pods(case_id)
-        return peak is None or peak >= exclusive_pods
+        peak = case_peaks[case_id]
+        return peak is None or peak >= pod_budget
 
+    case_peaks = {case_id: case_peak_pods(case_id) for case_id in cases}
     exclusive_cases = [c for c in cases if needs_exclusive_run(c)]
     conc_cases = [c for c in cases if c not in exclusive_cases]
 
-    print(f"=== batch: {len(cases)} cases @ concurrency {conc} ===")
+    budget_text = f", pod budget {pod_budget}" if pod_budget is not None else ""
+    print(f"=== batch: {len(cases)} cases @ concurrency {conc}{budget_text} ===")
     print(f"    cases: {cases[0]}..{cases[-1]}  ({', '.join(cases)})")
     if exclusive_cases:
         print(f"    partition: {len(conc_cases)} concurrent, then {len(exclusive_cases)} "
@@ -419,10 +448,7 @@ def main():
         results[case_id] = verdict
 
     if conc_cases:
-        with cf.ThreadPoolExecutor(max_workers=conc) as ex:
-            futs = {ex.submit(run_one, c): c for c in conc_cases}
-            for fut in cf.as_completed(futs):
-                record(*fut.result())
+        run_concurrent_cases(conc_cases, conc, pod_budget, case_peaks, record)
     for c in exclusive_cases:
         record(*run_one(c))
         sweep_fault_artifacts()

@@ -139,7 +139,7 @@ echo "--- validate and run ${feature}/${topology} ---"
   python3 run.py --validate-only
   python3 batch.py \
     --conc "${OME_EVAL_CASE_CONCURRENCY:-4}" \
-    --exclusive-pods "${OME_EVAL_EXCLUSIVE_PODS:-64}" \
+    --pod-budget "${OME_EVAL_POD_BUDGET:-${OME_EVAL_EXCLUSIVE_PODS:-64}}" \
     --junit "results/${run_stamp}/junit-${feature}-${topology}.xml" \
     "$@"
   test -s "results/${run_stamp}/junit-${feature}-${topology}.xml"
