@@ -369,18 +369,25 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				// (format / architecture / framework) to an advisory event and
 				// proceed — the deliberate choice wins over the declaration.
 				//
-				// Everything else stays a hard error: a not-found / disabled
-				// runtime or a malformed model genuinely cannot run, and a sharded
-				// model with no configured cache provider physically cannot load
+				// A named-but-missing runtime gets the same permanent-config
+				// parking treatment as the fetch below: advisory condition +
+				// event, no error requeue, self-heals via the runtime watch.
+				//
+				// Everything else stays a hard error: a disabled runtime or a
+				// malformed model genuinely cannot run, and a sharded model
+				// with no configured cache provider physically cannot load
 				// (the webhook's modelRequiresCacheProvider guard is the same
 				// sharded check) — keep gating those.
-				if runtimeselector.IsRuntimeCompatibilityError(err) && !isvcutils.IsShardedBaseModel(baseModel) {
+				switch {
+				case runtimeselector.IsRuntimeCompatibilityError(err) && !isvcutils.IsShardedBaseModel(baseModel):
 					r.Log.Info("Runtime named explicitly; proceeding despite declared-format mismatch",
 						"runtime", rtName, "model", isvc.Spec.Model.Name, "details", err.Error())
 					r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeCompatibilityAdvisory",
 						"Runtime %s does not declare support for model %s (%v); proceeding because the runtime was named explicitly",
 						rtName, isvc.Spec.Model.Name, err)
-				} else {
+				case runtimeselector.IsRuntimeNotFoundError(err):
+					return r.markRuntimeUnresolved(isvc, deploymentMode, rtName, err)
+				default:
 					r.Log.Error(err, "Runtime validation failed", "runtime", rtName, "model", isvc.Spec.Model.Name)
 					r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeValidationError",
 						"Runtime %s does not support model %s: %v", rtName, isvc.Spec.Model.Name, err)
@@ -388,7 +395,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				}
 			}
 		}
-		rtSpec, isCluster, err := r.RuntimeSelector.GetRuntime(ctx, rtName, isvc.Namespace)
+		rtSpec, isCluster, err := r.RuntimeSelector.GetRuntime(ctx, rtName, isvc.Namespace, runtimeselector.RefKind(isvc.Spec.Runtime))
 		if err != nil {
 			if runtimeselector.IsRuntimeNotFoundError(err) {
 				// A named-but-missing runtime is a permanent user-config error,

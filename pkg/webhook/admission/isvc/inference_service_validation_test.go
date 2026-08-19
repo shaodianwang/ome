@@ -893,7 +893,7 @@ type runtimeLookupSpy struct {
 	getRuntimeCalls int
 }
 
-func (s *runtimeLookupSpy) GetRuntime(_ context.Context, _, _ string) (*v1beta1.ServingRuntimeSpec, bool, error) {
+func (s *runtimeLookupSpy) GetRuntime(_ context.Context, _, _, _ string) (*v1beta1.ServingRuntimeSpec, bool, error) {
 	s.getRuntimeCalls++
 	return nil, false, errors.New("runtime lookup must not be called")
 }

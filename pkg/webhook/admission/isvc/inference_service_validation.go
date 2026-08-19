@@ -541,7 +541,7 @@ func (v *InferenceServiceValidator) validateRuntimeOnlyAvailability(ctx context.
 		return nil
 	}
 
-	runtimeSpec, isCluster, err := v.RuntimeSelector.GetRuntime(ctx, runtimeRef.Name, isvc.Namespace)
+	runtimeSpec, isCluster, err := v.RuntimeSelector.GetRuntime(ctx, runtimeRef.Name, isvc.Namespace, runtimeselector.RefKind(runtimeRef))
 	if err != nil {
 		if runtimeselector.IsRuntimeNotFoundError(err) {
 			return nil

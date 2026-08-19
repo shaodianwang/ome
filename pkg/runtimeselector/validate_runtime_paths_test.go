@@ -97,6 +97,44 @@ func TestValidateRuntimeErrorPaths(t *testing.T) {
 		assert.NoError(t, fakeClient.Create(ctx, sr))
 		assert.NoError(t, selector.ValidateRuntime(ctx, "rt-good", model, isvc))
 	})
+
+	t.Run("declared ClusterServingRuntime kind validates the cluster runtime on a name collision", func(t *testing.T) {
+		// Namespaced runtime is compatible; the same-named cluster runtime is
+		// not. Only a cluster-scoped lookup can produce the mismatch error.
+		sr := &v1beta1.ServingRuntime{
+			ObjectMeta: metav1.ObjectMeta{Name: "rt-collide", Namespace: "default"},
+			Spec: v1beta1.ServingRuntimeSpec{
+				SupportedModelFormats: []v1beta1.SupportedModelFormat{
+					{ModelFormat: &v1beta1.ModelFormat{Name: "safetensors"}},
+				},
+			},
+		}
+		csr := &v1beta1.ClusterServingRuntime{
+			ObjectMeta: metav1.ObjectMeta{Name: "rt-collide"},
+			Spec: v1beta1.ServingRuntimeSpec{
+				SupportedModelFormats: []v1beta1.SupportedModelFormat{
+					{ModelFormat: &v1beta1.ModelFormat{Name: "tensorrt"}},
+				},
+			},
+		}
+		assert.NoError(t, fakeClient.Create(ctx, sr))
+		assert.NoError(t, fakeClient.Create(ctx, csr))
+
+		clusterKind := KindClusterServingRuntime
+		declaringISVC := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+			Spec: v1beta1.InferenceServiceSpec{
+				Runtime: &v1beta1.ServingRuntimeRef{Name: "rt-collide", Kind: &clusterKind},
+			},
+		}
+		err := selector.ValidateRuntime(ctx, "rt-collide", model, declaringISVC)
+		assert.Error(t, err)
+		assert.True(t, IsRuntimeCompatibilityError(err),
+			"declared kind must route validation to the cluster runtime, not the namespaced one")
+
+		// Without a declared kind the namespaced runtime wins and validates.
+		assert.NoError(t, selector.ValidateRuntime(ctx, "rt-collide", model, isvc))
+	})
 }
 
 // Error strings are operator-facing (kubectl events, conditions, logs);
@@ -133,6 +171,13 @@ func TestErrorMessageRendering(t *testing.T) {
 		assert.Contains(t, err.Error(), "rt-x")
 		assert.Contains(t, err.Error(), "namespace team-a")
 		assert.Contains(t, err.Error(), "cluster scope")
+	})
+
+	t.Run("RuntimeNotFoundError for a ServingRuntime-kind lookup names only the namespace", func(t *testing.T) {
+		err := &RuntimeNotFoundError{RuntimeName: "rt-x", Namespace: "team-a", Kind: KindServingRuntime}
+		assert.Contains(t, err.Error(), "ServingRuntime rt-x")
+		assert.Contains(t, err.Error(), "namespace team-a")
+		assert.NotContains(t, err.Error(), "cluster scope")
 	})
 
 	t.Run("RuntimeDisabledError renders the runtime scope", func(t *testing.T) {
