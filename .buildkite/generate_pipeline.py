@@ -164,6 +164,12 @@ KIND_SPEC_GROUPS = (
     ("scale-transitions", "Scale transitions", (
         "bounded_scale_down", "scale_during_rollout", "bluegreen_scale_down_during",
     )),
+    ("scale-transition-boundaries", "Scale transition boundaries", (
+        "scale_tr_oversized_gang", "scale_tr_orphan_refusal",
+    )),
+    ("scale-transition-races", "Scale transition races", (
+        "scale_tr_update_race", "scale_tr_drain_rebound",
+    )),
     ("deletion-disruption", "Deletion and disruption", (
         "cleanup_lifecycle", "force_delete", "pdb_eviction", "teardown",
         "partial_failure",

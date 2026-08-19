@@ -55,6 +55,10 @@ vs. recreate updates.
 | Pod-state watch filters (label, cross-ISVC) | watches_kind |
 | Scale up/down + pod lifecycle | lifecycle_kind |
 | Bounded scale-down waves + victim order | bounded_scale_down_kind |
+| Oversized-gang wave admission | scale_tr_oversized_gang_kind |
+| Statusless-orphan refusal during scale-down | scale_tr_orphan_refusal_kind |
+| Update deferred behind in-flight scale-down | scale_tr_update_race_kind |
+| Rebound while a victim is drain-held | scale_tr_drain_rebound_kind |
 | In-place update edge cases | update_kind |
 | State-machine interleavings | interleave_kind (INT-5) + interleave_extra_kind (INT-1..4/6) |
 | Runtime+model resolution (CBM/CSR stall, missing CSR) | runtime_resolution_kind (RT-4/5) |
