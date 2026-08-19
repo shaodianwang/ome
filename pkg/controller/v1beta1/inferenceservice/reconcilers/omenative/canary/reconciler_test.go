@@ -101,6 +101,85 @@ func TestReconcile_CanaryingPaused(t *testing.T) {
 	}
 }
 
+func TestReconcile_StepZeroResyncsReadyLiveTarget(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "old",
+		CurrentStep:        0,
+		StepEnteredTime:    &metav1.Time{Time: time.Unix(900, 0)},
+	}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {RolloutPhase: v1beta1.RolloutPhasePending},
+	}
+
+	in := baseInputs(isvc, map[string]int32{"old": 2, "new": 2})
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if isvc.Status.Canary.CanaryRevisionHash != "new" {
+		t.Fatalf("step 0 must identify the live target before traffic shifts, got %q", isvc.Status.Canary.CanaryRevisionHash)
+	}
+	if isvc.Status.Canary.StableRevisionHash != "old" {
+		t.Fatalf("stable identity must remain old, got %q", isvc.Status.Canary.StableRevisionHash)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
+		t.Fatalf("ready target should enter the manual pause, got %q", phaseOf(isvc))
+	}
+
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("promoting Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 1 {
+		t.Fatalf("promotion of the published target must advance, got step %d", isvc.Status.Canary.CurrentStep)
+	}
+}
+
+func TestReconcile_StepZeroResyncsReadyTargetBeforeRollback(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "old",
+		StableRevisionHash: "old",
+		CurrentStep:        0,
+		StepEnteredTime:    &metav1.Time{Time: time.Unix(900, 0)},
+	}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {RolloutPhase: v1beta1.RolloutPhasePending},
+	}
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+
+	in := baseInputs(isvc, map[string]int32{"old": 2, "new": 2})
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !res.RolledBack {
+		t.Fatalf("rollback request must enter the rollback path, got %+v", res)
+	}
+	if got := isvc.Status.Canary.CanaryRevisionHash; got != "new" {
+		t.Fatalf("rollback must bind to the live target, got canary hash %q", got)
+	}
+	if got := isvc.Status.Canary.RolledBackRevisionHash; got != "new" {
+		t.Fatalf("rollback must reject the live target, got %q", got)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseRollingBack {
+		t.Fatalf("ready target pods should be draining, got phase %q", phaseOf(isvc))
+	}
+
+	in.PerRevisionPods = map[string]int32{"old": 4}
+	res, err = Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("held rollback Reconcile: %v", err)
+	}
+	if !res.RolledBack || phaseOf(isvc) != v1beta1.RolloutPhaseRolledBack {
+		t.Fatalf("rollback must stay held after the target drains, phase=%q res=%+v", phaseOf(isvc), res)
+	}
+	if got := isvc.Status.Canary.RolledBackRevisionHash; got != "new" {
+		t.Fatalf("held rollback must keep rejecting the live target, got %q", got)
+	}
+}
+
 func TestReconcile_ManualPromoteAdvances(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
@@ -397,6 +476,57 @@ func TestReconcile_RetargetResetsAnalysisState(t *testing.T) {
 	}
 	if cs.AnalysisFailedChecks != 0 || cs.LastEvaluationTime != nil || cs.LastConclusiveEvaluationTime != nil || cs.MetricResults != nil {
 		t.Fatalf("retarget must not carry prior-canary analysis state, got %+v", cs)
+	}
+}
+
+func TestReconcile_ZeroTrafficStepRetargetResetsState(t *testing.T) {
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 0, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+	isvc := canaryISVC(steps, nil)
+	t0 := time.Unix(100000, 0)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:           "first",
+		StableRevisionHash:           "old",
+		CurrentStep:                  0,
+		ObservedTrafficWeight:        0,
+		PromotedThrough:              "first",
+		StepEnteredTime:              &metav1.Time{Time: t0.Add(-time.Hour)},
+		AnalysisFailedChecks:         2,
+		LastEvaluationTime:           &metav1.Time{Time: t0.Add(-time.Minute)},
+		LastConclusiveEvaluationTime: &metav1.Time{Time: t0.Add(-time.Minute)},
+		MetricResults:                []v1beta1.AnalysisMetricResult{{Name: "err", Passed: false}},
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhasePaused)
+
+	in := baseInputs(isvc, map[string]int32{"second": 2, "first": 2, "old": 2})
+	in.CanaryRevisionHash = "second"
+	in.Now = t0
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	cs := isvc.Status.Canary
+	if cs.CanaryRevisionHash != "second" || cs.CurrentStep != 0 || cs.ObservedTrafficWeight != 0 {
+		t.Fatalf("zero-traffic retarget must restart step 0 toward second, got %+v", cs)
+	}
+	if cs.StableRevisionHash != "old" {
+		t.Fatalf("zero-traffic retarget must preserve stable identity, got %q", cs.StableRevisionHash)
+	}
+	if cs.PromotedThrough != "" || cs.AnalysisFailedChecks != 0 || cs.LastEvaluationTime != nil ||
+		cs.LastConclusiveEvaluationTime != nil || cs.MetricResults != nil {
+		t.Fatalf("zero-traffic retarget must clear prior-target state, got %+v", cs)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
+		t.Fatalf("ready retarget should hold at the manual step, got %q", phaseOf(isvc))
+	}
+
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "second"}
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("promoting Reconcile: %v", err)
+	}
+	if cs.CurrentStep != 1 {
+		t.Fatalf("promotion of the retargeted revision must advance, got step %d", cs.CurrentStep)
 	}
 }
 

@@ -274,6 +274,56 @@ func canaryRoutingSelectorMatches(selector, podLabels map[string]string) bool {
 	return labels.SelectorFromSet(selector).Matches(labels.Set(podLabels))
 }
 
+func TestDispatch_ReadyTargetHashResyncsBeforePromotion(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Namespace = ns
+	isvc.Name = "ready-target"
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "stable",
+		CurrentStep:        0,
+	}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {RolloutPhase: v1beta1.RolloutPhasePending},
+	}
+
+	ir := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "ready-target-engine"}}
+	ir.Status.UpdateRevision = "ready-target-engine-target"
+	ir.Status.CurrentRevision = "ready-target-engine-stable"
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		isvc,
+		ir,
+		canaryPod(ns, isvc.Name, "engine", "target", "target-0"),
+		canaryPod(ns, isvc.Name, "engine", "target", "target-1"),
+		canaryPod(ns, isvc.Name, "engine", "stable", "stable-0"),
+		canaryPod(ns, isvc.Name, "engine", "stable", "stable-1"),
+	).Build()
+	deps := DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts()}
+
+	if _, err := Dispatch(context.Background(), deps); err != nil {
+		t.Fatalf("Dispatch error: %v", err)
+	}
+	if got := isvc.Status.Canary.CanaryRevisionHash; got != "target" {
+		t.Fatalf("ready live target must be published before the pause, got %q", got)
+	}
+	if got := isvc.Status.Canary.StableRevisionHash; got != "stable" {
+		t.Fatalf("stable identity must remain stable, got %q", got)
+	}
+	if got := isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase; got != v1beta1.RolloutPhasePaused {
+		t.Fatalf("ready target should enter the manual pause, got %q", got)
+	}
+
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: isvc.Status.Canary.CanaryRevisionHash}
+	if _, err := Dispatch(context.Background(), deps); err != nil {
+		t.Fatalf("promoting Dispatch error: %v", err)
+	}
+	if got := isvc.Status.Canary.CurrentStep; got != 1 {
+		t.Fatalf("promotion of the published target must advance, got step %d", got)
+	}
+}
+
 func TestDispatch_UsesObservedRunnerShapeForRevisionServices(t *testing.T) {
 	ns := "default"
 	n2 := 2

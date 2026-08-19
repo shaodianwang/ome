@@ -120,6 +120,20 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return pausedResult(cs, plan, in.DesiredReplicas), nil
 	}
 
+	// Bind an active canary to the IR's authoritative target before handling
+	// operator commands. A changed target starts the staged plan with fresh
+	// per-target state while preserving the original stable identity.
+	phase := in.ISVC.Status.Components[in.Component].RolloutPhase
+	if cs != nil && int(cs.CurrentStep) < len(plan.Steps) &&
+		cs.RolledBackRevisionHash == "" && phase != v1beta1.RolloutPhaseFailed {
+		if cs.StableRevisionHash == "" && in.StableRevisionHash != "" {
+			cs.StableRevisionHash = in.StableRevisionHash
+		}
+		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash {
+			resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
+		}
+	}
+
 	// Rollback (ome.io/rollout-rollback): abandon the canary and return the
 	// component to the stable revision, then HOLD there rejecting the rolled-back
 	// revision. The revert itself is driven by the controller — seeing
@@ -186,18 +200,6 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 	}
 
-	// Mid-rollout retarget: a NEW target revision appeared after traffic already
-	// shifted (e.g. the operator bumped the image again mid-canary). Restart the
-	// staged plan against the new target — otherwise the recorded hash goes stale
-	// and, under Manual, the operator's promote of the new hash would never match.
-	// The step-0 pre-traffic lag window (UpdateRevision briefly behind) is handled
-	// by the hash re-sync below, not here.
-	if cs != nil && int(cs.CurrentStep) < len(plan.Steps) &&
-		in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash &&
-		(cs.CurrentStep > 0 || cs.ObservedTrafficWeight > 0) {
-		resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
-	}
-
 	// Initialize the state machine on first sight of a NEW canary. Don't start
 	// one when the component is already fully converged on the target revision —
 	// or when the target isn't known yet — so adding a canary to an
@@ -234,16 +236,6 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 	newCount := resolveStepNewCount(step, in.DesiredReplicas)
 	partition := partitionForNewCount(in.DesiredReplicas, newCount)
-
-	// Re-sync the recorded canary hash to the live target while step 0 is still
-	// waiting on capacity (before any traffic has shifted). The IR's
-	// UpdateRevision can briefly lag the spec bump on the first reconcile, so the
-	// hash captured at init may be the stale pre-roll revision; locking that for
-	// the life of the rollout would mis-report the canary. Once traffic moves the
-	// canary is committed, so this only re-syncs during the initial wait.
-	if cs.CurrentStep == 0 && in.CanaryRevisionHash != "" && in.PerRevisionPods[in.CanaryRevisionHash] < newCount {
-		cs.CanaryRevisionHash = in.CanaryRevisionHash
-	}
 
 	// Capacity gate: don't shift traffic until the canary pods are Ready — the
 	// primary's own newCount AND every secondary component's canary capacity (PD,
