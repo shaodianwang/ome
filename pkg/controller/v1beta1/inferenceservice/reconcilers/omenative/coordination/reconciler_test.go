@@ -1060,6 +1060,7 @@ func TestReconcile_ConsiderCoordinationGroupEventFiresOnceAcrossReconciles(t *te
 	// First reconcile: transition into the advisory state -> event fires once.
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent, v1beta1.DecoderComponent),
 	}); err != nil {
 		t.Fatalf("reconcile 1: %v", err)
 	}
@@ -1072,6 +1073,7 @@ func TestReconcile_ConsiderCoordinationGroupEventFiresOnceAcrossReconciles(t *te
 	// per-reconcile event count.
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent, v1beta1.DecoderComponent),
 	}); err != nil {
 		t.Fatalf("reconcile 2: %v", err)
 	}
