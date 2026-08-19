@@ -839,6 +839,19 @@ func findInstanceStatus(observed []workload.InstanceStatus, idx int32) *workload
 	return nil
 }
 
+type podCreateError struct {
+	podName string
+	err     error
+}
+
+func (e *podCreateError) Error() string {
+	return fmt.Sprintf("create pod %s: %v", e.podName, e.err)
+}
+
+func (e *podCreateError) Unwrap() error {
+	return e.err
+}
+
 // createMissingPods renders and creates targets, owning the per-pod
 // ExpectCreates bookkeeping. idx is the expectations bucket — pass
 // inst.Index for steady-state Create / Restart Phase B. Callers must
@@ -893,7 +906,7 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 				// Prior reconcile created it; cache hasn't caught up yet.
 				continue
 			}
-			return created, fmt.Errorf("create pod %s: %w", t.Name, err)
+			return created, &podCreateError{podName: t.Name, err: err}
 		}
 		created++
 	}

@@ -511,6 +511,18 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		surgeInput.DesiredSpec.PodSpec = surgeRevSpec
 		surgeInput.DesiredSpec.WorkerPodSpec = surgeWorkerSpec
 		if _, cerr := createMissingPods(ctx, deps, surgeInput, plan, surgeInst, surgeIdx, missing, revisionHashFromTarget(surgeRev)); cerr != nil {
+			var createErr *podCreateError
+			if errors.As(cerr, &createErr) &&
+				!entry.Deadline.IsZero() &&
+				!errors.Is(cerr, context.Canceled) &&
+				!errors.Is(cerr, context.DeadlineExceeded) {
+				recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationSurgeCreateBlocked,
+					"OMENative migration uuid=%s waiting to create surge pod %s before its deadline",
+					requestUUID, createErr.podName)
+				logf.FromContext(ctx).V(1).Info("migration surge pod creation blocked",
+					"uuid", requestUUID, "pod", createErr.podName, "error", createErr.err.Error())
+				return false, accepted, nil
+			}
 			return false, accepted, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
 		}
 		return false, accepted, nil

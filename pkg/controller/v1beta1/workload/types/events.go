@@ -111,6 +111,7 @@ const (
 	// phase is restored from observation.
 	EventReasonMigrationExpired              EventReason = "MigrationExpired"
 	EventReasonRateLimited                   EventReason = "RateLimited"
+	EventReasonMigrationSurgeCreateBlocked   EventReason = "MigrationSurgeCreateBlocked"
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
 	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"
 
