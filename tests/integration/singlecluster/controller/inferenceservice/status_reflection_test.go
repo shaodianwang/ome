@@ -171,13 +171,12 @@ var _ = ginkgo.Describe("InferenceService Status reflection", ginkgo.Ordered, fu
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("Update ISVC with a benign annotation — Status.URL must remain populated through the Update reconcile")
-		got := &v1beta1.InferenceService{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "status-update-isvc", Namespace: ns.Name}, got)).To(Succeed())
-		if got.Annotations == nil {
-			got.Annotations = map[string]string{}
-		}
-		got.Annotations["test.ome.io/touched"] = "true"
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		updateInferenceService(types.NamespacedName{Name: "status-update-isvc", Namespace: ns.Name}, func(latest *v1beta1.InferenceService) {
+			if latest.Annotations == nil {
+				latest.Annotations = map[string]string{}
+			}
+			latest.Annotations["test.ome.io/touched"] = "true"
+		})
 
 		Consistently(func(g Gomega) {
 			latest := &v1beta1.InferenceService{}

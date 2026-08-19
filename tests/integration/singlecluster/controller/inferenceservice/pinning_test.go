@@ -384,12 +384,12 @@ var _ = ginkgo.Describe("InferenceService pinning", ginkgo.Ordered, func() {
 			Expect(listRevisionsForRuntime(csrName)).To(HaveLen(1))
 
 			ginkgo.By("operator bumps ome.io/runtime-sync — pin advances, drift clears")
-			got := getISVC(ns.Name, isvc.Name)
-			if got.Annotations == nil {
-				got.Annotations = map[string]string{}
-			}
-			got.Annotations[constants.RuntimeSyncAnnotationKey] = "ack-1"
-			Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+			updateInferenceService(types.NamespacedName{Namespace: ns.Name, Name: isvc.Name}, func(latest *v1beta1.InferenceService) {
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations[constants.RuntimeSyncAnnotationKey] = "ack-1"
+			})
 
 			Eventually(func(g Gomega) {
 				updated := getISVC(ns.Name, isvc.Name)
@@ -605,12 +605,12 @@ var _ = ginkgo.Describe("InferenceService pinning", ginkgo.Ordered, func() {
 				"Phase 1: drift-freeze prevents auto-rebuild; operator must ack to roll forward")
 
 			ginkgo.By("operator acks the drift → Deployment rebuilds using the now-live image")
-			got := getISVC(ns.Name, isvc.Name)
-			if got.Annotations == nil {
-				got.Annotations = map[string]string{}
-			}
-			got.Annotations[constants.RuntimeSyncAnnotationKey] = "ack-after-deletion"
-			Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+			updateInferenceService(types.NamespacedName{Namespace: ns.Name, Name: isvc.Name}, func(latest *v1beta1.InferenceService) {
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations[constants.RuntimeSyncAnnotationKey] = "ack-after-deletion"
+			})
 
 			Eventually(func(g Gomega) {
 				deps := &appsv1.DeploymentList{}
@@ -642,12 +642,12 @@ var _ = ginkgo.Describe("InferenceService pinning", ginkgo.Ordered, func() {
 			Expect(k8sClient.Delete(suiteCtx, rev)).To(Succeed())
 
 			ginkgo.By("triggering a reconcile by touching an annotation on the ISVC")
-			got := getISVC(ns.Name, isvc.Name)
-			if got.Annotations == nil {
-				got.Annotations = map[string]string{}
-			}
-			got.Annotations["test.ome.io/touch"] = "1"
-			Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+			updateInferenceService(types.NamespacedName{Namespace: ns.Name, Name: isvc.Name}, func(latest *v1beta1.InferenceService) {
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test.ome.io/touch"] = "1"
+			})
 
 			Eventually(func() bool {
 				return hasRuntimeDriftedCondition(getISVC(ns.Name, isvc.Name), corev1.ConditionTrue, "RevisionMissing")

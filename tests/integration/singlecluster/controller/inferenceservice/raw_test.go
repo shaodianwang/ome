@@ -129,10 +129,9 @@ var _ = ginkgo.Describe("InferenceService RawDeployment", ginkgo.Ordered, func()
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("updating the ISVC Engine image to v2")
-		latest := &v1beta1.InferenceService{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "update-isvc", Namespace: ns.Name}, latest)).To(Succeed())
-		latest.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
-		Expect(k8sClient.Update(suiteCtx, latest)).To(Succeed())
+		updateInferenceService(types.NamespacedName{Name: "update-isvc", Namespace: ns.Name}, func(latest *v1beta1.InferenceService) {
+			latest.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+		})
 
 		ginkgo.By("expecting the Deployment template to update to v2")
 		Eventually(func(g Gomega) {

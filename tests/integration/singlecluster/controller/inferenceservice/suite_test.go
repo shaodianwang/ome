@@ -9,9 +9,11 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -137,6 +139,15 @@ func setSuiteFakeMCDefaults() {
 			},
 		}, nil
 	}
+}
+
+func updateInferenceService(key types.NamespacedName, mutate func(*v1beta1.InferenceService)) {
+	gomega.Eventually(func(g gomega.Gomega) {
+		latest := &v1beta1.InferenceService{}
+		g.Expect(k8sClient.Get(suiteCtx, key, latest)).To(gomega.Succeed())
+		mutate(latest)
+		g.Expect(k8sClient.Update(suiteCtx, latest)).To(gomega.Succeed())
+	}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(gomega.Succeed())
 }
 
 var _ = ginkgo.AfterSuite(func() {
