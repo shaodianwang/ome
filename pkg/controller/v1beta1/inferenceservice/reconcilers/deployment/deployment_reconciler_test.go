@@ -447,7 +447,7 @@ func TestNewDeploymentReconciler(t *testing.T) {
 
 	componentExt := &v1beta1.ComponentExtensionSpec{}
 
-	reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+	reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 	// Verify the reconciler is properly initialized
 	assert.NotNil(t, reconciler)
@@ -493,7 +493,7 @@ func TestCheckDeploymentExist(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call checkDeploymentExist
 		result, deployObj, err := reconciler.checkDeploymentExist()
@@ -514,7 +514,7 @@ func TestCheckDeploymentExist(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingDeployment).Build()
 
 		// Create a reconciler with different specs
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call checkDeploymentExist
 		result, deployObj, err := reconciler.checkDeploymentExist()
@@ -530,7 +530,7 @@ func TestCheckDeploymentExist(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Create the deployment first so it exists
 		err := client.Create(context.TODO(), reconciler.Deployment)
@@ -553,7 +553,7 @@ func TestCheckDeploymentExist(t *testing.T) {
 		}
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call checkDeploymentExist
 		result, deployObj, err := reconciler.checkDeploymentExist()
@@ -596,7 +596,7 @@ func TestReconcile(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call Reconcile
 		result, err := reconciler.Reconcile()
@@ -623,7 +623,7 @@ func TestReconcile(t *testing.T) {
 		// Create a reconciler with different specs - ensure the reconciler's deployment has the expected image
 		newPodSpec := podSpec.DeepCopy()
 		newPodSpec.Containers[0].Image = "test-image:latest"
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, newPodSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, newPodSpec, nil)
 
 		// Call Reconcile
 		result, err := reconciler.Reconcile()
@@ -643,7 +643,7 @@ func TestReconcile(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Create the deployment first
 		err := client.Create(context.TODO(), reconciler.Deployment)
@@ -664,7 +664,7 @@ func TestReconcile(t *testing.T) {
 		}
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call Reconcile
 		result, err := reconciler.Reconcile()
@@ -682,7 +682,7 @@ func TestReconcile(t *testing.T) {
 		}
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call Reconcile
 		result, err := reconciler.Reconcile()
@@ -705,12 +705,134 @@ func TestReconcile(t *testing.T) {
 		}
 
 		// Create a reconciler
-		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec)
+		reconciler := NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, nil)
 
 		// Call Reconcile
 		result, err := reconciler.Reconcile()
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "mock update error")
+	})
+}
+
+func TestControllerOwnedReplicas(t *testing.T) {
+	three := 3
+	zero := 0
+	tests := []struct {
+		name       string
+		autoscaler *v1beta1.ComponentAutoscaler
+		ext        *v1beta1.ComponentExtensionSpec
+		want       *int32
+	}{
+		{
+			name:       "None class with explicit floor is controller-owned",
+			autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone},
+			ext:        &v1beta1.ComponentExtensionSpec{MinReplicas: &three},
+			want:       ptr.Int32(3),
+		},
+		{
+			name: "nil autoscaler resolves to None",
+			ext:  &v1beta1.ComponentExtensionSpec{MinReplicas: &three},
+			want: ptr.Int32(3),
+		},
+		{
+			name:       "None class without a declared floor preserves the live count",
+			autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone},
+			ext:        &v1beta1.ComponentExtensionSpec{},
+		},
+		{
+			name:       "None class with a non-positive floor preserves the live count",
+			autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone},
+			ext:        &v1beta1.ComponentExtensionSpec{MinReplicas: &zero},
+		},
+		{
+			name:       "HPA class is scaler-owned",
+			autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA},
+			ext:        &v1beta1.ComponentExtensionSpec{MinReplicas: &three},
+		},
+		{
+			name:       "KEDA class is scaler-owned",
+			autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerKEDA},
+			ext:        &v1beta1.ComponentExtensionSpec{MinReplicas: &three},
+		},
+		{
+			name:       "External class is scaler-owned",
+			autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal},
+			ext:        &v1beta1.ComponentExtensionSpec{MinReplicas: &three},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := controllerOwnedReplicas(tt.autoscaler, tt.ext)
+			if tt.want == nil {
+				assert.Nil(t, got)
+				return
+			}
+			assert.NotNil(t, got)
+			assert.Equal(t, *tt.want, *got)
+		})
+	}
+}
+
+func TestReconcileReplicaOwnership(t *testing.T) {
+	scheme := runtime.NewScheme()
+	assert.NoError(t, appsv1.AddToScheme(scheme))
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "test-container", Image: "test-image:latest"}},
+	}
+	componentMeta := metav1.ObjectMeta{
+		Name:      "test-isvc",
+		Namespace: "default",
+	}
+	minReplicas := 3
+
+	t.Run("None class stamps minReplicas on create", func(t *testing.T) {
+		componentExt := &v1beta1.ComponentExtensionSpec{MinReplicas: &minReplicas}
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		reconciler := NewDeploymentReconciler(cl, scheme, componentMeta, componentExt, podSpec.DeepCopy(),
+			&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone})
+
+		_, err := reconciler.Reconcile()
+		assert.NoError(t, err)
+
+		stored := &appsv1.Deployment{}
+		assert.NoError(t, cl.Get(context.TODO(), types.NamespacedName{Name: componentMeta.Name, Namespace: componentMeta.Namespace}, stored))
+		assert.NotNil(t, stored.Spec.Replicas)
+		assert.Equal(t, int32(3), *stored.Spec.Replicas)
+	})
+
+	t.Run("None class re-stamps a drifted replica count", func(t *testing.T) {
+		componentExt := &v1beta1.ComponentExtensionSpec{MinReplicas: &minReplicas}
+		existing := createRawDeployment(componentMeta, componentExt, podSpec.DeepCopy())
+		existing.Spec.Replicas = ptr.Int32(5)
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+		reconciler := NewDeploymentReconciler(cl, scheme, componentMeta, componentExt, podSpec.DeepCopy(),
+			&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone})
+
+		_, err := reconciler.Reconcile()
+		assert.NoError(t, err)
+
+		stored := &appsv1.Deployment{}
+		assert.NoError(t, cl.Get(context.TODO(), types.NamespacedName{Name: componentMeta.Name, Namespace: componentMeta.Namespace}, stored))
+		assert.NotNil(t, stored.Spec.Replicas)
+		assert.Equal(t, int32(3), *stored.Spec.Replicas)
+	})
+
+	t.Run("HPA class preserves a scaler-written replica count", func(t *testing.T) {
+		componentExt := &v1beta1.ComponentExtensionSpec{MinReplicas: &minReplicas, MaxReplicas: 5}
+		existing := createRawDeployment(componentMeta, componentExt, podSpec.DeepCopy())
+		existing.Spec.Replicas = ptr.Int32(5)
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+		reconciler := NewDeploymentReconciler(cl, scheme, componentMeta, componentExt, podSpec.DeepCopy(),
+			&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA})
+
+		_, err := reconciler.Reconcile()
+		assert.NoError(t, err)
+
+		stored := &appsv1.Deployment{}
+		assert.NoError(t, cl.Get(context.TODO(), types.NamespacedName{Name: componentMeta.Name, Namespace: componentMeta.Namespace}, stored))
+		assert.NotNil(t, stored.Spec.Replicas)
+		assert.Equal(t, int32(5), *stored.Spec.Replicas)
 	})
 }

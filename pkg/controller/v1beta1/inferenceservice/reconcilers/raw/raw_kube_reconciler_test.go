@@ -125,7 +125,7 @@ func TestRawKubeReconciler_ReconcilesBaseResourcesWithoutAutoscaler(t *testing.T
 		},
 		Budget: &pdb.Budget{MaxUnavailable: &maximum},
 	}
-	reconciler, err := NewRawKubeReconciler(cl, cl, clientset, scheme, pdbRequest, componentMeta, spec, podSpec)
+	reconciler, err := NewRawKubeReconciler(cl, cl, clientset, scheme, pdbRequest, componentMeta, spec, podSpec, &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA})
 	require.NoError(t, err)
 	_, err = reconciler.Reconcile(context.Background())
 	require.NoError(t, err)
@@ -207,7 +207,7 @@ func TestRawKubeReconcilerDeletesOwnedPDBForNilBudget(t *testing.T) {
 	}
 	pdbRequest := pdb.Request{Owner: isvc, ObjectMeta: componentMeta}
 
-	reconciler, err := NewRawKubeReconciler(cl, cl, clientset, scheme, pdbRequest, componentMeta, spec, podSpec)
+	reconciler, err := NewRawKubeReconciler(cl, cl, clientset, scheme, pdbRequest, componentMeta, spec, podSpec, nil)
 	require.NoError(t, err)
 	_, err = reconciler.Reconcile(context.Background())
 	require.NoError(t, err)

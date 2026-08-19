@@ -49,7 +49,7 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 		},
 	}
 
-	reconciler, err := raw.NewRawKubeReconciler(r.Client, r.APIReader, r.Clientset, r.Scheme, pdbRequest, objectMeta, inferenceServiceSpec, podSpec)
+	reconciler, err := raw.NewRawKubeReconciler(r.Client, r.APIReader, r.Clientset, r.Scheme, pdbRequest, objectMeta, inferenceServiceSpec, podSpec, resolvedAutoscaler)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrapf(err, "failed to create RawKubeReconciler for %s", componentType)
 	}

@@ -40,6 +40,7 @@ func NewRawKubeReconciler(client client.Client,
 	componentMeta metav1.ObjectMeta,
 	inferenceServiceSpec *v1beta1.InferenceServiceSpec,
 	podSpec *corev1.PodSpec,
+	resolvedAutoscaler *v1beta1.ComponentAutoscaler,
 ) (*RawKubeReconciler, error) {
 	if reader == nil {
 		reader = client
@@ -58,7 +59,7 @@ func NewRawKubeReconciler(client client.Client,
 
 	return &RawKubeReconciler{
 		reader:              reader,
-		Deployment:          deployment.NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec),
+		Deployment:          deployment.NewDeploymentReconciler(client, scheme, componentMeta, componentExt, podSpec, resolvedAutoscaler),
 		Service:             service.NewServiceReconciler(client, scheme, componentMeta, componentExt, podSpec, nil),
 		PodDisruptionBudget: pdbReconciler,
 		pdbRequest:          pdbRequest,

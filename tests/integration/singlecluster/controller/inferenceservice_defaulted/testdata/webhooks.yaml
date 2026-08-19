@@ -1,0 +1,30 @@
+# MutatingWebhookConfiguration for the InferenceService defaulter
+# only. This suite pins the defaulter → reconciler chain, so the
+# validating configuration is deliberately absent — the validator
+# handler is registered on the webhook server but never dialed.
+# failurePolicy=Fail keeps the test semantics tight: a defaulter
+# wiring regression will fail visibly on every Create rather than
+# silently skip the mutation.
+#
+# envtest patches placeholder caBundle / clientConfig.service →
+# clientConfig.url at install time; values here are scaffolding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: inferenceservice-defaulter.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /mutate-ome-io-v1beta1-inferenceservice
+    failurePolicy: Fail
+    name: inferenceservice.ome-webhook-server.defaulter
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]
