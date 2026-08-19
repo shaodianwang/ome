@@ -13,7 +13,8 @@ Architecture:
      by-line, maintaining a per-pod state map (comp, alive, ready, hash, uid,
      newanno). Compute per-Component (alive, ready, updated) counts.
   3. State machine:
-       INIT      → wait until every configured Component has N pods Ready.
+       INIT      → wait until every configured Component has N complete
+                   Instances Ready+serving and its IR reports a settled revision.
        (trigger) → snapshot OLD revision hashes + pod UIDs, then bump the
                    `perm.test/rev` annotation on EVERY group member (engine-only
                    when there is no coordination group). → ROTATING
@@ -1739,9 +1740,99 @@ def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None):
     return rr.returncode == 0
 
 
+def _serving_instance_counts(pod_state, pods_per_inst):
+    """Return fully Ready+serving Instance counts by Component."""
+    by_instance = defaultdict(list)
+    for pod in pod_state.values():
+        if pod and pod.get("alive"):
+            by_instance[(pod.get("comp"), pod.get("inst", "0"))].append(pod)
+    counts = defaultdict(int)
+    for (component, _), pods in by_instance.items():
+        expected = max(1, pods_per_inst.get(component, 1))
+        if len(pods) >= expected and sum(
+                1 for pod in pods if pod.get("ready") and pod.get("serving")) >= expected:
+            counts[component] += 1
+    return dict(counts)
+
+
+def _initial_ir_settled(items, expected, configured):
+    """Require authoritative IR status to describe a steady initial fleet."""
+    by_component = defaultdict(list)
+    for item in items:
+        component = (item.get("spec") or {}).get("component")
+        if component in configured:
+            by_component[component].append(item)
+
+    for component in sorted(configured):
+        matches = by_component.get(component, [])
+        if len(matches) != 1:
+            return False, f"{component}: observed {len(matches)} InferenceReplicas, want 1"
+        item = matches[0]
+        metadata = item.get("metadata") or {}
+        status = item.get("status") or {}
+        desired = expected[component]
+        try:
+            generation = int(metadata.get("generation") or 0)
+            observed_generation = int(status.get("observedGeneration") or 0)
+        except (TypeError, ValueError):
+            return False, f"{component}: generation status is malformed"
+        if generation > 0 and observed_generation < generation:
+            return False, f"{component}: observedGeneration {observed_generation} < {generation}"
+        for field in ("replicas", "readyReplicas", "servingReplicas",
+                      "updatedReplicas", "updatedReadyReplicas"):
+            try:
+                actual = int(status.get(field) or 0)
+            except (TypeError, ValueError):
+                return False, f"{component}: {field} is malformed"
+            if actual != desired:
+                return False, f"{component}: {field} {actual}/{desired}"
+        current = status.get("currentRevision") or ""
+        update = status.get("updateRevision") or ""
+        if not current or current != update:
+            return False, f"{component}: currentRevision and updateRevision have not converged"
+        instances = status.get("instanceStatuses")
+        if not isinstance(instances, list) or len(instances) != desired:
+            actual = len(instances) if isinstance(instances, list) else 0
+            return False, f"{component}: instanceStatuses {actual}/{desired}"
+        expected_indexes = set(range(desired))
+        try:
+            indexes = {int(instance.get("index", -1)) for instance in instances}
+        except (AttributeError, TypeError, ValueError):
+            return False, f"{component}: Instance indexes are malformed"
+        if indexes != expected_indexes:
+            return False, f"{component}: Instance indexes have not converged"
+        for instance in instances:
+            if instance.get("phase") != "Ready" or instance.get("operation") is not None:
+                return False, f"{component}/{instance.get('index', '?')}: Instance is not settled"
+    return True, "settled"
+
+
+def _initial_rollout_settled(pod_state, pods_per_inst, expected, configured, ir_items):
+    """Require both live serving pods and settled controller state."""
+    serving = _serving_instance_counts(pod_state, pods_per_inst)
+    for component in sorted(configured):
+        if serving.get(component, 0) != expected[component]:
+            return False, f"{component}: serving {serving.get(component, 0)}/{expected[component]}"
+    return _initial_ir_settled(ir_items, expected, configured)
+
+
+def _fetch_initial_ir_items(case_id):
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l",
+                f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        items = json.loads(r.stdout).get("items")
+    except Exception:
+        return None
+    return items if isinstance(items, list) else None
+
+
 def _setup_and_ready(case_id, yaml_file, hdr):
-    """Apply runtime + ISVC, start the watcher, wait for initial Ready, and snapshot
-    pre-trigger revision/UID/node state. Returns (ctx, None) or (None, (state, msg))."""
+    """Apply runtime + ISVC, wait for initial settlement, and snapshot state.
+
+    Returns (ctx, None) or (None, (state, msg)).
+    """
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
     N = {"engine": Ne, "decoder": Nd, "router": Nr}
     configured = {c for c in COMPS if N[c] > 0}
@@ -1763,17 +1854,26 @@ def _setup_and_ready(case_id, yaml_file, hdr):
         "fault": _fault_new(case_id, hdr),
     }
     budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
-    print(f"\n  Phase 1: waiting for initial Ready (need {Ne}/{Nd}/{Nr}; ≤{budget}s)")
+    print(f"\n  Phase 1: waiting for initial settlement (need {Ne}/{Nd}/{Nr}; ≤{budget}s)")
     t0 = time.time()
+    last_wait = None
     while time.time() - t0 < budget and not ctx["closed"]:
         agg = _read_one(ctx)
         if all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured):
+            ir_items = _fetch_initial_ir_items(case_id)
+            settled, wait = _initial_rollout_settled(
+                ctx["pod_state"], ctx["pods_per_inst"], N, configured, ir_items or [])
+            if not settled:
+                if wait != last_wait:
+                    print(f"  … Pods are container-ready; waiting for settled serving state ({wait})")
+                    last_wait = wait
+                continue
             alive = [p for p in ctx["pod_state"].values() if p and p["alive"]]
             ctx["old_hashes"] = {p["hash"] for p in alive if p.get("hash")}
             for c in configured:
                 ctx["old_uids"][c] = {p["uid"] for p in alive if p["comp"] == c and p.get("uid")}
             ctx["old_nodes"] = {(p["comp"], p["inst"]): p.get("node", "") for p in alive}
-            print(f"  ✓ Initial Ready after {int(time.time() - t0)}s; old rev {sorted(ctx['old_hashes']) or '(none)'}")
+            print(f"  ✓ Initial fleet settled after {int(time.time() - t0)}s; old rev {sorted(ctx['old_hashes']) or '(none)'}")
             # Pre-trigger fault apparatus (quota / cordon) arms once Ready.
             ok_f, fmsg = _fault_setup(ctx["fault"], case_id, hdr)
             if not ok_f:
@@ -1785,7 +1885,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     _stop_watcher(ctx)
     kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")   # don't leak the ISVC
     print(f"  ✗ INIT TIMEOUT after {budget}s")
-    return None, ("INIT_TIMEOUT", "never reached initial Ready")
+    return None, ("INIT_TIMEOUT", "never reached initial settled state")
 
 
 def _write_fail(case_id, desc, hdr, state, msg):
@@ -3715,9 +3815,11 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     converged_at = None
     stable_since = None
     progressed = False
+    initial_pods_ready = False
+    initial_wait = None
     deadline_init = init_started + init_budget
     deadline_conv = None
-    print(f"\n  Phase 1: waiting for initial Ready (need {Ne}/{Nd}/{Nr})")
+    print(f"\n  Phase 1: waiting for initial settlement (need {Ne}/{Nd}/{Nr})")
 
     survivor_uids = set()   # pre-scale UIDs of survivor-index pods (stability check)
     buf = ""
@@ -3736,6 +3838,35 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                 # checks only when caught up, so the multi-second kubectl gets never
                 # throttle event consumption (events processed every iteration below).
                 _inv_tick(inv, pod_state, pods_per_inst)
+                if state == "INIT" and initial_pods_ready:
+                    ir_items = _fetch_initial_ir_items(case_id)
+                    settled, wait = _initial_rollout_settled(
+                        pod_state, pods_per_inst, N, configured, ir_items or [])
+                    if not settled:
+                        if wait != initial_wait:
+                            print(f"  … Pods are container-ready; waiting for settled serving state ({wait})")
+                            initial_wait = wait
+                    else:
+                        print(f"  ✓ Initial fleet settled after {int(now - init_started)}s")
+                        survivor_uids = {q["uid"] for q in pod_state.values()
+                                         if q and q["alive"] and _is_survivor(q) and q.get("uid")}
+                        ok_f, fmsg = _fault_setup(fault, case_id, hdr)
+                        if not ok_f:
+                            print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
+                            state = "INFRA-FAIL"
+                            break
+                        patch = {"spec": {c: {"minReplicas": target[c], "maxReplicas": target[c]}
+                                          for c in configured if target[c] != N[c]}}
+                        print(f"\n  Phase 2: scaledown patch {json.dumps(patch['spec'])}")
+                        rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(patch))
+                        if rr.returncode != 0:
+                            print(f"  ✗ TRIGGER FAILED: {rr.stderr[:200]}")
+                            state = "TRIGGER_FAIL"
+                            break
+                        trigger_ts = time.time()
+                        deadline_conv = trigger_ts + conv_budget
+                        print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
+                        state = "DRAINING"
                 if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
                     state = "CONVERGED"
                     converged_at = stable_since - trigger_ts
@@ -3786,27 +3917,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                 if agg.get(c, (0, 0, 0))[0] > peaks[c]:
                     peaks[c] = agg[c][0]
             if state == "INIT":
-                if all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured):
-                    print(f"  ✓ Initial Ready after {int(now - init_started)}s")
-                    survivor_uids = {q["uid"] for q in pod_state.values()
-                                     if q and q["alive"] and _is_survivor(q) and q.get("uid")}
-                    ok_f, fmsg = _fault_setup(fault, case_id, hdr)
-                    if not ok_f:
-                        print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
-                        state = "INFRA-FAIL"
-                        break
-                    patch = {"spec": {c: {"minReplicas": target[c], "maxReplicas": target[c]}
-                                      for c in configured if target[c] != N[c]}}
-                    print(f"\n  Phase 2: scaledown patch {json.dumps(patch['spec'])}")
-                    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(patch))
-                    if rr.returncode != 0:
-                        print(f"  ✗ TRIGGER FAILED: {rr.stderr[:200]}")
-                        state = "TRIGGER_FAIL"
-                        break
-                    trigger_ts = time.time()
-                    deadline_conv = trigger_ts + conv_budget
-                    print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
-                    state = "DRAINING"
+                initial_pods_ready = all(
+                    agg.get(c, (0, 0, 0))[1] == N[c] for c in configured)
             elif state == "DRAINING":
                 # Fault phase hook (settling fires right after the trigger).
                 _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
@@ -4140,6 +4252,8 @@ def run_case(case_id):
     converged_at = None
     stable_since = None
     progressed = False               # have we OBSERVED the rollout perturb the system?
+    initial_pods_ready = False
+    initial_wait = None
     old_hashes = None                # pre-trigger revision hashes (snapshot at trigger)
     old_uids = {}                    # comp → set(pod uids) pre-trigger (for in-place UID stability)
     rev_aware = False
@@ -4159,7 +4273,7 @@ def run_case(case_id):
     order_viol = {}                  # comp → worst (drained - ready - maxUnavail) surge-before-drain breach
     deadline_init = init_started + init_budget
     deadline_rotate = None
-    print(f"\n  Phase 1: waiting for initial Ready (need engine={Ne}, decoder={Nd}, router={Nr} pods all Ready)")
+    print(f"\n  Phase 1: waiting for initial settlement (need engine={Ne}, decoder={Nd}, router={Nr})")
 
     buf = ""
     try:
@@ -4181,6 +4295,43 @@ def run_case(case_id):
                 # tick runs only between bursts, when pod_state is already current).
                 _inv_tick(inv, pod_state, pods_per_inst)
 
+                if state == "INIT" and initial_pods_ready:
+                    ir_items = _fetch_initial_ir_items(case_id)
+                    settled, wait = _initial_rollout_settled(
+                        pod_state, pods_per_inst, N, configured, ir_items or [])
+                    if not settled:
+                        if wait != initial_wait:
+                            print(f"  … Pods are container-ready; waiting for settled serving state ({wait})")
+                            initial_wait = wait
+                    else:
+                        print(f"\n  ✓ Initial fleet settled after {int(now - init_started)}s")
+                        old_hashes = {p["hash"] for p in pod_state.values()
+                                      if p and p["alive"] and p.get("hash")}
+                        for c in configured:
+                            old_uids[c] = {p["uid"] for p in pod_state.values()
+                                           if p and p["alive"] and p["comp"] == c and p.get("uid")}
+                        rev_aware = bool(old_hashes)
+                        print(f"  old revision hash(es): {sorted(old_hashes) or '(none)'}")
+                        ok_f, fmsg = _fault_setup(fault, case_id, hdr)
+                        if not ok_f:
+                            print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
+                            state = "INFRA-FAIL"
+                            break
+                        patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL,
+                                                              "ome.io/deploymentMode": "OMENative"}}
+                                          for c in sorted(bumped)}}
+                        print(f"\n  Phase 2: triggering rotation (bump {TRIGGER_ANNO}→{TRIGGER_VAL} on {sorted(bumped)})")
+                        rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                                     "-p", json.dumps(patch))
+                        if rr.returncode != 0:
+                            print(f"  ✗ TRIGGER FAILED: {rr.stderr[:200]}")
+                            state = "TRIGGER_FAIL"
+                            break
+                        trigger_ts = time.time()
+                        deadline_rotate = trigger_ts + rotate_budget
+                        print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → all N on new revision)")
+                        state = "ROTATING"
+
                 # CONVERGED is gated on `progressed`: we must have OBSERVED the rollout
                 # perturb the pods first, else stable_since latches on the pre-rollout
                 # steady state and a slow controller reaction is mis-declared CONVERGED.
@@ -4191,7 +4342,7 @@ def run_case(case_id):
                     break
                 if state == "INIT" and now > deadline_init:
                     state = "INIT_TIMEOUT"
-                    print(f"  ✗ INIT TIMEOUT after {init_budget}s — never reached initial Ready")
+                    print(f"  ✗ INIT TIMEOUT after {init_budget}s — never reached initial settled state")
                     break
                 if state == "ROTATING" and deadline_rotate and now > deadline_rotate:
                     state = "ROTATE_TIMEOUT" if progressed else "NO_ROLLOUT"
@@ -4284,34 +4435,8 @@ def run_case(case_id):
                 last_counts = counts
 
             if state == "INIT":
-                if all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured):
-                    print(f"\n  ✓ Initial Ready reached after {int(now - init_started)}s")
-                    old_hashes = {p["hash"] for p in pod_state.values()
-                                  if p and p["alive"] and p.get("hash")}
-                    for c in configured:
-                        old_uids[c] = {p["uid"] for p in pod_state.values()
-                                       if p and p["alive"] and p["comp"] == c and p.get("uid")}
-                    rev_aware = bool(old_hashes)
-                    print(f"  old revision hash(es): {sorted(old_hashes) or '(none)'}")
-                    ok_f, fmsg = _fault_setup(fault, case_id, hdr)
-                    if not ok_f:
-                        print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
-                        state = "INFRA-FAIL"
-                        break
-                    patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL,
-                                                          "ome.io/deploymentMode": "OMENative"}}
-                                      for c in sorted(bumped)}}
-                    print(f"\n  Phase 2: triggering rotation (bump {TRIGGER_ANNO}→{TRIGGER_VAL} on {sorted(bumped)})")
-                    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
-                                 "-p", json.dumps(patch))
-                    if rr.returncode != 0:
-                        print(f"  ✗ TRIGGER FAILED: {rr.stderr[:200]}")
-                        state = "TRIGGER_FAIL"
-                        break
-                    trigger_ts = time.time()
-                    deadline_rotate = trigger_ts + rotate_budget
-                    print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → all N on new revision)")
-                    state = "ROTATING"
+                initial_pods_ready = all(
+                    agg.get(c, (0, 0, 0))[1] == N[c] for c in configured)
             elif state == "ROTATING":
                 tnow = now - trigger_ts
                 # Fault phase hook: settling fires on the first ROTATING
