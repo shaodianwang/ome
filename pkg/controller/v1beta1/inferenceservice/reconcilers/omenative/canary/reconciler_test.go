@@ -767,6 +767,113 @@ func TestReconcile_ConsumeFailureDoesNotAbort(t *testing.T) {
 	}
 }
 
+// TestReconcile_CompletionClearsPromotedThrough pins the completion end of the
+// durable-promote lifecycle: a promote that advances into the final step can be
+// consumed on the same pass the final capacity converges, so completion lands
+// while the record still awaits observed annotation absence. Completion must
+// clear the record — the done sentinel returns before the main-path sync, so
+// residue would otherwise persist until a new canary re-arms.
+func TestReconcile_CompletionClearsPromotedThrough(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "new",
+		CurrentStep:        1,
+		StepEnteredTime:    &metav1.Time{Time: time.Unix(1000, 0)},
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"new": 4})
+	in.Client = c
+	// Pass 1: the promote advances into the final step, recording the durable
+	// promote; the annotation stays until the advance persists.
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.CurrentStep != 2 || isvc.Status.Canary.PromotedThrough != "new" {
+		t.Fatalf("promote should advance into the final step recording the promote, got %+v", isvc.Status.Canary)
+	}
+
+	// Pass 2: the annotation is consumed AND the final step completes (capacity
+	// already converged, no drain window) on the same pass.
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !res.Complete || isvc.Status.Canary.CurrentStep != 3 {
+		t.Fatalf("expected completion, got res=%+v status=%+v", res, isvc.Status.Canary)
+	}
+	if isvc.Status.Canary.PromotedThrough != "" {
+		t.Fatalf("completion must clear the durable promote record, got %q", isvc.Status.Canary.PromotedThrough)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutPromoteAnnotation]; still {
+		t.Fatal("the applied promote must be removed on the apiserver by completion")
+	}
+
+	// Pass 3: the done sentinel holds — inactive, no residue reappears.
+	res, err = Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.Active || isvc.Status.Canary.PromotedThrough != "" {
+		t.Fatalf("done canary must stay settled, got res=%+v record=%q", res, isvc.Status.Canary.PromotedThrough)
+	}
+}
+
+// TestReconcile_DoneSentinelSettlesPromoteResidue pins residue convergence for
+// an already-completed canary whose durable promote record survived completion
+// (e.g. a status recorded before completion cleared it): the done sentinel must
+// still retry the annotation removal while it lingers and clear the record once
+// the annotation is observed gone — without re-activating the canary.
+func TestReconcile_DoneSentinelSettlesPromoteResidue(t *testing.T) {
+	isvc := canaryISVC(threeStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:    "new",
+		CurrentStep:           3, // done sentinel
+		ObservedTrafficWeight: 100,
+		PromotedThrough:       "new",
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+
+	in := baseInputs(isvc, map[string]int32{"new": 4})
+	in.Client = c
+	// Pass 1: the lingering annotation matches the record → removed on the
+	// apiserver; the record waits for observed absence.
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.Active || isvc.Status.Canary.CurrentStep != 3 {
+		t.Fatalf("done canary must stay inactive at the sentinel, got res=%+v status=%+v", res, isvc.Status.Canary)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutPromoteAnnotation]; still {
+		t.Fatal("the sentinel must retry the lingering annotation removal on the apiserver")
+	}
+
+	// Pass 2: the annotation is observed gone → the record clears.
+	isvc.Annotations = stored.Annotations
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.PromotedThrough != "" {
+		t.Fatalf("the record must clear once the annotation is observed gone, got %q", isvc.Status.Canary.PromotedThrough)
+	}
+	if isvc.Status.Canary.CurrentStep != 3 {
+		t.Fatalf("settling residue must not re-activate the canary, got step %d", isvc.Status.Canary.CurrentStep)
+	}
+}
+
 // TestReconcile_RollbackConsumptionPersistedOnRearm pins the rollback-annotation
 // half of durable consumption: a re-arm toward a new target must remove
 // ome.io/rollout-rollback on the apiserver — left in place, the reloaded

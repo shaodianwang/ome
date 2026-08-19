@@ -195,6 +195,11 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash {
 			resetCanaryStatus(cs, in.CanaryRevisionHash, in.Now)
 		} else {
+			// This return skips the main-path syncPromotedThrough, so converge any
+			// promote residue here: a canary can complete while the durable record
+			// is still waiting on observed annotation absence, and a done canary
+			// evaluates no gates, so the record has nothing left to keep inert.
+			syncPromotedThrough(ctx, in, cs)
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
 			return &Result{Active: false}, nil
 		}
@@ -312,6 +317,10 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			// The canary revision is the stable revision now: drop the pre-canary
 			// identity so it cannot leak into a later rollout's rollback target.
 			cs.StableRevisionHash = ""
+			// The promote annotation is durably consumed above and a done canary
+			// evaluates no gates, so the durable promote record is spent: clear it
+			// with the same status flush rather than leaving it as residue.
+			cs.PromotedThrough = ""
 			return &Result{Active: true, Complete: true, Partition: 0}, nil
 		}
 		return &Result{Active: true, Partition: 0, RequeueAfter: reconcileRequeue}, nil
