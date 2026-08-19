@@ -1,0 +1,50 @@
+# Combined webhook fixture for the ISVC admission-matrix suite: BOTH
+# the mutating (defaulter) and validating webhook configurations are
+# installed, so every Create/Update flows defaulter → validator exactly
+# as it does on a real cluster. The sibling suites install one
+# configuration each to isolate a single handler; this suite exists to
+# test their interaction.
+#
+# envtest patches the placeholder caBundle / clientConfig.service →
+# clientConfig.url at install time; values here are scaffolding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: inferenceservice-defaulter.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /mutate-ome-io-v1beta1-inferenceservice
+    failurePolicy: Fail
+    name: inferenceservice.ome-webhook-server.defaulter
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: inferenceservice.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-inferenceservice
+    failurePolicy: Fail
+    name: inferenceservice.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]
