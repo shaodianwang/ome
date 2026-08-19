@@ -51,6 +51,31 @@ func podRuntimeImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	return true
 }
 
+// podRuntimeImageChangesMatch requires runtime confirmation only for
+// containers whose image field differs between the running and target
+// revisions. ContainerStatus.Image may name any repository tag for the
+// running image, so unchanged containers are not a transition signal.
+func podRuntimeImageChangesMatch(pod *corev1.Pod, running, target *corev1.PodSpec) bool {
+	if pod == nil || target == nil {
+		return false
+	}
+	if running == nil {
+		return podRuntimeImagesMatch(pod, target)
+	}
+	runningImages := make(map[string]string, len(running.Containers))
+	for _, c := range running.Containers {
+		runningImages[c.Name] = c.Image
+	}
+	changed := corev1.PodSpec{}
+	for _, c := range target.Containers {
+		if image, ok := runningImages[c.Name]; ok && image == c.Image {
+			continue
+		}
+		changed.Containers = append(changed.Containers, corev1.Container{Name: c.Name, Image: c.Image})
+	}
+	return len(changed.Containers) == 0 || podRuntimeImagesMatch(pod, &changed)
+}
+
 // podImagesMatch returns true when every container in target has a
 // same-named pod container with the same .Image. Pod containers absent
 // from target (webhook-injected sidecars) are not OMENative-owned and
@@ -75,10 +100,10 @@ func podImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	return true
 }
 
-// patchPodImages strategic-merge-patches each changed container image.
-// Strategic-merge keys by container name so the patch leaves other
-// containers and apiserver-defaulted fields untouched; a plain Update
-// would conflict with any other controller writing to the same RV.
+// patchPodImages strategic-merge-patches each changed container image with an
+// optimistic resource-version precondition. Strategic merge keys by container
+// name, and the precondition rejects a concurrent pod or status mutation after
+// the caller's live read.
 // Returns whether a patch was actually issued so callers only requeue
 // for a kubelet roll when one is coming.
 func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, target *corev1.PodSpec) (bool, error) {
@@ -89,29 +114,22 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 	for _, t := range target.Containers {
 		wantByName[t.Name] = t.Image
 	}
-	// Build the strategic-merge patch payload: only the containers
-	// whose image differs from current state appear in the patch.
-	var containersPatch []map[string]string
-	for _, current := range pod.Spec.Containers {
+	base := pod.DeepCopy()
+	changed := false
+	for i := range pod.Spec.Containers {
+		current := &pod.Spec.Containers[i]
 		newImage, ok := wantByName[current.Name]
 		if !ok || newImage == current.Image {
 			continue
 		}
-		containersPatch = append(containersPatch, map[string]string{
-			"name":  current.Name,
-			"image": newImage,
-		})
+		current.Image = newImage
+		changed = true
 	}
-	if len(containersPatch) == 0 {
+	if !changed {
 		return false, nil
 	}
-	raw, err := json.Marshal(map[string]any{
-		"spec": map[string]any{"containers": containersPatch},
-	})
-	if err != nil {
-		return false, fmt.Errorf("marshal image patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
-	}
-	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
+	patch := client.StrategicMergeFrom(base, client.MergeFromWithOptimisticLock{})
+	if err := c.Patch(ctx, pod, patch); err != nil {
 		return false, fmt.Errorf("patch pod %s/%s images: %w", pod.Namespace, pod.Name, err)
 	}
 	return true, nil
@@ -170,6 +188,9 @@ func annotationsDiff(podAnnotations, previousTargetAnnotations, newTargetAnnotat
 	out := map[string]any{}
 	// Add/update: every key in the new target whose pod value differs.
 	for k, want := range newTargetAnnotations {
+		if k == inPlaceImageTransitionAnnotation {
+			continue
+		}
 		if got, ok := podAnnotations[k]; !ok || got != want {
 			out[k] = want
 		}
@@ -180,6 +201,9 @@ func annotationsDiff(podAnnotations, previousTargetAnnotations, newTargetAnnotat
 	// still present in the new target (they were handled by the
 	// add/update loop above).
 	for k := range previousTargetAnnotations {
+		if k == inPlaceImageTransitionAnnotation {
+			continue
+		}
 		if _, stillTarget := newTargetAnnotations[k]; stillTarget {
 			continue
 		}

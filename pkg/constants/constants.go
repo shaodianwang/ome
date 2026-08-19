@@ -222,8 +222,9 @@ var (
 
 // InferenceService Internal Annotations
 var (
-	InferenceServiceInternalAnnotationsPrefix        = "internal." + OMEAPIGroupName
-	StorageInitializerSourceUriInternalAnnotationKey = InferenceServiceInternalAnnotationsPrefix + "/storage-initializer-sourceuri"
+	InferenceServiceInternalAnnotationsPrefix           = "internal." + OMEAPIGroupName
+	StorageInitializerSourceUriInternalAnnotationKey    = InferenceServiceInternalAnnotationsPrefix + "/storage-initializer-sourceuri"
+	InferenceServiceInPlaceImageTransitionAnnotationKey = InferenceServiceInternalAnnotationsPrefix + "/in-place-image-transition"
 )
 
 // ome networking constants

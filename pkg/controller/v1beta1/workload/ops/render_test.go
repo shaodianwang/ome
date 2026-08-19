@@ -330,6 +330,24 @@ func TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels(t *testi
 	}
 }
 
+func TestRenderWithRevisionReservesInPlaceImageTransitionAnnotation(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	meta := &metav1.ObjectMeta{Annotations: map[string]string{
+		constants.InferenceServiceInPlaceImageTransitionAnnotationKey: "forged",
+		"example.com/preserve": "yes",
+	}}
+	pod, err := testRenderWithRevision(basicISVC(), basicPodSpec(), meta, plan, inst, runner, 0, "")
+	if err != nil {
+		t.Fatalf("render pod: %v", err)
+	}
+	if _, found := pod.Annotations[constants.InferenceServiceInPlaceImageTransitionAnnotationKey]; found {
+		t.Fatalf("reserved transition annotation reached pod: %#v", pod.Annotations)
+	}
+	if pod.Annotations["example.com/preserve"] != "yes" {
+		t.Fatalf("ordinary annotation was dropped: %#v", pod.Annotations)
+	}
+}
+
 func TestRender_IncarnationStampedOnLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
 	inst.Incarnation = 7

@@ -45,6 +45,7 @@ func (c *staleInPlacePodClient) List(ctx context.Context, list client.ObjectList
 // TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable verifies
 // that a metadata-only rollout holds its MaxUnavailable slot until a fresh
 // observation promotes the current Instance, then advances to the next index.
+// The runtime may report a different repository alias for the unchanged image.
 func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testing.T) {
 	scheme := makeScheme(t)
 	spec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}}
@@ -96,7 +97,7 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 			Spec: *spec.DeepCopy(),
 			Status: corev1.PodStatus{
 				Conditions:        append([]corev1.PodCondition(nil), readyConditions...),
-				ContainerStatuses: []corev1.ContainerStatus{{Name: "main", Image: "test:v1"}},
+				ContainerStatuses: []corev1.ContainerStatus{{Name: "main", Image: "mirror.example.com/test:v1"}},
 			},
 		}
 	}
@@ -204,10 +205,10 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 	if err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
-	if result.RequeueAfter != workloadops.UpdateRequeueInterval {
-		t.Errorf("second Reconcile requeue: got %v want %v", result.RequeueAfter, workloadops.UpdateRequeueInterval)
+	if result.RequeueAfter <= 0 {
+		t.Errorf("second Reconcile must retain a follow-up requeue, got %v", result.RequeueAfter)
 	}
-	assertStatus(0, v1beta1.OMENativeInstanceUpdating, runningName)
+	assertStatus(0, v1beta1.OMENativeInstanceReady, targetName)
 	assertStatus(1, v1beta1.OMENativeInstanceReady, runningName)
 	assertPodRevision(pod1, "one", "oldhash")
 
@@ -215,18 +216,11 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 	if _, err := workload.Reconcile(context.Background(), deps, inputFromAPI(), plan, target); err != nil {
 		t.Fatalf("third Reconcile: %v", err)
 	}
-	assertStatus(0, v1beta1.OMENativeInstanceReady, targetName)
-	assertStatus(1, v1beta1.OMENativeInstanceReady, runningName)
-	assertPodRevision(pod1, "one", "oldhash")
-
-	if _, err := workload.Reconcile(context.Background(), deps, inputFromAPI(), plan, target); err != nil {
-		t.Fatalf("fourth Reconcile: %v", err)
-	}
 	assertStatus(1, v1beta1.OMENativeInstanceUpdating, runningName)
 	assertPodRevision(pod1, "two", "newhash")
 
 	if _, err := workload.Reconcile(context.Background(), deps, inputFromAPI(), plan, target); err != nil {
-		t.Fatalf("fifth Reconcile: %v", err)
+		t.Fatalf("fourth Reconcile: %v", err)
 	}
 	assertStatus(1, v1beta1.OMENativeInstanceReady, targetName)
 }

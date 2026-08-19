@@ -479,6 +479,30 @@ func TestProcessComponentLabelsDoesNotMutateISVCLabels(t *testing.T) {
 		"component label stamping must not leak into isvc.Labels")
 }
 
+func TestProcessComponentAnnotationsReservesInPlaceImageTransition(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	b := &BaseComponentFields{RuntimeName: "test-runtime", Log: logr.Discard()}
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-isvc", Namespace: "default",
+		Annotations: map[string]string{
+			constants.InferenceServiceInPlaceImageTransitionAnnotationKey: "isvc-forged",
+			"example.com/isvc": "keep",
+		},
+	}}
+	component := map[string]string{
+		constants.InferenceServiceInPlaceImageTransitionAnnotationKey: "component-forged",
+		"example.com/component": "keep",
+	}
+
+	annotations, err := ProcessComponentAnnotations(b, isvc, component)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(annotations).NotTo(gomega.HaveKey(constants.InferenceServiceInPlaceImageTransitionAnnotationKey))
+	g.Expect(annotations).To(gomega.HaveKeyWithValue("example.com/isvc", "keep"))
+	g.Expect(annotations).To(gomega.HaveKeyWithValue("example.com/component", "keep"))
+	g.Expect(isvc.Annotations).To(gomega.HaveKeyWithValue(constants.InferenceServiceInPlaceImageTransitionAnnotationKey, "isvc-forged"))
+	g.Expect(component).To(gomega.HaveKeyWithValue(constants.InferenceServiceInPlaceImageTransitionAnnotationKey, "component-forged"))
+}
+
 // TestUpdateComponentStatusLeanModel verifies that UpdateComponentStatus does
 // NOT touch isvc.Status.ModelStatus when spec.model is nil — the "lean"
 // runtime-only ISVC shape supported by the webhook. Prior to the fix, the

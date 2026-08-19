@@ -90,42 +90,51 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		return false, fmt.Errorf("load running CR data (instance=%d): %w", inst.Index, err)
 	}
 	var targetAnnotations, previousAnnotations map[string]string
+	var runningSpec *corev1.PodSpec
 	if targetPayload != nil && targetPayload.PodMeta != nil {
 		targetAnnotations = targetPayload.PodMeta.Annotations
 	}
-	if runningPayload != nil && runningPayload.PodMeta != nil {
-		previousAnnotations = runningPayload.PodMeta.Annotations
+	if runningPayload != nil {
+		runningSpec = runningPayload.PodSpec
+		if runningPayload.PodMeta != nil {
+			previousAnnotations = runningPayload.PodMeta.Annotations
+		}
 	}
 
-	// Image patch. When markNotReady=true, re-read each pod and re-check
-	// podreadiness.IsServing immediately before patching — a concurrent writer (another
-	// controller, a pod-mutating webhook re-injecting a sidecar) could flip
-	// serving back to True after the drain check passed, and patching a
-	// serving pod violates the always-drain-first invariant. On detection,
-	// re-mark NotServing and requeue. Live reader so a stale serving=False
-	// view doesn't fail the recheck open.
-	//
-	// The metadata patches piggyback on this loop. Any issued mutation
-	// ends the pass so convergence and status promotion use a fresh pod
-	// observation.
-	mutated := false
+	// Pod mutation and convergence both start from a live read. Kubelet status
+	// writes advance resourceVersion independently of the cached observation;
+	// using that observation for an optimistic image patch can conflict until
+	// the cache catches up. The same live object closes the window where a pod
+	// becomes serving again after the drain check. The metadata patches
+	// piggyback on this loop. Any issued mutation ends the pass so convergence
+	// and status promotion use another live pod observation.
+	livePods := make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
-		needsImagePatch := !podImagesMatch(pod, targetSpec)
-		if markNotReady && needsImagePatch {
-			fresh := &corev1.Pod{}
-			if gerr := deps.Reader().Get(ctx, client.ObjectKeyFromObject(pod), fresh); gerr != nil {
-				if apierrors.IsNotFound(gerr) {
-					continue
-				}
-				return false, fmt.Errorf("re-read pod for serving recheck (instance=%d, pod=%s): %w", inst.Index, pod.Name, gerr)
-			}
-			if podreadiness.IsServing(fresh) {
-				if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), fresh, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
-					return false, fmt.Errorf("re-mark not serving (instance=%d, pod=%s): %w", inst.Index, fresh.Name, err)
-				}
+		fresh := &corev1.Pod{}
+		if gerr := deps.Reader().Get(ctx, client.ObjectKeyFromObject(pod), fresh); gerr != nil {
+			if apierrors.IsNotFound(gerr) {
 				return false, nil
 			}
-			pod = fresh
+			return false, fmt.Errorf("re-read pod before in-place update (instance=%d, pod=%s): %w", inst.Index, pod.Name, gerr)
+		}
+		livePods = append(livePods, fresh)
+	}
+	mutated := false
+	for _, pod := range livePods {
+		imagePatches := imagePatchTargets(pod, targetSpec)
+		needsImagePatch := len(imagePatches) > 0
+		if markNotReady && needsImagePatch && podreadiness.IsServing(pod) {
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+				return false, fmt.Errorf("re-mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			}
+			return false, nil
+		}
+		markerReady, merr := ensureInPlaceImageTransition(ctx, deps.Client, pod, targetSpec, imagePatches)
+		if merr != nil {
+			return false, fmt.Errorf("record image transition (instance=%d, pod=%s): %w", inst.Index, pod.Name, merr)
+		}
+		if !markerReady {
+			return false, nil
 		}
 		if needsImagePatch {
 			issued, perr := patchPodImages(ctx, deps.Client, pod, targetSpec)
@@ -154,23 +163,42 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		return false, nil
 	}
 
-	// Convergence: ContainersReady alone isn't enough — the cache can
-	// still show the old condition immediately after a spec.image flip.
-	// Also require Status.ContainerStatuses[*].Image to match so we
-	// declare done only after kubelet actually rolled the container.
-	if !query.AllPodsRuntimeReady(pods) {
+	// ContainersReady can remain true in a stale observation after an image
+	// patch. Runtime image confirmation is therefore required for every image
+	// that differs between the immutable running and target revisions. An empty
+	// changed-image set is already satisfied; runtime aliases for unchanged
+	// containers are not evidence about this rollout.
+	if !query.AllPodsRuntimeReady(livePods) {
 		return false, nil
 	}
-	for _, pod := range pods {
+	for _, pod := range livePods {
 		if !podImagesMatch(pod, targetSpec) {
 			return false, nil
 		}
-		if !podRuntimeImagesMatch(pod, targetSpec) {
+		if !podRuntimeImageChangesMatch(pod, runningSpec, targetSpec) {
+			return false, nil
+		}
+		transition, present, valid := inPlaceImageTransitionFromPod(pod)
+		valid = valid && inPlaceImageTransitionMatchesTarget(transition, targetSpec)
+		if present && !valid {
+			return false, nil
+		}
+		if valid && !inPlaceImageTransitionRuntimeMatches(pod, transition) {
 			return false, nil
 		}
 	}
+	for _, pod := range livePods {
+		_, present, _ := inPlaceImageTransitionFromPod(pod)
+		if !present {
+			continue
+		}
+		if err := removeInPlaceImageTransition(ctx, deps.Client, pod); err != nil {
+			return false, fmt.Errorf("clear image transition (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+		}
+		return false, nil
+	}
 
-	for _, pod := range pods {
+	for _, pod := range livePods {
 		if podreadiness.IsServing(pod) {
 			continue
 		}

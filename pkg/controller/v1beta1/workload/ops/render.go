@@ -120,6 +120,9 @@ func RenderWithRevision(
 	if podTemplateObjectMeta != nil && len(podTemplateObjectMeta.Annotations) > 0 {
 		anns = make(map[string]string, len(podTemplateObjectMeta.Annotations))
 		for k, v := range podTemplateObjectMeta.Annotations {
+			if k == constants.InferenceServiceInPlaceImageTransitionAnnotationKey {
+				continue
+			}
 			anns[k] = v
 		}
 	}

@@ -934,6 +934,7 @@ func ProcessComponentAnnotations(
 	if componentAnnotations != nil {
 		mergedAnnotations = utils.Union(annotations, componentAnnotations)
 	}
+	delete(mergedAnnotations, constants.InferenceServiceInPlaceImageTransitionAnnotationKey)
 
 	return ProcessBaseAnnotations(b, isvc, mergedAnnotations)
 }

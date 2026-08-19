@@ -154,12 +154,14 @@ func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if done {
-		t.Fatalf("expected done=false after patching image (kubelet hasn't rolled containers yet)")
+	for pass := 1; pass <= 2; pass++ {
+		done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+		if err != nil {
+			t.Fatalf("Update pass %d: %v", pass, err)
+		}
+		if done {
+			t.Fatalf("pass %d returned done=true before kubelet rolled containers", pass)
+		}
 	}
 
 	got := &corev1.Pod{}
@@ -202,8 +204,10 @@ func TestUpdate_InPlace_RestampsRevisionHashLabel(t *testing.T) {
 		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	if _, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target); err != nil {
-		t.Fatalf("Update: %v", err)
+	for pass := 1; pass <= 2; pass++ {
+		if _, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target); err != nil {
+			t.Fatalf("Update pass %d: %v", pass, err)
+		}
 	}
 
 	got := &corev1.Pod{}
@@ -390,6 +394,11 @@ func TestPatchPodImages_ReportsIssued(t *testing.T) {
 	pod := legacyPodAtIncarnation(isvc, 0, 1, true, true)
 	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "llama:v1"}}
 	c := legacyNewFakeClient(t, pod)
+	stored := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), stored); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	pod = stored
 
 	issued, err := patchPodImages(context.Background(), c, pod, &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
@@ -1326,8 +1335,9 @@ func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
 
 // TestUpdate_InPlaceAnnotationMutationRequiresFreshObservation verifies that
 // an annotation-only rollout remains Updating for the pass that patches pod
-// metadata. Ready promotion is allowed only after a fresh pod observation
-// confirms the metadata and revision label.
+// metadata. Ready promotion uses a fresh observation of the metadata and
+// revision label; an alternate runtime image alias does not imply an image
+// transition when the running and target revisions name the same image.
 func TestUpdate_InPlaceAnnotationMutationRequiresFreshObservation(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -1344,7 +1354,7 @@ func TestUpdate_InPlaceAnnotationMutationRequiresFreshObservation(t *testing.T) 
 	pod.Annotations = map[string]string{"release": "one"}
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name:  "main",
-		Image: "docker.io/nginxinc/nginx-unprivileged:1.27-alpine",
+		Image: "mirror.example.com/library/nginx-unprivileged:1.27-alpine",
 	}}
 	c := legacyNewFakeClient(t, isvc, ir, pod)
 	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, spec,
