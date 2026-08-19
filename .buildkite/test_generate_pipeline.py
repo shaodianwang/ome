@@ -213,6 +213,28 @@ class TestGkeKindGroupEmission(PipelineTestCase):
             self.assertIsNone(regex.search("/repo/tests/alpha_kind_test.go.bak"))
 
 
+class TestImageBuildEmission(unittest.TestCase):
+    def test_wrapper_and_generated_build_job_have_automatic_retries(self):
+        yaml_text = gp._build_image_step(
+            "ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"
+        )
+        self.assertIn(
+            '  retry:\n'
+            '    automatic:\n'
+            '      - exit_status: "*"\n'
+            '        limit: 2',
+            yaml_text,
+        )
+        plugin_config = yaml_text.split(gp.CF_DOCKER_IMAGE_PLUGIN, 1)[1]
+        self.assertIn(
+            '        retry:\n'
+            '          automatic:\n'
+            '            - exit_status: "*"\n'
+            '              limit: 2',
+            plugin_config,
+        )
+
+
 class TestEvalSubsharding(unittest.TestCase):
     def test_worker_and_pod_limits_each_create_waves(self):
         worker_limited = [f"p{i:02d}" for i in range(1, 10)]

@@ -915,6 +915,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
                   push-branches: "main"
                   tags: ["latest", "{COMMIT[:8]}"]
                   login: true
+{_auto_retry(indent=18)}
                   tw-buildkit: true
         """
     )
