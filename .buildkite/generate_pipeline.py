@@ -131,7 +131,7 @@ KIND_SPEC_GROUPS = (
         "sequential_pause_mid", "sequential_scale_during",
     )),
     ("sequential-holds", "Sequential hold and release", (
-        "sequential_later_only_bump",
+        "sequential_failure_hold", "sequential_later_only_bump",
     )),
     ("update-core", "Core update strategies", (
         "update", "inplace", "recreate_pod", "mixed_strategy",
