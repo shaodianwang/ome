@@ -153,10 +153,10 @@ def run_concurrent_cases(cases, concurrency, pod_budget, case_peaks, record, run
                 record(*future.result())
 
 
-def print_failure_logs(case_ids):
+def print_failure_logs(case_ids, heading="FAILED CASE LOGS"):
     """Include failed subprocess output in the CI log when artifacts are unavailable."""
     print("\n" + "=" * 90)
-    print("FAILED CASE LOGS")
+    print(heading)
     print("=" * 90)
     for case_id in case_ids:
         feature, topo = case_category(case_id)
@@ -429,6 +429,7 @@ def main():
 
     t0 = time.time()
     results = {}
+    streamed_failures = set()
     done = 0
 
     def record(case_id, rc, secs):
@@ -446,6 +447,9 @@ def main():
             verdict = f"PROCESS_EXIT_{rc}"
         print(f"  [{done}/{len(cases)}] {case_id} done in {secs:.0f}s  rc={rc}  verdict={verdict}")
         results[case_id] = verdict
+        if not is_green(verdict):
+            print_failure_logs([case_id], heading=f"FAILED CASE LOG: {case_id}")
+            streamed_failures.add(case_id)
 
     if conc_cases:
         run_concurrent_cases(conc_cases, conc, pod_budget, case_peaks, record)
@@ -478,7 +482,9 @@ def main():
     if failed:
         print(f"\n=== FAILED {len(failed)}/{len(results)}: "
               f"{', '.join(f'{c}={results[c]}' for c in failed)} ===")
-        print_failure_logs(failed)
+        unstreamed = [case_id for case_id in failed if case_id not in streamed_failures]
+        if unstreamed:
+            print_failure_logs(unstreamed)
         return 1
     print(f"\n=== all {len(results)} case(s) green ===")
     return 0
