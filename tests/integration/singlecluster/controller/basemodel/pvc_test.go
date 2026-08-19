@@ -126,10 +126,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("changing the URI and expecting a Job with a different deterministic name")
-		got := &v1beta1.BaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "llama-7b", Namespace: ns}, got)).To(Succeed())
-		got.Spec.Storage.StorageUri = ptr.To("pvc://second-pvc/models/llama")
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		updateBaseModelStorageURI(types.NamespacedName{Name: "llama-7b", Namespace: ns}, "pvc://second-pvc/models/llama")
 
 		Eventually(func(g Gomega) {
 			jobs := &batchv1.JobList{}
@@ -389,4 +386,13 @@ func bindPVC(ctx context.Context, kc client.Client, name, namespace string) {
 	Expect(kc.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, pvc)).To(Succeed())
 	pvc.Status.Phase = corev1.ClaimBound
 	Expect(kc.Status().Update(ctx, pvc)).To(Succeed())
+}
+
+func updateBaseModelStorageURI(key types.NamespacedName, uri string) {
+	Eventually(func(g Gomega) {
+		latest := &v1beta1.BaseModel{}
+		g.Expect(k8sClient.Get(suiteCtx, key, latest)).To(Succeed())
+		latest.Spec.Storage.StorageUri = ptr.To(uri)
+		g.Expect(k8sClient.Update(suiteCtx, latest)).To(Succeed())
+	}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 }

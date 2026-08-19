@@ -9,7 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -144,10 +143,7 @@ var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("swapping URI to pvc:// — controller must enter the PVC branch on next reconcile")
-		got := &v1beta1.BaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "swap-llama", Namespace: ns}, got)).To(Succeed())
-		got.Spec.Storage.StorageUri = ptr.To("pvc://swap-pvc/models/llama")
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		updateBaseModelStorageURI(types.NamespacedName{Name: "swap-llama", Namespace: ns}, "pvc://swap-pvc/models/llama")
 
 		ginkgo.By("expecting a metadata Job to appear (PVC branch active)")
 		Eventually(func(g Gomega) {
@@ -199,10 +195,7 @@ var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 		}
 
 		ginkgo.By("swapping URI to oci:// — controller must clean up PVC artifacts")
-		got := &v1beta1.BaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "swap-out-llama", Namespace: ns}, got)).To(Succeed())
-		got.Spec.Storage.StorageUri = ptr.To("oci://n/test/b/models/o/llama")
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		updateBaseModelStorageURI(types.NamespacedName{Name: "swap-out-llama", Namespace: ns}, "oci://n/test/b/models/o/llama")
 
 		ginkgo.By("metadata Job from the old PVC URI must be deleted")
 		Eventually(func(g Gomega) {

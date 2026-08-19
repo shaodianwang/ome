@@ -109,11 +109,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile lifecycle edges", ginkgo.Ordere
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("swap URI to pvc-b — controller must produce a NEW Job (different deterministic name)")
-		got := &v1beta1.BaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "swap-llama", Namespace: ns}, got)).To(Succeed())
-		newURI := "pvc://pvc-b/models/llama"
-		got.Spec.Storage.StorageUri = &newURI
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		updateBaseModelStorageURI(types.NamespacedName{Name: "swap-llama", Namespace: ns}, "pvc://pvc-b/models/llama")
 
 		Eventually(func(g Gomega) {
 			jobs := &batchv1.JobList{}
