@@ -102,7 +102,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("bluegreen-core", "BlueGreen rollouts", (
         "bluegreen", "bluegreen_n3", "bluegreen_inplaceonly_happy",
-        "inplace_maxunavailable",
+        "bluegreen_revision_status", "inplace_maxunavailable",
     )),
     ("canary-rollouts", "Canary rollouts", (
         "canary_retarget_rollback",
