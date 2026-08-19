@@ -345,24 +345,33 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if err != nil {
 		return false, accepted, fmt.Errorf("Migrate: list surge pods: %w", err)
 	}
-	if migrationCompletionTailRecoverable(entry, source, sourcePods, surge) {
+	if migrationCompletionTailRecoverable(entry, sourcePods, surge) {
 		// The source status is the normal ownership token for terminal
-		// cleanup. Once it is absent, only the owner-aware status adapter can
-		// prove that absence against the current owner before residual
-		// per-Instance resources are finalized.
+		// cleanup. The promoted surge may become the steady plan member while
+		// source resource finalization still retains that token, so completion
+		// resumes from the persisted pair instead of rendering pods from the
+		// post-promotion plan.
 		if input.ApplyInstanceMutationsWithRetryBlock == nil {
 			return false, accepted, nil
 		}
-		confirmed, cerr := confirmMigrationCompletionPair(ctx, input, sourceIdx, surge)
+		confirmed := false
+		var cerr error
+		if source == nil {
+			confirmed, cerr = confirmMigrationCompletionPair(ctx, input, sourceIdx, surge)
+		} else {
+			confirmed, cerr = confirmMigrationDrainPair(
+				ctx, input, source, surge, requestUUID, surgeIdx, source.RunningRevision, true,
+			)
+		}
 		if cerr != nil {
 			return false, accepted, fmt.Errorf("Migrate: confirm completion pair: %w", cerr)
 		}
 		if !confirmed {
 			return false, accepted, nil
 		}
-		finalized, ferr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, nil)
+		finalized, ferr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, source)
 		if ferr != nil {
-			return false, accepted, fmt.Errorf("Migrate: finalize absent source Instance: %w", ferr)
+			return false, accepted, fmt.Errorf("Migrate: finalize source Instance in completion tail: %w", ferr)
 		}
 		if !finalized {
 			return false, accepted, nil
@@ -639,12 +648,11 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 
 func migrationCompletionTailRecoverable(
 	record *workload.MigrationRecord,
-	source *workload.InstanceStatus,
 	sourcePods []*corev1.Pod,
 	surge *workload.InstanceStatus,
 ) bool {
 	return record.Phase == workload.MigrationPhaseDraining &&
-		source == nil && len(sourcePods) == 0 &&
+		len(sourcePods) == 0 &&
 		surge != nil && surge.Phase == workload.InstancePhaseReady &&
 		surge.Operation == nil && surge.RunningRevision != ""
 }

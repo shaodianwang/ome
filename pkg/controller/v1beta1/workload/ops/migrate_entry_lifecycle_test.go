@@ -873,6 +873,13 @@ func TestMigrate_FinalizationWaitsForResourceAbsence(t *testing.T) {
 			t.Fatalf("delete accepted stamped a terminal migration record: %+v", *record)
 		}
 
+		record := f.record(t, uuid)
+		if record.SurgeInstance == nil {
+			t.Fatal("promoted migration has no surge instance")
+		}
+		promoted := f.plan.Instances[0]
+		promoted.Index = *record.SurgeInstance
+		f.plan.Instances = []workload.InstancePlan{promoted}
 		resourcesAbsent = true
 		done, accepted, err = f.passResult(t, uuid)
 		if err != nil || !done || !accepted {
@@ -887,6 +894,146 @@ func TestMigrate_FinalizationWaitsForResourceAbsence(t *testing.T) {
 		return
 	}
 	t.Fatal("migration never reached resource finalization")
+}
+
+func TestMigrate_GangPromotionTailCompletesFromRetainedSource(t *testing.T) {
+	f := newGangMigFixture(t)
+	resourcesAbsent := false
+	finalizations := 0
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+		finalizations++
+		return resourcesAbsent, nil
+	}
+	const uuid = "mig-gang-promoted-tail"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	surgeIndex := driveGangMigrationToPendingFinalization(t, f, uuid)
+	if finalizations != 1 {
+		t.Fatalf("pending finalizations=%d want 1", finalizations)
+	}
+
+	// The promoted surge is the steady plan member while the source status
+	// remains as the terminal-cleanup ownership token.
+	promoted := f.plan.Instances[0]
+	promoted.Index = surgeIndex
+	f.plan.Instances = []workload.InstancePlan{promoted}
+	resourcesAbsent = true
+
+	done, accepted, err := f.passResult(t, uuid)
+	defaultPod := &corev1.Pod{}
+	defaultPodName := query.PodName(f.isvc.Name, f.component, surgeIndex, "default", 0)
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: defaultPodName}, defaultPod); !apierrors.IsNotFound(err) {
+		t.Fatalf("completion tail synthesized a single-pod runner: get %s returned %v", defaultPodName, err)
+	}
+	if err != nil || !done || !accepted {
+		t.Fatalf("completion pass: done=%v accepted=%v err=%v", done, accepted, err)
+	}
+	if finalizations != 2 {
+		t.Fatalf("finalizations=%d want 2", finalizations)
+	}
+	if source := findInstanceStatusOnIRForFixture(t, f, 0); source != nil {
+		t.Fatalf("completion retained source status: %+v", source)
+	}
+	record := f.record(t, uuid)
+	if record.Phase != workload.MigrationPhaseCompleted || record.CompletedAt == nil {
+		t.Fatalf("completion record = %+v", *record)
+	}
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("completion ledger: entries=%+v err=%v", ledger.Entries, err)
+	}
+	if len(ledger.Entries) != 1 || ledger.Entries[0].RequestUUID != uuid ||
+		ledger.Entries[0].Phase != audit.PhaseCompleted || ledger.Entries[0].Outcome != "migrated" {
+		t.Fatalf("completion ledger=%+v want one Completed migrated entry", ledger.Entries)
+	}
+	runnerCounts := map[string]int{}
+	for _, pod := range f.listPods(t) {
+		if pod.Labels[query.LabelInstanceIdx] == fmt.Sprintf("%d", surgeIndex) {
+			runnerCounts[pod.Labels[query.LabelRunner]]++
+		}
+	}
+	if runnerCounts["leader"] != 1 || runnerCounts["worker"] != 2 || len(runnerCounts) != 2 {
+		t.Fatalf("promoted gang runners=%v want leader=1 worker=2", runnerCounts)
+	}
+}
+
+func TestMigrate_GangPromotionTailRejectsDifferentRevision(t *testing.T) {
+	f := newGangMigFixture(t)
+	resourcesAbsent := false
+	finalizations := 0
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) {
+		finalizations++
+		return resourcesAbsent, nil
+	}
+	const uuid = "mig-gang-promoted-tail-revision"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	surgeIndex := driveGangMigrationToPendingFinalization(t, f, uuid)
+
+	ir := f.getIR(t)
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == surgeIndex {
+			ir.Status.InstanceStatuses[i].RunningRevision = "different-revision"
+		}
+	}
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("change promoted revision: %v", err)
+	}
+	promoted := f.plan.Instances[0]
+	promoted.Index = surgeIndex
+	f.plan.Instances = []workload.InstancePlan{promoted}
+	resourcesAbsent = true
+
+	done, accepted, err := f.passResult(t, uuid)
+	if err != nil || done || !accepted {
+		t.Fatalf("guarded pass: done=%v accepted=%v err=%v", done, accepted, err)
+	}
+	if finalizations != 1 {
+		t.Fatalf("revision mismatch ran finalization: calls=%d want 1", finalizations)
+	}
+	if source := findInstanceStatusOnIRForFixture(t, f, 0); source == nil {
+		t.Fatal("revision mismatch removed the source status")
+	}
+	record := f.record(t, uuid)
+	if record.Phase != workload.MigrationPhaseDraining || record.CompletedAt != nil {
+		t.Fatalf("revision mismatch closed the record: %+v", *record)
+	}
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if ledger.HasCompletedOrFailedRequest(uuid) {
+		t.Fatalf("revision mismatch wrote a terminal ledger entry: %+v", ledger.Entries)
+	}
+}
+
+func driveGangMigrationToPendingFinalization(t *testing.T, f *migFixture, uuid string) int32 {
+	t.Helper()
+	for pass := 0; pass < 12; pass++ {
+		done, accepted, err := f.passResult(t, uuid)
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if done || !accepted {
+			t.Fatalf("pass %d completed or deferred before finalization: done=%v accepted=%v", pass, done, accepted)
+		}
+		record := f.record(t, uuid)
+		if record.SurgeInstance != nil && record.Phase == workload.MigrationPhaseDraining {
+			surge := findInstanceStatusOnIRForFixture(t, f, *record.SurgeInstance)
+			source := findInstanceStatusOnIRForFixture(t, f, record.SourceInstance)
+			sourcePods := 0
+			for _, pod := range f.listPods(t) {
+				if pod.Labels[query.LabelInstanceIdx] == fmt.Sprintf("%d", record.SourceInstance) {
+					sourcePods++
+				}
+			}
+			if source != nil && sourcePods == 0 && surge != nil &&
+				surge.Phase == v1beta1.OMENativeInstanceReady && surge.Operation == nil && surge.RunningRevision != "" {
+				return *record.SurgeInstance
+			}
+		}
+		f.react(t)
+	}
+	t.Fatal("gang migration never reached pending resource finalization")
+	return -1
 }
 
 func TestMigrate_CompletionTailCrashRecoversBeforeDeadline(t *testing.T) {
