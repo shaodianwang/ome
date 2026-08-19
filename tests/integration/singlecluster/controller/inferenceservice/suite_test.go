@@ -14,6 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -95,6 +96,13 @@ var _ = ginkgo.BeforeSuite(func() {
 		},
 	)
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
+		// Register the OMENative pod field-index on the manager cache,
+		// exactly as cmd/manager does. Without it every OMENative ISVC
+		// reconcile fails at the coordination step's indexed pod lookup
+		// and status never converges.
+		if err := query.RegisterOMENativePodIndex(ctx, mgr.GetFieldIndexer()); err != nil {
+			return err
+		}
 		// SetupBaseModel without WithOmeAgentConfig is fine — PVC tests
 		// pre-bind their PVCs by hand and never invoke the metadata Job.
 		if err := components.SetupBaseModel(ctx, mgr,
