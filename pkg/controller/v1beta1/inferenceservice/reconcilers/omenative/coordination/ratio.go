@@ -5,6 +5,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // RatioState carries the cross-Component replica counts the
@@ -21,6 +23,11 @@ type RatioState struct {
 	// revision) as of this reconcile.
 	Current map[v1beta1.ComponentType]int32
 
+	// Desired maps Component to its authoritative desired Instance count from
+	// InferenceReplica spec. A nil spec.replicas resolves to the API default of
+	// one. Recovery never adds serving capacity beyond this shape.
+	Desired map[v1beta1.ComponentType]int32
+
 	// NewPods maps Component → number of new-revision pods (i.e.,
 	// pods on the target ControllerRevision) as of this reconcile. The
 	// serving-capacity band projects against Serving (live traffic
@@ -36,6 +43,18 @@ type RatioState struct {
 	// against this — operators care about live traffic capacity, not
 	// rollout progress fractions.
 	Serving map[v1beta1.ComponentType]int32
+
+	// RecoveryEligible marks Components whose authoritative desired shape is
+	// positive but whose live serving capacity is below that shape. The ratio
+	// gate sets this only after observing every member's IR status, so a nil map
+	// keeps callers on the strict ratio path.
+	RecoveryEligible map[v1beta1.ComponentType]bool
+
+	// InFlightSurge maps Component to active SurgeThenDrain operations, including
+	// operations persisted in IR status and operations started in this reconcile
+	// wake-up. Recovery pacing admits at most one outstanding capacity-restoring
+	// surge per Component.
+	InFlightSurge map[v1beta1.ComponentType]int32
 
 	// InFlightUnavail maps Component → number of Instances currently
 	// taken OUT of serving by an in-flight drain/recreate/in-place
@@ -179,11 +198,11 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 	// band. A Component that is level with (or behind) every peer always
 	// proceeds, so the pair advances in lockstep and never deadlocks.
 	if outpacesPeerProgress(state.Original, state.NewPods, component, band) {
-		return RatioDecision{
+		return recoverySurgeFallback(state, baseline, component, RatioDecision{
 			AllowedSurgeDelta: 0,
 			SkewRejected:      true,
 			Reason:            "surge would outpace peer new-revision rollout past tolerance",
-		}
+		})
 	}
 	for delta := proposedDelta; delta > 0; delta-- {
 		projected := projectedServing(baseline, component, delta)
@@ -222,11 +241,55 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 			Reason:            "surge allowed (minimal transient +1 on a balanced baseline; a surge cannot starve a peer)",
 		}
 	}
-	return RatioDecision{
+	return recoverySurgeFallback(state, baseline, component, RatioDecision{
 		AllowedSurgeDelta: 0,
 		SkewRejected:      true,
 		Reason:            "surge would skew cross-Component serving ratio past tolerance",
+	})
+}
+
+// recoverySurgeFallback admits one capacity-restoring step only after the
+// ordinary positive-surge path rejects, preserving all existing approvals.
+func recoverySurgeFallback(state RatioState, serving map[v1beta1.ComponentType]int32, component v1beta1.ComponentType, rejected RatioDecision) RatioDecision {
+	if !state.RecoveryEligible[component] || state.InFlightSurge[component] > 0 ||
+		!recoverySurgeAllowed(state, serving, component) {
+		return rejected
 	}
+	reason := "capacity recovery advances a lagging Component"
+	if serving[component] == 0 {
+		reason = "capacity recovery bootstrap for zero-serving Component"
+	}
+	return RatioDecision{
+		AllowedSurgeDelta: 1,
+		Reason:            reason,
+	}
+}
+
+// recoverySurgeAllowed admits a step when the Component's serving/desired
+// fraction is not ahead of any deficient peer. Cross multiplication is exact.
+func recoverySurgeAllowed(state RatioState, serving map[v1beta1.ComponentType]int32, component v1beta1.ComponentType) bool {
+	currentC := state.Current[component]
+	desiredC := state.Desired[component]
+	servingC := serving[component]
+	if currentC <= 0 || desiredC <= 0 || servingC < 0 || servingC >= desiredC || servingC+1 > desiredC {
+		return false
+	}
+	for c, desired := range state.Desired {
+		if desired <= 0 || state.Current[c] <= 0 || serving[c] < 0 {
+			return false
+		}
+	}
+	for peer, desiredP := range state.Desired {
+		if peer == component || !state.RecoveryEligible[peer] {
+			continue
+		}
+		left := int64(servingC) * int64(desiredP)
+		right := int64(serving[peer]) * int64(desiredC)
+		if left > right {
+			return false
+		}
+	}
+	return true
 }
 
 // outpacesPeerProgress reports whether `component` is ALREADY rolling
@@ -255,8 +318,8 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 // already out front. Properties:
 //   - No deadlock: a Component level with or behind every still-rolling
 //     peer always proceeds, so the slowest peer is never blocked.
-//   - No false hold at the finish: a peer that has fully rolled no longer
-//     constrains, so the trailing Component's final surges aren't blocked.
+//   - No false hold at the finish: a peer that has fully rolled does not
+//     constrain, so the trailing Component's final surges aren't blocked.
 //   - First surge always allowed: at 0 new : 0 new neither side leads.
 //
 // A Component alone in its group (no peer with positive original) is never
@@ -276,7 +339,7 @@ func outpacesPeerProgress(original, newPods map[v1beta1.ComponentType]int32, com
 		if peer == component || origP <= 0 {
 			continue
 		}
-		// A peer that has finished rolling no longer paces this Component.
+		// A peer that has finished rolling does not pace this Component.
 		if newPods[peer] >= origP {
 			continue
 		}
@@ -415,10 +478,28 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 			continue
 		}
 		switch s.Operation.Step {
-		case "Surge", "SurgeDrain", "SurgeDrainSettle", "GangSurgeTarget":
+		case workloadops.UpdateStepSurge, workloadops.UpdateStepSurgeDrain,
+			workloadops.UpdateStepSurgeDrainSettle, workloadtypes.UpdateStepGangSurgeTarget:
 			// surge (single-pod or gang replacement) adds capacity, it
 			// doesn't remove a pod from rotation
 		default:
+			n++
+		}
+	}
+	return n
+}
+
+// surgeInFlight counts source Instances with an active SurgeThenDrain
+// operation. Gang replacements carry a target marker in addition to their
+// source operation, so counting source lifecycle steps records each surge once.
+func surgeInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
+	var n int32
+	for _, s := range statuses {
+		if s.Operation == nil {
+			continue
+		}
+		switch s.Operation.Step {
+		case workloadops.UpdateStepSurge, workloadops.UpdateStepSurgeDrain, workloadops.UpdateStepSurgeDrainSettle:
 			n++
 		}
 	}
@@ -457,7 +538,7 @@ func servingSurgePeakInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 
 	}
 	var n int32
 	for _, s := range statuses {
-		if s.Operation == nil || s.Operation.Step != "GangSurgeTarget" {
+		if s.Operation == nil || s.Operation.Step != workloadtypes.UpdateStepGangSurgeTarget {
 			continue
 		}
 		// Counted in ServingReplicas only once the whole gang is serving,
@@ -482,23 +563,22 @@ func servingSurgePeakInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 
 // Returns allowed=true when:
 //   - The Component is not in any RatioBalanced coord group,
 //   - The component is alone in its group (no peer to skew against),
-//   - The group has no ObservedRatio snapshot yet (first reconcile),
-//   - OR the projected NewPods[component]+1 stays within the group's
+//   - The group has no ObservedRatio snapshot yet,
+//   - OR the projected serving capacity stays within the group's
 //     RatioTolerancePercent band against every peer Component.
 //
 // Returns allowed=false when EvaluateSurge rejects the +1 surge. Caller
 // requeues; the peer Component will have caught up by the next reconcile.
 //
-// Reads exclusively from isvc.Status — no client/cache hits — so it is
-// safe to call from hot paths.
+// The ratio anchor comes from ISVC coordination status. Live per-Component
+// shape, serving capacity, rollout progress, and operations come from the
+// authoritative InferenceReplica objects through the supplied reader.
 //
-// inFlightDelta is the number of pods the dispatcher has ALREADY pulled
-// from rotation in THIS wake-up for the caller's Component.
-// status.ServingReplicas reflects the prior reconcile pass — without
-// subtracting in-flight, every gate decision in one wake-up shares the
-// same stale snapshot answer and the dispatcher fires past the band
-// before status catches up.
-func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool, reason string) {
+// inFlightSurge is the number of surges the dispatcher has already started in
+// this wake-up for the caller's Component. inFlightUnavail is the number of
+// pods it has already pulled from rotation. IR status reflects the prior pass,
+// so both fresh tallies participate in the decision.
+func (ctx GateContext) CheckRatio(inFlightSurge, inFlightUnavail, projDelta int32) (allowed bool, reason string) {
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
 	}
@@ -512,16 +592,17 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 		return true, "single-component group"
 	}
 
-	// Build RatioState from the live ISVC status. Original is read from
-	// the previously-recorded ObservedRatio (which is SnapshotOriginal'd
-	// at rollout start). If absent (first reconcile), let the surge
-	// through — the next pass will snapshot and gate.
+	// Original is read from the recorded ObservedRatio. Live shape,
+	// serving, progress, and operations are read from authoritative IR status.
 	state := RatioState{
-		Original:        make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		Current:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		NewPods:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		Serving:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		InFlightUnavail: make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Original:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Current:          make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Desired:          make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		NewPods:          make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Serving:          make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		RecoveryEligible: make(map[v1beta1.ComponentType]bool, len(group.Components)),
+		InFlightSurge:    make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		InFlightUnavail:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
 	}
 	var groupStatus *v1beta1.RolloutCoordinationGroupStatus
 	if isvc.Status.RolloutCoordination != nil {
@@ -533,9 +614,11 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 			}
 		}
 	}
-	if groupStatus == nil || groupStatus.ObservedRatio == nil || len(groupStatus.ObservedRatio.Original) == 0 {
+	hasObservedRatio := groupStatus != nil && groupStatus.ObservedRatio != nil && len(groupStatus.ObservedRatio.Original) > 0
+	if !hasObservedRatio {
 		return true, "no ObservedRatio snapshot yet (first reconcile)"
 	}
+	recoveryObservable := true
 	for _, c := range group.Components {
 		orig := groupStatus.ObservedRatio.Original[c]
 		if orig <= 0 {
@@ -548,41 +631,59 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 		// transient apiserver blip feeds a phantom zero-serving peer into
 		// EvaluateSurge and disables the ratio band exactly when the
 		// cluster is unhealthy.
-		summary, err := irprojector.ComponentIRStatus(ctx.Ctx, ctx.Reads, isvc.Namespace, isvc.Name, c)
+		ir, err := irprojector.ComponentIR(ctx.Ctx, ctx.Reads, isvc.Namespace, isvc.Name, c)
 		if err != nil {
 			return false, fmt.Sprintf("cannot read %s IR status, failing closed: %v", c, err)
 		}
-
-		if summary != nil {
-			state.Current[c] = summary.Replicas
-			state.NewPods[c] = summary.UpdatedReplicas
-			// Serving is what the band check projects against — live
-			// traffic capacity, not rollout progress.
-			// Net out the transient gang-surge PEAK (replacement gang
-			// serving beside the not-yet-drained source) so a multi-node
-			// Component is gated at its STEADY serving, exactly like a
-			// single-pod Component whose surge flip is atomic. Without this
-			// a gang's N+1 peak is mistaken for durable capacity and the
-			// gate authorizes a drain that settles the ratio out of band.
-			serving := summary.ServingReplicas - servingSurgePeakInFlight(summary.InstanceStatuses)
-			if serving < 0 {
-				serving = 0
-			}
-			state.Serving[c] = serving
-			// Operation-tracked in-flight drains (fresh; see RatioState doc).
-			state.InFlightUnavail[c] = unavailableInFlight(summary.InstanceStatuses)
+		if ir == nil {
+			recoveryObservable = false
+			continue
 		}
+		summary := &ir.Status
+		desired := int32(1)
+		if ir.Spec.Replicas != nil {
+			desired = *ir.Spec.Replicas
+		}
+		if summary.Replicas <= 0 || desired <= 0 {
+			recoveryObservable = false
+		}
+		state.Current[c] = summary.Replicas
+		state.Desired[c] = desired
+		state.NewPods[c] = summary.UpdatedReplicas
+		// Serving is what the band check projects against — live
+		// traffic capacity, not rollout progress.
+		// Net out the transient gang-surge PEAK (replacement gang
+		// serving beside the not-yet-drained source) so a multi-node
+		// Component is gated at its STEADY serving, exactly like a
+		// single-pod Component whose surge flip is atomic. Without this
+		// a gang's N+1 peak is mistaken for durable capacity and the
+		// gate authorizes a drain that settles the ratio out of band.
+		serving := summary.ServingReplicas - servingSurgePeakInFlight(summary.InstanceStatuses)
+		if serving < 0 {
+			serving = 0
+		}
+		state.Serving[c] = serving
+		state.RecoveryEligible[c] = desired > 0 && serving < desired
+		state.InFlightSurge[c] = surgeInFlight(summary.InstanceStatuses)
+		// Operation-tracked in-flight drains (fresh; see RatioState doc).
+		state.InFlightUnavail[c] = unavailableInFlight(summary.InstanceStatuses)
+	}
+	if !recoveryObservable {
+		clear(state.RecoveryEligible)
 	}
 	// Account for pods this wake-up has already started pulling out of
 	// rotation but whose status_aggregate write hasn't landed yet. Only
 	// the caller's Component carries in-flight here; peer Components'
 	// in-flight is implicit in their own dispatchers' separate runs and
 	// will be reflected in their next status write.
-	if inFlightDelta > 0 {
-		state.Serving[component] -= inFlightDelta
+	if inFlightUnavail > 0 {
+		state.Serving[component] -= inFlightUnavail
 		if state.Serving[component] < 0 {
 			state.Serving[component] = 0
 		}
+	}
+	if inFlightSurge > 0 {
+		state.InFlightSurge[component] += inFlightSurge
 	}
 
 	// projDelta is the projected per-pod transient capacity change for THIS
@@ -727,21 +828,7 @@ func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason str
 	if desired <= 0 {
 		desired = 1
 	}
-	var currentInFlight int32
-	for _, s := range summary.InstanceStatuses {
-		if s.Operation == nil {
-			continue
-		}
-		// Surge mechanism uses "Surge" (creating new pod), "SurgeDrain"
-		// (waiting for EndpointSlice removal), and "SurgeDrainSettle"
-		// (aging out persistent connections). All contribute an extra pod
-		// alive. Other steps (Drain for recreate, InPlace
-		// for in-place patch) are NOT surge — they don't add pods.
-		switch s.Operation.Step {
-		case "Surge", "SurgeDrain", "SurgeDrainSettle":
-			currentInFlight++
-		}
-	}
+	currentInFlight := surgeInFlight(summary.InstanceStatuses)
 	if inFlightDelta < 0 {
 		inFlightDelta = 0
 	}

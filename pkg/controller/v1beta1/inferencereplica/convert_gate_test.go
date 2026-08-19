@@ -6,6 +6,7 @@ import (
 
 	"github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -294,6 +295,40 @@ func TestBuildReconcileInput_GateFreshPeerReleasesWhenBalanced(t *testing.T) {
 	g.Expect(allowed).To(gomega.BeTrue(),
 		"engine surge must be allowed once the decoder's FRESH status is balanced (4/4 → engine 5/4 = "+
 			"1.25 in band), even though the parent projection lags at 3/4: "+reason)
+}
+
+// TestBuildReconcileInput_RatioRecoveryStartsFromAuthoritativeZero verifies
+// that authoritative positive desired state at zero serving admits one
+// recovery surge and serializes a second same-Component start in the wake-up.
+func TestBuildReconcileInput_RatioRecoveryStartsFromAuthoritativeZero(t *testing.T) {
+	g := gomega.NewWithT(t)
+	engineIR := peerIR(v1beta1.EngineComponent, 4, 0)
+	decoderIR := peerIR(v1beta1.DecoderComponent, 4, 0)
+	for i := int32(0); i < 4; i++ {
+		engineIR.Status.InstanceStatuses = append(engineIR.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+			Index: i,
+			Phase: v1beta1.OMENativeInstanceFailed,
+		})
+		decoderIR.Status.InstanceStatuses = append(decoderIR.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+			Index: i,
+			Phase: v1beta1.OMENativeInstanceFailed,
+		})
+	}
+	r, _ := newReconciler(t, engineIR, decoderIR)
+
+	parent := mkRatioParent(25, 4, 1)
+	maxSurge := intstr.FromInt32(4)
+	parent.Spec.Rollout.Groups[0].RollingUpdate.MaxSurge = &maxSurge
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, 0, 0, coordination.GroupDefaults{})
+	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
+
+	allowed, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	g.Expect(allowed).To(gomega.BeTrue(),
+		"positive authoritative shape at 0:0 serving must admit one recovery bootstrap: "+reason)
+
+	allowed, reason = input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 1, 0)
+	g.Expect(allowed).To(gomega.BeFalse(),
+		"same-wakeup recovery must serialize per Component even when MaxSurge permits more: "+reason)
 }
 
 // TestBuildReconcileInput_SequentialGateReadsFreshPeerStatus is the

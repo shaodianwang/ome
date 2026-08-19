@@ -1155,7 +1155,7 @@ func TestGateContextCheckRatio_ShortCircuitsAllowed(t *testing.T) {
 		ShortCircuit: true,
 		ShortReason:  "no coordination block",
 	}
-	if allowed, reason := ctx.CheckRatio(0, -1); !allowed || reason != "no coordination block" {
+	if allowed, reason := ctx.CheckRatio(0, 0, -1); !allowed || reason != "no coordination block" {
 		t.Errorf("short-circuit: got (allowed=%v, reason=%q), want (true, no coordination block)", allowed, reason)
 	}
 	if allowed, reason := ctx.CheckSurge(0); !allowed || reason != "no coordination block" {

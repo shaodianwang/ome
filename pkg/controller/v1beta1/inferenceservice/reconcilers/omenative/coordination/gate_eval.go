@@ -79,7 +79,7 @@ func EvaluateUpdateGate(
 		if strategy == workloadtypes.UpdateStrategySurgeThenDrain || strategy == "" {
 			projDelta = 1
 		}
-		if ok, reason := gateCtx.CheckRatio(inFlightUnavail, projDelta); !ok {
+		if ok, reason := gateCtx.CheckRatio(inFlightSurge, inFlightUnavail, projDelta); !ok {
 			return false, reason
 		}
 	} else {

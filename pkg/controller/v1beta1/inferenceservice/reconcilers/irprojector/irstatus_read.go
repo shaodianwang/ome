@@ -10,16 +10,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ComponentIRStatus returns the authoritative InferenceReplica status for one
-// Component of an ISVC, read via the supplied reader (cached client is fine —
-// these are non-destructive coordination reads). Returns (nil, nil) when the IR
-// does not exist yet, so callers treat "no authoritative status" the same as the
-// pre-migration empty projection. Any other read failure is returned as a
-// wrapped error — callers MUST distinguish it from the missing-IR case: a
-// transient read error is not "no observation yet", and safety gates that treat
-// it that way fail open. This is the single source of truth every in-cluster
-// decision reads instead of the ISVC's copied LifecycleStatus.
-func ComponentIRStatus(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) (*v1beta1.InferenceReplicaStatus, error) {
+// ComponentIR returns the authoritative InferenceReplica for one Component of
+// an ISVC. Returns (nil, nil) when the IR does not exist yet. Any other read
+// failure is returned as a wrapped error so safety gates can distinguish a
+// missing observation from an unreliable read.
+func ComponentIR(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) (*v1beta1.InferenceReplica, error) {
 	// A nil reader degrades to "no authoritative status" rather than
 	// panicking a reconcile — same result callers get for a missing IR.
 	if reads == nil {
@@ -32,6 +27,18 @@ func ComponentIRStatus(ctx context.Context, reads client.Reader, namespace, isvc
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get InferenceReplica %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	return ir, nil
+}
+
+// ComponentIRStatus returns the authoritative InferenceReplica status for one
+// Component of an ISVC, read via the supplied reader. The full-object reader
+// owns missing and error semantics so status-only consumers share the same
+// behavior as consumers that also need desired spec state.
+func ComponentIRStatus(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) (*v1beta1.InferenceReplicaStatus, error) {
+	ir, err := ComponentIR(ctx, reads, namespace, isvcName, c)
+	if err != nil || ir == nil {
+		return nil, err
 	}
 	return &ir.Status, nil
 }

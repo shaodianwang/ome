@@ -24,17 +24,22 @@ func testScheme() *runtime.Scheme {
 }
 
 // fakeClientForISVC creates a fake client seeded with InferenceReplica objects
-// built from the ISVC's Status.Components. This mirrors what the old gate path
-// read from isvc.Status.Components[c].Lifecycle, now authoritative via
-// ComponentIRStatus reading the IR objects directly.
+// whose status is derived from the ISVC component lifecycle fixtures.
 func fakeClientForISVC(isvc *v1beta1.InferenceService) client.Client {
 	return fakeClientForISVCWithInstances(isvc, nil)
 }
 
 // fakeClientForISVCWithInstances is fakeClientForISVC plus per-component
-// InstanceStatuses overlaid onto the derived IRs. Instance detail is the IR's
-// source-of-truth and is no longer carried on the ISVC Lifecycle summary.
+// InstanceStatuses overlaid onto the derived IRs.
 func fakeClientForISVCWithInstances(isvc *v1beta1.InferenceService, instancesByComponent map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus) client.Client {
+	return fakeClientForISVCWithDesiredAndInstances(isvc, nil, instancesByComponent)
+}
+
+func fakeClientForISVCWithDesiredAndInstances(
+	isvc *v1beta1.InferenceService,
+	desiredByComponent map[v1beta1.ComponentType]*int32,
+	instancesByComponent map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus,
+) client.Client {
 	if isvc == nil || (isvc.Status.Components == nil && len(instancesByComponent) == 0) {
 		return fake.NewClientBuilder().WithScheme(testScheme()).Build()
 	}
@@ -44,10 +49,18 @@ func fakeClientForISVCWithInstances(isvc *v1beta1.InferenceService, instancesByC
 		if cs.Lifecycle == nil {
 			continue
 		}
+		replicas := cs.Lifecycle.Replicas
+		desired, specified := desiredByComponent[c]
+		if !specified {
+			desired = &replicas
+		}
 		ir := &v1beta1.InferenceReplica{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      isvc.Name + "-" + string(c),
 				Namespace: isvc.Namespace,
+			},
+			Spec: v1beta1.InferenceReplicaSpec{
+				Replicas: desired,
 			},
 			Status: v1beta1.InferenceReplicaStatus{
 				Replicas:           cs.Lifecycle.Replicas,
@@ -64,8 +77,7 @@ func fakeClientForISVCWithInstances(isvc *v1beta1.InferenceService, instancesByC
 		covered[c] = true
 	}
 	// Components with instances but no Lifecycle entry still need an IR so the
-	// gate can read their instance detail. An empty overlay creates no IR —
-	// preserving the "no observation → bypass" first-reconcile semantics.
+	// gate can read their instance detail. An empty overlay creates no IR.
 	for c, insts := range instancesByComponent {
 		if covered[c] || len(insts) == 0 {
 			continue
@@ -185,6 +197,25 @@ func TestEvaluateSurge_NilToleranceDisablesDriftBound(t *testing.T) {
 		NewPods: map[v1beta1.ComponentType]int32{
 			v1beta1.EngineComponent:  15,
 			v1beta1.DecoderComponent: 5,
+		},
+		Current: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  40,
+			v1beta1.DecoderComponent: 20,
+		},
+		Desired: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  40,
+			v1beta1.DecoderComponent: 20,
+		},
+		Serving: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  0,
+			v1beta1.DecoderComponent: 0,
+		},
+		RecoveryEligible: map[v1beta1.ComponentType]bool{
+			v1beta1.EngineComponent:  true,
+			v1beta1.DecoderComponent: true,
+		},
+		InFlightSurge: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent: 1,
 		},
 	}
 	d := EvaluateSurge(pacing, state, v1beta1.EngineComponent, 5)
@@ -376,10 +407,33 @@ func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
 	}
 }
 
-func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
-	// RatioBalanced configured but no ObservedRatio snapshot yet.
-	// First reconcile must allow the surge so SnapshotOriginal can run
-	// next pass.
+func TestCheckRatioGate_NoAnchorWithCompleteIRAllowed(t *testing.T) {
+	// RatioBalanced configured with complete positive IR observations but no
+	// ObservedRatio snapshot yet. There is no stable ratio anchor to enforce.
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: ptr.To(int32(5))},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent:  {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4, ServingReplicas: 4}},
+				v1beta1.DecoderComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4, ServingReplicas: 4}},
+			},
+		},
+	}
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
+	if !allowed {
+		t.Errorf("complete IR observations without an anchor must allow: %s", reason)
+	}
+}
+
+func TestCheckRatioGate_NoAnchorAllowsWithoutIR(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
 			Rollout: &v1beta1.RolloutSpec{
@@ -391,9 +445,9 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 			},
 		},
 	}
-	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
-	if !allowed {
-		t.Errorf("first reconcile (no ObservedRatio yet) must allow surge")
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
+	if !allowed || !strings.Contains(reason, "no ObservedRatio") {
+		t.Fatalf("the no-anchor fast path must not require IR observations: allowed=%t reason=%q", allowed, reason)
 	}
 }
 
@@ -1203,10 +1257,10 @@ func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	ctx := ResolveGateContext(context.Background(), fakeClientForISVC(isvc), isvc, v1beta1.EngineComponent)
 
-	if allowed, reason := ctx.CheckRatio(0, +1); !allowed {
+	if allowed, reason := ctx.CheckRatio(0, 0, +1); !allowed {
 		t.Errorf("surge projection (+1) on symmetric 4:4 tol=25%% must be allowed (5/4=1.25 <= 1.25); got denied: %s", reason)
 	}
-	if allowed, reason := ctx.CheckRatio(0, -1); !allowed {
+	if allowed, reason := ctx.CheckRatio(0, 0, -1); !allowed {
 		t.Errorf("drain (-1) on symmetric 4:4 tol=25%% must be allowed by the discrete-granularity tiebreaker (1.333 <= 2x band 1.5); got denied: %s", reason)
 	}
 }
@@ -1898,7 +1952,7 @@ func TestCheckRatioGate_DrainedGangSurgeNotANetTrough(t *testing.T) {
 	// The gang-surge instance detail lives on the engine IR; overlay it there
 	// (not the queried decoder) so the gate nets engine's serving correctly.
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.EngineComponent: engInsts})
-	allowed, reason := ResolveGateContext(context.Background(), client, isvc, v1beta1.DecoderComponent).CheckRatio(0, -1)
+	allowed, reason := ResolveGateContext(context.Background(), client, isvc, v1beta1.DecoderComponent).CheckRatio(0, 0, -1)
 	if allowed {
 		t.Fatalf("a decoder drain against an engine at its STEADY N=2 (surge "+
 			"source already drained) projects 2:1 (ratio 2.0 vs 1:1 anchor, "+
@@ -1917,7 +1971,7 @@ func TestCheckRatioGate_DrainedGangSurgeNotANetTrough(t *testing.T) {
 // GateContext methods the wrappers did.
 func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32, insts ...v1beta1.OMENativeInstanceStatus) (bool, string) {
 	client := fakeClientForISVCWithInstances(isvc, map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{component: insts})
-	return ResolveGateContext(context.Background(), client, isvc, component).CheckRatio(inFlightDelta, -1)
+	return ResolveGateContext(context.Background(), client, isvc, component).CheckRatio(0, inFlightDelta, -1)
 }
 
 func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32, insts ...v1beta1.OMENativeInstanceStatus) (bool, string) {
@@ -1930,16 +1984,15 @@ func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 	return ResolveGateContext(context.Background(), client, isvc, component).CheckSurge(inFlightDelta)
 }
 
-// The fail-closed trio: a transient IR read error (anything but
-// NotFound) must DENY, not read as "no observation yet" — the gates'
-// whole job is to hold disruption when the cluster view is unreliable.
-// Missing-IR (NotFound) keeps the first-reconcile allow semantics; that
-// path is pinned by the existing NoObservation tests.
+// The fail-closed trio: a transient IR read error must DENY, not read as "no
+// observation yet". RatioBalanced also denies a missing member IR because its
+// cross-Component decision requires a complete view. The single-Component
+// surge and unavailability gates retain their first-observation behavior.
 
 func TestCheckRatio_ReadErrorFailsClosed(t *testing.T) {
 	isvc := mkPDFixture(nil)
 	reader := &failingIRClient{Client: fakeClientForISVC(isvc)}
-	allowed, reason := ResolveGateContext(context.Background(), reader, isvc, v1beta1.EngineComponent).CheckRatio(0, -1)
+	allowed, reason := ResolveGateContext(context.Background(), reader, isvc, v1beta1.EngineComponent).CheckRatio(0, 0, -1)
 	if allowed {
 		t.Fatalf("ratio gate must fail closed on IR read error: %s", reason)
 	}
