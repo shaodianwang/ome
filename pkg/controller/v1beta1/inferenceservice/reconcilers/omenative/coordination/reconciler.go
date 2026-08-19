@@ -784,6 +784,17 @@ func buildRatioState(isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupO
 	// observed replicas if not yet recorded (first observation that
 	// also has all Components populated in status).
 	state.Original = existingOriginalReplicas(isvc, g.Name)
+	// Drop anchors for members no longer in the group so a stale
+	// entry cannot keep constraining the band.
+	members := make(map[v1beta1.ComponentType]struct{}, len(g.Components))
+	for _, c := range g.Components {
+		members[c] = struct{}{}
+	}
+	for c := range state.Original {
+		if _, ok := members[c]; !ok {
+			delete(state.Original, c)
+		}
+	}
 	if len(state.Original) == 0 {
 		desired := make(map[v1beta1.ComponentType]int32, len(g.Components))
 		allPopulated := true
@@ -801,6 +812,22 @@ func buildRatioState(isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupO
 		if allPopulated {
 			state.Original = SnapshotOriginal(desired)
 		}
+		return state
+	}
+	// Anchor members missing from the snapshot from observed replicas,
+	// deferring any member whose status is still unwritten (zero
+	// Replicas) — the same rule the initial snapshot applies.
+	missing := make(map[v1beta1.ComponentType]int32)
+	for _, c := range g.Components {
+		if _, ok := state.Original[c]; ok {
+			continue
+		}
+		if d := obs.Components[c].DesiredReplicas; d > 0 {
+			missing[c] = d
+		}
+	}
+	for c, r := range SnapshotOriginal(missing) {
+		state.Original[c] = r
 	}
 	return state
 }

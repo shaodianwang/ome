@@ -1494,6 +1494,194 @@ func TestBuildRatioState_PreservesAlreadyRecordedAnchor(t *testing.T) {
 	if state.Original[v1beta1.DecoderComponent] != 2 {
 		t.Errorf("anchor preservation: decoder Original got %d want 2 (the snapshot from rollout start, NOT the current 1)", state.Original[v1beta1.DecoderComponent])
 	}
+	if len(state.Original) != 2 {
+		t.Errorf("stable membership must keep the anchor verbatim; got Original=%v", state.Original)
+	}
+}
+
+// ratioMembershipISVC builds an ISVC whose group "0" carries a persisted
+// {engine: 4, decoder: 2} anchor plus any extra anchor entries.
+func ratioMembershipISVC(extra map[v1beta1.ComponentType]int32) *v1beta1.InferenceService {
+	original := map[v1beta1.ComponentType]int32{
+		v1beta1.EngineComponent:  4,
+		v1beta1.DecoderComponent: 2,
+	}
+	for c, r := range extra {
+		original[c] = r
+	}
+	return &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"},
+		Status: v1beta1.InferenceServiceStatus{
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:          "0",
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{Original: original},
+				}},
+			},
+		},
+	}
+}
+
+// TestBuildRatioState_LateMemberGainsAnchor: a Component added after the
+// anchor was recorded gains an entry from its observed Replicas while
+// recorded entries stay verbatim despite drifted live counts.
+func TestBuildRatioState_LateMemberGainsAnchor(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+	isvc := ratioMembershipISVC(nil)
+	// Live counts drifted since the snapshot (engine 4→2): the merge
+	// must not rewrite existing anchors from live status.
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-decoder", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	routerIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-router", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 3},
+	}
+	c := testClient(engineIR, decoderIR, routerIR)
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
+	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
+	if state.Original[v1beta1.RouterComponent] != 3 {
+		t.Errorf("late member anchor: router Original got %d want 3 (its observed Replicas at join)", state.Original[v1beta1.RouterComponent])
+	}
+	if state.Original[v1beta1.EngineComponent] != 4 {
+		t.Errorf("existing anchor disturbed: engine Original got %d want 4 (must stay verbatim despite live drift to 2)", state.Original[v1beta1.EngineComponent])
+	}
+	if state.Original[v1beta1.DecoderComponent] != 2 {
+		t.Errorf("existing anchor disturbed: decoder Original got %d want 2", state.Original[v1beta1.DecoderComponent])
+	}
+}
+
+// TestBuildRatioState_LateMemberWithZeroStatusDeferred: a late member
+// with zero observed Replicas (status unwritten) is not anchored on this
+// pass, matching the initial snapshot's defer-on-zero rule.
+func TestBuildRatioState_LateMemberWithZeroStatusDeferred(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+	isvc := ratioMembershipISVC(nil)
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 4},
+	}
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-decoder", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	// No router IR: its observation reads DesiredReplicas == 0.
+	c := testClient(engineIR, decoderIR)
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
+	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
+	if _, ok := state.Original[v1beta1.RouterComponent]; ok {
+		t.Errorf("zero-status late member must be deferred, not anchored; got router Original=%d", state.Original[v1beta1.RouterComponent])
+	}
+	if state.Original[v1beta1.EngineComponent] != 4 || state.Original[v1beta1.DecoderComponent] != 2 {
+		t.Errorf("existing anchors must survive a deferred late member; got Original=%v", state.Original)
+	}
+}
+
+// TestBuildRatioState_RemovedMemberAnchorDropped: an anchor entry for a
+// Component no longer in the group is dropped; remaining anchors stay
+// verbatim.
+func TestBuildRatioState_RemovedMemberAnchorDropped(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+	isvc := ratioMembershipISVC(map[v1beta1.ComponentType]int32{v1beta1.RouterComponent: 3})
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 4},
+	}
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-decoder", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	c := testClient(engineIR, decoderIR)
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
+	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
+	if _, ok := state.Original[v1beta1.RouterComponent]; ok {
+		t.Errorf("removed member's anchor must be dropped; got router Original=%d", state.Original[v1beta1.RouterComponent])
+	}
+	if state.Original[v1beta1.EngineComponent] != 4 || state.Original[v1beta1.DecoderComponent] != 2 {
+		t.Errorf("remaining anchors must stay verbatim; got Original=%v", state.Original)
+	}
+}
+
+// TestBuildRatioState_AllAnchorsStaleFallsBackToSnapshot: when every
+// persisted anchor belongs to removed members, the group is treated as
+// never-snapshotted and the initial snapshot path runs.
+func TestBuildRatioState_AllAnchorsStaleFallsBackToSnapshot(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc", Namespace: "default"},
+		Status: v1beta1.InferenceServiceStatus{
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name: "0",
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{v1beta1.RouterComponent: 3},
+					},
+				}},
+			},
+		},
+	}
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-engine", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 4},
+	}
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-decoder", Namespace: "default"},
+		Status:     v1beta1.InferenceReplicaStatus{Replicas: 2},
+	}
+	c := testClient(engineIR, decoderIR)
+	obs, err := buildGroupObservation(context.Background(), c, isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	if err != nil {
+		t.Fatalf("buildGroupObservation: %v", err)
+	}
+	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
+	if state.Original[v1beta1.EngineComponent] != 4 || state.Original[v1beta1.DecoderComponent] != 2 {
+		t.Errorf("all-stale anchor must re-snapshot the current membership; got Original=%v", state.Original)
+	}
+	if _, ok := state.Original[v1beta1.RouterComponent]; ok {
+		t.Errorf("stale anchor entry must not survive the re-snapshot; got Original=%v", state.Original)
+	}
 }
 
 // TestPodReadyAndServing covers the serving-readiness predicate the canary
