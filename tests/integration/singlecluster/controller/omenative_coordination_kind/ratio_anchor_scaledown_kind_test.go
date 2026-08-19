@@ -110,16 +110,18 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor across deliberate 
 			"anchor must stay at the snapshot taken at first observation; a deliberate scale-down must not rewrite it")
 
 		// Pod-level invariant: exactly one alive decoder pod remains.
-		snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "ratio-co-anchor")
-		Expect(err).NotTo(HaveOccurred())
-		alive := 0
-		for _, p := range snap.ByComponent[v1beta1.DecoderComponent] {
-			if p.DeletionTimestamp != nil {
-				continue
+		Eventually(func(g Gomega) {
+			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "ratio-co-anchor")
+			g.Expect(err).NotTo(HaveOccurred())
+			alive := 0
+			for _, p := range snap.ByComponent[v1beta1.DecoderComponent] {
+				if p.DeletionTimestamp != nil {
+					continue
+				}
+				alive++
 			}
-			alive++
-		}
-		Expect(alive).To(Equal(1),
-			"expected exactly 1 alive decoder pod post-scale-down, got %d", alive)
+			g.Expect(alive).To(Equal(1),
+				"expected exactly 1 alive decoder pod post-scale-down, got %d", alive)
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })
