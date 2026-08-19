@@ -28,7 +28,7 @@ const defaultReadyTimeout = 15 * time.Minute
 
 // ReconcileInputs is the subset of state the canary executor needs. It mirrors
 // coordination.ReconcileInputs. DesiredReplicas and ReadyCanaryInstances are
-// Instance counts; PerRevisionPods supplies live revision presence and the
+// Instance counts; PerRevisionPods supplies ready serving Pod counts and the
 // capacity fallback when the exact Instance count is unavailable.
 type ReconcileInputs struct {
 	Client client.Client
@@ -70,13 +70,13 @@ type ReconcileInputs struct {
 	QueryTimeout time.Duration
 }
 
-// The live Pod count bounds the exact ready Instance count and remains the
+// The ready Pod count bounds the exact ready Instance count and remains the
 // fallback for direct callers that do not provide topology-aware observation.
-func readyCapacityCount(livePods int32, readyInstances *int32) int32 {
-	if readyInstances != nil && *readyInstances < livePods {
+func readyCapacityCount(readyPods int32, readyInstances *int32) int32 {
+	if readyInstances != nil && *readyInstances < readyPods {
 		return *readyInstances
 	}
-	return livePods
+	return readyPods
 }
 
 func readyCanaryCapacity(in ReconcileInputs) int32 {

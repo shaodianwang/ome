@@ -166,7 +166,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		StableRevisionHash:       stableHash,
 		ReadyCanaryInstances:     revisions.readyTargetInstanceCount(observedPods[primary]),
 		DesiredReplicas:          componentReplicas(d.ISVC, primary),
-		PerRevisionPods:          perRev[primary],
+		PerRevisionPods:          readyRev[primary],
 		SecondaryCapacityReady:   secondaryReady,
 		Now:                      now,
 		Sampler:                  samplerOrNil(d.Sampler),
@@ -460,11 +460,15 @@ func (r observedCanaryRevisions) readyTargetInstanceCount(pods []*corev1.Pod) *i
 			continue
 		}
 		runner := v1beta1.RunnerName(pod.Labels[query.LabelRunner])
-		if _, known := required[runner]; !known {
+		size, known := required[runner]
+		if !known {
 			continue
 		}
 		ordinal, ok := query.PodOrdinalFromLabels(pod)
 		if !ok {
+			continue
+		}
+		if ordinal < 0 || (size == 1 && ordinal > 1) || (size > 1 && ordinal >= size) {
 			continue
 		}
 		if readyPods[index] == nil {

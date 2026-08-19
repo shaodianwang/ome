@@ -427,6 +427,32 @@ func TestReadyTargetInstanceCount(t *testing.T) {
 		}
 		assertCount(t, one, []*corev1.Pod{makePod(0, v1beta1.RunnerNameDefault, "bad", "default")}, 0)
 	})
+	t.Run("numeric ordinals outside runner slots", func(t *testing.T) {
+		workers := observedCanaryRevisions{
+			targetHash: "target", runners: []v1beta1.Runner{{Name: v1beta1.RunnerNameWorker, Size: 2}}, fromIR: true,
+		}
+		assertCount(t, workers, []*corev1.Pod{
+			makePod(0, v1beta1.RunnerNameWorker, "2", "worker-a"),
+			makePod(0, v1beta1.RunnerNameWorker, "3", "worker-b"),
+		}, 0)
+		one := observedCanaryRevisions{
+			targetHash: "target", runners: []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}, fromIR: true,
+		}
+		assertCount(t, one, []*corev1.Pod{makePod(0, v1beta1.RunnerNameDefault, "2", "default")}, 0)
+	})
+	t.Run("valid runner slot boundaries", func(t *testing.T) {
+		workers := observedCanaryRevisions{
+			targetHash: "target", runners: []v1beta1.Runner{{Name: v1beta1.RunnerNameWorker, Size: 2}}, fromIR: true,
+		}
+		assertCount(t, workers, []*corev1.Pod{
+			makePod(0, v1beta1.RunnerNameWorker, "0", "worker-a"),
+			makePod(0, v1beta1.RunnerNameWorker, "1", "worker-b"),
+		}, 1)
+		one := observedCanaryRevisions{
+			targetHash: "target", runners: []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}, fromIR: true,
+		}
+		assertCount(t, one, []*corev1.Pod{makePod(0, v1beta1.RunnerNameDefault, "1", "default")}, 1)
+	})
 	t.Run("ineligible pods", func(t *testing.T) {
 		one := observedCanaryRevisions{
 			targetHash:  "target",
