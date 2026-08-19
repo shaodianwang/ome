@@ -89,29 +89,30 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 		resolvedMode = &mm
 	}
 
+	// Replica defaults are config-driven (deploy.replicas in the
+	// inferenceservice-config ConfigMap). An unconfigured value disables
+	// defaulting of that field: the spec is stored as authored.
+	var replicas *controllerconfig.ReplicasDefaultsConfig
+	if deployConfig != nil {
+		replicas = deployConfig.Replicas
+	}
+
 	if isvc.Spec.Engine != nil {
-		defaultEngine(isvc.Spec.Engine, resolvedMode)
+		defaultEngine(isvc.Spec.Engine, resolvedMode, replicas)
 	}
 	if isvc.Spec.Decoder != nil {
-		defaultDecoder(isvc.Spec.Decoder, resolvedMode)
+		defaultDecoder(isvc.Spec.Decoder, resolvedMode, replicas)
 	}
 	if isvc.Spec.Router != nil {
-		defaultRouter(isvc.Spec.Router, resolvedMode)
+		defaultRouter(isvc.Spec.Router, resolvedMode, replicas)
 	}
 	// Rollout pacing/structure defaults are applied at runtime by the resolve
 	// layer (coordination.ResolveGroups), not at admission.
 	return nil
 }
 
-func defaultEngine(engine *v1beta1.EngineSpec, specMode *constants.DeploymentModeType) {
-	if engine.MinReplicas == nil {
-		minReplicas := 1
-		engine.MinReplicas = &minReplicas
-	}
-	// MaxReplicas is a non-pointer int — 0 means "not set".
-	if engine.MaxReplicas == 0 {
-		engine.MaxReplicas = 3
-	}
+func defaultEngine(engine *v1beta1.EngineSpec, specMode *constants.DeploymentModeType, replicas *controllerconfig.ReplicasDefaultsConfig) {
+	defaultReplicaBounds(&engine.ComponentExtensionSpec, replicas.Min(), replicas.EngineMax())
 	defaultWorkerSize(engine.Leader, engine.Worker)
 	// A raw spec without a runner shape may inherit Leader/Worker from its
 	// runtime.
@@ -122,14 +123,8 @@ func defaultEngine(engine *v1beta1.EngineSpec, specMode *constants.DeploymentMod
 	defaultOMENativeComponent(&engine.ComponentExtensionSpec, shape, specMode)
 }
 
-func defaultDecoder(decoder *v1beta1.DecoderSpec, specMode *constants.DeploymentModeType) {
-	if decoder.MinReplicas == nil {
-		minReplicas := 1
-		decoder.MinReplicas = &minReplicas
-	}
-	if decoder.MaxReplicas == 0 {
-		decoder.MaxReplicas = 3
-	}
+func defaultDecoder(decoder *v1beta1.DecoderSpec, specMode *constants.DeploymentModeType, replicas *controllerconfig.ReplicasDefaultsConfig) {
+	defaultReplicaBounds(&decoder.ComponentExtensionSpec, replicas.Min(), replicas.DecoderMax())
 	defaultWorkerSize(decoder.Leader, decoder.Worker)
 	// A raw spec without a runner shape may inherit Leader/Worker from its
 	// runtime.
@@ -138,6 +133,34 @@ func defaultDecoder(decoder *v1beta1.DecoderSpec, specMode *constants.Deployment
 		shape = podShapeMulti
 	}
 	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, shape, specMode)
+}
+
+// defaultReplicaBounds fills unset replica bounds from the configured
+// admission defaults. A nil default leaves the corresponding field as
+// authored (no defaulting) — the values come only from configuration,
+// never from literals baked into the binary. MaxReplicas is a
+// non-pointer int, so 0 means "not set".
+func defaultReplicaBounds(ext *v1beta1.ComponentExtensionSpec, defaultMin, defaultMax *int) {
+	if ext.MinReplicas == nil && defaultMin != nil {
+		minReplicas := *defaultMin
+		ext.MinReplicas = &minReplicas
+	}
+	if ext.MaxReplicas == 0 && defaultMax != nil {
+		ext.MaxReplicas = defaultedMaxReplicas(*defaultMax, ext.MinReplicas)
+	}
+}
+
+// defaultedMaxReplicas returns the value to stamp for an omitted
+// MaxReplicas: the configured default, raised to MinReplicas when the
+// operator authored a larger floor. Filling an unset max below an
+// explicit min would manufacture a min>max conflict that the
+// replica-bounds validator rejects on create and every later update.
+// An explicitly authored MaxReplicas is never adjusted.
+func defaultedMaxReplicas(configuredDefault int, minReplicas *int) int {
+	if minReplicas != nil && *minReplicas > configuredDefault {
+		return *minReplicas
+	}
+	return configuredDefault
 }
 
 // defaultWorkerSize sets Worker.Size=1 only for a declared Leader+Worker pair.
@@ -153,14 +176,8 @@ func defaultWorkerSize(leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) {
 	worker.Size = &size
 }
 
-func defaultRouter(router *v1beta1.RouterSpec, specMode *constants.DeploymentModeType) {
-	if router.MinReplicas == nil {
-		minReplicas := 1
-		router.MinReplicas = &minReplicas
-	}
-	if router.MaxReplicas == 0 {
-		router.MaxReplicas = 2
-	}
+func defaultRouter(router *v1beta1.RouterSpec, specMode *constants.DeploymentModeType, replicas *controllerconfig.ReplicasDefaultsConfig) {
+	defaultReplicaBounds(&router.ComponentExtensionSpec, replicas.Min(), replicas.RouterMax())
 	// Router has no Leader/Worker; always single-pod.
 	defaultOMENativeComponent(&router.ComponentExtensionSpec, podShapeSingle, specMode)
 }

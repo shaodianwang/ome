@@ -546,7 +546,75 @@ func TestNewDeployConfig(t *testing.T) {
 			expectedError: false,
 			validateConfig: func(t *testing.T, cfg *DeployConfig) {
 				assert.Empty(t, cfg.DefaultDeploymentMode)
+				assert.Nil(t, cfg.Replicas)
+				// Nil-receiver accessors report unconfigured, never a number.
+				assert.Nil(t, cfg.Replicas.Min())
+				assert.Nil(t, cfg.Replicas.EngineMax())
+				assert.Nil(t, cfg.Replicas.DecoderMax())
+				assert.Nil(t, cfg.Replicas.RouterMax())
 			},
+		},
+		{
+			name: "replicas block parsed with per-component max defaults",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"replicas": {
+						"defaultMinReplicas": 1,
+						"defaultMaxReplicas": {"engine": 3, "decoder": 3, "router": 2}
+					}
+				}`,
+			},
+			expectedError: false,
+			validateConfig: func(t *testing.T, cfg *DeployConfig) {
+				require.NotNil(t, cfg.Replicas)
+				require.NotNil(t, cfg.Replicas.Min())
+				assert.Equal(t, 1, *cfg.Replicas.Min())
+				require.NotNil(t, cfg.Replicas.EngineMax())
+				assert.Equal(t, 3, *cfg.Replicas.EngineMax())
+				require.NotNil(t, cfg.Replicas.DecoderMax())
+				assert.Equal(t, 3, *cfg.Replicas.DecoderMax())
+				require.NotNil(t, cfg.Replicas.RouterMax())
+				assert.Equal(t, 2, *cfg.Replicas.RouterMax())
+			},
+		},
+		{
+			name: "partial replicas block leaves omitted fields unconfigured",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"replicas": {"defaultMaxReplicas": {"engine": 3}}
+				}`,
+			},
+			expectedError: false,
+			validateConfig: func(t *testing.T, cfg *DeployConfig) {
+				require.NotNil(t, cfg.Replicas)
+				assert.Nil(t, cfg.Replicas.Min())
+				require.NotNil(t, cfg.Replicas.EngineMax())
+				assert.Equal(t, 3, *cfg.Replicas.EngineMax())
+				assert.Nil(t, cfg.Replicas.DecoderMax())
+				assert.Nil(t, cfg.Replicas.RouterMax())
+			},
+		},
+		{
+			name: "zero replica default rejected at config-load",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"replicas": {"defaultMinReplicas": 0}
+				}`,
+			},
+			expectedError: true,
+		},
+		{
+			name: "negative per-component max default rejected at config-load",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"replicas": {"defaultMaxReplicas": {"router": -2}}
+				}`,
+			},
+			expectedError: true,
 		},
 	}
 

@@ -29,7 +29,8 @@ data:
     }
   deploy: |-
     {
-      "defaultDeploymentMode": "{{ .Values.ome.controller.deploymentMode }}"
+      "defaultDeploymentMode": "{{ .Values.ome.controller.deploymentMode }}"{{- with .Values.ome.controller.replicas }},
+      "replicas": {{ toJson . }}{{- end }}
     }
 {{- with .Values.ome.controller.podDisruptionBudget }}
   podDisruptionBudget: |-

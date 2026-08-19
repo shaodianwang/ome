@@ -169,6 +169,146 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 		Expect(*ru.MaxUnavailable).To(Equal(want), "MaxUnavailable must default to 25%")
 	})
 
+	ginkgo.It("engine minReplicas=5 with maxReplicas omitted → admitted with maxReplicas clamped to 5", func() {
+		// Replica-clamp lock: filling an omitted maxReplicas below an
+		// explicit minReplicas would manufacture a min>max conflict that
+		// the validating webhook rejects on create and on every later
+		// non-delete update. The defaulter must raise the filled max to
+		// the authored min.
+		engine := engineWithImage("ghcr.io/test/runtime:test")
+		engine.MinReplicas = ptr.To(5)
+		isvc := v1beta1testing.MakeInferenceService("def-clamp-min5", "isvc-defaulter").
+			Model("any-model").
+			Engine(engine).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-clamp-min5", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(5)))
+		Expect(got.Spec.Engine.MaxReplicas).To(Equal(5), "defaulted maxReplicas must be clamped up to minReplicas")
+	})
+
+	ginkgo.It("engine minReplicas=2 with maxReplicas omitted → stored maxReplicas is the configured default 3", func() {
+		// The clamp only raises the filled max to min; a min at or below
+		// the configured component default must still receive that default
+		// (deploy.replicas in the seeded inferenceservice-config).
+		engine := engineWithImage("ghcr.io/test/runtime:test")
+		engine.MinReplicas = ptr.To(2)
+		isvc := v1beta1testing.MakeInferenceService("def-clamp-min2", "isvc-defaulter").
+			Model("any-model").
+			Engine(engine).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-clamp-min2", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(2)))
+		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3))
+	})
+
+	ginkgo.It("router minReplicas=5 with maxReplicas omitted → admitted with maxReplicas clamped to 5", func() {
+		// Router has its own (lower) configured max default, so it needs
+		// its own clamp lock: an authored router floor above that default
+		// must not be capped below itself.
+		isvc := v1beta1testing.MakeInferenceService("def-clamp-router", "isvc-defaulter").
+			Model("any-model").
+			Engine(engineWithImage("ghcr.io/test/runtime:test")).
+			Router(&v1beta1.RouterSpec{
+				PodSpec: v1beta1.PodSpec{
+					Containers: []corev1.Container{{Name: "ome-container", Image: "ghcr.io/test/router:test"}},
+				},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					MinReplicas: ptr.To(5),
+				},
+			}).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-clamp-router", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Router.MinReplicas).To(HaveValue(Equal(5)))
+		Expect(got.Spec.Router.MaxReplicas).To(Equal(5), "defaulted router maxReplicas must be clamped up to minReplicas")
+	})
+
+	ginkgo.It("update that re-defaults an unset maxReplicas clamps to the new minReplicas", func() {
+		// Updates run through the defaulter again. Raising minReplicas
+		// while clearing maxReplicas must re-default the max at or above
+		// the new floor, keeping the stored object admissible.
+		isvc := v1beta1testing.MakeInferenceService("def-clamp-update", "isvc-defaulter").
+			Model("any-model").
+			Engine(engineWithImage("ghcr.io/test/runtime:test")).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-clamp-update", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3))
+
+		got.Spec.Engine.MinReplicas = ptr.To(5)
+		got.Spec.Engine.MaxReplicas = 0
+		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+
+		after := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-clamp-update", Namespace: "isvc-defaulter"}, after)).To(Succeed())
+		Expect(after.Spec.Engine.MinReplicas).To(HaveValue(Equal(5)))
+		Expect(after.Spec.Engine.MaxReplicas).To(Equal(5), "re-defaulted maxReplicas must clamp to the updated minReplicas")
+	})
+
+	ginkgo.It("no deploy.replicas config → replica bounds are stored exactly as authored", func() {
+		// Config-driven degrade lock: the replica defaults live only in
+		// the inferenceservice-config ConfigMap. With the deploy.replicas
+		// block absent the defaulter stamps nothing — no literals baked
+		// into the binary — and the spec round-trips as authored.
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{
+			Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName,
+		}, cm)).To(Succeed())
+		originalDeploy := cm.Data["deploy"]
+		cm.Data["deploy"] = `{"defaultDeploymentMode": "RawDeployment"}`
+		Expect(k8sClient.Update(suiteCtx, cm)).To(Succeed())
+		ginkgo.DeferCleanup(func() {
+			restore := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(suiteCtx, types.NamespacedName{
+				Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName,
+			}, restore)).To(Succeed())
+			restore.Data["deploy"] = originalDeploy
+			Expect(k8sClient.Update(suiteCtx, restore)).To(Succeed())
+		})
+
+		isvc := v1beta1testing.MakeInferenceService("def-no-replica-config", "isvc-defaulter").
+			Model("any-model").
+			Engine(engineWithImage("ghcr.io/test/runtime:test")).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-no-replica-config", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Engine.MinReplicas).To(BeNil(), "unconfigured minReplicas default must not be stamped")
+		Expect(got.Spec.Engine.MaxReplicas).To(BeZero(), "unconfigured maxReplicas default must not be stamped")
+	})
+
+	ginkgo.It("explicit maxReplicas below minReplicas passes through the defaulter untouched", func() {
+		// The clamp applies only to a max the defaulter itself fills. An
+		// authored min>max pair must reach the validating webhook as
+		// written so it can be rejected (pinned in the validator suite);
+		// this suite installs only the mutating webhook, so we assert
+		// pass-through on the stored object.
+		engine := engineWithImage("ghcr.io/test/runtime:test")
+		engine.MinReplicas = ptr.To(5)
+		engine.MaxReplicas = 2
+		isvc := v1beta1testing.MakeInferenceService("def-clamp-explicit", "isvc-defaulter").
+			Model("any-model").
+			Engine(engine).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-clamp-explicit", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(5)))
+		Expect(got.Spec.Engine.MaxReplicas).To(Equal(2), "explicit maxReplicas must never be adjusted by the defaulter")
+	})
+
 	ginkgo.It("explicit DeploymentMode annotation is preserved (defaulter does not overwrite)", func() {
 		// User opt-in to a specific mode must win over the
 		// defaulter's heuristic. The defaulter checks for the

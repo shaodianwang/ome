@@ -234,6 +234,96 @@ type NamespaceIngressGateway struct {
 // +kubebuilder:object:generate=false
 type DeployConfig struct {
 	DefaultDeploymentMode string `json:"defaultDeploymentMode,omitempty"`
+	// Replicas carries the admission-time component replica defaults the
+	// ISVC defaulter stamps on unset minReplicas/maxReplicas fields. There
+	// are intentionally NO in-code defaults — the values are supplied via
+	// the inferenceservice-config ConfigMap (Helm chart / GitOps). Absent
+	// (nil block or nil field) means unconfigured: the defaulter leaves the
+	// corresponding field as authored, never a silent fallback to baked-in
+	// numbers. Configured values must be > 0 (rejected at config-load).
+	Replicas *ReplicasDefaultsConfig `json:"replicas,omitempty"`
+}
+
+// ReplicasDefaultsConfig is the admission-time replica-defaulting policy
+// loaded from the "deploy.replicas" block of the inferenceservice-config
+// ConfigMap. Every field is optional; a nil field disables defaulting of
+// that value only.
+//
+// +kubebuilder:object:generate=false
+type ReplicasDefaultsConfig struct {
+	// DefaultMinReplicas fills an unset component minReplicas (all
+	// components share one floor default).
+	DefaultMinReplicas *int `json:"defaultMinReplicas,omitempty"`
+	// DefaultMaxReplicas fills an unset component maxReplicas, per
+	// component. The defaulter raises the filled value to an authored
+	// minReplicas so it never manufactures a min>max conflict.
+	DefaultMaxReplicas ComponentMaxReplicasDefaults `json:"defaultMaxReplicas,omitempty"`
+}
+
+// ComponentMaxReplicasDefaults holds the per-component maxReplicas defaults.
+//
+// +kubebuilder:object:generate=false
+type ComponentMaxReplicasDefaults struct {
+	Engine  *int `json:"engine,omitempty"`
+	Decoder *int `json:"decoder,omitempty"`
+	Router  *int `json:"router,omitempty"`
+}
+
+// Min returns the configured minReplicas default; nil (including a nil
+// receiver) means unconfigured — the defaulter leaves the field as authored.
+func (c *ReplicasDefaultsConfig) Min() *int {
+	if c == nil {
+		return nil
+	}
+	return c.DefaultMinReplicas
+}
+
+// EngineMax returns the configured engine maxReplicas default; nil
+// (including a nil receiver) means unconfigured.
+func (c *ReplicasDefaultsConfig) EngineMax() *int {
+	if c == nil {
+		return nil
+	}
+	return c.DefaultMaxReplicas.Engine
+}
+
+// DecoderMax returns the configured decoder maxReplicas default; nil
+// (including a nil receiver) means unconfigured.
+func (c *ReplicasDefaultsConfig) DecoderMax() *int {
+	if c == nil {
+		return nil
+	}
+	return c.DefaultMaxReplicas.Decoder
+}
+
+// RouterMax returns the configured router maxReplicas default; nil
+// (including a nil receiver) means unconfigured.
+func (c *ReplicasDefaultsConfig) RouterMax() *int {
+	if c == nil {
+		return nil
+	}
+	return c.DefaultMaxReplicas.Router
+}
+
+// validate rejects non-positive configured values. A replica default of
+// zero or below can never be a sane admission stamp, so it is a config
+// error surfaced at load time rather than a bad object stored later.
+func (c *ReplicasDefaultsConfig) validate() error {
+	fields := []struct {
+		name  string
+		value *int
+	}{
+		{"defaultMinReplicas", c.DefaultMinReplicas},
+		{"defaultMaxReplicas.engine", c.DefaultMaxReplicas.Engine},
+		{"defaultMaxReplicas.decoder", c.DefaultMaxReplicas.Decoder},
+		{"defaultMaxReplicas.router", c.DefaultMaxReplicas.Router},
+	}
+	for _, f := range fields {
+		if f.value != nil && *f.value <= 0 {
+			return fmt.Errorf("invalid deploy config, replicas.%s must be > 0, got %d", f.name, *f.value)
+		}
+	}
+	return nil
 }
 
 // +kubebuilder:object:generate=false
@@ -1140,6 +1230,12 @@ func parseDeployConfig(configMap *v1.ConfigMap) (*DeployConfig, error) {
 
 		if deployConfig.DefaultDeploymentMode != string(constants.RawDeployment) {
 			return nil, fmt.Errorf("invalid deployment mode. Supported default mode is %s", constants.RawDeployment)
+		}
+
+		if deployConfig.Replicas != nil {
+			if err := deployConfig.Replicas.validate(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return deployConfig, nil

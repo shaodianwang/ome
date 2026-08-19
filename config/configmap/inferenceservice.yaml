@@ -21,7 +21,15 @@ data:
 
   deploy: |-
     {
-      "defaultDeploymentMode": "RawDeployment"
+      "defaultDeploymentMode": "RawDeployment",
+      "replicas": {
+        "defaultMinReplicas": 1,
+        "defaultMaxReplicas": {
+          "engine": 3,
+          "decoder": 3,
+          "router": 2
+        }
+      }
     }
 
   podDisruptionBudget: |-

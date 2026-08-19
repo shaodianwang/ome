@@ -26,7 +26,10 @@ import (
 //     (NewIngressConfig errors otherwise) and DisableIngressCreation=true
 //     to keep the controller from materializing routes
 //   - deploy.defaultDeploymentMode = RawDeployment (the safe default;
-//     NewDeployConfig errors on empty)
+//     NewDeployConfig errors on empty), plus the deploy.replicas admission
+//     defaults (min=1, max engine/decoder=3, router=2 — the values the
+//     chart ships) so defaulter-dependent specs see chart-equivalent
+//     behavior
 //   - lifecycle scaleUpPodBatchSize and scaleDownPodBatchSize bound OMENative
 //     create and delete work in Pod-equivalent units while keeping each
 //     Instance or gang atomic
@@ -53,7 +56,15 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "disableIngressCreation": true
 }`,
 		"deploy": `{
-  "defaultDeploymentMode": "RawDeployment"
+  "defaultDeploymentMode": "RawDeployment",
+  "replicas": {
+    "defaultMinReplicas": 1,
+    "defaultMaxReplicas": {
+      "engine": 3,
+      "decoder": 3,
+      "router": 2
+    }
+  }
 }`,
 		"lifecycle": `{
   "scaleUpPodBatchSize": 100,

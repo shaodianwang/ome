@@ -128,6 +128,18 @@ ome:
     #     fb_metric_schema: ome_controller
     podAnnotations: {}
     deploymentMode: "RawDeployment"
+    # Admission-time component replica defaults stamped by the ISVC mutating
+    # webhook on unset minReplicas/maxReplicas. Source of truth for these
+    # values (the OME binary has NO built-in defaults; an omitted field means
+    # the defaulter leaves that field as authored). A filled maxReplicas is
+    # raised to an authored minReplicas so admission never manufactures a
+    # min>max conflict.
+    replicas:
+      defaultMinReplicas: 1
+      defaultMaxReplicas:
+        engine: 3
+        decoder: 3
+        router: 2
     # Max reconciles each controller runs in parallel (distinct objects only —
     # controller-runtime serializes per object key, so independent objects
     # reconcile concurrently). Source of truth for these values (the OME binary
