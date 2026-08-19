@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,10 +14,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // fakeClientForSeqISVC creates a fake client seeded with InferenceReplica objects
 // built from the ISVC's Status.Components, for sequential gate tests.
+//
+// Each Component's Lifecycle.ObservedGeneration is modeled as the parent
+// ISVC generation the projector last applied to that IR: it lands in the
+// parent-generation annotation the gate's projection-lag signal reads. A
+// value that does not match isvc.Generation therefore models "this IR's
+// projection was not produced from the ISVC generation being reconciled".
+// The IR's own metadata.generation is set to match its
+// status.observedGeneration so the same-object status-lag signal stays
+// silent — these fakes isolate the projection-lag signal.
 func fakeClientForSeqISVC(isvc *v1beta1.InferenceService) client.Client {
 	if isvc == nil || isvc.Status.Components == nil {
 		return fake.NewClientBuilder().WithScheme(testScheme()).Build()
@@ -28,8 +39,10 @@ func fakeClientForSeqISVC(isvc *v1beta1.InferenceService) client.Client {
 		}
 		ir := &v1beta1.InferenceReplica{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      isvc.Name + "-" + string(c),
-				Namespace: isvc.Namespace,
+				Name:        isvc.Name + "-" + string(c),
+				Namespace:   isvc.Namespace,
+				Generation:  cs.Lifecycle.ObservedGeneration,
+				Annotations: parentGenAnnotation(cs.Lifecycle.ObservedGeneration),
 			},
 			Status: v1beta1.InferenceReplicaStatus{
 				ObservedGeneration: cs.Lifecycle.ObservedGeneration,
@@ -41,6 +54,14 @@ func fakeClientForSeqISVC(isvc *v1beta1.InferenceService) client.Client {
 		irs = append(irs, ir)
 	}
 	return fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(irs...).Build()
+}
+
+// parentGenAnnotation builds the projector's parent-generation stamp for a
+// fake IR.
+func parentGenAnnotation(gen int64) map[string]string {
+	return map[string]string{
+		constants.InferenceReplicaParentGenerationAnnotationKey: strconv.FormatInt(gen, 10),
+	}
 }
 
 // --- activeSequentialComponent (pure helper shared with state machine) ---
@@ -158,11 +179,11 @@ func setComponentRevisions(isvc *v1beta1.InferenceService, c v1beta1.ComponentTy
 }
 
 // setComponentObservedGeneration stamps
-// Status.Components[c].Lifecycle.ObservedGeneration with `gen`. The
-// AggregateAndWriteStatus deferred write copies isvc.Generation onto
-// every Component's ObservedGeneration at the end of each reconcile,
-// so simulating a moment-of-bump means setting Status.* to N while
-// leaving isvc.Generation at N+1.
+// Status.Components[c].Lifecycle.ObservedGeneration with `gen`, which
+// fakeClientForSeqISVC also mirrors into the fake IR's parent-generation
+// annotation. Simulating a moment-of-bump therefore means setting it to
+// N while leaving isvc.Generation at N+1 — the gate's projection-lag
+// signal sees the stamp trailing the live generation.
 func setComponentObservedGeneration(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen int64) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
@@ -496,27 +517,28 @@ func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
 	//   - ObservedGeneration is still N on every Component's status
 	//     block.
 	//
-	// Pre-fix: revision-hash skew is silent (UpdateRevision ==
-	// CurrentRevision == OLD) for both Components → activeSequentialComponent
-	// sees nothing rolling → gate falls through to "Sequential group
-	// idle" → both Components dispatch concurrently, blowing the
-	// Sequential invariant.
-	//
-	// Post-fix: generation skew (ObservedGeneration=N <
-	// isvc.Generation=N+1) flips RolloutInFlight=true on every
-	// Component whose status hasn't caught up. activeSequentialComponent
-	// picks decoder (first in Order); engine is correctly denied.
+	// Revision-hash skew is silent here (UpdateRevision ==
+	// CurrentRevision == OLD) for both Components, so without a lag
+	// signal the gate would fall through to "Sequential group idle" and
+	// both Components would dispatch concurrently, blowing the
+	// Sequential invariant. The projection-lag signal (parent-generation
+	// stamp N ≠ isvc.Generation N+1) flips RolloutInFlight=true on every
+	// Component the projector hasn't re-applied yet;
+	// activeSequentialComponent picks decoder (first in Order) and
+	// engine is correctly denied.
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	isvc.Generation = 2 // operator's spec bump just landed
-	// Both Components carry stale status: UpdateRevision points at the
-	// pre-bump CR, ObservedGeneration is one behind isvc.Generation.
+	// Both Components carry stale stamps: UpdateRevision points at the
+	// pre-bump CR, the projected parent generation is one behind
+	// isvc.Generation.
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev1")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
 	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 1)
 	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 1)
 
-	// Engine must wait — decoder is first in Order and the gen-skew
-	// signal pins decoder as the active Sequential Component.
+	// Engine must wait — decoder is first in Order and the
+	// projection-lag signal pins decoder as the active Sequential
+	// Component.
 	client := fakeClientForSeqISVC(isvc)
 	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
@@ -569,7 +591,11 @@ func seqReadyIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHas
 		}
 	}
 	return &v1beta1.InferenceReplica{
-		ObjectMeta: metav1.ObjectMeta{Name: isvcName + "-" + string(c)},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        isvcName + "-" + string(c),
+			Generation:  observedGen,
+			Annotations: parentGenAnnotation(observedGen),
+		},
 		Status: v1beta1.InferenceReplicaStatus{
 			ObservedGeneration: observedGen,
 			CurrentRevision:    rev(currentHash),
@@ -584,14 +610,14 @@ func seqReadyIR(isvcName string, c v1beta1.ComponentType, currentHash, updateHas
 // regression for a Sequential overlap where the trailing Component
 // started rolling concurrently with the leader. At the moment of bump
 // every instance is still Ready on the OLD revision — the realistic
-// steady state — and the gen-skew window leaves UpdateRevision naming
+// steady state — and the lag window leaves UpdateRevision naming
 // the OLD CR.
 //
 // Bug: observeSequentialComponentsForGate computed AtDesiredShape from
 // that stale UpdateRevision. With all instances Ready on OLD,
 // ReachedDesiredShape(insts-on-old, target=old, partition=0, replicas)
 // returns true → AtDesiredShape=true on BOTH Components at once, while
-// RolloutInFlight is also true (gen skew). activeSequentialComponent
+// RolloutInFlight is also true (lag). activeSequentialComponent
 // skips on AtDesiredShape, finds nothing active, and the gate falls
 // through to "Sequential group idle" — so engine dispatches concurrently
 // with decoder.
@@ -656,11 +682,11 @@ func TestCheckSequentialGate_StagedPartitionReleasesNext(t *testing.T) {
 	}
 }
 
-func TestCheckSequentialGate_GenerationSkewOnlyOneComponent(t *testing.T) {
-	// Defensive: only decoder's status is stale (engine already
-	// caught up in a prior reconcile, e.g. a partial bump on a
-	// previously-converged group). Decoder's gen-skew alone is enough
-	// to pin it as the active Sequential Component; engine must defer.
+func TestCheckSequentialGate_ProjectionLagOnlyOneComponent(t *testing.T) {
+	// Defensive: only decoder's projection is stale (engine already
+	// re-projected for the live generation). Decoder's projection lag
+	// alone is enough to pin it as the active Sequential Component;
+	// engine must defer until the projector's pass reaches decoder.
 	isvc := mkSequentialFixture("seq-isvc", 0)
 	isvc.Generation = 5
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev1")
@@ -671,7 +697,82 @@ func TestCheckSequentialGate_GenerationSkewOnlyOneComponent(t *testing.T) {
 	client := fakeClientForSeqISVC(isvc)
 	allowed, reason := CheckSequentialGate(context.Background(), client, isvc, v1beta1.EngineComponent)
 	if allowed {
-		t.Errorf("engine must wait while decoder has gen-skew: %s", reason)
+		t.Errorf("engine must wait while decoder's projection lags: %s", reason)
+	}
+	if !strings.Contains(reason, "decoder") {
+		t.Errorf("denial reason should name decoder: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_LaterOnlyBumpReleasesLaterComponent(t *testing.T) {
+	// Partial bump: only the engine — later in Order — was changed.
+	// After the projector's pass, the untouched decoder carries a
+	// current parent-generation stamp with converged revisions and a
+	// status that matches its own (unmoved) IR generation; the engine
+	// carries genuine revision skew. The gate must route active to the
+	// engine and release it: an idle earlier-in-Order Component must
+	// never hold a later Component's rollout hostage.
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 2 // engine-only bump landed and was projected
+
+	cl := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
+		// Decoder: nothing to roll. Projection stamp current (2), all
+		// instances Ready on its only revision.
+		seqReadyIR("seq-isvc", v1beta1.DecoderComponent, "rev1", "rev1", "rev1", 2, 2),
+		// Engine: bumped — status already records the new target.
+		seqReadyIR("seq-isvc", v1beta1.EngineComponent, "rev1", "rev2", "rev1", 2, 2),
+	).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), cl, isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("engine-only bump: engine must be released without a decoder handoff, got denied: %s", reason)
+	}
+	if !strings.Contains(reason, "Sequential active Component") {
+		t.Errorf("allowance reason should signal the active-Component path: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_StampAheadOfISVCReadHolds(t *testing.T) {
+	// Strict-equality guard on the projection signal: a
+	// parent-generation stamp AHEAD of the ISVC in hand means the gate
+	// is deciding against a stale ISVC read — the projector has
+	// already applied a newer spec. The pair is not one consistent
+	// snapshot, so the Component counts as in-flight and its
+	// Sequential peers stay held until a clean read lands.
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 2
+
+	decoder := seqReadyIR("seq-isvc", v1beta1.DecoderComponent, "rev1", "rev1", "rev1", 2, 2)
+	decoder.Annotations = parentGenAnnotation(3) // projected for a newer ISVC generation
+	engine := seqReadyIR("seq-isvc", v1beta1.EngineComponent, "rev1", "rev1", "rev1", 2, 2)
+	cl := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(decoder, engine).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), cl, isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("engine must be held while decoder's stamp is ahead of the ISVC read: %s", reason)
+	}
+	if !strings.Contains(reason, "decoder") {
+		t.Errorf("denial reason should name decoder: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_StatusAheadOfIRGenerationHolds(t *testing.T) {
+	// Strict-equality guard on the same-object signal: a status block
+	// recording a generation the IR object in hand does not carry
+	// means the read is torn (a stale IR paired with a newer status
+	// write). The Component counts as in-flight until a clean
+	// observation lands, holding its Sequential peers.
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 2
+
+	decoder := seqReadyIR("seq-isvc", v1beta1.DecoderComponent, "rev1", "rev1", "rev1", 2, 2)
+	decoder.Generation = 1 // status (2) was written for a newer object than this read
+	engine := seqReadyIR("seq-isvc", v1beta1.EngineComponent, "rev1", "rev1", "rev1", 2, 2)
+	cl := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(decoder, engine).Build()
+
+	allowed, reason := CheckSequentialGate(context.Background(), cl, isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("engine must be held while decoder's status is ahead of its IR generation: %s", reason)
 	}
 	if !strings.Contains(reason, "decoder") {
 		t.Errorf("denial reason should name decoder: %s", reason)

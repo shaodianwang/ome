@@ -3,12 +3,14 @@ package coordination
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -148,7 +150,7 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 // (RolloutInFlight=false), which is exactly what the active-selector
 // needs.
 //
-// RolloutInFlight is derived from TWO independent signals:
+// RolloutInFlight is derived from THREE independent signals:
 //
 //  1. Revision-hash skew: `UpdateRevision != CurrentRevision` — the
 //     classic "spec changed and status caught up enough to record the
@@ -156,67 +158,78 @@ func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
 //     AggregateAndWriteStatus has stamped UpdateRevision=target.Name on
 //     the Component being reconciled.
 //
-//  2. Generation skew: `ObservedGeneration < isvc.Generation` — fires
-//     at the *moment of bump*, BEFORE any deferred status write has
-//     run. The top-level reconciler computes `target` via
-//     ensureRevisionWithCollisionRetry and defers
-//     AggregateAndWriteStatus until after the op chain returns; the
-//     dispatcher's gate check is invoked between those two points. At
-//     that instant UpdateRevision still names the OLD CR (so signal #1
-//     is silent), but every per-Component status block is one
-//     reconcile behind isvc.Generation. The generation skew turns
-//     RolloutInFlight on for every Component whose status hasn't
-//     caught up to the bump — and the active-selector then routes the
-//     dispatcher to the first one in Order, denying the rest.
+//  2. Status lag: `ir.Status.ObservedGeneration != ir.Generation` —
+//     fires at the *moment of bump*, after the projector has written
+//     the IR spec but BEFORE the IR's deferred status write has run.
+//     In that window UpdateRevision still names the OLD CR (so signal
+//     #1 is silent) even though the Component is about to roll.
+//     Same-object compare: ir.Status.ObservedGeneration mirrors the
+//     IR's own metadata.generation, so it says nothing about the
+//     parent ISVC — that is signal #3's job. Strict equality: any
+//     divergence means the status block was not computed against the
+//     spec being observed, so it cannot vouch for convergence.
 //
-// Over-detection from signal #2 is harmless. A Component whose target
-// PodSpec didn't actually change still gets observed as in-flight here,
-// but detectUpdateTrigger in the dispatcher returns needs=false for
-// that Component (its pods' RunningRevision already matches target.Name)
-// and the gate is never consulted. Once AggregateAndWriteStatus runs
-// and bumps ObservedGeneration, the noise clears.
+//  3. Projection lag: the parent-generation annotation the projector
+//     stamps on every pass differs from the live isvc.Generation (or
+//     is absent). The ISVC controller projects the group's IRs one at
+//     a time, so between the operator's bump and the completion of
+//     that projection pass a peer IR can look fully converged while
+//     its new spec simply hasn't been written yet. Failing closed
+//     here keeps "at most one Component rolls" honest across that
+//     window; the signal self-clears the moment the projector
+//     re-stamps the annotation — including on Components whose
+//     projected spec did not change at all (a partial bump), which is
+//     what lets the gate release a later-in-Order Component without
+//     waiting on an idle earlier one. Strict equality again: a stamp
+//     from a different generation — either side — means the ISVC and
+//     IR in hand are not one consistent snapshot.
+//
+// Over-detection from signals #2/#3 is harmless. A Component whose
+// target PodSpec didn't actually change still gets observed as
+// in-flight here, but detectUpdateTrigger in the dispatcher returns
+// needs=false for that Component (its pods' RunningRevision already
+// matches target.Name) and the gate is never consulted. Once the
+// projector and the IR status writer catch up, the noise clears.
 func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]ComponentObservation, error) {
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
-		// Effective partition from the projected IR spec (the merged
-		// ISVC↔runtime lifecycle the workload controller stages Instances
-		// at), resolved the same way as buildGroupObservation. Needed both
-		// to carry Partition and to compute AtDesiredShape below so
-		// activeSequentialComponent can release a converged staged
-		// Component here — including one staged at a runtime-inherited
-		// partition the raw ISVC never shows. A read error fails closed,
-		// same as the status read below.
-		partition, err := irprojector.ComponentIRPartition(ctx, reads, isvc.Namespace, isvc.Name, c)
+		// One consistent IR snapshot per Component: metadata (generation,
+		// parent-generation annotation), spec (effective partition from the
+		// merged ISVC↔runtime lifecycle — including a runtime-inherited
+		// partition the raw ISVC never shows), and status. A read error
+		// fails closed: fabricating a zero-valued observation for the
+		// rolling peer would admit a second Component and break
+		// at-most-one-rolling.
+		ir, err := irprojector.ComponentIR(ctx, reads, isvc.Namespace, isvc.Name, c)
 		if err != nil {
 			return nil, err
 		}
+		partition := irprojector.IRPartition(ir)
 		obs := ComponentObservation{Component: c, Partition: partition}
-		summary, err := irprojector.ComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
-		if err != nil {
-			return nil, err
-		}
-		if summary != nil {
+		if ir != nil {
+			summary := &ir.Status
 			cur := query.RevisionFromName(summary.CurrentRevision)
 			tgt := query.RevisionFromName(summary.UpdateRevision)
 			obs.CurrentRevisionHash = cur.Hash()
 			obs.TargetRevisionHash = tgt.Hash()
 			revisionSkew := !tgt.IsZero() && !tgt.Same(cur)
-			generationSkew := summary.ObservedGeneration < isvc.Generation
-			obs.RolloutInFlight = revisionSkew || generationSkew
+			statusLag := summary.ObservedGeneration != ir.Generation
+			projectionLag := irParentGenerationMismatch(ir, isvc.Generation)
+			obs.RolloutInFlight = revisionSkew || statusLag || projectionLag
 			// Convergence to the desired staged shape — mirrors
 			// buildComponentObservation so the gate's active-selector sees
 			// the same "done for handoff" signal the state machine does.
 			//
 			// Gate on revisionSkew: AtDesiredShape means "converged to the
 			// NEW target's staged shape", which is undefined until status
-			// records that target. During the generation-skew window (status
-			// one reconcile behind a fresh bump) UpdateRevision still names
-			// the OLD CR, so ReachedDesiredShape compares instances-on-old
-			// against target-old and spuriously reports convergence. That
-			// released the Sequential gate the moment both images were
-			// bumped — every Component saw RolloutInFlight=true (via gen
-			// skew) AND AtDesiredShape=true (via stale target) at once, the
-			// active-selector found nothing active, and all Components
+			// records that target. During the lag windows (status or
+			// projection one pass behind a fresh bump) UpdateRevision still
+			// names the OLD CR, so ReachedDesiredShape compares
+			// instances-on-old against target-old and spuriously reports
+			// convergence. That released the Sequential gate the moment both
+			// images were bumped — every Component saw RolloutInFlight=true
+			// (via lag) AND AtDesiredShape=true (via stale target) at once,
+			// the active-selector found nothing active, and all Components
 			// started rolling at t=0 (overlap). Only trust AtDesiredShape
 			// once the target is genuinely known to differ.
 			if revisionSkew {
@@ -228,6 +241,28 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 		out[c] = obs
 	}
 	return out, nil
+}
+
+// irParentGenerationMismatch reports whether the IR's parent-generation
+// annotation differs from the live ISVC generation — the projection this
+// IR carries was not produced from the ISVC spec the gate is deciding
+// for, so its converged-looking status cannot be trusted. Strict
+// equality on purpose: a stamp trailing the ISVC means the projector
+// hasn't re-applied this Component yet, and a stamp ahead of it means
+// the gate is holding a stale ISVC read; neither pair is a consistent
+// snapshot. A missing or unparsable annotation fails closed (treated as
+// a mismatch): coordination gates must not admit a peer on the strength
+// of a stamp that isn't there.
+func irParentGenerationMismatch(ir *v1beta1.InferenceReplica, isvcGeneration int64) bool {
+	raw, ok := ir.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey]
+	if !ok {
+		return true
+	}
+	gen, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return true
+	}
+	return gen != isvcGeneration
 }
 
 // previousCompletedComponentForGate is the order-aware "what came

@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/onsi/gomega"
@@ -20,9 +21,9 @@ import (
 // of single-Component blueGreen groups, in list order; the controller's
 // collapseSequential folds them back into one Sequential group whose Order
 // is the list order (decoder→engine). Generation is 2; callers stamp
-// per-Component Status to model in-flight vs converged via
-// ObservedGeneration skew (gen < 2 ⇒ in flight, the moment-of-bump
-// signal observeSequentialComponentsForGate keys on).
+// each IR's parent-generation annotation and status to model in-flight
+// vs converged (stamp ≠ 2 ⇒ projection lag, the moment-of-bump signal
+// observeSequentialComponentsForGate keys on).
 func mkSequentialParent() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 2},
@@ -49,6 +50,16 @@ func mkIR(c v1beta1.ComponentType, replicas int32) *v1beta1.InferenceReplica {
 	return baselineIR("llama-"+string(c), "default", replicas)
 }
 
+// setParentGenStamp models the projector's parent-generation annotation
+// on a fake IR — the stamp the Sequential gate's projection-lag signal
+// reads.
+func setParentGenStamp(ir *v1beta1.InferenceReplica, gen int64) {
+	if ir.Annotations == nil {
+		ir.Annotations = map[string]string{}
+	}
+	ir.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey] = strconv.FormatInt(gen, 10)
+}
+
 func setObservedGen(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen int64) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
@@ -69,13 +80,18 @@ func setObservedGen(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen
 // decoder (first in Order) is in flight.
 func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 	g := gomega.NewWithT(t)
-	// Moment-of-bump: both Components lag isvc.Generation=2 ⇒ both in
-	// flight. The active selector picks decoder (first in Order); the
-	// engine must wait. Seed IR objects with ObservedGeneration=1.
+	// Moment-of-bump: both Components' parent-generation stamps lag
+	// isvc.Generation=2 (the projector hasn't re-applied them yet) ⇒
+	// both in flight. The active selector picks decoder (first in
+	// Order); the engine must wait.
 	decoderIR := mkIR(v1beta1.DecoderComponent, 1)
+	decoderIR.Generation = 1
 	decoderIR.Status.ObservedGeneration = 1
+	setParentGenStamp(decoderIR, 1)
 	engineIR := mkIR(v1beta1.EngineComponent, 1)
+	engineIR.Generation = 1
 	engineIR.Status.ObservedGeneration = 1
+	setParentGenStamp(engineIR, 1)
 	r, _ := newReconciler(t, decoderIR, engineIR)
 
 	parent := mkSequentialParent()
@@ -95,15 +111,21 @@ func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 // becomes the active Sequential Component and is allowed to roll.
 func TestBuildReconcileInput_SequentialReleasesActiveComponent(t *testing.T) {
 	g := gomega.NewWithT(t)
-	// Decoder converged (ObservedGeneration caught up to parent Generation=2)
-	// ⇒ not in flight. Engine still lagging (gen=1) ⇒ it is the active
-	// Sequential Component. Seed BOTH IRs so the gate reads their fresh status
+	// Decoder converged: its parent-generation stamp matches parent
+	// Generation=2 and its status has caught up to its own IR generation
+	// ⇒ not in flight. Engine's projected spec just changed (IR
+	// generation 2, status still at 1) ⇒ it is the active Sequential
+	// Component. Seed BOTH IRs so the gate reads their fresh status
 	// (the group is not idle — engine is genuinely in flight — so this exercises
 	// the active-component release path, not the "Sequential group idle" bypass).
 	decoderIR := mkIR(v1beta1.DecoderComponent, 1)
-	decoderIR.Status.ObservedGeneration = 2
+	decoderIR.Generation = 1
+	decoderIR.Status.ObservedGeneration = 1
+	setParentGenStamp(decoderIR, 2)
 	engineIR := mkIR(v1beta1.EngineComponent, 1)
+	engineIR.Generation = 2
 	engineIR.Status.ObservedGeneration = 1
+	setParentGenStamp(engineIR, 2)
 	r, _ := newReconciler(t, decoderIR, engineIR)
 
 	parent := mkSequentialParent()

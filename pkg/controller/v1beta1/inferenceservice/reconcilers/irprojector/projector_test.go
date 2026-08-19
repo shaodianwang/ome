@@ -327,6 +327,40 @@ func TestEnsureInferenceReplica_NoChange_IssuesNoWrite(t *testing.T) {
 	g.Expect(writes).To(gomega.Equal(0), "identical re-projection must issue no writes")
 }
 
+// TestEnsureInferenceReplica_StampsParentGeneration pins the parent-
+// generation stamp: a created IR carries the parent ISVC's generation,
+// and a generation-only bump (no projected-spec diff) still re-stamps
+// the annotation. The Sequential gate's projection-lag signal relies on
+// the stamp advancing even for Components whose projected spec the bump
+// did not touch — that is what releases a later-in-Order Component from
+// waiting on an idle earlier one.
+func TestEnsureInferenceReplica_StampsParentGeneration(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Generation = 3
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Name: "llama-engine", Namespace: "prod"}
+	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.Annotations).To(gomega.HaveKeyWithValue(
+		constants.InferenceReplicaParentGenerationAnnotationKey, "3"),
+		"created IR must carry the parent ISVC generation")
+
+	// Generation-only bump: the projected spec is unchanged, but the
+	// stamp must still advance via an annotation-only patch.
+	isvc.Generation = 4
+	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
+	g.Expect(got.Annotations).To(gomega.HaveKeyWithValue(
+		constants.InferenceReplicaParentGenerationAnnotationKey, "4"),
+		"re-projection must advance the stamp even with no spec diff")
+}
+
 // TestEnsureInferenceReplica_SpecChange_IssuesMergePatch pins the change
 // path: when the desired spec differs from the live IR, the projector
 // issues exactly one merge Patch (not an Update), so a concurrent status

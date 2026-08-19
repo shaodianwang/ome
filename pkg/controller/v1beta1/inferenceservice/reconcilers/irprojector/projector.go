@@ -339,6 +339,16 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	}
 	ir.Annotations[constants.InferenceReplicaControllerWriteAnnotationKey] = constants.InferenceReplicaControllerWriteAnnotationVal
 
+	// Stamp the parent ISVC generation this projection reflects. The
+	// stamp lands on every projector pass — including passes that leave
+	// the Spec untouched — so coordination gates can tell a Component
+	// whose projection is still catching up with an ISVC bump apart
+	// from one that genuinely has nothing to roll. Object-level
+	// annotation only: it never reaches pod templates or the revision
+	// hash (revisionHash covers pod-template inputs, not IR metadata).
+	ir.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey] =
+		strconv.FormatInt(p.ISVC.Generation, 10)
+
 	// Record inherited ISVC annotation keys so revision hashing can ignore object-only
 	// metadata without changing pod metadata propagation.
 	if excluded := objectScopedAnnotationKeys(p); len(excluded) > 0 {

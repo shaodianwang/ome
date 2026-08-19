@@ -200,6 +200,17 @@ var (
 	// RevisionExcludedAnnotationKeysAnnotationKey lists inherited ISVC annotation keys
 	// omitted from the pod-template revision hash; component annotations remain hash inputs.
 	RevisionExcludedAnnotationKeysAnnotationKey = OMEAPIGroupName + "/revision-excluded-annotation-keys"
+
+	// InferenceReplicaParentGenerationAnnotationKey records the parent
+	// ISVC's metadata.generation the projector most recently applied to
+	// this InferenceReplica. Coordination gates compare it against the
+	// live ISVC generation to tell "this Component's projection hasn't
+	// caught up with the operator's latest spec bump" apart from "this
+	// Component genuinely has nothing to roll" — the IR's own
+	// status.observedGeneration cannot answer that, because it tracks
+	// the IR's generation, which only moves when the projected spec
+	// itself changes.
+	InferenceReplicaParentGenerationAnnotationKey = OMEAPIGroupName + "/parent-generation"
 )
 
 // Label Constants

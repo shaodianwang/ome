@@ -31,6 +31,21 @@ func ComponentIR(ctx context.Context, reads client.Reader, namespace, isvcName s
 	return ir, nil
 }
 
+// IRPartition returns the effective rollingUpdate partition carried on a
+// projected InferenceReplica spec, or 0 (the API-defined "update every
+// Instance" value) when the IR is nil or no partition is set. Shared by
+// ComponentIRPartition and callers that already hold the IR object.
+func IRPartition(ir *v1beta1.InferenceReplica) int32 {
+	if ir == nil {
+		return 0
+	}
+	lc := ir.Spec.Lifecycle
+	if lc == nil || lc.UpdateStrategy == nil || lc.UpdateStrategy.RollingUpdate == nil || lc.UpdateStrategy.RollingUpdate.Partition == nil {
+		return 0
+	}
+	return *lc.UpdateStrategy.RollingUpdate.Partition
+}
+
 // ComponentIRStatus returns the authoritative InferenceReplica status for one
 // Component of an ISVC, read via the supplied reader. The full-object reader
 // owns missing and error semantics so status-only consumers share the same
@@ -58,22 +73,9 @@ func ComponentIRStatus(ctx context.Context, reads client.Reader, namespace, isvc
 // returned as a wrapped error so safety gates can fail closed instead of
 // mistaking a flaky read for "no partition".
 func ComponentIRPartition(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) (int32, error) {
-	// A nil reader degrades to "no partition" — same result callers get
-	// for a missing IR.
-	if reads == nil {
-		return 0, nil
+	ir, err := ComponentIR(ctx, reads, namespace, isvcName, c)
+	if err != nil {
+		return 0, err
 	}
-	ir := &v1beta1.InferenceReplica{}
-	key := types.NamespacedName{Namespace: namespace, Name: InferenceReplicaName(isvcName, c)}
-	if err := reads.Get(ctx, key, ir); err != nil {
-		if apierrors.IsNotFound(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("get InferenceReplica %s/%s: %w", key.Namespace, key.Name, err)
-	}
-	lc := ir.Spec.Lifecycle
-	if lc == nil || lc.UpdateStrategy == nil || lc.UpdateStrategy.RollingUpdate == nil || lc.UpdateStrategy.RollingUpdate.Partition == nil {
-		return 0, nil
-	}
-	return *lc.UpdateStrategy.RollingUpdate.Partition, nil
+	return IRPartition(ir), nil
 }

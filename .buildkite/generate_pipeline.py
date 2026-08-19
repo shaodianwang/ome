@@ -127,6 +127,9 @@ KIND_SPEC_GROUPS = (
     ("sequential-interleavings", "Sequential rollout interleavings", (
         "sequential_pause_mid", "sequential_scale_during",
     )),
+    ("sequential-holds", "Sequential hold and release", (
+        "sequential_later_only_bump",
+    )),
     ("update-core", "Core update strategies", (
         "update", "inplace", "recreate_pod", "mixed_strategy",
         "percomponent_surge",
