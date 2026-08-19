@@ -506,6 +506,97 @@ def _eval_case_groups() -> list[tuple[str, str, list[str]]]:
     ]
 
 
+def _eval_case_peak_pods(case_id: str) -> int | None:
+    """Return the case's declared peak pod count, including runtime workers."""
+    matches = sorted(EVAL_CASE_DIR.glob(f"*/{case_id}.yaml"))
+    if len(matches) != 1:
+        return None
+    text = matches[0].read_text()
+    header = text.splitlines()[0].lstrip("#").strip()
+    fields = dict(token.split("=", 1) for token in header.split() if "=" in token)
+    topology = fields.get("topo", "")
+    documents = re.split(r"(?m)^---\s*$", text)
+    isvc = next(
+        (doc for doc in documents if re.search(r"(?m)^kind:\s*InferenceService\s*$", doc)),
+        "",
+    )
+    if not isvc:
+        return None
+
+    total = 0
+    for component, suffix in (("engine", "e"), ("decoder", "d"), ("router", "r")):
+        replicas = int(fields.get(f"ceil_{suffix}", fields.get(f"N{suffix}", "0")))
+        if replicas == 0:
+            continue
+        block_match = re.search(
+            rf"(?ms)^  {component}:\s*\n(.*?)(?=^  [A-Za-z][A-Za-z0-9_-]*:\s*(?:\n|$)|\Z)",
+            isvc,
+        )
+        block = block_match.group(1) if block_match else ""
+        inline = re.search(r"(?m)^    worker:\s*\{[^}]*\bsize:\s*(\d+)", block)
+        nested = re.search(
+            r"(?m)^    worker:\s*\n(?:^      .*\n)*?^      size:\s*(\d+)", block
+        )
+        worker_size = int((inline or nested).group(1)) if (inline or nested) else 0
+        if topology.endswith("-mn") and component != "router" and worker_size == 0:
+            return None
+        total += replicas * (1 + worker_size)
+    return total
+
+
+def _split_eval_cases(
+    cases: list[str],
+    case_peaks: dict[str, int | None],
+    concurrency: int,
+    pod_budget: int,
+    target_waves: int,
+) -> list[list[str]]:
+    """Pack cases into feasible scheduler waves, then bound waves per job."""
+    if concurrency < 1 or pod_budget < 1 or target_waves < 1:
+        raise RuntimeError(
+            "OMENative eval concurrency, pod budget, and target waves must be positive"
+        )
+    if not cases:
+        return []
+
+    # batch.py runs an unknown or over-budget case exclusively, so either shape
+    # consumes one full pod-capacity wave for planning purposes.
+    def wave_weight(case_id: str) -> int:
+        peak = case_peaks.get(case_id)
+        if peak is None:
+            return pod_budget
+        return min(max(peak, 0), pod_budget)
+
+    weights = {case_id: wave_weight(case_id) for case_id in cases}
+    order = {case_id: index for index, case_id in enumerate(cases)}
+    waves: list[list[str]] = []
+    pod_loads: list[int] = []
+    for case_id in sorted(cases, key=lambda item: (-weights[item], order[item])):
+        wave = next(
+            (
+                index
+                for index, members in enumerate(waves)
+                if len(members) < concurrency
+                and pod_loads[index] + weights[case_id] <= pod_budget
+            ),
+            None,
+        )
+        if wave is None:
+            wave = len(waves)
+            waves.append([])
+            pod_loads.append(0)
+        waves[wave].append(case_id)
+        pod_loads[wave] += weights[case_id]
+
+    shards = [
+        [case_id for wave in waves[start : start + target_waves] for case_id in wave]
+        for start in range(0, len(waves), target_waves)
+    ]
+    for shard in shards:
+        shard.sort(key=order.get)
+    return shards
+
+
 def _gke_eval_group() -> str:
     """Main-only deployed OMENative eval, split into named feature/topology jobs."""
     plugins = _gke_kind_plugins(_kind_ci_image(f"eval-{COMMIT[:8]}"), shared_model=True)
@@ -513,6 +604,9 @@ def _gke_eval_group() -> str:
         os.environ.get("GKE_EVAL_POD_BUDGET")
         or os.environ.get("GKE_EVAL_EXCLUSIVE_PODS")
     )
+    concurrency = int(os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"))
+    default_target_waves = int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4"))
+    canary_target_waves = int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2"))
     children = []
     for feature, topology, cases in _eval_case_groups():
         slug = f"{feature}-{topology}".replace("_", "-")
@@ -520,24 +614,37 @@ def _gke_eval_group() -> str:
         pod_budget = configured_pod_budget or ("35" if feature == "canary" else "64")
         if feature == "canary":
             pod_budget = os.environ.get("GKE_EVAL_CANARY_POD_BUDGET", pod_budget)
-        children.append(
-            {
-                "label": f":test_tube: {feature} / {topology} ({len(cases)} cases)",
-                "key": f"omenative-e2e-{slug}",
-                "depends_on": "package-kind-eval-image",
-                "timeout_in_minutes": 180,
-                "env": {
-                    "OME_KIND_PROMETHEUS_ENABLED": prometheus,
-                    "OME_EVAL_CASE_CONCURRENCY": os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"),
-                    "OME_EVAL_POD_BUDGET": pod_budget,
-                    "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
-                },
-                "agents": {"queue": GKE_QUEUE},
-                "command": "sh .buildkite/run_omenative_eval_gke.sh "
-                + " ".join([feature, topology, *cases]),
-                "plugins": plugins,
-            }
+        target_waves = (
+            canary_target_waves if feature == "canary" else default_target_waves
         )
+        subshards = _split_eval_cases(
+            cases,
+            {case_id: _eval_case_peak_pods(case_id) for case_id in cases},
+            concurrency,
+            int(pod_budget),
+            target_waves,
+        )
+        for index, shard_cases in enumerate(subshards, start=1):
+            part = f" [{index}/{len(subshards)}]" if len(subshards) > 1 else ""
+            key_part = f"-{index}-of-{len(subshards)}" if len(subshards) > 1 else ""
+            children.append(
+                {
+                    "label": f":test_tube: {feature} / {topology}{part} ({len(shard_cases)} cases)",
+                    "key": f"omenative-e2e-{slug}{key_part}",
+                    "depends_on": "package-kind-eval-image",
+                    "timeout_in_minutes": 180,
+                    "env": {
+                        "OME_KIND_PROMETHEUS_ENABLED": prometheus,
+                        "OME_EVAL_CASE_CONCURRENCY": str(concurrency),
+                        "OME_EVAL_POD_BUDGET": pod_budget,
+                        "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
+                    },
+                    "agents": {"queue": GKE_QUEUE},
+                    "command": "sh .buildkite/run_omenative_eval_gke.sh "
+                    + " ".join([feature, topology, *shard_cases]),
+                    "plugins": plugins,
+                }
+            )
     group = {
         "group": ":test_tube: OMENative YAML E2E (KIND on GKE)",
         "key": "omenative-e2e-kind-gke",

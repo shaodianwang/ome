@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -212,6 +213,83 @@ class TestGkeKindGroupEmission(PipelineTestCase):
             self.assertIsNone(regex.search("/repo/tests/alpha_kind_test.go.bak"))
 
 
+class TestEvalSubsharding(unittest.TestCase):
+    def test_worker_and_pod_limits_each_create_waves(self):
+        worker_limited = [f"p{i:02d}" for i in range(1, 10)]
+        worker_shards = gp._split_eval_cases(
+            worker_limited,
+            {case_id: 1 for case_id in worker_limited},
+            concurrency=4,
+            pod_budget=100,
+            target_waves=2,
+        )
+        self.assertEqual(
+            [len(shard) for shard in worker_shards],
+            [8, 1],
+        )
+
+        pod_limited = [f"p{i:02d}" for i in range(1, 5)]
+        pod_shards = gp._split_eval_cases(
+            pod_limited,
+            {case_id: 30 for case_id in pod_limited},
+            concurrency=4,
+            pod_budget=35,
+            target_waves=2,
+        )
+        self.assertEqual(
+            [len(shard) for shard in pod_shards],
+            [2, 2],
+        )
+
+    def test_unknown_and_over_budget_cases_take_exclusive_waves(self):
+        cases = ["p01", "p02", "p03", "p04", "p05"]
+        shards = gp._split_eval_cases(
+            cases,
+            {"p01": None, "p02": 100, "p03": 35, "p04": None, "p05": 80},
+            concurrency=4,
+            pod_budget=35,
+            target_waves=2,
+        )
+        self.assertEqual([len(shard) for shard in shards], [2, 2, 1])
+        self.assertEqual(
+            sorted(case_id for shard in shards for case_id in shard), cases
+        )
+
+    def test_assignment_is_deterministic_and_complete(self):
+        cases = ["p01", "p02", "p03", "p04", "p05", "p06"]
+        peaks = {
+            "p01": 21,
+            "p02": 9,
+            "p03": 13,
+            "p04": 21,
+            "p05": 9,
+            "p06": 13,
+        }
+        first = gp._split_eval_cases(cases, peaks, 4, 35, 2)
+        second = gp._split_eval_cases(cases, peaks, 4, 35, 2)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            sorted(case_id for shard in first for case_id in shard), cases
+        )
+
+    def test_peak_pods_includes_multinode_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case_dir = Path(tmp) / "canary"
+            case_dir.mkdir()
+            (case_dir / "p01.yaml").write_text(
+                """# p01: fixture  Ne=2 Nd=0 Nr=0 ceil_e=3 topo=engine-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p01 }
+spec:
+  engine:
+    worker: { size: 2 }
+"""
+            )
+            with mock.patch.object(gp, "EVAL_CASE_DIR", Path(tmp)):
+                self.assertEqual(gp._eval_case_peak_pods("p01"), 9)
+
+
 class TestCheckedInTreeClassification(unittest.TestCase):
     """The committed spec tree must always generate cleanly."""
 
@@ -239,6 +317,73 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertTrue(groups)
         case_ids = [case for _, _, cases in groups for case in cases]
         self.assertEqual(len(case_ids), len(set(case_ids)))
+
+    def test_checked_in_eval_subshards_are_complete_and_bounded(self):
+        assignments = {}
+        job_count = 0
+        shard_counts = {}
+        for feature, topology, cases in gp._eval_case_groups():
+            pod_budget = 35 if feature == "canary" else 64
+            target_waves = 2 if feature == "canary" else 4
+            shards = gp._split_eval_cases(
+                cases,
+                {case_id: gp._eval_case_peak_pods(case_id) for case_id in cases},
+                concurrency=4,
+                pod_budget=pod_budget,
+                target_waves=target_waves,
+            )
+            shard_counts[(feature, topology)] = len(shards)
+            job_count += len(shards)
+            for shard_index, shard in enumerate(shards):
+                self.assertTrue(shard)
+                waves = gp._split_eval_cases(
+                    shard,
+                    {case_id: gp._eval_case_peak_pods(case_id) for case_id in shard},
+                    concurrency=4,
+                    pod_budget=pod_budget,
+                    target_waves=1,
+                )
+                self.assertLessEqual(len(waves), target_waves)
+                for case_id in shard:
+                    self.assertNotIn(case_id, assignments)
+                    assignments[case_id] = (feature, topology, shard_index)
+
+        committed = {
+            case_id
+            for _, _, cases in gp._eval_case_groups()
+            for case_id in cases
+        }
+        self.assertEqual(set(assignments), committed)
+        self.assertEqual(shard_counts[("canary", "engine")], 7)
+        self.assertEqual(shard_counts[("canary", "pd")], 6)
+        self.assertEqual(job_count, 62)
+
+    def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GKE_EVAL_CASE_CONCURRENCY": "4",
+                "GKE_EVAL_TARGET_WAVES": "4",
+                "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+            },
+        ):
+            yaml_text = gp._gke_eval_group()
+        keys = re.findall(r'key: "(omenative-e2e-[^"]+)"', yaml_text)
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertIn("canary / engine [1/7]", yaml_text)
+        self.assertIn("canary / pd [6/6]", yaml_text)
+        commands = re.findall(
+            r'command: "sh \.buildkite/run_omenative_eval_gke\.sh ([^"]+)"',
+            yaml_text,
+        )
+        emitted = [case_id for command in commands for case_id in command.split()[2:]]
+        committed = [
+            case_id
+            for _, _, cases in gp._eval_case_groups()
+            for case_id in cases
+        ]
+        self.assertEqual(len(emitted), len(committed))
+        self.assertEqual(set(emitted), set(committed))
 
 
 if __name__ == "__main__":
