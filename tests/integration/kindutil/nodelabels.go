@@ -44,6 +44,7 @@ func LabelNode(ctx context.Context, c client.Client, nodeName, key, value string
 	if err := c.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
 		return fmt.Errorf("LabelNode: get %s: %w", nodeName, err)
 	}
+	base := node.DeepCopy()
 	if node.Labels == nil {
 		node.Labels = map[string]string{}
 	}
@@ -51,11 +52,11 @@ func LabelNode(ctx context.Context, c client.Client, nodeName, key, value string
 		return nil
 	}
 	node.Labels[key] = value
-	return c.Update(ctx, node)
+	return c.Patch(ctx, node, client.MergeFrom(base))
 }
 
 // labelAllNodes is the all-nodes implementation backing the
-// per-model helpers above. Walks the live node list and Updates
+// per-model helpers above. Walks the live node list and patches
 // each that needs the label.
 func labelAllNodes(ctx context.Context, c client.Client, key, value string) error {
 	nodes := &corev1.NodeList{}
@@ -64,6 +65,7 @@ func labelAllNodes(ctx context.Context, c client.Client, key, value string) erro
 	}
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
+		base := node.DeepCopy()
 		if node.Labels[key] == value {
 			continue
 		}
@@ -71,8 +73,8 @@ func labelAllNodes(ctx context.Context, c client.Client, key, value string) erro
 			node.Labels = map[string]string{}
 		}
 		node.Labels[key] = value
-		if err := c.Update(ctx, node); err != nil {
-			return fmt.Errorf("labelAllNodes: update %s with %s=%s: %w",
+		if err := c.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+			return fmt.Errorf("labelAllNodes: patch %s with %s=%s: %w",
 				node.Name, key, value, err)
 		}
 	}
