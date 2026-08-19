@@ -33,6 +33,8 @@ vs. recreate updates.
 | BlueGreen + RecreatePod | recreate_pod_kind |
 | BlueGreen + RatioBalanced small | ratiobalanced_kind (C-1/4) |
 | BlueGreen + RatioBalanced load | loadtest_kind |
+| RatioBalanced anchor snapshot + deliberate scale-down | ratio_anchor_scaledown_kind |
+| RatioBalanced anchor for a late-joining group member | ratio_late_member_anchor_kind |
 | Pause/resume Idle | pause_kind |
 | Pause/resume mid-rollout | pause_midrollout_kind |
 | InferenceReplica pause blocks pod recreation | inference_replica_pause_kind |

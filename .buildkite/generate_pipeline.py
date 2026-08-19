@@ -114,6 +114,9 @@ KIND_SPEC_GROUPS = (
     ("ratio-core", "RatioBalanced coordination", (
         "ratiobalanced", "ratio_n3", "ratio_pause_resume",
     )),
+    ("ratio-edges", "RatioBalanced edge states", (
+        "ratio_anchor_scaledown", "ratio_late_member_anchor",
+    )),
     ("ratio-load", "RatioBalanced load", (
         "loadtest",
     )),
