@@ -47,6 +47,7 @@ vs. recreate updates.
 | PD three-way (Engine+Decoder+Router) | pd_three_way_kind |
 | PD concurrent ops | pd_concurrent_kind (PDA-1/2) |
 | Annotation-driven migration | migrate_kind (8 specs) |
+| Whole-gang migration + gang expiry teardown | migration_gang_kind |
 | ObservedGeneration + per-Instance counters | status_surface_kind + status_kind |
 | Event recorder firing | events_kind (7 specs) |
 | Pod-state watch filters (label, cross-ISVC) | watches_kind |

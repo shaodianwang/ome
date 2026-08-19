@@ -151,6 +151,9 @@ KIND_SPEC_GROUPS = (
     ("migration-relocation", "Migration and relocation", (
         "auto_migrate", "auto_migrate_multiinstance", "migrate", "interleave_extra",
     )),
+    ("migration-lifecycle", "Migration gang lifecycle", (
+        "migration_gang",
+    )),
     ("pause-cancel-interleavings", "Pause, cancel, and interleavings", (
         "pause", "pause_midrollout", "inference_replica_pause",
         "cancel_midrollout", "interleave",
