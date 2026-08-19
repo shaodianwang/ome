@@ -163,11 +163,10 @@ func MigrationModeOrDefault(p *MigrationPolicy) MigrationMode {
 	return p.Mode
 }
 
-// instancePlanIndices computes the per-Instance index set the plan
-// should drive: all migration-in-flight indices (unbounded by replicas;
-// they're the transient surge pair), then the oldest existing
-// non-migration indices up to the replica cap, then newly allocated
-// indices at the lowest unused position to round out scale-up.
+// instancePlanIndices computes the per-Instance index set the plan should
+// drive: active surge pairs (unbounded by replicas), then the oldest existing
+// steady indices up to the replica cap, excluding sources whose replacements
+// are proven promoted, then new indices to round out scale-up.
 //
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
@@ -187,10 +186,25 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 	for idx := range updateSurgeSourceIndices(instances) {
 		migrationSource[idx] = struct{}{}
 	}
+	// Every claim reserves its target for uniqueness; the handoff predicates
+	// separately decide whether a source has enough proof to retire.
+	handoffTargetReferences := map[int32]int{}
+	for _, s := range instances {
+		if s.Operation == nil || s.Operation.SurgeIndex == nil {
+			continue
+		}
+		targetIndex := *s.Operation.SurgeIndex
+		switch s.Operation.Type {
+		case InstanceOperationMigrate, InstanceOperationUpdate:
+			handoffTargetReferences[targetIndex]++
+			migrationProtected[targetIndex] = struct{}{}
+		}
+	}
 
 	// Ready instances are stable replicas, preferred to keep.
 	readyByIndex := map[int32]bool{}
 	statusByIndex := map[int32]InstanceStatus{}
+	retiringSources := map[int32]struct{}{}
 	for _, s := range instances {
 		statusByIndex[s.Index] = s
 		if s.Phase == InstancePhaseReady {
@@ -198,33 +212,32 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 		}
 	}
 
-	// Release a gang source only after it entered the drain phase and its
-	// replacement was promoted on the operation's pinned revision. A fresh
-	// claim that collided with an occupied index stays pinned until the update
-	// state machine can reset and reallocate it.
+	// A handoff source retires only after its replacement is Ready. Gang updates
+	// additionally require the drain step and the operation's pinned revision;
+	// a fresh claim that collides with an occupied index stays protected.
 	for _, s := range instances {
 		if s.Operation == nil || s.Operation.SurgeIndex == nil {
 			continue
 		}
 		targetIndex := *s.Operation.SurgeIndex
 		if s.Operation.Type != InstanceOperationUpdate {
-			if readyByIndex[targetIndex] {
+			target, found := statusByIndex[targetIndex]
+			if found && migrationHandoffPromoted(s, target, handoffTargetReferences[targetIndex]) {
 				delete(migrationProtected, s.Index)
+				delete(migrationProtected, targetIndex)
 				delete(migrationSource, s.Index)
+				retiringSources[s.Index] = struct{}{}
 			}
 			continue
 		}
-		if s.Operation.Step != UpdateStepSurgeDrain {
-			continue
-		}
 		target, found := statusByIndex[targetIndex]
-		if !found || target.Phase != InstancePhaseReady || target.Operation != nil ||
-			target.TargetRevision != "" || target.RunningRevision != s.Operation.TargetRevision {
+		if !found || !updateHandoffPromoted(s, target, handoffTargetReferences[targetIndex]) {
 			continue
 		}
 		delete(migrationProtected, s.Index)
 		delete(migrationProtected, targetIndex)
 		delete(migrationSource, s.Index)
+		retiringSources[s.Index] = struct{}{}
 	}
 
 	sorted := make([]int32, 0, len(used))
@@ -259,15 +272,19 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 	}
 
 	// Pass 2: fill the steady replica budget. Prefer Ready (stable) instances
-	// over not-yet-Ready ones (e.g. a stale surge source mid-drain) so an
-	// already-rolled instance is never dropped to keep one being phased out;
-	// within each readiness tier, oldest (lowest index) first.
+	// over not-yet-Ready ones, then keep the oldest eligible index within each
+	// readiness tier.
 	fill := func(wantReady bool) {
 		for _, idx := range sorted {
 			if steadyCount >= replicas {
 				return
 			}
 			if _, already := picked[idx]; already {
+				continue
+			}
+			// A source with a proven promoted replacement is terminal cleanup,
+			// not a fallback for an unrelated Instance awaiting status promotion.
+			if _, retiring := retiringSources[idx]; retiring {
 				continue
 			}
 			if readyByIndex[idx] != wantReady {
@@ -298,6 +315,26 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 
 	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
 	return indices
+}
+
+func migrationHandoffPromoted(source, target InstanceStatus, targetReferences int) bool {
+	return targetReferences == 1 &&
+		source.Phase == InstancePhaseMigrating && source.RunningRevision != "" && source.TargetRevision == "" &&
+		source.Operation != nil && source.Operation.Type == InstanceOperationMigrate &&
+		source.Operation.RequestUUID != "" && source.Operation.SurgeIndex != nil &&
+		*source.Operation.SurgeIndex == target.Index &&
+		target.Incarnation == 1 && target.ActiveOrdinal == 0 && target.Phase == InstancePhaseReady &&
+		target.RunningRevision == source.RunningRevision && target.TargetRevision == "" && target.Operation == nil
+}
+
+func updateHandoffPromoted(source, target InstanceStatus, targetReferences int) bool {
+	return targetReferences == 1 &&
+		source.Phase == InstancePhaseUpdating && source.RunningRevision != "" && source.TargetRevision != "" &&
+		source.Operation != nil && source.Operation.Type == InstanceOperationUpdate &&
+		source.Operation.Step == UpdateStepSurgeDrain && source.Operation.SurgeIndex != nil &&
+		*source.Operation.SurgeIndex == target.Index && source.Operation.TargetRevision == source.TargetRevision &&
+		target.Incarnation == 1 && target.ActiveOrdinal == 0 && target.Phase == InstancePhaseReady &&
+		target.RunningRevision == source.TargetRevision && target.TargetRevision == "" && target.Operation == nil
 }
 
 // migrationInFlightIndices returns the indices of InstanceStatuses

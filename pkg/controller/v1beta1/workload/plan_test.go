@@ -353,14 +353,139 @@ func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
 }
 
 func TestInstancePlanIndices_MigrationReadyTargetReplacesSource(t *testing.T) {
+	const revision = "comp-rev-current"
 	targetIndex := int32(1)
 	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, SurgeIndex: &targetIndex}},
-		{Index: targetIndex, Phase: InstancePhaseReady},
+		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
+		{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
 	}
-	if diff := cmp.Diff([]int32{targetIndex}, instancePlanIndices(instances, 1)); diff != "" {
+	indices := instancePlanIndices(instances, 1)
+	if diff := cmp.Diff([]int32{targetIndex}, indices); diff != "" {
 		t.Fatalf("promoted migration target must replace its source (-want +got):\n%s", diff)
+	}
+	plan := ComponentPlan{Instances: []InstancePlan{{Index: targetIndex}}}
+	if extras := ExtraInstanceIndices(instances, plan, false); len(extras) != 0 {
+		t.Fatalf("normal scale-down selected migration source as extra: %v", extras)
+	}
+}
+
+func TestInstancePlanIndices_MigrationRetiringSourceDoesNotDisplaceSteadyInstance(t *testing.T) {
+	const revision = "comp-rev-current"
+	targetIndex := int32(8)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
+		{Index: 1, Phase: InstancePhaseReady},
+		{Index: 2, Phase: InstancePhaseReady},
+		{Index: 3, Phase: InstancePhaseReady},
+		{Index: 4, Phase: InstancePhaseReady},
+		{Index: 5, Phase: InstancePhaseReady},
+		{Index: 6, Phase: InstancePhaseReady},
+		{Index: 7, Phase: InstancePhaseCreating},
+		{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	}
+	want := []int32{1, 2, 3, 4, 5, 6, 7, 8}
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 8)); diff != "" {
+		t.Fatalf("retiring migration source displaced a steady instance (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_MigrationSourceRequiresPromotedTargetProof(t *testing.T) {
+	const revision = "comp-rev-current"
+	targetIndex := int32(2)
+	source := InstanceStatus{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
+		Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}}
+	tests := []struct {
+		name   string
+		target InstanceStatus
+	}{
+		{
+			name:   "wrong revision",
+			target: InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: "comp-rev-other"},
+		},
+		{
+			name: "operation still active",
+			target: InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision,
+				Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+		},
+		{
+			name: "target revision still set",
+			target: InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady,
+				RunningRevision: revision, TargetRevision: revision},
+		},
+		{
+			name:   "incarnation does not match a fresh surge",
+			target: InstanceStatus{Index: targetIndex, Incarnation: 2, Phase: InstancePhaseReady, RunningRevision: revision},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			instances := []InstanceStatus{
+				source,
+				{Index: 1, Phase: InstancePhaseCreating, RunningRevision: revision},
+				test.target,
+			}
+			want := []int32{0, 1, 2}
+			if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
+				t.Fatalf("unproven migration target released its source (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestInstancePlanIndices_SharedMigrationTargetKeepsAllParticipants(t *testing.T) {
+	const revision = "comp-rev-current"
+	sharedTarget := int32(3)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
+		{Index: 1, Phase: InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-b", SurgeIndex: &sharedTarget}},
+		{Index: 2, Phase: InstancePhaseCreating, RunningRevision: revision},
+		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	}
+	want := []int32{0, 1, 2, 3}
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
+		t.Fatalf("shared migration target released a source or sibling (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_WrongPhaseMigrationReferenceBlocksRetirement(t *testing.T) {
+	const revision = "comp-rev-current"
+	sharedTarget := int32(3)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
+		{Index: 1, Phase: InstancePhaseFailed, RunningRevision: revision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-stale", SurgeIndex: &sharedTarget}},
+		{Index: 2, Phase: InstancePhaseCreating, RunningRevision: revision},
+		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	}
+	want := []int32{0, 1, 2, 3}
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
+		t.Fatalf("wrong-phase migration reference released a valid source (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_MixedHandoffsSharingTargetKeepAllParticipants(t *testing.T) {
+	const (
+		oldRevision = "comp-rev-oldbbbb"
+		newRevision = "comp-rev-newaaaa"
+	)
+	sharedTarget := int32(3)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
+		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+				SurgeIndex: &sharedTarget, TargetRevision: newRevision}},
+		{Index: 2, Phase: InstancePhaseCreating, RunningRevision: oldRevision},
+		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+	}
+	want := []int32{0, 1, 2, 3}
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
+		t.Fatalf("mixed handoffs sharing one target released a participant (-want +got):\n%s", diff)
 	}
 }
 
@@ -424,7 +549,7 @@ func TestInstancePlanIndices_GangSurgeReadyTargetRequiresDrainProof(t *testing.T
 	zero := int32(0)
 	statuses := func(step string) []InstanceStatus {
 		return []InstanceStatus{
-			{Index: 0, Phase: InstancePhaseReady, RunningRevision: newRev},
+			{Index: 0, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRev},
 			{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRev, TargetRevision: newRev,
 				Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: step, SurgeIndex: &zero, TargetRevision: newRev}},
 			{Index: 2, Phase: InstancePhaseReady, RunningRevision: newRev},
@@ -440,6 +565,182 @@ func TestInstancePlanIndices_GangSurgeReadyTargetRequiresDrainProof(t *testing.T
 	// replacement is promoted.
 	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(statuses(UpdateStepSurgeDrain), 2)); diff != "" {
 		t.Fatalf("validated source should leave the steady plan (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_GangSurgeSourceRequiresPromotedTargetProof(t *testing.T) {
+	const (
+		oldRevision = "comp-rev-oldbbbb"
+		newRevision = "comp-rev-newaaaa"
+	)
+	targetIndex := int32(2)
+	validSource := InstanceStatus{Index: 0, Phase: InstancePhaseUpdating,
+		RunningRevision: oldRevision, TargetRevision: newRevision,
+		Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+			SurgeIndex: &targetIndex, TargetRevision: newRevision}}
+	validTarget := InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision}
+
+	wrongIncarnation := validTarget
+	wrongIncarnation.Incarnation = 2
+	wrongOrdinal := validTarget
+	wrongOrdinal.ActiveOrdinal = 1
+	wrongTargetRevision := validTarget
+	wrongTargetRevision.RunningRevision = oldRevision
+	activeTarget := validTarget
+	activeTarget.Operation = &InstanceOperation{Type: InstanceOperationUpdate}
+	pinnedTarget := validTarget
+	pinnedTarget.TargetRevision = newRevision
+	wrongPhase := validSource
+	wrongPhase.Phase = InstancePhaseFailed
+	missingRunningRevision := validSource
+	missingRunningRevision.RunningRevision = ""
+	missingTargetRevision := validSource
+	missingTargetRevision.TargetRevision = ""
+	mismatchedTargetRevision := validSource
+	mismatchedTargetRevision.TargetRevision = "comp-rev-other"
+
+	tests := []struct {
+		name   string
+		source InstanceStatus
+		target InstanceStatus
+	}{
+		{name: "target incarnation", source: validSource, target: wrongIncarnation},
+		{name: "target active ordinal", source: validSource, target: wrongOrdinal},
+		{name: "target running revision", source: validSource, target: wrongTargetRevision},
+		{name: "target operation", source: validSource, target: activeTarget},
+		{name: "target revision pin", source: validSource, target: pinnedTarget},
+		{name: "source phase", source: wrongPhase, target: validTarget},
+		{name: "source running revision", source: missingRunningRevision, target: validTarget},
+		{name: "source target revision", source: missingTargetRevision, target: validTarget},
+		{name: "source revision pin", source: mismatchedTargetRevision, target: validTarget},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			instances := []InstanceStatus{
+				test.source,
+				{Index: 1, Phase: InstancePhaseCreating, RunningRevision: oldRevision},
+				test.target,
+			}
+			want := []int32{0, 1, 2}
+			if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
+				t.Fatalf("unproven gang-surge target released its source (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestInstancePlanIndices_GangSurgeRetiringSourceDoesNotDisplaceSteadyInstance(t *testing.T) {
+	const (
+		oldRevision = "comp-rev-oldbbbb"
+		newRevision = "comp-rev-newaaaa"
+	)
+	targetIndex := int32(8)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+				SurgeIndex: &targetIndex, TargetRevision: newRevision}},
+		{Index: 1, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 2, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 3, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 4, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 5, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 6, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 7, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+	}
+	want := []int32{1, 2, 3, 4, 5, 6, 7, 8}
+	indices := instancePlanIndices(instances, 8)
+	if diff := cmp.Diff(want, indices); diff != "" {
+		t.Fatalf("retiring gang-surge source displaced a steady instance (-want +got):\n%s", diff)
+	}
+	planned := make([]InstancePlan, 0, len(indices))
+	for _, index := range indices {
+		planned = append(planned, InstancePlan{Index: index})
+	}
+	if diff := cmp.Diff([]int32{0}, ExtraInstanceIndices(instances, ComponentPlan{Instances: planned}, false)); diff != "" {
+		t.Fatalf("normal scale-down ownership crossed the retiring update source (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_ConcurrentRetiringSourcesDoNotDisplaceSteadyInstances(t *testing.T) {
+	const (
+		oldRevision = "comp-rev-oldbbbb"
+		newRevision = "comp-rev-newaaaa"
+	)
+	targetEight, targetNine := int32(8), int32(9)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+				SurgeIndex: &targetEight, TargetRevision: newRevision}},
+		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+				SurgeIndex: &targetNine, TargetRevision: newRevision}},
+		{Index: 2, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 3, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 4, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 5, Phase: InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 6, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: 7, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: targetEight, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+		{Index: targetNine, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+	}
+	want := []int32{2, 3, 4, 5, 6, 7, 8, 9}
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 8)); diff != "" {
+		t.Fatalf("retiring gang-surge sources displaced steady instances (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_SharedUpdateTargetKeepsAllParticipants(t *testing.T) {
+	const (
+		oldRevision = "comp-rev-oldbbbb"
+		newRevision = "comp-rev-newaaaa"
+	)
+	sharedTarget := int32(3)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+				SurgeIndex: &sharedTarget, TargetRevision: newRevision}},
+		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+				SurgeIndex: &sharedTarget, TargetRevision: newRevision}},
+		{Index: 2, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+	}
+	want := []int32{0, 1, 2, 3}
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
+		t.Fatalf("shared update target released a source or sibling (-want +got):\n%s", diff)
+	}
+}
+
+func TestInstancePlanIndices_NonRetiringSelectionControls(t *testing.T) {
+	tests := []struct {
+		name      string
+		instances []InstanceStatus
+	}{
+		{
+			name: "Ready Instance keeps priority",
+			instances: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseReady},
+				{Index: 1, Phase: InstancePhaseCreating},
+				{Index: 2, Phase: InstancePhaseReady},
+			},
+		},
+		{
+			name: "oldest non-Ready Instance remains the fallback",
+			instances: []InstanceStatus{
+				{Index: 0, Phase: InstancePhaseCreating},
+				{Index: 1, Phase: InstancePhaseCreating},
+				{Index: 2, Phase: InstancePhaseReady},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := []int32{0, 2}
+			if diff := cmp.Diff(want, instancePlanIndices(test.instances, 2)); diff != "" {
+				t.Fatalf("non-retiring selection changed (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
