@@ -25,12 +25,12 @@ func SetupServingRuntimeWebhooks(mgr ctrl.Manager) error {
 
 	server.Register("/validate-ome-io-v1beta1-servingruntime", &webhook.Admission{
 		Handler: &servingruntimewebhook.ServingRuntimeValidator{
-			Client: mgr.GetClient(), Decoder: decoder,
+			Client: mgr.GetAPIReader(), Decoder: decoder,
 		},
 	})
 	server.Register("/validate-ome-io-v1beta1-clusterservingruntime", &webhook.Admission{
 		Handler: &servingruntimewebhook.ClusterServingRuntimeValidator{
-			Client: mgr.GetClient(), Decoder: decoder,
+			Client: mgr.GetAPIReader(), Decoder: decoder,
 		},
 	})
 	return nil

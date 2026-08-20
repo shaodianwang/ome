@@ -30,14 +30,14 @@ const (
 // +kubebuilder:webhook:verbs=create;update,path=/validate-ome-io-v1beta1-clusterservingruntime,mutating=false,failurePolicy=fail,groups=ome.io,resources=clusterservingruntimes,versions=v1beta1,name=clusterservingruntime.ome-webhook-server.validator
 
 type ClusterServingRuntimeValidator struct {
-	Client  client.Client
+	Client  client.Reader
 	Decoder admission.Decoder
 }
 
 // +kubebuilder:webhook:verbs=create;update,path=/validate-ome-io-v1beta1-servingruntime,mutating=false,failurePolicy=fail,groups=ome.io,resources=servingruntimes,versions=v1beta1,name=servingruntime.ome-webhook-server.validator
 
 type ServingRuntimeValidator struct {
-	Client  client.Client
+	Client  client.Reader
 	Decoder admission.Decoder
 }
 
@@ -73,7 +73,7 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 	}
 
 	existing := &v1beta1.ServingRuntimeList{}
-	if err := sr.Client.List(context.TODO(), existing, client.InNamespace(servingRuntime.Namespace)); err != nil {
+	if err := sr.Client.List(ctx, existing, client.InNamespace(servingRuntime.Namespace)); err != nil {
 		log.Error(err, "Failed to get serving runtime list", "namespace", servingRuntime.Namespace)
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
@@ -135,7 +135,7 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 	}
 
 	existing := &v1beta1.ClusterServingRuntimeList{}
-	if err := csr.Client.List(context.TODO(), existing); err != nil {
+	if err := csr.Client.List(ctx, existing); err != nil {
 		log.Error(err, "Failed to get cluster serving runtime list")
 		return admission.Errored(http.StatusInternalServerError, err)
 	}

@@ -589,12 +589,12 @@ func main() {
 
 		setupLog.Info("Registering cluster serving runtime validator webhook to the webhook server")
 		hookServer.Register("/validate-ome-io-v1beta1-clusterservingruntime", &webhook.Admission{
-			Handler: &servingruntime.ClusterServingRuntimeValidator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
+			Handler: &servingruntime.ClusterServingRuntimeValidator{Client: mgr.GetAPIReader(), Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		setupLog.Info("Registering serving runtime validator webhook to the webhook server")
 		hookServer.Register("/validate-ome-io-v1beta1-servingruntime", &webhook.Admission{
-			Handler: &servingruntime.ServingRuntimeValidator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
+			Handler: &servingruntime.ServingRuntimeValidator{Client: mgr.GetAPIReader(), Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		setupLog.Info("Registering serving runtime engine-preset mutator webhooks to the webhook server")

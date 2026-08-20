@@ -25,7 +25,7 @@ func validateProfileMarker(annotations map[string]string, disabled *bool) error 
 	return nil
 }
 
-func validateClusterRuntimeInheritance(ctx context.Context, c client.Client, csr *v1beta1.ClusterServingRuntime) error {
+func validateClusterRuntimeInheritance(ctx context.Context, c client.Reader, csr *v1beta1.ClusterServingRuntime) error {
 	parentName := csr.Annotations[constants.RuntimeInheritFromAnnotationKey]
 	if parentName == "" {
 		return nil
@@ -40,7 +40,7 @@ func validateClusterRuntimeInheritance(ctx context.Context, c client.Client, csr
 	return err
 }
 
-func validateNamespacedRuntimeInheritance(ctx context.Context, c client.Client, sr *v1beta1.ServingRuntime) error {
+func validateNamespacedRuntimeInheritance(ctx context.Context, c client.Reader, sr *v1beta1.ServingRuntime) error {
 	parentName := sr.Annotations[constants.RuntimeInheritFromAnnotationKey]
 	if parentName == "" {
 		return nil
@@ -55,7 +55,7 @@ func validateNamespacedRuntimeInheritance(ctx context.Context, c client.Client, 
 	return err
 }
 
-func clusterFetcher(c client.Client) runtimeinheritance.Fetcher {
+func clusterFetcher(c client.Reader) runtimeinheritance.Fetcher {
 	return func(ctx context.Context, name string) (*runtimeinheritance.RuntimeRef, error) {
 		csr := &v1beta1.ClusterServingRuntime{}
 		if err := c.Get(ctx, types.NamespacedName{Name: name}, csr); err != nil {
@@ -72,7 +72,7 @@ func clusterFetcher(c client.Client) runtimeinheritance.Fetcher {
 	}
 }
 
-func namespacedFetcher(c client.Client, namespace string) runtimeinheritance.Fetcher {
+func namespacedFetcher(c client.Reader, namespace string) runtimeinheritance.Fetcher {
 	return func(ctx context.Context, name string) (*runtimeinheritance.RuntimeRef, error) {
 		sr := &v1beta1.ServingRuntime{}
 		err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, sr)
