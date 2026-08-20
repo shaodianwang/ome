@@ -238,6 +238,7 @@ type InferenceReplicaPacing struct {
 // InferenceReplica. The InferenceReplica controller is the sole
 // writer. Fields mirror the legacy LifecycleStatus shape so
 // the dual-write window can byte-compare the two.
+// +kubebuilder:validation:XValidation:rule="(!has(self.instanceStatusEncoding) && !has(self.instanceStatusColumns)) || (has(self.instanceStatusEncoding) && self.instanceStatusEncoding == 'ColumnarV2' && has(self.instanceStatusColumns) && !has(self.instanceStatuses))",message="instance status encoding and payload must form a valid DenseV1 or ColumnarV2 representation"
 type InferenceReplicaStatus struct {
 	// ObservedGeneration is the InferenceReplica.metadata.generation
 	// the most recent status flush reflects.
@@ -298,14 +299,22 @@ type InferenceReplicaStatus struct {
 	// +optional
 	LabelSelector string `json:"labelSelector,omitempty"`
 
-	// InstanceStatuses reports per-Instance state. Reuses the
-	// existing OMENativeInstanceStatus type to enable byte-equality
-	// diffs against the legacy ISVC.status subtree during the
-	// migration window.
+	// InstanceStatuses is the DenseV1 per-Instance representation. It may be
+	// present only when InstanceStatusEncoding is absent.
 	// +optional
 	// +listType=map
 	// +listMapKey=index
 	InstanceStatuses []OMENativeInstanceStatus `json:"instanceStatuses,omitempty"`
+
+	// InstanceStatusEncoding selects a non-dense per-Instance representation.
+	// Its absence identifies DenseV1.
+	// +optional
+	InstanceStatusEncoding *InstanceStatusEncoding `json:"instanceStatusEncoding,omitempty"`
+
+	// InstanceStatusColumns contains the ColumnarV2 per-Instance
+	// representation and is present together with InstanceStatusEncoding.
+	// +optional
+	InstanceStatusColumns *InstanceStatusColumns `json:"instanceStatusColumns,omitempty"`
 
 	// RetryBlocks records per-target-revision retry authority for update
 	// attempts. Revision-scoped: one block per failed target revision,
