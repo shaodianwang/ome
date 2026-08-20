@@ -210,9 +210,10 @@ that prior value in a grouped column and decodes it before planning.
    deserialization and has no new cardinality rejection.
 6. The representation marker and its payload MUST change in one status update.
    A committed object contains exactly one Instance representation.
-7. ColumnarV2 mode MUST compare complete DenseV1 and ColumnarV2 status
-   candidates and persist ColumnarV2 only when it is strictly smaller. A tie
-   selects DenseV1.
+7. Every supported manager, repair, or fixture path that persists ColumnarV2
+   MUST compare complete DenseV1 and ColumnarV2 status candidates and persist
+   ColumnarV2 only when it is strictly smaller. A tie selects DenseV1. Schema
+   validity alone does not authorize a ColumnarV2 write.
 8. V2 MUST add no Pod or EndpointSlice LIST, watch, write, label, or annotation.
 9. Status ownership, operation ordering, and external effects remain exactly
     as defined by OEP-0007 and OEP-0007.4.
@@ -378,10 +379,10 @@ dense fallback.
 The codec sits at the API/workload boundary:
 
 ```text
-raw API status (preserved for no-op comparison)
+fresh API object plus its stored encoding
         |
         v
-decode durable rows into a separate logical copy
+decode durable rows into the existing DenseV1 logical shape
         |
         v
 construct the existing epoch-scoped ComponentObservation
@@ -392,10 +393,13 @@ existing mutation family produces its V1 persistence candidate
   publication writer materializes current counters on its owned copy
         |
         v
-clear the three OEP-0007.4 Pod-derived fields on a persistence copy
+clear the three OEP-0007.4 Pod-derived fields on a write copy
         |
         v
-validate -> encode candidates -> compare with raw -> status update if changed
+validate -> select a canonical candidate
+        |
+        v
+status update only when logical state changed or source != selected encoding
 ```
 
 Decode happens after every IR GET whose consumer reads Instance status and
@@ -405,14 +409,19 @@ classified separately and preserve the raw status union without decoding it.
 Read-only local and remote status consumers use the same logical view; none may
 read `instanceStatuses` directly as a fallback.
 
-A cycle-free leaf codec returns an opaque Snapshot containing private raw state
-for comparison and a typed LogicalView for consumers. This makes provenance
-enforceable: only the persistence adapter can recover the raw representation.
+A cycle-free leaf codec returns a freshly fetched IR in the existing DenseV1
+logical shape plus the encoding observed before decode. The source encoding is
+load-bearing: without it, a logical no-op cannot distinguish an already
+converged object from DenseV1-to-ColumnarV2 activation or ColumnarV2-to-DenseV1
+rollback. The writer compares source with the encoder-selected representation,
+not merely the configured target, because a ColumnarV2 target may legitimately
+select DenseV1 fallback.
+
 The executable inventory covers reconciliation, aggregation, revision
-retention, placement, and `irprojector.ComponentIR`, while explicitly
-classifying spec/metadata pass-through reads. `ComponentIR` is the canonical
-decode boundary for coordination's direct RatioBalanced and Sequential callers;
-`ComponentIRStatus` delegates to it transitively.
+retention, placement, and `irprojector` helpers while explicitly classifying
+spec/metadata pass-through reads. Row-consuming coordination and placement
+helpers use explicitly decoded accessors; raw helpers remain available only to
+callers that do not inspect the per-Instance representation.
 
 V2 does not collapse observation epochs. `ComponentObservation` continues to
 decide which consumers read prior-published row values and which read current
@@ -420,20 +429,25 @@ Pod or EndpointSlice facts. The publication path may materialize all current
 counters exactly as V1 does; the storage normalizer then clears only the three
 fields OEP-0007.4 excludes before it builds either wire candidate.
 
-The raw fetched status and decoded logical rows have separate lifetimes. This
-is load-bearing: hydrating `instanceStatuses` in place would make every
-ColumnarV2 GET look different from its stored object and trigger a write on
-every reconcile. A conflict discards both values and repeats the complete flow
-from an uncached `APIReader` GET. Tests deliberately hold the informer cache
-stale; fake-client retry success alone is insufficient evidence.
+The fetched object belongs to the codec reader; decode changes only that fresh
+copy after recording its source encoding. The controller does not retain a
+second 2,000- or 5,000-row raw status throughout reconciliation. On a conflict,
+the writer discards the logical copy and source value and repeats the complete
+flow from an uncached `APIReader` GET. Tests deliberately hold the informer
+cache stale; fake-client retry success alone is insufficient evidence.
 
-An uncached GET also contains server-owned managed fields that the normal cache
-transform removes. The writer preserves the fetched raw status for comparison,
-but clears `metadata.managedFields` on both complete write candidates before
-size comparison and PUT. Persisted-GET measurements still include the ownership
-the API server regenerates. DenseV1 currently transmits those fields, so
-clearing them is an intentional request-mechanics change—not a logical-status
-change—and requires real-apiserver ownership and default-mode regression tests.
+At the start of reconciliation, a transition gate performs this live read and
+returns before lifecycle effects when the stored and selected representations
+differ. It writes once, then immediately requeues. DenseV1 under a ColumnarV2
+target must build both candidates because strict-smaller selection may retain
+DenseV1; ColumnarV2 under a DenseV1 target always converts.
+
+Already-converged objects take a fast path: DenseV1 under a DenseV1 target and
+ColumnarV2 under a ColumnarV2 target do not rebuild and serialize both candidates
+merely to prove another no-op. This relies on the sole-writer invariant: every
+supported ColumnarV2 ingress, including repair and qualification fixtures, uses
+the same current selector. A direct status-subresource write that bypasses the
+adapter violates the ownership contract and is not a supported ingress.
 
 The selected wire representation lives only on the write copy. After a
 successful update, the adapter decodes the object returned by the API server and
@@ -498,8 +512,8 @@ The executable inventory is type-aware rather than a search for one method
 name. It rejects IR status writes through Update, Patch, server-side Apply,
 generated `UpdateStatus`, dynamic clients, or `SubResource("status")` outside
 the adapter. A matching read inventory rejects direct consumption of
-`InstanceStatuses` or `InstanceStatusColumns` outside the codec and typed
-logical-view adapter; spec/metadata-only reads receive named classifications.
+`InstanceStatuses` or `InstanceStatusColumns` outside the codec and explicit
+decoded-accessor boundary; spec/metadata-only reads receive named classifications.
 Test-only fixture writes are explicitly classified rather than silently
 exempting an entire directory. In particular, the multicluster performance
 admitter and real-Kueue fixtures must use the logical codec/write boundary or
@@ -539,12 +553,14 @@ repair helper. An operator supplies a complete known-good DenseV1 or
 ColumnarV2 Instance representation obtained from a trusted backup or
 investigation. Through the repair-only adapter entry point, the helper performs
 an uncached live GET for resourceVersion and unrelated status, does not decode
-the corrupt Instance payload, validates the replacement independently, and
-replaces only that representation in one status update with a resourceVersion
-precondition. It never clears rows, derives missing durable history from Pods,
-or partially accepts a corrupt payload. Tests cover stale resourceVersion,
-invalid replacement, both valid encodings, preservation of unrelated status,
-and resumption of the same logical decision after repair.
+the corrupt Instance payload, validates and decodes the replacement
+independently, then runs those trusted logical rows through the configured
+strict-smaller selector. It replaces only the Instance representation in one
+status update with a resourceVersion precondition. It never clears rows, derives
+missing durable history from Pods, or partially accepts a corrupt payload. Tests
+cover stale resourceVersion, invalid replacement, both input encodings and the
+selected output, preservation of unrelated status, and resumption of the same
+logical decision after repair.
 
 ## Compatibility and Rollout
 
@@ -766,7 +782,7 @@ runbook call out this raw API change explicitly.
 
 The checked-in Rust IR type already omits the existing `retryBlocks` and
 `migrations` status fields. Because V2 must regenerate that type, the
-implementation PR reports this pre-existing generated correction separately
+API artifact PR reports this pre-existing generated correction separately
 from ColumnarV2 fields, pins the Rust generator version, and adds generation
 drift plus shared-wire-vector serde tests. It must not hide those missing fields
 or present their generated churn as V2 production logic.
@@ -825,8 +841,8 @@ single-Pod and gang shapes, sparse and transitional rows, every operation, and
 EndpointSlice lead/lag.
 
 Coordination coverage explicitly exercises RatioBalanced and Sequential through
-their direct `irprojector.ComponentIR` call sites; testing only
-`ComponentIRStatus` does not cover those readers.
+their production decoded-accessor call sites; testing the codec alone does not
+cover those readers.
 
 The OEP-0007.4 prior-epoch cases remain mandatory. In particular, publish a
 complete gang, remove one member before Ready, restart the manager, and assert
@@ -852,7 +868,7 @@ zero write when the logical status is unchanged. Dedicated tests force
 columnar-smaller, dense-smaller, and equal-size
 selection. Repeated reconciles must not alternate formats or generate a status
 write storm. The sole unchanged-logical-status exception is an explicitly
-requested conversion at the dedicated publication boundary. The executable
+requested conversion at the start-of-reconcile transition gate. The executable
 inventory defined under Status ownership runs with this matrix.
 
 The conflict test uses a real API server and a deliberately stale informer
@@ -970,14 +986,13 @@ same logical persistence candidate, runs the common V1 storage normalizer,
 constructs one complete dense status-update request, and serializes it. The
 ColumnarV2 encode measurement starts from that same candidate, constructs both
 complete requests, selects one, and serializes the selected request. The
-DenseV1 decode baseline deserializes a complete dense API object and constructs
-the separate logical copy required by the shared boundary; the ColumnarV2
-measurement deserializes a complete columnar object and expands its logical
-copy.
+DenseV1 decode baseline deserializes a complete dense API object and records its
+source encoding; the ColumnarV2 measurement deserializes a complete columnar
+object, validates it, and expands rows on that freshly fetched object.
 
 The chart-default DenseV1 path has a hard-fail before/after qualification step;
 the existing soft-fail small-workload performance lane is not evidence for this
-gate. A new runner builds the recorded main merge-base and implementation-head
+gate. A new runner builds the recorded main merge-base and capability-head
 manager images, then drives identical accepted 2,000- and 5,000-row DenseV1
 inputs through fresh managers on the same stable worker. The artifact records
 commit and image digests. Ten interleaved samples compare median process CPU and
@@ -996,23 +1011,23 @@ subtracted values; a nonpositive workload delta invalidates the sample instead
 of becoming zero.
 
 The head DenseV1 medians may increase by at most 25%. This allowance covers the
-immutable raw/logical boundary without accepting a default-mode regression
-hidden by Columnar savings. Changing the protocol or ceiling requires OEP
-review, not a softer test.
+codec reader and source-provenance check without accepting a default-mode
+regression hidden by Columnar savings. Changing the protocol or ceiling requires
+OEP review, not a softer test.
 
 At 2,000 and 5,000 rows, column build, candidate selection, and serialization
 use no more than 3x the DenseV1 median time or bytes allocated; decode uses no
 more than 2x; peak resident-memory delta is no more than 3x. The encode and
 memory ceilings allow the normalized logical value and two candidate
-representations to coexist; the decode ceiling allows the immutable wire value
-and expanded logical copy. Codec memory uses the same external
-baseline-subtracted process measurement around repeated operations.
+representations to coexist; the decode ceiling allows the wire value and
+expanded logical rows to coexist during validation. Codec memory uses the same
+external baseline-subtracted process measurement around repeated operations.
 From 2,000 to 5,000 rows, each measure grows no more than 3.25x: the row count
 grows 2.5x and the remaining allowance covers sorting and allocator variance
 without accepting superlinear growth. Ten interleaved samples compare medians
-so machine speed does not become the gate. The implementation PR records the
-raw benchmark results; changing a ceiling requires OEP review rather than
-weakening a test to admit the implementation.
+so machine speed does not become the gate. The qualification PR records the raw
+benchmark results; changing a ceiling requires OEP review rather than weakening
+a test to admit the implementation.
 
 ### KIND tests
 
@@ -1025,8 +1040,10 @@ retains zero rows, or proves a strict smaller-candidate DenseV1 fallback. The
 suite contains named actual-ColumnarV2 paths for every lifecycle and
 status-mutation family: seed enough rows or a validated column payload, restart
 the manager, and prove the subsequent decision and write. A named actual-column
-path with no column read is a failure; the aggregate ColumnarV2-target run must
-also record both column writes and post-restart reads.
+path with no column read is a failure. Representation events are attributed to
+one case ID and reset and validated within that case. Every required
+actual-column case itself records both a ColumnarV2 write and a post-restart
+read, so its result proves coverage without depending on a cross-job summary.
 
 Keep 2,000- and 5,000-Instance synthetic tests in unit or envtest; KIND is for
 kubelet and EndpointSlice timing, not thousands of real Pods per presubmit.
@@ -1049,43 +1066,77 @@ harness rule, but its status assertions must still execute and any XFAIL must
 retain the declared reason. Every other case must PASS in both modes, and no new
 parked case or XFAIL is allowed.
 
-This requires two harness changes in the implementation PR. First, the Python
-status reader must decode DenseV1 and ColumnarV2 from shared golden vectors and
-must fail a case when an expected IR-status assertion was not evaluated; an
+This requires two harness changes before the capability PR may merge.
+First, the Python status reader must decode DenseV1 and ColumnarV2 from shared
+golden vectors and must fail a case when an expected IR-status assertion was
+not evaluated; an
 empty dense list may never turn a status check into a vacuous PASS. Second, PR
 CI must package exact SHA/digest-pinned branch images without overwriting stable
 tags and run the full harness rather than relying on the current main-only image
-path. These are acceptance infrastructure for the storage change, not separate
-no-op precursor PRs.
+path.
+
+Every shard requires exactly one terminal result for each assigned case ID and
+rejects missing, duplicate, or extra results; SKIP, FAIL, INFRA-FAIL, unexpected
+XFAIL or XPASS, crashes, and cancellations; and unmet parked-case or
+representation expectations. Before upload, the generator validates the
+concrete emitted manifest against repository inventory and rejects missing or
+duplicate, or extra `(target, case-ID)` assignments. Generation tests
+independently pin the same invariant. Every emitted shard is an unconditional,
+required, non-soft-fail command step, so the build cannot pass unless every
+shard exits zero. The shard-local verifier runs before artifact upload, and
+upload handling cannot mask its nonzero status. These checks compose into exact
+matrix coverage; a cross-job artifact collector is not required for
+correctness. Per-shard result files remain useful diagnostics, but artifact
+upload is not a prerequisite for the pass/fail result.
 
 At proposal time, one target uses 26 KIND jobs and 62 harness jobs; naively
 doubling both creates 176 clusters requesting up to 880 CPUs and roughly 2.4 TiB
 of memory. The qualification pipeline therefore shards by measured duration and
 may run target modes sequentially on a reused clean cluster, but it may not drop
 or duplicate a `(target, case-ID)` pair. The full dual-target matrix is mandatory
-for the implementation PR and the three Beta main runs. Ordinary unrelated PRs
-may path-gate it; permanent cheap codec, inventory, size, and focused
-actual-column gates remain presubmit, with full dual coverage scheduled.
+before the capability PR may merge and for the three Beta main runs.
+Ordinary unrelated PRs may path-gate it; permanent cheap codec, inventory, size,
+and focused actual-column gates remain presubmit, with full dual coverage
+scheduled.
 
 ## Implementation Sequence
 
-After this OEP merges, one focused implementation PR delivers the API types,
-generated artifacts, configuration, codec, read/write boundary, conversion,
-measurements, and tests. The same PR carries the operator-side transition
-preflight and repair helper, consumer inventories, runbook, release notes, and
-harness support. Splitting no-op seams from the eventual behavior would make
-reviewers reconstruct one storage invariant across several PRs.
+Implementation is delivered as a small dependency-ordered stack. Each PR owns
+one reviewable invariant and leaves the cluster in a valid state:
 
-One PR does not mean one undifferentiated review. Its commit stack and reviewer
-assignments separate API/schema and codec, the existing status boundary and
-configuration, operational tooling, and test evidence. The PR description
+1. Add only the API wire fields and generated artifacts. Schema availability is
+   not activation: until the reader barrier is complete, no shipped binary,
+   repair command, non-qualification fixture, or documented operator path may
+   persist ColumnarV2.
+2. Add the bounded index-set primitive and codec as a library with no production
+   writer call site.
+3. Route every local and remote production IR reader through the codec; add the
+   shared `maxDecodedInstances` configuration and schema/startup preflight; and
+   prove the complete consumer inventory. DenseV1 remains the only supported
+   production write target.
+4. Route the existing status writer through the new boundary while it remains
+   DenseV1-only. Add the read-only transition preflight and operational
+   documentation. Any repair capability in this slice is restricted to a
+   validated DenseV1 replacement.
+5. Add or extend qualification independently: real-apiserver fault tests, size
+   and performance gates, dual-target KIND, and the complete dual-target
+   YAML/Python harness.
+6. The final capability PR enables config-controlled ColumnarV2 candidate
+   selection at the existing writer boundary, adds the ColumnarV2 configuration
+   value, and adds the complete repair entry point. CI may select ColumnarV2
+   only in isolated qualification clusters. The exact head commit and image
+   digest must pass every Alpha gate before merge. The shipped chart remains
+   DenseV1; production activation occurs only through the stopped-fleet
+   transition.
+
+A slice may be divided further when generated code, test infrastructure, or
+operational tooling would obscure its production change. No intermediate PR
+may write ColumnarV2 before all production readers can decode it, and no test
+infrastructure PR may silently change controller behavior. Every PR description
 reports hand-written production, generated, operational-tooling, fixture, and
-test lines separately. Hand-written production scope is limited to API types,
+test lines separately. Hand-written production remains limited to API types,
 codec/configuration, metrics, and the existing IR read/write boundary; a new
-controller, resource, or persistence path requires an OEP amendment rather than
-more code hidden in this PR. The writer remains DenseV1 until the same PR's
-codec, real-apiserver, size, dual-target KIND, and dual-target harness gates
-pass, and the chart still renders DenseV1 after merge.
+controller, resource, or persistence path requires another OEP amendment.
 
 ## Graduation Criteria
 
@@ -1158,6 +1209,6 @@ decode-limit default.
 
 ## Next Action
 
-After OEP approval, the implementation PR must satisfy every Alpha and
-presubmit gate before a controlled canary selects ColumnarV2. Beta gates precede
-wider rollout; Stable follows the seven-day canary and downgrade drill.
+After OEP approval, the implementation stack must satisfy every Alpha and
+presubmit gate before a controlled canary selects ColumnarV2. Beta gates
+precede wider rollout; Stable follows the seven-day canary and downgrade drill.
