@@ -1,0 +1,40 @@
+title: "OMENative InferenceReplica status compaction v2"
+oep-number: "0007.5"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-08-17
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# OEP-0007.4 separates durable lifecycle state from three live Pod
+# observations. This follow-up losslessly compacts the durable rows that remain.
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"
+  - "/oeps/0007.1-omenative-coordinated-rollout"
+  - "/oeps/0007.3-bounded-scale-down"
+  - "/oeps/0007.4-inferencereplica-status-compaction"
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# The chart renders DenseV1. ColumnarV2 activation and its decode bound are
+# explicit in inferenceservice-config; the binary has no target or limit
+# default. Reverse conversion is conditional because DenseV1 can exceed the
+# API request limit after a fleet grows.
+feature-gates: []
+disable-supported: false
+
+metrics:
+  - ome_omenative_ir_status_bytes
+  - ome_omenative_ir_status_codec_errors_total
+  - ome_omenative_ir_status_conversions_total
+  - ome_omenative_ir_status_writes_total
