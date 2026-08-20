@@ -56,6 +56,10 @@ git clone --depth 1 --branch "$ARGO_GITOPS_BASE_BRANCH" \
   "$ARGO_GITOPS_REPO_URL" "$WORK_DIR/argo-gitops"
 git -C "$WORK_DIR/argo-gitops" switch -c "$PROMOTION_BRANCH"
 
+OLD_SHA="$(python3 "$OME_CHECKOUT/.buildkite/daily_gitops.py" \
+  --repo-root "$WORK_DIR/argo-gitops" \
+  --print-current-sha)"
+
 echo "--- pin the RC-tested OME release"
 python3 "$OME_CHECKOUT/.buildkite/daily_gitops.py" \
   --candidate "$CANDIDATE_FILE" \
@@ -109,6 +113,25 @@ SCHEDULER_VERSION="$(read_candidate_field charts ome-scheduler)"
 BUILD_URL="${BUILDKITE_BUILD_URL:-Buildkite build ${BUILDKITE_BUILD_NUMBER:-unknown}}"
 PR_TITLE="chore(ome): promote RC-tested release $SHORT_SHA"
 PR_BODY_FILE="$WORK_DIR/pr-body.md"
+OME_REPO="${OME_REPO:-mslsrc/ome}"
+OME_COMPARE_RESPONSE="$WORK_DIR/ome-compare.json"
+OME_COMPARE_CODE="$(curl -sS -o "$OME_COMPARE_RESPONSE" -w '%{http_code}' \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H 'Accept: application/vnd.github+json' \
+  "https://api.github.com/repos/$OME_REPO/compare/$OLD_SHA...$SHORT_SHA")"
+if [ "$OME_COMPARE_CODE" != "200" ]; then
+  cat "$OME_COMPARE_RESPONSE" >&2
+  echo "OME comparison lookup failed with HTTP $OME_COMPARE_CODE" >&2
+  exit 1
+fi
+CHANGESET_FILE="$WORK_DIR/changeset.md"
+python3 "$OME_CHECKOUT/.buildkite/daily_changeset.py" \
+  --comparison "$OME_COMPARE_RESPONSE" \
+  --output "$CHANGESET_FILE" \
+  --repository "$OME_REPO" \
+  --base-sha "$OLD_SHA" \
+  --head-sha "$SHORT_SHA"
+
 cat >"$PR_BODY_FILE" <<EOF
 ## Summary
 
@@ -121,6 +144,9 @@ Promote OME release \`$SHORT_SHA\` after it passed the daily RC smoke test.
 | ome-scheduler | \`$SCHEDULER_VERSION\` |
 
 The controller and omeAgent image tags are also pinned to \`$SHORT_SHA\` in both cluster overrides.
+EOF
+cat "$CHANGESET_FILE" >>"$PR_BODY_FILE"
+cat >>"$PR_BODY_FILE" <<EOF
 
 ## Clusters
 

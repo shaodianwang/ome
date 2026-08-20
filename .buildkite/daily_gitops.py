@@ -16,6 +16,14 @@ TARGETS = (
     Path("cluster/workload/msl-gcp-usc1-1-tpu/boostrap-override/values.yaml"),
     Path("cluster/workload/msl-gcp-usc1-2-tpu/boostrap-override/values.yaml"),
 )
+CURRENT_CONTROLLER_TAG_PATH = (
+    "apps",
+    "ome-resources",
+    "values",
+    "ome",
+    "controller",
+    "tag",
+)
 
 
 class CandidateError(ValueError):
@@ -75,6 +83,49 @@ def _find_key(
         if pattern.match(lines[index].rstrip("\r\n")):
             return index
     return None
+
+
+def _read_sha_scalar(text: str, path: tuple[str, ...]) -> str:
+    lines = text.splitlines(keepends=True)
+    start, end, parent_indent = 0, len(lines), -2
+    for key in path[:-1]:
+        key_indent = parent_indent + 2
+        key_index = _find_key(lines, start, end, key_indent, key, mapping=True)
+        if key_index is None:
+            raise CandidateError(f"GitOps value is missing {'.'.join(path)}")
+        start = key_index + 1
+        end = _block_end(lines, key_index)
+        parent_indent = key_indent
+
+    key = path[-1]
+    key_indent = parent_indent + 2
+    pattern = re.compile(
+        rf'^\s{{{key_indent}}}{re.escape(key)}:\s*["\']?'
+        rf'(?P<sha>[0-9a-f]{{7,64}})["\']?(?:\s+#.*)?$'
+    )
+    for index in range(start, end):
+        match = pattern.match(lines[index].rstrip("\r\n"))
+        if match:
+            return match.group("sha")
+    raise CandidateError(f"GitOps value is missing a valid {'.'.join(path)}")
+
+
+def current_release_sha(repo_root: Path) -> str:
+    """Return the OME controller SHA pinned across every promotion target."""
+
+    pins: dict[str, str] = {}
+    for relative_path in TARGETS:
+        path = repo_root / relative_path
+        if not path.is_file():
+            raise FileNotFoundError(f"GitOps target does not exist: {relative_path}")
+        text = path.read_text()
+        pins[str(relative_path)] = _read_sha_scalar(text, CURRENT_CONTROLLER_TAG_PATH)
+
+    unique = set(pins.values())
+    if len(unique) != 1:
+        details = ", ".join(f"{label}={sha}" for label, sha in pins.items())
+        raise CandidateError(f"GitOps OME controller pins disagree: {details}")
+    return unique.pop()
 
 
 def _ensure_mapping(lines: list[str], path: tuple[str, ...]) -> int:
@@ -152,9 +203,16 @@ def update_repo(repo_root: Path, candidate: dict[str, Any]) -> list[Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--candidate", required=True, type=Path)
+    parser.add_argument("--candidate", type=Path)
     parser.add_argument("--repo-root", required=True, type=Path)
+    parser.add_argument("--print-current-sha", action="store_true")
     args = parser.parse_args()
+
+    if args.print_current_sha:
+        print(current_release_sha(args.repo_root))
+        return
+    if args.candidate is None:
+        parser.error("--candidate is required unless --print-current-sha is set")
 
     candidate = json.loads(args.candidate.read_text())
     changed = update_repo(args.repo_root, candidate)
