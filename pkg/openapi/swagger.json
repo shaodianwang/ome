@@ -7,6 +7,480 @@
   },
   "paths": {},
   "definitions": {
+    "v1beta1.AcceleratorBudget": {
+      "description": "AcceleratorBudget is one node's allowance of one resource on one ResourceFlavor. Kueue quota is keyed by that pair, so both halves are needed: a flavor names a hardware class by node labels and says nothing about which resource the count applies to.\n\nAccelerators are the only budgeted dimension: cpu and memory are covered on the materialized ClusterQueue so Kueue admission never blocks on them, but they are not authored here.",
+      "type": "object",
+      "required": [
+        "resourceName",
+        "resourceFlavor",
+        "nominal"
+      ],
+      "properties": {
+        "borrowingLimit": {
+          "description": "BorrowingLimit is how far above its share this leaf may burst by borrowing idle sibling capacity, passed through to Kueue. Borrowing is cluster-local, so enabling it turns nominal from a fleet ceiling into a guaranteed floor plus reclaimable overage; the relaxed ceiling is reported in status. Leaves only.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "lendingLimit": {
+          "description": "LendingLimit is how much of this leaf's share siblings may borrow while it is idle, passed through to Kueue. It MUST NOT exceed the share Kueue sees. Leaves only.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "nominal": {
+          "description": "Nominal is the allowance for this flavor, in the plane's own terms: the fleet-wide total where the tree is authored, this cluster's resolved share on a projected copy. It becomes the ClusterQueue's nominalQuota.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "perCluster": {
+          "description": "PerCluster is the admin-authored split, required when the effective policy is Explicit and rejected otherwise. Entries MUST sum to Nominal. It is absent on a projected copy, which carries one already-resolved share rather than a fleet split.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorClusterShare"
+          },
+          "x-kubernetes-list-map-keys": [
+            "cluster"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "policy": {
+          "description": "Policy overrides the node's default split for this flavor only, so a leaf can be Explicit on a reserved flavor and Proportional on a fungible one. Leaves only.",
+          "type": "string"
+        },
+        "resourceFlavor": {
+          "description": "ResourceFlavor names an existing Kueue ResourceFlavor. OME references flavors and does not own node labeling; a flavor missing on a target cluster makes that cluster's ClusterQueue inactive, so the budget is not materialized there.",
+          "type": "string",
+          "default": ""
+        },
+        "resourceName": {
+          "description": "ResourceName is the Kubernetes resource this allowance counts, such as nvidia.com/gpu or google.com/tpu. It becomes the resource entry in the materialized ClusterQueue's resourceGroup. Which names are budgetable is operator config; the API accepts any qualified resource name.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.AcceleratorBudgetStatus": {
+      "description": "AcceleratorBudgetStatus is one (resource, flavor) pair's resolved allowance and observed use.",
+      "type": "object",
+      "required": [
+        "resourceName",
+        "resourceFlavor"
+      ],
+      "properties": {
+        "admitted": {
+          "description": "Admitted is the quantity of this flavor currently admitted against the materialized queues, including anything borrowed.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "borrowed": {
+          "description": "Borrowed is the admitted quantity above the nominal share, taken from idle siblings and reclaimable on contention.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "effectiveCeiling": {
+          "description": "EffectiveCeiling is the relaxed ceiling a bursting leaf can actually reach — nominal plus borrowable headroom, summed over the clusters it has a share on. Set only when a borrowingLimit is configured, so the shift from hard cap to floor-plus-overage is explicit rather than silent.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "nominal": {
+          "description": "Nominal is the resolved allowance for this plane: the fleet total where the tree is authored, this cluster's share on a projection.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "perCluster": {
+          "description": "PerCluster breaks the numbers above down by cluster. Populated where the tree is authored; empty on a projected copy, which knows only itself.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorClusterBudgetStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "cluster"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "resourceFlavor": {
+          "description": "ResourceFlavor is the flavor these numbers describe.",
+          "type": "string",
+          "default": ""
+        },
+        "resourceName": {
+          "description": "ResourceName is the resource these numbers describe.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.AcceleratorCapacityStatus": {
+      "description": "AcceleratorCapacityStatus is the observed physical capacity of one flavor, the denominator an admin reads a budget against. It is derived, never authored.",
+      "type": "object",
+      "required": [
+        "resourceName",
+        "resourceFlavor"
+      ],
+      "properties": {
+        "allocatable": {
+          "description": "Allocatable is the currently schedulable quantity: the flavor's resource summed over Ready, uncordoned nodes matching the flavor's node labels. Nodes that are NotReady or cordoned remain physical inventory but contribute no schedulable capacity.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "highWaterMark": {
+          "description": "HighWaterMark is the greatest Allocatable observed for this flavor. Budget checks compare against it rather than the instantaneous value, so capacity that shrinks — a drain, a cordon, a device-plugin restart — never marks a node Degraded. It is lowered only once the observed value stays below it by more than the configured hysteresis band.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "observedAt": {
+          "description": "ObservedAt is when Allocatable was last sampled.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "perCluster": {
+          "description": "PerCluster breaks capacity down by cluster on a management plane. Empty on a workload cluster, whose root reports only its own capacity.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorClusterCapacityStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "cluster"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "resourceFlavor": {
+          "description": "ResourceFlavor is the flavor these numbers describe.",
+          "type": "string",
+          "default": ""
+        },
+        "resourceName": {
+          "description": "ResourceName is the resource these numbers describe.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.AcceleratorClusterBudgetStatus": {
+      "description": "AcceleratorClusterBudgetStatus is one cluster's slice of a flavor's status.",
+      "type": "object",
+      "required": [
+        "cluster"
+      ],
+      "properties": {
+        "admitted": {
+          "description": "Admitted is the quantity admitted on this cluster, including borrowed.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "borrowed": {
+          "description": "Borrowed is the admitted quantity above this cluster's share.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "cluster": {
+          "description": "Cluster is the WorkloadCluster's name.",
+          "type": "string",
+          "default": ""
+        },
+        "nominal": {
+          "description": "Nominal is the share assigned to this cluster.",
+          "$ref": "#/definitions/resource.Quantity"
+        }
+      }
+    },
+    "v1beta1.AcceleratorClusterCapacityStatus": {
+      "description": "AcceleratorClusterCapacityStatus is one cluster's contribution to a flavor's observed capacity.",
+      "type": "object",
+      "required": [
+        "cluster"
+      ],
+      "properties": {
+        "allocatable": {
+          "description": "Allocatable is that cluster's schedulable quantity of the flavor.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "cluster": {
+          "description": "Cluster is the WorkloadCluster's name.",
+          "type": "string",
+          "default": ""
+        },
+        "highWaterMark": {
+          "description": "HighWaterMark is the greatest Allocatable observed on this cluster.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "observedAt": {
+          "description": "ObservedAt is when this cluster's value was last sampled. A stale stamp distinguishes \"capacity dropped\" from \"the cluster stopped reporting\".",
+          "$ref": "#/definitions/v1.Time"
+        }
+      }
+    },
+    "v1beta1.AcceleratorClusterShare": {
+      "description": "AcceleratorClusterShare is one cluster's slice of a flavor's budget.",
+      "type": "object",
+      "required": [
+        "cluster",
+        "nominal"
+      ],
+      "properties": {
+        "cluster": {
+          "description": "Cluster is the WorkloadCluster's name.",
+          "type": "string",
+          "default": ""
+        },
+        "nominal": {
+          "description": "Nominal is that cluster's share, and becomes the nominalQuota of the ClusterQueue materialized there.",
+          "$ref": "#/definitions/resource.Quantity"
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuota": {
+      "description": "AcceleratorQuota is one node of the fleet quota tree. Cluster-scoped: it is fleet-level capacity policy, not a namespaced workload.\n\nThe name-length rule is deliberately at the root rather than under spec: removecrdvalidation replaces only the spec and status schemas, so a root rule is the one structural check that also holds in the minimal CRD variant.",
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+          "type": "string"
+        },
+        "metadata": {
+          "default": {},
+          "$ref": "#/definitions/v1.ObjectMeta"
+        },
+        "spec": {
+          "default": {},
+          "$ref": "#/definitions/v1beta1.AcceleratorQuotaSpec"
+        },
+        "status": {
+          "default": {},
+          "$ref": "#/definitions/v1beta1.AcceleratorQuotaStatus"
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaClusterStatus": {
+      "description": "AcceleratorQuotaClusterStatus is one workload cluster's projection state, reported where the tree is authored.",
+      "type": "object",
+      "required": [
+        "cluster"
+      ],
+      "properties": {
+        "appliedGeneration": {
+          "description": "AppliedGeneration is the source generation this cluster's projection last carried. Behind metadata.generation means the update has not landed.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "appliedTime": {
+          "description": "AppliedTime is when the projection was last applied successfully.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "cluster": {
+          "description": "Cluster is the WorkloadCluster's name.",
+          "type": "string",
+          "default": ""
+        },
+        "materializedGeneration": {
+          "description": "MaterializedGeneration is the source generation this cluster has actually materialized, read back from the projection's status.sourceGeneration. Both it and AppliedGeneration count source revisions, so the pair is comparable: equal means caught up, lower means the remote controller has not yet rendered what was projected.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "message": {
+          "description": "Message explains why this cluster is behind.",
+          "type": "string"
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaDistribution": {
+      "description": "AcceleratorQuotaDistribution holds a node's default split policy. A struct rather than a bare field so future policy inputs attach to the policy they configure.",
+      "type": "object",
+      "properties": {
+        "policy": {
+          "description": "Policy is the default split for every budget on this node that does not override it.",
+          "type": "string"
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaList": {
+      "description": "AcceleratorQuotaList contains a list of AcceleratorQuota nodes. Listing the whole set is how the tree is assembled: the edges live in the CRs, not in a separate document.",
+      "type": "object",
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "apiVersion": {
+          "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorQuota"
+          }
+        },
+        "kind": {
+          "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+          "type": "string"
+        },
+        "metadata": {
+          "default": {},
+          "$ref": "#/definitions/v1.ListMeta"
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaMaterialization": {
+      "description": "AcceleratorQuotaMaterialization is the freeze bookkeeping that makes last-good behavior durable across controller restarts.",
+      "type": "object",
+      "properties": {
+        "frozen": {
+          "description": "Frozen reports that output is held at its last-good state because a computed invariant is violated. While frozen the controller writes no new projections or Kueue objects for this node, and deletes none; only explicit deletion of the CR reaps them.",
+          "type": "boolean"
+        },
+        "frozenAt": {
+          "description": "FrozenAt is when the freeze began.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "lastAppliedGeneration": {
+          "description": "LastAppliedGeneration is the spec generation the frozen output was built from, which is the state a reader is currently looking at.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "lastAppliedTime": {
+          "description": "LastAppliedTime is when that output was written.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "reason": {
+          "description": "Reason is the condition reason that caused the freeze, retained so the cause survives a later condition update.",
+          "type": "string"
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaParentRef": {
+      "description": "AcceleratorQuotaParentRef names the parent node by CR name. Nodes are cluster-scoped, so the name is globally unique and needs no namespace.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Name is the parent AcceleratorQuota's metadata.name.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaSpec": {
+      "description": "AcceleratorQuotaSpec is one node's declared position in the tree and, for a leaf, its budget.\n\nThe rules below are same-object shape checks only. Everything needing the rest of the tree — parent resolution, cycles, depth, containment, fleet-wide namespace uniqueness, role transitions — is enforced by the validating webhook at admission and re-checked by the controller at reconcile, which is the authority. Structural checks here are also stripped from the minimal CRD variant, so they are convenience, never the durable tier.",
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "budgets": {
+          "description": "Budgets is the per-flavor allowance, one entry per ResourceFlavor.\n\nOn a leaf this is the budget: the fleet-wide allowance where the tree is authored, that cluster's resolved share on a projected copy. On a Cohort node it is an authoring guardrail only — the parent number that parent \u003e= sum(children) is checked against. A grouping materializes as a Kueue Cohort with no resourceGroups, so a Cohort budget is never quota anyone can consume.\n\nCapped at the number of entries one Kueue resourceGroup accepts.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorBudget"
+          },
+          "x-kubernetes-list-map-keys": [
+            "resourceName",
+            "resourceFlavor"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "distribution": {
+          "description": "Distribution is this leaf's default split policy, overridable per budget entry. Unset means the operator-level default from the quota config applies; absent that too, the node reports Degraded rather than guessing.",
+          "$ref": "#/definitions/v1beta1.AcceleratorQuotaDistribution"
+        },
+        "namespaces": {
+          "description": "Namespaces are the serving namespaces this leaf binds. Each becomes one LocalQueue pointing at the leaf's ClusterQueue, on every cluster the leaf has a share on. A namespace belongs to exactly one leaf fleet-wide, or a workload in it has no single queue to charge.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "parentRef": {
+          "description": "ParentRef is the edge to this node's parent. Every node sets it except the single reserved root. It is mutable: re-parenting updates the materialized ClusterQueue's cohort in place, so the queue, its LocalQueues, and its admitted workloads all survive.",
+          "$ref": "#/definitions/v1beta1.AcceleratorQuotaParentRef"
+        },
+        "priorityTier": {
+          "description": "PriorityTier names the WorkloadPriorityClass stamped on this leaf's workloads. It is a default, not a partition: a workload declaring its own priority keeps it, and the leaf's ClusterQueue admits mixed priorities. OME references the class and does not create it. Capped at AcceleratorQuotaMaxNameLength because it is stamped into a label value.",
+          "type": "string"
+        },
+        "role": {
+          "description": "Role declares whether this node groups other nodes or is a leaf carrying the budget. A node is one or the other, never both. Changing it is admitted only under the drained-leaf / childless-grouping guard, because the change deletes the underlying Kueue object.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.AcceleratorQuotaStatus": {
+      "description": "AcceleratorQuotaStatus is the observed state of one node. The quota controller owning the plane is its sole writer.",
+      "type": "object",
+      "properties": {
+        "budgets": {
+          "description": "Budgets reports, per resource and flavor, the resolved allowance and the usage rolled up from the materialized ClusterQueues.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorBudgetStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "resourceName",
+            "resourceFlavor"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "capacity": {
+          "description": "Capacity is the observed accelerator capacity behind this tree, reported on the root node only. On a management plane it is the fleet view broken down per cluster; on a workload cluster it is that cluster's own derived capacity, which is the only thing the local controller writes on its root.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorCapacityStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "resourceName",
+            "resourceFlavor"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "clusters": {
+          "description": "Clusters reports per-cluster projection state on a management plane: which generation each workload cluster has, and why one is behind. Empty on a workload cluster, which projects nothing.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.AcceleratorQuotaClusterStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "cluster"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "conditions": {
+          "description": "Conditions reports Ready, Degraded, and Materialized.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1.Condition"
+          },
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map",
+          "x-kubernetes-patch-merge-key": "type",
+          "x-kubernetes-patch-strategy": "merge"
+        },
+        "materialization": {
+          "description": "Materialization records what this node last wrote successfully and whether that output is currently frozen. A frozen node keeps serving its last-good materialization; nothing is deleted while an invariant is violated.",
+          "$ref": "#/definitions/v1beta1.AcceleratorQuotaMaterialization"
+        },
+        "observedGeneration": {
+          "description": "ObservedGeneration is the metadata.generation the most recent status flush reflects.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "parent": {
+          "description": "Parent echoes the resolved parent's name, so a node's edge is readable from status alone once the controller has confirmed it resolves.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path is the computed root-to-node path, a node's human-readable identity. Materialized Kueue object names come from metadata.name instead, so re-parenting changes this and nothing else.",
+          "type": "string"
+        },
+        "sourceGeneration": {
+          "description": "SourceGeneration is the source CR's generation this node's materialization reflects, echoed from the projection annotation once the local controller has materialized it. Set only on a projected copy: it is what lets the management plane compare remote progress against what it projected, which object-local generations cannot express.",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
     "v1beta1.AnalysisMetric": {
       "description": "AnalysisMetric is one success condition: a PromQL query whose scalar result is compared against Threshold with Operator. A multi-series result is reduced to the worst series for the operator before comparison — the maximum for LT/LTE, the minimum for GT/GTE — so the metric passes only when every series passes.",
       "type": "object",

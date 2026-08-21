@@ -12,125 +12,945 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetric":                 schema_pkg_apis_ome_v1beta1_AnalysisMetric(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult":           schema_pkg_apis_ome_v1beta1_AnalysisMetricResult(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisPrometheus":             schema_pkg_apis_ome_v1beta1_AnalysisPrometheus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":               schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                      schema_pkg_apis_ome_v1beta1_BaseModel(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                  schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus":                   schema_pkg_apis_ome_v1beta1_CanaryStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement":             schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":               schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterConnectionSource":        schema_pkg_apis_ome_v1beta1_ClusterConnectionSource(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterProfileRef":              schema_pkg_apis_ome_v1beta1_ClusterProfileRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":          schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":      schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":            schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus":      schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":         schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":            schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":         schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":             schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing":             schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                    schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":         schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":          schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":           schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                     schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":                    schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":                schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":            schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":            schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupBlueGreen":                 schema_pkg_apis_ome_v1beta1_GroupBlueGreen(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupCanary":                    schema_pkg_apis_ome_v1beta1_GroupCanary(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupRollingUpdate":             schema_pkg_apis_ome_v1beta1_GroupRollingUpdate(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler":                  schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                     schema_pkg_apis_ome_v1beta1_HashCookie(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                     schema_pkg_apis_ome_v1beta1_HashHeader(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy":          schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica":               schema_pkg_apis_ome_v1beta1_InferenceReplica(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaList":           schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing":         schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec":           schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus":         schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":               schema_pkg_apis_ome_v1beta1_InferenceService(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":           schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":           schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":         schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":              schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusColumnEntry":      schema_pkg_apis_ome_v1beta1_InstanceStatusColumnEntry(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusColumns":          schema_pkg_apis_ome_v1beta1_InstanceStatusColumns(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusCountGroup":       schema_pkg_apis_ome_v1beta1_InstanceStatusCountGroup(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusInt64Group":       schema_pkg_apis_ome_v1beta1_InstanceStatusInt64Group(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusPhaseGroup":       schema_pkg_apis_ome_v1beta1_InstanceStatusPhaseGroup(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusStringGroup":      schema_pkg_apis_ome_v1beta1_InstanceStatusStringGroup(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination":            schema_pkg_apis_ome_v1beta1_InstanceTermination(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                 schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KubeConfigSource":               schema_pkg_apis_ome_v1beta1_KubeConfigSource(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus":                schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MaintainRatio":                  schema_pkg_apis_ome_v1beta1_MaintainRatio(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                 schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":          schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationStatus":                schema_pkg_apis_ome_v1beta1_MigrationStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":               schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                    schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":             schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":                    schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":             schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":                schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                       schema_pkg_apis_ome_v1beta1_ModelRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":            schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":             schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                    schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":                schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":                 schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":        schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec":                  schema_pkg_apis_ome_v1beta1_PlacementSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":             schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RetryBlock":                     schema_pkg_apis_ome_v1beta1_RetryBlock(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                  schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutAnalysis":                schema_pkg_apis_ome_v1beta1_RolloutAnalysis(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec":        schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":      schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroup":                   schema_pkg_apis_ome_v1beta1_RolloutGroup(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep":               schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                   schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                    schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                     schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                         schema_pkg_apis_ome_v1beta1_Runner(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                     schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef":                 schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy":                  schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                 schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":             schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":          schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":              schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":             schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":           schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec":                      schema_pkg_apis_ome_v1beta1_SplitSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                    schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":           schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":               schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                    schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":                  schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy":                 schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                     schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadCluster":                schema_pkg_apis_ome_v1beta1_WorkloadCluster(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterList":            schema_pkg_apis_ome_v1beta1_WorkloadClusterList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterSpec":            schema_pkg_apis_ome_v1beta1_WorkloadClusterSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterStatus":          schema_pkg_apis_ome_v1beta1_WorkloadClusterStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudget":                schema_pkg_apis_ome_v1beta1_AcceleratorBudget(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudgetStatus":          schema_pkg_apis_ome_v1beta1_AcceleratorBudgetStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityStatus":        schema_pkg_apis_ome_v1beta1_AcceleratorCapacityStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterBudgetStatus":   schema_pkg_apis_ome_v1beta1_AcceleratorClusterBudgetStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterCapacityStatus": schema_pkg_apis_ome_v1beta1_AcceleratorClusterCapacityStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterShare":          schema_pkg_apis_ome_v1beta1_AcceleratorClusterShare(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuota":                 schema_pkg_apis_ome_v1beta1_AcceleratorQuota(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaClusterStatus":    schema_pkg_apis_ome_v1beta1_AcceleratorQuotaClusterStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaDistribution":     schema_pkg_apis_ome_v1beta1_AcceleratorQuotaDistribution(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaList":             schema_pkg_apis_ome_v1beta1_AcceleratorQuotaList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaMaterialization":  schema_pkg_apis_ome_v1beta1_AcceleratorQuotaMaterialization(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaParentRef":        schema_pkg_apis_ome_v1beta1_AcceleratorQuotaParentRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaSpec":             schema_pkg_apis_ome_v1beta1_AcceleratorQuotaSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaStatus":           schema_pkg_apis_ome_v1beta1_AcceleratorQuotaStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetric":                   schema_pkg_apis_ome_v1beta1_AnalysisMetric(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult":             schema_pkg_apis_ome_v1beta1_AnalysisMetricResult(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisPrometheus":               schema_pkg_apis_ome_v1beta1_AnalysisPrometheus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":                 schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                        schema_pkg_apis_ome_v1beta1_BaseModel(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                    schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                    schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus":                     schema_pkg_apis_ome_v1beta1_CanaryStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement":               schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":                 schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":             schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterConnectionSource":          schema_pkg_apis_ome_v1beta1_ClusterConnectionSource(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterProfileRef":                schema_pkg_apis_ome_v1beta1_ClusterProfileRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":            schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":        schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":              schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus":        schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":           schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":              schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":           schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":               schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing":               schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                      schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":           schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":            schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":             schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                       schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":                      schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":                  schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":              schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":              schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupBlueGreen":                   schema_pkg_apis_ome_v1beta1_GroupBlueGreen(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupCanary":                      schema_pkg_apis_ome_v1beta1_GroupCanary(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupRollingUpdate":               schema_pkg_apis_ome_v1beta1_GroupRollingUpdate(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler":                    schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                       schema_pkg_apis_ome_v1beta1_HashCookie(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                       schema_pkg_apis_ome_v1beta1_HashHeader(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy":            schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica":                 schema_pkg_apis_ome_v1beta1_InferenceReplica(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaList":             schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing":           schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec":             schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus":           schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":                 schema_pkg_apis_ome_v1beta1_InferenceService(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":             schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":             schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":           schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":                schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusColumnEntry":        schema_pkg_apis_ome_v1beta1_InstanceStatusColumnEntry(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusColumns":            schema_pkg_apis_ome_v1beta1_InstanceStatusColumns(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusCountGroup":         schema_pkg_apis_ome_v1beta1_InstanceStatusCountGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusInt64Group":         schema_pkg_apis_ome_v1beta1_InstanceStatusInt64Group(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusPhaseGroup":         schema_pkg_apis_ome_v1beta1_InstanceStatusPhaseGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusStringGroup":        schema_pkg_apis_ome_v1beta1_InstanceStatusStringGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination":              schema_pkg_apis_ome_v1beta1_InstanceTermination(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                   schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KubeConfigSource":                 schema_pkg_apis_ome_v1beta1_KubeConfigSource(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                       schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                    schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus":                  schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MaintainRatio":                    schema_pkg_apis_ome_v1beta1_MaintainRatio(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                   schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":            schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                  schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationStatus":                  schema_pkg_apis_ome_v1beta1_MigrationStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":                 schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                      schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":               schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":                      schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":               schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":                  schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                         schema_pkg_apis_ome_v1beta1_ModelRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":              schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":               schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                      schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":                  schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":                   schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":          schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                  schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                  schema_pkg_apis_ome_v1beta1_ParentReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec":                    schema_pkg_apis_ome_v1beta1_PlacementSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                  schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                          schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":               schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RetryBlock":                       schema_pkg_apis_ome_v1beta1_RetryBlock(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                    schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutAnalysis":                  schema_pkg_apis_ome_v1beta1_RolloutAnalysis(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":         schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus":   schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":         schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec":          schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":        schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroup":                     schema_pkg_apis_ome_v1beta1_RolloutGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep":                 schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                     schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                      schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                       schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                           schema_pkg_apis_ome_v1beta1_Runner(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                       schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef":                   schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy":                    schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                   schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":               schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":            schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":                schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":               schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":             schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec":                        schema_pkg_apis_ome_v1beta1_SplitSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                      schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":             schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":                 schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                      schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":                    schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy":                   schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                       schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadCluster":                  schema_pkg_apis_ome_v1beta1_WorkloadCluster(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterList":              schema_pkg_apis_ome_v1beta1_WorkloadClusterList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterSpec":              schema_pkg_apis_ome_v1beta1_WorkloadClusterSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterStatus":            schema_pkg_apis_ome_v1beta1_WorkloadClusterStatus(ref),
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorBudget(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorBudget is one node's allowance of one resource on one ResourceFlavor. Kueue quota is keyed by that pair, so both halves are needed: a flavor names a hardware class by node labels and says nothing about which resource the count applies to.\n\nAccelerators are the only budgeted dimension: cpu and memory are covered on the materialized ClusterQueue so Kueue admission never blocks on them, but they are not authored here.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"resourceName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceName is the Kubernetes resource this allowance counts, such as nvidia.com/gpu or google.com/tpu. It becomes the resource entry in the materialized ClusterQueue's resourceGroup. Which names are budgetable is operator config; the API accepts any qualified resource name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"resourceFlavor": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceFlavor names an existing Kueue ResourceFlavor. OME references flavors and does not own node labeling; a flavor missing on a target cluster makes that cluster's ClusterQueue inactive, so the budget is not materialized there.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"policy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Policy overrides the node's default split for this flavor only, so a leaf can be Explicit on a reserved flavor and Proportional on a fungible one. Leaves only.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"nominal": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Nominal is the allowance for this flavor, in the plane's own terms: the fleet-wide total where the tree is authored, this cluster's resolved share on a projected copy. It becomes the ClusterQueue's nominalQuota.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"borrowingLimit": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BorrowingLimit is how far above its share this leaf may burst by borrowing idle sibling capacity, passed through to Kueue. Borrowing is cluster-local, so enabling it turns nominal from a fleet ceiling into a guaranteed floor plus reclaimable overage; the relaxed ceiling is reported in status. Leaves only.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"lendingLimit": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LendingLimit is how much of this leaf's share siblings may borrow while it is idle, passed through to Kueue. It MUST NOT exceed the share Kueue sees. Leaves only.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"perCluster": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"cluster",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PerCluster is the admin-authored split, required when the effective policy is Explicit and rejected otherwise. Entries MUST sum to Nominal. It is absent on a projected copy, which carries one already-resolved share rather than a fleet split.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterShare"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"resourceName", "resourceFlavor", "nominal"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterShare", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorBudgetStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorBudgetStatus is one (resource, flavor) pair's resolved allowance and observed use.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"resourceName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceName is the resource these numbers describe.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"resourceFlavor": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceFlavor is the flavor these numbers describe.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"nominal": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Nominal is the resolved allowance for this plane: the fleet total where the tree is authored, this cluster's share on a projection.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"effectiveCeiling": {
+						SchemaProps: spec.SchemaProps{
+							Description: "EffectiveCeiling is the relaxed ceiling a bursting leaf can actually reach — nominal plus borrowable headroom, summed over the clusters it has a share on. Set only when a borrowingLimit is configured, so the shift from hard cap to floor-plus-overage is explicit rather than silent.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"admitted": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Admitted is the quantity of this flavor currently admitted against the materialized queues, including anything borrowed.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"borrowed": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Borrowed is the admitted quantity above the nominal share, taken from idle siblings and reclaimable on contention.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"perCluster": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"cluster",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PerCluster breaks the numbers above down by cluster. Populated where the tree is authored; empty on a projected copy, which knows only itself.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterBudgetStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"resourceName", "resourceFlavor"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterBudgetStatus", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorCapacityStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorCapacityStatus is the observed physical capacity of one flavor, the denominator an admin reads a budget against. It is derived, never authored.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"resourceName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceName is the resource these numbers describe.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"resourceFlavor": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceFlavor is the flavor these numbers describe.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"allocatable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Allocatable is the currently schedulable quantity: the flavor's resource summed over Ready, uncordoned nodes matching the flavor's node labels. Nodes that are NotReady or cordoned remain physical inventory but contribute no schedulable capacity.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"highWaterMark": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HighWaterMark is the greatest Allocatable observed for this flavor. Budget checks compare against it rather than the instantaneous value, so capacity that shrinks — a drain, a cordon, a device-plugin restart — never marks a node Degraded. It is lowered only once the observed value stays below it by more than the configured hysteresis band.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"observedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedAt is when Allocatable was last sampled.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"perCluster": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"cluster",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "PerCluster breaks capacity down by cluster on a management plane. Empty on a workload cluster, whose root reports only its own capacity.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterCapacityStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"resourceName", "resourceFlavor"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterCapacityStatus", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorClusterBudgetStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorClusterBudgetStatus is one cluster's slice of a flavor's status.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the WorkloadCluster's name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"nominal": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Nominal is the share assigned to this cluster.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"admitted": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Admitted is the quantity admitted on this cluster, including borrowed.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"borrowed": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Borrowed is the admitted quantity above this cluster's share.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+				},
+				Required: []string{"cluster"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorClusterCapacityStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorClusterCapacityStatus is one cluster's contribution to a flavor's observed capacity.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the WorkloadCluster's name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"allocatable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Allocatable is that cluster's schedulable quantity of the flavor.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"highWaterMark": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HighWaterMark is the greatest Allocatable observed on this cluster.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"observedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedAt is when this cluster's value was last sampled. A stale stamp distinguishes \"capacity dropped\" from \"the cluster stopped reporting\".",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+				},
+				Required: []string{"cluster"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorClusterShare(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorClusterShare is one cluster's slice of a flavor's budget.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the WorkloadCluster's name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"nominal": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Nominal is that cluster's share, and becomes the nominalQuota of the ClusterQueue materialized there.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+				},
+				Required: []string{"cluster", "nominal"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuota(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuota is one node of the fleet quota tree. Cluster-scoped: it is fleet-level capacity policy, not a namespaced workload.\n\nThe name-length rule is deliberately at the root rather than under spec: removecrdvalidation replaces only the spec and status schemas, so a root rule is the one structural check that also holds in the minimal CRD variant.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaSpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaStatus"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaClusterStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaClusterStatus is one workload cluster's projection state, reported where the tree is authored.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the WorkloadCluster's name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"appliedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AppliedGeneration is the source generation this cluster's projection last carried. Behind metadata.generation means the update has not landed.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"appliedTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AppliedTime is when the projection was last applied successfully.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"materializedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaterializedGeneration is the source generation this cluster has actually materialized, read back from the projection's status.sourceGeneration. Both it and AppliedGeneration count source revisions, so the pair is comparable: equal means caught up, lower means the remote controller has not yet rendered what was projected.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Message explains why this cluster is behind.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"cluster"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaDistribution(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaDistribution holds a node's default split policy. A struct rather than a bare field so future policy inputs attach to the policy they configure.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"policy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Policy is the default split for every budget on this node that does not override it.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaList contains a list of AcceleratorQuota nodes. Listing the whole set is how the tree is assembled: the edges live in the CRs, not in a separate document.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuota"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuota", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaMaterialization(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaMaterialization is the freeze bookkeeping that makes last-good behavior durable across controller restarts.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"frozen": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Frozen reports that output is held at its last-good state because a computed invariant is violated. While frozen the controller writes no new projections or Kueue objects for this node, and deletes none; only explicit deletion of the CR reaps them.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"frozenAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FrozenAt is when the freeze began.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is the condition reason that caused the freeze, retained so the cause survives a later condition update.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"lastAppliedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastAppliedGeneration is the spec generation the frozen output was built from, which is the state a reader is currently looking at.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"lastAppliedTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastAppliedTime is when that output was written.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaParentRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaParentRef names the parent node by CR name. Nodes are cluster-scoped, so the name is globally unique and needs no namespace.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the parent AcceleratorQuota's metadata.name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaSpec is one node's declared position in the tree and, for a leaf, its budget.\n\nThe rules below are same-object shape checks only. Everything needing the rest of the tree — parent resolution, cycles, depth, containment, fleet-wide namespace uniqueness, role transitions — is enforced by the validating webhook at admission and re-checked by the controller at reconcile, which is the authority. Structural checks here are also stripped from the minimal CRD variant, so they are convenience, never the durable tier.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"role": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Role declares whether this node groups other nodes or is a leaf carrying the budget. A node is one or the other, never both. Changing it is admitted only under the drained-leaf / childless-grouping guard, because the change deletes the underlying Kueue object.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"parentRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ParentRef is the edge to this node's parent. Every node sets it except the single reserved root. It is mutable: re-parenting updates the materialized ClusterQueue's cohort in place, so the queue, its LocalQueues, and its admitted workloads all survive.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaParentRef"),
+						},
+					},
+					"namespaces": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Namespaces are the serving namespaces this leaf binds. Each becomes one LocalQueue pointing at the leaf's ClusterQueue, on every cluster the leaf has a share on. A namespace belongs to exactly one leaf fleet-wide, or a workload in it has no single queue to charge.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"priorityTier": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PriorityTier names the WorkloadPriorityClass stamped on this leaf's workloads. It is a default, not a partition: a workload declaring its own priority keeps it, and the leaf's ClusterQueue admits mixed priorities. OME references the class and does not create it. Capped at AcceleratorQuotaMaxNameLength because it is stamped into a label value.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"distribution": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Distribution is this leaf's default split policy, overridable per budget entry. Unset means the operator-level default from the quota config applies; absent that too, the node reports Degraded rather than guessing.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaDistribution"),
+						},
+					},
+					"budgets": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"resourceName",
+									"resourceFlavor",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Budgets is the per-flavor allowance, one entry per ResourceFlavor.\n\nOn a leaf this is the budget: the fleet-wide allowance where the tree is authored, that cluster's resolved share on a projected copy. On a Cohort node it is an authoring guardrail only — the parent number that parent >= sum(children) is checked against. A grouping materializes as a Kueue Cohort with no resourceGroups, so a Cohort budget is never quota anyone can consume.\n\nCapped at the number of entries one Kueue resourceGroup accepts.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudget"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"role"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaDistribution", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaParentRef"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AcceleratorQuotaStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorQuotaStatus is the observed state of one node. The quota controller owning the plane is its sole writer.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the metadata.generation the most recent status flush reflects.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"parent": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Parent echoes the resolved parent's name, so a node's edge is readable from status alone once the controller has confirmed it resolves.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"path": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Path is the computed root-to-node path, a node's human-readable identity. Materialized Kueue object names come from metadata.name instead, so re-parenting changes this and nothing else.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"sourceGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SourceGeneration is the source CR's generation this node's materialization reflects, echoed from the projection annotation once the local controller has materialized it. Set only on a projected copy: it is what lets the management plane compare remote progress against what it projected, which object-local generations cannot express.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"budgets": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"resourceName",
+									"resourceFlavor",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Budgets reports, per resource and flavor, the resolved allowance and the usage rolled up from the materialized ClusterQueues.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudgetStatus"),
+									},
+								},
+							},
+						},
+					},
+					"capacity": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"resourceName",
+									"resourceFlavor",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Capacity is the observed accelerator capacity behind this tree, reported on the root node only. On a management plane it is the fleet view broken down per cluster; on a workload cluster it is that cluster's own derived capacity, which is the only thing the local controller writes on its root.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityStatus"),
+									},
+								},
+							},
+						},
+					},
+					"clusters": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"cluster",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Clusters reports per-cluster projection state on a management plane: which generation each workload cluster has, and why one is behind. Empty on a workload cluster, which projects nothing.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaClusterStatus"),
+									},
+								},
+							},
+						},
+					},
+					"materialization": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Materialization records what this node last wrote successfully and whether that output is currently frozen. A frozen node keeps serving its last-good materialization; nothing is deleted while an invariant is violated.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaMaterialization"),
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type":       "map",
+								"x-kubernetes-patch-merge-key": "type",
+								"x-kubernetes-patch-strategy":  "merge",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions reports Ready, Degraded, and Materialized.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudgetStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaClusterStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorQuotaMaterialization", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 

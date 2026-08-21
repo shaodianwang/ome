@@ -91,7 +91,7 @@ Four concrete failure modes, each anchored to current code:
    binding, no hierarchy — the "tenant" is whatever `LocalQueue` the string
    happens to name. Priority is a single hard-coded class,
    `DedicatedAiClusterPreemptionWorkloadPriorityClass = "kueue-scheduling-high-priority"`
-   (`constants.go:210`), applied uniformly — which also violates the repo's
+   (`constants.go:231`), applied uniformly — which also violates the repo's
    no-magic-values rule.
 
 3. **No global budget in multi-cluster.** Placement fans an ISVC out to
@@ -183,18 +183,19 @@ verify it at admission (see *Assembling the tree*). Sketch (full schema in Desig
 Details):
 
 ```yaml
-# an internal node: a grouping Cohort, optionally with borrowable headroom
+# an internal node: a grouping Cohort holding the number its children must fit in
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata: {name: org}                      # this node's identity; children target it by name
 spec:
   role: Cohort                             # grouping node
   parentRef: {name: root}                  # top-tier grouping under the reserved fleet root
-  budgets:                                 # optional headroom, borrowable by children
-    - resourceFlavor: gb300
+  budgets:                                 # authoring guardrail; never materialized
+    - resourceName: nvidia.com/gpu
+      resourceFlavor: gb300
       nominal: 100
 ---
-# a leaf node: binds namespaces, carries the per-flavor budget (ClusterQueue)
+# a leaf node: binds namespaces, carries the budget (ClusterQueue)
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata: {name: team-a}
@@ -206,8 +207,9 @@ spec:
   distribution:
     policy: Proportional                   # this node's default; Explicit = admin sets perCluster
   budgets:
-    - resourceFlavor: gb300
-      policy: Explicit                     # optional; overrides this node's default for one flavor
+    - resourceName: nvidia.com/gpu         # the resource the count applies to
+      resourceFlavor: gb300                # the hardware class it applies on
+      policy: Explicit                     # optional; overrides this node's default for one entry
       nominal: 60                          # global allowance; split follows the policy
       borrowingLimit: 16                   # optional; burst up (Kueue borrowingLimit)
       lendingLimit: 20                     # optional; release when idle (Kueue lendingLimit)
@@ -216,8 +218,9 @@ spec:
         - {cluster: cluster-b, nominal: 24}
 status:
   parent: org
-  resourceFlavors:
-    - {resourceFlavor: gb300, nominal: 60, admitted: 44, borrowed: 4,
+  budgets:
+    - {resourceName: nvidia.com/gpu, resourceFlavor: gb300, nominal: 60,
+       admitted: 44, borrowed: 4,
        perCluster: [{cluster: cluster-a, nominal: 36, admitted: 30}, ...]}
 ```
 
@@ -366,13 +369,16 @@ the tree is authorable and checkable as a whole.
   capacity per flavor from each `WorkloadCluster` (a snapshot — see below). There
   is no single fleet-wide default object; each node states its policy and the
   webhook defaults an unset value.
-- `spec.budgets[] {resourceFlavor, policy?, nominal, borrowingLimit?, lendingLimit?,
-  perCluster?}` — the per-flavor allowance. `resourceFlavor` references an existing Kueue
-  `ResourceFlavor` by name (OME does not own node labeling, Open Question #4). An
-  optional per-entry `policy` overrides the node default at **`(node, flavor)`**
-  granularity — the same granularity as `perCluster` — so a leaf can be `Explicit`
-  on a reserved flavor and `Proportional` on a fungible one. `perCluster[]
-  {cluster, nominal}` is required iff the entry's effective policy is `Explicit`.
+- `spec.budgets[] {resourceName, resourceFlavor, policy?, nominal, borrowingLimit?,
+  lendingLimit?, perCluster?}` — the allowance for one `(resource, flavor)` pair,
+  which is how Kueue keys quota. `resourceName` is the Kubernetes resource the
+  count applies to (e.g. `google.com/tpu`); `resourceFlavor` references an existing
+  Kueue `ResourceFlavor` by name (OME does not own node labeling, Open Question
+  #4). An optional per-entry `policy` overrides the node default at
+  **`(node, resource, flavor)`** granularity — the same granularity as
+  `perCluster` — so a leaf can be `Explicit` on a reserved flavor and
+  `Proportional` on a fungible one. `perCluster[] {cluster, nominal}` is required
+  iff the entry's effective policy is `Explicit`, and rejected otherwise.
 - `status` reports `parent`, `path` (the computed root-to-node path, for humans),
   observed `admitted`/`borrowed` per flavor and per
   cluster (rolled up from each cluster's `ClusterQueue.status`), and conditions
@@ -391,8 +397,11 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
   node, or any node other than `root` created without a `parentRef`, is rejected.
   `root` is authored like any other node and its per-flavor `nominal` is the
   fleet-wide total, so containment chains top to bottom: `root` ≥ Σ top-tier ≥ … ≥
-  the leaves (a parent's `nominal` per flavor MUST be ≥ the sum of its children's —
-  the standard hierarchical-quota invariant).
+  the leaves (a parent's `nominal` per `(resource, flavor)` MUST be ≥ the sum of
+  its children's — the standard hierarchical-quota invariant). This is an
+  **authoring** invariant: it is rejected at admission and re-checked at
+  reconcile, but nothing below the budget enforces it at runtime, because Kueue
+  cohort quota is additive (see *Budget → Kueue mapping*).
 - **Identity.** A node is identified by its CR `metadata.name`, which is globally
   unique because `AcceleratorQuota` is cluster-scoped — and that name is what the
   distributor uses for the materialized Kueue object. Its **path from the root** is
@@ -424,8 +433,11 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
   `ClusterQueue`s cannot have child `ClusterQueue`s. `spec.role` **declares** which,
   and the webhook validates the structure against it rather than inferring kind
   from whether children happen to exist:
-  - `role: Cohort` MAY carry `budgets` (headroom, borrowable down the tree) but
-    MUST NOT carry `namespaces`/`priorityTier` — no workload binds to a `Cohort`.
+  - `role: Cohort` MAY carry `budgets` — the parent number containment is checked
+    against, an authoring guardrail that never materializes (see *Budget → Kueue
+    mapping*) — but MUST NOT carry `namespaces`/`priorityTier`, since no workload
+    binds to a `Cohort`, nor `borrowingLimit`/`lendingLimit`, which have no
+    meaning on a quota that is never materialized.
   - `role: ClusterQueue` MUST carry ≥1 resourceFlavor budget and MUST NOT be named as any other
     node's `parentRef`. **Adding a child under a `ClusterQueue` node is rejected**; to
     place workloads at a grouping level, add an explicit `ClusterQueue` leaf child under
@@ -454,14 +466,32 @@ The concrete translation:
 
 | AcceleratorQuota | Kueue object |
 |---|---|
-| `role: Cohort` node | `Cohort` (`spec.parentName` = `parentRef.name`) |
-| `role: ClusterQueue` node | `ClusterQueue` (`spec.cohortName` = `parentRef.name`) |
-| per-`(node, flavor)` per-cluster `share.nominal` | `ClusterQueue` resourceFlavor `nominalQuota` |
-| node `borrowingLimit` | `ClusterQueue` resourceFlavor `borrowingLimit` (burst up, within-cluster cohort borrow) |
-| node `lendingLimit` | `ClusterQueue` resourceFlavor `lendingLimit` (share released to siblings when idle) |
-| internal-node per-flavor headroom | `Cohort` resourceFlavor `nominalQuota` + `borrowingLimit`/`lendingLimit` |
+| `role: Cohort` node | `Cohort` (`v1alpha1`; `spec.parent` = `parentRef.name`), **no `resourceGroups`** |
+| `role: ClusterQueue` node | `ClusterQueue` (`spec.cohort` = `parentRef.name`) |
+| per-`(node, resource, flavor)` per-cluster `share.nominal` | `ClusterQueue` `resourceGroups[].flavors[].resources[].nominalQuota` |
+| node `borrowingLimit` | `ClusterQueue` resource `borrowingLimit` (burst up, within-cluster cohort borrow) |
+| node `lendingLimit` | `ClusterQueue` resource `lendingLimit` (share released to siblings when idle) |
+| internal-node per-flavor budget | **nothing** — an authoring guardrail only, see below |
 | leaf `namespaces[]` | `LocalQueue` per namespace, `spec.clusterQueue` = leaf CQ |
 | `priorityTier` | referenced `WorkloadPriorityClass` |
+
+**Internal-node budgets do not materialize, and containment is not enforced by
+Kueue.** Kueue's cohort quota is *additive*, not a ceiling: `SubtreeQuota` is
+"the sum of the node's quota, as well as resources available from its children"
+(`pkg/cache/resource_node.go`). Giving a `Cohort` its own `nominalQuota` would
+therefore *add* to what its children already contribute — an `org` of 100 over
+leaves of 60 + 40 would admit 200, the opposite of the cap an admin authored. A
+`Cohort` node's `budgets` are consequently an **authoring guardrail** — the number
+`parent ≥ Σ children` is checked against at admission — with **no runtime
+enforcement**, and internal nodes materialize as `Cohort` objects carrying no
+`resourceGroups` (pure topology, which still pools what children lend). The only
+enforced ceiling is the sum of leaf `nominalQuota` + `borrowingLimit`.
+
+Quota is keyed by **`(resource, flavor)`**, not by flavor alone: a
+`ResourceFlavor` names a hardware class by node labels and says nothing about
+which resource a count applies to, while Kueue's `ClusterQueue` pairs
+`coveredResources` with per-flavor `resources[].name`. A budget entry therefore
+carries both `resourceName` (e.g. `google.com/tpu`) and `resourceFlavor`.
 
 Materialized object names come from the node's CR `metadata.name` (globally unique,
 and stable across re-parenting), never from its position in the tree.

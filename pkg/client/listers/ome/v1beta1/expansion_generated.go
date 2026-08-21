@@ -2,6 +2,10 @@
 
 package v1beta1
 
+// AcceleratorQuotaListerExpansion allows custom methods to be added to
+// AcceleratorQuotaLister.
+type AcceleratorQuotaListerExpansion interface{}
+
 // BaseModelListerExpansion allows custom methods to be added to
 // BaseModelLister.
 type BaseModelListerExpansion interface{}

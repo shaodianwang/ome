@@ -2,6 +2,8 @@
 
 package v1beta1
 
+type AcceleratorQuotaExpansion interface{}
+
 type BaseModelExpansion interface{}
 
 type ClusterBaseModelExpansion interface{}

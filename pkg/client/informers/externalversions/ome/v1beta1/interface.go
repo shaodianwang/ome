@@ -8,6 +8,8 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
+	// AcceleratorQuotas returns a AcceleratorQuotaInformer.
+	AcceleratorQuotas() AcceleratorQuotaInformer
 	// BaseModels returns a BaseModelInformer.
 	BaseModels() BaseModelInformer
 	// ClusterBaseModels returns a ClusterBaseModelInformer.
@@ -35,6 +37,11 @@ type version struct {
 // New returns a new Interface.
 func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+}
+
+// AcceleratorQuotas returns a AcceleratorQuotaInformer.
+func (v *version) AcceleratorQuotas() AcceleratorQuotaInformer {
+	return &acceleratorQuotaInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // BaseModels returns a BaseModelInformer.
