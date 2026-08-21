@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin an RC-tested OME candidate in the two production GKE overrides."""
+"""Pin an RC-tested OME candidate in the production GKE overrides."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from daily_candidate import CHARTS, IMAGES, SHA_RE, parse_chart_version
 TARGETS = (
     Path("cluster/workload/msl-gcp-usc1-1-tpu/boostrap-override/values.yaml"),
     Path("cluster/workload/msl-gcp-usc1-2-tpu/boostrap-override/values.yaml"),
+    Path("cluster/workload/msl-gcp-usc1-3-tpu/boostrap-override/values.yaml"),
 )
 CURRENT_CONTROLLER_TAG_PATH = (
     "apps",

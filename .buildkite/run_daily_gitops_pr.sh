@@ -72,7 +72,8 @@ fi
 
 TARGET_ONE='cluster/workload/msl-gcp-usc1-1-tpu/boostrap-override/values.yaml'
 TARGET_TWO='cluster/workload/msl-gcp-usc1-2-tpu/boostrap-override/values.yaml'
-EXPECTED_PATHS="$(printf '%s\n%s' "$TARGET_ONE" "$TARGET_TWO")"
+TARGET_THREE='cluster/workload/msl-gcp-usc1-3-tpu/boostrap-override/values.yaml'
+EXPECTED_PATHS="$(printf '%s\n%s\n%s' "$TARGET_ONE" "$TARGET_TWO" "$TARGET_THREE")"
 ACTUAL_PATHS="$(git -C "$WORK_DIR/argo-gitops" diff --name-only | sort)"
 if [ "$ACTUAL_PATHS" != "$EXPECTED_PATHS" ]; then
   echo "unexpected GitOps paths changed:" >&2
@@ -84,7 +85,7 @@ git -C "$WORK_DIR/argo-gitops" diff --stat
 
 git -C "$WORK_DIR/argo-gitops" config user.name "OME RC release bot"
 git -C "$WORK_DIR/argo-gitops" config user.email "ome-rc-release-bot@users.noreply.github.com"
-git -C "$WORK_DIR/argo-gitops" add -- "$TARGET_ONE" "$TARGET_TWO"
+git -C "$WORK_DIR/argo-gitops" add -- "$TARGET_ONE" "$TARGET_TWO" "$TARGET_THREE"
 git -C "$WORK_DIR/argo-gitops" commit \
   -m "chore(ome): promote RC-tested release $SHORT_SHA"
 
@@ -143,7 +144,7 @@ Promote OME release \`$SHORT_SHA\` after it passed the daily RC smoke test.
 | ome-resources | \`$RESOURCES_VERSION\` |
 | ome-scheduler | \`$SCHEDULER_VERSION\` |
 
-The controller and omeAgent image tags are also pinned to \`$SHORT_SHA\` in both cluster overrides.
+The controller and omeAgent image tags are also pinned to \`$SHORT_SHA\` in all three cluster overrides.
 EOF
 cat "$CHANGESET_FILE" >>"$PR_BODY_FILE"
 cat >>"$PR_BODY_FILE" <<EOF
@@ -152,6 +153,7 @@ cat >>"$PR_BODY_FILE" <<EOF
 
 - \`msl-gcp-usc1-1-tpu\`
 - \`msl-gcp-usc1-2-tpu\`
+- \`msl-gcp-usc1-3-tpu\`
 
 ## Validation
 
