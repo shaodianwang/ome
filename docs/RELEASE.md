@@ -37,6 +37,7 @@ Built by the `build-<name>` steps and mirrored to prod by `mirror-<name>`:
 | `ome-agent` | `dockerfiles/ome-agent.Dockerfile` | `msl_infra/ome-agent` |
 | `muse-server` | `dockerfiles/muse-server.Dockerfile` | `msl_infra/muse-server` |
 | `ome-scheduler` | `dockerfiles/ome-scheduler.Dockerfile` | `msl_infra/ome-scheduler` |
+| `ome-quota-manager` | `dockerfiles/ome-quota-manager.Dockerfile` | `msl_infra/ome-quota-manager` |
 | `canary-metrics` | `dockerfiles/canary-metrics.Dockerfile` | `msl_infra/canary-metrics` |
 
 - **Tags:** each image is pushed as `latest` **and** `<shortSHA>`
@@ -49,14 +50,17 @@ Built by the `build-<name>` steps and mirrored to prod by `mirror-<name>`:
 ### Charts
 
 Packaged and pushed by `.buildkite/push_chart.sh` (`push-chart-<name>` steps):
-`ome-crd`, `ome-resources`, `ome-isvc`, `muse`, `ome-scheduler`.
+`ome-crd`, `ome-resources`, `ome-isvc`, `muse`, `ome-scheduler`, `ome-quota-manager`.
 
 - **Chart version:** `1.0.0-<UTCtimestamp>.<shortSHA>` (stamped into `Chart.yaml`).
-- **Self-pinning:** at package time the `ome-resources`, `ome-scheduler`, and
-  `muse` charts stamp their `values.yaml` so `global.hub` points at the **prod
-  ECR** and the image `tag`/`version` is that same `<shortSHA>`. A published
-  chart therefore already references its own matching images — GitOps needs no
-  separate image override if it pins the chart version.
+- **Self-pinning:** at package time the `ome-resources`, `ome-scheduler`, `muse`,
+  and `ome-quota-manager` charts stamp their `values.yaml` so `global.hub` points
+  at the **prod ECR** and the image `tag`/`version` is that same `<shortSHA>`. A
+  published chart therefore already references its own matching images — GitOps
+  needs no separate image override if it pins the chart version. A chart that
+  ships an image and is *not* on this list publishes an unqualified reference
+  that resolves to Docker Hub, so add new ones here and in `push_chart.sh`
+  together.
 - Pushed to `oci://<ecr>/msl_infra/ome-charts` (both dev and prod ECR).
 
 ### Registries

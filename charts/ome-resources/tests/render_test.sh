@@ -144,3 +144,14 @@ without_size_retention="$("${helm_bin}" template ome-resources "${chart_dir}" \
 if grep -Fq -- '--storage.tsdb.retention.size=' <<<"${without_size_retention}"; then
   fail "Prometheus size retention was rendered when disabled"
 fi
+
+# The fleet-quota controller lives under pkg/controller/v1beta1/acceleratorquota,
+# inside the tree controller-gen scans, but it runs in ome-quota-manager with its
+# own ServiceAccount. A +kubebuilder:rbac marker added there would regenerate
+# role.yaml, pass the manifests-drift gate once committed, and silently hand
+# ome-manager the quota plane's permissions — eventually cluster-wide write on
+# Kueue's ClusterQueue and Cohort, on the ServiceAccount that also runs the
+# fail-closed pod mutating webhook.
+if grep -Fq 'acceleratorquotas' <<<"${rendered}"; then
+  fail "quota RBAC leaked into the ome-manager role; it belongs to charts/ome-quota-manager"
+fi

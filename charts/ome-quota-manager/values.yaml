@@ -1,0 +1,123 @@
+# Default values for ome-quota-manager.
+
+global:
+  # Optional registry prefix applied to image repositories that don't already
+  # contain a '/'. Matches the ome-resources and ome-scheduler convention.
+  hub: ""
+  # Image pull secrets applied to the quota-manager pod.
+  imagePullSecrets: []
+
+quotaManager:
+  # Name every object this chart creates is derived from: the Deployment, the
+  # ServiceAccount, the webhook Service and configuration, the cert Secret, and
+  # the RBAC that scopes itself to those by name. Deliberately not the release
+  # name — a `helm install quota …` should not produce a Deployment called
+  # `quota`, and the ValidatingWebhookConfiguration is cluster-scoped, so a name
+  # that varies per release makes collisions between installs invisible.
+  #
+  # Must be a DNS label of at most 55 characters, so the derived Service and
+  # Secret names stay valid.
+  name: ome-quota-manager
+
+  crd:
+    # Install the AcceleratorQuota CRD from this chart, for a standalone install
+    # with no ome-crd — the manager cannot sync its cache without it, and a
+    # missing CRD shows up only as a crash-looping pod.
+    #
+    # Off by default, and it must stay that way for any cluster that also runs
+    # ome-crd: that chart owns the same cluster-scoped object, and the second
+    # release to claim it fails on Helm's ownership check. Turn this on only
+    # where this chart is the sole installer.
+    install: false
+
+  # Which half of the quota plane this install runs. REQUIRED — the chart fails
+  # to render without it, because there is no safe default: workload mode writes
+  # Kueue objects on this cluster, management mode projects shares onto others,
+  # and guessing either would be a surprise.
+  #   "workload"   - render the local AcceleratorQuota tree into Kueue here.
+  #   "management" - hold the authored fleet tree and project per-cluster shares.
+  # One mode per install: the two write different halves of the reserved root's
+  # status, so running both against one cluster is a last-writer-wins race.
+  mode: ""
+
+  image:
+    repository: ome-quota-manager
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Two replicas with leader election: exactly one reconciles and the other is a
+  # warm standby. Leader election must stay on whenever replicaCount > 1 — two
+  # active instances would race each other's status writes on every node.
+  replicaCount: 2
+  leaderElect: true
+
+  # maxTreeDepth bounds a node's distance from the root, in edges (the root is 0,
+  # a top-tier grouping is 1). 0 disables the check rather than assuming a bound;
+  # it is a guardrail against accidental sprawl, not a Kueue limit.
+  maxTreeDepth: 5
+
+  # resyncInterval re-runs the tree checks on an otherwise-idle plane, so a
+  # violation only a clock can clear is noticed without an edit. "" or 0 leaves
+  # reconciles purely event-driven.
+  resyncInterval: 10m
+
+  # The reserved root node is always named "root" and is deliberately not
+  # configurable: every AcceleratorQuota in the fleet writes
+  # parentRef: {name: root}, so a per-cluster name would make those CRs
+  # non-portable between planes.
+
+  # webhook serves admission validation for AcceleratorQuota, turning a
+  # tree-breaking write into a rejected kubectl apply instead of a Degraded
+  # condition minutes later.
+  #
+  # The ValidatingWebhookConfiguration is failurePolicy=Fail. That is safe here
+  # in a way it would not be for a pod webhook: it gates one cluster-scoped CRD
+  # that only capacity admins write, so an outage blocks quota edits, never
+  # serving pods.
+  webhook:
+    enabled: true
+    port: 9443
+    # internalCertManagement generates and rotates the serving cert in process
+    # and injects the caBundle itself, so the component works out of the box
+    # with NO cert-manager in the cluster — the same default Kueue ships.
+    #
+    # The cost, stated plainly: self-injection needs write access to this
+    # component's ValidatingWebhookConfiguration. The chart scopes update to
+    # that one object by name, and grants nothing on mutating webhooks, but
+    # list/watch on the kind cannot be narrowed — the rotator builds an
+    # unfiltered informer over it.
+    #
+    # Set false to have cert-manager supply the cert instead: the chart then
+    # renders an Issuer + Certificate and the inject-ca-from annotation, and
+    # drops the webhook-configuration RBAC entirely.
+    internalCertManagement: true
+    # A tree assembly is one uncached LIST plus in-memory work over a handful of
+    # nodes, so the default 10s is generous; it exists so a wedged apiserver
+    # rejects fast rather than hanging every quota write.
+    timeoutSeconds: 10
+
+  logLevel: info
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations: {}
+  podLabels: {}
+
+  # A single-replica install cannot satisfy a PDB, so it is off by default and
+  # only meaningful alongside replicaCount > 1.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  metricsPort: 8080
+  probePort: 8081

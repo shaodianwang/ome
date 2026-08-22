@@ -64,6 +64,15 @@ if [ "${CHART}" = "ome-scheduler" ]; then
   sed -i "s|tag: latest|tag: \"${IMAGE_TAG}\"|" "charts/${CHART}/values.yaml"
 fi
 
+# ome-quota-manager ships its own image, so it needs the same stamp. Without it
+# the published chart keeps hub: "" and tag: latest, which a kubelet resolves as
+# docker.io/library/ome-quota-manager:latest and cannot pull.
+if [ "${CHART}" = "ome-quota-manager" ]; then
+  IMAGE_TAG="${SHORT_SHA}"
+  sed -i "s|hub: \"\"|hub: \"${PROD_ECR_REGISTRY}/msl_infra\"|" "charts/${CHART}/values.yaml"
+  sed -i "s|tag: latest|tag: \"${IMAGE_TAG}\"|" "charts/${CHART}/values.yaml"
+fi
+
 # The muse-server image is mirrored to the prod ECR from this same commit, so
 # point the chart's default hub/tag at it — gitops then needs no image overrides.
 if [ "${CHART}" = "muse" ]; then

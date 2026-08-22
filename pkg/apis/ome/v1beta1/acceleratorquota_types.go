@@ -102,6 +102,32 @@ const (
 	// AcceleratorQuotaReasonFrozen marks a node whose materialization is held at
 	// its last-good state because a computed invariant is violated.
 	AcceleratorQuotaReasonFrozen = "Frozen"
+
+	// AcceleratorQuotaReasonParentCycle marks a node whose parentRef chain loops.
+	// Distinct from ParentMissing because the remedy differs: a missing parent is
+	// created, a cycle is broken.
+	AcceleratorQuotaReasonParentCycle = "ParentCycle"
+
+	// AcceleratorQuotaReasonUnreachable marks a node that is structurally sound
+	// itself but cannot be placed in the tree, because an ancestor is missing or
+	// looping. It has no position, so it must not materialize: a ClusterQueue
+	// whose cohort was never created is silently rehomed by Kueue onto an
+	// implicit default cohort.
+	AcceleratorQuotaReasonUnreachable = "Unreachable"
+
+	// AcceleratorQuotaReasonNodeKindInvalid marks a node whose structure
+	// contradicts its declared role — a leaf named as another node's parent, a
+	// leaf with no budget, or a grouping carrying leaf-only fields.
+	AcceleratorQuotaReasonNodeKindInvalid = "NodeKindInvalid"
+
+	// AcceleratorQuotaReasonDepthExceeded marks a node further from the root than
+	// the configured maximum.
+	AcceleratorQuotaReasonDepthExceeded = "DepthExceeded"
+
+	// AcceleratorQuotaReasonDuplicateNode marks a node name that appears twice in
+	// one assembled tree. Cluster-scoped names are unique per apiserver, so this
+	// only arises when a caller assembles a set by hand.
+	AcceleratorQuotaReasonDuplicateNode = "DuplicateNode"
 )
 
 // Projection and ownership marks. The origin label identifies a copy a

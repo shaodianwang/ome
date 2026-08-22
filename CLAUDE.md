@@ -90,8 +90,8 @@ tests/integration/
 ├── kindutil/                              # shared test scaffolding (KIND) + fake-serving image source
 ├── components/, util/                     # helpers
 └── singlecluster/
-    ├── webhook/{inferenceservice,inferenceservice_defaulter,basemodel,servingruntime,pod,runtimepreset,runtimerevision}
-    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,omenative_coordination_kind}
+    ├── webhook/{inferenceservice,inferenceservice_defaulter,basemodel,servingruntime,pod,runtimepreset,runtimerevision,acceleratorquota,acceleratorquota_cert}
+    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,acceleratorquota,omenative_coordination_kind}
     ├── clustercache/
     └── agents/metadata/
 ```

@@ -1,0 +1,238 @@
+// Package acceleratorquota reconciles the AcceleratorQuota tree's observed
+// state. It assembles every node on the cluster, re-runs the invariant checks
+// the admission webhook runs, and writes each node's position and condition.
+//
+// It materializes nothing. Admission is fast feedback but not a serialization
+// point — two children admitted concurrently can each pass containment and
+// together bust their parent, and a parent can be deleted out from under a
+// child — so the tree has to be re-checked by something that sees it whole,
+// after the fact. That re-check is this controller's whole job for now; the
+// Kueue materializer and the management-plane projector build on the same
+// assembled tree.
+package acceleratorquota
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/quota/tree"
+)
+
+// Mode selects which half of the quota plane a manager runs. It is a manager
+// flag rather than config because it decides which controllers exist.
+type Mode string
+
+const (
+	// ModeWorkload renders the local tree into Kueue on a serving cluster. It is
+	// the only mode that writes Kueue objects, and only on its own cluster.
+	ModeWorkload Mode = "workload"
+
+	// ModeManagement holds the authored fleet tree and projects per-cluster
+	// shares onto members. It writes no Kueue object anywhere.
+	ModeManagement Mode = "management"
+)
+
+// Deliberately no +kubebuilder:rbac markers here, unlike every sibling in this
+// directory. controller-gen scans ./pkg/controller/... into the ome-manager
+// ClusterRole, but this controller runs in ome-quota-manager, a separate binary
+// with its own ServiceAccount. A marker added here would silently hand
+// ome-manager the quota plane's permissions — today AcceleratorQuota, later
+// cluster-wide write on Kueue's ClusterQueue and Cohort — and that write grant
+// belongs only to the process that renders Kueue, not to the one also running
+// the InferenceService reconcilers and the fail-closed pod mutating webhook.
+//
+// The grants live in charts/ome-quota-manager/templates/rbac.yaml, and
+// charts/ome-resources/tests/render_test.sh fails if they ever appear in the
+// ome-manager role.
+
+// Reconciler keeps every AcceleratorQuota's status in step with the tree they
+// collectively describe.
+//
+// Reconciliation is whole-tree, not per-object: one node's edit can change
+// another node's verdict — re-parenting moves a subtree's paths, and a budget
+// change can bust a parent that was fine a moment ago — so every pass rebuilds
+// the tree and reconciles every node's status. A fleet is a handful of nodes,
+// so this costs one LIST.
+type Reconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+	Log    logr.Logger
+
+	// APIReader is an uncached reader. The tree verdict must not be computed
+	// from a stale cache: a node admitted a moment ago but not yet in the
+	// informer cache would be invisible, and this controller would then clear a
+	// Degraded condition that is still true.
+	APIReader client.Reader
+
+	// Options carry the operator-configured root name and depth bound. The
+	// package invents neither.
+	Options tree.Options
+
+	// ResyncInterval re-runs the checks on an otherwise-idle plane, so a
+	// violation only a clock can clear is noticed without an edit. Zero leaves
+	// reconciles purely event-driven.
+	ResyncInterval time.Duration
+}
+
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := r.Log.WithValues("acceleratorquota", req.Name)
+
+	var list v1beta1.AcceleratorQuotaList
+	if err := r.APIReader.List(ctx, &list); err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing AcceleratorQuotas: %w", err)
+	}
+
+	built, violations, err := tree.Build(list.Items, r.Options)
+	if err != nil {
+		// A configuration failure, not a property of the nodes. Surfacing it as
+		// an error requeues with backoff and logs, rather than silently leaving
+		// every node's status untouched as if there were nothing to do.
+		return ctrl.Result{}, fmt.Errorf("assembling the quota tree: %w", err)
+	}
+
+	frozen := built.Frozen(violations)
+	var errs []error
+	for _, node := range built.Nodes() {
+		if err := r.reconcileStatus(ctx, node, frozen); err != nil {
+			errs = append(errs, fmt.Errorf("node %s: %w", node.Name(), err))
+		}
+	}
+	if len(errs) > 0 {
+		// One node's conflicted status write must not skip the rest, so failures
+		// are collected and the whole pass retried.
+		return ctrl.Result{}, fmt.Errorf("writing quota status: %w", errors.Join(errs...))
+	}
+
+	if len(violations) > 0 {
+		log.V(1).Info("quota tree has violations", "count", len(violations), "nodes", violations.Nodes())
+	}
+	return ctrl.Result{RequeueAfter: r.ResyncInterval}, nil
+}
+
+// reconcileStatus writes one node's observed position and condition. It patches
+// only when something changed, so an idle fleet does not rewrite status on every
+// resync tick and spin the watch.
+func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation) error {
+	current := node.Quota
+	updated := current.DeepCopy()
+
+	updated.Status.ObservedGeneration = current.Generation
+	updated.Status.Path = node.Path
+	updated.Status.Parent = ""
+	if node.Parent != nil {
+		updated.Status.Parent = node.Parent.Name()
+	}
+
+	violation, isFrozen := frozen[node.Name()]
+	setConditions(&updated.Status, violation, isFrozen)
+
+	if equalStatus(current.Status, updated.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, updated, client.MergeFrom(current)); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			// The node was deleted or rewritten mid-pass; the next reconcile
+			// sees the newer state. Neither is worth failing the pass over.
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// setConditions stamps Ready and Degraded as a mutually exclusive pair, so a
+// reader never has to reconcile two conditions that disagree.
+//
+// A node frozen by an ancestor reports the ancestor's cause rather than a
+// generic message: the operator has to fix the ancestor, and saying so is the
+// difference between a two-minute fix and a hunt.
+func setConditions(status *v1beta1.AcceleratorQuotaStatus, violation tree.Violation, isFrozen bool) {
+	now := metav1.Now()
+	ready := metav1.Condition{
+		Type:               v1beta1.AcceleratorQuotaReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1beta1.AcceleratorQuotaReasonAdmitted,
+		Message:            "node is a valid member of the quota tree",
+		LastTransitionTime: now,
+		ObservedGeneration: status.ObservedGeneration,
+	}
+	degraded := metav1.Condition{
+		Type:               v1beta1.AcceleratorQuotaDegraded,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.AcceleratorQuotaReasonAdmitted,
+		Message:            "no invariant violated",
+		LastTransitionTime: now,
+		ObservedGeneration: status.ObservedGeneration,
+	}
+
+	if isFrozen {
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = violation.Reason
+		ready.Message = violation.Message
+		degraded.Status = metav1.ConditionTrue
+		degraded.Reason = violation.Reason
+		degraded.Message = violation.Message
+	}
+
+	apimeta.SetStatusCondition(&status.Conditions, ready)
+	apimeta.SetStatusCondition(&status.Conditions, degraded)
+}
+
+// equalStatus compares the fields this controller owns. Condition timestamps are
+// excluded deliberately: SetStatusCondition only moves LastTransitionTime when
+// the status actually flips, so comparing the rest is what makes a no-op pass a
+// genuine no-op.
+func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
+	if a.ObservedGeneration != b.ObservedGeneration || a.Path != b.Path || a.Parent != b.Parent {
+		return false
+	}
+	for _, condType := range []string{v1beta1.AcceleratorQuotaReady, v1beta1.AcceleratorQuotaDegraded} {
+		ca := apimeta.FindStatusCondition(a.Conditions, condType)
+		cb := apimeta.FindStatusCondition(b.Conditions, condType)
+		if ca == nil || cb == nil {
+			if ca != cb {
+				return false
+			}
+			continue
+		}
+		if ca.Status != cb.Status || ca.Reason != cb.Reason || ca.Message != cb.Message ||
+			ca.ObservedGeneration != cb.ObservedGeneration {
+			return false
+		}
+	}
+	return true
+}
+
+// SetupWithManager wires the reconciler to watch AcceleratorQuotas.
+//
+// Every event enqueues the same key, because the unit of work is the tree, not
+// the object: editing one node can change another's verdict, and a per-object
+// queue would leave the second node reporting a stale condition until it
+// happened to be touched. Collapsing to one key also means a burst of edits
+// coalesces into a single rebuild.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.APIReader == nil {
+		return fmt.Errorf("acceleratorquota: APIReader is required (the tree verdict must not be read from a cache)")
+	}
+	if r.Options.RootName == "" {
+		return fmt.Errorf("acceleratorquota: %w", tree.ErrRootNameUnset)
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&v1beta1.AcceleratorQuota{}).
+		Named("acceleratorquota").
+		Complete(r)
+}

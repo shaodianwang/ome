@@ -6,6 +6,7 @@ REGISTRY     ?= ghcr.io/moirai-internal
 TAG          ?= $(GIT_TAG)
 ARCH         ?= linux/amd64
 MANAGER_IMG  ?= $(REGISTRY)/ome-manager:$(TAG)
+QUOTA_MANAGER_IMG ?= $(REGISTRY)/ome-quota-manager:$(TAG)
 
 # Git version and commit information for build
 version_pkg = github.com/ome-projects/ome/pkg/version
@@ -184,6 +185,10 @@ manifests: controller-gen yq ## 📄 Generate WebhookConfiguration, ClusterRole 
 
 	@echo "\n📁 Step 6: Copying manifests to Helm charts..."
 	@cp config/crd/full/ome* charts/ome-crd/templates/ && cp config/rbac/role.yaml charts/ome-resources/templates/ome-controller/rbac/role.yaml
+	@# ome-quota-manager can optionally install the one CRD it needs, for a
+	@# standalone install with no ome-crd. Copied, not symlinked, because Helm
+	@# does not follow symlinks out of the chart directory.
+	@mkdir -p charts/ome-quota-manager/files && cp config/crd/full/ome.io_acceleratorquotas.yaml charts/ome-quota-manager/files/
 	@echo "✅ Manifests copied to Helm charts"
 
 	@echo "\n🎉 Manifest generation completed successfully!\n"
@@ -290,6 +295,8 @@ helm-lint: helm ## ⎈ Lint all charts
 	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-scheduler/tests/render_test.sh
 	@echo "🧪 Testing ome-resources chart contracts..."
 	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-resources/tests/render_test.sh
+	@echo "🧪 Testing ome-quota-manager chart contracts..."
+	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-quota-manager/tests/render_test.sh
 	@echo "✅ Helm lint complete"
 
 .PHONY: helm-doc
@@ -363,6 +370,16 @@ ome-agent-image: fmt vet xet-build ## Build ome-agent image.
 		. -f dockerfiles/ome-agent.Dockerfile -t $(REGISTRY)/ome-agent:$(TAG)
 	@echo "✅ Image built"
 
+.PHONY: ome-quota-manager-image
+ome-quota-manager-image: fmt vet ## Build ome-quota-manager image.
+	@echo "🚀 Building ome-quota-manager image..."
+	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
+		--build-arg VERSION=$(GIT_TAG) \
+		--build-arg GIT_TAG=$(GIT_TAG) \
+		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
+		. -f dockerfiles/ome-quota-manager.Dockerfile -t $(QUOTA_MANAGER_IMG)
+	@echo "✅ Image built"
+
 .PHONY: muse-image
 muse-image: ## Build the MUSE console image (read-plane API + web UI).
 	@echo "🚀 Building muse-server image..."
@@ -382,6 +399,7 @@ build-all-images: fmt vet ## 🚀 Build all images for current architecture
 	@echo "🚀 Building all OME images for $(ARCH)..."
 	@$(MAKE) ome-image
 	@$(MAKE) ome-agent-image
+	@$(MAKE) ome-quota-manager-image
 	@echo "✅ All images built successfully"
 
 .PHONY: build-all-images-multiarch
@@ -397,6 +415,11 @@ build-all-images-multiarch: fmt vet docker-buildx-setup ## 🌍 Build all images
 		--build-arg GIT_TAG=$(GIT_TAG) \
 		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
 		. -f dockerfiles/ome-agent.Dockerfile -t $(REGISTRY)/ome-agent:$(TAG) --push
+	$(DOCKER_BUILD_CMD) buildx build --platform=linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(GIT_TAG) \
+		--build-arg GIT_TAG=$(GIT_TAG) \
+		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
+		. -f dockerfiles/ome-quota-manager.Dockerfile -t $(QUOTA_MANAGER_IMG) --push
 	@echo "✅ All multi-arch images built and pushed"
 
 .PHONY: telepresence

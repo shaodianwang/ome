@@ -16,7 +16,7 @@ approvers:
 # WorkloadCluster connection subsystem. MUSE is read-only; budget edits are GitOps.
 see-also:
   - "/oeps/0018-multi-cluster-placement"  # per-cluster Kueue admission + WorkloadCluster connection this builds on
-  - "/oeps/0019-control-plane-split"      # the distributor runs in the control/management plane; mode taxonomy
+  - "/oeps/0019-control-plane-split"      # the management-plane projector runs in the control plane; mode taxonomy
   - "/oeps/0022-ome-scheduler"            # Kueue admits (quota) vs scheduler places; quota is the "hold flag"
   - "/oeps/0018.3-placement-modes"        # Split apportions minReplicas across clusters; quota must cover the floor
   - "/oeps/0013-autoscaling"              # minReplicas floor vs maxReplicas ceiling interplay with a ClusterQueue

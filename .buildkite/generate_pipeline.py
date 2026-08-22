@@ -212,9 +212,13 @@ IMAGES = [
     # It is built on TW (with egress) and mirrored to the registry reachable
     # from the restricted GKE queue. See dockerfiles/kind-ci.Dockerfile.
     ("kind-ci", "kind-ci", "dockerfiles/kind-ci.Dockerfile"),
+    # ome-quota-manager: the fleet-quota control plane (OEP-0024). Shares the
+    # root Go module (unlike ome-scheduler) but ships as its own image so its
+    # Kueue write grant is scoped to its own ServiceAccount.
+    ("ome-quota-manager", "ome-quota-manager", "dockerfiles/ome-quota-manager.Dockerfile"),
 ]
 
-CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler"]
+CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager"]
 
 
 # ---------------------------------------------------------------------------

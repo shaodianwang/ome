@@ -9,7 +9,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/quota/tree"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
+	quotawebhook "github.com/ome-projects/ome/pkg/webhook/admission/acceleratorquota"
 	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
 	isvcwebhook "github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	podwebhook "github.com/ome-projects/ome/pkg/webhook/admission/pod"
@@ -35,6 +37,33 @@ func SetupBaseModelWebhooks(mgr ctrl.Manager) error {
 		&webhook.Admission{Handler: &basemodelwebhook.BaseModelValidator{Decoder: decoder}})
 	server.Register("/validate-ome-io-v1beta1-clusterbasemodel",
 		&webhook.Admission{Handler: &basemodelwebhook.ClusterBaseModelValidator{Decoder: decoder}})
+	return nil
+}
+
+// SetupAcceleratorQuotaWebhook registers the AcceleratorQuota validating
+// webhook, wired exactly as cmd/ome-quota-manager does it.
+//
+// The reader is the manager's APIReader rather than its cache: admission has to
+// assemble the tree from live state, and a cache lagging by one write is a tree
+// that admits the second half of a racing pair.
+//
+// maxDepth is a parameter only so a suite can exercise the bound without
+// authoring six levels; the root name is not, being a wire-contract identity.
+func SetupAcceleratorQuotaWebhook(mgr ctrl.Manager, maxDepth int) error {
+	server := mgr.GetWebhookServer()
+	if server == nil {
+		return fmt.Errorf("SetupAcceleratorQuotaWebhook: manager has no webhook server (set Framework.WebhookPath)")
+	}
+	server.Register("/validate-ome-io-v1beta1-acceleratorquota", &webhook.Admission{
+		Handler: &quotawebhook.Validator{
+			Client:  mgr.GetAPIReader(),
+			Decoder: admission.NewDecoder(mgr.GetScheme()),
+			Options: tree.Options{
+				RootName: v1beta1.AcceleratorQuotaRootName,
+				MaxDepth: maxDepth,
+			},
+		},
+	})
 	return nil
 }
 

@@ -1,0 +1,28 @@
+# Suite-local fixture: only the AcceleratorQuota validator. The full
+# config/webhook/manifests.yaml would install every OME webhook and require
+# each corresponding handler to be registered in this suite's manager.
+#
+# envtest rewrites caBundle and swaps clientConfig.service for a
+# clientConfig.url pointing at the in-process server, so the values below are
+# scaffolding — except the rules, which decide what actually reaches the
+# handler and are therefore a copy of what the chart installs.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: ome-quota-manager.ome.io
+webhooks:
+  - name: acceleratorquota.ome-quota-manager.validator
+    clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-quota-manager-webhook
+        namespace: ome
+        path: /validate-ome-io-v1beta1-acceleratorquota
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["acceleratorquotas"]

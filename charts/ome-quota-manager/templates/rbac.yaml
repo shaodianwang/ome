@@ -1,0 +1,143 @@
+# Hand-authored, not generated. controller-gen builds the ome-manager ClusterRole
+# from markers under ./pkg/controller/..., and merging these grants into that role
+# would defeat the point of a separate binary: the quota plane's permissions —
+# today AcceleratorQuota, later cluster-wide write on Kueue's ClusterQueue and
+# Cohort — must belong only to the process that uses them.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.quotaManager.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.quotaManager.name }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+rules:
+# The tree is assembled from every node on the cluster, so this is a list/watch
+# of the whole kind, not a get of one object.
+- apiGroups: ["ome.io"]
+  resources: ["acceleratorquotas"]
+  verbs: ["get", "list", "watch"]
+# Status only. The controller reports a node's position and condition; it never
+# edits a spec, which is the admin's (or, for a projection, the management
+# plane's) to write.
+- apiGroups: ["ome.io"]
+  resources: ["acceleratorquotas/status"]
+  verbs: ["get", "update", "patch"]
+# No events grant: nothing in this component holds an EventRecorder. It is
+# granted back alongside the first emitter rather than kept warm — an unused
+# write verb is indistinguishable from a used one at review time.
+{{- if and .Values.quotaManager.webhook.enabled .Values.quotaManager.webhook.internalCertManagement }}
+# Internal cert management injects the generated caBundle into this component's
+# own ValidatingWebhookConfiguration.
+#
+# update is scoped by name to that one object, so this grant cannot rewrite
+# ome-manager's fail-closed pod mutator or any other component's webhook — the
+# rotator only ever Gets and Updates the configurations it was told to manage.
+# Nothing is granted on mutatingwebhookconfigurations; this component has none.
+#
+# list and watch CANNOT be narrowed the same way: resourceNames does not apply
+# to them, and the rotator builds an unfiltered informer over the kind. Reading
+# webhook configurations is low-sensitivity — caBundles are public — but it is a
+# cluster-wide read and worth knowing about.
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations"]
+  verbs: ["list", "watch"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations"]
+  resourceNames: ["{{ .Values.quotaManager.name }}.ome.io"]
+  verbs: ["get", "update"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.quotaManager.name }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.quotaManager.name }}
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.quotaManager.name }}
+  namespace: {{ .Release.Namespace }}
+{{- if and .Values.quotaManager.webhook.enabled .Values.quotaManager.webhook.internalCertManagement }}
+---
+# The cert Secret is namespaced, so this is a Role rather than another
+# cluster-wide grant. list and watch are unavoidable — the rotator runs a
+# namespace-scoped informer over Secrets — so this does expose every Secret in
+# the release namespace to the component. Keep the namespace to OME's own.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.quotaManager.name }}-webhook-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["{{ .Values.quotaManager.name }}-webhook-cert"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.quotaManager.name }}-webhook-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.quotaManager.name }}-webhook-cert
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.quotaManager.name }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.quotaManager.leaderElect }}
+---
+# Leader election is namespaced: the lease lives beside the Deployment, so this
+# is a Role rather than another cluster-wide grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.quotaManager.name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.quotaManager.name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-quota-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.quotaManager.name }}-leader-election
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.quotaManager.name }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
