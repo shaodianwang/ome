@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -248,6 +250,36 @@ func TestHealthProbeConfiguration(t *testing.T) {
 		probeAddr: ":9091",
 	}
 	assert.Equal(t, ":9091", customOpts.probeAddr, "Custom health probe address should be set correctly")
+}
+
+func TestManagerProbeChecker(t *testing.T) {
+	t.Run("webhook disabled", func(t *testing.T) {
+		checker := managerProbeChecker(false, func() webhook.Server {
+			t.Fatal("webhook server getter was called")
+			return nil
+		})
+		require.NoError(t, checker(nil))
+	})
+
+	t.Run("webhook enabled", func(t *testing.T) {
+		want := errors.New("webhook probe")
+		calls := 0
+		checker := managerProbeChecker(true, func() webhook.Server {
+			calls++
+			return webhookServerWithChecker{checker: func(*http.Request) error { return want }}
+		})
+		require.Equal(t, 1, calls)
+		require.ErrorIs(t, checker(nil), want)
+	})
+}
+
+type webhookServerWithChecker struct {
+	webhook.Server
+	checker healthz.Checker
+}
+
+func (s webhookServerWithChecker) StartedChecker() healthz.Checker {
+	return s.checker
 }
 
 func TestWebhookConfiguration(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
@@ -99,6 +99,13 @@ func registerOptionalScheme(cfg *rest.Config, s *runtime.Scheme, groupVersion sc
 
 func loadPodBatchSizes(clientset kubernetes.Interface) (controllerconfig.PodBatchSizes, error) {
 	return controllerconfig.LoadPodBatchSizes(clientset)
+}
+
+func managerProbeChecker(enableWebhook bool, webhookServer func() webhook.Server) healthz.Checker {
+	if !enableWebhook {
+		return healthz.Ping
+	}
+	return webhookServer().StartedChecker()
 }
 
 func init() {
@@ -665,15 +672,12 @@ func main() {
 		}
 	}
 
-	if err := mgr.AddHealthzCheck("healthz", func(req *http.Request) error {
-		return mgr.GetWebhookServer().StartedChecker()(req)
-	}); err != nil {
+	probeChecker := managerProbeChecker(options.enableWebhook, mgr.GetWebhookServer)
+	if err := mgr.AddHealthzCheck("healthz", probeChecker); err != nil {
 		setupLog.Error(err, "Unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
-		return mgr.GetWebhookServer().StartedChecker()(req)
-	}); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", probeChecker); err != nil {
 		setupLog.Error(err, "Unable to set up ready check")
 		os.Exit(1)
 	}
