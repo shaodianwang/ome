@@ -8,8 +8,18 @@ import (
 )
 
 // PodTermination extracts the most operator-relevant container failure
-// diagnostics from pod into an *InstanceTermination, stamping `now` as the
-// record time. Returns nil only when pod is nil.
+// diagnostics from pod into an *InstanceTermination. Returns nil only when
+// pod is nil.
+//
+// Time records WHEN THE FAILURE HAPPENED, taken from kubelet's FinishedAt,
+// and NOT when this function ran. `now` is only a fallback for the cases
+// where no container-level termination timestamp survived (branch 4 below,
+// and a zero FinishedAt). This matters beyond cosmetics: InstanceTermination
+// is stored on InstanceStatus.LastFailure, which is part of the status the
+// no-op write guard DeepEquals before writing (see inferencereplica/
+// status.go). Stamping `now` made a permanently-failed Instance produce a
+// differing status on EVERY reconcile, defeating that guard and driving a
+// self-sustaining write -> watch -> reconcile loop.
 //
 // Selection precedence (the failure operators most want to see first):
 //
@@ -46,7 +56,10 @@ func PodTermination(pod *corev1.Pod, now metav1.Time) *InstanceTermination {
 			return terminationFromTerminated(pod, cs.Name, t, now)
 		}
 	}
-	// 2. Terminal waiting-state wedge.
+	// 2. Terminal waiting-state wedge. The waiting state itself carries no
+	// timestamp, but a backoff-looping container (CrashLoopBackOff) records
+	// the prior crash in LastTerminationState — prefer that over `now` so
+	// the record is stable across observations.
 	for _, cs := range allStatuses {
 		if cs.State.Waiting != nil && isTerminalWaitingReason(cs.State.Waiting.Reason) {
 			return &InstanceTermination{
@@ -54,7 +67,7 @@ func PodTermination(pod *corev1.Pod, now metav1.Time) *InstanceTermination {
 				ContainerName: cs.Name,
 				Reason:        cs.State.Waiting.Reason,
 				Message:       cs.State.Waiting.Message,
-				Time:          now,
+				Time:          lastTerminationTimeOr(cs, now),
 			}
 		}
 	}
@@ -67,7 +80,8 @@ func PodTermination(pod *corev1.Pod, now metav1.Time) *InstanceTermination {
 			return terminationFromTerminated(pod, cs.Name, cs.LastTerminationState.Terminated, now)
 		}
 	}
-	// 4. Pod-level fallback.
+	// 4. Pod-level fallback. No container-level FinishedAt survived, so `now`
+	// is the only timestamp available here.
 	if pod.Status.Phase == corev1.PodFailed {
 		return &InstanceTermination{
 			PodName: pod.Name,
@@ -117,6 +131,7 @@ func nonZeroTerminated(cs corev1.ContainerStatus) *corev1.ContainerStateTerminat
 // terminationFromTerminated builds an InstanceTermination from a terminated
 // container state. Reason falls back to "Error" when kubelet left it blank
 // (it occasionally does for OOM races) so the record is never reason-less.
+// Time is kubelet's FinishedAt; `now` is used only when kubelet left it zero.
 func terminationFromTerminated(pod *corev1.Pod, container string, t *corev1.ContainerStateTerminated, now metav1.Time) *InstanceTermination {
 	reason := t.Reason
 	if reason == "" {
@@ -129,8 +144,27 @@ func terminationFromTerminated(pod *corev1.Pod, container string, t *corev1.Cont
 		Reason:        reason,
 		ExitCode:      &exit,
 		Message:       t.Message,
-		Time:          now,
+		Time:          finishedAtOr(t, now),
 	}
+}
+
+// finishedAtOr returns kubelet's recorded termination time, or `fallback`
+// when it is absent. A zero FinishedAt means kubelet never stamped one, so
+// there is no event time to report and the observation time is the best
+// available answer.
+func finishedAtOr(t *corev1.ContainerStateTerminated, fallback metav1.Time) metav1.Time {
+	if t != nil && !t.FinishedAt.IsZero() {
+		return t.FinishedAt
+	}
+	return fallback
+}
+
+// lastTerminationTimeOr returns the FinishedAt of the container's previous
+// termination, or `fallback` when there is none. Used by the waiting-state
+// branch, where the live state carries no timestamp but a backoff-looping
+// container has one from the crash that put it there.
+func lastTerminationTimeOr(cs corev1.ContainerStatus, fallback metav1.Time) metav1.Time {
+	return finishedAtOr(cs.LastTerminationState.Terminated, fallback)
 }
 
 // isTerminalWaitingReason mirrors the workload escalator's
