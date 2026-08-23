@@ -43,3 +43,13 @@ issues:
       linters:
         - staticcheck
       text: "SA6002"
+
+    # reconcile.Result.Requeue is deprecated in favour of RequeueAfter, but
+    # the two are not interchangeable: Requeue re-enqueues through the
+    # controller's rate limiter, RequeueAfter pins a fixed delay. Every site
+    # that sets it wants the backoff, so converting them means choosing a
+    # delay per reconciler — a behavioural change to the core loops, not a
+    # rename. Suppressed until that migration is done deliberately.
+    - linters:
+        - staticcheck
+      text: "SA1019: .*\\.Requeue is deprecated"

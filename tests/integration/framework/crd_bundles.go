@@ -6,8 +6,7 @@ import (
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
-	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 )
 
 // Pre-defined OptionalCRDBundle constants for OME's optional dependencies.
@@ -87,12 +86,17 @@ var PrometheusOperator = OptionalCRDBundle{
 	},
 }
 
-// Kueue bundle: kueue.x-k8s.io/v1beta1.{ResourceFlavor,ClusterQueue,
-// LocalQueue,Workload,Cohort,AdmissionCheck,…} plus the v1alpha1 types
-// (Topology, etc.). Required for the real-Kueue placement
-// validation harness, which runs Kueue's full admission stack
-// (StartKueue) in-process against envtest and gates→admits→ungates
-// queue-labeled pods with no kubelet.
+// Kueue bundle: kueue.x-k8s.io/v1beta2.{ResourceFlavor,ClusterQueue,
+// LocalQueue,Workload,Cohort,AdmissionCheck,Topology,…}. v1beta2 is the
+// storage version and the one Kueue's own controllers speak, so the
+// harness registers it alone. Registering the served v1beta1 too would be
+// a trap: Kueue's conversion webhook is applied by a kustomize patch that
+// dep-crds does not vendor, so the bases carry no conversion strategy and
+// the apiserver would hand back a bare apiVersion rewrite — dropping the
+// fields v1beta2 renamed, cohortName among them. Required for the
+// real-Kueue placement validation harness, which runs Kueue's full
+// admission stack (StartKueue) in-process against envtest and
+// gates→admits→ungates queue-labeled pods with no kubelet.
 //
 // The CRD YAMLs in dep-crds/kueue/ are module-sourced from
 // sigs.k8s.io/kueue's config/components/crd/bases (vendored by
@@ -105,6 +109,5 @@ var Kueue = OptionalCRDBundle{
 	CRDDir: "kueue",
 	Schemes: []func(*apiruntime.Scheme) error{
 		kueue.AddToScheme,
-		kueuealpha.AddToScheme,
 	},
 }

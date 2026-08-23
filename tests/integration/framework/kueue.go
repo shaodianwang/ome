@@ -3,9 +3,10 @@ package framework
 import (
 	"context"
 	"fmt"
-	"go/build"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -13,19 +14,22 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	configapi "sigs.k8s.io/kueue/apis/config/v1beta1"
-	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
-	"sigs.k8s.io/kueue/pkg/cache"
+	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
+	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	coreindexer "sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/pod"
-	"sigs.k8s.io/kueue/pkg/queue"
 	"sigs.k8s.io/kueue/pkg/scheduler"
-	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
+	utiltesting "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 )
+
+const kueueModulePath = "sigs.k8s.io/kueue"
 
 // StartKueue wires Kueue's full admission stack onto the supplied
 // manager and starts its scheduler: core controllers + indexers, the
@@ -38,9 +42,9 @@ import (
 // Prerequisites the caller owns:
 //   - The manager's scheme has the Kueue types registered (use the
 //     framework.Kueue OptionalCRDBundle, which contributes
-//     kueue.AddToScheme + kueuealpha.AddToScheme to the client-side
-//     scheme; configapi.AddToScheme is registered here on the manager's
-//     scheme so the default Configuration can be built).
+//     kueue.AddToScheme to the client-side scheme; configapi.AddToScheme
+//     is registered here on the manager's scheme so the default
+//     Configuration can be built).
 //   - The manager has a webhook server configured (envtest's
 //     WebhookInstallOptions host/port/certdir) and the Kueue pod webhook
 //     manifests are installed on the apiserver. The Kueue webhook
@@ -48,8 +52,9 @@ import (
 //     the kueue module's config/components/webhook — see kueue_test.go
 //     for how the smoke test points envtest at them.
 //
-// The wiring mirrors kueue@v0.10.6's pod integration suite managerSetup;
-// the option set is load-bearing and documented inline below.
+// The wiring mirrors Kueue's own cmd/kueue manager setup, reduced to the
+// pod integration; the option set is load-bearing and documented inline
+// below.
 func StartKueue(ctx context.Context, mgr ctrl.Manager) error {
 	// configapi types must be on the manager scheme so the default
 	// Configuration can be materialized via scheme.Default below.
@@ -66,10 +71,9 @@ func StartKueue(ctx context.Context, mgr ctrl.Manager) error {
 
 	jobframework.EnableIntegration(pod.FrameworkName)
 
-	// The pod webhook gates a pod only if it matches the integration's
-	// podSelector AND namespaceSelector. A nil podSelector becomes
-	// labels.Nothing() (matches nothing) -> no gate, so PodSelector MUST
-	// be a non-nil EMPTY selector to gate all pods.
+	// The pod webhook gates every pod in a namespace this selector matches;
+	// the system namespaces are excluded so the harness never gates Kueue's
+	// or the control plane's own pods.
 	nsSelector := &metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{{
 			Key:      "kubernetes.io/metadata.name",
@@ -82,41 +86,58 @@ func StartKueue(ctx context.Context, mgr ctrl.Manager) error {
 		return fmt.Errorf("StartKueue: managed-jobs ns selector: %w", err)
 	}
 
+	// The scheduler cache and the queue manager are a pair: the cache holds
+	// admitted usage, the queues hold what is waiting. The requeuer is the
+	// Runnable that re-drives workloads parked as inadmissible, so it has to
+	// be handed to the manager or a workload that misses quota once is never
+	// retried when quota is released.
+	cCache := schdcache.New(mgr.GetClient())
+	requeuer := qcache.NewRequeuer()
+	if err := mgr.Add(requeuer); err != nil {
+		return fmt.Errorf("StartKueue: add inadmissible-workload requeuer: %w", err)
+	}
+	preemptionExpectations := preemptexpectations.New()
+	queues := qcache.NewManager(mgr.GetClient(), cCache, requeuer,
+		qcache.WithPreemptionExpectations(preemptionExpectations))
+
 	opts := []jobframework.Option{
 		// Without an explicit queue-name label, pods are left alone —
 		// the harness drives admission by labeling pods, not by managing
 		// every workload.
 		jobframework.WithManageJobsWithoutQueueName(false),
 		jobframework.WithManagedJobsNamespaceSelector(mjnsSelector),
-		jobframework.WithIntegrationOptions(corev1.SchemeGroupVersion.WithKind("Pod").String(), &configapi.PodIntegrationOptions{
-			PodSelector:       &metav1.LabelSelector{}, // non-nil empty = all pods; nil silently disables gating
-			NamespaceSelector: nsSelector,
-		}),
+		jobframework.WithCache(cCache),
+		jobframework.WithQueues(queues),
 	}
 
-	podRec := pod.NewReconciler(mgr.GetClient(), mgr.GetEventRecorderFor(constants.JobControllerName), opts...)
+	podRec, err := pod.NewReconciler(ctx, mgr.GetClient(), mgr.GetFieldIndexer(),
+		mgr.GetEventRecorderFor(constants.JobControllerName), opts...)
+	if err != nil {
+		return fmt.Errorf("StartKueue: pod reconciler: %w", err)
+	}
 	if err := podRec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("StartKueue: pod reconciler setup: %w", err)
 	}
 
-	cCache := cache.New(mgr.GetClient())
-	queues := queue.NewManager(mgr.GetClient(), cCache)
-	opts = append(opts, jobframework.WithQueues(queues))
-
 	conf := &configapi.Configuration{}
 	mgr.GetScheme().Default(conf)
-	if _, err := core.SetupControllers(mgr, queues, cCache, conf); err != nil {
+	// A nil RoleTracker is Kueue's standalone mode: every controller acts as
+	// the active one. The harness runs a single manager without leader
+	// election, so there is no follower to demote.
+	if _, err := core.SetupControllers(mgr, queues, cCache, conf, nil, preemptionExpectations); err != nil {
 		return fmt.Errorf("StartKueue: core.SetupControllers: %w", err)
 	}
 
 	if err := pod.SetupWebhook(mgr, opts...); err != nil {
 		return fmt.Errorf("StartKueue: pod webhook setup: %w", err)
 	}
-	if _, err := webhooks.Setup(mgr); err != nil {
+	if _, err := webhooks.Setup(mgr, nil); err != nil {
 		return fmt.Errorf("StartKueue: webhooks.Setup: %w", err)
 	}
 
-	sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName))
+	sched := scheduler.New(queues, cCache, mgr.GetClient(),
+		mgr.GetEventRecorderFor(constants.AdmissionName),
+		scheduler.WithPreemptionExpectations(preemptionExpectations))
 	if err := sched.Start(ctx); err != nil {
 		return fmt.Errorf("StartKueue: scheduler start: %w", err)
 	}
@@ -162,30 +183,25 @@ func ApplyKueueQuota(ctx context.Context, c client.Client, namespace, queueName,
 // pass this into Framework.ExtraWebhookPaths. The Kueue webhook manifests
 // are NOT vendored into dep-crds (that dir is CRDs-only).
 //
-// The module version is resolved by globbing the cache (sigs.k8s.io/kueue@*)
-// rather than hardcoding it, so a go.mod kueue bump needs no edit here. It
-// returns ("", error) when the module dir cannot be located.
+// The directory is resolved with `go list -m`, the same way the kueue-crds
+// Makefile target locates the CRDs, so a go.mod kueue bump needs no edit here
+// and a module cache holding several Kueue versions cannot serve manifests
+// from the wrong one. It returns ("", error) when the module dir cannot be
+// located.
 func KueueWebhookDir() (string, error) {
-	mc := os.Getenv("GOMODCACHE")
-	if mc == "" {
-		mc = filepath.Join(build.Default.GOPATH, "pkg", "mod")
-	}
-	matches, err := filepath.Glob(filepath.Join(mc, "sigs.k8s.io", "kueue@*"))
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", kueueModulePath).Output()
 	if err != nil {
-		return "", fmt.Errorf("KueueWebhookDir: glob module cache: %w", err)
+		return "", fmt.Errorf("KueueWebhookDir: go list -m %s: %w", kueueModulePath, err)
 	}
-	if len(matches) == 0 {
-		return "", fmt.Errorf("KueueWebhookDir: no sigs.k8s.io/kueue@* in module cache %s", mc)
+	moduleDir := strings.TrimSpace(string(out))
+	if moduleDir == "" {
+		return "", fmt.Errorf("KueueWebhookDir: %s has no module dir; run `go mod download`", kueueModulePath)
 	}
-	// Prefer a dir that actually has the webhook manifests; on a multi-version
-	// cache this skips a stale entry.
-	for _, dir := range matches {
-		whDir := filepath.Join(dir, "config", "components", "webhook")
-		if _, statErr := os.Stat(whDir); statErr == nil {
-			return whDir, nil
-		}
+	whDir := filepath.Join(moduleDir, "config", "components", "webhook")
+	if _, err := os.Stat(whDir); err != nil {
+		return "", fmt.Errorf("KueueWebhookDir: %s: %w", whDir, err)
 	}
-	return "", fmt.Errorf("KueueWebhookDir: no config/components/webhook under any of %v", matches)
+	return whDir, nil
 }
 
 // createIgnoreExists creates obj, treating AlreadyExists as success so

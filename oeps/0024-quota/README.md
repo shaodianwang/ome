@@ -585,11 +585,11 @@ ancestor; status and usage observation continue while output writes stop. Usage
 must keep flowing or MUSE shows stale numbers for a very much alive tenant.
 
 **A missing ancestor `Cohort` is a silent trap, not an error.** If a leaf's
-`spec.cohort` names a `Cohort` object that is not there, Kueue does not complain —
+`spec.cohortName` names a `Cohort` object that is not there, Kueue does not complain —
 it substitutes an implicit default cohort with no parent and no borrow/lend limits
-(`apis/kueue/v1beta1/clusterqueue_types.go:63-65`, implemented at
-`pkg/hierarchy/manager.go:94-96`). The topology quietly flattens and the borrowing
-scope changes with no signal.
+(`apis/kueue/v1beta2/clusterqueue_types.go`, `ClusterQueueSpec.CohortName`; implemented at
+`pkg/cache/hierarchy/manager.go`, `getOrCreateCohort`). The topology quietly flattens and
+the borrowing scope changes with no signal.
 
 Top-down materialization keeps this out of the *new*-subtree path. The way in is
 re-parenting: moving a live leaf under an ancestor that is frozen and never
@@ -666,7 +666,7 @@ the tree is authorable and checkable as a whole.
 
 - `spec.parentRef {name}` — the parent node's CR name; omitted **only** by the
   single reserved `root`. The tree is the graph of these edges (mirrors Kueue's
-  `Cohort.spec.parent`).
+  `Cohort.spec.parentName`).
 - `spec.role` ∈ `{Cohort, ClusterQueue}` — what the node **is**, declared not
   inferred. `Cohort` = an internal grouping node; `ClusterQueue` = a leaf that
   carries the budget and binds namespaces. Structure is validated *against* this
@@ -851,8 +851,8 @@ The concrete translation:
 
 | AcceleratorQuota | Kueue object |
 |---|---|
-| `role: Cohort` node | `Cohort` (`v1alpha1`; `spec.parent` = `parentRef.name`), **no `resourceGroups`** |
-| `role: ClusterQueue` node | `ClusterQueue` (`spec.cohort` = `parentRef.name`) |
+| `role: Cohort` node | `Cohort` (`spec.parentName` = `parentRef.name`), **no `resourceGroups`** |
+| `role: ClusterQueue` node | `ClusterQueue` (`spec.cohortName` = `parentRef.name`) |
 | per-`(node, resource, flavor)` per-cluster `share.nominal` | `ClusterQueue` `resourceGroups[].flavors[].resources[].nominalQuota` |
 | node `borrowingLimit` | `ClusterQueue` resource `borrowingLimit` (burst up, within-cluster cohort borrow) |
 | node `lendingLimit` | `ClusterQueue` resource `lendingLimit` (share released to siblings when idle) |
@@ -906,9 +906,9 @@ how a "hard cap" tenant silently doubles. In Kueue, **null means unlimited**:
 > borrowingLimit … If null, it means that there is no borrowing limit.
 > lendingLimit … If null, it means that there is no lending limit, meaning that all
 > the nominalQuota can be borrowed by other clusterQueues in the cohort.
-> — `apis/kueue/v1beta1/clusterqueue_types.go:235-252`
+> — `apis/kueue/v1beta2/clusterqueue_types.go`, `ResourceQuota.BorrowingLimit` / `.LendingLimit`
 
-Every leaf we materialize sets `spec.cohort` (see *Budget → Kueue mapping*), and the
+Every leaf we materialize sets `spec.cohortName` (see *Budget → Kueue mapping*), and the
 two limits are only *permitted* when a cohort is set. So leaving both unset does
 **not** produce a hard cap — it produces **unlimited borrowing within the cohort**.
 Bursting is the default; capping is the opt-in.
@@ -1052,7 +1052,7 @@ The order matters, because containment is checked at every step:
    `team-a-group`. `parentRef` is freely mutable (`role` changes only under the drain guard in
    *Node kind*), and since Kueue
    object names come from `metadata.name`, this is an **in-place update** of the
-   existing `ClusterQueue`'s `spec.cohort`: the queue object, its namespaces,
+   existing `ClusterQueue`'s `spec.cohortName`: the queue object, its namespaces,
    its `LocalQueue`s, and its admitted workloads all survive. Only the node's
    `status.path` changes.
 3. **Size the grouping, shrink the incumbent, then add the sibling** — set

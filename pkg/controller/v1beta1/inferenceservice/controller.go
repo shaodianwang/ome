@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -1232,8 +1233,11 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Scheme registration is conditional on EnableGatewayAPI (see
 	// cmd/manager), so gate on both the scheme and the CRD being present.
 	const httpRouteKind = "HTTPRoute"
-	if mgr.GetScheme().Recognizes(gatewayapiv1.SchemeGroupVersion.WithKind(httpRouteKind)) {
-		httpRouteFound, err := utils.IsCrdAvailable(r.ClientConfig, gatewayapiv1.SchemeGroupVersion.String(), httpRouteKind)
+	// gateway-api exports its group/version as a metav1.GroupVersion, which
+	// carries no WithKind; the two structs are field-identical, so convert.
+	gatewayGV := schema.GroupVersion(gatewayapiv1.GroupVersion)
+	if mgr.GetScheme().Recognizes(gatewayGV.WithKind(httpRouteKind)) {
+		httpRouteFound, err := utils.IsCrdAvailable(r.ClientConfig, gatewayGV.String(), httpRouteKind)
 		if err != nil {
 			return err
 		}

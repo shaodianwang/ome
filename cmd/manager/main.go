@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	kueuev1beta1 "sigs.k8s.io/kueue/apis/kueue/v1beta1"
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	schedulerpluginsv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 	volcanobatch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcano "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -105,7 +105,7 @@ func init() {
 	utilruntime.Must(v1beta1.AddToScheme(scheme))
 	utilruntime.Must(schedulerpluginsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(kueuev1beta1.AddToScheme(scheme))
+	utilruntime.Must(kueuev1beta2.AddToScheme(scheme))
 	// KEDA is a hard dependency, not an
 	// optional CRD probe. Register the scheme unconditionally — if KEDA is
 	// absent from the cluster the first ScaledObject Create will fail with

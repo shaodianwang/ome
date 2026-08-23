@@ -80,6 +80,47 @@ type DataPayload struct {
 	TopologyKey *string `json:"topologyKey,omitempty"`
 }
 
+// dataPayloadJSON is the wire shape DataPayload marshals to. It exists so the
+// canonical bytes belong to this package rather than to whichever apimachinery
+// version the binary is compiled against: metav1.ObjectMeta's JSON shape is
+// not stable across Kubernetes releases, and any shift in it renames every
+// live ControllerRevision and rolls the fleet with no other signal.
+type dataPayloadJSON struct {
+	PodSpec       *corev1.PodSpec   `json:"podSpec"`
+	PodMeta       *templateMetaJSON `json:"podMeta"`
+	WorkerPodSpec *corev1.PodSpec   `json:"workerPodSpec,omitempty"`
+	TopologyKey   *string           `json:"topologyKey,omitempty"`
+}
+
+// templateMetaJSON is the pod-template metadata exactly as it is hashed: an
+// explicit null creationTimestamp ahead of labels and annotations. Only labels
+// and annotations carry meaning (see TemplateMeta); the null timestamp is
+// inert padding that the canonical bytes carry so revision names stay stable
+// against apimachinery's own serialization of an empty timestamp.
+type templateMetaJSON struct {
+	CreationTimestamp *metav1.Time      `json:"creationTimestamp"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	Annotations       map[string]string `json:"annotations,omitempty"`
+}
+
+// MarshalJSON renders the pinned canonical shape. Unmarshalling stays on the
+// default path: templateMetaJSON's field names are a subset of ObjectMeta's,
+// so stored payloads decode straight back into PodMeta.
+func (p DataPayload) MarshalJSON() ([]byte, error) {
+	out := dataPayloadJSON{
+		PodSpec:       p.PodSpec,
+		WorkerPodSpec: p.WorkerPodSpec,
+		TopologyKey:   p.TopologyKey,
+	}
+	if p.PodMeta != nil {
+		out.PodMeta = &templateMetaJSON{
+			Labels:      p.PodMeta.Labels,
+			Annotations: p.PodMeta.Annotations,
+		}
+	}
+	return json.Marshal(out)
+}
+
 // Hash returns the deterministic hash that becomes the
 // ControllerRevision name suffix, plus the canonical serialized bytes
 // stored in CR.Data.Raw. collisionCount is folded into the hash so a
