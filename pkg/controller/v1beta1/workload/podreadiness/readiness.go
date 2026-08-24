@@ -30,31 +30,27 @@
 //
 // Multi-pod Instances require gang-readiness: each pod should remain
 // NotReady until every sibling in the Instance reaches ContainersReady.
-// v1 of the multi-pod path does NOT implement a separately-keyed writer;
-// instead, the equivalent gang-readiness contract is enforced by the
-// Create flow in ops/create.go: the controller calls MarkPodServing on
-// the Instance's pods ONLY after query.AllPodsRuntimeReady(existing)
-// returns true for the WHOLE Instance (every leader + every worker has
-// ContainersReady=True). Before that gate, no pod in the gang has
-// serving=True, so none receives traffic.
+// The multi-pod path carries no separately-keyed gang writer; the
+// gang-readiness contract is enforced instead by the Instance-create
+// flow, which calls MarkPodServing on the Instance's pods ONLY once
+// every leader and every worker reports ContainersReady=True. Before
+// that gate no pod in the gang has serving=True, so none receives
+// traffic.
 //
-// The two designs are observably equivalent:
+// That gate is observably equivalent to a per-pod gang writer:
 //   - A new pod's WriterLifecycle/KeyLifecycleInstanceReady stays in
 //     the message list until the controller writes the MarkPodServing
-//     removal in Create's Ready promotion. (The condition starts
-//     non-existent on a fresh pod, which is treated as "writer is
-//     implicitly holding"; the first MarkPodServing creates it with
+//     removal in the create flow's Ready promotion. (The condition
+//     starts non-existent on a fresh pod, which is treated as "writer
+//     is implicitly holding"; the first MarkPodServing creates it with
 //     Status=True.)
-//   - Create's gate is on the WHOLE Instance — AllPodsRuntimeReady — so
-//     the flip happens atomically across leader + workers. No partial
+//   - The gate covers the WHOLE Instance, so the flip happens
+//     atomically across leader and workers. There is no partial
 //     "leader serving, workers still warming" window.
 //
-// If a future use case needs per-pod gang holds (e.g., a partial
-// in-place update on a multi-pod gang), a separately-keyed writer can
-// be added without re-architecting; the multi-writer protocol already
-// supports it. For now, the spec field's "intent" semantic (gang
-// readiness mandatory) and the controller's Create-time gate
-// (AllPodsRuntimeReady) cover the contract.
+// A per-pod gang hold — wanted, for instance, by a partial in-place
+// update on a multi-pod gang — is a separately-keyed writer the
+// multi-writer protocol already admits without re-architecting.
 package podreadiness
 
 import (
@@ -147,9 +143,20 @@ func AddNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, 
 			Status:             corev1.ConditionFalse,
 			Reason:             "NotReady",
 			Message:            list.dump(),
-			LastTransitionTime: metav1.Now(),
+			LastTransitionTime: transitionTime(cond, corev1.ConditionFalse),
 		})
 	})
+}
+
+// transitionTime is the LastTransitionTime to stamp when writing status
+// onto cond. A write that only reshuffles the writer list must carry the
+// old timestamp forward, or every writer that joins or leaves resets the
+// "how long has this pod been NotReady" clock consumers read.
+func transitionTime(cond *corev1.PodCondition, status corev1.ConditionStatus) metav1.Time {
+	if cond != nil && cond.Status == status {
+		return cond.LastTransitionTime
+	}
+	return metav1.Now()
 }
 
 // RemoveNotReadyKey removes msg from the readiness condition's
@@ -165,6 +172,10 @@ func AddNotReadyKey(ctx context.Context, c client.Client, reader client.Reader, 
 // the hold genuinely dies with the pod, use
 // RemoveNotReadyKeyIgnoreNotFound instead.
 //
+// Pod names here are slot-based, so a same-name pod carrying a
+// different UID is a replacement, not the caller's pod: that is
+// ErrPodIdentityChanged, for the same reason.
+//
 // reader is the live reader the RV-pinned patch base is read through
 // (nil falls back to c). Wrapped in retry.RetryOnConflict; patches
 // only the single condition slot.
@@ -174,8 +185,10 @@ func RemoveNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 }
 
 // RemoveNotReadyKeyIgnoreNotFound is RemoveNotReadyKey for drain-hold
-// release: a pod that no longer exists is a no-op (nil) because the
-// hold dies with the pod. Never use it on a promote-to-serving path —
+// release: a pod that no longer exists — vanished outright, or replaced
+// under the same name by a pod with a different UID — is a no-op (nil)
+// because the hold dies with the pod. Never use it on a
+// promote-to-serving path —
 // tolerating NotFound there turns "replacement is in rotation" into
 // "replacement may be gone" and lets the caller drain its predecessor
 // with nothing serving.
@@ -201,11 +214,29 @@ func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 			}
 			return fmt.Errorf("re-read pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
+		if pod.UID != "" && fresh.UID != pod.UID {
+			// A same-name replacement occupies the slot. The caller's
+			// hold died with its pod, so releasing it here would clear
+			// a gate the replacement never earned. For the tolerant
+			// variant that is the same no-op as a vanished pod.
+			if ignoreNotFound {
+				return nil
+			}
+			return fmt.Errorf("%w: pod %s/%s", ErrPodIdentityChanged, pod.Namespace, pod.Name)
+		}
 		cond := findCondition(fresh, ConditionType)
 		if cond == nil {
-			// Fresh pod, no condition yet. Removing a key that isn't
-			// present is vacuously "no writers hold it NotReady"
-			// → write Status=True.
+			// An absent condition is the implicit Lifecycle hold on a
+			// fresh pod. Only the promote path may resolve it: that IS
+			// its Ready promotion. A drain-hold release has nothing to
+			// release here — its hold was never recorded — and writing
+			// Status=True would promote a pod no writer promoted,
+			// slipping past the Instance-wide gang gate.
+			if ignoreNotFound {
+				return nil
+			}
+			// Removing a key that isn't present is vacuously "no
+			// writers hold it NotReady" → write Status=True.
 			if err := patchCondition(ctx, c, fresh, corev1.PodCondition{
 				Type:               ConditionType,
 				Status:             corev1.ConditionTrue,
@@ -241,7 +272,7 @@ func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 			Status:             status,
 			Reason:             reason,
 			Message:            message,
-			LastTransitionTime: metav1.Now(),
+			LastTransitionTime: transitionTime(cond, status),
 		}); err != nil {
 			return err
 		}
@@ -251,9 +282,16 @@ func removeNotReadyKey(ctx context.Context, c client.Client, reader client.Reade
 	return changed, err
 }
 
-// ContainsNotReadyKey reports whether the readiness condition
-// currently holds msg in its message list. Read-side check used by
-// callers that want to skip the redundant Add/Remove call.
+// ContainsNotReadyKey reports whether the readiness condition holds
+// msg as a live hold — msg is in the message list AND Status is False.
+// Read-side check used by callers that want to skip a redundant Add.
+//
+// The Status=False requirement makes this "is the hold in effect", not
+// "is the entry present". A condition in the paradoxical Status=True
+// state with a non-empty list therefore reports false. That is what an
+// Add caller wants, since AddNotReadyKey repairs the paradox on its
+// next write. A Remove caller must NOT use this to skip its call: the
+// stale entry is exactly what needs removing, and skipping leaves it.
 func ContainsNotReadyKey(pod *corev1.Pod, msg Message) bool {
 	if pod == nil {
 		return false

@@ -208,3 +208,16 @@ func TestAvailabilityFloor_Table(t *testing.T) {
 		})
 	}
 }
+
+// A percentage large enough to scale past MaxInt32 must still clamp to total:
+// comparing after narrowing to int32 lets the value wrap and slip through.
+func TestScaledCountFromIntOrString_ClampsAboveMaxInt32(t *testing.T) {
+	huge := intstr.FromString("300000000%")
+	got := ScaledCountFromIntOrString(&huge, 1000, true)
+	if got != 1000 {
+		t.Fatalf("ScaledCountFromIntOrString(300000000%%, total=1000) = %d, want 1000", got)
+	}
+	if got < 0 {
+		t.Fatalf("returned a negative count: %d", got)
+	}
+}

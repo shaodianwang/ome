@@ -6,7 +6,6 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
@@ -78,7 +77,10 @@ func (fa *FineTunedAdapterInjector) injectFineTunedAdapter(pod *v1.Pod) error {
 	}
 
 	mounts := fa.getVolumeMounts(pod)
-	initContainer := fa.createInitContainer(initEnvs, mounts, securityContext)
+	initContainer, err := fa.createInitContainer(initEnvs, mounts, securityContext)
+	if err != nil {
+		return err
+	}
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, *initContainer)
 	return nil
 }
@@ -97,7 +99,11 @@ func (fa *FineTunedAdapterInjector) getVolumeMounts(pod *v1.Pod) []v1.VolumeMoun
 	}
 }
 
-func (fa *FineTunedAdapterInjector) createInitContainer(envs []v1.EnvVar, mounts []v1.VolumeMount, securityContext *v1.SecurityContext) *v1.Container {
+func (fa *FineTunedAdapterInjector) createInitContainer(envs []v1.EnvVar, mounts []v1.VolumeMount, securityContext *v1.SecurityContext) (*v1.Container, error) {
+	resources, err := newResourceRequirements(fa.CpuLimit, fa.MemoryLimit, fa.CpuRequest, fa.MemoryRequest)
+	if err != nil {
+		return nil, fmt.Errorf("fine-tuned adapter injector: %w", err)
+	}
 	return &v1.Container{
 		Name:                     constants.FineTunedAdapterContainerName,
 		Image:                    fa.Image,
@@ -105,18 +111,9 @@ func (fa *FineTunedAdapterInjector) createInitContainer(envs []v1.EnvVar, mounts
 		Env:                      envs,
 		VolumeMounts:             mounts,
 		Args:                     []string{"fine-tuned-adapter", "--config", "/ome-agent.yaml", "--debug"},
-		Resources: v1.ResourceRequirements{
-			Limits: map[v1.ResourceName]resource.Quantity{
-				v1.ResourceCPU:    resource.MustParse(fa.CpuLimit),
-				v1.ResourceMemory: resource.MustParse(fa.MemoryLimit),
-			},
-			Requests: map[v1.ResourceName]resource.Quantity{
-				v1.ResourceCPU:    resource.MustParse(fa.CpuRequest),
-				v1.ResourceMemory: resource.MustParse(fa.MemoryRequest),
-			},
-		},
-		SecurityContext: securityContext,
-	}
+		Resources:                resources,
+		SecurityContext:          securityContext,
+	}, nil
 }
 
 func (fa *FineTunedAdapterInjector) getFineTunedWeightUri(pod *v1.Pod) (*storage.OCIStorageComponents, error) {

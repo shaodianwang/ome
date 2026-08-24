@@ -321,7 +321,7 @@ const (
 // ModelCapability enum
 // TODO: Remove legacy capabilities
 //
-// +kubebuilder:validation:Enum=TEXT_GENERATION;TEXT_SUMMARIZATION;TEXT_EMBEDDINGS;TEXT_RERANK;CHAT;VISION;EMBEDDING;RERANK;TEXT_TO_TEXT;TEXT_TO_AUDIO;TEXT_TO_IMAGE;TEXT_TO_VIDEO;IMAGE_TEXT_TO_TEXT;IMAGE_TEXT_TO_AUDIO;IMAGE_TEXT_TO_IMAGE;IMAGE_TEXT_TO_VIDEO;VIDEO_TEXT_TO_AUDIO;AUDIO_TO_TEXT;AUDIO_TO_AUDIO;AUDIO_TRANSLATION
+// +kubebuilder:validation:Enum=TEXT_GENERATION;TEXT_SUMMARIZATION;TEXT_EMBEDDINGS;TEXT_RERANK;CHAT;VISION;EMBEDDING;RERANK;TEXT_TO_TEXT;TEXT_TO_AUDIO;TEXT_TO_IMAGE;TEXT_TO_VIDEO;IMAGE_TEXT_TO_TEXT;IMAGE_TEXT_TO_AUDIO;IMAGE_TEXT_TO_IMAGE;IMAGE_TEXT_TO_VIDEO;VIDEO_TEXT_TO_TEXT;VIDEO_TEXT_TO_AUDIO;AUDIO_TO_TEXT;AUDIO_TEXT_TO_TEXT;AUDIO_TO_AUDIO;AUDIO_TRANSLATION
 type ModelCapability string
 
 const (
@@ -344,8 +344,10 @@ const (
 	ModelCapabilityImageTextToAudio ModelCapability = "IMAGE_TEXT_TO_AUDIO"
 	ModelCapabilityImageTextToImage ModelCapability = "IMAGE_TEXT_TO_IMAGE"
 	ModelCapabilityImageTextToVideo ModelCapability = "IMAGE_TEXT_TO_VIDEO"
+	ModelCapabilityVideoTextToText  ModelCapability = "VIDEO_TEXT_TO_TEXT"
 	ModelCapabilityVideoTextToAudio ModelCapability = "VIDEO_TEXT_TO_AUDIO"
 	ModelCapabilityAudioToText      ModelCapability = "AUDIO_TO_TEXT"
+	ModelCapabilityAudioTextToText  ModelCapability = "AUDIO_TEXT_TO_TEXT"
 	ModelCapabilityAudioToAudio     ModelCapability = "AUDIO_TO_AUDIO"
 	ModelCapabilityAudioTranslation ModelCapability = "AUDIO_TRANSLATION"
 	ModelCapabilityUnknown          ModelCapability = ""
