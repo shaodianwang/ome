@@ -2,7 +2,7 @@ title: "Multi-Cluster Horizontal Scale-Out via Fractional Admission"
 oep-number: "0018.1"
 authors:
   - "@simo-lin"
-status: provisional
+status: implemented
 creation-date: 2026-06-26
 reviewers:
   - TBD

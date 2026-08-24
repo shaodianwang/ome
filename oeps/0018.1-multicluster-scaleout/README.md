@@ -1,10 +1,10 @@
 # OEP-0018.1: Multi-Cluster Horizontal Scale-Out via Fractional Admission
 
-> **Status: DRAFT / provisional.** This is a follow-up to OEP-0018 and a design
-> record, not an implemented behavior. It depends on OEP-0018's base
-> implementation, which is **untested and carries serious bugs** (see
-> [Current state & prerequisites](#current-state--prerequisites)). Nothing here
-> ships until those land.
+> **Status: largely implemented.** This is a follow-up to OEP-0018. The base it
+> depends on is fixed and validated, and fractional placement itself has since
+> shipped as `spec.placement.mode: Split` under OEP-0018.3. Read this document
+> as the design rationale for that behavior; see
+> [Current state](#current-state) for what remains.
 
 <!-- toc -->
 - [Summary](#summary)
@@ -29,7 +29,7 @@
   - [End-to-end flow](#end-to-end-flow)
   - [Failure modes and re-sharding](#failure-modes-and-re-sharding)
   - [Dependencies](#dependencies)
-- [Current state & prerequisites](#current-state--prerequisites)
+- [Current state](#current-state)
 - [Test Plan](#test-plan)
 - [Graduation Criteria](#graduation-criteria)
 - [Drawbacks](#drawbacks)
@@ -403,7 +403,7 @@ Reuses 0018's four components; two are extended:
 ```
 Inputs: desired N (spec.replicas); candidate set C (reachable WorkloadClusters
         whose labels satisfy the ISVC's accelerator requirements — the SAME
-        matching 0018 needs, see prereq #2); per-cluster min/max; spread mode.
+        matching 0018 does); per-cluster min/max; spread mode.
 
 1. APPORTION (initial request, not a capacity read):
    target_per_cluster = ceil(N / |C|)   [Balanced]   or   N filling fewer  [Packed]
@@ -433,7 +433,7 @@ Inputs: desired N (spec.replicas); candidate set C (reachable WorkloadClusters
      gated remainder that might admit later, or newly-reachable candidates),
      bump their derived replicas, and GOTO 3. If no candidate can take more
      (all gated remainders persist), phase=Degraded and wait — Kueue queueing
-     governs, NOT an OME timeout (same gated-deadline pause as 0018, prereq).
+     governs, NOT an OME timeout (the same gated-deadline pause 0018 uses).
 
 5. NEVER delete a home that admitted >0 (this is the core delta from 0018's
    step 4 "delete all losers"). Deletion happens only via: drop-sliver (step 3),
@@ -503,12 +503,14 @@ interacts with OEP-0013's per-Component scaler model. Deferred (see Non-Goals).
 
 Tl;dr: fractional placement is useless without a multi-home load balancer —
 capacity you can't address is wasted. But the concrete global-traffic backend is a
-**foundational problem that single-active 0018 already needs and never solved** (its
-endpoint publisher is an unimplemented stub that only mirrors `status.URL`, prereq
-#7). So this OEP deliberately does **not** design the backend. It defines a precise
-**contract** and a **pluggable publisher seam**; the backend is owned by a separate
-proposal — *the global weighted endpoint OEP* (new, TBD number), a **shared
-dependency of OEP-0018 and this OEP**.
+**foundational problem that single-active 0018 also has**. So this OEP deliberately
+does **not** design the backend. It defines a precise **contract** and a
+**pluggable publisher seam**.
+
+Since this was written, one concrete backend has shipped: `placement/endpoint`
+programs a Gateway API HTTPRoute over per-home ExternalName Services, weighted by
+each home's ready replicas. The seam remains, so a DNS/GSLB backend can be added
+without touching the reconciler.
 
 **What this OEP produces — the contract.** The control plane writes and keeps fresh
 the per-home routing intent in `status.placement.homes[]`:
@@ -570,8 +572,9 @@ and it must not flap.
 Triggers:
 - **Home unreachable:** connection manager flips it unhealthy (0018). Its
   replicas are presumed lost after a grace window.
-- **Home loses admission (preemption):** that home's admittedReplicas drops
-  (this is a base prereq — 0018 today never re-checks admission, prereq #6).
+- **Home loses admission (preemption):** that home's admittedReplicas drops.
+  The base detects this: the Single-mode sticky path re-checks admission and
+  re-races after a grace window.
 - **Global scale-up beyond current headroom:** desired N rises past what homes
   can admit (see autoscaling, point 3).
 
@@ -597,10 +600,9 @@ Unchanged from OEP-0018: one kubeconfig Secret per workload cluster, direct
 apiserver calls, origin-annotation (`ome.io/placement-origin` +
 `...-origin-uid`) GC, static-credentials-by-default with opt-in allowlisted
 `exec` plugins. Fractional placement changes only the *fan-out controller's*
-behavior, not the wire. Two transport-adjacent base bugs become more dangerous at
-multi-home scale and are hard prerequisites: the cross-tenant `deleteLosers`
-data-loss (prereq #1) and the under-scoped GC (prereq #4/#5) — both detailed
-below.
+behavior, not the wire. Two transport-adjacent base bugs were the most dangerous
+at multi-home scale — the cross-tenant `deleteLosers` data-loss and the
+under-scoped GC — and both are fixed (see [Current state](#current-state)).
 
 ### End-to-end flow
 
@@ -636,11 +638,11 @@ below.
 | One home admits >0 but < minReplicasPerCluster | A 1–3 replica sliver wastes a home's overhead | Drop the sliver (scale derived to 0), return its replicas to the deficit (algorithm step 3) |
 | Over-request causes transient over-admission (sum > N) | Briefly more replicas than desired (wasted GPUs) | Trim youngest/gated-first down to N (step 4); prefer not shedding ready replicas |
 | A home goes unreachable | Its replicas presumed lost after graceWindow | Re-shard the deficit onto survivors/new candidates **additively**; endpoint keeps serving on survivors; never zero the ISVC |
-| A home is preempted (admitted drops) | Partial capacity loss, NOT total | Re-shard the lost replicas; **base prereq #6** — 0018 never re-checks admission today, must be fixed |
+| A home is preempted (admitted drops) | Partial capacity loss, NOT total | Re-shard the lost replicas; the base re-checks admission and re-races after a grace window (Single mode) |
 | Brief unreachable blip < graceWindow | Risk of needless re-home + weight flap | Grace window suppresses re-shard; hysteresis on endpoint reweight |
 | Endpoint weights chase transient readiness | Traffic flaps to warming/cold replicas | Weight by **ready** only, with hysteresis; never weight by apportioned/admitted |
 | Gang would be split across clusters | Physically broken collectives (START_SESSION fails) | **Invariant**: split only at replica boundary; Kueue per-gang admission enforces indivisibility |
-| Two control-plane controllers (HA) double-fan-out | Conflicting deriveds across many homes | Leader election; deterministic derived names; **base prereq #5** — GC must be control-plane-scoped or HA double-GCs |
+| Two control-plane controllers (HA) double-fan-out | Conflicting deriveds across many homes | Leader election; deterministic derived names; the GC is control-plane-scoped, so one control plane never reaps another's deriveds |
 
 ### Dependencies
 
@@ -667,105 +669,103 @@ below.
   GSLB / mesh). The single largest integration unknown; without it there is no
   multi-home serving (the weighted-endpoint section).
 
-## Current state & prerequisites
+## Current state
 
-**Read this before anything else: the base (OEP-0018) is implemented but
-UNTESTED, and a bug-hunt over that implementation (2026-06-26, 38 findings) found
-serious defects that this OEP both depends on and *amplifies*.** Fractional
-placement turns single-active into multi-home, so every base bug that was "bad on
-one cluster" becomes "bad across N clusters." None of this OEP's value is real
-until the base is trustworthy. Source: the OEP-0018 bug-hunt findings.
+**The base (OEP-0018) is fixed and validated, and fractional placement itself
+has shipped.** A bug-hunt over the base implementation (2026-06-26) found 38
+defects, eight of which this OEP called blockers. All eight are resolved, as are
+the notable mediums; the base now has both an envtest and a real-Kueue
+end-to-end suite. Fractional placement landed as `spec.placement.mode: Split`
+under OEP-0018.3, so the sections above describe shipped behavior rather than a
+proposal.
 
-The base resolved one important non-bug: **the race admission signal does flow**
-— `inferencereplica/status.go` sets `Admitted` on the OMENative instance status,
-the irprojector copies it onto `isvc.Status.Components[].Lifecycle.InstanceStatuses`,
-and `placement/admission.go` reads it. So winner election works on the happy
-path. But the following **must be fixed before this OEP is implementable**, in
-roughly this priority:
+The race admission signal flows as designed: `inferencereplica/status.go` sets
+`Admitted` on the OMENative instance status, the irprojector copies it onto
+`isvc.Status.Components[].Lifecycle.InstanceStatuses`, and `placement/admission.go`
+reads it.
 
-1. **`deleteLosers` is cross-tenant data loss (High).** `placement/controller.go`
-   deletes `InferenceService{name,ns}` on every connected cluster **by identity
-   only, with no `PlacementOriginLabel` guard** — a same-named ISVC a user
-   created independently on another cluster gets deleted. This is catastrophic
-   under fractional placement, where we operate on *more* clusters at once. Every
-   cross-cluster delete MUST be guarded by the origin label/UID. **Blocker.**
-2. **Candidate matching ignores accelerator requirements (High).** `match.go`
-   only honors an optional `ome.io/cluster-selector` annotation; absent it (the
-   documented default), it fans out to **every** Ready cluster. This OEP's
-   apportionment is meaningless if candidates aren't the accelerator-matched set
-   — we'd spread replicas onto clusters that can't run the model. The OEP-0018
-   invariant "candidates = clusters whose labels satisfy the ISVC's accelerator
-   requirements" must actually be implemented. **Blocker** (the algorithm's step
-   1 input depends on it).
-3. **Partial admission misread as full placement (High).** `admission.go
-   AnyInstanceAdmitted` returns true if *any* component has *any* instance
-   admitted — so a PD ISVC whose engine admitted but whose decoder is still gated
-   is declared placed. Under single-active this prematurely deletes losers; under
-   fractional placement it would mis-count `admittedReplicas` per home. We need a
-   precise "how many *complete* replicas (all declared components, ≥desired
-   instances each) are admitted on this home" accounting — which is exactly the
-   per-home count fractional placement is built on. **Blocker.**
-4. **GC deletes live deriveds on a transient/partial List (High).** `gc.go` builds
-   the live-UID set from a paginated `APIReader` List and reaps any UID not seen;
-   an empty/partial response deletes live derived ISVCs. With more homes, more
-   surface to mis-reap. Must treat list errors as "abort GC," never "reap all."
-   **Blocker.**
-5. **GC has no control-plane identity scoping (High).** Two control planes (or an
-   HA mis-config) sharing a workload cluster each delete the other's deriveds.
-   HA is a Beta goal here; the GC must scope by control-plane identity first.
-   **Blocker for HA.**
-6. **Sticky-winner never re-checks admission (High).** `controller.go` exits the
-   placed state only on terminal-Failed or derived-gone; a winner re-gated /
-   preempted by Kueue is reported placed forever. **This OEP's re-shard depends
-   entirely on detecting admission loss** — without this, preemption (a named
-   failure mode) silently degrades capacity with no re-shard. **Blocker** for
-   the re-shard subsystem.
-7. **Endpoint publisher is a stub (Medium gap, NOT a serving blocker).** It only
-   mirrors the derived's `status.URL` into `status.placement.endpoint` (which *is*
-   the winning home's reachable ingress URL) and flaps to nil on non-Placed passes.
-   So a service is reachable today at its home URL; what's missing is a *stable,
-   cluster-independent* name (single-active) and *weighted balancing across homes*
-   (multi-home). Both are delivered by consuming the `homes[]` contract from the
-   front-tier (or the optional native-LB OEP) — not by code this OEP must ship. Fix
-   the nil-flap (cosmetic) regardless.
-8. **Cross-cluster RBAC is wrong (High).** The token ClusterRole grants ISVC/CSR
-   write but **no Pod/PodGroup read** (needed for admission watches) and is
-   cluster-wide-broad (blast radius). Fractional placement reads admission state
-   on *more* clusters; the RBAC must grant Pod/PodGroup read and be scoped to the
-   minimum verbs. **Blocker** (admission watches don't work without it).
+### Resolved blockers
 
-Notable mediums that bite harder at multi-home scale (fix before Beta): no
-reconnect/backoff (a single failed `/version` probe disconnects a live client);
-`placeOn`'s `CreateOrUpdate` clobbers worker-side reconciler state every 30s poll
-(worse when we're updating apportioned counts continuously); `deleteLosers`
-aborts on the first per-cluster error; a disconnected cluster leaks its derived
-on ISVC delete; candidate set (etcd `Ready`) diverges from `Manager.Connected()`
-(in-memory, empty after restart) causing re-placement flap on restart — which
-becomes re-shard flap here. One low to note: `KueueServingAnnotation` is not a
-real Kueue key (the gate stamp is inert), but the queue-name *label* is correct
-and is what actually gates, so gating works.
+| # | Blocker | Resolution |
+|---|---|---|
+| 1 | `deleteLosers` deleted by identity alone (cross-tenant data loss) | `deleteDerivedOn` reads first, checks the origin label/UID, and deletes under a UID precondition; `applyDerived` carries the same guard so a foreign object is never overwritten either (#579, #608) |
+| 2 | Candidate matching ignored accelerator requirements | `MatchCandidates` ANDs the requirements selector with the optional cluster-selector; an ISVC declaring no requirement matches NO cluster instead of fanning out fleet-wide (#576), extended to the typed `spec.placement` selectors (#891) |
+| 3 | Partial admission misread as full placement | `AllComponentsAdmitted` requires every declared component to have an admitted instance; `AnyInstanceAdmitted` is retained only as a low-level predicate (#579) |
+| 4 | GC deleted live deriveds on a transient/partial List | A list error aborts the sweep, and an empty live-UID set is treated as suspect and skipped rather than reaping everything (#577) |
+| 5 | GC had no control-plane identity scoping | `GCReconciler.ControlPlaneID` filters both the remote List and the orphan classification, so one control plane never reaps another's deriveds (#577) |
+| 6 | Sticky winner never re-checked admission | The sticky path re-reads per-component IR status and, on lost admission, rides a grace window then re-races off the healthy candidates (#863) |
+| 7 | Endpoint publisher was a stub | `placement/endpoint` programs a Gateway API HTTPRoute over per-home ExternalName Services, weighted by ready replicas; the nil-flap is gone (sticky last-known URL) (#589, #894, #911, #896) |
+| 8 | Cross-cluster RBAC was wrong and over-broad | The token ClusterRole now grants read-only `pods` and `scheduling.x-k8s.io/podgroups`, and ClusterServingRuntime access was narrowed to get/list/watch (#575) |
 
-Net: the single-active happy path and the race signal are real; the system is
-**not safe to enable as-is**, and bugs #1–#8 are simultaneously prerequisites for
-the base and directly generalized by this OEP. **Recommendation: do not start
-this OEP's implementation until #1–#8 are fixed and the base has the e2e
-validation it currently lacks.**
+### Resolved mediums
+
+- Reconnect/backoff: a previously-reachable cluster tolerates transient probe
+  failures for a grace period instead of disconnecting on one failed `/version`,
+  and reconnects on a two-backoff schedule (#578, #589).
+- `placeOn` no longer clobbers worker-side metadata — control-plane-owned keys
+  are merged over what the worker added (#579), with conflict-aware writes
+  (#606) and the foreign-object guard (#608).
+- `deleteLosers` tolerates per-cluster failures instead of aborting on the
+  first, and `reconcileDelete` holds the finalizer when a *connected* cluster
+  still has the derived (#579).
+- Candidate set vs `Manager.Connected()` divergence no longer flaps placement:
+  fan-out snapshots connectivity and skips unreachable candidates rather than
+  treating them as lost (#589).
+- `KueueServingAnnotation` (never a real Kueue key) is gone; only the
+  queue-name label, which is what actually gates, remains (#576).
+
+### Validation
+
+- `tests/integration/multicluster/` — 1 control plane + 2 member envtest
+  apiservers in one process, covering the produce→project→read path the base
+  originally lacked, plus the winner-lost grace window, lost-admission re-race,
+  terminal failure, origin guard, GC scoping, and the Split apportionment modes
+  (#589, #602).
+- The same suite under `OME_MC_REALKUEUE=1` runs full member managers with
+  Kueue's real admission stack — S1–S7 cover the happy race, PD all-components
+  admission, gated-deadline, no-quota-anywhere, re-placement, and GC scoping
+  (#612). **Not wired into CI**; it is opt-in and local-only today.
+
+### What is still open
+
+- **A KIND multi-cluster e2e.** All existing coverage is envtest, which has no
+  kubelet, so nothing it places ever runs. Real scheduling, gang formation, and
+  cross-home traffic remain unproven.
+- **No `Degraded` phase.** A placement reports `Placed` whenever at least one
+  home is admitted, so a permanent shortfall — 3 replicas admitted against a
+  desired 125 — looks healthy at the phase level. The shortfall is visible only
+  in the per-candidate counts. Step 4 of the algorithm above calls for
+  `Degraded`; it was never implemented.
+- **No re-shard damping.** Split re-apportions from scratch every poll with no
+  grace window and no weight hysteresis, so capacity flux can churn targets and
+  endpoint weights. Single mode has an equivalent guard; Split does not.
+- **Trim ordering is implicit.** The algorithm leaves the exact order `TBD` and
+  asks for gated-first. The plan's keep-selection prefers Ready instances, which
+  sheds gated ones first in practice — but an admitted-but-still-starting
+  instance sits in the same tier as a gated one, so between those two the
+  tiebreak is index, not admission.
+- **Terminal failure is not surfaced in Split.** `IsTerminallyFailed` is only
+  consulted on the Single-mode sticky path; a Split home whose instances fail
+  terminally is invisible.
+- **The gang-boundary invariant is structural, not asserted.** Apportionment is
+  in whole replicas and a replica is a whole gang, so it holds by construction —
+  but no test pins it.
+- **Apportioned autoscaling and HA** remain Beta items. Per-home replica bands
+  are pinned on the derived, but nothing clamps a per-home scaler dynamically.
 
 ## Test Plan
 
-The base has essentially no real validation today (the bug-hunt is study-only;
-there is no e2e produce→project→read test proving the race end to end). This
-OEP's test plan therefore starts by *finishing the base's* test plan, then adds
-the fractional/multi-home/re-shard surface.
+The base validation this OEP originally had to bootstrap now exists: the
+envtest multi-cluster suite covers produce→project→read plus a regression for
+each resolved blocker, and the real-Kueue path covers admission for real. What
+remains is the fractional/multi-home/re-shard surface and the kubelet-level
+coverage envtest cannot give.
 
-- **Base validation first (gating):** an e2e that submits an ISVC to the control
-  plane, asserts a derived is *produced* on each candidate, the admission signal
-  *projects* to `status.placement`, and the controller *reads* it to elect — the
-  produce→project→read path that the base never validated. Plus regression tests
-  for each of prereqs #1–#8 (origin-guarded delete; accelerator-matched
-  candidates; complete-replica admission accounting; GC list-error safety + CP
-  scoping; preemption re-race; weighted endpoint published; RBAC grants
-  Pod/PodGroup read).
+- **Base validation (done):** `tests/integration/multicluster/` asserts a derived
+  is *produced* on each candidate, the admission signal *projects* to
+  `status.placement`, and the controller *reads* it to elect; with
+  `OME_MC_REALKUEUE=1` the same suite drives real Kueue admission. Remaining gap:
+  the real-Kueue path is opt-in and not gated in CI.
 - **Unit:** apportionment (`ceil(N/|C|)`, min/max clamping, Packed vs Balanced);
   sliver-drop; over-admission trim (gated-first, prefer-keep-ready);
   deficit re-apportionment loop; per-home admitted/ready/weight accounting;
@@ -786,11 +786,12 @@ the fractional/multi-home/re-shard surface.
 
 ## Graduation Criteria
 
-- **Alpha:** OEP-0018 prereqs #1–#8 fixed and the base e2e green; fractional
-  placement across ≥2 homes with real Kueue; `sum(admitted)` converges to a
-  desired N that fits in no single cluster; a weighted endpoint for one concrete
-  global-traffic backend; gang-boundary invariant enforced and tested; behind the
-  `--enable-multicluster` flag + `spec.placement.scaleOut.enabled` opt-in.
+- **Alpha:** OEP-0018's blockers are fixed and the base e2e is green; fractional
+  placement ships as `spec.placement.mode: Split` with per-home
+  admitted/ready accounting and a ready-weighted endpoint. Outstanding for
+  Alpha: `sum(admitted)` convergence proven against real Kueue across ≥2 homes,
+  a `Degraded` phase for a shortfall that never closes, and the gang-boundary
+  invariant asserted by a test rather than held by construction.
 - **Beta:** re-shard hardened (grace windows, additive-first, weight hysteresis);
   apportioned autoscaling wired to OEP-0013 (per-home scalers clamped to share);
   HA control plane (leader election) with control-plane-scoped GC; over-admission
@@ -895,8 +896,8 @@ Presented as a menu with each option's cost, then the pick.
   services contend for the same homes' quota, whose replicas does Kueue preempt,
   and does that cause oscillating re-shards between them? TBD.
 
-See also: OEP-0018 (the single-active base this extends; its prereqs gate this
-work), OEP-0013 (per-cluster autoscaling, now apportioned to a global target),
+See also: OEP-0018 (the single-active base this extends), OEP-0018.3 (the
+placement-mode set this shipped under), OEP-0013 (per-cluster autoscaling, now apportioned to a global target),
 OEP-0009 (model-weight locality, the pre-staging assumption that must now span
 every home).
 </content>

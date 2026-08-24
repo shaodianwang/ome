@@ -51,7 +51,8 @@ make coverage             # Show coverage summary (48% threshold enforced)
 `make test-kind` runs only the coordination suite under
 `tests/integration/singlecluster/controller/omenative_coordination_kind/`. It
 needs Docker on the host and a `kind` binary on PATH (install with
-`go install sigs.k8s.io/kind@v0.27.0`). `KIND_KEEP_CLUSTER=true` is
+`make kind`, which pins the version from `hack/internal/tools/go.mod`
+and installs to `bin/kind`). `KIND_KEEP_CLUSTER=true` is
 on by default so re-runs are fast; set `KIND_RECREATE=true` to force
 a fresh cluster. Narrow with `GINKGO_FOCUS='regex'`.
 
@@ -119,7 +120,7 @@ make test-kind-clean                                 # delete leftover KIND clus
 
 Requirements:
 - Docker daemon running on the host (KIND brings up the cluster as a Docker container).
-- `kind` binary on PATH: `go install sigs.k8s.io/kind@v0.27.0`.
+- `kind` binary on PATH: `make kind` (version pinned in `hack/internal/tools/go.mod`, installed to `bin/kind`).
 
 `KIND_KEEP_CLUSTER=true` is on by default in `make test-kind` — the cluster persists between runs for fast iteration. Set `KIND_RECREATE=true` to force a fresh cluster (use after suspected dirty state).
 
