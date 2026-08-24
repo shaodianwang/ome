@@ -32,6 +32,12 @@ num_connections: 100
 download_size_limit_gb: 650
 enable_size_limit_check: true
 
+# Bound a HuggingFace snapshot download. hf_download_timeout caps the whole
+# transfer; hf_download_stale_progress_timeout aborts one that stops making
+# progress. Omit either to leave that guard off.
+hf_download_timeout: "72h"
+hf_download_stale_progress_timeout: "30m"
+
 source:
   storage_uri: "oci://n/<namespace>/b/<bucket-name>/o/<object-name>"
   oci:

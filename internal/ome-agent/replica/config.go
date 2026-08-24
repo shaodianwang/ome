@@ -2,6 +2,7 @@ package replica
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/ome-projects/ome/pkg/xet"
 
@@ -24,6 +25,13 @@ type Config struct {
 	DownloadSizeLimitGB  int    `mapstructure:"download_size_limit_gb"`
 	EnableSizeLimitCheck bool   `mapstructure:"enable_size_limit_check"`
 	NumConnections       int    `mapstructure:"num_connections"`
+
+	// HFDownloadTimeout bounds a whole HuggingFace snapshot download and
+	// HFDownloadStaleProgressTimeout aborts one that stops making progress.
+	// Both are supplied by config (the agent's values file); unset means the
+	// corresponding guard is off, which is the behavior without them.
+	HFDownloadTimeout              time.Duration `mapstructure:"hf_download_timeout"`
+	HFDownloadStaleProgressTimeout time.Duration `mapstructure:"hf_download_stale_progress_timeout"`
 
 	Source struct {
 		StorageURIStr  string `mapstructure:"storage_uri" validate:"required"`
