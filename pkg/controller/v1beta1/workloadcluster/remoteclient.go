@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -85,6 +86,12 @@ type selectivelyCachingClient struct {
 }
 
 func (c *selectivelyCachingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	// Metadata-only reads use a distinct informer type from the structured
+	// objects configured in cachedKinds, so they must remain direct reads.
+	if _, metadataOnly := obj.(*metav1.PartialObjectMetadata); metadataOnly {
+		return c.WithWatch.Get(ctx, key, obj, opts...)
+	}
+
 	gvk, err := apiutil.GVKForObject(obj, c.scheme)
 	if err != nil {
 		return err
@@ -97,6 +104,10 @@ func (c *selectivelyCachingClient) Get(ctx context.Context, key client.ObjectKey
 }
 
 func (c *selectivelyCachingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, metadataOnly := list.(*metav1.PartialObjectMetadataList); metadataOnly {
+		return c.WithWatch.List(ctx, list, opts...)
+	}
+
 	gvk, err := apiutil.GVKForObject(list, c.scheme)
 	if err != nil {
 		return err
