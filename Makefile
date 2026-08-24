@@ -715,7 +715,9 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# The multicluster suite owns three envtest control planes. Run it after the
 	@# package-parallel suites so periodic cross-apiserver assertions get a
 	@# responsive API server rather than competing with every suite's startup.
-	@$(TEST_ENV) go test -v -timeout=20m ./tests/integration/multicluster/... \
+	@# Exact package, NOT /... — the KIND-backed suites nested under it need
+	@# Docker and belong to the test-kind lane, not this one.
+	@$(TEST_ENV) go test -v -timeout=20m ./tests/integration/multicluster \
 		$(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
@@ -818,8 +820,11 @@ mc-realkueue: envtest dep-crds ## 🧪 Run the OEP-0018 real-Kueue multi-cluster
 	@# `make integration-test` run leaves members bare (the sim path in
 	@# placement_test.go / gc_test.go). No kubelet: admission = Kueue gate removal.
 	@# CI runs this soft-fail. Narrow with GINKGO_FOCUS='S1|S3'.
+	@# Exact package, NOT /... — the nested KIND suite's TestMultiClusterScaleOutKind
+	@# also matches -run TestMultiCluster, which would drag Docker + two KIND
+	@# clusters into this envtest-only target.
 	@OME_MC_REALKUEUE=1 $(TEST_ENV) \
-		go test ./tests/integration/multicluster/... -run TestMultiCluster -timeout 20m \
+		go test ./tests/integration/multicluster -run TestMultiCluster -timeout 20m \
 		$(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') $(if $(GINKGO_VERBOSE),-v -ginkgo.v)
 
 .PHONY: test-kind

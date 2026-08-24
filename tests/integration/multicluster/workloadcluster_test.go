@@ -48,7 +48,7 @@ var _ = ginkgo.Describe("WorkloadCluster kubeconfig handling", func() {
 	}
 	// expectReadyReason creates the WorkloadCluster and asserts its Ready condition.
 	expectReadyReason := func(status metav1.ConditionStatus, reason string) {
-		mustCreate(controlCluster, workloadClusterFor(wcName, secretNS, secret, nil))
+		mustCreate(controlCluster, WorkloadClusterFor(wcName, secretNS, secret, nil))
 		waitReadyReason(status, reason)
 	}
 
@@ -75,7 +75,7 @@ var _ = ginkgo.Describe("WorkloadCluster kubeconfig handling", func() {
 	ginkgo.It("re-validates and reconnects when the kubeconfig Secret is rotated (valid->bad->valid)", func() {
 		ginkgo.By("starting from a valid kubeconfig: Ready=True/Reachable")
 		mustCreate(controlCluster, kubeconfigSecretFor(member1Cluster, secretNS, secret))
-		mustCreate(controlCluster, workloadClusterFor(wcName, secretNS, secret, nil))
+		mustCreate(controlCluster, WorkloadClusterFor(wcName, secretNS, secret, nil))
 		waitReadyReason(metav1.ConditionTrue, "Reachable")
 
 		ginkgo.By("rotating the Secret to an unsafe kubeconfig: Ready flips to False/BadKubeConfig")
@@ -145,6 +145,6 @@ func badKubeconfigBytes(member cluster, mutate badKubeconfigVariant) []byte {
 func badKubeconfigSecret(member cluster, namespace, name string, mutate badKubeconfigVariant) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data:       map[string][]byte{kubeConfigSecretKey: badKubeconfigBytes(member, mutate)},
+		Data:       map[string][]byte{KubeConfigSecretKey: badKubeconfigBytes(member, mutate)},
 	}
 }

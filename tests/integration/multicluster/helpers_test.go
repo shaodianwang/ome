@@ -7,7 +7,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,10 +15,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
-
-// kubeConfigSecretKey is the Secret data key the WorkloadCluster kubeConfig
-// source reads. It matches the CRD's `kubeConfig.key` default.
-const kubeConfigSecretKey = "kubeconfig"
 
 // kubeConfigBytesFor serializes a member cluster's rest.Config to kubeconfig bytes.
 func kubeConfigBytesFor(member cluster) []byte {
@@ -32,10 +27,9 @@ func kubeConfigBytesFor(member cluster) []byte {
 // Secret on the control cluster. The control plane's WorkloadCluster reconciler
 // reads this Secret to connect to the member.
 func kubeconfigSecretFor(member cluster, namespace, name string) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data:       map[string][]byte{kubeConfigSecretKey: kubeConfigBytesFor(member)},
-	}
+	s, err := KubeConfigSecret(member.cfg, namespace, name)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "kubeconfig Secret for member")
+	return s
 }
 
 // rotateSecret overwrites a kubeconfig Secret's data on the given cluster,
@@ -44,25 +38,9 @@ func rotateSecret(c cluster, namespace, name string, kubeconfig []byte) {
 	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
 		s := &corev1.Secret{}
 		g.Expect(c.client.Get(c.ctx, types.NamespacedName{Namespace: namespace, Name: name}, s)).To(gomega.Succeed())
-		s.Data = map[string][]byte{kubeConfigSecretKey: kubeconfig}
+		s.Data = map[string][]byte{KubeConfigSecretKey: kubeconfig}
 		g.Expect(c.client.Update(c.ctx, s)).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
-}
-
-// workloadClusterFor builds a WorkloadCluster CR pointing at a kubeconfig Secret,
-// carrying the given labels (matched against an ISVC's accelerator requirements).
-func workloadClusterFor(name, secretNamespace, secretName string, labels map[string]string) *v1beta1.WorkloadCluster {
-	return &v1beta1.WorkloadCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
-		Spec: v1beta1.WorkloadClusterSpec{
-			ClusterSource: v1beta1.ClusterConnectionSource{
-				KubeConfig: &v1beta1.KubeConfigSource{
-					SecretRef: corev1.SecretReference{Name: secretName, Namespace: secretNamespace},
-					Key:       kubeConfigSecretKey,
-				},
-			},
-		},
-	}
 }
 
 // sourceISVC builds a minimal control-plane source InferenceService that declares
@@ -125,11 +103,8 @@ func orphanDerived(namespace, name, controlPlaneID, originUID string) *v1beta1.I
 // createNamespace creates a namespace on the given cluster (idempotent: an
 // already-existing namespace is fine).
 func createNamespace(c cluster, name string) {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	err := c.client.Create(c.ctx, ns)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create namespace %q", name)
-	}
+	gomega.ExpectWithOffset(1, CreateNamespace(c.ctx, c.client, name)).
+		To(gomega.Succeed(), "create namespace %q", name)
 }
 
 // mustCreate creates an object and fails the spec on error.
@@ -145,13 +120,9 @@ func deleteIfExists(c cluster, obj client.Object) {
 // getDerivedOn fetches the derived InferenceService that the placer created on a
 // member cluster, returning (nil, false) when it is absent.
 func getDerivedOn(member cluster, namespace, name string) (*v1beta1.InferenceService, bool) {
-	derived := &v1beta1.InferenceService{}
-	err := member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: name}, derived)
-	if apierrors.IsNotFound(err) {
-		return nil, false
-	}
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "get derived ISVC on member")
-	return derived, true
+	derived, ok, err := GetDerived(member.ctx, member.client, namespace, name)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "get derived ISVC on member")
+	return derived, ok
 }
 
 // admitDerivedOn simulates the member-side admission path: it stamps the Engine
@@ -190,11 +161,7 @@ func admitDerivedOn(member cluster, namespace, name string) {
 // placementStatusOf reads the source ISVC's placement status from the control
 // cluster, returning nil when not yet written.
 func placementStatusOf(namespace, name string) *v1beta1.PlacementStatus {
-	isvc := &v1beta1.InferenceService{}
-	if err := controlCluster.client.Get(controlCluster.ctx, types.NamespacedName{Namespace: namespace, Name: name}, isvc); err != nil {
-		return nil
-	}
-	return isvc.Status.Placement
+	return PlacementStatus(controlCluster.ctx, controlCluster.client, namespace, name)
 }
 
 // skipIfRealKueue skips a sim-path spec when the real-Kueue member-manager path

@@ -37,7 +37,7 @@ var _ = ginkgo.Describe("Multi-cluster placement GC", func() {
 		mustCreate(controlCluster, kubeconfigSecretFor(member1Cluster, secretNS, secretName))
 		ginkgo.By("connecting member1 as a Ready WorkloadCluster")
 		ometesting.CreateAndWaitReady(controlCluster.ctx, controlCluster.client,
-			workloadClusterFor(wcName, secretNS, secretName, nil),
+			WorkloadClusterFor(wcName, secretNS, secretName, nil),
 			"WorkloadCluster Ready=True",
 			func(o *v1beta1.WorkloadCluster) bool {
 				return apimeta.IsStatusConditionTrue(o.Status.Conditions, v1beta1.WorkloadClusterReady)
@@ -50,7 +50,7 @@ var _ = ginkgo.Describe("Multi-cluster placement GC", func() {
 
 	ginkgo.AfterEach(func() {
 		deleteIfExists(controlCluster, keeperISVC(isvcNS, keeperName))
-		deleteIfExists(controlCluster, workloadClusterFor(wcName, secretNS, secretName, nil))
+		deleteIfExists(controlCluster, WorkloadClusterFor(wcName, secretNS, secretName, nil))
 	})
 
 	ginkgo.It("reaps an orphan derived whose source is gone, and leaves another control plane's derived", func() {

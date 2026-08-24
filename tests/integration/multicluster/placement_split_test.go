@@ -64,7 +64,7 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 		ginkgo.By("creating the WorkloadClusters and waiting for Ready=True")
 		for _, wc := range []struct{ name, secret string }{{wc1Name, secret1}, {wc2Name, secret2}} {
 			ometesting.CreateAndWaitReady(controlCluster.ctx, controlCluster.client,
-				workloadClusterFor(wc.name, secretNS, wc.secret, matchingLabels()),
+				WorkloadClusterFor(wc.name, secretNS, wc.secret, matchingLabels()),
 				"WorkloadCluster Ready=True",
 				func(o *v1beta1.WorkloadCluster) bool {
 					return apimeta.IsStatusConditionTrue(o.Status.Conditions, v1beta1.WorkloadClusterReady)
@@ -74,8 +74,8 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 
 	ginkgo.AfterEach(func() {
 		deleteIfExists(controlCluster, splitSourceISVC(isvcNS, isvcName, requirement(), nil))
-		deleteIfExists(controlCluster, workloadClusterFor(wc1Name, secretNS, secret1, nil))
-		deleteIfExists(controlCluster, workloadClusterFor(wc2Name, secretNS, secret2, nil))
+		deleteIfExists(controlCluster, WorkloadClusterFor(wc1Name, secretNS, secret1, nil))
+		deleteIfExists(controlCluster, WorkloadClusterFor(wc2Name, secretNS, secret2, nil))
 	})
 
 	// derivedEngineMin reads the derived ISVC's pinned engine floor on a member,

@@ -75,7 +75,7 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 		ginkgo.By("creating the WorkloadClusters and waiting for Ready=True")
 		for _, wc := range []struct{ name, secret string }{{wc1Name, secret1}, {wc2Name, secret2}} {
 			ometesting.CreateAndWaitReady(controlCluster.ctx, controlCluster.client,
-				workloadClusterFor(wc.name, secretNS, wc.secret, matchingLabels()),
+				WorkloadClusterFor(wc.name, secretNS, wc.secret, matchingLabels()),
 				"WorkloadCluster Ready=True",
 				func(o *v1beta1.WorkloadCluster) bool {
 					return apimeta.IsStatusConditionTrue(o.Status.Conditions, v1beta1.WorkloadClusterReady)
@@ -84,8 +84,8 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 	})
 
 	ginkgo.AfterEach(func() {
-		deleteIfExists(controlCluster, workloadClusterFor(wc1Name, secretNS, secret1, nil))
-		deleteIfExists(controlCluster, workloadClusterFor(wc2Name, secretNS, secret2, nil))
+		deleteIfExists(controlCluster, WorkloadClusterFor(wc1Name, secretNS, secret1, nil))
+		deleteIfExists(controlCluster, WorkloadClusterFor(wc2Name, secretNS, secret2, nil))
 	})
 
 	ginkgo.It("S1 happy race: member1 admits, member2 blocked → winner=member1, loser swept", func() {
@@ -124,7 +124,7 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Equal(v1beta1.PlacementPhasePlaced))
 		ps := placementStatusOf(isvcNS, isvcName)
 		gomega.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-		gomega.Expect(candidateClusters(ps)).To(gomega.ContainElement(wc1Name),
+		gomega.Expect(CandidateClusters(ps)).To(gomega.ContainElement(wc1Name),
 			"the winner must appear in the candidates list")
 
 		ginkgo.By("asserting member2's loser derived is swept by the placer (deleted or Terminating)")
@@ -311,7 +311,7 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 
 		ginkgo.By("removing member1 from the candidate set (deleting its WorkloadCluster)")
 		gomega.Expect(controlCluster.client.Delete(controlCluster.ctx,
-			workloadClusterFor(wc1Name, secretNS, secret1, nil))).To(gomega.Succeed())
+			WorkloadClusterFor(wc1Name, secretNS, secret1, nil))).To(gomega.Succeed())
 
 		ginkgo.By("asserting the placer re-races and member2 becomes the new winner")
 		gomega.Eventually(func() string {
@@ -440,19 +440,6 @@ func expectDerivedSweptOn(member cluster, ns, name string) {
 		return !ok || d.DeletionTimestamp != nil
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.BeTrue(),
 		"the placer must sweep the loser derived (delete it); full reap is the member's finalizer teardown")
-}
-
-// candidateClusters returns the cluster names from a placement status' candidate
-// list.
-func candidateClusters(ps *v1beta1.PlacementStatus) []string {
-	if ps == nil {
-		return nil
-	}
-	out := make([]string, 0, len(ps.Candidates))
-	for _, c := range ps.Candidates {
-		out = append(out, c.Cluster)
-	}
-	return out
 }
 
 // runnableSourceISVC builds a control-plane SOURCE ISVC that the placer derives
