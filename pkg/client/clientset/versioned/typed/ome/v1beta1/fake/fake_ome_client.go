@@ -12,6 +12,10 @@ type FakeOmeV1beta1 struct {
 	*testing.Fake
 }
 
+func (c *FakeOmeV1beta1) AcceleratorClasses() v1beta1.AcceleratorClassInterface {
+	return newFakeAcceleratorClasses(c)
+}
+
 func (c *FakeOmeV1beta1) AcceleratorQuotas() v1beta1.AcceleratorQuotaInterface {
 	return newFakeAcceleratorQuotas(c)
 }

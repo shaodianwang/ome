@@ -28,6 +28,11 @@ var (
 	InferenceServiceConfigMapName = "inferenceservice-config"
 	BaseModelFinalizer            = "basemodels.ome.io/finalizer"
 	ClusterBaseModelFinalizer     = "clusterbasemodels.ome.io/finalizer"
+	AcceleratorClassFinalizer     = "acceleratorclasses.ome.io/finalizer"
+	// AcceleratorClassAnnotationKey pins an InferenceService to a named
+	// AcceleratorClass; runtime auto-selection rejects runtimes that do not
+	// support the class.
+	AcceleratorClassAnnotationKey = OMEAPIGroupName + "/accelerator-class"
 )
 
 // OME Agent Constants

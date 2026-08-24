@@ -68,6 +68,8 @@ type BaseComponentFields struct {
 	BaseModelMeta                     *metav1.ObjectMeta
 	Runtime                           *v1beta1.ServingRuntimeSpec
 	RuntimeName                       string
+	AcceleratorClass                  *v1beta1.AcceleratorClassSpec
+	AcceleratorClassName              string
 	FineTunedServing                  bool
 	FineTunedServingWithMergedWeights bool
 	FineTunedWeights                  []*v1beta1.FineTunedWeight
@@ -104,6 +106,8 @@ func newBaseComponentFields(deps *ComponentDeps, in ComponentInputs, loggerName 
 		StatusManager:           status.NewStatusReconciler(),
 		Log:                     ctrl.Log.WithName(loggerName),
 		SupportedModelFormat:    in.ModelFormat,
+		AcceleratorClass:        in.AcceleratorClass,
+		AcceleratorClassName:    in.AcceleratorClassName,
 		Overlays:                in.Overlays,
 	}
 }
@@ -261,12 +265,26 @@ func UpdateEnvVariables(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 		}
 	}
 
+	// append env var from runtime spec if it is specified.
+	// runner container is user values, it takes precedence over runtime values.
+	// if the env exists, update its value.
+	// if the env does not exist, append it to the list.
+	if b.SupportedModelFormat != nil && b.SupportedModelFormat.AcceleratorConfig != nil && b.AcceleratorClassName != "" {
+		acceleratorConfig := b.SupportedModelFormat.GetAcceleratorConfig(b.AcceleratorClassName)
+		if acceleratorConfig != nil {
+			envOverride := acceleratorConfig.EnvironmentOverride
+			for envName, envVar := range envOverride {
+				isvcutils.UpdateEnvVars(container, &corev1.EnvVar{
+					Name: envName, Value: envVar})
+			}
+		}
+	}
 }
 
 // UpdatePodSpecNodeSelector updates pod spec node selectors for scheduling.
 func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, componentType v1beta1.ComponentType) {
 	if b.BaseModel == nil || b.BaseModelMeta == nil {
-		applyMergedNodeSelector(b.Runtime, isvc, podSpec, componentType)
+		applyMergedNodeSelector(b.Runtime, b.AcceleratorClass, isvc, podSpec, componentType)
 		return
 	}
 
@@ -282,9 +300,9 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	// label nodes for PVC storage (PVCs aren't tied to specific nodes), so
 	// the K8s scheduler handles placement based on PVC accessibility.
 	if isPVCBaseModel(b) {
-		b.Log.V(2).Info("Skipping model node selector for PVC-backed BaseModel",
+		b.Log.V(2).Info("Skipping model node selector for PVC-backed BaseModel; runtime/AcceleratorClass selectors still apply",
 			"inferenceService", isvc.Name, "namespace", isvc.Namespace)
-		applyMergedNodeSelector(b.Runtime, isvc, podSpec, componentType)
+		applyMergedNodeSelector(b.Runtime, b.AcceleratorClass, isvc, podSpec, componentType)
 		return
 	}
 
@@ -298,7 +316,7 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 		isvcutils.AddNodeSelectorForModelReadyNode(podSpec, b.BaseModelMeta)
 	}
 
-	applyMergedNodeSelector(b.Runtime, isvc, podSpec, componentType)
+	applyMergedNodeSelector(b.Runtime, b.AcceleratorClass, isvc, podSpec, componentType)
 
 	if !isShardedModel(b.BaseModel) {
 		b.Log.V(1).Info("Added preferred node affinity for model scheduling",
@@ -308,8 +326,8 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	}
 }
 
-func applyMergedNodeSelector(runtime *v1beta1.ServingRuntimeSpec, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, componentType v1beta1.ComponentType) {
-	mergedNodeSelector := isvcutils.MergeNodeSelector(runtime, isvc, componentType)
+func applyMergedNodeSelector(runtime *v1beta1.ServingRuntimeSpec, acceleratorClass *v1beta1.AcceleratorClassSpec, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, componentType v1beta1.ComponentType) {
+	mergedNodeSelector := isvcutils.MergeNodeSelector(runtime, acceleratorClass, isvc, componentType)
 	if len(mergedNodeSelector) > 0 {
 		if podSpec.NodeSelector == nil {
 			podSpec.NodeSelector = make(map[string]string)
@@ -449,32 +467,143 @@ func modelCacheEndpointHostPort(endpoint string) string {
 	return endpoint
 }
 
+// MergeRuntimeArgumentsOverride merges runtime argument overrides according AcceleratorClass into the container args
+func MergeRuntimeArgumentsOverride(b *BaseComponentFields, container *corev1.Container) {
+	// append arg var from runtime spec if it is specified
+	if b.SupportedModelFormat != nil && b.SupportedModelFormat.AcceleratorConfig != nil && b.AcceleratorClassName != "" {
+		acceleratorModelConfig := b.SupportedModelFormat.GetAcceleratorConfig(b.AcceleratorClassName)
+		if acceleratorModelConfig != nil {
+			argsOverride := acceleratorModelConfig.RuntimeArgsOverride
+			container.Args = isvcutils.MergeArgs(container.Args, argsOverride)
+
+			// if runtime argument override has TensorParallelism, update the args accordingly
+			// it will be in container.command or container.args
+			// check these two places
+			if acceleratorModelConfig.TensorParallelismOverride != nil {
+				tensorParallelismConfig := acceleratorModelConfig.TensorParallelismOverride
+
+				// Override tensor parallel size if specified
+				// --tp-size and --tp are parameters used in sglang
+				// --tensor-parallel-size is the parameter used in vllm
+				if tensorParallelismConfig.TensorParallelSize != nil && *tensorParallelismConfig.TensorParallelSize > 0 {
+					overrideParam(container, []string{"--tp-size", "--tp", "--tensor-parallel-size"}, *tensorParallelismConfig.TensorParallelSize)
+				}
+				// Override pipeline parallel size if specified
+				// --pp-size and --pp are parameters used in sglang
+				// --pipeline-parallel-size is parameter used in vllm
+				if tensorParallelismConfig.PipelineParallelSize != nil && *tensorParallelismConfig.PipelineParallelSize > 0 {
+					overrideParam(container, []string{"--pp-size", "--pp", "--pipeline-parallel-size"}, *tensorParallelismConfig.PipelineParallelSize)
+				}
+			}
+		}
+	}
+}
+
+func overrideParam(container *corev1.Container, aliases []string, value int64) {
+	var updated bool
+	// First, try to override in container.Args
+	for _, alias := range aliases {
+		container.Args, updated = isvcutils.OverrideArgParam(container.Args, alias, value)
+		if updated {
+			return // Found and updated in Args
+		}
+	}
+
+	// If not found in Args, try to override in container.Command
+	for _, alias := range aliases {
+		container.Command, updated = isvcutils.OverrideCommandParam(container.Command, alias, value)
+		if updated {
+			return // Found and updated in Command
+		}
+	}
+}
+
 // isResourcesUnspecified checks if the resource requirements are unspecified
 func isResourcesUnspecified(resources corev1.ResourceRequirements) bool {
 	return resources.Limits == nil && resources.Requests == nil && len(resources.Claims) == 0
 }
 
-// MergeEngineResources fills the engine container's resource requests/
-// limits from the runtime when the operator hasn't set them on the
-// InferenceService spec.
+// MergeResources merges resource requests and limits from the runtime and accelerator class into the container
+func MergeResources(b *BaseComponentFields, container *corev1.Container) {
+	isvcutils.MergeResource(container, b.AcceleratorClass, b.Runtime)
+}
+
+// MergeEngineResources merges resource requests and limits for the engine container.
+// It only merges resources from the runtime and accelerator class when the user has not
+// explicitly specified resources in the InferenceService spec. This ensures user-specified
+// resources are respected and not overridden, while providing sensible defaults from the
+// runtime and accelerator class when resources are not specified.
 func MergeEngineResources(b *BaseComponentFields, isvc *v1beta1.InferenceService, container *corev1.Container) {
 	if isvc.Spec.Engine != nil &&
 		(isvc.Spec.Engine.Runner == nil ||
 			isResourcesUnspecified(isvc.Spec.Engine.Runner.Container.Resources)) {
 		b.Log.V(1).Info("Merging resources for engine container as user did not specify resources in InferenceService")
-		isvcutils.MergeResource(container, b.Runtime)
+		MergeResources(b, container)
 	}
 }
 
-// MergeDecoderResources fills the decoder container's resource requests/
-// limits from the runtime when the operator hasn't set them on the
-// InferenceService spec.
+// MergeDecoderResources merges resource requests and limits for the decoder container.
+// It only merges resources from the runtime and accelerator class when the user has not
+// explicitly specified resources in the InferenceService spec. This ensures user-specified
+// resources are respected and not overridden, while providing sensible defaults from the
+// runtime and accelerator class when resources are not specified.
 func MergeDecoderResources(b *BaseComponentFields, isvc *v1beta1.InferenceService, container *corev1.Container) {
 	if isvc.Spec.Decoder != nil &&
 		(isvc.Spec.Decoder.Runner == nil ||
 			isResourcesUnspecified(isvc.Spec.Decoder.Runner.Container.Resources)) {
 		b.Log.V(1).Info("Merging resources for decoder container as user did not specify resources in InferenceService")
-		isvcutils.MergeResource(container, b.Runtime)
+		MergeResources(b, container)
+	}
+}
+
+// UpdateEngineAffinity applies the accelerator class's discovery affinity to the
+// engine pod spec when the user did not specify affinity in the InferenceService.
+func UpdateEngineAffinity(b *BaseComponentFields, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec) {
+	if isvc.Spec.Engine != nil && isvc.Spec.Engine.PodSpec.Affinity == nil {
+		mergeAcceleratorAffinity(b, podSpec)
+	}
+}
+
+// UpdateDecoderAffinity applies the accelerator class's discovery affinity to the
+// decoder pod spec when the user did not specify affinity in the InferenceService.
+func UpdateDecoderAffinity(b *BaseComponentFields, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec) {
+	if isvc.Spec.Decoder != nil && isvc.Spec.Decoder.PodSpec.Affinity == nil {
+		mergeAcceleratorAffinity(b, podSpec)
+	}
+}
+
+// acceleratorProvidesParallelismOverride reports whether the selected
+// accelerator class supplies a TensorParallelismOverride for the matched
+// model format. Only then does the accelerator config own the parallelism
+// flags; otherwise the automatic PARALLELISM_SIZE computation still applies.
+func acceleratorProvidesParallelismOverride(b *BaseComponentFields) bool {
+	if b.AcceleratorClassName == "" || b.SupportedModelFormat == nil {
+		return false
+	}
+	acceleratorConfig := b.SupportedModelFormat.GetAcceleratorConfig(b.AcceleratorClassName)
+	return acceleratorConfig != nil && acceleratorConfig.TensorParallelismOverride != nil
+}
+
+// mergeAcceleratorAffinity fills the pod spec's NodeAffinity from the
+// accelerator class's discovery affinity when the pod spec has none.
+// Only NodeAffinity is taken: Discovery describes which NODES carry the
+// hardware, and copying class-level pod (anti-)affinity terms could
+// suppress the gang co-location terms OMENative injects per Instance
+// (a pre-existing required podAffinity on the gang topology key skips
+// the worker-follows-leader injection).
+func mergeAcceleratorAffinity(b *BaseComponentFields, podSpec *corev1.PodSpec) {
+	if b.AcceleratorClass == nil || b.AcceleratorClass.Discovery.Affinity == nil {
+		return
+	}
+	acAffinity := b.AcceleratorClass.Discovery.Affinity
+	if acAffinity.NodeAffinity == nil {
+		return
+	}
+	if podSpec.Affinity == nil {
+		podSpec.Affinity = &corev1.Affinity{}
+	}
+	if podSpec.Affinity.NodeAffinity == nil {
+		podSpec.Affinity.NodeAffinity = acAffinity.NodeAffinity.DeepCopy()
 	}
 }
 

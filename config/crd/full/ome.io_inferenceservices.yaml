@@ -44,8 +44,100 @@ spec:
               type: object
             spec:
               properties:
+                acceleratorSelector:
+                  properties:
+                    acceleratorClass:
+                      type: string
+                    constraints:
+                      properties:
+                        architectureFamilies:
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        excludedClasses:
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        maxMemory:
+                          format: int64
+                          type: integer
+                        minArchitectureVersion:
+                          type: string
+                        minComputePerformanceTFLOPS:
+                          format: int64
+                          type: integer
+                        minMemory:
+                          format: int64
+                          type: integer
+                        preferredPrecisions:
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        requiredFeatures:
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      type: object
+                    policy:
+                      enum:
+                        - BestFit
+                        - Cheapest
+                        - MostCapable
+                        - FirstAvailable
+                      type: string
+                  type: object
                 decoder:
                   properties:
+                    acceleratorOverride:
+                      properties:
+                        acceleratorClass:
+                          type: string
+                        constraints:
+                          properties:
+                            architectureFamilies:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            excludedClasses:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            maxMemory:
+                              format: int64
+                              type: integer
+                            minArchitectureVersion:
+                              type: string
+                            minComputePerformanceTFLOPS:
+                              format: int64
+                              type: integer
+                            minMemory:
+                              format: int64
+                              type: integer
+                            preferredPrecisions:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            requiredFeatures:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          type: object
+                        policy:
+                          enum:
+                            - BestFit
+                            - Cheapest
+                            - MostCapable
+                            - FirstAvailable
+                          type: string
+                      type: object
                     activeDeadlineSeconds:
                       format: int64
                       type: integer
@@ -13301,6 +13393,52 @@ spec:
                   type: string
                 engine:
                   properties:
+                    acceleratorOverride:
+                      properties:
+                        acceleratorClass:
+                          type: string
+                        constraints:
+                          properties:
+                            architectureFamilies:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            excludedClasses:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            maxMemory:
+                              format: int64
+                              type: integer
+                            minArchitectureVersion:
+                              type: string
+                            minComputePerformanceTFLOPS:
+                              format: int64
+                              type: integer
+                            minMemory:
+                              format: int64
+                              type: integer
+                            preferredPrecisions:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            requiredFeatures:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          type: object
+                        policy:
+                          enum:
+                            - BestFit
+                            - Cheapest
+                            - MostCapable
+                            - FirstAvailable
+                          type: string
+                      type: object
                     activeDeadlineSeconds:
                       format: int64
                       type: integer
@@ -31498,6 +31636,23 @@ spec:
                           - apiVersion
                           - kind
                           - name
+                        type: object
+                      selectedAccelerator:
+                        properties:
+                          acceleratorClass:
+                            type: string
+                          nodeSelector:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          reason:
+                            type: string
+                          resourceRequests:
+                            additionalProperties:
+                              type: string
+                            type: object
+                        required:
+                          - acceleratorClass
                         type: object
                       traffic:
                         items:

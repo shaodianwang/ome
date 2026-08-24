@@ -43,5 +43,11 @@ type ComponentInputs struct {
 	Runtime        *v1beta1.ServingRuntimeSpec
 	RuntimeName    string
 	ModelFormat    *v1beta1.SupportedModelFormat
-	Overlays       []isvcutils.ResolvedOverlay
+	// AcceleratorClass is the resolved accelerator class spec for this
+	// component (nil when the ISVC declares no accelerator preference).
+	// Drives node-selector/affinity/resource merging and per-class
+	// runtime arg/env overrides during pod construction.
+	AcceleratorClass     *v1beta1.AcceleratorClassSpec
+	AcceleratorClassName string
+	Overlays             []isvcutils.ResolvedOverlay
 }

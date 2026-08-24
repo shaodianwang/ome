@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -450,14 +451,15 @@ func TestInferenceServiceReconcile(t *testing.T) {
 
 			// Create reconciler
 			reconciler := &InferenceServiceReconciler{
-				Client:          c,
-				APIReader:       c,
-				ClientConfig:    &rest.Config{},
-				Clientset:       clientset,
-				Log:             ctrl.Log.WithName("test"),
-				Scheme:          scheme,
-				Recorder:        recorder,
-				RuntimeSelector: runtimeselector.New(c),
+				Client:                   c,
+				APIReader:                c,
+				ClientConfig:             &rest.Config{},
+				Clientset:                clientset,
+				Log:                      ctrl.Log.WithName("test"),
+				Scheme:                   scheme,
+				Recorder:                 recorder,
+				RuntimeSelector:          runtimeselector.New(c),
+				AcceleratorClassSelector: acceleratorclassselector.New(c),
 			}
 
 			// Ensure the InferenceService exists in the client

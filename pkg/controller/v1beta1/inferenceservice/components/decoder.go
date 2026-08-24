@@ -295,7 +295,10 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 		UpdateEnvVariables(&d.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		UpdateVolumeMounts(&d.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		MergeDecoderResources(&d.BaseComponentFields, isvc, &runnerSpec.Container)
-		d.setParallelismEnvVarForDecoder(&runnerSpec.Container, d.getWorkerSize())
+		MergeRuntimeArgumentsOverride(&d.BaseComponentFields, &runnerSpec.Container)
+		if !acceleratorProvidesParallelismOverride(&d.BaseComponentFields) {
+			d.setParallelismEnvVarForDecoder(&runnerSpec.Container, d.getWorkerSize())
+		}
 	}
 
 	// Use common pod spec reconciler for base logic
@@ -306,6 +309,7 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 
 	UpdatePodSpecVolumes(&d.BaseComponentFields, isvc, podSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&d.BaseComponentFields, isvc, podSpec, v1beta1.DecoderComponent)
+	UpdateDecoderAffinity(&d.BaseComponentFields, isvc, podSpec)
 
 	d.Log.V(1).Info("Decoder PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
@@ -326,7 +330,10 @@ func (d *Decoder) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectM
 			UpdateVolumeMounts(&d.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			UpdateEnvVariables(&d.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			MergeDecoderResources(&d.BaseComponentFields, isvc, &workerRunner.Container)
-			d.setParallelismEnvVarForDecoder(&workerRunner.Container, d.getWorkerSize())
+			MergeRuntimeArgumentsOverride(&d.BaseComponentFields, &workerRunner.Container)
+			if !acceleratorProvidesParallelismOverride(&d.BaseComponentFields) {
+				d.setParallelismEnvVarForDecoder(&workerRunner.Container, d.getWorkerSize())
+			}
 		}
 	}
 
@@ -337,6 +344,7 @@ func (d *Decoder) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectM
 	}
 	UpdatePodSpecVolumes(&d.BaseComponentFields, isvc, workerPodSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&d.BaseComponentFields, isvc, workerPodSpec, v1beta1.DecoderComponent)
+	UpdateDecoderAffinity(&d.BaseComponentFields, isvc, workerPodSpec)
 
 	d.Log.V(1).Info("Decoder Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return workerPodSpec, nil

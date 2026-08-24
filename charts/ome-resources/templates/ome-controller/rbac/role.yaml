@@ -205,6 +205,7 @@ rules:
 - apiGroups:
   - ome.io
   resources:
+  - acceleratorclasses
   - basemodels
   - basemodels/finalizers
   - clusterbasemodels
@@ -229,6 +230,15 @@ rules:
 - apiGroups:
   - ome.io
   resources:
+  - acceleratorclasses/finalizers
+  - clusterbasemodels/finalizers
+  - inferencereplicas/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ome.io
+  resources:
+  - acceleratorclasses/status
   - basemodels/status
   - clusterbasemodels/status
   - clusterservingruntimes/status
@@ -241,13 +251,6 @@ rules:
   verbs:
   - get
   - patch
-  - update
-- apiGroups:
-  - ome.io
-  resources:
-  - clusterbasemodels/finalizers
-  - inferencereplicas/finalizers
-  verbs:
   - update
 - apiGroups:
   - policy

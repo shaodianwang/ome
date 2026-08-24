@@ -44,6 +44,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	v1beta1acceleratorclasscontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorclass"
 	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
@@ -581,6 +582,27 @@ func main() {
 	if options.enableMultiCluster || isControlPlane {
 		if err = setupMultiCluster(mgr, clientSet, options, isControlPlane); err != nil {
 			setupLog.Error(err, "Failed to set up multi-cluster")
+			os.Exit(1)
+		}
+	}
+
+	// AcceleratorClass discovery stamps status from the local cluster's Node
+	// inventory — meaningless on the control plane (which owns no workload
+	// nodes) and its Node watch would add a cluster-wide Node informer there,
+	// so it follows the same role gating as the other catalog controllers.
+	if isControlPlane {
+		setupLog.Info("control-plane role: AcceleratorClass controller disabled")
+	} else {
+		acceleratorClassEventBroadcaster := record.NewBroadcaster()
+		setupLog.Info("Setting up AcceleratorClass controller")
+		acceleratorClassEventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
+		if err = (&v1beta1acceleratorclasscontroller.AcceleratorClassReconciler{
+			Client:   mgr.GetClient(),
+			Log:      ctrl.Log.WithName("AcceleratorClass"),
+			Scheme:   mgr.GetScheme(),
+			Recorder: acceleratorClassEventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create AcceleratorClass controller")
 			os.Exit(1)
 		}
 	}

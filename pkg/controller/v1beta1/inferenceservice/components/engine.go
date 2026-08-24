@@ -314,7 +314,10 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 		UpdateEnvVariables(&e.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		UpdateVolumeMounts(&e.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		MergeEngineResources(&e.BaseComponentFields, isvc, &runnerSpec.Container)
-		e.setParallelismEnvVarForEngine(&runnerSpec.Container, e.getWorkerSize())
+		MergeRuntimeArgumentsOverride(&e.BaseComponentFields, &runnerSpec.Container)
+		if !acceleratorProvidesParallelismOverride(&e.BaseComponentFields) {
+			e.setParallelismEnvVarForEngine(&runnerSpec.Container, e.getWorkerSize())
+		}
 	}
 
 	// Use common pod spec reconciler for base logic
@@ -324,6 +327,7 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 	}
 	UpdatePodSpecVolumes(&e.BaseComponentFields, isvc, podSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&e.BaseComponentFields, isvc, podSpec, v1beta1.EngineComponent)
+	UpdateEngineAffinity(&e.BaseComponentFields, isvc, podSpec)
 
 	e.Log.V(1).Info("Engine PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
@@ -344,7 +348,10 @@ func (e *Engine) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectMe
 			UpdateVolumeMounts(&e.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			UpdateEnvVariables(&e.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			MergeEngineResources(&e.BaseComponentFields, isvc, &workerRunner.Container)
-			e.setParallelismEnvVarForEngine(&workerRunner.Container, e.getWorkerSize())
+			MergeRuntimeArgumentsOverride(&e.BaseComponentFields, &workerRunner.Container)
+			if !acceleratorProvidesParallelismOverride(&e.BaseComponentFields) {
+				e.setParallelismEnvVarForEngine(&workerRunner.Container, e.getWorkerSize())
+			}
 		}
 	}
 
@@ -355,6 +362,7 @@ func (e *Engine) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectMe
 	}
 	UpdatePodSpecVolumes(&e.BaseComponentFields, isvc, workerPodSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&e.BaseComponentFields, isvc, workerPodSpec, v1beta1.EngineComponent)
+	UpdateEngineAffinity(&e.BaseComponentFields, isvc, workerPodSpec)
 	e.Log.V(1).Info("Engine Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return workerPodSpec, nil
 }

@@ -103,6 +103,10 @@
   color: "EF4444"
   description: "Multi-node/distributed inference changes"
 
+- name: accelerator
+  color: "84CC16"
+  description: "Accelerator class changes"
+
 - name: xet
   color: "FBBF24"
   description: "Xet/HuggingFace acceleration changes"

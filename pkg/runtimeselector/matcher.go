@@ -2,10 +2,12 @@ package runtimeselector
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	modelVer "sigs.k8s.io/ome/pkg/modelver"
 )
 
@@ -25,6 +27,16 @@ func (m *DefaultRuntimeMatcher) IsCompatible(runtime *v1beta1.ServingRuntimeSpec
 		return false, &RuntimeDisabledError{RuntimeName: runtimeName}
 	}
 
+	// Check accelerator class compatibility
+	if !m.compareAcceleratorClass(runtime, isvc) {
+		return false, &RuntimeCompatibilityError{
+			RuntimeName: runtimeName,
+			ModelName:   "", // Will be filled by caller if available
+			ModelFormat: model.ModelFormat.Name,
+			Reason:      "runtime does not support the required accelerator class",
+		}
+	}
+	// Check if any supported format matches
 	for _, format := range runtime.SupportedModelFormats {
 		if !m.compareSupportedModelFormats(model, format) {
 			continue
@@ -51,6 +63,14 @@ func (m *DefaultRuntimeMatcher) GetCompatibilityDetails(runtime *v1beta1.Serving
 		return report, nil
 	}
 
+	// Check if accelerator class is compatible
+	if !m.compareAcceleratorClass(runtime, isvc) {
+		report.IncompatibilityReasons = append(report.IncompatibilityReasons,
+			"runtime does not support the required accelerator class")
+		return report, nil
+	}
+
+	// Check supported formats (mimics original RuntimeSupportsModel logic)
 	formatSupported := false
 	var formatMismatchReasons []string
 	for _, format := range runtime.SupportedModelFormats {
@@ -187,6 +207,49 @@ func (m *DefaultRuntimeMatcher) evaluateFormatMatch(model *v1beta1.BaseModelSpec
 	return match
 }
 
+// compareAcceleratorClass checks if the runtime supports the required accelerator class.
+func (m *DefaultRuntimeMatcher) compareAcceleratorClass(runtime *v1beta1.ServingRuntimeSpec, isvc *v1beta1.InferenceService) bool {
+	// if inferenceService is nil, we assume no accelerator requirement
+	if isvc == nil {
+		return true
+	}
+
+	// Collect all unique accelerator requirements from the InferenceService
+	requiredClasses := make(map[string]struct{})
+	if class, ok := isvc.Annotations[constants.AcceleratorClassAnnotationKey]; ok {
+		requiredClasses[class] = struct{}{}
+	}
+	if isvc.Spec.AcceleratorSelector != nil && isvc.Spec.AcceleratorSelector.AcceleratorClass != nil {
+		requiredClasses[*isvc.Spec.AcceleratorSelector.AcceleratorClass] = struct{}{}
+	}
+	if isvc.Spec.Engine != nil && isvc.Spec.Engine.AcceleratorOverride != nil && isvc.Spec.Engine.AcceleratorOverride.AcceleratorClass != nil {
+		requiredClasses[*isvc.Spec.Engine.AcceleratorOverride.AcceleratorClass] = struct{}{}
+	}
+	if isvc.Spec.Decoder != nil && isvc.Spec.Decoder.AcceleratorOverride != nil && isvc.Spec.Decoder.AcceleratorOverride.AcceleratorClass != nil {
+		requiredClasses[*isvc.Spec.Decoder.AcceleratorOverride.AcceleratorClass] = struct{}{}
+	}
+
+	// If ISVC has no accelerator requirements, it's compatible from this perspective.
+	if len(requiredClasses) == 0 {
+		return true
+	}
+
+	// If ISVC has requirements, the runtime must support them.
+	if runtime.AcceleratorRequirements == nil || len(runtime.AcceleratorRequirements.AcceleratorClasses) == 0 {
+		return false // Runtime supports no accelerators, but ISVC requires one.
+	}
+
+	supportedClasses := runtime.AcceleratorRequirements.AcceleratorClasses
+	for reqClass := range requiredClasses {
+		if !slices.Contains(supportedClasses, reqClass) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// compareSupportedModelFormats checks if a model matches a supported format.
 func (m *DefaultRuntimeMatcher) compareSupportedModelFormats(model *v1beta1.BaseModelSpec, format v1beta1.SupportedModelFormat) bool {
 	if modelRequiresCacheProvider(model) && !supportedFormatSupportsModelCacheProvider(format, m.config.ModelCacheProvider) {
 		return false

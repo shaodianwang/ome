@@ -54,6 +54,34 @@ spec:
               type: object
             spec:
               properties:
+                acceleratorRequirements:
+                  properties:
+                    acceleratorClasses:
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    minArchitectureVersion:
+                      type: string
+                    minComputePerformanceTFLOPS:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    minMemory:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    preferredPrecisions:
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    requiredFeatures:
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  type: object
                 affinity:
                   properties:
                     nodeAffinity:
@@ -1224,6 +1252,52 @@ spec:
                   x-kubernetes-list-type: map
                 decoderConfig:
                   properties:
+                    acceleratorOverride:
+                      properties:
+                        acceleratorClass:
+                          type: string
+                        constraints:
+                          properties:
+                            architectureFamilies:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            excludedClasses:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            maxMemory:
+                              format: int64
+                              type: integer
+                            minArchitectureVersion:
+                              type: string
+                            minComputePerformanceTFLOPS:
+                              format: int64
+                              type: integer
+                            minMemory:
+                              format: int64
+                              type: integer
+                            preferredPrecisions:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            requiredFeatures:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          type: object
+                        policy:
+                          enum:
+                            - BestFit
+                            - Cheapest
+                            - MostCapable
+                            - FirstAvailable
+                          type: string
+                      type: object
                     activeDeadlineSeconds:
                       format: int64
                       type: integer
@@ -15223,6 +15297,52 @@ spec:
                   type: string
                 engineConfig:
                   properties:
+                    acceleratorOverride:
+                      properties:
+                        acceleratorClass:
+                          type: string
+                        constraints:
+                          properties:
+                            architectureFamilies:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            excludedClasses:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            maxMemory:
+                              format: int64
+                              type: integer
+                            minArchitectureVersion:
+                              type: string
+                            minComputePerformanceTFLOPS:
+                              format: int64
+                              type: integer
+                            minMemory:
+                              format: int64
+                              type: integer
+                            preferredPrecisions:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            requiredFeatures:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          type: object
+                        policy:
+                          enum:
+                            - BestFit
+                            - Cheapest
+                            - MostCapable
+                            - FirstAvailable
+                          type: string
+                      type: object
                     activeDeadlineSeconds:
                       format: int64
                       type: integer
@@ -34375,6 +34495,39 @@ spec:
                 supportedModelFormats:
                   items:
                     properties:
+                      acceleratorConfig:
+                        additionalProperties:
+                          properties:
+                            environmentOverride:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            minMemoryPerBillionParams:
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            runtimeArgsOverride:
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            tensorParallelismOverride:
+                              properties:
+                                dataParallelSize:
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                                pipelineParallelSize:
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                                tensorParallelSize:
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                          type: object
+                        type: object
                       autoSelect:
                         type: boolean
                       diffusionPipeline:

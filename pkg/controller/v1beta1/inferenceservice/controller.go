@@ -36,11 +36,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
+	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
@@ -132,7 +134,11 @@ type InferenceServiceReconciler struct {
 	Scheme          *runtime.Scheme
 	Recorder        record.EventRecorder
 	RuntimeSelector runtimeselector.Selector
-	ModelCache      sharded.Provider
+	// AcceleratorClassSelector resolves the AcceleratorClass for each
+	// Engine/Decoder component (explicit name, or policy over the
+	// runtime's acceleratorRequirements). Initialized in SetupWithManager.
+	AcceleratorClassSelector acceleratorclassselector.Selector
+	ModelCache               sharded.Provider
 	// TrafficReconciler is the backend-policy reconciler.
 	// Built from the active translator at controller startup; the
 	// active translator is selected by traffic/factory.New based on
@@ -510,35 +516,61 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// state change — demoted to V(1) because they're hot-path /
 	// steady-state breadcrumbs.
 	if mergedEngine != nil {
+		engineACObj, engineAcName, err := r.AcceleratorClassSelector.GetAcceleratorClass(ctx, isvc, rt, v1beta1.EngineComponent)
+		if err != nil {
+			log.Error(err, "Failed to get accelerator class for engine component")
+			r.Recorder.Eventf(isvc, v1.EventTypeWarning, "AcceleratorClassError", "Failed to get accelerator class for engine: %v", err)
+			return reconcile.Result{}, err
+		}
+		var engineAC *v1beta1.AcceleratorClassSpec
+		if engineACObj != nil {
+			engineAC = &engineACObj.Spec
+		}
 		engineSupportedModelFormats := r.RuntimeSelector.GetSupportedModelFormat(ctx, rt, baseModel, userSpecifiedRuntime)
 		log.V(1).Info("Creating engine reconciler",
-			"deploymentMode", engineDeploymentMode)
+			"deploymentMode", engineDeploymentMode,
+			"acceleratorClass", engineAcName)
 
 		engineReconciler := components.NewEngine(cdeps, components.ComponentInputs{
-			DeploymentMode: engineDeploymentMode,
-			BaseModel:      baseModel,
-			BaseModelMeta:  baseModelMeta,
-			Runtime:        rt,
-			RuntimeName:    rtName,
-			ModelFormat:    engineSupportedModelFormats,
-			Overlays:       resolvedOverlays,
+			DeploymentMode:       engineDeploymentMode,
+			BaseModel:            baseModel,
+			BaseModelMeta:        baseModelMeta,
+			Runtime:              rt,
+			RuntimeName:          rtName,
+			ModelFormat:          engineSupportedModelFormats,
+			AcceleratorClass:     engineAC,
+			AcceleratorClassName: engineAcName,
+			Overlays:             resolvedOverlays,
 		}, mergedEngine)
 		reconcilers = append(reconcilers, engineReconciler)
 	}
 
 	if mergedDecoder != nil {
+		decoderACObj, decoderAcName, err := r.AcceleratorClassSelector.GetAcceleratorClass(ctx, isvc, rt, v1beta1.DecoderComponent)
+		if err != nil {
+			log.Error(err, "Failed to get accelerator class for decoder component")
+			r.Recorder.Eventf(isvc, v1.EventTypeWarning, "AcceleratorClassError", "Failed to get accelerator class for decoder: %v", err)
+			return reconcile.Result{}, err
+		}
+		var decoderAC *v1beta1.AcceleratorClassSpec
+		if decoderACObj != nil {
+			decoderAC = &decoderACObj.Spec
+		}
 		decoderSupportedModelFormats := r.RuntimeSelector.GetSupportedModelFormat(ctx, rt, baseModel, userSpecifiedRuntime)
 		log.V(1).Info("Creating decoder reconciler",
-			"deploymentMode", decoderDeploymentMode)
+			"deploymentMode", decoderDeploymentMode,
+			"acceleratorClass", decoderAcName)
 
 		decoderReconciler := components.NewDecoder(cdeps, components.ComponentInputs{
-			DeploymentMode: decoderDeploymentMode,
-			BaseModel:      baseModel,
-			BaseModelMeta:  baseModelMeta,
-			Runtime:        rt,
-			RuntimeName:    rtName,
-			ModelFormat:    decoderSupportedModelFormats,
-			Overlays:       resolvedOverlays,
+			DeploymentMode:       decoderDeploymentMode,
+			BaseModel:            baseModel,
+			BaseModelMeta:        baseModelMeta,
+			Runtime:              rt,
+			RuntimeName:          rtName,
+			ModelFormat:          decoderSupportedModelFormats,
+			AcceleratorClass:     decoderAC,
+			AcceleratorClassName: decoderAcName,
+			Overlays:             resolvedOverlays,
 		}, mergedDecoder)
 		reconcilers = append(reconcilers, decoderReconciler)
 	}
@@ -1131,6 +1163,9 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	runtimeSelectorConfig.ModelCacheProvider = r.ModelCache.Name
 	r.RuntimeSelector = runtimeselector.NewWithConfig(runtimeSelectorConfig)
 
+	// Initialize AcceleratorClassSelector
+	r.AcceleratorClassSelector = acceleratorclassselector.New(mgr.GetClient())
+
 	// KEDA is an optional CRD: probe and only watch ScaledObject when present.
 	// An unconditional watch fails manager startup (cache-sync timeout) when the
 	// CRD is absent, crash-looping the controller for every ISVC. A class=keda
@@ -1273,6 +1308,17 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1beta1.ClusterServingRuntime{},
 			handler.EnqueueRequestsFromMapFunc(r.isvcsReferencingRuntime))
 
+	// AcceleratorClass events fan out to every ISVC with an accelerator
+	// preference. Policy-based selection (BestFit/Cheapest/...) can resolve
+	// to ANY class, so the mapping is preference-bearing ISVCs, not ISVCs
+	// naming this class. Without this watch a class edit (or the class
+	// finally appearing) never re-reconciles an ISVC that selected — or
+	// failed to select — an accelerator.
+	ctrlBuilder = ctrlBuilder.
+		Watches(&v1beta1.AcceleratorClass{},
+			handler.EnqueueRequestsFromMapFunc(r.isvcsWithAcceleratorPreference),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+
 	// Re-reconcile an ISVC when its canary analysis sample lands, so the executor
 	// consumes the result immediately instead of waiting on the periodic requeue.
 	// The sampler emits a GenericEvent carrying the ISVC's namespace/name.
@@ -1409,6 +1455,35 @@ func (r *InferenceServiceReconciler) isvcsReferencingRuntime(ctx context.Context
 		isvc := &unresolved.Items[i]
 		if runtimeNamespace != "" && isvc.Namespace != runtimeNamespace {
 			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: isvc.Namespace, Name: isvc.Name,
+		}})
+	}
+	return reqs
+}
+
+// isvcsWithAcceleratorPreference returns reconcile requests for every ISVC
+// that expresses any accelerator preference (spec selector, per-component
+// override, or the accelerator-class annotation). AcceleratorClass events
+// are rare (hardware catalog changes), so a full list scan is acceptable.
+func (r *InferenceServiceReconciler) isvcsWithAcceleratorPreference(ctx context.Context, _ client.Object) []reconcile.Request {
+	var isvcs v1beta1.InferenceServiceList
+	if err := r.List(ctx, &isvcs); err != nil {
+		r.Log.Error(err, "fan-out accelerator class event: list InferenceServices failed")
+		return nil
+	}
+
+	var reqs []reconcile.Request
+	for i := range isvcs.Items {
+		isvc := &isvcs.Items[i]
+		hasPreference := isvc.Spec.AcceleratorSelector != nil ||
+			(isvc.Spec.Engine != nil && isvc.Spec.Engine.AcceleratorOverride != nil) ||
+			(isvc.Spec.Decoder != nil && isvc.Spec.Decoder.AcceleratorOverride != nil)
+		if !hasPreference {
+			if _, ok := isvc.Annotations[constants.AcceleratorClassAnnotationKey]; !ok {
+				continue
+			}
 		}
 		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
 			Namespace: isvc.Namespace, Name: isvc.Name,

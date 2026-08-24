@@ -25,6 +25,7 @@ const (
 	PriorityIsNotSameServingRuntimeError        = "%s under the servingruntime %s"
 	PriorityIsNotSameClusterServingRuntimeError = "%s under the clusterservingruntime %s"
 	ChainsawInjectAnnotationNotAllowError       = "chainsaw inject annotation is not allowed"
+	UnknownAcceleratorClassError                = "unknown accelerator classes referenced in AcceleratorRequirements: %v"
 )
 
 // +kubebuilder:webhook:verbs=create;update,path=/validate-ome-io-v1beta1-clusterservingruntime,mutating=false,failurePolicy=fail,groups=ome.io,resources=clusterservingruntimes,versions=v1beta1,name=clusterservingruntime.ome-webhook-server.validator
@@ -90,6 +91,12 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Denied(err.Error())
 	}
 
+	// Validate that all referenced accelerator classes exist
+	if err := validateAcceleratorClasses(ctx, sr.Client, &servingRuntime.Spec); err != nil {
+		log.Info("Accelerator class validation failed", "name", servingRuntime.Name, "namespace", servingRuntime.Namespace, "error", err)
+		return admission.Denied(err.Error())
+	}
+
 	// Spec-only checks run outside the loop so they still apply when the
 	// namespace has no other runtimes.
 	if err := validation.ValidateModelFormatPrioritySame(&servingRuntime.Spec); err != nil {
@@ -146,6 +153,12 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 
 	// Per-Component Autoscaler block validation; see ServingRuntime.Handle.
 	if err := validateRuntimeComponentAutoscalers(&clusterServingRuntime.Spec); err != nil {
+		return admission.Denied(err.Error())
+	}
+
+	// Validate that all referenced accelerator classes exist
+	if err := validateAcceleratorClasses(ctx, csr.Client, &clusterServingRuntime.Spec); err != nil {
+		log.Info("Accelerator class validation failed", "name", clusterServingRuntime.Name, "error", err)
 		return admission.Denied(err.Error())
 	}
 
@@ -322,4 +335,41 @@ func contains[T comparable](slice []T, element T) bool {
 		}
 	}
 	return false
+}
+
+// validateAcceleratorClasses checks that all accelerator classes referenced in the runtime spec exist.
+// This is a strict validation to ensure that:
+// 1. Typos in accelerator class names are caught early
+// 2. Runtime scheduling won't fail due to missing accelerator definitions
+// 3. Cluster operators can safely create runtimes knowing their accelerator dependencies are met
+func validateAcceleratorClasses(ctx context.Context, c client.Reader, spec *v1beta1.ServingRuntimeSpec) error {
+	if spec.AcceleratorRequirements == nil || len(spec.AcceleratorRequirements.AcceleratorClasses) == 0 {
+		return nil
+	}
+
+	// Fetch all AcceleratorClasses in a single API call for better performance
+	allClasses := &v1beta1.AcceleratorClassList{}
+	if err := c.List(ctx, allClasses); err != nil {
+		return fmt.Errorf("failed to list accelerator classes: %w", err)
+	}
+
+	// Build a set for O(1) lookup
+	existingClasses := make(map[string]bool, len(allClasses.Items))
+	for _, ac := range allClasses.Items {
+		existingClasses[ac.Name] = true
+	}
+
+	// Collect all missing classes to report them together
+	var missingClasses []string
+	for _, className := range spec.AcceleratorRequirements.AcceleratorClasses {
+		if !existingClasses[className] {
+			missingClasses = append(missingClasses, className)
+		}
+	}
+
+	if len(missingClasses) > 0 {
+		return fmt.Errorf(UnknownAcceleratorClassError, missingClasses)
+	}
+
+	return nil
 }

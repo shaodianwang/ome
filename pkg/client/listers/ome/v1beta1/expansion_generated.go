@@ -2,6 +2,10 @@
 
 package v1beta1
 
+// AcceleratorClassListerExpansion allows custom methods to be added to
+// AcceleratorClassLister.
+type AcceleratorClassListerExpansion interface{}
+
 // AcceleratorQuotaListerExpansion allows custom methods to be added to
 // AcceleratorQuotaLister.
 type AcceleratorQuotaListerExpansion interface{}

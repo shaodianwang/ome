@@ -15,9 +15,9 @@ import (
 // metav1.GenerateName. Returns the created Namespace (with Name set).
 //
 // Per-test namespaces are the primary isolation mechanism — cluster-
-// scoped resources (ClusterBaseModel) still need per-test cleanup, but
-// anything namespaced gets dropped (logically) when the namespace is
-// marked Terminating.
+// scoped resources (ClusterBaseModel, AcceleratorClass) still need
+// per-test cleanup, but anything namespaced gets dropped (logically)
+// when the namespace is marked Terminating.
 func CreateNamespaceFromPrefix(ctx context.Context, c client.Client, prefix string) (*corev1.Namespace, error) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: prefix}}
 	if err := c.Create(ctx, ns); err != nil {
