@@ -11,13 +11,14 @@ crate-type = ["staticlib", "cdylib"]
 # Use upstream xet-core from GitHub.
 # Pin to a known-good revision; xet-core HEAD has renamed/removed packages
 # (e.g. cas_client) without notice. Bump deliberately when updating.
-xet-core-data = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "data" }
-cas-client = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "cas_client" }
-cas-object = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "cas_object" }
-utils = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "utils" }
-xet-runtime = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "xet_runtime" }
-progress-tracking = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "progress_tracking" }
-merklehash = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "merklehash" }
+xet-core-data = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "data" }
+cas-client = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "cas_client" }
+cas-object = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "cas_object" }
+utils = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "utils" }
+xet-runtime = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "xet_runtime" }
+progress-tracking = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "progress_tracking" }
+merklehash = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "merklehash" }
+file_reconstruction = { git = "https://github.com/huggingface/xet-core", rev = "db2a0e722bcd80ea7f5cf339a0b550d01e6321b2", package = "file_reconstruction" }
 
 # Standard dependencies
 ulid = "1.1"
@@ -33,9 +34,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 futures = "0.3"
-
-[build-dependencies]
-cbindgen = "0.26"
 
 [profile.release]
 lto = true
