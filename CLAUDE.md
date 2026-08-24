@@ -92,7 +92,7 @@ tests/integration/
 ├── components/, util/                     # helpers
 └── singlecluster/
     ├── webhook/{inferenceservice,inferenceservice_defaulter,basemodel,servingruntime,pod,runtimepreset,runtimerevision,acceleratorquota,acceleratorquota_cert}
-    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,acceleratorquota,omenative_coordination_kind}
+    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,acceleratorquota,acceleratorquota_capacity,omenative_coordination_kind}
     ├── clustercache/
     └── agents/metadata/
 ```

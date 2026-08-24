@@ -36,6 +36,14 @@ spec:
       name: Path
       priority: 1
       type: string
+    - jsonPath: .status.capacity[0].allocatable
+      name: Allocatable
+      priority: 1
+      type: string
+    - jsonPath: .status.capacity[0].highWaterMark
+      name: Peak
+      priority: 1
+      type: string
     name: v1beta1
     schema:
       openAPIV3Schema:

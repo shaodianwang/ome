@@ -88,6 +88,61 @@ fi
 grep -Fq 'resourceNames: ["ome-quota-manager-webhook-cert"]' <<<"${default}" ||
   fail "secret update is not scoped by name"
 
+# --- capacity derivation carries its own RBAC, and only in workload mode ---
+
+# The grants and the flags have to appear together: flags without the grants is
+# a crash-looping RBAC error, grants without the flags is a cluster-wide Node
+# read nothing uses.
+grep -Fq 'resources: ["nodes"]' <<<"${default}" ||
+  fail "workload mode did not grant the Node read capacity derivation needs"
+grep -Fq 'resources: ["resourceflavors"]' <<<"${default}" ||
+  fail "workload mode did not grant the ResourceFlavor read"
+grep -Fq -- '--accelerator-resources=google.com/tpu,nvidia.com/gpu' <<<"${default}" ||
+  fail "the accelerator suffixes were not passed"
+grep -Fq -- '--capacity-hysteresis-percent=10' <<<"${default}" ||
+  fail "the hysteresis band was not passed"
+
+# A management-mode install holds the authored fleet tree and has no local
+# silicon, so a cluster-wide Node read there would be unused privilege.
+management="$(render --set quotaManager.mode=management)"
+for unwanted in 'resources: ["nodes"]' 'resources: ["resourceflavors"]' '--accelerator-resources'; do
+  if grep -Fq -- "${unwanted}" <<<"${management}"; then
+    fail "management mode rendered ${unwanted}"
+  fi
+done
+
+# Turning derivation off must drop the grants with it, or the privilege
+# outlives the feature that justified it. Every spelling an operator might
+# reach for, because Helm deletes a defaulted map on a null rather than merging
+# it and an unguarded lookup then aborts the whole render.
+for off in \
+  'quotaManager.capacity.resources=null' \
+  'quotaManager.capacity=null' \
+  'quotaManager.capacity.resources={}' \
+  ; do
+  nocapacity="$(render --set quotaManager.mode=workload --set "${off}")" ||
+    fail "--set ${off} failed to render at all"
+  for unwanted in 'resources: ["nodes"]' 'resources: ["resourceflavors"]' '--accelerator-resources'; do
+    if grep -Fq -- "${unwanted}" <<<"${nocapacity}"; then
+      fail "--set ${off} still rendered ${unwanted}"
+    fi
+  done
+done
+
+# A blank entry is not a resource. The chart must agree with the binary, which
+# trims and drops blanks — otherwise a list of blanks grants cluster-wide Node
+# reads for a feature the binary treats as switched off.
+blanks="$(render --set quotaManager.mode=workload --set 'quotaManager.capacity.resources[0]=')"
+if grep -Fq -- 'resources: ["nodes"]' <<<"${blanks}"; then
+  fail "a list of blank resources still granted the Node read"
+fi
+
+# A flag rendered with no value crash-loops the pod on parse.
+allrendered="$(render --set quotaManager.mode=workload --set quotaManager.capacity.hysteresisPercent=null)"
+if grep -Eq -- '--[a-z-]+=(")?$' <<<"${allrendered}"; then
+  fail "a flag rendered with an empty value"
+fi
+
 # --- the CRD is opt-in, and retained when it is opted into ---
 
 if grep -Fq 'kind: CustomResourceDefinition' <<<"${default}"; then

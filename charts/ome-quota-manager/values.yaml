@@ -66,6 +66,41 @@ quotaManager:
   # parentRef: {name: root}, so a per-cluster name would make those CRs
   # non-portable between planes.
 
+  # capacity measures this cluster's own silicon and records it on the reserved
+  # root's status, so a budget can be checked against hardware that exists
+  # rather than only against the rest of the tree. Workload mode only — a
+  # management-mode install holds the authored fleet tree and has no local
+  # nodes to measure.
+  capacity:
+    # resources are the extended resource names that count as accelerators,
+    # written in full. Exact names rather than a pattern, because this list
+    # decides what every budget is measured against and a pattern would quietly
+    # widen that.
+    #
+    # A vendor that is not listed contributes no capacity. That is not silent:
+    # a budget written against unmeasured hardware exceeds a capacity of zero
+    # and reports CapacityExceeded. Add the resource here when a new accelerator
+    # arrives in the fleet.
+    #
+    # Empty disables derivation entirely and drops the Node and ResourceFlavor
+    # RBAC with it. There is no default because there is no safe guess: without
+    # this list nothing distinguishes a node's accelerators from its cpu.
+    resources:
+    - google.com/tpu
+    - nvidia.com/gpu
+
+    # hysteresisPercent is how far observed capacity must fall below the
+    # recorded high-water mark before the mark follows it down.
+    #
+    # Budget checks read the mark, not the instantaneous value, because capacity
+    # dips for reasons that say nothing about entitlement — a drain, a rolling
+    # reboot, a device plugin restarting. Without a band those dips would mark
+    # budgets Degraded every time a rack was patched. Growth is always believed
+    # immediately; only shrinkage is damped.
+    #
+    # 0 disables damping, so the mark tracks every dip.
+    hysteresisPercent: 10
+
   # webhook serves admission validation for AcceleratorQuota, turning a
   # tree-breaking write into a rejected kubectl apply instead of a Degraded
   # condition minutes later.

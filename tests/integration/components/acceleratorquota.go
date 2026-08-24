@@ -27,6 +27,18 @@ func WithQuotaResync(d time.Duration) AcceleratorQuotaOption {
 	return func(r *acceleratorquota.Reconciler) { r.ResyncInterval = d }
 }
 
+// WithQuotaCapacity turns on deriving the cluster's own accelerator capacity
+// onto the reserved root. Off unless a suite asks, matching the binary: absent
+// config disables derivation rather than guessing which resources are
+// accelerators.
+func WithQuotaCapacity(resources []string, hysteresisPercent int32) AcceleratorQuotaOption {
+	return func(r *acceleratorquota.Reconciler) {
+		r.Capacity = acceleratorquota.CapacityOptions{
+			Resources: resources, HysteresisPercent: hysteresisPercent,
+		}
+	}
+}
+
 // SetupAcceleratorQuota registers the quota status controller.
 //
 // The root name is the compiled-in reserved name, not an option: it is a

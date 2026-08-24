@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap/zapcore"
@@ -28,6 +29,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
@@ -44,6 +46,12 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1beta1.AddToScheme(scheme))
+	// Unconditional, unlike ome-manager's probe table: Kueue is optional for
+	// serving, but this whole binary is opt-in, so registering the types costs
+	// nothing when they are unused. Reads go through the uncached reader, so a
+	// cluster without the CRDs installed gets a no-match error the caller
+	// handles rather than an informer that never syncs.
+	utilruntime.Must(kueuev1beta2.AddToScheme(scheme))
 }
 
 // options are all supplied by the chart. Every knob is a flag rather than a
@@ -63,6 +71,13 @@ type options struct {
 	// only a clock can clear is noticed without an edit. Zero leaves reconciles
 	// purely event-driven.
 	resyncInterval time.Duration
+	// acceleratorResources are the resource-name suffixes that count as
+	// accelerator capacity. Empty disables capacity derivation, and with it the
+	// Node and ResourceFlavor reads it needs.
+	acceleratorResources string
+	// capacityHysteresisPercent damps the derived high-water mark. Zero means no
+	// damping rather than a default band.
+	capacityHysteresisPercent int
 	// enableWebhook serves the admission validator. It is separable from the
 	// controller because the two fail differently: a webhook outage with
 	// failurePolicy=Fail blocks writes, so an operator debugging a wedged
@@ -116,6 +131,20 @@ func main() {
 	flag.IntVar(&opts.maxTreeDepth, "max-tree-depth", opts.maxTreeDepth,
 		"Greatest permitted distance from the root, in edges (the root is 0, a top-tier grouping "+
 			"is 1). 0 disables the depth check rather than assuming a bound.")
+	flag.StringVar(&opts.acceleratorResources, "accelerator-resources", opts.acceleratorResources,
+		"Comma-separated extended resource names that count as accelerator capacity, written in full, "+
+			"e.g. \"google.com/tpu,nvidia.com/gpu\". Exact names rather than a pattern, because this list "+
+			"decides what every budget is measured against. A vendor left off contributes no capacity, "+
+			"which surfaces as CapacityExceeded on any budget written against it rather than passing "+
+			"silently. Empty disables capacity derivation entirely: without it nothing distinguishes a "+
+			"node's accelerators from its cpu, and there is no safe guess. Workload mode only — a "+
+			"management-mode manager has no local silicon to measure.")
+	flag.IntVar(&opts.capacityHysteresisPercent, "capacity-hysteresis-percent", opts.capacityHysteresisPercent,
+		"How far observed capacity must fall below the recorded high-water mark before the mark follows "+
+			"it down. Budget checks read the mark, not the instantaneous value, because capacity dips for "+
+			"reasons unrelated to entitlement — a drain, a reboot, a device plugin restarting — and "+
+			"following those down would mark budgets Degraded every time a rack was patched. Growth is "+
+			"always believed immediately. 0 disables damping.")
 	flag.DurationVar(&opts.resyncInterval, "resync-interval", opts.resyncInterval,
 		"Re-run the tree checks on an otherwise-idle plane, so a violation only a clock can clear "+
 			"is noticed without an edit. 0 leaves reconciles purely event-driven.")
@@ -206,6 +235,21 @@ func main() {
 		},
 		ResyncInterval: opts.resyncInterval,
 	}
+	// Workload mode only. A management-mode manager holds the authored fleet
+	// tree; the nodes it would measure belong to members it reaches over a
+	// remote client, and their capacity arrives as status read back from each
+	// member's own root rather than as something this process samples.
+	if mode == acceleratorquota.ModeWorkload {
+		r.Capacity = acceleratorquota.CapacityOptions{
+			Resources:         splitAndTrim(opts.acceleratorResources),
+			HysteresisPercent: int32(opts.capacityHysteresisPercent),
+		}
+		if r.Capacity.Enabled() {
+			setupLog.Info("Deriving cluster capacity onto the reserved root",
+				"resources", r.Capacity.Resources,
+				"hysteresisPercent", r.Capacity.HysteresisPercent)
+		}
+	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create the AcceleratorQuota controller")
 		os.Exit(1)
@@ -281,4 +325,17 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// splitAndTrim turns a comma-separated flag into a slice, dropping blanks so a
+// trailing comma or a quoted empty string disables derivation rather than
+// configuring a suffix that matches every resource name.
+func splitAndTrim(csv string) []string {
+	var out []string
+	for _, part := range strings.Split(csv, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

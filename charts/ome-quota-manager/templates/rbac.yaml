@@ -29,6 +29,29 @@ rules:
 - apiGroups: ["ome.io"]
   resources: ["acceleratorquotas/status"]
   verbs: ["get", "update", "patch"]
+{{- if and (eq (include "ome-quota-manager.mode" .) "workload") (include "ome-quota-manager.acceleratorResources" .) }}
+# Deriving the reserved root's capacity means measuring the cluster's silicon,
+# which is a cluster-wide read of Nodes and of Kueue's ResourceFlavors — the
+# latter because a flavor names a hardware class by node labels and OME does not
+# own node labelling, so the mapping is read rather than authored.
+#
+# Read-only, and only in workload mode: a management-mode manager holds the
+# authored fleet tree and has no local silicon to measure.
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["resourceflavors"]
+  verbs: ["get", "list", "watch"]
+# The one spec write this component makes, and only to bring the reserved root
+# into being. Capacity has to be reportable before any tree is authored, or a
+# management plane sizing a Proportional split has nothing to read from a member
+# that has no budget yet. The root is created bare — the budget on it stays the
+# admin's to write.
+- apiGroups: ["ome.io"]
+  resources: ["acceleratorquotas"]
+  verbs: ["create"]
+{{- end }}
 # No events grant: nothing in this component holds an EventRecorder. It is
 # granted back alongside the first emitter rather than kept warm — an unused
 # write verb is indistinguishable from a used one at review time.

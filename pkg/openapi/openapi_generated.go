@@ -1229,7 +1229,7 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorQuota(ref common.ReferenceCallback) 
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorQuota is one node of the fleet quota tree. Cluster-scoped: it is fleet-level capacity policy, not a namespaced workload.\n\nThe name-length rule is deliberately at the root rather than under spec: removecrdvalidation replaces only the spec and status schemas, so a root rule is the one structural check that also holds in the minimal CRD variant.",
+				Description: "AcceleratorQuota is one node of the fleet quota tree. Cluster-scoped: it is fleet-level capacity policy, not a namespaced workload.\n\nThe name-length rule is deliberately at the root rather than under spec: removecrdvalidation replaces only the spec and status schemas, so a root rule is the one structural check that also holds in the minimal CRD variant.\n\nOnly the reserved root carries capacity, and only its first (resource, flavor) pair fits a column — a cluster with two accelerator types needs `-o yaml` for the rest. Worth the column anyway: without it a drained node changes nothing an operator can see, since nothing consumes capacity yet.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {

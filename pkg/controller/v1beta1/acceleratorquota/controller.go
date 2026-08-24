@@ -18,12 +18,20 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/tree"
@@ -83,6 +91,12 @@ type Reconciler struct {
 	// violation only a clock can clear is noticed without an edit. Zero leaves
 	// reconciles purely event-driven.
 	ResyncInterval time.Duration
+
+	// Capacity configures deriving this cluster's own accelerator capacity onto
+	// the reserved root. Unset leaves the controller reporting tree position
+	// only, which is what a management-mode manager wants: it holds the
+	// authored fleet tree and has no local silicon to measure.
+	Capacity CapacityOptions
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -116,6 +130,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if len(violations) > 0 {
 		log.V(1).Info("quota tree has violations", "count", len(violations), "nodes", violations.Nodes())
+	}
+
+	// Capacity describes the cluster as a whole, so it needs the node that means
+	// "the whole cluster". Create it rather than wait: a cluster reports what it
+	// has whether or not anyone has authored a budget yet.
+	if r.Capacity.Enabled() {
+		if built.Root == nil {
+			created, err := r.ensureRoot(ctx)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !created {
+				// The name is taken by a node that is not the tree root: it
+				// carries a parentRef, or sits in a cycle. Creating cannot fix
+				// that and nor can retrying, so without saying so capacity
+				// derivation would sit idle forever with no error, no event and
+				// no condition to explain it.
+				log.Info("capacity derivation is idle: the reserved root name is held by a node that is not the tree root",
+					"root", r.Options.RootName)
+			}
+			// Keep the resync. The create's own watch event normally brings us
+			// straight back, but in the idle case above there is no such event
+			// and dropping the interval would disable the only thing that would
+			// notice the tree being repaired.
+			return ctrl.Result{RequeueAfter: r.ResyncInterval}, nil
+		}
+		if err := r.reconcileCapacity(ctx, built.Root.Quota); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	return ctrl.Result{RequeueAfter: r.ResyncInterval}, nil
 }
@@ -231,8 +274,47 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Options.RootName == "" {
 		return fmt.Errorf("acceleratorquota: %w", tree.ErrRootNameUnset)
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.AcceleratorQuota{}).
-		Named("acceleratorquota").
-		Complete(r)
+		Named("acceleratorquota")
+
+	if r.Capacity.Enabled() {
+		// Reconciles are event-driven, and a cluster can start with no
+		// AcceleratorQuota and no Nodes — nothing to fire an event, so nothing
+		// would ever create the root and capacity would never be reported. One
+		// pass at startup removes that dependency on the cluster happening to
+		// contain something.
+		//
+		// A plain RunnableFunc is leader-elected, so a standby replica does not
+		// race the leader; AlreadyExists is benign in any case.
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			if _, err := r.ensureRoot(ctx); err != nil {
+				return err
+			}
+			return nil
+		})); err != nil {
+			return fmt.Errorf("acceleratorquota: scheduling the root check: %w", err)
+		}
+
+		// Every node maps to the same request: reconciliation is whole-tree, so
+		// which node changed does not narrow the work.
+		//
+		// The predicate is not an optimisation to revisit later. Node status is
+		// among the highest-volume writes in a cluster and almost none of it
+		// moves a number this controller reads, so without it a large fleet
+		// would rebuild the tree continuously.
+		b = b.WatchesRawSource(source.Kind(
+			mgr.GetCache(),
+			&corev1.Node{},
+			handler.TypedEnqueueRequestsFromMapFunc(func(context.Context, *corev1.Node) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: r.Options.RootName}}}
+			}),
+			predicate.TypedFuncs[*corev1.Node]{
+				UpdateFunc: func(e event.TypedUpdateEvent[*corev1.Node]) bool {
+					return nodeCapacityChanged(e.ObjectOld, e.ObjectNew, r.Capacity.Resources)
+				},
+			},
+		))
+	}
+	return b.Complete(r)
 }

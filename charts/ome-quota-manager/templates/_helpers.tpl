@@ -51,6 +51,28 @@ mean a webhook that never serves.
 {{- end -}}
 
 {{/*
+The accelerator resources capacity derivation is configured with, as a list with
+blanks removed.
+
+Nil-safe and blank-safe on purpose. A GitOps overlay switching the feature off
+naturally writes `capacity:` or `capacity: {resources: null}`, and Helm deletes
+the defaulted map rather than merging it, so an unguarded lookup aborts the whole
+render. Blanks are dropped because the binary drops them too — without that the
+chart would grant cluster-wide Node reads for a list the binary reads as empty.
+*/}}
+{{- define "ome-quota-manager.acceleratorResources" -}}
+{{- $capacity := .Values.quotaManager.capacity | default dict -}}
+{{- $resources := $capacity.resources | default list -}}
+{{- $out := list -}}
+{{- range $resources -}}
+{{- if trim (toString .) -}}
+{{- $out = append $out (trim (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $out -}}
+{{- end -}}
+
+{{/*
 Fails the render unless mode is one of the two the binary accepts. There is no
 safe default: workload mode writes Kueue objects on this cluster and management
 mode projects shares onto others, so an unset or mistyped value must stop the

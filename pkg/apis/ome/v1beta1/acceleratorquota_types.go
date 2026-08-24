@@ -230,6 +230,12 @@ const (
 // +kubebuilder:printcolumn:name="Degraded",type=string,JSONPath=`.status.conditions[?(@.type=="Degraded")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Path",type=string,priority=1,JSONPath=`.status.path`
+// Only the reserved root carries capacity, and only its first (resource,
+// flavor) pair fits a column — a cluster with two accelerator types needs
+// `-o yaml` for the rest. Worth the column anyway: without it a drained node
+// changes nothing an operator can see, since nothing consumes capacity yet.
+// +kubebuilder:printcolumn:name="Allocatable",type=string,priority=1,JSONPath=`.status.capacity[0].allocatable`
+// +kubebuilder:printcolumn:name="Peak",type=string,priority=1,JSONPath=`.status.capacity[0].highWaterMark`
 type AcceleratorQuota struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

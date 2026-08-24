@@ -45,6 +45,12 @@ spec:
         {{- with .Values.quotaManager.resyncInterval }}
         - "--resync-interval={{ . }}"
         {{- end }}
+        {{- if eq (include "ome-quota-manager.mode" .) "workload" }}
+        {{- with (include "ome-quota-manager.acceleratorResources" .) }}
+        - "--accelerator-resources={{ . }}"
+        - "--capacity-hysteresis-percent={{ ($.Values.quotaManager.capacity | default dict).hysteresisPercent | default 0 }}"
+        {{- end }}
+        {{- end }}
         - "--webhook={{ .Values.quotaManager.webhook.enabled }}"
         {{- if .Values.quotaManager.webhook.enabled }}
         - "--webhook-port={{ .Values.quotaManager.webhook.port }}"
