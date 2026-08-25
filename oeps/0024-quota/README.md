@@ -867,12 +867,18 @@ Two shape requirements the table cannot carry, both of which fail quietly:
 stays pending with no object in an error state. Binding namespaces via `LocalQueue`
 alone is not enough.
 
-**`resourceGroups` partition by flavor reachability, not one group per flavor.** A
-resource group must list every flavor that covers its resources, and two resources
-sharing a flavor must live in the *same* group. So the budgets are partitioned into
-connected components over the `(resourceName, resourceFlavor)` pair graph, one
-group per component — not one group per flavor, which Kueue rejects the moment two
-resources share one.
+**A leaf emits exactly one `resourceGroup`, never one per flavor.** Kueue scopes
+its uniqueness checks across *all* of a `ClusterQueue`'s groups: a resource may
+appear in at most one, and so may a flavor. Since the cpu/memory cover must be
+present for any pod to be assignable, and every serving pod requests both, the
+cover pins itself to one group — and every budgeted accelerator resource must join
+it, or its flavors could never satisfy a pod that also asks for cpu. Splitting by
+flavor produces groups whose flavors are unreachable, which Kueue accepts and the
+scheduler then silently never uses.
+
+Within that one group, every flavor must enumerate every covered resource, so a
+flavor that does not fund a given accelerator carries it at `nominalQuota: 0`
+rather than omitting it.
 
 **Kueue objects are written by server-side apply, never read-modify-write.** OME
 is deliberately an *older client than its server*: the module pin is held back by
