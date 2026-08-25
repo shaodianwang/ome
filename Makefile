@@ -340,6 +340,26 @@ ome-agent: xet-build ## 🔄 Build ome-agent binary.
 	$(GO_BUILD_ENV) $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/ome-agent ./cmd/ome-agent
 	@echo "✅ Build complete"
 
+.PHONY: kubectl-qt
+kubectl-qt: ## 🌲 Build the kubectl-qt quota-tree plugin.
+	@echo "🌲 Building kubectl-qt..."
+	@# No xet dependency: the plugin only reads the API, so it stays a pure-Go
+	@# binary that builds anywhere without a Rust toolchain.
+	CGO_ENABLED=0 $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/kubectl-qt ./cmd/kubectl-qt
+	@echo "✅ Build complete — put bin/kubectl-qt on PATH and run 'kubectl qt'"
+
+# kubectl finds plugins by scanning PATH for kubectl-* and execing the match,
+# so installing the binary is the whole integration: `kubectl qt` resolves with
+# no manifest and no plugin manager. That includes krew — krew is one way to
+# get a kubectl-* onto PATH, not a thing a plugin has to be built for, so a
+# krew user gets the same working `kubectl qt` from this target.
+.PHONY: install-kubectl-qt
+install-kubectl-qt: kubectl-qt ## 🌲 Install kubectl-qt onto PATH so 'kubectl qt' resolves.
+	@install -d "$(shell $(GO_CMD) env GOPATH)/bin"
+	@install -m 0755 bin/kubectl-qt "$(shell $(GO_CMD) env GOPATH)/bin/kubectl-qt"
+	@echo "✅ Installed to $(shell $(GO_CMD) env GOPATH)/bin/kubectl-qt"
+	@echo "   Run 'kubectl qt' (needs $(shell $(GO_CMD) env GOPATH)/bin on PATH)."
+
 .PHONY: run-ome-manager
 run-ome-manager: manifests generate fmt vet ## Run ome-manager binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
 	@echo "🏃‍♂️ Running ome-manager..."
