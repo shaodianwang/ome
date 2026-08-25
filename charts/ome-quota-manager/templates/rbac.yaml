@@ -52,6 +52,33 @@ rules:
   resources: ["acceleratorquotas"]
   verbs: ["create"]
 {{- end }}
+{{- if and (eq (include "ome-quota-manager.mode" .) "workload") (include "ome-quota-manager.coverResources" .) }}
+# Materializing the tree means writing Kueue's own objects: a Cohort per
+# internal node, a ClusterQueue per leaf, and a LocalQueue in every bound
+# namespace. This is the grant that made the quota plane a separate binary --
+# cluster-wide write on Kueue is not something the ServiceAccount running the
+# InferenceService reconcilers and the fail-closed pod mutator should also hold.
+#
+# delete is needed for the orphan sweep, which is bounded by the managed-by
+# label: objects this manager did not create are never touched. list and watch
+# are what the sweep selects with.
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["cohorts", "clusterqueues", "localqueues"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# The finalizer that gates a node's deletion until its Kueue objects are reaped.
+# Without it, deleting the CR leaves a ClusterQueue behind still admitting
+# workloads against a budget nobody can see any more.
+#
+# patch on the resource itself, not update on acceleratorquotas/finalizers: a
+# finalizer lives in metadata, so adding one is an ordinary patch of the object.
+# The finalizers subresource governs something else entirely — setting
+# blockOwnerDeletion in an ownerReference — which this component never does.
+# Granting that instead leaves the controller unable to claim a node, and every
+# pass then fails on a forbidden patch before anything is materialized.
+- apiGroups: ["ome.io"]
+  resources: ["acceleratorquotas"]
+  verbs: ["patch"]
+{{- end }}
 # No events grant: nothing in this component holds an EventRecorder. It is
 # granted back alongside the first emitter rather than kept warm — an unused
 # write verb is indistinguishable from a used one at review time.

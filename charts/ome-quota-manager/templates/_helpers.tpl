@@ -60,6 +60,38 @@ the defaulted map rather than merging it, so an unguarded lookup aborts the whol
 render. Blanks are dropped because the binary drops them too — without that the
 chart would grant cluster-wide Node reads for a list the binary reads as empty.
 */}}
+{{/*
+Cover resources as name=quantity pairs. Blank names and blank quantities are
+dropped, so a partially-filled overlay disables materialization rather than
+rendering a flag the binary rejects at startup.
+*/}}
+{{- define "ome-quota-manager.coverResources" -}}
+{{- $materialize := .Values.quotaManager.materialize | default dict -}}
+{{- $cover := $materialize.coverResources | default dict -}}
+{{- $out := list -}}
+{{- range $name, $qty := $cover -}}
+{{- if and (trim (toString $name)) (trim (toString $qty)) -}}
+{{- $out = append $out (printf "%s=%s" (trim (toString $name)) (trim (toString $qty))) -}}
+{{- end -}}
+{{- end -}}
+{{- join "," (sortAlpha $out) -}}
+{{- end -}}
+
+{{/*
+The field manager that owns applied Kueue objects. Defaults to the component
+name so a single-manager install needs no configuration, while two managers on
+one cluster can be told apart.
+*/}}
+{{- define "ome-quota-manager.fieldManager" -}}
+{{- $materialize := .Values.quotaManager.materialize | default dict -}}
+{{- $fm := $materialize.fieldManager | default "" -}}
+{{- if trim (toString $fm) -}}
+{{- trim (toString $fm) -}}
+{{- else -}}
+{{- .Values.quotaManager.name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "ome-quota-manager.acceleratorResources" -}}
 {{- $capacity := .Values.quotaManager.capacity | default dict -}}
 {{- $resources := $capacity.resources | default list -}}

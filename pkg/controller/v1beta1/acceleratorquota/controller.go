@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -34,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/quota/backend"
 	"github.com/ome-projects/ome/pkg/quota/tree"
 )
 
@@ -97,6 +99,12 @@ type Reconciler struct {
 	// only, which is what a management-mode manager wants: it holds the
 	// authored fleet tree and has no local silicon to measure.
 	Capacity CapacityOptions
+
+	// Materialize configures rendering the tree into an enforcement backend.
+	// Unset leaves the tree observed but unenforced, which is both the
+	// management-mode shape and the way a workload cluster runs before an
+	// operator opts into writing Kueue objects.
+	Materialize MaterializeOptions
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -107,7 +115,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("listing AcceleratorQuotas: %w", err)
 	}
 
-	built, violations, err := tree.Build(list.Items, r.Options)
+	// A node being deleted is not part of the tree it is leaving. Excluding it
+	// keeps this pass from re-rendering the objects the finalizer is about to
+	// reap, which would read as a failed reap.
+	live, deleting := partitionByDeletion(list.Items)
+
+	built, violations, err := tree.Build(live, r.Options)
 	if err != nil {
 		// A configuration failure, not a property of the nodes. Surfacing it as
 		// an error requeues with backoff and logs, rather than silently leaving
@@ -117,8 +130,39 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	frozen := built.Frozen(violations)
 	var errs []error
+
+	if r.Materialize.Enabled() {
+		// Claim every live node before writing anything, so a delete that
+		// arrives mid-pass still finds a finalizer to hold it.
+		for i := range live {
+			if err := r.ensureFinalizer(ctx, &live[i]); err != nil {
+				errs = append(errs, fmt.Errorf("node %s: %w", live[i].Name, err))
+			}
+		}
+		// Reap before applying. A departing node and a live one can name the
+		// same object transiently, and reaping second would delete what this
+		// pass just wrote.
+		keep := sets.New[string]()
+		for _, node := range built.Nodes() {
+			keep.Insert(node.Name())
+		}
+		for i := range deleting {
+			if err := r.finalize(ctx, &deleting[i], keep); err != nil {
+				errs = append(errs, fmt.Errorf("node %s: %w", deleting[i].Name, err))
+			}
+		}
+	}
+
+	outcomes := map[string]backend.NodeOutcome{}
+	if r.Materialize.Enabled() && len(errs) == 0 {
+		outcomes, err = r.materialize(ctx, built, frozen)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	for _, node := range built.Nodes() {
-		if err := r.reconcileStatus(ctx, node, frozen); err != nil {
+		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()]); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name(), err))
 		}
 	}
@@ -166,7 +210,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // reconcileStatus writes one node's observed position and condition. It patches
 // only when something changed, so an idle fleet does not rewrite status on every
 // resync tick and spin the watch.
-func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation) error {
+func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation, outcome backend.NodeOutcome) error {
 	current := node.Quota
 	updated := current.DeepCopy()
 
@@ -179,6 +223,9 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 
 	violation, isFrozen := frozen[node.Name()]
 	setConditions(&updated.Status, violation, isFrozen)
+	if r.Materialize.Enabled() {
+		setMaterializationStatus(&updated.Status, current.Generation, outcome, isFrozen, metav1.Now())
+	}
 
 	if equalStatus(current.Status, updated.Status) {
 		return nil
@@ -228,8 +275,14 @@ func setConditions(status *v1beta1.AcceleratorQuotaStatus, violation tree.Violat
 		degraded.Message = violation.Message
 	}
 
-	apimeta.SetStatusCondition(&status.Conditions, ready)
-	apimeta.SetStatusCondition(&status.Conditions, degraded)
+	setCondition(status, ready)
+	setCondition(status, degraded)
+}
+
+// setCondition is the one place conditions are written, so every condition this
+// controller owns gets the same treatment.
+func setCondition(status *v1beta1.AcceleratorQuotaStatus, condition metav1.Condition) {
+	apimeta.SetStatusCondition(&status.Conditions, condition)
 }
 
 // equalStatus compares the fields this controller owns. Condition timestamps are
@@ -240,7 +293,14 @@ func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
 	if a.ObservedGeneration != b.ObservedGeneration || a.Path != b.Path || a.Parent != b.Parent {
 		return false
 	}
-	for _, condType := range []string{v1beta1.AcceleratorQuotaReady, v1beta1.AcceleratorQuotaDegraded} {
+	if !equalMaterialization(a.Materialization, b.Materialization) {
+		return false
+	}
+	for _, condType := range []string{
+		v1beta1.AcceleratorQuotaReady,
+		v1beta1.AcceleratorQuotaDegraded,
+		v1beta1.AcceleratorQuotaMaterialized,
+	} {
 		ca := apimeta.FindStatusCondition(a.Conditions, condType)
 		cb := apimeta.FindStatusCondition(b.Conditions, condType)
 		if ca == nil || cb == nil {

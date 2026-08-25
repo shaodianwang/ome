@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
+	kueuebackend "github.com/ome-projects/ome/pkg/quota/backend/kueue"
 	"github.com/ome-projects/ome/pkg/quota/tree"
 )
 
@@ -35,6 +38,29 @@ func WithQuotaCapacity(resources []string, hysteresisPercent int32) AcceleratorQ
 	return func(r *acceleratorquota.Reconciler) {
 		r.Capacity = acceleratorquota.CapacityOptions{
 			Resources: resources, HysteresisPercent: hysteresisPercent,
+		}
+	}
+}
+
+// WithQuotaMaterialization turns on rendering the tree into Kueue. Off unless a
+// suite asks, matching the binary: absent cover resources disable it rather
+// than inventing a ceiling that would surface as a real quota.
+//
+// The writer is the manager's client and the reader its uncached APIReader,
+// exactly as cmd/ome-quota-manager wires it — the ownership check before every
+// apply is a read-then-write, and a cached read would let an object created
+// moments earlier be adopted as if it were not there.
+func WithQuotaMaterialization(mgr ctrl.Manager, fieldManager string, cover map[corev1.ResourceName]resource.Quantity) AcceleratorQuotaOption {
+	return func(r *acceleratorquota.Reconciler) {
+		r.Materialize = acceleratorquota.MaterializeOptions{
+			Backend: &kueuebackend.Backend{
+				Writer: mgr.GetClient(),
+				Reader: mgr.GetAPIReader(),
+				Options: kueuebackend.Options{
+					FieldManager:   fieldManager,
+					CoverResources: cover,
+				},
+			},
 		}
 	}
 }

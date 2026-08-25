@@ -50,6 +50,10 @@ spec:
         - "--accelerator-resources={{ . }}"
         - "--capacity-hysteresis-percent={{ ($.Values.quotaManager.capacity | default dict).hysteresisPercent | default 0 }}"
         {{- end }}
+        {{- with (include "ome-quota-manager.coverResources" .) }}
+        - "--cover-resources={{ . }}"
+        - "--field-manager={{ include "ome-quota-manager.fieldManager" $ }}"
+        {{- end }}
         {{- end }}
         - "--webhook={{ .Values.quotaManager.webhook.enabled }}"
         {{- if .Values.quotaManager.webhook.enabled }}

@@ -31,6 +31,53 @@ import (
 
 const kueueModulePath = "sigs.k8s.io/kueue"
 
+// StartKueueCore wires only Kueue's core controllers: the ClusterQueue, Cohort,
+// LocalQueue, ResourceFlavor and Workload reconcilers, plus the indexers they
+// need.
+//
+// It exists because StartKueue is the *admission* stack -- pod integration, the
+// pod webhook and the scheduler -- and a caller that only needs Kueue to judge
+// the objects it writes should not have to stand up a webhook server and
+// install Kueue's webhook manifests to get that judgement. Registering webhooks
+// on a manager with no webhook server configured does not fail loudly: the
+// server Runnable fails at start, the manager exits, and every informer in the
+// process then reports a sync timeout -- which reads as a broken cache rather
+// than a missing prerequisite.
+//
+// What this buys the caller is Kueue's own verdict on a ClusterQueue, notably
+// the Active condition, which is how Kueue reports that a queue can admit at
+// all. What it does NOT buy is admission: no pod is gated or ungated, because
+// nothing here watches pods. Use StartKueue for that.
+//
+// Prerequisite: the manager's scheme has the Kueue types registered, which the
+// framework.Kueue OptionalCRDBundle contributes.
+func StartKueueCore(ctx context.Context, mgr ctrl.Manager) error {
+	if err := configapi.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("StartKueueCore: register config scheme: %w", err)
+	}
+	if err := coreindexer.Setup(ctx, mgr.GetFieldIndexer()); err != nil {
+		return fmt.Errorf("StartKueueCore: core indexer setup: %w", err)
+	}
+
+	cCache := schdcache.New(mgr.GetClient())
+	requeuer := qcache.NewRequeuer()
+	if err := mgr.Add(requeuer); err != nil {
+		return fmt.Errorf("StartKueueCore: add inadmissible-workload requeuer: %w", err)
+	}
+	preemptionExpectations := preemptexpectations.New()
+	queues := qcache.NewManager(mgr.GetClient(), cCache, requeuer,
+		qcache.WithPreemptionExpectations(preemptionExpectations))
+
+	conf := &configapi.Configuration{}
+	mgr.GetScheme().Default(conf)
+	// A nil RoleTracker is Kueue's standalone mode: every controller acts as the
+	// active one, which is right for a single manager with no leader election.
+	if _, err := core.SetupControllers(mgr, queues, cCache, conf, nil, preemptionExpectations); err != nil {
+		return fmt.Errorf("StartKueueCore: core.SetupControllers: %w", err)
+	}
+	return nil
+}
+
 // StartKueue wires Kueue's full admission stack onto the supplied
 // manager and starts its scheduler: core controllers + indexers, the
 // pod-integration reconciler + webhook, the core webhooks, and the

@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -353,10 +354,7 @@ func TestSweep(t *testing.T) {
 				WithObjects(tc.existing...).Build()
 			b := &Backend{Writer: c, Reader: c, Options: testOptions()}
 
-			keep := map[string]struct{}{}
-			for _, k := range tc.keep {
-				keep[k] = struct{}{}
-			}
+			keep := sets.New[string](tc.keep...)
 			if _, err := b.Sweep(context.Background(), keep); err != nil {
 				t.Fatalf("Sweep() error = %v", err)
 			}

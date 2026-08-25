@@ -1,0 +1,43 @@
+# The smallest tree that materializes: one leaf on the reserved root.
+#
+#   root       Cohort        (self-created, no budget)
+#   └── solo   ClusterQueue  16 chips   ns kwok-sim-solo
+#
+# The root is not declared: the controller creates it itself, bare, so a cluster
+# reports capacity before any budget is authored. Every tree here just names it
+# as a parent.
+#
+# Start here rather than at 31 to watch one leaf become Kueue objects with no
+# grouping tier in the way:
+#
+#   kubectl apply -f hack/kwok-sim/fixtures/32-acceleratorquota-solo.yaml
+#   kubectl get aq -o wide
+#   kubectl get clusterqueues,localqueues -A
+#
+# Expect a ClusterQueue named solo carrying the accelerator budget alongside a
+# cpu/memory cover, and a LocalQueue named `default` in kwok-sim-solo. The cover
+# is why a queue budgeted only for accelerators would admit nothing: Kueue
+# refuses to admit a workload requesting a resource its queue does not cover,
+# and every serving pod requests cpu and memory.
+#
+# Remove it with `kubectl delete aq solo`, which is what reaps those objects —
+# the node carries a finalizer and nothing else removes them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kwok-sim-solo
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: solo
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: root
+  namespaces:
+  - kwok-sim-solo
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 16

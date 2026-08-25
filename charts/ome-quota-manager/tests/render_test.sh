@@ -143,6 +143,81 @@ if grep -Eq -- '--[a-z-]+=(")?$' <<<"${allrendered}"; then
   fail "a flag rendered with an empty value"
 fi
 
+# --- materialization carries its own Kueue write RBAC, workload mode only ---
+
+# Flags and grants have to appear together: flags without the grants is a
+# crash-looping RBAC error, grants without the flags is cluster-wide write on
+# Kueue that nothing uses.
+grep -Fq -- '--cover-resources=cpu=16M,memory=16Pi' <<<"${default}" ||
+  fail "the default cover resources were not passed"
+
+# An operator overrides one key and keeps the other: Helm merges the map rather
+# than replacing it, and the whole point of a default is that omitting a key
+# leaves it alone.
+onekey="$(render --set quotaManager.mode=workload \
+  --set quotaManager.materialize.coverResources.cpu=2k)"
+grep -Fq -- '--cover-resources=cpu=2k,memory=16Pi' <<<"${onekey}" ||
+  fail "overriding one cover resource did not leave the other at its default"
+
+# A Cohort's subtree quota sums the cover across its children, and the Kueue this
+# repo compiles against wraps rather than clamps on int64 overflow. Ei-scale
+# defaults leave no room for that sum, and a wrapped ceiling is a wrong admission
+# decision rather than a failure.
+if grep -Eq -- '--cover-resources=[^ ]*[0-9]+(Ei|E)([,"]|$)' <<<"${default}"; then
+  fail "the default cover resources reach Ei/E scale, leaving no room for a cohort subtree sum"
+fi
+grep -Fq -- '--field-manager=ome-quota-manager' <<<"${default}" ||
+  fail "the field manager did not default to the component name"
+grep -Fq 'resources: ["cohorts", "clusterqueues", "localqueues"]' <<<"${default}" ||
+  fail "workload mode did not grant the Kueue write materialization needs"
+# patch on the resource, not update on the finalizers subresource: a finalizer
+# is metadata, so claiming a node is an ordinary patch. Granting the subresource
+# instead leaves every reconcile failing on a forbidden patch, which is invisible
+# to a render test that only checks a grant is present.
+grep -Fq 'verbs: ["patch"]' <<<"${default}" ||
+  fail "the finalizer patch grant is missing, so no node could be claimed or reaped"
+if grep -Fq 'resources: ["acceleratorquotas/finalizers"]' <<<"${default}"; then
+  fail "granted the finalizers subresource, which governs blockOwnerDeletion and is not what a finalizer needs"
+fi
+
+# A rename must carry the field manager with it, or two installs would claim
+# each other's objects.
+grep -Fq -- '--field-manager=aq-mgr' <<<"${renamed}" ||
+  fail "the field manager did not follow the rename"
+
+# A management-mode install writes no Kueue object anywhere, so the write grant
+# there would be pure unused privilege.
+for unwanted in 'resources: ["cohorts", "clusterqueues", "localqueues"]' '--cover-resources' '--field-manager'; do
+  if grep -Fq -- "${unwanted}" <<<"${management}"; then
+    fail "management mode rendered ${unwanted}"
+  fi
+done
+
+# Turning materialization off must drop the write grant with it, in every
+# spelling an operator might reach for.
+for off in \
+  'quotaManager.materialize.coverResources=null' \
+  'quotaManager.materialize=null' \
+  ; do
+  nomat="$(render --set quotaManager.mode=workload --set "${off}")" ||
+    fail "--set ${off} failed to render at all"
+  for unwanted in 'resources: ["cohorts", "clusterqueues", "localqueues"]' '--cover-resources' \
+    'verbs: ["patch"]'; do
+    if grep -Fq -- "${unwanted}" <<<"${nomat}"; then
+      fail "--set ${off} still rendered ${unwanted}"
+    fi
+  done
+done
+
+# A blank quantity is not a cover resource. The chart must agree with the
+# binary, which rejects a valueless pair at startup.
+blankqty="$(render --set quotaManager.mode=workload \
+  --set quotaManager.materialize.coverResources.cpu= \
+  --set quotaManager.materialize.coverResources.memory=)"
+if grep -Fq -- 'resources: ["cohorts", "clusterqueues", "localqueues"]' <<<"${blankqty}"; then
+  fail "blank cover quantities still granted the Kueue write"
+fi
+
 # --- the CRD is opt-in, and retained when it is opted into ---
 
 if grep -Fq 'kind: CustomResourceDefinition' <<<"${default}"; then

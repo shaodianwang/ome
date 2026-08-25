@@ -101,6 +101,65 @@ quotaManager:
     # 0 disables damping, so the mark tracks every dip.
     hysteresisPercent: 10
 
+  # materialize renders the tree into Kueue: a Cohort per internal node, a
+  # ClusterQueue per leaf, a LocalQueue in every bound namespace.
+  #
+  # Leaving coverResources empty disables it and drops the cluster-wide Kueue
+  # write RBAC with it, so a cluster can observe its quota tree long before it
+  # enforces one.
+  materialize:
+    # coverResources are the non-accelerator resources every rendered
+    # ClusterQueue funds alongside its budget.
+    #
+    # They exist because Kueue refuses to admit a workload whose request names a
+    # resource its queue does not cover, and every serving pod requests cpu and
+    # memory. A queue budgeted only for accelerators therefore admits nothing,
+    # and reports the reason nowhere: the queue exists, its LocalQueues resolve,
+    # and workloads simply stay pending.
+    #
+    # These are not a budget. They are a ceiling set high enough not to be one:
+    # the accelerator entry is what actually limits a tenant. Kueue has no
+    # "unlimited" value for a nominalQuota, and omitting a covered resource is
+    # precisely what makes a queue unable to admit, so a large finite number is
+    # the only idiom available.
+    #
+    # Sizing them is bounded on both sides, and neither bound fails loudly.
+    #
+    #   too low   a real limit on every tenant. Pods stay pending with nothing
+    #             in an error state to say why. Note that cpu suffixes bite:
+    #             9999m is ~10 cores, not 9999.
+    #   too high  Kueue holds these as int64 and a Cohort's subtree quota is the
+    #             SUM over its children, so N leaves each carrying the cover
+    #             must stay inside that. Overflow is not symmetric across
+    #             versions either: newer Kueue clamps, but the version this
+    #             repo compiles against wraps, and a wrapped ceiling means a
+    #             wrong admission decision rather than a failure.
+    #
+    # The units differ, which is easy to miss: cpu is held in MILLI-units, so
+    # its ceiling is a thousand times lower than memory's for the same digits.
+    #
+    # Scale to size against: one 4-chip TPU node is ~224 cpu and ~0.28Ti, so
+    #
+    #     32 nodes    7k cpu     0.01Pi
+    #   7500 nodes  1.68M cpu    2.07Pi
+    #
+    # The defaults are ~9x the 7500-node figure — unreachable in practice, and
+    # far enough from the ceiling that a Cohort can hold ~500 sibling leaves
+    # before the subtree sum is at risk.
+    #
+    # Override either key on its own; Helm merges the map, so setting cpu leaves
+    # memory at its default. Emptying the map disables materialization and drops
+    # the Kueue write RBAC with it.
+    coverResources:
+      cpu: 16M
+      memory: 16Pi
+
+    # fieldManager owns the applied Kueue objects and is the value of the
+    # managed-by label the orphan sweep selects by. Two quota managers pointed
+    # at one cluster MUST NOT share it, or each treats the other's objects as
+    # its own and they will fight. Empty uses the component name.
+    fieldManager: ""
+
   # webhook serves admission validation for AcceleratorQuota, turning a
   # tree-breaking write into a rejected kubectl apply instead of a Degraded
   # condition minutes later.

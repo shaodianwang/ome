@@ -9,6 +9,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
@@ -155,7 +156,7 @@ func (b *Backend) flavors(ctx context.Context) (map[string]struct{}, error) {
 // subtree's objects must survive, which is exactly what distinguishes a freeze
 // from a deletion. Objects without this manager's label are never touched, so a
 // hand-authored queue outlives any sweep.
-func (b *Backend) Sweep(ctx context.Context, keep map[string]struct{}) (int, error) {
+func (b *Backend) Sweep(ctx context.Context, keep sets.Set[string]) (int, error) {
 	selector := client.MatchingLabels{v1beta1.AcceleratorQuotaManagedByLabel: b.Options.FieldManager}
 
 	var deleted int
@@ -167,7 +168,7 @@ func (b *Backend) Sweep(ctx context.Context, keep map[string]struct{}) (int, err
 	}
 	for i := range localQueues.Items {
 		lq := &localQueues.Items[i]
-		if _, ok := keep[lq.Labels[v1beta1.AcceleratorQuotaNodeLabel]]; ok {
+		if keep.Has(lq.Labels[v1beta1.AcceleratorQuotaNodeLabel]) {
 			continue
 		}
 		if err := b.deleteObject(ctx, lq); err != nil {
@@ -185,7 +186,7 @@ func (b *Backend) Sweep(ctx context.Context, keep map[string]struct{}) (int, err
 	}
 	for i := range clusterQueues.Items {
 		cq := &clusterQueues.Items[i]
-		if _, ok := keep[cq.Labels[v1beta1.AcceleratorQuotaNodeLabel]]; ok {
+		if keep.Has(cq.Labels[v1beta1.AcceleratorQuotaNodeLabel]) {
 			continue
 		}
 		if err := b.deleteObject(ctx, cq); err != nil {
@@ -201,7 +202,7 @@ func (b *Backend) Sweep(ctx context.Context, keep map[string]struct{}) (int, err
 	}
 	for i := range cohorts.Items {
 		c := &cohorts.Items[i]
-		if _, ok := keep[c.Labels[v1beta1.AcceleratorQuotaNodeLabel]]; ok {
+		if keep.Has(c.Labels[v1beta1.AcceleratorQuotaNodeLabel]) {
 			continue
 		}
 		if err := b.deleteObject(ctx, c); err != nil {

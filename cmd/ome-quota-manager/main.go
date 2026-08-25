@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -33,6 +35,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
+	kueuebackend "github.com/ome-projects/ome/pkg/quota/backend/kueue"
 	quotacert "github.com/ome-projects/ome/pkg/quota/cert"
 	"github.com/ome-projects/ome/pkg/quota/tree"
 	quotawebhook "github.com/ome-projects/ome/pkg/webhook/admission/acceleratorquota"
@@ -78,6 +81,8 @@ type options struct {
 	// capacityHysteresisPercent damps the derived high-water mark. Zero means no
 	// damping rather than a default band.
 	capacityHysteresisPercent int
+	coverResources            string
+	fieldManager              string
 	// enableWebhook serves the admission validator. It is separable from the
 	// controller because the two fail differently: a webhook outage with
 	// failurePolicy=Fail blocks writes, so an operator debugging a wedged
@@ -145,6 +150,17 @@ func main() {
 			"reasons unrelated to entitlement — a drain, a reboot, a device plugin restarting — and "+
 			"following those down would mark budgets Degraded every time a rack was patched. Growth is "+
 			"always believed immediately. 0 disables damping.")
+	flag.StringVar(&opts.coverResources, "cover-resources", opts.coverResources,
+		"Comma-separated resource=quantity pairs every rendered ClusterQueue funds alongside its "+
+			"accelerator budget, e.g. \"cpu=1k,memory=1Ti\". Kueue refuses to admit a workload "+
+			"requesting a resource its queue does not cover, and every serving pod requests cpu and "+
+			"memory, so a queue budgeted only for accelerators admits nothing and reports the reason "+
+			"nowhere. These are a ceiling high enough not to be a budget, which is why they are "+
+			"configured rather than authored on the CR. Empty disables materialization.")
+	flag.StringVar(&opts.fieldManager, "field-manager", opts.fieldManager,
+		"Field manager that owns the Kueue objects this process applies, and the value of the "+
+			"managed-by label it selects them by. Two managers pointed at one cluster must not share "+
+			"it, or each will treat the other's objects as its own. Empty disables materialization.")
 	flag.DurationVar(&opts.resyncInterval, "resync-interval", opts.resyncInterval,
 		"Re-run the tree checks on an otherwise-idle plane, so a violation only a clock can clear "+
 			"is noticed without an edit. 0 leaves reconciles purely event-driven.")
@@ -249,6 +265,29 @@ func main() {
 				"resources", r.Capacity.Resources,
 				"hysteresisPercent", r.Capacity.HysteresisPercent)
 		}
+
+		cover, err := parseCoverResources(opts.coverResources)
+		if err != nil {
+			setupLog.Error(err, "invalid --cover-resources")
+			os.Exit(1)
+		}
+		backendOpts := kueuebackend.Options{FieldManager: opts.fieldManager, CoverResources: cover}
+		if err := backendOpts.Validate(); err != nil {
+			setupLog.Error(err, "invalid materialization configuration")
+			os.Exit(1)
+		}
+		if backendOpts.Enabled() {
+			r.Materialize = acceleratorquota.MaterializeOptions{
+				Backend: &kueuebackend.Backend{
+					Writer:  mgr.GetClient(),
+					Reader:  mgr.GetAPIReader(),
+					Options: backendOpts,
+				},
+			}
+			setupLog.Info("Materializing the quota tree into Kueue",
+				"fieldManager", backendOpts.FieldManager,
+				"coverResources", opts.coverResources)
+		}
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create the AcceleratorQuota controller")
@@ -325,6 +364,29 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// parseCoverResources reads "cpu=1k,memory=1Ti" into quantities. An empty list
+// is not an error: it is how an operator says materialization is off.
+func parseCoverResources(csv string) (map[corev1.ResourceName]resource.Quantity, error) {
+	pairs := splitAndTrim(csv)
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	out := make(map[corev1.ResourceName]resource.Quantity, len(pairs))
+	for _, pair := range pairs {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("cover resource %q is not name=quantity", pair)
+		}
+		name = strings.TrimSpace(name)
+		qty, err := resource.ParseQuantity(strings.TrimSpace(value))
+		if err != nil {
+			return nil, fmt.Errorf("cover resource %q: %w", name, err)
+		}
+		out[corev1.ResourceName(name)] = qty
+	}
+	return out, nil
 }
 
 // splitAndTrim turns a comma-separated flag into a slice, dropping blanks so a

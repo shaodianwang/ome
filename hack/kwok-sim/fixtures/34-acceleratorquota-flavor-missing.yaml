@@ -1,0 +1,42 @@
+# A leaf budgeted against a flavor the cluster does not have.
+#
+#   root           Cohort        (self-created, no budget)
+#   └── stranded   ClusterQueue  16 chips  tpu9z  <- no such ResourceFlavor
+#
+# This is the failure worth seeing, because Kueue's own handling of it is quiet:
+# a ClusterQueue naming a flavor that does not exist is not rejected, it is made
+# INACTIVE. An inactive queue admits nothing and says so only in its own status,
+# where nobody reading the AcceleratorQuota would find it.
+#
+# So the budget is not rendered at all, and the leaf reports it instead:
+#
+#   kubectl apply -f hack/kwok-sim/fixtures/34-acceleratorquota-flavor-missing.yaml
+#   kubectl describe aq stranded | sed -n '/Conditions/,$p'
+#
+# Expect Materialized=False with reason FlavorMissing, naming tpu9z. Expect a
+# ClusterQueue to exist and stay usable, carrying only the cpu/memory cover —
+# the tenant is admitted for nothing, which is the honest rendering of a budget
+# for hardware that is not here.
+#
+# Fix it by correcting the flavor to tpu7x, or by creating the flavor. OME reads
+# flavors and never authors them: a flavor names a hardware class by node
+# labels, and node labelling is not OME's to own.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kwok-sim-stranded
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: stranded
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: root
+  namespaces:
+  - kwok-sim-stranded
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu9z
+    nominal: 16

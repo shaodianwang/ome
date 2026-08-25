@@ -1,14 +1,26 @@
-# A four-node AcceleratorQuota tree over the simulated fleet (OEP-0024).
+# A three-node AcceleratorQuota tree over the simulated fleet (OEP-0024).
 #
-#   root                 Cohort        64 chips   <- also carries derived capacity
+#   root                 Cohort        (self-created, no budget)
 #   └── sim-tenants      Cohort        64 chips
 #       ├── sim-serving  ClusterQueue  48 chips   ns kwok-sim
 #       └── sim-batch    ClusterQueue  16 chips   ns kwok-sim-batch
 #
-# Two levels of grouping so containment is exercised at both: a parent's nominal
-# must be at least the sum of its children's, per (resource, flavor).
+# The reserved root is NOT declared here. The controller creates it itself, and
+# creates it bare, so a cluster reports its derived capacity before anyone has
+# authored a budget — a management plane sizing a Proportional split needs to
+# read a member's capacity exactly when that member has no tree yet. Declaring
+# it in a fixture would duplicate that and hand the object to a second writer.
 #
-# 64 is one cube. The default --cubes 4x4x4,2x2x2 is two, so the tree budgets
+# Containment is exercised at sim-tenants: a parent's nominal must be at least
+# the sum of its children's, per (resource, flavor), and 48 + 16 is exactly 64.
+# It is NOT exercised at the root, because a node carrying no budgets is skipped
+# — the check compares numbers and the root has none. To enforce a fleet total,
+# patch one onto the root the controller made:
+#
+#   kubectl patch aq root --type=merge -p \
+#     '{"spec":{"budgets":[{"resourceName":"google.com/tpu","resourceFlavor":"tpu7x","nominal":64}]}}'
+#
+# 64 is one cube. The default --cubes 4x4x4,2x2x2 is two, so this tree budgets
 # half the fleet and the root's status.capacity reports the whole of it — which
 # is the number to read these against.
 #
@@ -16,6 +28,20 @@
 # component works without one. Apply it by hand for a starting point:
 #
 #   kubectl apply -f hack/kwok-sim/fixtures/31-acceleratorquota.yaml
+#   kubectl get aq -o wide
+#   kubectl get cohorts,clusterqueues,localqueues -A
+#
+# 32, 33 and 34 are smaller trees for particular behaviours. They hang off the
+# same self-created root and bind their own namespaces, so they coexist with
+# this one — until you patch a fleet total onto the root, at which point they
+# all count against it and the sum matters. Remove one with
+# `kubectl delete aq <name>`, which is also what reaps its Kueue objects: the
+# nodes carry a finalizer and nothing else removes them, since a frozen node
+# keeps its objects on purpose.
+#
+#   32  one leaf, no grouping tier — the smallest thing that materializes
+#   33  containment violated on purpose — the freeze rule
+#   34  a budget naming a flavor that does not exist — FlavorMissing
 #
 # The tenant namespaces are carried here rather than left to up.sh so that
 # stays a single self-contained command.
@@ -28,23 +54,6 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: kwok-sim-batch
----
-apiVersion: ome.io/v1beta1
-kind: AcceleratorQuota
-metadata:
-  name: root
-spec:
-  # The reserved root is the one node with no parentRef, and its name is fixed:
-  # every other node in the fleet writes parentRef: {name: root}.
-  #
-  # Applying this usually patches a root the controller already created for
-  # itself to report capacity on. It creates that one bare, so the budget below
-  # is what this adds: a fleet total is the admin's to write.
-  role: Cohort
-  budgets:
-  - resourceName: google.com/tpu
-    resourceFlavor: tpu7x
-    nominal: 64
 ---
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
