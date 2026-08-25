@@ -351,3 +351,95 @@ func TestRecordScaleDownOversizedBatch(t *testing.T) {
 		t.Errorf("counter delta: got %v, want 1", delta)
 	}
 }
+
+func TestRecordISVCTimeToReady_Observes(t *testing.T) {
+	labels := prometheus.Labels{"namespace": "prod", "isvc": "llama", "deploy_kind": DeployKindCreate}
+	startCount, startSum := histogramFor("ome_isvc_time_to_ready_seconds", labels)
+	RecordISVCTimeToReady("prod", "llama", DeployKindCreate, 120)
+	cnt, sum := histogramFor("ome_isvc_time_to_ready_seconds", labels)
+	if cnt-startCount != 1 {
+		t.Errorf("count delta: got %v want 1", cnt-startCount)
+	}
+	if d := sum - startSum; d < 119.99 || d > 120.01 {
+		t.Errorf("sum delta: got %v want ~120.0", d)
+	}
+}
+
+func TestRecordISVCTimeToReady_DeployKindIsolated(t *testing.T) {
+	create := prometheus.Labels{"namespace": "prod", "isvc": "mistral", "deploy_kind": DeployKindCreate}
+	update := prometheus.Labels{"namespace": "prod", "isvc": "mistral", "deploy_kind": DeployKindUpdate}
+	createStart, _ := histogramFor("ome_isvc_time_to_ready_seconds", create)
+	updateStart, _ := histogramFor("ome_isvc_time_to_ready_seconds", update)
+
+	RecordISVCTimeToReady("prod", "mistral", DeployKindUpdate, 30)
+
+	createEnd, _ := histogramFor("ome_isvc_time_to_ready_seconds", create)
+	updateEnd, _ := histogramFor("ome_isvc_time_to_ready_seconds", update)
+	if updateEnd-updateStart != 1 {
+		t.Errorf("update count delta: got %v want 1", updateEnd-updateStart)
+	}
+	if createEnd != createStart {
+		t.Errorf("update observation changed create count from %v to %v", createStart, createEnd)
+	}
+}
+
+func TestRecordISVCTimeToReady_InvalidSamplesDropped(t *testing.T) {
+	labels := prometheus.Labels{"namespace": "prod", "isvc": "phi", "deploy_kind": DeployKindCreate}
+	startCount, _ := histogramFor("ome_isvc_time_to_ready_seconds", labels)
+	RecordISVCTimeToReady("prod", "phi", DeployKindCreate, 0)
+	RecordISVCTimeToReady("prod", "phi", DeployKindCreate, -3)
+	RecordISVCTimeToReady("", "phi", DeployKindCreate, 5)
+	RecordISVCTimeToReady("prod", "", DeployKindCreate, 5)
+	// An unrecognized deploy kind must not land a series: dashboards select
+	// on the two stable values and a typo would silently split the SLI.
+	RecordISVCTimeToReady("prod", "phi", "", 5)
+	RecordISVCTimeToReady("prod", "phi", "recreate", 5)
+	if cnt, _ := histogramFor("ome_isvc_time_to_ready_seconds", labels); cnt != startCount {
+		t.Errorf("invalid samples must be dropped; count moved from %v to %v", startCount, cnt)
+	}
+	if cnt, _ := histogramFor("ome_isvc_time_to_ready_seconds",
+		prometheus.Labels{"namespace": "prod", "isvc": "phi", "deploy_kind": "recreate"}); cnt != 0 {
+		t.Errorf("unrecognized deploy_kind landed a series with count %v", cnt)
+	}
+}
+
+// Readiness spans minutes for a cold model load, so the histogram must retain
+// resolution well past DefBuckets' 10s ceiling or every real observation
+// collapses into +Inf and the quantiles become unrecoverable.
+func TestReadinessHistogramsResolveMinutes(t *testing.T) {
+	labels := prometheus.Labels{"namespace": "prod", "isvc": "gemma", "deploy_kind": DeployKindCreate}
+	const tenMinutes = 600
+	start := histogramBucketFor("ome_isvc_time_to_ready_seconds", labels, 1024)
+	RecordISVCTimeToReady("prod", "gemma", DeployKindCreate, tenMinutes)
+	if got := histogramBucketFor("ome_isvc_time_to_ready_seconds", labels, 1024); got-start != 1 {
+		t.Errorf("a %ds observation did not land in the le=1024 bucket (delta %v)", tenMinutes, got-start)
+	}
+}
+
+func TestDeleteISVCSeries(t *testing.T) {
+	ttr := prometheus.Labels{"namespace": "prod", "isvc": "doomed", "deploy_kind": DeployKindCreate}
+	pcr := prometheus.Labels{"namespace": "prod", "isvc": "doomed", "component": "engine"}
+	RecordISVCTimeToReady("prod", "doomed", DeployKindCreate, 42)
+	RecordPodCreateToReady("prod", "doomed", "engine", 7)
+	if cnt, _ := histogramFor("ome_isvc_time_to_ready_seconds", ttr); cnt == 0 {
+		t.Fatal("precondition: time-to-ready series should exist before delete")
+	}
+	if cnt, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", pcr); cnt == 0 {
+		t.Fatal("precondition: pod-create-to-ready series should exist before delete")
+	}
+
+	// Empty identities are a no-op rather than a wildcard delete.
+	DeleteISVCSeries("", "doomed")
+	DeleteISVCSeries("prod", "")
+	if cnt, _ := histogramFor("ome_isvc_time_to_ready_seconds", ttr); cnt == 0 {
+		t.Error("empty identity must not delete series")
+	}
+
+	DeleteISVCSeries("prod", "doomed")
+	if cnt, _ := histogramFor("ome_isvc_time_to_ready_seconds", ttr); cnt != 0 {
+		t.Errorf("time-to-ready series survived delete with count %v", cnt)
+	}
+	if cnt, _ := histogramFor("ome_omenative_pod_create_to_ready_seconds", pcr); cnt != 0 {
+		t.Errorf("pod-create-to-ready series survived delete with count %v", cnt)
+	}
+}

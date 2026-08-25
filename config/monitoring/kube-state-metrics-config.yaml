@@ -140,7 +140,14 @@ data:
                 stateSet:
                   labelName: state
                   path: [status, state]
+                  # Must enumerate the whole LifeCycleState enum: a StateSet
+                  # emits no series at all for a value absent from this list,
+                  # so an omitted transient state makes a model stuck in it
+                  # invisible rather than merely unlabelled.
                   list:
+                    - Creating
+                    - Importing
+                    - In_Transit
                     - In_Training
                     - Ready
                     - Failed

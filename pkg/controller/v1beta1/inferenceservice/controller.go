@@ -56,6 +56,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
+	isvcstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/runtimerevision"
@@ -238,11 +239,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	} else {
 		// The object is being deleted
 		if controllerutil.ContainsFinalizer(isvc, inferenceServiceFinalizer) {
-			// Drop this ISVC's OMENative coordination + canary metric series so
-			// the per-(namespace,isvc) vectors do not leak unbounded after
-			// teardown. Idempotent and runs on the finalizer-bearing delete pass.
+			// Drop this ISVC's OMENative coordination, canary, and readiness
+			// metric series so the per-(namespace,isvc) vectors do not leak
+			// unbounded after teardown. Idempotent and runs on the
+			// finalizer-bearing delete pass.
 			coordination.DeleteForISVC(isvc.Namespace, isvc.Name)
 			canary.DeleteForISVC(isvc.Namespace, isvc.Name)
+			obsmetrics.DeleteISVCSeries(isvc.Namespace, isvc.Name)
 
 			// remove our finalizer from the list and update it.
 			controllerutil.RemoveFinalizer(isvc, inferenceServiceFinalizer)
@@ -998,11 +1001,20 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 	// landed between our snapshot and the re-Get (Incarnation bumps,
 	// Phase transitions, RunningRevision promotes) are preserved. The
 	// outer reconciler doesn't own that subtree.
+	//
+	// Readiness of the object this flush actually wrote over, captured from
+	// the live apiserver read on the attempt that wins. The event baseline
+	// above deliberately uses the cached top-of-reconcile snapshot; the
+	// time-to-ready metric needs the durable one, because the IR projector
+	// stamps component-ready conditions on the same object outside this
+	// function and can flip Ready between the two reads.
+	var preWriteReady *knapis.Condition
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &v1beta1.InferenceService{}
 		if err := r.APIReader.Get(context.TODO(), namespacedName, latest); err != nil {
 			return err
 		}
+		preWriteReady = latest.Status.GetCondition(knapis.ConditionReady)
 		preserved := preserveLifecycleStatus(latest.Status.Components)
 		latest.Status = desiredService.Status
 		mergeLifecycleStatus(&latest.Status, preserved)
@@ -1039,6 +1051,9 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 	// Ready / NotReady transition events fire only after a successful
 	// status write that actually flipped readiness.
 	isReady := inferenceServiceReadiness(desiredService.Status)
+	if isReady && (preWriteReady == nil || preWriteReady.Status != v1.ConditionTrue) {
+		isvcstatus.ObserveTimeToReady(desiredService, preWriteReady)
+	}
 	if wasReady && !isReady {
 		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, string(InferenceServiceNotReadyState),
 			"InferenceService [%v] is no longer Ready", desiredService.GetName())

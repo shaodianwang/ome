@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	knapis "knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -143,6 +145,15 @@ func aggregateOneComponent(ctx context.Context, c client.Client, reads client.Re
 	// ir.Spec.Replicas supplies the desired count so surge does not inflate it.
 	topCond := status.TopLevelComponentReadyFromLifecycle(component, desired, ir.Spec.Lifecycle, ir.Spec.Replicas)
 	isvcKey := client.ObjectKeyFromObject(isvc)
+	// Stamping topCond recomputes the aggregate Ready condition, so for an
+	// OMENative ISVC this write is usually the one that first flips Ready
+	// True — the reconciler's own status flush then sees it already set.
+	// Capture the transition here so end-to-end deployment latency is not
+	// systematically dropped for the components that use this path.
+	var (
+		readyFlipped bool
+		prevReady    *knapis.Condition
+	)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
 		if err := reads.Get(ctx, isvcKey, fresh); err != nil {
@@ -187,9 +198,15 @@ func aggregateOneComponent(ctx context.Context, c client.Client, reads client.Re
 			}
 			return fmt.Errorf("update ISVC status: %w", err)
 		}
+		prevReady = before.GetCondition(knapis.ConditionReady)
+		readyFlipped = status.IsReadyTrue(fresh.Status) &&
+			(prevReady == nil || prevReady.Status != v1.ConditionTrue)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("AggregateIRStatus: persist component=%s status: %w", component, err)
+	}
+	if readyFlipped {
+		status.ObserveTimeToReady(isvc, prevReady)
 	}
 
 	// Mirror onto the caller's in-memory ISVC so downstream code in

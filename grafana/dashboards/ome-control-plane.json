@@ -910,7 +910,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Per-revision Services by role",
+      "title": "Per-revision Services by component",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -927,9 +927,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (role) (ome_omenative_per_revision_service_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
+          "expr": "sum by (component) (ome_omenative_per_revision_service_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
           "refId": "N",
-          "legendFormat": "{{role}}"
+          "legendFormat": "{{component}}"
         }
       ],
       "fieldConfig": {
@@ -955,7 +955,7 @@
         },
         "overrides": []
       },
-      "description": "Kubernetes Services OMENative currently generates per revision, split by role (engine / router / decoder). Step changes track rollouts.",
+      "description": "Kubernetes Services OMENative currently generates per revision, split by component (engine / router / decoder). Step changes track rollouts.",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1110,7 +1110,7 @@
     },
     {
       "type": "row",
-      "title": "Managed resources",
+      "title": "Managed resources \u2014 from kube-state-metrics",
       "gridPos": {
         "x": 0,
         "y": 46,
@@ -1139,7 +1139,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (status) (ome_inferenceservice_transition_status{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
+          "expr": "sum by (status) (ome_inferenceservice_transition_status{cluster=\"$cluster\"})",
           "refId": "S",
           "legendFormat": "{{status}}"
         }
@@ -1167,7 +1167,7 @@
         },
         "overrides": []
       },
-      "description": "ISVCs by transition state. A state that stops draining is a stuck rollout.",
+      "description": "ISVCs by transition state. A state that stops draining is a stuck rollout. Needs the OME CustomResourceState config applied to kube-state-metrics.",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1199,7 +1199,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (state) (ome_basemodel_state{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
+          "expr": "sum by (state) (ome_basemodel_state{cluster=\"$cluster\"})",
           "refId": "T",
           "legendFormat": "namespaced/{{state}}"
         },
@@ -1208,7 +1208,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (state) (ome_clusterbasemodel_state{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
+          "expr": "sum by (state) (ome_clusterbasemodel_state{cluster=\"$cluster\"})",
           "refId": "U",
           "legendFormat": "cluster/{{state}}"
         }

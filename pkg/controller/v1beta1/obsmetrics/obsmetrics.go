@@ -43,6 +43,17 @@ const (
 	ControllerIR = "ir"
 )
 
+// deploy_kind label values for RecordISVCTimeToReady. Stable strings —
+// dashboards and alerts key off them.
+const (
+	// DeployKindCreate is recorded when the ISVC reached Ready for the
+	// first time, so the measurement covers an initial deployment.
+	DeployKindCreate = "create"
+	// DeployKindUpdate is recorded when the ISVC had previously been Ready,
+	// so the measurement covers a rollout of an already-serving service.
+	DeployKindUpdate = "update"
+)
+
 var (
 	// Histogram buckets affect exported measurement resolution only; they do
 	// not tune controller behavior. Pod-cost buckets cover large fleet changes,
@@ -50,6 +61,13 @@ var (
 	// multi-hour drains.
 	scaleDownBatchPodBuckets = prometheus.ExponentialBuckets(1, 2, 12)
 	scaleDownDurationBuckets = prometheus.ExponentialBuckets(1, 2, 15)
+
+	// Model-serving readiness spans seconds (a warm pod restarting) to tens of
+	// minutes (a cold multi-hundred-gigabyte weight load), so these buckets run
+	// from one second to a little over four hours. Upstream's DefBuckets tops
+	// out at ten seconds, which puts every real observation in +Inf and makes
+	// the quantiles unrecoverable.
+	readinessDurationBuckets = prometheus.ExponentialBuckets(1, 2, 15)
 
 	statusUpdateTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -67,11 +85,11 @@ var (
 		prometheus.HistogramOpts{
 			Name: "ome_omenative_rollout_phase_duration_seconds",
 			Help: "Wall-clock seconds a coordination group spent in a phase before transitioning out, labeled by the phase being left.",
-			// Upstream Prometheus default buckets — a well-known shared
-			// constant, not an OME-baked tuning value. Bucket layout is a
-			// dashboard concern, not a behavioral one (it never changes a
-			// deployment outcome, timeout, or limit).
-			Buckets: prometheus.DefBuckets,
+			// A group dwells in Waiting or Draining for minutes, so the
+			// bucket ceiling has to clear that. Bucket layout is a dashboard
+			// concern, not a behavioral one (it never changes a deployment
+			// outcome, timeout, or limit).
+			Buckets: readinessDurationBuckets,
 		},
 		[]string{"phase"},
 	)
@@ -83,10 +101,30 @@ var (
 		prometheus.HistogramOpts{
 			Name: "ome_omenative_pod_create_to_ready_seconds",
 			Help: "Wall-clock seconds from the earliest pod's creation to the Instance first reaching Ready, labeled by namespace, ISVC, and component.",
-			// Upstream Prometheus default buckets (see above).
-			Buckets: prometheus.DefBuckets,
+			// Readiness buckets (see above): a serving pod pulling an image
+			// and localizing weights routinely takes minutes.
+			Buckets: readinessDurationBuckets,
 		},
 		[]string{"namespace", "isvc", "component"},
+	)
+
+	// isvcTimeToReadySeconds records end-to-end deployment latency: the gap
+	// between the ISVC last losing readiness (or being created, for a first
+	// deploy) and the aggregate Ready condition next going True. Unlike
+	// podCreateToReadySeconds it spans admission, runtime selection, and
+	// model localization, because it is anchored on the ISVC's own condition
+	// rather than on a pod that does not exist until those steps finish.
+	//
+	// deployKind separates a first deploy from a rollout of an existing
+	// service: they have different expected durations and mixing them makes
+	// the quantiles bimodal.
+	isvcTimeToReadySeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "ome_isvc_time_to_ready_seconds",
+			Help:    "Wall-clock seconds from an InferenceService losing readiness (or being created) to its aggregate Ready condition next going True, labeled by namespace, ISVC, and deploy kind (create|update).",
+			Buckets: readinessDurationBuckets,
+		},
+		[]string{"namespace", "isvc", "deploy_kind"},
 	)
 
 	scaleDownBatchPods = prometheus.NewHistogramVec(
@@ -137,6 +175,7 @@ func init() {
 		statusUpdateTotal,
 		rolloutPhaseDurationSeconds,
 		podCreateToReadySeconds,
+		isvcTimeToReadySeconds,
 		scaleDownBatchPods,
 		scaleDownActivePods,
 		scaleDownDeferredInstances,
@@ -176,6 +215,36 @@ func RecordPodCreateToReady(namespace, isvc, component string, seconds float64) 
 	podCreateToReadySeconds.WithLabelValues(namespace, isvc, component).Observe(seconds)
 }
 
+// RecordISVCTimeToReady observes end-to-end deployment latency for one
+// not-Ready-to-Ready transition of an InferenceService. Callers must invoke
+// it only on the edge, and only after the status write that carried the
+// transition has committed, so a level-triggered reconcile loop cannot
+// re-observe the same deployment. Non-positive durations, empty identity
+// labels, and unrecognized deploy kinds are dropped.
+func RecordISVCTimeToReady(namespace, isvc, deployKind string, seconds float64) {
+	if namespace == "" || isvc == "" || seconds <= 0 {
+		return
+	}
+	if deployKind != DeployKindCreate && deployKind != DeployKindUpdate {
+		return
+	}
+	isvcTimeToReadySeconds.WithLabelValues(namespace, isvc, deployKind).Observe(seconds)
+}
+
+// DeleteISVCSeries removes the per-ISVC readiness series when their owning
+// ISVC disappears. Both vectors carry the ISVC identity, so without this they
+// would retain a series per ISVC ever deployed for the lifetime of the
+// process. Partial matching drops every deploy-kind and component variant
+// under the identity in one call.
+func DeleteISVCSeries(namespace, isvc string) {
+	if namespace == "" || isvc == "" {
+		return
+	}
+	id := prometheus.Labels{"namespace": namespace, "isvc": isvc}
+	isvcTimeToReadySeconds.DeletePartialMatch(id)
+	podCreateToReadySeconds.DeletePartialMatch(id)
+}
+
 // RecordScaleDownBatchPods observes the Pod-equivalent cost admitted into one
 // scale-down wave. A wave always has positive cost; invalid observations and
 // empty component labels are dropped.
@@ -207,7 +276,9 @@ func SetScaleDownDeferredInstances(namespace, isvc, component string, instances 
 }
 
 // DeleteScaleDownSeries removes per-IR gauges when their owning IR disappears.
-// Histograms and counters have bounded component-only cardinality and remain.
+// The scale-down histograms and counters are labeled by component alone, so
+// their cardinality is bounded and they remain; the ISVC-labeled readiness
+// histograms are cleaned up by DeleteISVCSeries instead.
 func DeleteScaleDownSeries(namespace, isvc, component string) {
 	if !validScaleDownIdentity(namespace, isvc, component) {
 		return
