@@ -13,19 +13,41 @@ data:
   #      the canonical OME-wide pod selector, not the OMENative-only
   #      `ome.io/managed-by`).
   #   2. OME control-plane pods (controller-manager, model-agent)
-  #      that opt in via the standard `prometheus.io/scrape: "true"`
-  #      pod annotation.
+  #      that opt in via the standard Prometheus annotation.
   # Port + path resolve from the standard `prometheus.io/port` and
   # `prometheus.io/path` annotations when set; otherwise Prometheus
   # falls back to its discovery defaults.
   prometheus.yml: |
     global:
       scrape_interval: {{ .Values.prometheus.scrapeInterval }}
-      scrape_timeout: 10s
+      scrape_timeout: {{ .Values.prometheus.scrapeTimeout }}
+      {{- with .Values.prometheus.externalLabels }}
       external_labels:
-        cluster: ome
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     scrape_configs:
       - job_name: ome-inferenceservice-pods
+        {{- with .Values.prometheus.scrapeLimits.sampleLimit }}
+        sample_limit: {{ . }}
+        {{- end }}
+        {{- with .Values.prometheus.scrapeLimits.targetLimit }}
+        target_limit: {{ . }}
+        {{- end }}
+        {{- with .Values.prometheus.scrapeLimits.labelLimit }}
+        label_limit: {{ . }}
+        {{- end }}
+        {{- with .Values.prometheus.scrapeLimits.labelNameLengthLimit }}
+        label_name_length_limit: {{ . }}
+        {{- end }}
+        {{- with .Values.prometheus.scrapeLimits.labelValueLengthLimit }}
+        label_value_length_limit: {{ . }}
+        {{- end }}
+        {{- with .Values.prometheus.scrapeLimits.bodySizeLimit }}
+        body_size_limit: {{ . }}
+        {{- end }}
+        {{- with .Values.prometheus.scrapeLimits.keepDroppedTargets }}
+        keep_dropped_targets: {{ . }}
+        {{- end }}
         kubernetes_sd_configs:
           - role: pod
             # Server-side informer filter: discover ONLY InferenceService pods.
@@ -51,11 +73,25 @@ data:
           - source_labels: [__meta_kubernetes_pod_phase]
             regex: Running
             action: keep
-          # Honor the standard prometheus.io/scrape opt-out: setting
-          # it explicitly to "false" on an ISVC pod skips it.
+          {{- if .Values.prometheus.requireScrapeAnnotation }}
+          # An explicit standard opt-out wins over the OME-level opt-in.
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
             regex: "false"
             action: drop
+          # Scraping is opt-in through either the standard annotation or OME's
+          # controller-level scrape setting.
+          - source_labels:
+              - __meta_kubernetes_pod_annotation_prometheus_io_scrape
+              - __meta_kubernetes_pod_annotation_ome_io_enable_prometheus_scraping
+            regex: "true;.*|.*;true"
+            action: keep
+          {{- else }}
+          # Compatibility mode scrapes every ISVC pod unless it explicitly
+          # opts out with the standard annotation.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "false"
+            action: drop
+          {{- end }}
           # Address: replace the discovered port with prometheus.io/port
           # when set on the pod.
           - source_labels:
@@ -83,6 +119,10 @@ data:
           # ome.io/-prefixed one -- so source the unprefixed label.
           - source_labels: [__meta_kubernetes_pod_label_component]
             target_label: component
+        {{- with .Values.prometheus.metricRelabelConfigs }}
+        metric_relabel_configs:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
 
       - job_name: ome-control-plane
         kubernetes_sd_configs:
@@ -118,4 +158,11 @@ data:
             target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+
+      {{- if .Values.prometheus.selfScrape.enabled }}
+      - job_name: ome-prometheus
+        static_configs:
+          - targets:
+              - {{ printf "127.0.0.1:%v" .Values.prometheus.listenPort | quote }}
+      {{- end }}
 {{- end }}

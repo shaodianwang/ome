@@ -169,8 +169,8 @@ ome:
     canaryAnalysis:
       # Default Prometheus the analysis queries when a canary does not set its own
       # spec.rollout.canary.prometheus.serverAddress. Empty -> the bundled
-      # ome-prometheus Service (computed http://ome-prometheus.<namespace>.svc:9090
-      # by the ConfigMap template). Set to your own Prometheus/Thanos for prod.
+      # ome-prometheus Service at prometheus.service.port. Set to your own
+      # Prometheus/Thanos for production.
       bundledPrometheusAddress: ""
       # Per-sample query timeout, max background query concurrency, and how long a
       # sampled result stays usable in the controller's cache.
@@ -494,13 +494,12 @@ podMonitor:
   relabelings: []
   metricRelabelings: []
 
-# Single-replica Prometheus bundled by this chart so KEDA autoscaling
-# triggers (OEP-0013) and canary metric-analysis (OEP-0015.2) have a metrics
-# source out of the box — it is the default source the canary analysis gate
-# queries (http://ome-prometheus.<ns>.svc:9090). Disable when your cluster
-# already runs a Prometheus that scrapes OME pods, and point the analysis
-# source / KEDA at that one instead. NOT intended for long-term observability
-# or alerting; retention is deliberately short and storage is emptyDir.
+# Single-replica Prometheus bundled by this chart for KEDA autoscaling and
+# canary metric analysis. It is the default source for canary queries. Disable
+# it when your cluster already runs a Prometheus that scrapes OME pods, and
+# point analysis and KEDA at that instance instead. It is not intended for
+# long-term observability or alerting; retention is deliberately short and
+# storage defaults to emptyDir.
 prometheus:
   enabled: true
   # Retention window for persisted TSDB blocks. Short by design — this
@@ -509,16 +508,53 @@ prometheus:
   # two-hour production block duration.
   retention: 30m
   # Size-based TSDB retention guard. Prometheus counts the head/WAL when
-  # evaluating this limit but can delete only persisted blocks. 6GB is
-  # about 70% of the 8Gi emptyDir cap, leaving space for the mutable head,
+  # evaluating this limit but can delete only persisted blocks. 6GB is about
+  # 70% of the default 8Gi emptyDir cap, leaving space for the mutable head,
   # WAL checkpoints, and compaction. Set empty to disable; when overriding,
-  # keep this at no more than 80-85% of storage.sizeLimit.
+  # keep this below 80-85% of the selected volume capacity.
   retentionSize: 6GB
   scrapeInterval: 15s
+  scrapeTimeout: 10s
+  # Internal Prometheus HTTP port. service.port remains the Service-facing
+  # port and may differ from this value.
+  listenPort: 9090
+  # Require an explicit scrape opt-in on InferenceService pods through either
+  # prometheus.io/scrape="true" or ome.io/enable-prometheus-scraping="true".
+  # The compatibility default keeps the existing opt-out behavior; enable this
+  # on large or shared clusters to bound the discovered scrape population.
+  requireScrapeAnnotation: false
+  # Prometheus metric_relabel_configs applied to the InferenceService scrape
+  # job. Use this to keep only the series needed by autoscaling and canary
+  # queries. Empty keeps every metric exposed by scraped pods.
+  metricRelabelConfigs: []
+  # Optional per-scrape guardrails. Set an individual value to 0 or empty to
+  # leave the corresponding Prometheus limit unset.
+  scrapeLimits:
+    sampleLimit: 0
+    targetLimit: 0
+    labelLimit: 0
+    labelNameLengthLimit: 0
+    labelValueLengthLimit: 0
+    bodySizeLimit: ""
+    keepDroppedTargets: 0
+  # Retain Prometheus's own process and TSDB metrics for capacity planning.
+  selfScrape:
+    enabled: true
+  externalLabels:
+    cluster: ome
+  # Optional query guards. Zero or empty values retain Prometheus's upstream
+  # defaults.
+  query:
+    maxConcurrency: 0
+    maxSamples: 0
+    timeout: ""
+  # Optional Go soft memory limit. Leave empty to use Prometheus's runtime
+  # behavior; set below the container limit to reserve non-heap headroom.
+  goMemLimit: ""
   # Namespaces to discover InferenceService pods in. Empty = all namespaces
-  # (discovery is already server-side filtered to ome.io/inferenceservice pods,
-  # so it stays cheap even cluster-wide). Set a list to hard-scope discovery on
-  # very large multi-tenant clusters, e.g. [ome, team-a, team-b].
+  # (discovery is server-side filtered to ome.io/inferenceservice pods, which
+  # bounds the Kubernetes informer but not scrape cardinality). Set a list to
+  # hard-scope discovery on large multi-tenant clusters.
   scrapeNamespaces: []
   image:
     repository: prom/prometheus
@@ -549,6 +585,17 @@ prometheus:
     # inference fleet while still protecting the node from runaway disk use;
     # retentionSize cannot delete the mutable head or WAL.
     sizeLimit: 8Gi
+  # Optional durable TSDB storage. When disabled, the Deployment uses the
+  # emptyDir volume configured above. existingClaim takes precedence over a
+  # chart-managed claim when persistence is enabled.
+  persistence:
+    enabled: false
+    existingClaim: ""
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 16Gi
+    annotations: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}

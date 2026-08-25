@@ -67,10 +67,35 @@ ome:
 modelAgent:
   enabled: false
 
-# Bundled Prometheus for OME/KEDA metrics. Chart scopes SD to ISVC-labeled pods + the
-# release namespace (#493), so safe at this cluster's scale.
+# Bundled Prometheus for OME/KEDA metrics. Large-cluster capacity and scrape
+# controls are set explicitly for this fleet.
 prometheus:
   enabled: true
+  retention: 1h
+  retentionSize: 12GB
+  requireScrapeAnnotation: true
+  goMemLimit: 9GiB
+  scrapeLimits:
+    sampleLimit: 10000
+    targetLimit: 5000
+    labelLimit: 100
+    labelNameLengthLimit: 128
+    labelValueLengthLimit: 2048
+    bodySizeLimit: 50MB
+    keepDroppedTargets: 100
+  query:
+    maxConcurrency: 8
+    maxSamples: 10000000
+    timeout: 30s
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  storage:
+    sizeLimit: 16Gi
 serviceMonitor:
   enabled: true
 podMonitor:

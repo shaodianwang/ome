@@ -39,7 +39,7 @@ data:
 
   canaryAnalysis: |-
     {
-      "bundledPrometheusAddress": "{{ .Values.ome.controller.canaryAnalysis.bundledPrometheusAddress | default (printf "http://ome-prometheus.%s.svc:9090" .Release.Namespace) }}",
+      "bundledPrometheusAddress": "{{ .Values.ome.controller.canaryAnalysis.bundledPrometheusAddress | default (printf "http://ome-prometheus.%s.svc:%v" .Release.Namespace .Values.prometheus.service.port) }}",
       "queryTimeout": "{{ .Values.ome.controller.canaryAnalysis.queryTimeout | default "5s" }}",
       "maxConcurrency": {{ .Values.ome.controller.canaryAnalysis.maxConcurrency | default 8 }},
       "cacheTTL": "{{ .Values.ome.controller.canaryAnalysis.cacheTTL | default "2m" }}"

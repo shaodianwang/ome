@@ -127,6 +127,197 @@ model_agent="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --show-only templates/model-agent-daemonset/daemonset.yaml)"
 grep -Fq 'helm.sh/chart: ome-resources-0.1.0' <<<"${model_agent}" ||
   fail "model agent chart version label was not rendered"
+
+prometheus_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --show-only templates/prometheus/configmap.yaml)"
+prometheus_deployment="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --show-only templates/prometheus/deployment.yaml)"
+
+grep -Fq 'scrape_timeout: 10s' <<<"${prometheus_config}" ||
+  fail "default Prometheus scrape timeout was not rendered"
+grep -Fq 'cluster: ome' <<<"${prometheus_config}" ||
+  fail "default Prometheus external label was not rendered"
+if grep -Fq 'sample_limit:' <<<"${prometheus_config}" ||
+  grep -Fq 'target_limit:' <<<"${prometheus_config}" ||
+  grep -Fq 'body_size_limit:' <<<"${prometheus_config}"; then
+  fail "optional Prometheus scrape limits were rendered by default"
+fi
+grep -Fq 'regex: "false"' <<<"${prometheus_config}" ||
+  fail "default Prometheus scrape annotation compatibility mode was not rendered"
+if grep -Fq 'regex: "true;.*|.*;true"' <<<"${prometheus_config}"; then
+  fail "Prometheus scrape opt-in was rendered by default"
+fi
+grep -Fq 'job_name: ome-prometheus' <<<"${prometheus_config}" ||
+  fail "Prometheus self-scrape job was not rendered"
+grep -Fq '127.0.0.1:9090' <<<"${prometheus_config}" ||
+  fail "Prometheus self-scrape target was not rendered"
+if grep -Fq -- '--query.' <<<"${prometheus_deployment}"; then
+  fail "optional Prometheus query limits were rendered by default"
+fi
+if grep -Fq 'name: GOMEMLIMIT' <<<"${prometheus_deployment}"; then
+  fail "Prometheus GOMEMLIMIT was rendered when unset"
+fi
+if grep -Fq 'templates/prometheus/pvc.yaml' <<<"${rendered}"; then
+  fail "Prometheus PVC was rendered when persistence is disabled"
+fi
+
+prometheus_without_self_scrape="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.selfScrape.enabled=false \
+  --show-only templates/prometheus/configmap.yaml)"
+if grep -Fq -- '- job_name: ome-prometheus' <<<"${prometheus_without_self_scrape}"; then
+  fail "Prometheus self-scrape job was rendered when disabled"
+fi
+
+opt_in_scrape_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.requireScrapeAnnotation=true \
+  --show-only templates/prometheus/configmap.yaml)"
+grep -Fq 'regex: "true;.*|.*;true"' <<<"${opt_in_scrape_config}" ||
+  fail "Prometheus scrape annotation opt-in was not rendered"
+grep -Fq '__meta_kubernetes_pod_annotation_ome_io_enable_prometheus_scraping' <<<"${opt_in_scrape_config}" ||
+  fail "OME Prometheus scrape opt-in annotation was not rendered"
+
+metric_relabel_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set 'prometheus.metricRelabelConfigs[0].source_labels[0]=__name__' \
+  --set-string 'prometheus.metricRelabelConfigs[0].regex=up|cd_probe_up' \
+  --set 'prometheus.metricRelabelConfigs[0].action=keep' \
+  --show-only templates/prometheus/configmap.yaml)"
+grep -Fq 'metric_relabel_configs:' <<<"${metric_relabel_config}" ||
+  fail "Prometheus metric relabel configuration was not rendered"
+grep -Fq 'regex: up|cd_probe_up' <<<"${metric_relabel_config}" ||
+  fail "Prometheus metric relabel regex override was not rendered"
+default_prometheus_checksum="$(grep -m1 'checksum/config:' <<<"${prometheus_deployment}" | awk '{print $2}')"
+metric_relabel_deployment="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set 'prometheus.metricRelabelConfigs[0].source_labels[0]=__name__' \
+  --set-string 'prometheus.metricRelabelConfigs[0].regex=up|cd_probe_up' \
+  --set 'prometheus.metricRelabelConfigs[0].action=keep' \
+  --show-only templates/prometheus/deployment.yaml)"
+metric_relabel_checksum="$(grep -m1 'checksum/config:' <<<"${metric_relabel_deployment}" | awk '{print $2}')"
+[[ -n "${default_prometheus_checksum}" && -n "${metric_relabel_checksum}" ]] ||
+  fail "Prometheus ConfigMap checksum was not rendered"
+[[ "${default_prometheus_checksum}" != "${metric_relabel_checksum}" ]] ||
+  fail "changing Prometheus metric relabeling did not roll the config checksum"
+
+prometheus_runtime_overrides="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.listenPort=9191 \
+  --set prometheus.service.port=80 \
+  --set-string prometheus.goMemLimit=9GiB \
+  --show-only templates/prometheus/deployment.yaml)"
+prometheus_port_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.listenPort=9191 \
+  --set prometheus.service.port=80 \
+  --show-only templates/prometheus/configmap.yaml)"
+prometheus_port_service="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.listenPort=9191 \
+  --set prometheus.service.port=80 \
+  --show-only templates/prometheus/service.yaml)"
+prometheus_port_controller_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.listenPort=9191 \
+  --set prometheus.service.port=80 \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq -- '--web.listen-address=:9191' <<<"${prometheus_runtime_overrides}" ||
+  fail "Prometheus listen port override was not rendered"
+grep -Fq 'containerPort: 9191' <<<"${prometheus_runtime_overrides}" ||
+  fail "Prometheus container port override was not rendered"
+grep -Fq '127.0.0.1:9191' <<<"${prometheus_port_config}" ||
+  fail "Prometheus self-scrape did not use the listen port"
+grep -Fq 'port: 80' <<<"${prometheus_port_service}" ||
+  fail "Prometheus Service port override was not rendered"
+grep -Fq 'http://ome-prometheus.ome.svc:80' <<<"${prometheus_port_controller_config}" ||
+  fail "canary Prometheus address did not use the Service port"
+grep -Fq 'name: GOMEMLIMIT' <<<"${prometheus_runtime_overrides}" ||
+  fail "Prometheus GOMEMLIMIT name was not rendered"
+grep -Fq 'value: "9GiB"' <<<"${prometheus_runtime_overrides}" ||
+  fail "Prometheus GOMEMLIMIT value was not rendered"
+
+prometheus_persistent="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.persistence.enabled=true \
+  --set prometheus.persistence.size=32Gi \
+  --set prometheus.persistence.storageClassName=fast-rwo)"
+prometheus_persistent_deployment="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.persistence.enabled=true \
+  --show-only templates/prometheus/deployment.yaml)"
+grep -Fq 'templates/prometheus/pvc.yaml' <<<"${prometheus_persistent}" ||
+  fail "Prometheus PVC was not rendered when persistence is enabled"
+grep -Fq 'claimName: "ome-prometheus"' <<<"${prometheus_persistent_deployment}" ||
+  fail "Prometheus chart-managed PVC was not mounted"
+grep -Fq 'storage: 32Gi' <<<"${prometheus_persistent}" ||
+  fail "Prometheus chart-managed PVC size was not rendered"
+grep -Fq 'storageClassName: "fast-rwo"' <<<"${prometheus_persistent}" ||
+  fail "Prometheus chart-managed PVC storage class was not rendered"
+grep -Fq -- '- ReadWriteOnce' <<<"${prometheus_persistent}" ||
+  fail "Prometheus chart-managed PVC access mode was not rendered"
+if grep -Fq 'emptyDir:' <<<"${prometheus_persistent_deployment}"; then
+  fail "Prometheus emptyDir was rendered with persistence enabled"
+fi
+
+prometheus_existing_claim="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.persistence.enabled=true \
+  --set prometheus.persistence.existingClaim=shared-prometheus)"
+prometheus_existing_claim_deployment="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set prometheus.persistence.enabled=true \
+  --set prometheus.persistence.existingClaim=shared-prometheus \
+  --show-only templates/prometheus/deployment.yaml)"
+grep -Fq 'claimName: "shared-prometheus"' <<<"${prometheus_existing_claim_deployment}" ||
+  fail "Prometheus existing PVC was not mounted"
+if grep -Fq 'templates/prometheus/pvc.yaml' <<<"${prometheus_existing_claim}"; then
+  fail "Prometheus PVC was created when an existing claim was configured"
+fi
+
+usc1_prometheus_deployment="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --values "${chart_dir}/values-usc1-1-tpu.yaml" \
+  --show-only templates/prometheus/deployment.yaml)"
+usc1_prometheus_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --values "${chart_dir}/values-usc1-1-tpu.yaml" \
+  --show-only templates/prometheus/configmap.yaml)"
+grep -Fq -- '--storage.tsdb.retention.time=1h' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus retention was not rendered"
+grep -Fq -- '--storage.tsdb.retention.size=12GB' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus size retention was not rendered"
+grep -Fq 'sample_limit: 10000' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus sample limit was not rendered"
+grep -Fq 'target_limit: 5000' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus target limit was not rendered"
+grep -Fq 'label_limit: 100' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus label limit was not rendered"
+grep -Fq 'label_name_length_limit: 128' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus label-name length limit was not rendered"
+grep -Fq 'label_value_length_limit: 2048' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus label-value length limit was not rendered"
+grep -Fq 'body_size_limit: 50MB' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus body size limit was not rendered"
+grep -Fq 'keep_dropped_targets: 100' <<<"${usc1_prometheus_config}" ||
+  fail "usc1 Prometheus dropped-target limit was not rendered"
+grep -Fq -- '--query.max-concurrency=8' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus query concurrency was not rendered"
+grep -Fq -- '--query.max-samples=10000000' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus query sample limit was not rendered"
+grep -Fq -- '--query.timeout=30s' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus query timeout was not rendered"
+grep -Fq 'memory: 12Gi' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus memory limit was not rendered"
+grep -Fq 'memory: 8Gi' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus memory request was not rendered"
+grep -Fq 'sizeLimit: 16Gi' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus storage limit was not rendered"
+grep -Fq 'value: "9GiB"' <<<"${usc1_prometheus_deployment}" ||
+  fail "usc1 Prometheus GOMEMLIMIT was not rendered"
+
 grep -Fq 'sizeLimit: 8Gi' <<<"${rendered}" ||
   fail "default Prometheus storage sizeLimit is not 8Gi"
 grep -Fq -- '--storage.tsdb.retention.size=6GB' <<<"${rendered}" ||

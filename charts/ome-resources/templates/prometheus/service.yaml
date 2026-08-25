@@ -1,8 +1,6 @@
 {{- if .Values.prometheus.enabled }}
-# Fronts the bundled Prometheus Deployment on port 9090. KEDA
-# ScaledObjects address this via
-#   http://ome-prometheus.{{ .Release.Namespace }}.svc:9090
-# so OEP-0013 prometheus triggers work out of the box.
+# Fronts the bundled Prometheus Deployment for in-cluster KEDA and canary
+# queries. The Service port may differ from the container's listen port.
 apiVersion: v1
 kind: Service
 metadata:
