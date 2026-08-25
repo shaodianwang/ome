@@ -103,6 +103,18 @@ const (
 	// its last-good state because a computed invariant is violated.
 	AcceleratorQuotaReasonFrozen = "Frozen"
 
+	// AcceleratorQuotaReasonMaterializationFailed marks a node whose objects
+	// could not be written. It is the transient case — an API error, a
+	// throttled write — and clears on the next successful pass.
+	AcceleratorQuotaReasonMaterializationFailed = "MaterializationFailed"
+
+	// AcceleratorQuotaReasonObjectConflict marks a node whose object name is
+	// already taken by one this manager does not own. Adoption is refused
+	// rather than performed, so the existing object is left untouched and the
+	// node materializes nothing. Unlike a failed write this does not clear on
+	// its own: an operator has to remove the object or rename the node.
+	AcceleratorQuotaReasonObjectConflict = "ObjectConflict"
+
 	// AcceleratorQuotaReasonParentCycle marks a node whose parentRef chain loops.
 	// Distinct from ParentMissing because the remedy differs: a missing parent is
 	// created, a cycle is broken.
@@ -132,8 +144,15 @@ const (
 
 // Projection and ownership marks. The origin label identifies a copy a
 // management plane wrote onto a workload cluster. The managed-by and node labels
-// go on the Kueue objects a node materializes, which are cluster-scoped and so
-// cannot carry an OwnerReference back to the CR.
+// go on the Kueue objects a node materializes, and are how those objects are
+// found: they carry no OwnerReference back to the CR.
+//
+// That is a choice, not a constraint — a cluster-scoped owner may own a
+// cluster-scoped dependent. Garbage collection fires only on deletion of the
+// owner, and switching the mode off deletes no AcceleratorQuota, so an
+// OwnerReference would do nothing in the case that matters while making
+// "disable the mode" look like it might reap. Deletion is reaped by the
+// finalizer instead, which is the one path that removes these objects.
 const (
 	// AcceleratorQuotaOriginLabel is present on a projected copy and absent on
 	// an authored one. Its value is the management plane's configured identity,
