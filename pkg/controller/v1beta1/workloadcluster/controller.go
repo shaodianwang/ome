@@ -178,6 +178,13 @@ func (r *Reconciler) finish(ctx context.Context, wc *v1beta1.WorkloadCluster, re
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
+		// wc was read through the cache, so a pass that runs before the cache
+		// caught up writes at a stale resourceVersion and loses the race. The
+		// next pass recomputes the same status from fresh state, so requeue
+		// rather than reporting a failure that did not happen.
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("workloadcluster %s: update status: %w", wc.Name, err)
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
