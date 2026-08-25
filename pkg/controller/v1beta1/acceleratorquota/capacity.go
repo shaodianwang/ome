@@ -3,17 +3,25 @@ package acceleratorquota
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/capacity"
 )
+
+// rootBootstrapRetry paces the startup root check. Not a knob, and deliberately
+// not one: the only thing it waits on is this process's own admission path
+// coming up, which is a startup transient measured in seconds. Every other
+// trigger for the same check is event-driven or the resync tick.
+const rootBootstrapRetry = 2 * time.Second
 
 // CapacityOptions configure deriving the cluster's own accelerator capacity
 // onto the reserved root. Absent config disables derivation rather than
@@ -66,6 +74,40 @@ func (r *Reconciler) ensureRoot(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("creating the reserved root: %w", err)
 	}
 	return true, nil
+}
+
+// bootstrapRoot is the startup pass that brings the reserved root into being on
+// a cluster where nothing has happened yet to fire a reconcile.
+//
+// It retries rather than failing, because the write it makes is gated by this
+// component's own validating webhook: failurePolicy=Fail, with a caBundle this
+// same process injects only once the manager is running. So the first attempts
+// are refused for a reason that clears itself — the caBundle is still the
+// chart's placeholder, or the serving cert has not been projected back down to
+// the webhook server yet. Surfacing that from a Runnable would stop the manager
+// and take the rotator down with it, and the restart would lose the identical
+// race: a startup that cannot converge on its own. The create is idempotent, so
+// retrying until it lands costs nothing.
+func (r *Reconciler) bootstrapRoot(ctx context.Context) error {
+	return r.bootstrapRootEvery(ctx, rootBootstrapRetry)
+}
+
+// bootstrapRootEvery is bootstrapRoot with the cadence named by the caller, so
+// the contract that a refused create is survivable can be exercised without
+// waiting out the production interval.
+func (r *Reconciler) bootstrapRootEvery(ctx context.Context, every time.Duration) error {
+	// The poll's only error is the manager stopping, which is not this check
+	// failing.
+	_ = wait.PollUntilContextCancel(ctx, every, true,
+		func(ctx context.Context) (bool, error) {
+			if _, err := r.ensureRoot(ctx); err != nil {
+				r.Log.V(1).Info("waiting to create the reserved root",
+					"root", r.Options.RootName, "reason", err.Error())
+				return false, nil
+			}
+			return true, nil
+		})
+	return nil
 }
 
 // reconcileCapacity samples the cluster's nodes and records the result on the

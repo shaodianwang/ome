@@ -286,13 +286,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// contain something.
 		//
 		// A plain RunnableFunc is leader-elected, so a standby replica does not
-		// race the leader; AlreadyExists is benign in any case.
-		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-			if _, err := r.ensureRoot(ctx); err != nil {
-				return err
-			}
-			return nil
-		})); err != nil {
+		// race the leader; AlreadyExists is benign in any case. The pass retries
+		// internally and never returns an error, because the write goes through
+		// this component's own fail-closed webhook and the manager it would take
+		// down is the one that brings that webhook up.
+		if err := mgr.Add(manager.RunnableFunc(r.bootstrapRoot)); err != nil {
 			return fmt.Errorf("acceleratorquota: scheduling the root check: %w", err)
 		}
 

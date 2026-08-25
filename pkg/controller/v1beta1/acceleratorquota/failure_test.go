@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -160,5 +161,83 @@ func TestReconcileWritesEveryNodeDespiteOneFailure(t *testing.T) {
 	// And the two that did not fail were actually written, not just attempted.
 	if got := observe(t, c)["team-a"]; got.Path != treePath("org", "team-a") {
 		t.Errorf("team-a status was not written: %+v", got)
+	}
+}
+
+// The startup root check writes through this component's own fail-closed
+// validating webhook, whose caBundle the same process injects seconds later. A
+// refused create is therefore the normal first outcome on a fresh install, and a
+// Runnable that returned it would stop the manager before the rotator ran —
+// making every restart lose the same race.
+func TestBootstrapRootSurvivesARefusedCreate(t *testing.T) {
+	// Fast enough to keep the test honest about retrying without paying the
+	// production cadence.
+	const retry = time.Millisecond
+
+	webhookRefusal := apierrors.NewInternalError(errors.New(
+		`failed calling webhook "acceleratorquota.ome-quota-manager.validator": ` +
+			`could not get REST client: unable to load root certificates`))
+
+	tests := []struct {
+		name string
+		// refusals is how many creates are refused before the admission path
+		// comes up. -1 never lets it up.
+		refusals int
+		wantRoot bool
+	}{
+		{name: "the admission path is already up", refusals: 0, wantRoot: true},
+		{name: "the caBundle lands on a later attempt", refusals: 3, wantRoot: true},
+		{name: "an admission path that never comes up is not fatal", refusals: -1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts int
+			s := testScheme(t)
+			c := fake.NewClientBuilder().
+				WithScheme(s).
+				WithStatusSubresource(&v1beta1.AcceleratorQuota{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, cl client.WithWatch, obj client.Object,
+						opts ...client.CreateOption) error {
+						attempts++
+						if tc.refusals < 0 || attempts <= tc.refusals {
+							return webhookRefusal
+						}
+						return cl.Create(ctx, obj, opts...)
+					},
+				}).
+				Build()
+			r := &Reconciler{
+				Client: c, Scheme: s, Log: logf.Log.WithName("test"), APIReader: c,
+				Options: tree.Options{RootName: rootName, MaxDepth: 5},
+			}
+
+			ctx := context.Background()
+			if !tc.wantRoot {
+				// Nothing else ends the poll, so this stands in for the manager
+				// shutting down while the check is still trying.
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*retry)
+				defer cancel()
+			}
+
+			// The whole point: whatever the apiserver said, the manager lives.
+			if err := r.bootstrapRootEvery(ctx, retry); err != nil {
+				t.Fatalf("bootstrapRootEvery() = %v, want the manager left running", err)
+			}
+
+			err := c.Get(context.Background(), client.ObjectKey{Name: rootName}, &v1beta1.AcceleratorQuota{})
+			switch {
+			case tc.wantRoot && err != nil:
+				t.Fatalf("the reserved root was not created after %d attempts: %v", attempts, err)
+			case !tc.wantRoot && err == nil:
+				t.Fatal("a root was created while every create was refused")
+			}
+			if tc.wantRoot && attempts != tc.refusals+1 {
+				t.Errorf("attempts = %d, want %d (one per refusal, then the one that lands)",
+					attempts, tc.refusals+1)
+			}
+		})
 	}
 }
