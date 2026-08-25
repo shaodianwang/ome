@@ -1,0 +1,92 @@
+# A four-node AcceleratorQuota tree over the simulated fleet (OEP-0024).
+#
+#   root                 Cohort        64 chips   <- also carries derived capacity
+#   └── sim-tenants      Cohort        64 chips
+#       ├── sim-serving  ClusterQueue  48 chips   ns kwok-sim
+#       └── sim-batch    ClusterQueue  16 chips   ns kwok-sim-batch
+#
+# Two levels of grouping so containment is exercised at both: a parent's nominal
+# must be at least the sum of its children's, per (resource, flavor).
+#
+# 64 is one cube. The default --cubes 4x4x4,2x2x2 is two, so the tree budgets
+# half the fleet and the root's status.capacity reports the whole of it — which
+# is the number to read these against.
+#
+# up.sh does not apply this: a tree is what you are here to write, and the
+# component works without one. Apply it by hand for a starting point:
+#
+#   kubectl apply -f hack/kwok-sim/fixtures/31-acceleratorquota.yaml
+#
+# The tenant namespaces are carried here rather than left to up.sh so that
+# stays a single self-contained command.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kwok-sim
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kwok-sim-batch
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  # The reserved root is the one node with no parentRef, and its name is fixed:
+  # every other node in the fleet writes parentRef: {name: root}.
+  #
+  # Applying this usually patches a root the controller already created for
+  # itself to report capacity on. It creates that one bare, so the budget below
+  # is what this adds: a fleet total is the admin's to write.
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 64
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-tenants
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 64
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  # A namespace charges exactly one leaf fleet-wide, which is why the second
+  # tenant below gets its own.
+  namespaces:
+  - kwok-sim
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 48
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-batch
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  namespaces:
+  - kwok-sim-batch
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 16

@@ -1,0 +1,24 @@
+# The Kueue ResourceFlavor the simulated fleet's chips are attributed to.
+#
+# A flavor names a hardware class by node labels, and OME reads them rather than
+# authoring them: without one, ome-quota-manager finds accelerators that belong
+# to no flavor and reports them unattributed instead of as capacity, so the
+# reserved root's status.capacity stays empty.
+#
+# cloud.google.com/gke-tpu-accelerator is the coarsest label every fake node
+# carries — one flavor for the whole fleet, whatever --cubes carved it into. A
+# real fleet would usually split further, by topology or by reservation.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: tpu7x
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+  # The fake nodes carry rc-1's real taint, so anything Kueue admits against
+  # this flavor has to tolerate it.
+  tolerations:
+  - key: google.com/tpu
+    value: present
+    effect: NoSchedule
+    operator: Equal

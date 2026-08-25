@@ -25,9 +25,28 @@ k -n "$NS" get pods -o json | jq -r '.items[] | select(.spec.nodeName) | "\(.met
 echo
 echo "== chip utilisation =="
 total=$(k get nodes -l kwok-sim/cube -o json | jq '[.items[].status.capacity["google.com/tpu"]|tonumber]|add')
-used=$(k -n "$NS" get pods -o json | jq '[.items[]|select(.spec.nodeName)|.spec.containers[].resources.limits["google.com/tpu"]//"0"|tonumber]|add')
+used=$(k -n "$NS" get pods -o json | jq '[.items[]|select(.spec.nodeName)|.spec.containers[].resources.limits["google.com/tpu"]//"0"|tonumber]|add // 0')
 echo "  ${used:-0} / ${total:-0} chips"
 
 echo
 echo "== pending pods (if any) =="
 k -n "$NS" get pods --field-selector=status.phase=Pending --no-headers 2>/dev/null | head || true
+
+# Keyed on the tree, not on the CRD: ome-crd installs AcceleratorQuota whichever
+# components up.sh selected, so the CRD's presence says nothing about whether
+# this cluster runs a quota plane. The reserved root does — a workload-mode
+# manager creates it for itself, so no nodes at all means no manager.
+if [ -n "$(k get acceleratorquota -o name 2>/dev/null || true)" ]; then
+  echo
+  echo "== accelerator quota =="
+  k get acceleratorquota 2>/dev/null || true
+  # Capacity is reported on the root alone: it is the node that means "this whole
+  # cluster". Budgets read against the high-water mark, not against allocatable.
+  cap="$(k get acceleratorquota root -o json 2>/dev/null \
+        | jq -r '.status.capacity // [] | .[] |
+                 "  \(.resourceName) on \(.resourceFlavor): allocatable=\(.allocatable // 0) highWater=\(.highWaterMark // 0)"' \
+        2>/dev/null || true)"
+  echo
+  echo "== derived capacity (root) =="
+  echo "${cap:-  none — no ResourceFlavor matches the fleet, or the root does not exist}"
+fi

@@ -1,9 +1,10 @@
 # OME on kind + kwok, with simulated rc-1 TPU nodes
 
 A local cluster that behaves like `msl-gcp-usc1-rc-1` for anything you can answer
-by looking at where pods land: a real OME control plane — manager, webhooks, and
-`ome-scheduler` — driving [kwok](https://kwok.sigs.k8s.io)-simulated `tpu7x`
-nodes that carry rc-1's real labels, taints and capacity.
+by looking at where pods land: a real OME control plane — manager, webhooks,
+`ome-scheduler` and `ome-quota-manager` — driving
+[kwok](https://kwok.sigs.k8s.io)-simulated `tpu7x` nodes that carry rc-1's real
+labels, taints and capacity.
 
 There is no kubelet behind those nodes. Placement, topology, gang co-location,
 packing and saturation are faithful. Anything that needs a container to actually
@@ -17,7 +18,7 @@ one-time image build. Helm 3 and 4 both work.
 ## Quick start
 
 ```sh
-hack/kwok-sim/up.sh --with-isvcs             # first run: builds two images (slow)
+hack/kwok-sim/up.sh --with-isvcs             # first run: builds three images (slow)
 hack/kwok-sim/up.sh --with-isvcs --skip-build  # ~95s once they exist
 ```
 
@@ -50,6 +51,40 @@ sim-4x4x4   http://sim-4x4x4.kwok-sim.svc.cluster.local:8080   True    demo-noop
 ```
 
 Tear down with `kind delete cluster --name ome-kwok`.
+
+## Components
+
+`up.sh` builds and deploys three OME components. `--component` narrows that to
+the ones you are working on; repeat it for more than one.
+
+| component | image | chart | brings with it |
+|---|---|---|---|
+| `manager` | `ome-manager` | `ome-resources` | cert-manager, the model and runtime fixtures |
+| `scheduler` | `ome-scheduler` | `ome-scheduler` | the scheduler-plugins `PodGroup` CRD |
+| `quota-manager` | `ome-quota-manager` | `ome-quota-manager` | the Kueue CRDs, the `ResourceFlavor` fixture |
+
+```sh
+hack/kwok-sim/up.sh                                    # all three
+hack/kwok-sim/up.sh --component quota-manager          # rebuild and re-roll one
+hack/kwok-sim/up.sh --component manager --component scheduler
+```
+
+The simulator itself is ensured on every run whatever is selected — the kind
+cluster, kwok and its Stages, the fake nodes, and the OME CRDs — so a single
+component can be re-rolled against a cluster that is already up. Everything else
+is gated on the selection: `--component quota-manager` installs no cert-manager
+(the quota webhook manages its own cert) and touches neither the manager nor the
+runtime fixtures.
+
+`--no-scheduler` still means what it did: it subtracts `scheduler` from the
+default set and switches `--topology` to `strict`. Combining it with an explicit
+`--component scheduler` is an error rather than a silent winner.
+
+The OME CRDs are the one exception to "gated on the selection". `ome-crd` is
+installed unconditionally, because `charts/ome-quota-manager` can also install
+the `AcceleratorQuota` CRD (`quotaManager.crd.install`) and two charts claiming
+one cluster-scoped object fails whichever release claims it second — which one
+that is would otherwise depend on the order of past runs.
 
 ## The fleet
 
@@ -202,6 +237,104 @@ no leader election, and 256Mi/1Gi instead of 4Gi/12Gi. It also forces
 free-node counts from whatever upstream sampled and a partial view can rank a
 filled slice above an empty one.
 
+## Fleet quota
+
+`ome-quota-manager` is the OEP-0024 quota plane: a separate binary and
+Deployment that assembles the `AcceleratorQuota` tree, reports each node's
+position and condition, and derives this cluster's accelerator capacity onto the
+reserved root. `up.sh` runs it in **workload** mode — the half that owns a
+serving cluster's own silicon — because that is what this simulates. Management
+mode projects per-cluster shares onto members, and there are none here.
+
+**`up.sh` creates no `AcceleratorQuota`.** A quota tree is the thing you are
+here to write, so it is left to you exactly as the ISVCs are. Nothing is lost by
+that: the controller creates the reserved `root` itself — bare, `Cohort`, no
+parentRef, no budgets — as soon as capacity derivation is on, because capacity
+is a property of the cluster rather than of anything an admin authored. So a
+freshly-built cluster already shows the component working:
+
+```
+== accelerator quota ==
+NAME   ROLE     PARENT   READY   DEGRADED   AGE
+root   Cohort            True    False      30s
+
+== derived capacity (root) ==
+  google.com/tpu on tpu7x: allocatable=128 highWater=128
+```
+
+Delete that root and it comes straight back. What an admin adds to it is the
+*budget* — the fleet total, and the one number the controller will not invent.
+
+The one fixture `up.sh` does apply is `fixtures/30-resourceflavor.yaml`: a Kueue
+`ResourceFlavor` `tpu7x` selecting every fake node by
+`cloud.google.com/gke-tpu-accelerator`. That is not a tree, it describes the
+hardware — which this simulator owns — and without it the root reports no
+capacity at all (see below).
+
+`fixtures/31-acceleratorquota.yaml` is a tree to start from when you want one:
+`root` → `sim-tenants` → two leaves, budgeting one cube between a serving and a
+batch tenant, with two levels of grouping so containment is exercised at both.
+It carries its own tenant namespaces, so it applies standalone:
+
+```sh
+kubectl apply -f hack/kwok-sim/fixtures/31-acceleratorquota.yaml
+hack/kwok-sim/status.sh
+```
+
+That apply warns that `acceleratorquotas/root` has no
+`last-applied-configuration` annotation. Expected, not a fault: the controller
+created it imperatively, and `kubectl` patches the annotation on as it goes.
+
+```
+== accelerator quota ==
+NAME          ROLE           PARENT        READY   DEGRADED   AGE
+root          Cohort                       True    False      2m
+sim-batch     ClusterQueue   sim-tenants   True    False      5s
+sim-serving   ClusterQueue   sim-tenants   True    False      5s
+sim-tenants   Cohort         root          True    False      5s
+```
+
+**A ResourceFlavor is what makes capacity appear.** A flavor names a hardware
+class by node labels, and OME reads flavors rather than authoring them — so
+without one, every fake node's chips come back *unattributed* and the root's
+`status.capacity` stays empty. That is deliberate: an unclaimed accelerator is
+either a missing flavor or a labelling mistake, and both look identical to a
+shrinking fleet unless they are named.
+
+Only the Kueue **CRDs** are installed, not Kueue itself. Nothing here admits a
+workload, and the types are all the quota plane reads today. They are vendored
+by `make kueue-crds` from the version in `.kueue-crd-version` — the one the
+fleet runs, which is ahead of the `sigs.k8s.io/kueue` pin in `go.mod` — into the
+same gitignored `tests/integration/dep-crds/` tree as the `PodGroup` CRD. When
+that version cannot be fetched the target falls back to the pin, so the copy is
+still offline.
+
+The webhook needs no cert-manager: `quotaManager.webhook.internalCertManagement`
+is on by default, so the component generates its own serving cert and writes its
+own `caBundle`. It is `failurePolicy: Fail`, which is why `up.sh` waits for the
+`caBundle` and for ready endpoints before applying the tree, and retries the
+apply — the cert write and the webhook's first successful TLS accept are
+independent events.
+
+Capacity moves with the fleet, and the two numbers move differently.
+`--cubes 4x4x4` alone reports 64 chips; cordoning one node of the default 32
+takes `allocatable` to 124 and leaves `highWater` at 128:
+
+```sh
+kubectl cordon gke-tpu-<pool>-00
+kubectl get aq root -o jsonpath='{.status.capacity}' | jq .
+```
+
+`allocatable` is what is schedulable now. The mark tracks *installed* capacity —
+allocatable plus whatever is parked on cordoned or NotReady nodes — so a cordon
+does not move it at all, because the hardware is still in the rack. Hardware
+genuinely leaving does move it, judged against the hysteresis band. Budgets are
+checked against the mark, which is why a drain never marks a tenant Degraded.
+
+That distinction is easy to get backwards, and this simulator is a good place to
+see it: cordon the whole fleet and the mark holds at 128 while `allocatable`
+goes to 0; delete the nodes and the mark follows them down.
+
 ## What it is good for
 
 Saturation and packing behave correctly, which is the main reason to have this.
@@ -285,14 +418,16 @@ it here.
 
 | path | what |
 |---|---|
-| `up.sh` | one-shot: kind → kwok → nodes → PodGroup CRD → cert-manager → OME → ome-scheduler → fixtures |
+| `up.sh` | one-shot: kind → kwok → nodes → dependency CRDs → cert-manager → OME CRDs → the selected components → fixtures |
 | `render-runtimes.sh` | prints the runtimes adjusted for one `--topology` mode |
 | `gen-tpu-nodes.sh` | emits the node manifest; no cluster contact |
 | `apply-tpu-nodes.sh` | creates them (`--delete` to remove) |
-| `status.sh` | fleet, gang placement, chip utilisation, pending pods |
+| `status.sh` | fleet, gang placement, chip utilisation, pending pods, quota tree |
 | `fixtures/00-model.yaml` | `ClusterBaseModel` needing no bytes on disk |
 | `fixtures/10-runtime-tpu.yaml` | multi-node `ClusterServingRuntime`, one per carve |
 | `fixtures/2*-isvc-*.yaml` | one slice, and one whole cube |
+| `fixtures/30-resourceflavor.yaml` | the Kueue `ResourceFlavor` the fleet's chips attribute to |
+| `fixtures/31-acceleratorquota.yaml` | a four-node quota tree over one cube; not applied by `up.sh` |
 
 ## Install notes
 
@@ -303,10 +438,18 @@ Things `up.sh` does that are not obvious, if you are reproducing it by hand:
   `proxyconnect … connection refused`. `up.sh` clears the proxy vars for
   `kind create` only; set `KWOK_SIM_KEEP_PROXY=1` if your node genuinely needs
   one.
-- **Both images must be built locally.** The charts default to an internal
-  registry, so `up.sh` builds `ome-manager:kind-local` and
-  `ome-scheduler:kind-local` and `kind load`s them, with `--set global.hub=""`
-  so the charts render the bare tags that resolve to them.
+- **Every image must be built locally.** The charts default to an internal
+  registry, so `up.sh` builds `ome-manager:kind-local`,
+  `ome-scheduler:kind-local` and `ome-quota-manager:kind-local` and `kind load`s
+  them, with `--set global.hub=""` so the charts render the bare tags that
+  resolve to them. `--component` builds only what it selects.
+- **A rebuild alone does not restart anything.** The tag is reused, so the
+  Deployment's image ref is byte-identical: `docker build` succeeds, `kind load`
+  succeeds, `helm upgrade` reports no change, and the pod goes on serving the
+  previous binary. `up.sh` stamps the image ID into a pod annotation so a
+  rebuild is visible to the Deployment — and only a real one, so re-running with
+  an unchanged image still rolls nothing. Without that, `--component` would
+  quietly redeploy stale code, which is the one thing it exists not to do.
 - **Helm runs twice, and pass 1 is expected to fail.** The chart registers
   `failurePolicy: Fail` webhooks and, in the same apply, a `ClusterServingRuntime`
   those webhooks intercept — impossible before the controller serves and
@@ -327,15 +470,18 @@ Things `up.sh` does that are not obvious, if you are reproducing it by hand:
   scheduler is kube-scheduler-as-a-library, so its plugin API is pinned to one
   minor (`scheduler/go.mod` tracks k8s 1.35.4) and the node has to match.
   `--no-scheduler` frees you to run any version.
-- **There is no committed PodGroup CRD to point at.** It is vendored out of the
-  `sigs.k8s.io/scheduler-plugins` module already in `go.mod` into a gitignored
-  directory (`tests/integration/dep-crds/scheduler-plugins/`). Only the
+- **There are no committed PodGroup or Kueue CRDs to point at.** Both are
+  vendored into a gitignored directory
+  (`tests/integration/dep-crds/{scheduler-plugins,kueue}/`). Only the
   hand-vendored bundles there — `envoy-gateway`, `prometheus-operator` — are
   tracked, each with a `SOURCE` file. `up.sh` runs `make scheduler-plugins-crds`
-  when the file is missing; that target copies from the local module cache, so
-  it needs no network. The CRD is required for `ome-scheduler` and merely wanted
-  otherwise (without it OME stamps `GangSchedulingUnavailable=True` and a gang
-  can land partially).
+  or `make kueue-crds` when one is missing. `scheduler-plugins` copies from the
+  `go.mod` module in the local module cache and needs no network; `kueue` reads
+  `.kueue-crd-version` and falls back to that cached pin when it cannot fetch
+  it. `PodGroup` is required for `ome-scheduler` and merely wanted otherwise
+  (without it OME stamps `GangSchedulingUnavailable=True` and a gang can land
+  partially); the Kueue CRDs are required for `ome-quota-manager`, which cannot
+  attribute capacity to a flavor it cannot read.
 
 ## Refreshing the node shape from rc-1
 

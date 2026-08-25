@@ -3,14 +3,29 @@
 #
 # Usage:
 #   hack/kwok-sim/up.sh [--skip-build] [--cluster NAME] [--cubes 4x4x4,2x2x2]
-#                       [--no-scheduler] [--with-isvcs]
+#                       [--component NAME]... [--no-scheduler] [--with-isvcs]
 #
+#   --component NAME
+#                   build and deploy only this OME component; repeat the flag
+#                   for more than one. Omitted, all of them are built and
+#                   deployed. One of:
+#                     manager        ome-manager + its webhooks, the model and
+#                                    runtime fixtures
+#                     scheduler      ome-scheduler and the PodGroup CRD
+#                     quota-manager  ome-quota-manager, the Kueue CRDs it reads,
+#                                    and the ResourceFlavor the fleet maps to.
+#                                    No AcceleratorQuota is created; the
+#                                    controller makes its own reserved root.
+#                   The simulator itself — kind, kwok, the fake nodes, the OME
+#                   CRDs — is ensured on every run whatever is selected, so one
+#                   component can be re-rolled against a cluster already up.
 #   --no-scheduler  skip ome-scheduler and use the default scheduler; implies
 #                   --topology strict, the full production contract.
 #   --topology M    podgroup (default) | plugin | strict — where slice
 #                   co-location comes from. See render-runtimes.sh, and the
 #                   README on why strict + ome-scheduler wedges.
 #   --with-isvcs    also apply fixtures/2*-isvc-*.yaml and wait for them.
+#                   Needs the manager component.
 #
 # Environment:
 #   OME_KWOK_CLUSTER   kind cluster name        (default: ome-kwok)
@@ -42,22 +57,69 @@ OME_NS="ome"
 # the same for every carve — so it works as one fleet-wide setting.
 TOPOLOGY_KEY="cloud.google.com/gke-nodepool"
 SKIP_BUILD=0
-WITH_SCHEDULER=1
+NO_SCHEDULER=0
 WITH_ISVCS=0
 TOPOLOGY_MODE=""
+ALL_COMPONENTS="manager scheduler quota-manager"
+REQUESTED=""
 
 while [ $# -gt 0 ]; do
+  # A value-taking flag left last on the line leaves $2 unset, which `set -u`
+  # reports as "$2: unbound variable" — a bash internal, from a line number, for
+  # what is an ordinary usage mistake.
+  case "$1" in
+    --cluster|--cubes|--component|--topology)
+      [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;;
+  esac
   case "$1" in
     --cluster) CLUSTER="$2"; shift 2 ;;
     --cubes) CUBES="$2"; shift 2 ;;
+    --component) REQUESTED="${REQUESTED} $2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
-    --no-scheduler) WITH_SCHEDULER=0; shift ;;
+    --no-scheduler) NO_SCHEDULER=1; shift ;;
     --topology) TOPOLOGY_MODE="$2"; shift 2 ;;
     --with-isvcs) WITH_ISVCS=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# Membership over a space-separated list rather than an array: bash 3.2 is still
+# the default on macOS, and expanding an empty array under `set -u` is an error
+# there.
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+for c in $REQUESTED; do
+  in_list "$c" "$ALL_COMPONENTS" || {
+    echo "unknown component: $c (want one of: $ALL_COMPONENTS)" >&2; exit 2; }
+done
+
+if [ "$NO_SCHEDULER" -eq 1 ]; then
+  in_list scheduler "$REQUESTED" && {
+    echo "--component scheduler contradicts --no-scheduler" >&2; exit 2; }
+fi
+
+# --no-scheduler subtracts from the default set rather than being a fourth
+# spelling of --component, so the two stay composable.
+COMPONENTS=""
+for c in ${REQUESTED:-$ALL_COMPONENTS}; do
+  if [ "$c" = scheduler ] && [ "$NO_SCHEDULER" -eq 1 ]; then
+    continue
+  fi
+  COMPONENTS="${COMPONENTS:+$COMPONENTS }${c}"
+done
+
+WITH_MANAGER=0
+WITH_SCHEDULER=0
+WITH_QUOTA=0
+in_list manager "$COMPONENTS" && WITH_MANAGER=1
+in_list scheduler "$COMPONENTS" && WITH_SCHEDULER=1
+in_list quota-manager "$COMPONENTS" && WITH_QUOTA=1
+
+if [ "$WITH_ISVCS" -eq 1 ] && [ "$WITH_MANAGER" -eq 0 ]; then
+  echo "--with-isvcs needs the manager component; nothing else reconciles an ISVC" >&2
+  exit 2
+fi
 
 # plugin mode has no meaning without the plugin, and podgroup's override only
 # exists to work around it — so the default scheduler always runs strict.
@@ -72,12 +134,15 @@ done
 KCTX="kind-${CLUSTER}"
 IMAGE="ome-manager:${TAG}"
 SCHED_IMAGE="ome-scheduler:${TAG}"
+QUOTA_IMAGE="ome-quota-manager:${TAG}"
 k() { kubectl --context "$KCTX" "$@"; }
 
 # Helm 4 applies server-side, so its placeholder caBundle collides with the one
 # cert-manager's cainjector owns. Helm 3 has no such flag and needs none.
 FORCE_CONFLICTS=()
 helm version --short 2>/dev/null | grep -q '^v3' || FORCE_CONFLICTS=(--force-conflicts)
+
+echo "==> components: ${COMPONENTS}"
 
 echo "==> kind cluster ${CLUSTER}"
 # kind copies the shell's proxy variables into the node container. A proxy on
@@ -122,93 +187,160 @@ KWOK_SIM_CONTEXT="$KCTX" hack/kwok-sim/apply-tpu-nodes.sh --context "$KCTX" \
 # sigs.k8s.io/scheduler-plugins module already in go.mod, into a gitignored
 # directory. `make scheduler-plugins-crds` is that copy, and it reads the module
 # cache rather than the network, so regenerating is cheap and offline.
-echo "==> scheduler-plugins PodGroup CRD"
-PODGROUP_CRD=tests/integration/dep-crds/scheduler-plugins/scheduling.x-k8s.io_podgroups.yaml
-[ -f "$PODGROUP_CRD" ] || make scheduler-plugins-crds >/dev/null
-if [ -f "$PODGROUP_CRD" ]; then
-  k apply -f "$PODGROUP_CRD" >/dev/null
-elif [ "$WITH_SCHEDULER" -eq 1 ]; then
-  echo "FATAL: no PodGroup CRD and ome-scheduler requires it; run 'go mod download' then retry" >&2
-  exit 1
-else
-  echo "    unavailable — OME will report GangSchedulingUnavailable"
+if [ "$WITH_MANAGER" -eq 1 ] || [ "$WITH_SCHEDULER" -eq 1 ]; then
+  echo "==> scheduler-plugins PodGroup CRD"
+  PODGROUP_CRD=tests/integration/dep-crds/scheduler-plugins/scheduling.x-k8s.io_podgroups.yaml
+  [ -f "$PODGROUP_CRD" ] || make scheduler-plugins-crds >/dev/null
+  if [ -f "$PODGROUP_CRD" ]; then
+    k apply -f "$PODGROUP_CRD" >/dev/null
+  elif [ "$WITH_SCHEDULER" -eq 1 ]; then
+    echo "FATAL: no PodGroup CRD and ome-scheduler requires it; run 'go mod download' then retry" >&2
+    exit 1
+  else
+    echo "    unavailable — OME will report GangSchedulingUnavailable"
+  fi
 fi
 
-echo "==> cert-manager ${CERT_MANAGER_VERSION}"
-k apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
-k -n cert-manager wait --for=condition=Available deployment --all --timeout=300s >/dev/null
+# ome-quota-manager reads Kueue's ResourceFlavors to decide which hardware class
+# a node's accelerators belong to; without them every chip comes back
+# unattributed and the reserved root reports no capacity at all. Only the CRDs
+# are installed, not Kueue itself: nothing here admits a workload. Vendored by
+# `make kueue-crds` from .kueue-crd-version, into the same gitignored directory
+# as PodGroup.
+if [ "$WITH_QUOTA" -eq 1 ]; then
+  echo "==> Kueue CRDs"
+  KUEUE_CRDS=tests/integration/dep-crds/kueue
+  # Probed by file, not by directory: `make kueue-crds` mkdir -p's before it
+  # looks the module up, so an empty directory is what a missing module leaves
+  # behind. ResourceFlavor is the one the quota plane cannot work without.
+  [ -f "$KUEUE_CRDS/kueue.x-k8s.io_resourceflavors.yaml" ] || make kueue-crds >/dev/null
+  [ -f "$KUEUE_CRDS/kueue.x-k8s.io_resourceflavors.yaml" ] || {
+    echo "FATAL: no Kueue CRDs and ome-quota-manager requires them; run 'go mod download' then retry" >&2
+    exit 1; }
+  # Server-side: Kueue's Workload schema is far past the 256KiB a client-side
+  # apply has to fit into the last-applied-configuration annotation.
+  k apply --server-side --force-conflicts -f "$KUEUE_CRDS" >/dev/null
+
+  # Before the manager starts, not after it. The controller reconciles on
+  # AcceleratorQuota and Node events, and creating a ResourceFlavor is neither —
+  # so a flavor applied afterwards stays invisible until the next node event or
+  # the resync tick, leaving a fresh cluster reporting no capacity for minutes.
+  # Applying it here means it is already there for the first reconcile.
+  #
+  # No AcceleratorQuota is applied, here or anywhere: a tree is what an operator
+  # is here to write, so it is left alone exactly as the ISVCs are, and the
+  # controller creates the reserved root itself. The flavor is not a tree — it
+  # describes the hardware, which this simulator owns, and without it every fake
+  # chip is unattributed and the root reports nothing, which reads as a broken
+  # component rather than an empty fleet.
+  echo "==> ResourceFlavor (no AcceleratorQuota; the controller makes its own root)"
+  k apply -f hack/kwok-sim/fixtures/30-resourceflavor.yaml >/dev/null
+fi
+
+if [ "$WITH_MANAGER" -eq 1 ]; then
+  echo "==> cert-manager ${CERT_MANAGER_VERSION}"
+  k apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
+  k -n cert-manager wait --for=condition=Available deployment --all --timeout=300s >/dev/null
+fi
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
-  echo "==> build ${IMAGE}"
-  docker build -f dockerfiles/manager.Dockerfile -t "$IMAGE" .
+  if [ "$WITH_MANAGER" -eq 1 ]; then
+    echo "==> build ${IMAGE}"
+    docker build -f dockerfiles/manager.Dockerfile -t "$IMAGE" .
+  fi
   if [ "$WITH_SCHEDULER" -eq 1 ]; then
     echo "==> build ${SCHED_IMAGE}"
     docker build -f dockerfiles/ome-scheduler.Dockerfile -t "$SCHED_IMAGE" .
   fi
+  if [ "$WITH_QUOTA" -eq 1 ]; then
+    echo "==> build ${QUOTA_IMAGE}"
+    docker build -f dockerfiles/ome-quota-manager.Dockerfile -t "$QUOTA_IMAGE" .
+  fi
 fi
-echo "==> load ${IMAGE}"
-kind load docker-image "$IMAGE" --name "$CLUSTER"
+if [ "$WITH_MANAGER" -eq 1 ]; then
+  echo "==> load ${IMAGE}"
+  kind load docker-image "$IMAGE" --name "$CLUSTER"
+fi
 if [ "$WITH_SCHEDULER" -eq 1 ]; then
   echo "==> load ${SCHED_IMAGE}"
   kind load docker-image "$SCHED_IMAGE" --name "$CLUSTER"
 fi
+if [ "$WITH_QUOTA" -eq 1 ]; then
+  echo "==> load ${QUOTA_IMAGE}"
+  kind load docker-image "$QUOTA_IMAGE" --name "$CLUSTER"
+fi
 
+# A rebuild reuses the tag, so the Deployment's image ref is byte-identical and
+# nothing rolls: helm reports success, `kind load` reports success, and the pod
+# keeps serving the previous binary. Stamping the image ID into a pod annotation
+# is what makes a rebuild visible to the Deployment — and only a real one, so an
+# unchanged image still rolls nothing.
+image_id() { docker image inspect -f '{{.Id}}' "$1" | cut -d: -f2 | cut -c1-16; }
+
+# Unconditional, whatever --component selected. ome-crd is the single owner of
+# every OME CustomResourceDefinition here, including AcceleratorQuota, which
+# charts/ome-quota-manager can also install: two charts claiming one
+# cluster-scoped object fails whichever release claims it second, and which one
+# that is would depend on the order of past runs.
 echo "==> OME CRDs"
 helm upgrade --install ome-crd charts/ome-crd/ --kube-context "$KCTX" \
   --namespace "$OME_NS" --create-namespace --wait --timeout 180s >/dev/null
 
-# global.hub="" renders a bare ome-manager:<tag> so the kind-loaded image is the
-# one that runs. The release namespace must be `ome`: the ConfigMap name, the
-# webhooks' inject-ca-from, and the manager's leader-election namespace all
-# assume it. Chart defaults (3 replicas x 2 CPU / 4Gi) do not fit one kind node.
-HELM_ARGS=(
-  --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace
-  --set global.hub="" --set ome.controller.tag="$TAG"
-  --set modelAgent.enabled=false
-  --set prometheus.enabled=false
-  --set ome.multiclusterAccess.enabled=false
-  --set ome.controller.replicaCount=1
-  --set ome.controller.resources.requests.cpu=200m
-  --set ome.controller.resources.requests.memory=512Mi
-  --set ome.controller.resources.limits.cpu=2
-  --set ome.controller.resources.limits.memory=2Gi
-)
+if [ "$WITH_MANAGER" -eq 1 ]; then
+  # global.hub="" renders a bare ome-manager:<tag> so the kind-loaded image is the
+  # one that runs. The release namespace must be `ome`: the ConfigMap name, the
+  # webhooks' inject-ca-from, and the manager's leader-election namespace all
+  # assume it. Chart defaults (3 replicas x 2 CPU / 4Gi) do not fit one kind node.
+  HELM_ARGS=(
+    --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace
+    --set global.hub="" --set ome.controller.tag="$TAG"
+    --set modelAgent.enabled=false
+    --set prometheus.enabled=false
+    --set ome.multiclusterAccess.enabled=false
+    --set ome.controller.replicaCount=1
+    --set ome.controller.podAnnotations.kwok-sim/image-id="$(image_id "$IMAGE")"
+    --set ome.controller.resources.requests.cpu=200m
+    --set ome.controller.resources.requests.memory=512Mi
+    --set ome.controller.resources.limits.cpu=2
+    --set ome.controller.resources.limits.memory=2Gi
+  )
 
-# Two passes. The chart registers failurePolicy=Fail webhooks and, in the same
-# apply, a ClusterServingRuntime those webhooks intercept — which cannot succeed
-# before the controller serves and cainjector has replaced the placeholder
-# caBundle. Pass 1 is expected to report that rejection.
-echo "==> OME controller (pass 1 of 2; the runtime rejection here is expected)"
-helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" >/dev/null 2>&1 || true
-k -n "$OME_NS" rollout status deployment/ome-controller-manager --timeout=300s
+  # Two passes. The chart registers failurePolicy=Fail webhooks and, in the same
+  # apply, a ClusterServingRuntime those webhooks intercept — which cannot succeed
+  # before the controller serves and cainjector has replaced the placeholder
+  # caBundle. Pass 1 is expected to report that rejection.
+  echo "==> OME controller (pass 1 of 2; the runtime rejection here is expected)"
+  helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" >/dev/null 2>&1 || true
+  k -n "$OME_NS" rollout status deployment/ome-controller-manager --timeout=300s
 
-echo "==> wait for webhook cert and endpoints"
-for _ in $(seq 90); do
-  b="$(k get validatingwebhookconfiguration inferenceservice.ome.io \
-        -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
-  case "$b" in ""|"Cg==") sleep 2 ;; *) break ;; esac
-done
-# Ready endpoints, not merely present ones: the manager's readiness probe
-# answers on its health port before the webhook server has bound 9443, so a
-# Deployment that reports Available can still refuse admission connections.
-for _ in $(seq 90); do
-  k -n "$OME_NS" get endpointslices -l kubernetes.io/service-name=ome-webhook-server-service \
-    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' 2>/dev/null | grep -q . && break
-  sleep 2
-done
+  echo "==> wait for webhook cert and endpoints"
+  for _ in $(seq 90); do
+    b="$(k get validatingwebhookconfiguration inferenceservice.ome.io \
+          -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
+    case "$b" in ""|"Cg==") sleep 2 ;; *) break ;; esac
+  done
+  # Ready endpoints, not merely present ones: the manager's readiness probe
+  # answers on its health port before the webhook server has bound 9443, so a
+  # Deployment that reports Available can still refuse admission connections.
+  for _ in $(seq 90); do
+    k -n "$OME_NS" get endpointslices -l kubernetes.io/service-name=ome-webhook-server-service \
+      -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' 2>/dev/null | grep -q . && break
+    sleep 2
+  done
 
-echo "==> OME controller (pass 2 of 2)"
-# Still retried: cainjector's caBundle write and the webhook's first successful
-# TLS accept are independent events, and pass 2 needs both.
-for attempt in 1 2 3 4 5 6; do
-  if helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" \
-       "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null 2>&1; then
-    break
-  fi
-  [ "$attempt" -lt 6 ] || { echo "FATAL: ome-resources did not converge" >&2; exit 1; }
-  echo "    webhook not answering yet; retry ${attempt}"
-  sleep 10
-done
+  echo "==> OME controller (pass 2 of 2)"
+  # Still retried: cainjector's caBundle write and the webhook's first successful
+  # TLS accept are independent events, and pass 2 needs both.
+  for attempt in 1 2 3 4 5 6; do
+    if helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" \
+         "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null 2>&1; then
+      break
+    fi
+    [ "$attempt" -lt 6 ] || { echo "FATAL: ome-resources did not converge" >&2; exit 1; }
+    echo "    webhook not answering yet; retry ${attempt}"
+    sleep 10
+  done
+fi
 
 if [ "$WITH_SCHEDULER" -eq 1 ]; then
   # Same namespace as the manager so one `kubectl -n ome get pods` shows the
@@ -225,6 +357,7 @@ if [ "$WITH_SCHEDULER" -eq 1 ]; then
     --set scheduler.replicaCount=1 \
     --set scheduler.leaderElect=false \
     --set scheduler.podDisruptionBudget.enabled=false \
+    --set scheduler.podAnnotations.kwok-sim/image-id="$(image_id "$SCHED_IMAGE")" \
     --set scheduler.percentageOfNodesToScore=100 \
     --set scheduler.plugin.topologyKey="$TOPOLOGY_KEY" \
     --set scheduler.resources.requests.cpu=100m \
@@ -234,15 +367,58 @@ if [ "$WITH_SCHEDULER" -eq 1 ]; then
     "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
 fi
 
-echo "==> fixtures"
-k create namespace "$SIM_NS" --dry-run=client -o yaml | k apply -f - >/dev/null
-k apply -f hack/kwok-sim/fixtures/00-model.yaml >/dev/null
-echo "    runtimes: topology=${TOPOLOGY_MODE}$([ "$WITH_SCHEDULER" -eq 1 ] || echo ' (default scheduler)')"
-RENDER_ARGS=(--key "$TOPOLOGY_KEY")
-[ "$WITH_SCHEDULER" -eq 1 ] || RENDER_ARGS+=(--no-scheduler)
-hack/kwok-sim/render-runtimes.sh "$TOPOLOGY_MODE" "${RENDER_ARGS[@]}" | k apply -f - >/dev/null
-if [ "$TOPOLOGY_MODE" = "strict" ] && [ "$WITH_SCHEDULER" -eq 1 ]; then
-  echo "    NOTE: strict + ome-scheduler is the known wedge; gangs will stay Pending"
+if [ "$WITH_QUOTA" -eq 1 ]; then
+  # workload mode: this cluster is the one with the silicon, so the quota plane
+  # derives the reserved root's capacity from the fake nodes. Management mode
+  # projects per-cluster shares onto members, and there are none here.
+  # crd.install stays off — ome-crd above owns the CRD.
+  #
+  # The chart's own capacity.resources already names google.com/tpu, so the fake
+  # nodes are measured without an override. One replica and no leader election,
+  # for the same reason as ome-scheduler: it is one kind node.
+  echo "==> ome-quota-manager"
+  helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
+    --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace \
+    --set global.hub="" \
+    --set quotaManager.image.tag="$TAG" \
+    --set quotaManager.mode=workload \
+    --set quotaManager.crd.install=false \
+    --set quotaManager.replicaCount=1 \
+    --set quotaManager.leaderElect=false \
+    --set quotaManager.podDisruptionBudget.enabled=false \
+    --set quotaManager.podAnnotations.kwok-sim/image-id="$(image_id "$QUOTA_IMAGE")" \
+    "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
+
+  # The AcceleratorQuota webhook is failurePolicy=Fail, and it gates the
+  # controller's own creation of the reserved root as much as any hand-written
+  # tree — so until it answers, the cluster has no root and `up.sh` would hand
+  # back a component that looks broken. Unlike ome-manager's there is no
+  # cainjector involved: the component generates its own cert and writes its own
+  # caBundle, and both happen after the pod starts.
+  echo "==> wait for quota webhook cert and endpoints"
+  for _ in $(seq 90); do
+    b="$(k get validatingwebhookconfiguration ome-quota-manager.ome.io \
+          -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
+    case "$b" in ""|"Cg==") sleep 2 ;; *) break ;; esac
+  done
+  for _ in $(seq 90); do
+    k -n "$OME_NS" get endpointslices -l kubernetes.io/service-name=ome-quota-manager-webhook \
+      -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' 2>/dev/null | grep -q . && break
+    sleep 2
+  done
+fi
+
+if [ "$WITH_MANAGER" -eq 1 ]; then
+  echo "==> fixtures"
+  k create namespace "$SIM_NS" --dry-run=client -o yaml | k apply -f - >/dev/null
+  k apply -f hack/kwok-sim/fixtures/00-model.yaml >/dev/null
+  echo "    runtimes: topology=${TOPOLOGY_MODE}$([ "$WITH_SCHEDULER" -eq 1 ] || echo ' (default scheduler)')"
+  RENDER_ARGS=(--key "$TOPOLOGY_KEY")
+  [ "$WITH_SCHEDULER" -eq 1 ] || RENDER_ARGS+=(--no-scheduler)
+  hack/kwok-sim/render-runtimes.sh "$TOPOLOGY_MODE" "${RENDER_ARGS[@]}" | k apply -f - >/dev/null
+  if [ "$TOPOLOGY_MODE" = "strict" ] && [ "$WITH_SCHEDULER" -eq 1 ]; then
+    echo "    NOTE: strict + ome-scheduler is the known wedge; gangs will stay Pending"
+  fi
 fi
 
 if [ "$WITH_ISVCS" -eq 1 ]; then
@@ -263,14 +439,29 @@ if [ "$WITH_ISVCS" -eq 1 ]; then
   exit 0
 fi
 
-cat <<EOF
-
-Ready. Context ${KCTX}, fixtures namespace ${SIM_NS}.
-
+echo
+echo "Ready. Context ${KCTX}, fixtures namespace ${SIM_NS}."
+echo
+if [ "$WITH_MANAGER" -eq 1 ]; then
+  cat <<EOF
   kubectl apply -n ${SIM_NS} -f hack/kwok-sim/fixtures/20-isvc-2x2x2.yaml
   kubectl apply -n ${SIM_NS} -f hack/kwok-sim/fixtures/21-isvc-4x4x4.yaml
-  hack/kwok-sim/status.sh
 
 Or re-run with --with-isvcs to do that automatically.
+
+EOF
+fi
+if [ "$WITH_QUOTA" -eq 1 ]; then
+  cat <<EOF
+  kubectl get acceleratorquota root -o jsonpath='{.status.capacity}' | jq .
+  kubectl apply -f hack/kwok-sim/fixtures/31-acceleratorquota.yaml
+
+The root is created by the controller and carries this cluster's capacity. No
+tree is applied; that fixture is one if you want a starting point.
+
+EOF
+fi
+cat <<EOF
+  hack/kwok-sim/status.sh
 
 EOF

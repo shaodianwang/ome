@@ -441,7 +441,7 @@ projection when:
    oversubscription is legitimate, so this is opt-in.
 2. **Unknown flavor.** The `resourceFlavor` names no `ResourceFlavor` on this
    cluster. Rendering anyway produces an *inactive* `ClusterQueue`
-   (`pkg/cache/clusterqueue.go:281-283`), which is worse than a rejection: the
+   (`pkg/cache/scheduler/clusterqueue.go`, inactive-on-missing-flavor), which is worse than a rejection: the
    tenant silently cannot admit anything.
 3. **Foreign projector.** See *Projection contract*.
 
@@ -857,13 +857,40 @@ The concrete translation:
 | node `borrowingLimit` | `ClusterQueue` resource `borrowingLimit` (burst up, within-cluster cohort borrow) |
 | node `lendingLimit` | `ClusterQueue` resource `lendingLimit` (share released to siblings when idle) |
 | internal-node budget | **nothing** — an authoring guardrail only, see below |
-| leaf `namespaces[]` | `LocalQueue` per namespace, `spec.clusterQueue` = leaf CQ |
+| leaf `namespaces[]` | `LocalQueue` per namespace, `spec.clusterQueue` = leaf CQ; **plus** `ClusterQueue.spec.namespaceSelector` covering them |
 | `priorityTier` | referenced `WorkloadPriorityClass` |
+
+Two shape requirements the table cannot carry, both of which fail quietly:
+
+**`ClusterQueue.spec.namespaceSelector` must be set.** A null selector admits
+*nothing* — the queue exists, the `LocalQueue`s point at it, and every workload
+stays pending with no object in an error state. Binding namespaces via `LocalQueue`
+alone is not enough.
+
+**`resourceGroups` partition by flavor reachability, not one group per flavor.** A
+resource group must list every flavor that covers its resources, and two resources
+sharing a flavor must live in the *same* group. So the budgets are partitioned into
+connected components over the `(resourceName, resourceFlavor)` pair graph, one
+group per component — not one group per flavor, which Kueue rejects the moment two
+resources share one.
+
+**Kueue objects are written by server-side apply, never read-modify-write.** OME
+is deliberately an *older client than its server*: the module pin is held back by
+the Kubernetes and controller-runtime versions OME is on, while the fleet runs a
+newer Kueue. Both serve `v1beta2`, but the newer server's `ClusterQueue` carries
+spec fields OME's structs cannot represent. A `Get` → modify → `Update` through
+those structs drops them — silently disabling a Kueue feature on *every*
+reconcile, with no error and no diff to notice. Apply asserts only the fields
+this controller owns, so it is the difference between a correct materializer and
+a slow corruption; use Kueue's generated apply configurations rather than typed
+apply, since they serialize only what was explicitly set. This is a correctness
+requirement, not a style preference, and it holds for as long as the pin lags the
+fleet — which is indefinitely.
 
 **Internal-node budgets do not materialize, and containment is not enforced by
 Kueue.** Kueue's cohort quota is *additive*, not a ceiling: `SubtreeQuota` is
 "the sum of the node's quota, as well as resources available from its children,
-constrained by LendingLimits" (`pkg/cache/resource_node.go:33-35`) — and since
+constrained by LendingLimits" (`pkg/cache/scheduler/resource_node.go:34-36`) — and since
 `lendingLimit` defaults to null, meaning lend everything, that constraint is
 usually absent. Giving a `Cohort` its own `nominalQuota` would
 therefore *add* to what its children already contribute — an `org` of 100 over
@@ -1171,7 +1198,25 @@ here.
 - **ome-scheduler (OEP-0022).** Quota is exactly the "hold flag" seam: Kueue
   removes the `ome.io/admission` gate when quota allows (Phase B), then
   ome-scheduler places the gang. This OEP provides the quota half of that
-  contract; TAS stays off so the two don't both assign domains.
+  contract.
+
+  **TAS is on by default at the Kueue version we target**, so "the two don't both
+  assign domains" is a property of the *flavors*, not of the feature gate. Kueue
+  only builds topology state for a `ResourceFlavor` that sets `spec.topologyName`,
+  and only engages it when a PodSet requests topology explicitly or the
+  `ClusterQueue` is TAS-only — every flavor in every resource group carrying
+  `topologyName`. Quota leaves therefore **must not reference TAS flavors**, and
+  the two ways of getting that wrong fail differently: a TAS-only `ClusterQueue`
+  has Kueue assign domains underneath ome-scheduler, while a mixed one leaves
+  non-TAS PodSets unable to use the TAS flavor and simply pending.
+
+  Since OME references flavors rather than reconciling them (Open Question #4)
+  and does not deploy Kueue, this is a **deployment requirement on the cluster
+  operator**: either no referenced flavor sets `spec.topologyName`, or Kueue runs
+  with `TopologyAwareScheduling=false`. The materialization test suite starts
+  Kueue with default gates, so its fixtures must not set `topologyName` either —
+  the Topology CRD is installed, so an accidental one would be admitted rather
+  than rejected.
 
 ## Test Plan
 
@@ -1343,3 +1388,19 @@ here.
     resolve. Leave the pod unstamped (it runs unquota'd — a billing decision) or
     stamp anyway (Kueue holds it until the queue appears)? A policy choice, not an
     implementation detail. `TBD`.
+
+    **There is a third outcome, and it is not ours to choose.** Kueue defaults a
+    workload's queue when its integration is enabled for the kind, the namespace
+    passes `managedJobsNamespaceSelector`, and a `LocalQueue` literally named
+    `default` exists there — in which case the workload is silently stamped and
+    gated onto *that* queue. OME satisfies the first condition by construction, and
+    the defaulting webhook covers `Deployment`, `StatefulSet` and `LeaderWorkerSet`
+    as well as bare pods, so it reaches RawDeployment and MultiNode alike.
+
+    This makes the leaf `LocalQueue` **naming scheme** load-bearing, which this
+    document has so far left unstated. Naming it `default` — OME's existing
+    convention — means Kueue's guard is satisfied the moment the projection lands
+    and the race window closes itself. Any other name means option 1 additionally
+    requires that no `default` `LocalQueue` exists in a budgeted namespace, or the
+    workload is charged to a hand-provisioned leftover from the pre-quota era
+    rather than running unquota'd.

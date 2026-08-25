@@ -66,6 +66,17 @@ ifeq ($(ENVTEST_K8S_VERSION),)
 $(error cannot read .envtest-k8s-version)
 endif
 
+# Kueue version whose CRD schemas the integration suites validate against.
+# .kueue-crd-version is the single source of truth and tracks the version the
+# FLEET runs, which is deliberately ahead of the sigs.k8s.io/kueue pin in
+# go.mod — that pin is held back by the Kubernetes and controller-runtime
+# versions this repo is on. Vendoring the CRDs from go.mod instead would let a
+# suite accept an object the real apiserver rejects.
+KUEUE_CRD_VERSION ?= $(strip $(shell cat $(CURDIR)/.kueue-crd-version))
+ifeq ($(KUEUE_CRD_VERSION),)
+$(error cannot read .kueue-crd-version)
+endif
+
 # Image configuration for success and error scenarios
 SUCCESS_200_ISVC_IMG ?= success-200-isvc
 ERROR_404_ISVC_IMG ?= error-404-isvc
@@ -659,10 +670,18 @@ scheduler-plugins-crds: ## Vendor sigs.k8s.io/scheduler-plugins CRDs (scheduling
 .PHONY: kueue-crds
 kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor, ClusterQueue, LocalQueue, Workload, … for the OEP-0018 real-Kueue envtest harness)
 	@mkdir -p $(DEP_CRDS_DIR)/kueue
-	@KUEUE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/kueue 2>/dev/null) ; \
+	@# Sourced from $(KUEUE_CRD_VERSION), not the go.mod pin: the suites must
+	@# validate against the schema the fleet's apiserver enforces. Falls back to
+	@# the pin when that version cannot be fetched, so an offline build still
+	@# runs the suites rather than failing to vendor anything.
+	@KUEUE_DIR=$$(go list -m -mod=mod -f "{{.Dir}}" sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION) 2>/dev/null) ; \
+	if [ -z "$$KUEUE_DIR" ]; then \
+		echo "⚠️  cannot fetch sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION); falling back to the go.mod pin" >&2 ; \
+		KUEUE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/kueue 2>/dev/null) ; \
+	fi ; \
 	if [ -z "$$KUEUE_DIR" ]; then echo "sigs.k8s.io/kueue not in go.mod; skipping kueue-crds" >&2; exit 0; fi ; \
 	cp -f "$$KUEUE_DIR/config/components/crd/bases/"*.yaml $(DEP_CRDS_DIR)/kueue/ ; \
-	echo "✅ Vendored Kueue CRDs to $(DEP_CRDS_DIR)/kueue/"
+	echo "✅ Vendored Kueue CRDs from $$KUEUE_DIR to $(DEP_CRDS_DIR)/kueue/"
 
 .PHONY: test-kindutil-unit
 test-kindutil-unit: ## 🧪 Run KIND framework tests that do not require Docker
