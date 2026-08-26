@@ -128,6 +128,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("assembling the quota tree: %w", err)
 	}
 
+	// Capacity is cluster state, so the pure tree checks cannot see it. The
+	// verdict joins them here rather than in a path of its own, so a budget the
+	// fleet cannot afford freezes and reports exactly like any other violated
+	// invariant. The numbers come from the root's last observed capacity: this
+	// pass has not derived new ones yet, and a value one pass old is the right
+	// input for a check whose whole purpose is to ignore momentary dips.
+	if r.Capacity.Enabled() && built.Root != nil {
+		violations = append(violations,
+			capacityViolations(built.Nodes(), built.Root.Quota.Status.Capacity)...)
+	}
+
 	frozen := built.Frozen(violations)
 	var errs []error
 
