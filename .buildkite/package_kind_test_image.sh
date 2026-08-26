@@ -20,15 +20,19 @@ if [ "${BUILDKITE_BRANCH:-}" = main ]; then
   base_tag="$short_sha"
 fi
 target="${repo}/kind-ci:test-${short_sha}-${build_number}"
-artifact_bundle=".buildkite/artifacts/omenative-kind-test.tgz"
+# One bundle per KIND suite; every one is baked into the same runner image and
+# selected at run time by OME_KIND_TEST_BUNDLE.
+artifact_bundles="omenative-kind-test.tgz multicluster-kind-test.tgz"
 
 command -v buildkite-agent >/dev/null 2>&1 || {
   echo "buildkite-agent is required to download the test bundle" >&2
   exit 1
 }
-mkdir -p "$(dirname "$artifact_bundle")"
-buildkite-agent artifact download "$artifact_bundle" . --step test
-test -s "$artifact_bundle"
+mkdir -p .buildkite/artifacts
+for bundle in $artifact_bundles; do
+  buildkite-agent artifact download ".buildkite/artifacts/$bundle" . --step test
+  test -s ".buildkite/artifacts/$bundle"
+done
 
 if ! command -v crane >/dev/null 2>&1; then
   case "$(uname -m)" in
@@ -46,9 +50,33 @@ ecr_login_for prod crane auth login --username AWS --password-stdin "$PROD_ECR_R
 
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
-mkdir -p "$stage/kind-test"
-cp "$artifact_bundle" "$stage/kind-test/omenative-kind-test.tgz"
-tar -C "$stage" -cf "$stage/kind-test.layer.tar" kind-test
+mkdir -p "$stage/kind-test" "$stage/images"
+for bundle in $artifact_bundles; do
+  cp ".buildkite/artifacts/$bundle" "$stage/kind-test/$bundle"
+done
+
+# The multi-cluster suite installs Kueue into its members, and the GKE agents
+# have no egress, so the controller image has to arrive with the runner. It is
+# pulled here rather than baked into kind-ci because the image build only pushes
+# on main: a kind-ci change cannot be exercised on the branch that needs it.
+#
+# The tag comes from the manifest the bundle already carries, which `make
+# kueue-install` rendered from go.mod — so the loaded image and the Deployment's
+# image ref are the same by construction. /images is where the runner looks,
+# matching the tarballs kind-ci bakes in.
+kueue_version=$(tar -xzOf ".buildkite/artifacts/multicluster-kind-test.tgz" \
+  ./dep-crds/kueue-install/version)
+kueue_version=$(printf '%s' "$kueue_version" | tr -d '[:space:]')
+[ -n "$kueue_version" ] || { echo "multi-cluster bundle has no Kueue version" >&2; exit 1; }
+kueue_image="${KUEUE_IMAGE_REPO:-registry.k8s.io/kueue/kueue}:${kueue_version}"
+echo "--- pull ${kueue_image}"
+crane pull --platform linux/amd64 "$kueue_image" "$stage/images/kueue.tar"
+crane validate --tarball "$stage/images/kueue.tar"
+
+# /images already exists in the base; mktemp's 0700 would otherwise be layered
+# over it and hide the baked tarballs from a non-root runner.
+chmod 755 "$stage/images"
+tar -C "$stage" -cf "$stage/kind-test.layer.tar" kind-test images
 
 echo "--- publish ${target} from kind-ci:${base_tag} ---"
 crane append --platform linux/amd64 \

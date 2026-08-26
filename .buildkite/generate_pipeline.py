@@ -78,7 +78,22 @@ BUILD_QUEUE = "tw-cpu-x86"
 GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-tpu-v7x")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/omenative_coordination_kind"
+MC_KIND_SUITE_DIR = REPO_ROOT / "tests/integration/multicluster/scaleout_kind"
 EVAL_CASE_DIR = REPO_ROOT / "hack/omenative-testing/perm/isvcs"
+
+# Multi-cluster groups, same shape and same exact-ownership rule as the
+# coordination groups below. Every job here stands up three KIND clusters, so a
+# group is only worth adding once its wall-clock justifies paying for another
+# set. The quota specs are split out on that basis: they drive real Kueue
+# admission, so they wait on quota transitions the placement specs never hit.
+MC_KIND_SPEC_GROUPS = (
+    ("placement", "Multi-cluster placement", (
+        "fanout", "lifecycle", "endpoint", "ownership", "reshard", "scale",
+    )),
+    ("quota", "Multi-cluster Kueue quota", (
+        "admission", "split_quota",
+    )),
+)
 
 # Each group gets one three-node KIND cluster. Groups balance observed runtime
 # while keeping related specs together. Exact ownership makes a new spec fail
@@ -404,22 +419,37 @@ def _gke_kind_plugins(image: str, shared_model: bool = False) -> list[dict]:
     return [{"kubernetes": {"podSpecPatch": pod_spec}}]
 
 
-def _kind_spec_files() -> list[str]:
+def _spec_files_in(suite_dir) -> list[str]:
+    """Every spec file in a KIND suite directory that declares a Ginkgo tree."""
     pattern = re.compile(r"ginkgo\.(?:Describe|DescribeTable)\(")
     return [
         path.name
-        for path in sorted(KIND_SUITE_DIR.glob("*_kind_test.go"))
+        for path in sorted(suite_dir.glob("*_kind_test.go"))
         if pattern.search(path.read_text())
     ]
 
 
-def _kind_spec_groups() -> list[tuple[str, str, list[str]]]:
-    """Return the semantic groups after proving exact ownership of every spec."""
-    actual = set(_kind_spec_files())
+def _kind_spec_files() -> list[str]:
+    return _spec_files_in(KIND_SUITE_DIR)
+
+
+def _mc_kind_spec_files() -> list[str]:
+    return _spec_files_in(MC_KIND_SUITE_DIR)
+
+
+def _spec_groups_for(suite_dir, declarations) -> list[tuple[str, str, list[str]]]:
+    """Return a suite's groups after proving exact ownership of every spec.
+
+    Ownership is what makes a group list load-bearing rather than documentation:
+    each job runs only the files its group names, so an unlisted spec would
+    silently never run in CI. Failing generation is the cheapest place to catch
+    that.
+    """
+    actual = set(_spec_files_in(suite_dir))
     owners: dict[str, str] = {}
     groups = []
     slugs = set()
-    for slug, label, stems in KIND_SPEC_GROUPS:
+    for slug, label, stems in declarations:
         if not stems or slug in slugs:
             raise RuntimeError(f"invalid or duplicate KIND spec group: {slug}")
         slugs.add(slug)
@@ -440,6 +470,60 @@ def _kind_spec_groups() -> list[tuple[str, str, list[str]]]:
     return groups
 
 
+def _kind_spec_groups() -> list[tuple[str, str, list[str]]]:
+    return _spec_groups_for(KIND_SUITE_DIR, KIND_SPEC_GROUPS)
+
+
+def _mc_kind_spec_groups() -> list[tuple[str, str, list[str]]]:
+    return _spec_groups_for(MC_KIND_SUITE_DIR, MC_KIND_SPEC_GROUPS)
+
+
+def _kind_focus(files: list[str]) -> str:
+    """A -ginkgo.focus-file regex matching exactly the named spec files."""
+    return "/(" + "|".join(re.escape(filename) for filename in files) + ")$"
+
+
+def _mc_kind_group() -> str:
+    """The multi-cluster suite: its own group, one job per shard.
+
+    Separate from the coordination group so its soft-fail status cannot muddy
+    that lane's gating GitHub context, and so each lane's shards stay
+    independently countable.
+
+    Soft-fail while the suite settles: these are the first jobs to stand up more
+    than one KIND cluster per job, so their memory envelope under the dind
+    sidecar's limits is unproven, and a flaky hard gate on main is expensive to
+    unwind.
+    """
+    plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
+    steps = []
+    for slug, label, files in _mc_kind_spec_groups():
+        file_label = "file" if len(files) == 1 else "files"
+        steps.append(
+            {
+                "label": f":test_tube: {label} ({len(files)} {file_label})",
+                "key": f"kind-gke-mc-{slug}",
+                "depends_on": "package-kind-test-image",
+                "soft_fail": True,
+                "env": {
+                    "OME_KIND_TEST_BUNDLE": "/kind-test/multicluster-kind-test.tgz",
+                    "OME_KIND_FOCUS": _kind_focus(files),
+                    "OME_KIND_TIMEOUT": "60m",
+                },
+                "agents": {"queue": GKE_QUEUE},
+                "command": "sh .buildkite/run_kind_tests_gke.sh",
+                "plugins": plugins,
+            }
+        )
+    group = {
+        "group": ":test_tube: Integration Tests (multi-cluster KIND on GKE)",
+        "key": "integration-test-kind-mc-gke",
+        "notify": [{"github_commit_status": {"context": "integration-test-kind-mc-gke"}}],
+        "steps": steps,
+    }
+    return _yaml_block([group], 2)
+
+
 def _gke_kind_group() -> str:
     """A small set of named semantic jobs, each with its own KIND cluster."""
     plugins = _gke_kind_plugins(
@@ -447,7 +531,7 @@ def _gke_kind_group() -> str:
     )
     children = []
     for slug, label, files in _kind_spec_groups():
-        focus = "/(" + "|".join(re.escape(filename) for filename in files) + ")$"
+        focus = _kind_focus(files)
         file_label = "file" if len(files) == 1 else "files"
         children.append(
             {
@@ -756,6 +840,7 @@ def ci_steps() -> str:
               sh .buildkite/run_tests.sh
             artifact_paths:
               - ".buildkite/artifacts/omenative-kind-test.tgz"
+              - ".buildkite/artifacts/multicluster-kind-test.tgz"
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
@@ -873,6 +958,7 @@ def ci_steps() -> str:
     if GKE_KIND_ENABLED:
         steps += "\n" + _package_kind_test_image_step()
         steps += "\n" + _gke_kind_group()
+        steps += "\n" + _mc_kind_group()
     return steps
 
 

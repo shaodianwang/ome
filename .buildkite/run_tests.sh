@@ -88,26 +88,51 @@ make test
 make coverage
 
 # Reuse the already-warm Go and Rust build caches to produce the exact-commit
-# KIND suite binary once. Consumer jobs use this bundle instead of compiling.
-echo "--- package OMENative KIND test binary ---"
+# KIND suite binaries once. Consumer jobs use these bundles instead of
+# compiling: the GKE KIND pods have no public egress, so a `go build` there
+# would reach for the module proxy and fail.
+#
+# One bundle per suite rather than one shared bundle with several binaries. Each
+# carries its own manifest, so a new suite is additive — it cannot change what
+# an existing lane downloads or verifies.
 make dep-crds
-kind_artifact_stage="$(mktemp -d)"
 kind_artifact_dir=".buildkite/artifacts"
-kind_test_binary="omenative_coordination_kind.test"
-mkdir -p "$kind_artifact_stage/dep-crds" "$kind_artifact_dir"
-go test -c \
-  -o "$kind_artifact_stage/$kind_test_binary" \
+mkdir -p "$kind_artifact_dir"
+
+# package_kind_bundle <bundle-name> <binary-name> <package>
+#
+# The manifest names the binary it ships, so the runner does not have to know
+# which suite it was handed — it reads `binary=` and verifies that file's digest.
+package_kind_bundle() {
+  bundle_name="$1"
+  binary_name="$2"
+  package_path="$3"
+
+  echo "--- package KIND test bundle: $bundle_name ($binary_name) ---"
+  stage="$(mktemp -d)"
+  mkdir -p "$stage/dep-crds"
+  go test -c -o "$stage/$binary_name" "$package_path"
+  # Only the gitignored, vendored dep-crds travel with the bundle; the committed
+  # ones (prometheus-operator, envoy-gateway) arrive with the agent's checkout.
+  # kueue-install is a rendered install manifest rather than a CRD set, and it
+  # is derived from the Kueue version in go.mod, so it has to be the one built
+  # from this commit.
+  cp -R tests/integration/dep-crds/keda "$stage/dep-crds/"
+  cp -R tests/integration/dep-crds/scheduler-plugins "$stage/dep-crds/"
+  cp -R tests/integration/dep-crds/kueue-install "$stage/dep-crds/"
+  {
+    printf 'state=ready\n'
+    printf 'commit=%s\n' "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
+    printf 'goos=%s\n' "$(go env GOOS)"
+    printf 'goarch=%s\n' "$(go env GOARCH)"
+    printf 'binary=%s\n' "$binary_name"
+    printf 'sha256=%s\n' "$(sha256sum "$stage/$binary_name" | awk '{print $1}')"
+  } >"$stage/manifest"
+  tar -C "$stage" -czf "$PWD/$kind_artifact_dir/$bundle_name" .
+  rm -rf -- "$stage"
+}
+
+package_kind_bundle omenative-kind-test.tgz omenative_coordination_kind.test \
   ./tests/integration/singlecluster/controller/omenative_coordination_kind
-cp -R tests/integration/dep-crds/keda "$kind_artifact_stage/dep-crds/"
-cp -R tests/integration/dep-crds/scheduler-plugins "$kind_artifact_stage/dep-crds/"
-kind_test_sha256="$(sha256sum "$kind_artifact_stage/$kind_test_binary" | awk '{print $1}')"
-{
-  printf 'state=ready\n'
-  printf 'commit=%s\n' "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
-  printf 'goos=%s\n' "$(go env GOOS)"
-  printf 'goarch=%s\n' "$(go env GOARCH)"
-  printf 'sha256=%s\n' "$kind_test_sha256"
-} >"$kind_artifact_stage/manifest"
-tar -C "$kind_artifact_stage" -czf \
-  "$PWD/$kind_artifact_dir/omenative-kind-test.tgz" .
-rm -rf -- "$kind_artifact_stage"
+package_kind_bundle multicluster-kind-test.tgz scaleout_kind.test \
+  ./tests/integration/multicluster/scaleout_kind

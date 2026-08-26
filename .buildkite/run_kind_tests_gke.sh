@@ -1,13 +1,16 @@
 #!/bin/sh
 # Named OFFLINE KIND integration test step for the BuildKite pipeline.
 #
-# Runs the omenative_coordination_kind suite on a GKE-backed agent. The GKE RC
+# Runs one precompiled KIND suite on a GKE-backed agent. Which suite is decided
+# by OME_KIND_TEST_BUNDLE (default: the omenative_coordination_kind bundle); the
+# bundle's manifest names the binary inside it. The GKE RC
 # cluster has NO public egress from pods, so this script installs NOTHING at run
 # time — KIND, kubectl, the Docker CLI, and every base image are baked into the
 # workload image dockerfiles/kind-ci.Dockerfile. This script only:
 #   1. confirms the privileged dind sidecar is reachable,
-#   2. `docker load`s the baked image tarballs into dind (kind node + the
-#      golang/distroless bases the fake-serving build needs),
+#   2. `docker load`s the image tarballs under /images into dind (kind node, the
+#      golang/distroless bases the fake-serving build needs, and Kueue, which
+#      the multi-cluster suite installs into its members),
 #   3. loads the exact-commit test binary packaged by the unit-test job,
 #   4. runs the semantic file group selected by OME_KIND_FOCUS.
 #
@@ -53,6 +56,10 @@ artifact_commit="$(manifest_value commit)"
 artifact_goos="$(manifest_value goos)"
 artifact_goarch="$(manifest_value goarch)"
 artifact_sha256="$(manifest_value sha256)"
+# Bundles built before the manifest carried `binary=` shipped the coordination
+# suite, so fall back to that name rather than failing on an older artifact.
+artifact_binary="$(manifest_value binary)"
+[ -n "$artifact_binary" ] || artifact_binary="omenative_coordination_kind.test"
 [ "$artifact_state" = ready ] || { echo "FATAL: test bundle is not ready" >&2; exit 1; }
 [ "$artifact_commit" = "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" ] || {
   echo "FATAL: test bundle commit $artifact_commit does not match $BUILDKITE_COMMIT" >&2
@@ -62,13 +69,17 @@ artifact_sha256="$(manifest_value sha256)"
   echo "FATAL: test bundle platform is $artifact_goos/$artifact_goarch, expected linux/amd64" >&2
   exit 1
 }
-kind_test_binary="$artifact_stage/omenative_coordination_kind.test"
+kind_test_binary="$artifact_stage/$artifact_binary"
 [ -x "$kind_test_binary" ] || chmod +x "$kind_test_binary"
 printf '%s  %s\n' "$artifact_sha256" "$kind_test_binary" | sha256sum -c -
-mkdir -p tests/integration/dep-crds/keda tests/integration/dep-crds/scheduler-plugins
-cp -R "$artifact_stage/dep-crds/keda/." tests/integration/dep-crds/keda/
-cp -R "$artifact_stage/dep-crds/scheduler-plugins/." \
-  tests/integration/dep-crds/scheduler-plugins/
+# Restore whatever vendored dep-crds the bundle carries. Enumerated from the
+# bundle rather than named here so a suite that needs a new one is additive.
+for dep in "$artifact_stage"/dep-crds/*/; do
+  [ -d "$dep" ] || continue
+  dest="tests/integration/dep-crds/$(basename "$dep")"
+  mkdir -p "$dest"
+  cp -R "$dep." "$dest/"
+done
 
 echo "--- docker preflight: wait for the dind sidecar ---"
 command -v docker >/dev/null 2>&1 || { echo "FATAL: docker CLI missing from kind-ci image." >&2; exit 1; }
@@ -88,7 +99,8 @@ docker version --format 'client {{.Client.Version}} / server {{.Server.Version}}
 
 echo "--- load baked images into dind (no registry pulls) ---"
 for tar in "$IMAGES_DIR"/kindest-node.tar "$IMAGES_DIR"/fake-serving-build.tar \
-           "$IMAGES_DIR"/fake-serving-base.tar "$IMAGES_DIR"/busybox.tar; do
+           "$IMAGES_DIR"/fake-serving-base.tar "$IMAGES_DIR"/busybox.tar \
+           "$IMAGES_DIR"/kueue.tar; do
   [ -f "$tar" ] || { echo "FATAL: baked image tarball missing: $tar" >&2; exit 1; }
   docker load -i "$tar"
 done
@@ -125,12 +137,13 @@ kind get clusters 2>/dev/null | while read -r c; do
   esac
 done
 
-echo "--- run precompiled suite (${OME_KIND_FOCUS:-all files}) ---"
+echo "--- run precompiled suite $artifact_binary (${OME_KIND_FOCUS:-all files}) ---"
+kind_test_timeout="${OME_KIND_TIMEOUT:-90m}"
 if [ -n "${OME_KIND_FOCUS:-}" ]; then
-  "$kind_test_binary" -test.v -test.timeout=90m -ginkgo.v \
+  "$kind_test_binary" -test.v "-test.timeout=$kind_test_timeout" -ginkgo.v \
     "-ginkgo.focus-file=${OME_KIND_FOCUS}"
 else
-  "$kind_test_binary" -test.v -test.timeout=90m -ginkgo.v
+  "$kind_test_binary" -test.v "-test.timeout=$kind_test_timeout" -ginkgo.v
 fi
 
 # Cluster teardown happens in the EXIT trap (cleanup_ome_clusters).

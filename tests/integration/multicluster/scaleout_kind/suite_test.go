@@ -8,16 +8,18 @@
 // members schedule and run pods for real, so a fan-out is asserted by the
 // workload actually coming up on each home.
 //
-// Kueue is deliberately absent. Gating requires Kueue's mutating pod webhook and
-// the KIND harness runs no webhook server, so admission semantics stay on the
-// envtest real-Kueue suite; this suite covers only the kubelet delta. With no
-// gate on the pods every Instance reports Admitted as soon as it has pods, which
-// is why the specs here assert on pods and derived objects rather than on the
-// admission race.
+// Kueue runs on both members but manages only namespaces labelled
+// kindfix.KueueManagedLabel, so admission is opt-in per spec. In an unlabelled
+// namespace nothing gates the pods and every Instance reports Admitted as soon
+// as it has pods, which is why those specs assert on pods and derived objects
+// rather than on the admission race; the specs that do assert on gating label
+// their namespace and grant quota explicitly.
 //
-// The control plane is an envtest apiserver rather than a third KIND cluster: it
-// never schedules a pod, so a kubelet buys it nothing and costs a third Docker
-// cluster per run.
+// All three clusters are KIND, matching every other _kind suite in this repo.
+// The control plane never schedules a pod, so a kubelet buys it nothing on the
+// merits — but envtest would drag its apiserver/etcd assets and the IPv6
+// advertise-address shim into a CI image that has neither, to save one
+// single-node cluster. Uniformity is worth more than that.
 package scaleout_kind
 
 import (
@@ -33,9 +35,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/components"
-	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -44,8 +47,9 @@ import (
 // KIND cluster names for the two members. One cluster per member so the placer
 // exercises genuinely separate apiservers, schedulers, and kubelets.
 const (
-	member1ClusterName = "ome-mc-m1-kind"
-	member2ClusterName = "ome-mc-m2-kind"
+	controlPlaneClusterName = "ome-mc-cp-kind"
+	member1ClusterName      = "ome-mc-m1-kind"
+	member2ClusterName      = "ome-mc-m2-kind"
 )
 
 // controlPlaneID identifies this control plane on the members, so the GC sweep
@@ -95,10 +99,9 @@ type cluster struct {
 	client client.Client
 	ctx    context.Context
 
-	fwk         *framework.Framework       // control plane only
 	clusters    *components.ClusterManager // control plane only
 	manager     ctrl.Manager
-	stopManager func() // members only
+	stopManager func()
 }
 
 var (
@@ -106,8 +109,8 @@ var (
 	member1        cluster
 	member2        cluster
 
-	// suiteCancel stops the member managers and the KIND-side context at
-	// AfterSuite. The control plane owns its own context via framework.
+	// suiteCancel stops every manager at AfterSuite; all three clusters share
+	// the suite context.
 	suiteCancel context.CancelFunc
 )
 
@@ -115,18 +118,27 @@ func TestMultiClusterScaleOutKind(t *testing.T) {
 	util.RunSuite(t, "Multi-Cluster Scale-Out KIND Suite")
 }
 
-// startControlPlane brings up the envtest apiserver that hosts the source
-// InferenceServices and the WorkloadCluster registry. Only the OME CRDs are
-// installed: the control plane runs the placement + WorkloadCluster controllers,
-// neither of which touches KEDA, Prometheus, or Kueue types.
-func startControlPlane() cluster {
-	f := &framework.Framework{}
-	cfg, err := f.Init()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane framework.Init")
-	ctx, cl, err := f.SetupClient(cfg)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane framework.SetupClient")
+// startControlPlane brings up the KIND cluster that hosts the source
+// InferenceServices and the WorkloadCluster registry.
+//
+// Only the OME CRDs are installed and only the base scheme registered: the
+// control plane runs the placement + WorkloadCluster controllers, which watch
+// InferenceServices, WorkloadClusters, and Secrets — never KEDA, Prometheus, or
+// Kueue types. No workload is ever scheduled here.
+func startControlPlane(ctx context.Context, name string) cluster {
+	cfg, err := kindutil.EnsureCluster(ctx, name, 0)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "EnsureCluster %s", name)
 
-	return cluster{name: "control-plane", cfg: cfg, client: cl, ctx: ctx, fwk: f}
+	gomega.Expect(kindutil.ApplyCRDs(ctx, cfg, []string{"config/crd/full"})).
+		To(gomega.Succeed(), "ApplyCRDs %s", name)
+
+	scheme := kindutil.BaseScheme()
+	cl, err := client.New(cfg, client.Options{Scheme: scheme})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "client.New %s", name)
+
+	purgeControlPlaneLeftovers(ctx, cl, name)
+
+	return cluster{name: name, cfg: cfg, client: cl, ctx: ctx}
 }
 
 // startControlPlaneManager wires and starts the control-plane manager: the
@@ -136,7 +148,7 @@ func startControlPlane() cluster {
 // pass.
 func startControlPlaneManager(c *cluster) {
 	var cm *components.ClusterManager
-	err := c.fwk.StartManager(c.ctx, c.cfg, func(setupCtx context.Context, mgr ctrl.Manager) error {
+	mgr, stop, err := kindutil.StartManager(c.ctx, c.cfg, kindutil.BaseScheme(), func(setupCtx context.Context, mgr ctrl.Manager) error {
 		m, err := components.SetupWorkloadCluster(setupCtx, mgr,
 			components.WithClusterHealthInterval(clusterHealthInterval),
 			components.WithClusterConnectionGracePeriod(connectionGrace),
@@ -158,7 +170,8 @@ func startControlPlaneManager(c *cluster) {
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane StartManager")
 	c.clusters = cm
-	c.manager = c.fwk.Manager()
+	c.manager = mgr
+	c.stopManager = stop
 }
 
 // startMember brings up one KIND member: the cluster itself, the fake-serving
@@ -183,10 +196,19 @@ func startMember(ctx context.Context, name string) cluster {
 		To(gomega.Succeed(), "ApplyCRDs %s", name)
 
 	scheme := kindfix.OMEScheme()
+	// Quota objects are created through framework.ApplyKueueQuota, which builds
+	// v1beta2; nothing here touches the older version.
+	gomega.Expect(kueuev1beta2.AddToScheme(scheme)).To(gomega.Succeed(), "register Kueue types")
 	cl, err := client.New(cfg, client.Options{Scheme: scheme})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "client.New %s", name)
 
 	purgeLeftovers(ctx, cl, name)
+
+	// Kueue runs on every member, but manages only namespaces labelled
+	// kindfix.KueueManagedLabel. Specs that assert on admission opt in; the
+	// rest never see a scheduling gate even though every OME-derived pod
+	// carries a queue-name label.
+	gomega.Expect(kindfix.InstallKueue(ctx, cfg, name)).To(gomega.Succeed(), "install Kueue on %s", name)
 
 	mgr, stop, err := kindutil.StartManager(ctx, cfg, scheme,
 		kindfix.StandardOMESetup(kindfix.SetupOpts{WireInferenceReplica: true}))
@@ -208,12 +230,8 @@ var _ = ginkgo.BeforeSuite(func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	suiteCancel = cancel
 
-	// Sequential bring-up. framework.Init mutates the process-global client-go
-	// scheme, so it must not run concurrently with anything that reads it; doing
-	// the control plane first and the members after removes the race entirely
-	// (the members' managers are started last, once the scheme is stable).
-	ginkgo.By("standing up the control-plane envtest apiserver", func() {
-		controlCluster = startControlPlane()
+	ginkgo.By("standing up control-plane KIND cluster "+controlPlaneClusterName, func() {
+		controlCluster = startControlPlane(ctx, controlPlaneClusterName)
 	})
 	ginkgo.By("standing up member KIND cluster "+member1ClusterName, func() {
 		member1 = startMember(ctx, member1ClusterName)
@@ -227,22 +245,17 @@ var _ = ginkgo.BeforeSuite(func() {
 })
 
 var _ = ginkgo.AfterSuite(func() {
-	if member1.stopManager != nil {
-		member1.stopManager()
-	}
-	if member2.stopManager != nil {
-		member2.stopManager()
+	for _, c := range []cluster{controlCluster, member1, member2} {
+		if c.stopManager != nil {
+			c.stopManager()
+		}
 	}
 	if suiteCancel != nil {
 		suiteCancel()
 	}
-	if controlCluster.fwk != nil {
-		_ = controlCluster.fwk.StopManager(context.Background())
-		gomega.Expect(controlCluster.fwk.Teardown()).To(gomega.Succeed(), "control-plane Teardown")
-	}
 	// KIND cluster teardown honors KIND_KEEP_CLUSTER, so a local iteration loop
 	// reuses the clusters while CI gets a clean delete.
-	for _, name := range []string{member1ClusterName, member2ClusterName} {
+	for _, name := range []string{controlPlaneClusterName, member1ClusterName, member2ClusterName} {
 		if err := kindutil.DeleteCluster(context.Background(), name); err != nil {
 			ginkgo.GinkgoWriter.Printf("DeleteCluster(%s): %v\n", name, err)
 		}
@@ -297,5 +310,40 @@ func purgeLeftovers(ctx context.Context, c client.Client, memberName string) {
 
 	if purged > 0 {
 		ginkgo.GinkgoWriter.Printf("purged %d leftover object(s) from %s\n", purged, memberName)
+	}
+}
+
+// purgeControlPlaneLeftovers clears state a previous run left on the reused
+// control plane: this suite's namespaces (and the source InferenceServices in
+// them) plus every WorkloadCluster, which is cluster-scoped and so survives a
+// namespace sweep. Stale WorkloadClusters matter more than they look — the
+// placer treats each as a fan-out candidate and would try to connect to a
+// member that no longer exists.
+func purgeControlPlaneLeftovers(ctx context.Context, c client.Client, name string) {
+	var purged int
+
+	nsList := &corev1.NamespaceList{}
+	gomega.Expect(c.List(ctx, nsList)).To(gomega.Succeed(), "list namespaces on %s", name)
+	for i := range nsList.Items {
+		ns := &nsList.Items[i]
+		for _, prefix := range specNamespacePrefixes {
+			if strings.HasPrefix(ns.Name, prefix) && ns.DeletionTimestamp == nil {
+				gomega.Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(gomega.Succeed(),
+					"delete leftover namespace %s on %s", ns.Name, name)
+				purged++
+				break
+			}
+		}
+	}
+
+	wcs := &v1beta1.WorkloadClusterList{}
+	gomega.Expect(c.List(ctx, wcs)).To(gomega.Succeed(), "list WorkloadClusters on %s", name)
+	for i := range wcs.Items {
+		gomega.Expect(client.IgnoreNotFound(c.Delete(ctx, &wcs.Items[i]))).To(gomega.Succeed())
+		purged++
+	}
+
+	if purged > 0 {
+		ginkgo.GinkgoWriter.Printf("purged %d leftover object(s) from %s\n", purged, name)
 	}
 }

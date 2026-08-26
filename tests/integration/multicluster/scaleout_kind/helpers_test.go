@@ -258,3 +258,18 @@ func derivedOfSourceSwept(member cluster, namespace, name, srcUID string) bool {
 	}
 	return multicluster.OriginUID(derived) != srcUID
 }
+
+// labelNamespace stamps a label onto an existing namespace, retrying on
+// conflict. Used to opt a spec's workload namespace into Kueue management.
+func labelNamespace(c cluster, name, key, value string) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		ns := &corev1.Namespace{}
+		g.Expect(c.client.Get(c.ctx, types.NamespacedName{Name: name}, ns)).To(gomega.Succeed())
+		if ns.Labels == nil {
+			ns.Labels = map[string]string{}
+		}
+		ns.Labels[key] = value
+		g.Expect(c.client.Update(c.ctx, ns)).To(gomega.Succeed())
+	}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed(),
+		"label namespace %s on %s", name, c.name)
+}

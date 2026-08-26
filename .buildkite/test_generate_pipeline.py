@@ -187,6 +187,9 @@ class TestGkeKindGroupEmission(PipelineTestCase):
         self.assertEqual(
             self.yaml_text.count('depends_on: "package-kind-test-image"'), 2
         )
+        # The multi-cluster suite is a separate group, so its soft-fail status
+        # cannot muddy this lane's gating context.
+        self.assertNotIn("soft_fail", self.yaml_text)
 
     def test_labels_carry_spec_file_counts(self):
         self.assertIn("Pair of specs (2 files)", self.yaml_text)
@@ -410,3 +413,35 @@ class TestCheckedInTreeClassification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMulticlusterKindGroup(PipelineTestCase):
+    """The multi-cluster lane: its own group, its own bundle, shard-driven."""
+
+    def setUp(self):
+        self.yaml_text = gp._mc_kind_group()
+
+    def test_is_its_own_group_with_its_own_status_context(self):
+        self.assertIn('key: "integration-test-kind-mc-gke"', self.yaml_text)
+        self.assertIn('context: "integration-test-kind-mc-gke"', self.yaml_text)
+
+    def test_runs_its_own_bundle_and_soft_fails(self):
+        self.assertIn(
+            'OME_KIND_TEST_BUNDLE: "/kind-test/multicluster-kind-test.tgz"',
+            self.yaml_text,
+        )
+        self.assertIn("soft_fail: true", self.yaml_text)
+
+    def test_shards_partition_the_suite(self):
+        patterns = _focus_patterns(self.yaml_text)
+        groups = gp._mc_kind_spec_groups()
+        self.assertEqual(len(patterns), len(groups))
+        for name in gp._mc_kind_spec_files():
+            owners = [
+                slug
+                for (slug, _, _), pattern in zip(groups, patterns)
+                if re.search(pattern, str(gp.MC_KIND_SUITE_DIR / name))
+            ]
+            self.assertEqual(
+                len(owners), 1, f"{name} matched by {owners or 'no shard'}"
+            )

@@ -646,8 +646,15 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: keda-crds gateway-api-crds scheduler-plugins-crds kueue-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: keda-crds gateway-api-crds scheduler-plugins-crds kueue-crds kueue-install ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
+KUEUE_IMAGE_REPO ?= registry.k8s.io/kueue/kueue
+# Namespaces carrying this label are the ONLY ones Kueue manages for pod-based
+# integrations. Every OME-derived pod carries a queue-name label, so without
+# this opt-in an installed Kueue would gate every pod in every suite. Mirrored
+# by kueueManagedLabel in the multi-cluster KIND suite, which fails fast if the
+# rendered manifest and the Go constant ever drift.
+KUEUE_MANAGED_LABEL ?= ome.io/kueue-managed
 DEP_CRDS_DIR := tests/integration/dep-crds
 
 # Each <bundle>-crds target: copies CRD YAMLs from the corresponding
@@ -670,6 +677,24 @@ keda-crds: ## Vendor github.com/kedacore/keda CRDs (keda.sh — ScaledObject, Sc
 	if [ -z "$$KEDA_DIR" ]; then echo "github.com/kedacore/keda/v2 not in go.mod; skipping keda-crds" >&2; exit 0; fi ; \
 	cp -f "$$KEDA_DIR/config/crd/bases/"*.yaml $(DEP_CRDS_DIR)/keda/ ; \
 	echo "✅ Vendored KEDA CRDs to $(DEP_CRDS_DIR)/keda/"
+
+.PHONY: kueue-install
+kueue-install: kustomize ## Render the Kueue install manifest for the KIND suites (deployment + webhooks, not just CRDs)
+	@# The KIND suites need Kueue RUNNING, not just its CRDs: pods are gated by
+	@# its mutating webhook, so an in-cluster deployment is the only way to
+	@# observe admission. Rendered here rather than in the test so CI ships a
+	@# static file — the GKE agents have no kustomize and no egress.
+	@mkdir -p $(DEP_CRDS_DIR)/kueue-install
+	@KUEUE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/kueue 2>/dev/null) ; \
+	if [ -z "$$KUEUE_DIR" ]; then echo "sigs.k8s.io/kueue not in go.mod; skipping kueue-install" >&2; exit 0; fi ; \
+	KUEUE_VERSION=$$(go list -m -mod=readonly -f "{{.Version}}" sigs.k8s.io/kueue) ; \
+	$(KUSTOMIZE) build "$$KUEUE_DIR/config/default" \
+		| sed -E "s#image: .*/kueue/kueue:.*#image: $(KUEUE_IMAGE_REPO):$$KUEUE_VERSION#" \
+		| sed -E "s#imagePullPolicy: Always#imagePullPolicy: IfNotPresent#" \
+		| sed -E "s#^(    kind: Configuration)\$$#\\1\\n    managedJobsNamespaceSelector:\\n      matchLabels:\\n        $(KUEUE_MANAGED_LABEL): \"true\"#" \
+		> $(DEP_CRDS_DIR)/kueue-install/kueue.yaml ; \
+	echo "$$KUEUE_VERSION" > $(DEP_CRDS_DIR)/kueue-install/version ; \
+	echo "✅ Rendered Kueue $$KUEUE_VERSION install manifest to $(DEP_CRDS_DIR)/kueue-install/"
 
 .PHONY: gateway-api-crds
 gateway-api-crds: ## Vendor sigs.k8s.io/gateway-api standard-channel CRDs (HTTPRoute)
