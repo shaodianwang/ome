@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -412,6 +413,28 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 				},
 			},
 		))
+	}
+
+	// Consumption moves without anything in the tree changing, and nothing else
+	// here would notice: the reconcile is woken by AcceleratorQuota edits and by
+	// node capacity, neither of which a workload admission touches. Left to the
+	// resync tick alone, a queue's figures are up to a full interval stale — long
+	// enough that a fleet with work running reads as an idle one.
+	//
+	// A backend that cannot say what to watch simply does not get watched, and
+	// its figures refresh on the resync tick as before.
+	//
+	// Every event maps to one request, as the node watch does, so a burst of
+	// admissions collapses into a single queued pass rather than one per
+	// workload.
+	if watcher, ok := r.Materialize.Backend.(backend.UsageWatcher); ok {
+		obj, usageChanged := watcher.WatchUsage()
+		b = b.Watches(obj,
+			handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: r.Options.RootName}}}
+			}),
+			builder.WithPredicates(usageChanged),
+		)
 	}
 	return b.Complete(r)
 }

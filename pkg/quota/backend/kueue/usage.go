@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -13,7 +15,63 @@ import (
 	"github.com/ome-projects/ome/pkg/quota/usage"
 )
 
-var _ backend.UsageReader = (*Backend)(nil)
+var _ backend.UsageWatcher = (*Backend)(nil)
+
+// WatchUsage wakes the controller when a queue it owns changes what it holds.
+//
+// Kueue rewrites ClusterQueue status for plenty of reasons that move no
+// consumption — pending and reserving counts, condition restamps — and every
+// admitted event costs a whole-tree pass, so the predicate compares the two
+// lists this backend actually reads and admits nothing else.
+//
+// Create and Delete are admitted whatever they carry. A create is how the
+// informer replays queues that already exist at startup, and a delete is a
+// queue that has gone away underneath us: the objects carry no OwnerReference,
+// deliberately, so nothing else would notice one being removed by hand.
+func (b *Backend) WatchUsage() (client.Object, predicate.Predicate) {
+	owned := func(obj client.Object) bool {
+		return obj != nil &&
+			obj.GetLabels()[v1beta1.AcceleratorQuotaManagedByLabel] == b.Options.FieldManager
+	}
+
+	return &kueuev1beta2.ClusterQueue{}, predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return owned(e.Object) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return owned(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return owned(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			before, okBefore := e.ObjectOld.(*kueuev1beta2.ClusterQueue)
+			after, okAfter := e.ObjectNew.(*kueuev1beta2.ClusterQueue)
+			if !okBefore || !okAfter || !owned(after) {
+				return false
+			}
+			return !equalFlavorUsage(before.Status.FlavorsUsage, after.Status.FlavorsUsage) ||
+				!equalFlavorUsage(before.Status.FlavorsReservation, after.Status.FlavorsReservation)
+		},
+	}
+}
+
+// equalFlavorUsage compares two of Kueue's usage lists position by position.
+//
+// Position rather than by name: Kueue renders these from the queue's own
+// resourceGroups, so the order is stable for a given spec, and a reordering
+// means the spec moved — which is a change worth a pass in its own right.
+func equalFlavorUsage(a, b []kueuev1beta2.FlavorUsage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || len(a[i].Resources) != len(b[i].Resources) {
+			return false
+		}
+		for j := range a[i].Resources {
+			x, y := a[i].Resources[j], b[i].Resources[j]
+			if x.Name != y.Name || x.Total.Cmp(y.Total) != 0 || x.Borrowed.Cmp(y.Borrowed) != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // ReadUsage reports what each leaf's ClusterQueue currently holds.
 //

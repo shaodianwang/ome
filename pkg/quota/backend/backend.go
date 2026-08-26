@@ -11,6 +11,8 @@ import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/ome-projects/ome/pkg/quota/tree"
 	"github.com/ome-projects/ome/pkg/quota/usage"
@@ -108,4 +110,32 @@ type UsageReader interface {
 	// the whole fleet its usage figures, so a backend reports what it could
 	// read and errors only when it could read nothing.
 	ReadUsage(ctx context.Context, leaves []*tree.Node) (map[string]map[usage.Key]usage.Observed, error)
+}
+
+// UsageWatcher is a UsageReader whose figures live on an object the manager can
+// watch, so a change is an event rather than something to be found by asking
+// again later.
+//
+// Separate from UsageReader because the two are independently possible: a
+// backend may expose consumption only through an API call with nothing to
+// watch, and answering "what should wake the controller" is then simply not
+// something it can do. A caller that finds no watcher falls back to whatever
+// cadence it already reconciles on.
+//
+// The backend supplies the object and the predicate rather than the caller,
+// because only the backend knows which objects are its own — the ownership mark
+// is its to define — and only it knows which part of their status carries
+// consumption. The caller owns the mapping to a reconcile request, since which
+// object changed does not narrow whole-tree work.
+type UsageWatcher interface {
+	UsageReader
+
+	// WatchUsage returns a prototype of the object whose status carries
+	// consumption, and a predicate admitting only the changes worth a
+	// reconcile.
+	//
+	// The predicate is load-bearing, not an optimisation. An enforcement
+	// backend rewrites these objects for reasons that have nothing to do with
+	// consumption, and every admitted event costs a whole-tree pass.
+	WatchUsage() (client.Object, predicate.Predicate)
 }

@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -263,6 +264,142 @@ func TestReadUsageSurfacesAFailedList(t *testing.T) {
 			_, err := b.ReadUsage(context.Background(), leaves)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ReadUsage() error = %v, want error: %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// The predicate is what keeps a watch on ClusterQueue from costing a whole-tree
+// pass every time Kueue restamps a status. Kueue rewrites these objects for
+// pending counts, reserving counts and condition timestamps, none of which move
+// a number this backend reads.
+func TestWatchUsagePredicate(t *testing.T) {
+	b := &Backend{Options: testOptions()}
+	obj, pred := b.WatchUsage()
+
+	if _, ok := obj.(*kueuev1beta2.ClusterQueue); !ok {
+		t.Fatalf("WatchUsage() object = %T, want *kueuev1beta2.ClusterQueue", obj)
+	}
+
+	usage := func(total, borrowed string) kueuev1beta2.ClusterQueueStatus {
+		return kueuev1beta2.ClusterQueueStatus{
+			FlavorsUsage: []kueuev1beta2.FlavorUsage{
+				flavorUsage("tpu7x", [3]string{"google.com/tpu", total, borrowed}),
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		before *kueuev1beta2.ClusterQueue
+		after  *kueuev1beta2.ClusterQueue
+		want   bool
+	}{
+		{
+			name:   "admitted quantity moving is worth a pass",
+			before: clusterQueue("team-a", "team-a", usage("10", "0")),
+			after:  clusterQueue("team-a", "team-a", usage("50", "0")),
+			want:   true,
+		},
+		{
+			name:   "borrowed quantity moving is worth a pass",
+			before: clusterQueue("team-a", "team-a", usage("50", "0")),
+			after:  clusterQueue("team-a", "team-a", usage("50", "8")),
+			want:   true,
+		},
+		{
+			// The reservation list is read too, so it has to wake the controller
+			// on its own -- a workload reserves before it is admitted.
+			name:   "reservation moving on its own is worth a pass",
+			before: clusterQueue("team-a", "team-a", kueuev1beta2.ClusterQueueStatus{}),
+			after: clusterQueue("team-a", "team-a", kueuev1beta2.ClusterQueueStatus{
+				FlavorsReservation: []kueuev1beta2.FlavorUsage{
+					flavorUsage("tpu7x", [3]string{"google.com/tpu", "16", "0"}),
+				},
+			}),
+			want: true,
+		},
+		{
+			// The specific noise this predicate exists to absorb.
+			name:   "a restamped status holding the same figures is not",
+			before: clusterQueue("team-a", "team-a", usage("50", "0")),
+			after: func() *kueuev1beta2.ClusterQueue {
+				cq := clusterQueue("team-a", "team-a", usage("50", "0"))
+				cq.Status.PendingWorkloads = 7
+				cq.Status.ReservingWorkloads = 3
+				cq.Status.AdmittedWorkloads = 2
+				return cq
+			}(),
+			want: false,
+		},
+		{
+			// A queue this manager does not own must never wake it, however its
+			// figures move.
+			name:   "an unowned queue is ignored",
+			before: &kueuev1beta2.ClusterQueue{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}, Status: usage("10", "0")},
+			after:  &kueuev1beta2.ClusterQueue{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}, Status: usage("99", "0")},
+			want:   false,
+		},
+		{
+			// Another manager's queues are its own business.
+			name:   "a queue owned by a different manager is ignored",
+			before: clusterQueue("team-a", "team-a", usage("10", "0")),
+			after: func() *kueuev1beta2.ClusterQueue {
+				cq := clusterQueue("team-a", "team-a", usage("99", "0"))
+				cq.Labels[v1beta1.AcceleratorQuotaManagedByLabel] = "someone-else"
+				return cq
+			}(),
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pred.Update(event.UpdateEvent{ObjectOld: tc.before, ObjectNew: tc.after})
+			if got != tc.want {
+				t.Errorf("Update() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Create and Delete carry no before-and-after to compare, and both matter: a
+// create is how the informer replays what already exists at startup, and a
+// delete is a queue removed underneath us, which nothing else would notice
+// because these objects carry no OwnerReference.
+func TestWatchUsageCreateAndDelete(t *testing.T) {
+	b := &Backend{Options: testOptions()}
+	_, pred := b.WatchUsage()
+
+	ours := clusterQueue("team-a", "team-a", kueuev1beta2.ClusterQueueStatus{})
+	theirs := &kueuev1beta2.ClusterQueue{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}}
+
+	tests := []struct {
+		name string
+		got  bool
+		want bool
+	}{
+		{
+			name: "a create of our own queue wakes the controller",
+			got:  pred.Create(event.CreateEvent{Object: ours}), want: true,
+		},
+		{
+			name: "a create of a queue we do not own does not",
+			got:  pred.Create(event.CreateEvent{Object: theirs}), want: false,
+		},
+		{
+			name: "a delete of our own queue wakes the controller",
+			got:  pred.Delete(event.DeleteEvent{Object: ours}), want: true,
+		},
+		{
+			name: "a delete of a queue we do not own does not",
+			got:  pred.Delete(event.DeleteEvent{Object: theirs}), want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %v, want %v", tc.got, tc.want)
 			}
 		})
 	}
