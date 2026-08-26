@@ -61,6 +61,7 @@ func (in *AcceleratorBudgetStatus) DeepCopyInto(out *AcceleratorBudgetStatus) {
 		*out = &x
 	}
 	out.Admitted = in.Admitted.DeepCopy()
+	out.Reserved = in.Reserved.DeepCopy()
 	out.Borrowed = in.Borrowed.DeepCopy()
 	if in.PerCluster != nil {
 		in, out := &in.PerCluster, &out.PerCluster
@@ -275,6 +276,7 @@ func (in *AcceleratorClusterBudgetStatus) DeepCopyInto(out *AcceleratorClusterBu
 	*out = *in
 	out.Nominal = in.Nominal.DeepCopy()
 	out.Admitted = in.Admitted.DeepCopy()
+	out.Reserved = in.Reserved.DeepCopy()
 	out.Borrowed = in.Borrowed.DeepCopy()
 }
 

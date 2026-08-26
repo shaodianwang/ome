@@ -285,6 +285,12 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorBudgetStatus(ref common.ReferenceCal
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},
+					"reserved": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reserved is the quantity held by workloads carrying a quota reservation, admitted or not. It is never below Admitted, and the gap between them is work that owns the chips but has not started — a tenant sitting at its ceiling with Admitted low reads as idle unless this is read too.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
 					"borrowed": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Borrowed is the admitted quantity above the nominal share, taken from idle siblings and reclaimable on contention.",
@@ -748,6 +754,12 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorClusterBudgetStatus(ref common.Refer
 					"admitted": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Admitted is the quantity admitted on this cluster, including borrowed.",
+							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+						},
+					},
+					"reserved": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reserved is the quantity reserved on this cluster, admitted or not.",
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},

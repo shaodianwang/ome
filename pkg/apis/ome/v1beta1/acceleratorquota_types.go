@@ -540,6 +540,13 @@ type AcceleratorBudgetStatus struct {
 	// +optional
 	Admitted resource.Quantity `json:"admitted,omitempty"`
 
+	// Reserved is the quantity held by workloads carrying a quota reservation,
+	// admitted or not. It is never below Admitted, and the gap between them is
+	// work that owns the chips but has not started — a tenant sitting at its
+	// ceiling with Admitted low reads as idle unless this is read too.
+	// +optional
+	Reserved resource.Quantity `json:"reserved,omitempty"`
+
 	// Borrowed is the admitted quantity above the nominal share, taken from idle
 	// siblings and reclaimable on contention.
 	// +optional
@@ -566,6 +573,10 @@ type AcceleratorClusterBudgetStatus struct {
 	// Admitted is the quantity admitted on this cluster, including borrowed.
 	// +optional
 	Admitted resource.Quantity `json:"admitted,omitempty"`
+
+	// Reserved is the quantity reserved on this cluster, admitted or not.
+	// +optional
+	Reserved resource.Quantity `json:"reserved,omitempty"`
 
 	// Borrowed is the admitted quantity above this cluster's share.
 	// +optional

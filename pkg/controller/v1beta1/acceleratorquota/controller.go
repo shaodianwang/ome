@@ -172,8 +172,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// Observational, so a backend that cannot be read costs the fleet its usage
+	// figures for this pass and nothing else. Failing here would stop the
+	// conditions and tree positions below from being written too, which is the
+	// half an operator actually acts on.
+	reading, err := r.rollUsage(ctx, built)
+	if err != nil {
+		log.V(1).Info("consumption not read this pass", "reason", err.Error())
+	}
+
 	for _, node := range built.Nodes() {
-		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()]); err != nil {
+		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()], reading); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name(), err))
 		}
 	}
@@ -229,7 +238,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // reconcileStatus writes one node's observed position and condition. It patches
 // only when something changed, so an idle fleet does not rewrite status on every
 // resync tick and spin the watch.
-func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation, outcome backend.NodeOutcome) error {
+func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation,
+	outcome backend.NodeOutcome, reading usageReading) error {
 	current := node.Quota
 	updated := current.DeepCopy()
 
@@ -238,6 +248,13 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 	updated.Status.Parent = ""
 	if node.Parent != nil {
 		updated.Status.Parent = node.Parent.Name()
+	}
+	// Only rewritten when consumption was actually read. A pass that could not
+	// reach the backend leaves the previous figures standing rather than
+	// blanking them: "unknown" and "nothing held" are different answers, and
+	// only one of them is safe to publish on a failed read.
+	if totals, ok := reading.forNode(node.Name()); ok {
+		updated.Status.Budgets = budgetStatus(node, totals)
 	}
 
 	violation, isFrozen := frozen[node.Name()]
@@ -313,6 +330,9 @@ func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
 		return false
 	}
 	if !equalMaterialization(a.Materialization, b.Materialization) {
+		return false
+	}
+	if !equalBudgets(a.Budgets, b.Budgets) {
 		return false
 	}
 	for _, condType := range []string{

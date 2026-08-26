@@ -92,6 +92,10 @@
           ],
           "x-kubernetes-list-type": "map"
         },
+        "reserved": {
+          "description": "Reserved is the quantity held by workloads carrying a quota reservation, admitted or not. It is never below Admitted, and the gap between them is work that owns the chips but has not started — a tenant sitting at its ceiling with Admitted low reads as idle unless this is read too.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
         "resourceFlavor": {
           "description": "ResourceFlavor is the flavor these numbers describe.",
           "type": "string",
@@ -353,6 +357,10 @@
         },
         "nominal": {
           "description": "Nominal is the share assigned to this cluster.",
+          "$ref": "#/definitions/resource.Quantity"
+        },
+        "reserved": {
+          "description": "Reserved is the quantity reserved on this cluster, admitted or not.",
           "$ref": "#/definitions/resource.Quantity"
         }
       }

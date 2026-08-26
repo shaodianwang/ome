@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/ome-projects/ome/pkg/quota/tree"
+	"github.com/ome-projects/ome/pkg/quota/usage"
 )
 
 // Plan is what a backend is asked to make true on this cluster.
@@ -81,4 +82,30 @@ type Backend interface {
 	Name() string
 
 	Materialize(ctx context.Context, plan Plan) (Result, error)
+}
+
+// UsageReader is the optional half of the seam: reporting what the enforcement
+// system currently holds, so the tree can carry observed consumption next to
+// the budget that authorized it.
+//
+// Optional, and discovered by type assertion rather than folded into Backend,
+// because not every enforcement system reports consumption at all. Requiring it
+// would force a backend that cannot answer to stub a method returning nothing,
+// which is indistinguishable at the call site from a fleet holding nothing —
+// the same "absent means disabled, never assumed" rule the rest of the quota
+// plane follows.
+//
+// Readings are per leaf because only a leaf materializes a queue that can hold
+// anything; rolling them onto ancestors is pkg/quota/usage's job, not a
+// backend's.
+type UsageReader interface {
+	// ReadUsage reports what each named leaf currently holds, keyed by node
+	// name. A leaf with no materialized queue is absent from the result rather
+	// than present and empty: those are different states, and the caller
+	// reports them differently.
+	//
+	// A partial reading is a valid answer. One unreadable queue must not cost
+	// the whole fleet its usage figures, so a backend reports what it could
+	// read and errors only when it could read nothing.
+	ReadUsage(ctx context.Context, leaves []*tree.Node) (map[string]map[usage.Key]usage.Observed, error)
 }
