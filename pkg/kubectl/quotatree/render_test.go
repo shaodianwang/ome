@@ -14,6 +14,9 @@ func render(t *testing.T, v *View, opts RenderOptions) string {
 	if opts.Color == "" {
 		opts.Color = ColorNever
 	}
+	if opts.Now.IsZero() {
+		opts.Now = fixtureNow
+	}
 	var b strings.Builder
 	if err := Render(&b, v, opts); err != nil {
 		t.Fatalf("Render: %v", err)
@@ -27,13 +30,13 @@ func TestRenderDrawsTheTreeWithAlignedColumns(t *testing.T) {
 	want := strings.Join([]string{
 		"nvidia.com/gpu on flavor a100",
 		"",
-		"NAME                ROLE          NOMINAL  ADMITTED  READY",
-		"root                Cohort        512      288",
-		"├─ org-product      Cohort        256      128",
-		"│  └─ team-serving  ClusterQueue  256      128       False",
-		"└─ org-research     Cohort        256      160",
-		"   ├─ team-nlp      ClusterQueue  128      96",
-		"   └─ team-vision   ClusterQueue  128      64",
+		"NAME                ROLE          NOMINAL  ADMITTED  READY  AGE",
+		"root                Cohort        512      288              2d2h",
+		"├─ org-product      Cohort        256      128              3h",
+		"│  └─ team-serving  ClusterQueue  256      128       False  3h",
+		"└─ org-research     Cohort        256      160              3h",
+		"   ├─ team-nlp      ClusterQueue  128      96               3h",
+		"   └─ team-vision   ClusterQueue  128      64               3h",
 		"",
 	}, "\n")
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -186,10 +189,17 @@ func TestRenderColorWrapsWithoutBreakingAlignment(t *testing.T) {
 func TestRenderWideAddsTheDetailColumns(t *testing.T) {
 	got := render(t, buildView(t, healthyFleet(), 0), RenderOptions{Wide: true})
 
-	for _, col := range []string{"BORROWED", "ALLOCATABLE", "PEAK", "DEGRADED", "MATERIALIZED", "TIER", "NAMESPACES", "PATH"} {
+	for _, col := range []string{"BORROWED", "ALLOCATABLE", "PEAK", "DEGRADED", "MATERIALIZED", "TIER", "NAMESPACES", "PATH", "AGE"} {
 		if !strings.Contains(got, col) {
 			t.Errorf("wide output missing %s column", col)
 		}
+	}
+	// AGE is last in both layouts, so PATH no longer ends the wide header.
+	if header := strings.SplitN(got, "\n", 4)[2]; !strings.HasSuffix(header, "AGE") {
+		t.Errorf("AGE is not the final wide column:\n%s", header)
+	}
+	if !strings.Contains(got, "2d2h") {
+		t.Error("wide output does not age the root against the render clock")
 	}
 	if !strings.Contains(got, "nlp-dev,nlp-prod") {
 		t.Error("wide output does not list a leaf's bound namespaces, sorted")

@@ -1,0 +1,82 @@
+# A batch Job that charges the sim-batch leaf, so the quota tree reports usage
+# instead of a budget nothing has ever drawn against.
+#
+# Nothing else here submits anything to Kueue. An InferenceService takes OME's
+# own path and never passes through a LocalQueue, so with a tree applied and
+# Kueue running every node still reports admitted=0 — the plane looks identical
+# whether it is working or merely installed. This is the smallest thing that
+# tells the two apart.
+#
+# Needs the quota plane actually admitting, which is the --with-kueue half:
+#
+#   hack/kwok-sim/up.sh --with-kueue
+#   kubectl apply -f hack/kwok-sim/fixtures/31-acceleratorquota.yaml
+#   kubectl apply -f hack/kwok-sim/fixtures/40-job-batch.yaml
+#   kubectl get aq -o wide
+#
+# Three pods of four chips is 12 of sim-batch's 16, so the leaf reports 12
+# admitted with headroom left and sim-tenants rolls the same 12 up to itself.
+# Apply a second copy under another name and the 24 does not fit: Kueue funds
+# neither of the two pods it cannot pay for, that Job stays suspended, and
+# admitted holds at 12 — which is the whole point of the budget.
+#
+#   kubectl -n kwok-sim-batch get jobs,pods
+#   kubectl -n kwok-sim-batch get workloads
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kwok-batch
+  namespace: kwok-sim-batch
+  labels:
+    # The leaf's LocalQueue. Every one OME materializes takes Kueue's own
+    # default-queue name, so this value is the same in every bound namespace and
+    # does not track the AcceleratorQuota it belongs to. Without the label Kueue
+    # ignores the Job entirely: it runs unmanaged and charges nothing.
+    kueue.x-k8s.io/queue-name: default
+spec:
+  # Kueue's webhook suspends a queued Job itself. Declaring it means the Job is
+  # never briefly running unadmitted in the window before that webhook serves.
+  suspend: true
+  parallelism: 3
+  completions: 3
+  template:
+    metadata:
+      annotations:
+        # A pod that completes gives its chips back, and stage-fast's
+        # pod-complete carries no delay at all — the usage would appear and be
+        # gone between two reads. This holds each pod Running long enough to be
+        # worth looking at.
+        #
+        # The annotation is inert on its own: up.sh patches the stage to read
+        # it. Against a cluster built by hand, patch it the same way or these
+        # pods still succeed immediately.
+        pod-complete.stage.kwok.x-k8s.io/delay: "60m"
+    spec:
+      containers:
+      - name: dummy-job
+        image: registry.k8s.io/e2e-test-images/agnhost:2.53
+        args: ["pause"]
+        resources:
+          # Four chips is one whole fake node, which is how the fleet is carved.
+          # cpu and memory are covered on the rendered ClusterQueue at a ceiling
+          # nothing reaches, so the accelerator entry is the only one that
+          # decides whether this is admitted.
+          requests:
+            cpu: "8"
+            memory: 32Gi
+            google.com/tpu: "4"
+          limits:
+            cpu: "8"
+            memory: 32Gi
+            google.com/tpu: "4"
+      # The fake nodes carry the fleet's real TPU taint rather than kwok's
+      # default kwok.x-k8s.io/node=fake, so a stock kwok Job finds nowhere to
+      # land. Kueue adds this one itself on admission, from the tpu7x flavor;
+      # carrying it here means the pod is schedulable on its own terms.
+      tolerations:
+      - key: google.com/tpu
+        operator: Equal
+        value: present
+        effect: NoSchedule
+      restartPolicy: Never

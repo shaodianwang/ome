@@ -255,12 +255,19 @@ freshly-built cluster already shows the component working:
 
 ```
 == accelerator quota ==
-NAME   ROLE     PARENT   READY   DEGRADED   AGE
-root   Cohort            True    False      30s
+NAME   ROLE     PARENT   RESOURCE   FLAVOR   NOMINAL   ADMITTED   READY   DEGRADED   AGE
+root   Cohort                                                     True    False      30s
 
 == derived capacity (root) ==
   google.com/tpu on tpu7x: allocatable=128 highWater=128
 ```
+
+The budget columns are blank because this root carries no budget, which is the
+one shape they cannot describe: they report `status.budgets`, and a node with
+nothing authored has none. Capacity has no column at all — it is the root's
+alone, so `kubectl get aq` would print it blank on every other row. `status.sh`
+reads it off the root, as above, and `kubectl qt -o wide` carries it as
+`ALLOCATABLE` and `PEAK`.
 
 Delete that root and it comes straight back. What an admin adds to it is the
 *budget* — the fleet total, and the one number the controller will not invent.
@@ -287,12 +294,18 @@ created it imperatively, and `kubectl` patches the annotation on as it goes.
 
 ```
 == accelerator quota ==
-NAME          ROLE           PARENT        READY   DEGRADED   AGE
-root          Cohort                       True    False      2m
-sim-batch     ClusterQueue   sim-tenants   True    False      5s
-sim-serving   ClusterQueue   sim-tenants   True    False      5s
-sim-tenants   Cohort         root          True    False      5s
+NAME          ROLE           PARENT        RESOURCE         FLAVOR   NOMINAL   ADMITTED   READY   DEGRADED   AGE
+root          Cohort                                                                      True    False      2m
+sim-batch     ClusterQueue   sim-tenants   google.com/tpu   tpu7x    16        0          True    False      5s
+sim-serving   ClusterQueue   sim-tenants   google.com/tpu   tpu7x    48        0          True    False      5s
+sim-tenants   Cohort         root          google.com/tpu   tpu7x    64        0          True    False      5s
 ```
+
+`NOMINAL` is what the tree authored, so it appears whether or not anything can
+admit. `ADMITTED` is zero here and stays zero without `--with-kueue`: with only
+the Kueue CRDs installed there is nothing to admit a workload, and an
+InferenceService would not charge one of these queues anyway. See
+[`--with-kueue`](#--with-kueue) for the Job that moves it.
 
 **A ResourceFlavor is what makes capacity appear.** A flavor names a hardware
 class by node labels, and OME reads flavors rather than authoring them — so
@@ -352,6 +365,61 @@ own `caBundle`. It is `failurePolicy: Fail`, which is why `up.sh` waits for the
 `caBundle` and for ready endpoints before applying the tree, and retries the
 apply — the cert write and the webhook's first successful TLS accept are
 independent events.
+
+#### Making a tenant consume something
+
+A tree with Kueue behind it still reports `admitted=0` until a workload charges
+one of its queues, and nothing here does: an InferenceService takes OME's own
+path and never passes through a LocalQueue. `fixtures/40-job-batch.yaml` is a
+kwok Job that does — three pods of four chips against `sim-batch`'s 16.
+
+```sh
+kubectl apply -f hack/kwok-sim/fixtures/40-job-batch.yaml
+kubectl get aq -o wide
+```
+
+```
+NAME          ROLE           PARENT        RESOURCE         FLAVOR   NOMINAL   ADMITTED   BORROWED   READY   DEGRADED   AGE   PATH
+root          Cohort                                                                                 True    False      4m    /root
+sim-batch     ClusterQueue   sim-tenants   google.com/tpu   tpu7x    16        12         0          True    False      2m    /root/sim-tenants/sim-batch
+sim-serving   ClusterQueue   sim-tenants   google.com/tpu   tpu7x    48        0          0          True    False      2m    /root/sim-tenants/sim-serving
+sim-tenants   Cohort         root          google.com/tpu   tpu7x    64        12         0          True    False      2m    /root/sim-tenants
+```
+
+The 12 appears on `sim-tenants` as well as on the leaf, because usage rolls up
+the tree — a grouping reports what its subtree holds, not a budget of its own.
+`kubectl qt` shows the same numbers with the shape around them, and carries the
+root's capacity alongside:
+
+```
+google.com/tpu on flavor tpu7x
+
+NAME               ROLE          NOMINAL  ADMITTED  READY  AGE
+root               Cohort        -        -                4m
+└─ sim-tenants     Cohort        64       12               2m
+   ├─ sim-batch    ClusterQueue  16       12               2m
+   └─ sim-serving  ClusterQueue  48       0                2m
+```
+
+The root's dashes are the same fact the flat list shows as blanks: it carries no
+budget. The `(resource, flavor)` columns collapse into the caption because the
+whole tree uses one pair.
+
+The Job's pods must be held Running to keep holding chips. `stage-fast` ships
+`pod-complete` with no delay at all, so a Job's pod succeeds the moment it is
+Running; `up.sh` patches the stage to read
+`pod-complete.stage.kwok.x-k8s.io/delay` off the pod, and the fixture sets it to
+`60m`. Without that patch the annotation is inert and the usage is gone before
+the next read. The stage selects Job-owned pods only, so no ISVC is affected.
+
+Apply a second copy under another name and the 24 does not fit. Kueue funds
+neither of the two pods it cannot pay for, that Job stays suspended, and
+`ADMITTED` holds at 12:
+
+```sh
+sed 's/name: kwok-batch/name: kwok-batch-2/' hack/kwok-sim/fixtures/40-job-batch.yaml | kubectl apply -f -
+kubectl -n kwok-sim-batch get jobs,workloads
+```
 
 Capacity moves with the fleet, and the two numbers move differently.
 `--cubes 4x4x4` alone reports 64 chips; cordoning one node of the default 32
@@ -465,6 +533,7 @@ it here.
 | `fixtures/2*-isvc-*.yaml` | one slice, and one whole cube |
 | `fixtures/30-resourceflavor.yaml` | the Kueue `ResourceFlavor` the fleet's chips attribute to |
 | `fixtures/31-acceleratorquota.yaml` | a four-node quota tree over one cube; not applied by `up.sh` |
+| `fixtures/40-job-batch.yaml` | a kwok Job charging the `sim-batch` leaf, so the tree reports usage |
 
 ## Install notes
 

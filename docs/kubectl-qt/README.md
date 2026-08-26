@@ -13,14 +13,20 @@ the whole set is assembled. That assembly is what this plugin does.
 $ kubectl qt
 nvidia.com/gpu on flavor a100
 
-NAME                ROLE          NOMINAL  ADMITTED  READY
-root                Cohort        512      288
-├─ org-product      Cohort        256      128
-│  └─ team-serving  ClusterQueue  256      128       False
-└─ org-research     Cohort        256      160
-   ├─ team-nlp      ClusterQueue  128      96
-   └─ team-vision   ClusterQueue  128      64
+NAME                ROLE          NOMINAL  ADMITTED  READY  AGE
+root                Cohort        512      288              2d2h
+├─ org-product      Cohort        256      128              3h
+│  └─ team-serving  ClusterQueue  256      128       False  3h
+└─ org-research     Cohort        256      160              3h
+   ├─ team-nlp      ClusterQueue  128      96               3h
+   └─ team-vision   ClusterQueue  128      64               3h
 ```
+
+`kubectl get aq` names its columns the same way and in the same order, so a node
+reads alike either way. It carries a subset: no tree, no more than a node's
+first `(resource, flavor)` pair, no reason for a broken edge, and no observed
+capacity — `ALLOCATABLE` and `PEAK` are the root's alone, which a flat list has
+nowhere to put but a tree does.
 
 ## Install
 
@@ -75,6 +81,7 @@ asks kubectl to exec it for you.
 | `NOMINAL` | The allowance for this (resource, flavor) pair. |
 | `ADMITTED` | What is currently admitted against the materialized queues, including anything borrowed. |
 | `READY` | Blank when the node is Ready. A value here means it is not. |
+| `AGE` | How long the node has existed, measured once per render so no two rows disagree. |
 
 Three conventions are worth knowing:
 
@@ -98,24 +105,27 @@ Because nothing has written `status.budgets` on those nodes:
 $ kubectl qt
 google.com/tpu on flavor tpu7x
 
-NAME               ROLE          NOMINAL  ADMITTED  READY
-root               Cohort        -        -
-├─ sim-tenants     Cohort        64*      -
-│  ├─ sim-batch    ClusterQueue  16*      -
-│  └─ sim-serving  ClusterQueue  48*      -
-└─ solo            ClusterQueue  16*      -
+NAME               ROLE          NOMINAL  ADMITTED  READY  AGE
+root               Cohort        -        -                12m
+├─ sim-tenants     Cohort        64*      -                12m
+│  ├─ sim-batch    ClusterQueue  16*      -                12m
+│  └─ sim-serving  ClusterQueue  48*      -                12m
+└─ solo            ClusterQueue  16*      -                12m
 ```
 
 This tree is **healthy**, not broken. A blank `READY` means every node is
 `Ready=True`, so the quota controller is running and has accepted the tree —
 it validated the edges, computed each `status.path`, and found no violations.
 
-What it has not done is publish resolved budgets. The `AcceleratorQuota`
-controller writes `observedGeneration`, `path`, `parent`, `conditions`, and —
-on the root only, when capacity derivation is enabled — `status.capacity`. It
-does not populate `status.budgets`, so `NOMINAL` falls back to spec and
-`ADMITTED` has no source at all and stays `-`. On a plane where nothing
-resolves budgets this is a steady state: the `*` will not clear by waiting.
+What it has not done is publish resolved budgets. `status.budgets` is written by
+whatever resolves budgets on the plane being read, and where nothing does, the
+controller writes only `observedGeneration`, `path`, `parent`, `conditions`,
+and — on the root, when capacity derivation is enabled — `status.capacity`.
+`NOMINAL` then falls back to spec and `ADMITTED` has no source at all. This is a
+steady state, not a pending one: the `*` will not clear by waiting.
+
+A workload cluster materializing into Kueue does resolve them, and there the
+same tree reports a resolved `NOMINAL` with no mark and a real `ADMITTED`.
 
 `root` showing `-` rather than a number is also normal. Budgets on a Cohort are
 optional, and a workload-cluster root is typically authored without one — it

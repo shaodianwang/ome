@@ -5,6 +5,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/tree"
@@ -41,6 +42,11 @@ type NodeView struct {
 	// Path is the root-to-node path the controller computed, empty on a node
 	// with no position in the tree.
 	Path string `json:"path,omitempty"`
+
+	// CreationTimestamp is carried raw rather than as an age, so JSON output
+	// matches how it appears on the CR and stays comparable between two runs.
+	// The table humanizes it against the render's own clock.
+	CreationTimestamp metav1.Time `json:"creationTimestamp,omitempty"`
 
 	// Depth is the distance from the root in edges, -1 when unreachable.
 	Depth int `json:"depth"`
@@ -186,14 +192,15 @@ func BuildView(t *tree.Tree, vs tree.Violations) *View {
 func newNodeView(n *tree.Node) *NodeView {
 	q := n.Quota
 	nv := &NodeView{
-		Name:         n.Name(),
-		Role:         string(n.Role()),
-		Path:         n.Path,
-		Depth:        n.Depth,
-		PriorityTier: q.Spec.PriorityTier,
-		Namespaces:   append([]string(nil), q.Spec.Namespaces...),
-		Budgets:      budgetViews(q),
-		Capacity:     capacityViews(q),
+		Name:              n.Name(),
+		Role:              string(n.Role()),
+		Path:              n.Path,
+		Depth:             n.Depth,
+		CreationTimestamp: q.CreationTimestamp,
+		PriorityTier:      q.Spec.PriorityTier,
+		Namespaces:        append([]string(nil), q.Spec.Namespaces...),
+		Budgets:           budgetViews(q),
+		Capacity:          capacityViews(q),
 	}
 	if q.Spec.ParentRef != nil {
 		nv.Parent = q.Spec.ParentRef.Name

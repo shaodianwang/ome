@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -36,6 +37,11 @@ type RenderOptions struct {
 
 	// Color selects when to emit ANSI escapes.
 	Color ColorMode
+
+	// Now is what the AGE column is measured against. Zero means the wall
+	// clock, which is what a caller wants; it is a field so a test can render a
+	// fixture's ages without the output changing between two runs.
+	Now time.Time
 }
 
 // unset is what a column shows when a node has no value for it. A dash rather
@@ -51,6 +57,9 @@ func Render(w io.Writer, v *View, opts RenderOptions) error {
 	if opts.Glyphs == (Glyphs{}) {
 		opts.Glyphs = UnicodeGlyphs
 	}
+	if opts.Now.IsZero() {
+		opts.Now = time.Now()
+	}
 	p := newPalette(opts.Color, w)
 
 	if v == nil || (v.Root == nil && len(v.Orphans) == 0) {
@@ -63,7 +72,7 @@ func Render(w io.Writer, v *View, opts RenderOptions) error {
 	// more than one pair. With a single pair they say the same thing on every
 	// row, so they move to a caption above the table.
 	single := len(pairs) == 1
-	layout := newLayout(opts.Wide, single)
+	layout := newLayout(opts.Wide, single, opts.Now)
 
 	var rows []row
 	if v.Root != nil {

@@ -22,6 +22,22 @@ spec:
     - jsonPath: .spec.parentRef.name
       name: Parent
       type: string
+    - jsonPath: .status.budgets[0].resourceName
+      name: Resource
+      type: string
+    - jsonPath: .status.budgets[0].resourceFlavor
+      name: Flavor
+      type: string
+    - jsonPath: .status.budgets[0].nominal
+      name: Nominal
+      type: string
+    - jsonPath: .status.budgets[0].admitted
+      name: Admitted
+      type: string
+    - jsonPath: .status.budgets[0].borrowed
+      name: Borrowed
+      priority: 1
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -33,14 +49,6 @@ spec:
       type: date
     - jsonPath: .status.path
       name: Path
-      priority: 1
-      type: string
-    - jsonPath: .status.capacity[0].allocatable
-      name: Allocatable
-      priority: 1
-      type: string
-    - jsonPath: .status.capacity[0].highWaterMark
-      name: Peak
       priority: 1
       type: string
     name: v1beta1

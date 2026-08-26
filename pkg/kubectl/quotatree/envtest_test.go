@@ -3,10 +3,15 @@ package quotatree
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"text/tabwriter"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
@@ -91,6 +96,39 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		}
 	})
 
+	// The CRD's printer columns are the other reader of this data, and they are
+	// held to the plugin's vocabulary: same names, same order, so `kubectl get
+	// aq` and `kubectl qt` describe a node the same way.
+	t.Run("printer columns", func(t *testing.T) {
+		tbl := fetchTable(ctx, t, cfg)
+
+		wantDefault := "NAME ROLE PARENT RESOURCE FLAVOR NOMINAL ADMITTED READY DEGRADED AGE"
+		wantWide := "NAME ROLE PARENT RESOURCE FLAVOR NOMINAL ADMITTED BORROWED READY DEGRADED AGE PATH"
+		if got := strings.Join(columnNames(tbl, false), " "); got != wantDefault {
+			t.Errorf("default columns:\n got %s\nwant %s", got, wantDefault)
+		}
+		if got := strings.Join(columnNames(tbl, true), " "); got != wantWide {
+			t.Errorf("wide columns:\n got %s\nwant %s", got, wantWide)
+		}
+		t.Logf("kubectl get aq\n%s", renderTable(tbl, false))
+		t.Logf("kubectl get aq -o wide\n%s", renderTable(tbl, true))
+
+		// Every node carries a budget, so a leaf reports its own allowance and
+		// usage with no -o wide.
+		nlp := cellsOf(t, tbl, "team-nlp")
+		if nlp["NOMINAL"] != "128" || nlp["ADMITTED"] != "96" {
+			t.Errorf("a leaf's budget is missing from the default view: %v", nlp)
+		}
+		// Observed capacity is the root's alone, so it is no column here: in a
+		// flat list it would be blank on every row but one. The plugin keeps
+		// it, having a tree to put it in.
+		for _, col := range []string{"ALLOCATABLE", "PEAK"} {
+			if _, ok := nlp[col]; ok {
+				t.Errorf("%s is a column again, and only the root can fill it", col)
+			}
+		}
+	})
+
 	t.Run("orphan is reported not hidden", func(t *testing.T) {
 		orphan := leaf("stranded", "deleted-cohort", withSpec(specBudget(gpu, a100, "4")))
 		if _, err := client.OmeV1beta1().AcceleratorQuotas().Create(ctx, &orphan, metav1.CreateOptions{}); err != nil {
@@ -146,6 +184,104 @@ func runAgainst(ctx context.Context, t *testing.T, cfg *rest.Config, o Options) 
 		t.Fatalf("Run: %v", err)
 	}
 	return out.String()
+}
+
+// fetchTable asks the apiserver for the same server-side Table kubectl renders.
+// That is where a printer column's JSONPath is actually evaluated, and a path
+// matching nothing yields an empty cell rather than an error — so nothing short
+// of the rendered table shows whether a column works.
+func fetchTable(ctx context.Context, t *testing.T, cfg *rest.Config) *metav1.Table {
+	t.Helper()
+	httpClient, err := rest.HTTPClientFor(cfg)
+	if err != nil {
+		t.Fatalf("build http client: %v", err)
+	}
+	url := strings.TrimSuffix(cfg.Host, "/") + "/apis/ome.io/v1beta1/acceleratorquotas"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("list as table: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list as table %s: %s: %s", url, resp.Status, body)
+	}
+	var tbl metav1.Table
+	if err := json.Unmarshal(body, &tbl); err != nil {
+		t.Fatalf("decode table: %v", err)
+	}
+	return &tbl
+}
+
+// keptColumns applies kubectl's own rule: a column carrying a non-zero priority
+// is dropped unless -o wide was asked for, and the rest keep their declared
+// order.
+func keptColumns(tbl *metav1.Table, wide bool) []int {
+	var out []int
+	for i, c := range tbl.ColumnDefinitions {
+		if c.Priority != 0 && !wide {
+			continue
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
+func columnNames(tbl *metav1.Table, wide bool) []string {
+	kept := keptColumns(tbl, wide)
+	out := make([]string, 0, len(kept))
+	for _, i := range kept {
+		out = append(out, strings.ToUpper(tbl.ColumnDefinitions[i].Name))
+	}
+	return out
+}
+
+func renderTable(tbl *metav1.Table, wide bool) string {
+	var b bytes.Buffer
+	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, strings.Join(columnNames(tbl, wide), "\t"))
+	for _, r := range tbl.Rows {
+		cells := []string{}
+		for _, i := range keptColumns(tbl, wide) {
+			cells = append(cells, cellText(r.Cells, i))
+		}
+		fmt.Fprintln(w, strings.Join(cells, "\t"))
+	}
+	_ = w.Flush()
+	return b.String()
+}
+
+func cellText(cells []interface{}, i int) string {
+	if i >= len(cells) || cells[i] == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", cells[i])
+}
+
+// cellsOf indexes one object's row by column name, including the columns -o
+// wide would have hidden.
+func cellsOf(t *testing.T, tbl *metav1.Table, name string) map[string]string {
+	t.Helper()
+	for _, r := range tbl.Rows {
+		if cellText(r.Cells, 0) != name {
+			continue
+		}
+		out := map[string]string{}
+		for i, c := range tbl.ColumnDefinitions {
+			out[strings.ToUpper(c.Name)] = cellText(r.Cells, i)
+		}
+		return out
+	}
+	t.Fatalf("no row for %q", name)
+	return nil
 }
 
 // seedFleet writes the fixture through the apiserver, spec and status

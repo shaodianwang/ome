@@ -199,6 +199,17 @@ helm upgrade --install kwok kwok/kwok --version "$KWOK_CHART_VERSION" \
 # which collides in one namespace. Without the Stages nothing ever goes Ready.
 helm upgrade --install kwok-stages kwok/stage-fast --version "$KWOK_CHART_VERSION" \
   --kube-context "$KCTX" --namespace kube-system --wait --timeout 120s >/dev/null
+# stage-fast ships pod-complete with no delay at all, so a Job's pod succeeds
+# the moment it is Running and gives back whatever it held. Nothing that holds
+# a resource for a measurable interval can be simulated that way -- a quota
+# tenant's usage appears and is gone between two reads. Teaching the stage to
+# read a per-pod delay annotation makes the duration the pod's business, with
+# 30s for one that asks for nothing. The stage selects Job-owned pods only, so
+# this reaches no ISVC. Patched rather than applied: the chart owns the rest of
+# the object, and a partial apply over it would depend on merge semantics that
+# change once kubectl has written a last-applied annotation.
+kubectl --context "$KCTX" patch stage.kwok.x-k8s.io pod-complete --type=merge -p \
+  '{"spec":{"delay":{"durationMilliseconds":30000,"durationFrom":{"expressionFrom":".metadata.annotations[\"pod-complete.stage.kwok.x-k8s.io/delay\"]"}}}}' >/dev/null
 
 echo "==> simulated TPU nodes (${CUBES})"
 KWOK_SIM_CONTEXT="$KCTX" hack/kwok-sim/apply-tpu-nodes.sh --context "$KCTX" \

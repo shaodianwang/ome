@@ -608,7 +608,7 @@
       }
     },
     "v1beta1.AcceleratorQuota": {
-      "description": "AcceleratorQuota is one node of the fleet quota tree. Cluster-scoped: it is fleet-level capacity policy, not a namespaced workload.\n\nThe name-length rule is deliberately at the root rather than under spec: removecrdvalidation replaces only the spec and status schemas, so a root rule is the one structural check that also holds in the minimal CRD variant.\n\nOnly the reserved root carries capacity, and only its first (resource, flavor) pair fits a column — a cluster with two accelerator types needs `-o yaml` for the rest. Worth the column anyway: without it a drained node changes nothing an operator can see, since nothing consumes capacity yet.",
+      "description": "AcceleratorQuota is one node of the fleet quota tree. Cluster-scoped: it is fleet-level capacity policy, not a namespaced workload.\n\nThe name-length rule is deliberately at the root rather than under spec: removecrdvalidation replaces only the spec and status schemas, so a root rule is the one structural check that also holds in the minimal CRD variant.\n\nColumn names and order follow the kubectl-qt plugin, so a node reads the same either way, and the budget every node carries is in the default view rather than behind -o wide. Only status.budgets[0] fits a row; the plugin emits one per (resource, flavor) pair. Observed capacity is deliberately not a column: the root alone reports it, so in a flat list it would be blank on every other row. Read it off the root directly, or through the plugin, which has the tree to put it in.",
       "type": "object",
       "properties": {
         "apiVersion": {

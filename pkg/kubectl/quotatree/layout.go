@@ -2,8 +2,10 @@ package quotatree
 
 import (
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/duration"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -18,10 +20,14 @@ type layout struct {
 	// showPair adds the resource and flavor columns. Suppressed when the whole
 	// tree uses one pair, which the caption states instead.
 	showPair bool
+
+	// now is what AGE is measured against, fixed for the whole render so two
+	// rows of one table cannot disagree about the current time.
+	now time.Time
 }
 
-func newLayout(wide, singlePair bool) layout {
-	return layout{wide: wide, showPair: !singlePair}
+func newLayout(wide, singlePair bool, now time.Time) layout {
+	return layout{wide: wide, showPair: !singlePair, now: now}
 }
 
 func (l layout) header() row {
@@ -39,6 +45,7 @@ func (l layout) header() row {
 	} else {
 		names = append(names, "READY")
 	}
+	names = append(names, "AGE")
 
 	cells := make([]cell, 0, len(names))
 	for _, n := range names {
@@ -97,7 +104,7 @@ func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first 
 		cells = append(cells, cell{
 			text:  firstOnly(first, unhealthyReady(n)),
 			style: conditionStyle(n, v1beta1.AcceleratorQuotaReady),
-		})
+		}, l.ageCell(n, first))
 		return row{cells: cells, dim: n.contextDim()}
 	}
 
@@ -117,8 +124,20 @@ func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first 
 		text(firstOnly(first, orUnset(n.PriorityTier))),
 		text(firstOnly(first, orUnset(SortedNamespaces(n)))),
 		dim(firstOnly(first, orUnset(n.Path))),
+		l.ageCell(n, first),
 	)
 	return row{cells: cells, dim: n.contextDim()}
+}
+
+// ageCell renders how long the node has existed, in kubectl's own abbreviated
+// form so the two tables read alike. It recedes: age is the least of what a row
+// says, and it is the same width on every row, so drawn plain it would pull the
+// eye across the table for nothing.
+func (l layout) ageCell(n *NodeView, first bool) cell {
+	if n.CreationTimestamp.IsZero() {
+		return dim(firstOnly(first, unset))
+	}
+	return dim(firstOnly(first, duration.HumanDuration(l.now.Sub(n.CreationTimestamp.Time))))
 }
 
 // nameStyle picks how a node's name is drawn.

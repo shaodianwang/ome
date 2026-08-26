@@ -245,16 +245,22 @@ const (
 // +kubebuilder:resource:scope=Cluster,path=acceleratorquotas,shortName=aq,singular=acceleratorquota
 // +kubebuilder:printcolumn:name="Role",type=string,JSONPath=`.spec.role`
 // +kubebuilder:printcolumn:name="Parent",type=string,JSONPath=`.spec.parentRef.name`
+// Column names and order follow the kubectl-qt plugin, so a node reads the same
+// either way, and the budget every node carries is in the default view rather
+// than behind -o wide. Only status.budgets[0] fits a row; the plugin emits one
+// per (resource, flavor) pair. Observed capacity is deliberately not a column:
+// the root alone reports it, so in a flat list it would be blank on every other
+// row. Read it off the root directly, or through the plugin, which has the tree
+// to put it in.
+// +kubebuilder:printcolumn:name="Resource",type=string,JSONPath=`.status.budgets[0].resourceName`
+// +kubebuilder:printcolumn:name="Flavor",type=string,JSONPath=`.status.budgets[0].resourceFlavor`
+// +kubebuilder:printcolumn:name="Nominal",type=string,JSONPath=`.status.budgets[0].nominal`
+// +kubebuilder:printcolumn:name="Admitted",type=string,JSONPath=`.status.budgets[0].admitted`
+// +kubebuilder:printcolumn:name="Borrowed",type=string,priority=1,JSONPath=`.status.budgets[0].borrowed`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Degraded",type=string,JSONPath=`.status.conditions[?(@.type=="Degraded")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Path",type=string,priority=1,JSONPath=`.status.path`
-// Only the reserved root carries capacity, and only its first (resource,
-// flavor) pair fits a column — a cluster with two accelerator types needs
-// `-o yaml` for the rest. Worth the column anyway: without it a drained node
-// changes nothing an operator can see, since nothing consumes capacity yet.
-// +kubebuilder:printcolumn:name="Allocatable",type=string,priority=1,JSONPath=`.status.capacity[0].allocatable`
-// +kubebuilder:printcolumn:name="Peak",type=string,priority=1,JSONPath=`.status.capacity[0].highWaterMark`
 type AcceleratorQuota struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
