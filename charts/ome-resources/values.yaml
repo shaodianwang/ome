@@ -483,6 +483,79 @@ serviceMonitor:
   # Prometheus relabel rules applied after scraping (drop/keep series).
   metricRelabelings: []
 
+# P0 alert rules — the tier that pages immediately. Every rule here is a
+# symptom a user can feel; causes belong in the lower tiers, because paging on
+# a cause that has not yet hurt anyone teaches the on-call to close pages
+# without reading them.
+#
+# Shipped as a prometheus-operator PrometheusRule, so it needs the
+# monitoring.coreos.com/v1 CRD and a Prometheus whose ruleSelector matches
+# (see additionalLabels). The Prometheus this chart bundles is a plain
+# Deployment reading a ConfigMap and does NOT consume PrometheusRule objects —
+# point these at the same Prometheus that backs your alerting.
+#
+# Disabled by default: an alert rule that fires into a routing tree nobody has
+# configured is worse than no rule at all.
+prometheusRule:
+  enabled: false
+  # Extra labels merged onto the PrometheusRule, to match the operator's
+  # ruleSelector.
+  additionalLabels: {}
+  # How often Prometheus evaluates this group.
+  interval: 30s
+  # Routing label stamped on every rule below.
+  severity: critical
+  # Runbook base URL. Each alert appends its own "#anchor", so a reader lands
+  # on the section for the alert that woke them. Empty emits the bare anchor —
+  # every alert still names its section, it just is not clickable.
+  runbookUrlBase: ""
+  # Series selectors, as PromQL label matchers without the enclosing braces.
+  #
+  # OME control-plane series are matched by pod name rather than by `job`: the
+  # job label differs between the ServiceMonitor scrape path and the
+  # prometheus.io/scrape annotation path, so it is not portable. Override if
+  # your store relabels differently, or to scope alerts to one cluster.
+  selectors:
+    controlPlane: pod=~"ome-controller-manager.*"
+    # Router series come from the router image, which is built outside this
+    # repo. Leave empty to match all routers the store knows about.
+    router: ""
+  rules:
+    # No reconciliation is happening at all: the pods are gone, every replica
+    # is failing its scrape, or the replicas are up but none holds the lease.
+    controllerDown:
+      enabled: true
+      duration: 5m
+    # The admission webhook is returning server errors, which blocks every
+    # InferenceService write cluster-wide. Counts 5xx only: a *rejected*
+    # admission is a 200 carrying allowed=false, and rejecting a bad spec is
+    # the webhook working.
+    webhookFailing:
+      enabled: true
+      duration: 5m
+      ratioThreshold: 0.1
+    # An InferenceService has registered backends but the routers see none of
+    # them as healthy — a customer-visible outage for that workload.
+    serviceUnavailable:
+      enabled: true
+      duration: 5m
+    # Rollouts are failing broadly enough to implicate the control plane
+    # rather than any one workload, so both a rate and a spread are required.
+    massRolloutFailure:
+      enabled: true
+      duration: 15m
+      ratioThreshold: 0.5
+      minInferenceServices: 3
+    # The controller is up and scraping, but wedged: work is queued, the
+    # backlog is growing, and nothing is being reconciled.
+    reconcileStalled:
+      enabled: true
+      duration: 10m
+      # Depth below this is normal churn, not a backlog.
+      minQueueDepth: 1
+      # Reconciles/sec at or below this counts as no progress.
+      maxReconcileRate: 0.01
+
 # PodMonitor for the model-agent DaemonSet. The DaemonSet has no
 # fronting Service (it's addressed via node-local hostPath, not
 # cluster DNS), so PodMonitor is the right scrape primitive.
