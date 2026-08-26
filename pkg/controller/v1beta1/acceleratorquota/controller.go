@@ -194,7 +194,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if built.Root == nil {
 			created, err := r.ensureRoot(ctx)
 			if err != nil {
-				return ctrl.Result{}, err
+				if !webhookUnavailable(err) {
+					return ctrl.Result{}, err
+				}
+				// The startup pass makes the same create and already treats this
+				// as a wait; surfacing it here as well would answer a condition
+				// that clears on its own with a stack trace per attempt.
+				log.V(1).Info("waiting to create the reserved root",
+					"root", r.Options.RootName, "reason", err.Error())
+				return ctrl.Result{RequeueAfter: rootBootstrapRetry}, nil
 			}
 			if !created {
 				// The name is taken by a node that is not the tree root: it

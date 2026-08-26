@@ -67,20 +67,19 @@ var (
 	// the process writes it; see startSecretProjection for what fills it.
 	certDir string
 
-	certsReady chan struct{}
+	certOpts quotacert.Options
 )
 
 var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
-	// The write-conflict gate catches an OME reconciler that lacks conflict-aware
-	// retry. It does not apply here: the rotator refreshes from two paths at
-	// once — its own startup runnable and the Secret watch — so the loser of
-	// that race logs one optimistic-lock rejection at error level, retries with
-	// backoff, and succeeds. Every spec below depends on that success, so a
-	// regression to a genuinely stuck rotator fails them rather than passing
-	// quietly behind the skip.
-	s, err := framework.NewSuite(&framework.Framework{SkipWriteConflictCheck: true})
+	// The write-conflict gate stays on. It would fire if the rotator ever
+	// refreshed the Secret from two paths at once — its own startup runnable and
+	// the injector reacting to the Secret watch — which is what holding the
+	// injection until the cert is readable exists to prevent. A regression there
+	// fails this suite rather than showing up as an error-level optimistic-lock
+	// rejection in a running cluster.
+	s, err := framework.NewSuite(&framework.Framework{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	suiteFwk = s.Fwk
@@ -127,17 +126,26 @@ var _ = ginkgo.BeforeSuite(func() {
 		}},
 	})).To(gomega.Succeed())
 
-	certsReady = make(chan struct{})
+	certOpts = quotacert.Options{
+		Namespace:         certNamespace,
+		SecretName:        secretName,
+		ServiceName:       serviceName,
+		WebhookConfigName: webhookConfigName,
+		CertDir:           certDir,
+		CAName:            caName,
+		CAOrganization:    caOrganization,
+	}
+
+	// The binary's own order, and the reason the specs below assert without
+	// Eventually: Bootstrap runs on a manager of its own and returns only once
+	// the certificate is usable, so everything after this point — the real
+	// manager, its controllers, its webhook server — starts against an admission
+	// path that already works. No health probe address: the framework's manager
+	// binds its own, and this pass is over before that one is built.
+	gomega.Expect(quotacert.Bootstrap(suiteCtx, s.Cfg, certOpts, "")).To(gomega.Succeed())
+
 	mgrSetup := func(_ context.Context, mgr ctrl.Manager) error {
-		return quotacert.Manage(mgr, quotacert.Options{
-			Namespace:         certNamespace,
-			SecretName:        secretName,
-			ServiceName:       serviceName,
-			WebhookConfigName: webhookConfigName,
-			CertDir:           certDir,
-			CAName:            caName,
-			CAOrganization:    caOrganization,
-		}, certsReady)
+		return quotacert.Manage(mgr, certOpts)
 	}
 	gomega.Expect(suiteFwk.StartManager(suiteCtx, s.Cfg, mgrSetup)).To(gomega.Succeed())
 })

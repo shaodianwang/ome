@@ -3,6 +3,7 @@ package acceleratorquota
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -17,11 +18,28 @@ import (
 	"github.com/ome-projects/ome/pkg/quota/capacity"
 )
 
-// rootBootstrapRetry paces the startup root check. Not a knob, and deliberately
-// not one: the only thing it waits on is this process's own admission path
-// coming up, which is a startup transient measured in seconds. Every other
-// trigger for the same check is event-driven or the resync tick.
+// rootBootstrapRetry paces the root check while it waits. Not a knob, and
+// deliberately not one: the only thing it waits on is this process's own
+// admission path coming up, which is a startup transient measured in seconds.
+// Every other trigger for the same check is event-driven or the resync tick.
 const rootBootstrapRetry = 2 * time.Second
+
+// webhookUnavailable reports whether the apiserver refused a write because it
+// could not reach an admission webhook.
+//
+// At startup that is this component refusing its own write: the reserved-root
+// create is gated by a fail-closed webhook this same process serves, and until
+// the replica is a ready endpoint of its own webhook Service the apiserver has
+// nowhere to send the review. It clears itself within seconds, so it is a wait
+// rather than a failure. Every other refusal — a rejected spec, a denied
+// create — stays an error.
+//
+// The prefix is the apiserver's own, applied to every admission dial failure
+// whatever the cause underneath: no endpoints yet, no listener yet, a caBundle
+// that does not verify the served chain.
+func webhookUnavailable(err error) bool {
+	return apierrors.IsInternalError(err) && strings.Contains(err.Error(), "failed calling webhook")
+}
 
 // CapacityOptions configure deriving the cluster's own accelerator capacity
 // onto the reserved root. Absent config disables derivation rather than

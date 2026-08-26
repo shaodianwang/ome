@@ -1,11 +1,12 @@
 package cert
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr/testr"
+	"k8s.io/client-go/rest"
 )
 
 func complete() Options {
@@ -89,41 +90,48 @@ func TestOptionsValidate(t *testing.T) {
 	}
 }
 
-// Manage must reject before it registers anything. Half-registering a rotator
-// would leave the manager with a Runnable that can never succeed.
-func TestManageRejectsIncompleteOptions(t *testing.T) {
+// Both entry points must reject before they touch anything. Half-registering a
+// rotator leaves the manager with a Runnable that can never succeed, and a
+// bootstrap pass that got as far as building a manager would hold the health
+// probe port open on the way out.
+func TestEntryPointsRejectIncompleteOptions(t *testing.T) {
 	opts := complete()
 	opts.SecretName = ""
 
-	// A nil manager is safe precisely because validation runs first; if that
-	// ordering ever changes, this panics rather than passing quietly.
-	if err := Manage(nil, opts, make(chan struct{})); err == nil {
-		t.Fatal("Manage() = nil, want an error for the missing secret name")
+	// The nil manager and nil rest.Config are safe precisely because validation
+	// runs first; if that ordering ever changes, these panic rather than passing
+	// quietly.
+	if err := Manage(nil, opts); err == nil {
+		t.Error("Manage() = nil, want an error for the missing secret name")
+	}
+	if err := Bootstrap(context.Background(), nil, opts, ""); err == nil {
+		t.Error("Bootstrap() = nil, want an error for the missing secret name")
 	}
 }
 
-// WaitForReady gates webhook registration, so it must actually block until the
-// cert exists — returning early would register a handler the apiserver cannot
-// complete a TLS handshake with, turning every quota write into a connection
-// error under failurePolicy=Fail.
-func TestWaitForReady(t *testing.T) {
-	certsReady := make(chan struct{})
-	returned := make(chan struct{})
+// Bootstrap blocks the whole startup path, so a bootstrap that cannot succeed
+// has to come back as an error. The readiness channel is closed by the rotator
+// and by nothing else, so waiting on it alone would leave a process whose
+// rotator has already given up — an apiserver it cannot reach, a Secret the
+// chart never created — hanging unready forever instead of exiting and letting
+// the pod restart.
+func TestBootstrapReportsAGivenUpRotator(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	returned := make(chan error, 1)
 	go func() {
-		defer close(returned)
-		WaitForReady(testr.New(t), certsReady)
+		// Nothing is listening on port 1, so the rotator fails its first read
+		// and stops the manager under it.
+		returned <- Bootstrap(ctx, &rest.Config{Host: "127.0.0.1:1"}, complete(), "")
 	}()
 
 	select {
-	case <-returned:
-		t.Fatal("WaitForReady() returned before the certificate was ready")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(certsReady)
-	select {
-	case <-returned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForReady() did not return once the certificate was ready")
+	case err := <-returned:
+		if err == nil {
+			t.Fatal("Bootstrap() = nil, want the rotator's failure to surface")
+		}
+	case <-ctx.Done():
+		t.Fatal("Bootstrap() blocked on a readiness channel its rotator will never close")
 	}
 }

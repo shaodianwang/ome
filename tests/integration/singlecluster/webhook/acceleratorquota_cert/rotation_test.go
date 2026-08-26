@@ -19,21 +19,12 @@ const (
 )
 
 var _ = ginkgo.Describe("Internal webhook certificate management", func() {
-	ginkgo.It("signals readiness once the certificate is usable", func() {
-		// Webhook handlers register only after this closes, and the component's
-		// readyz gate is wired to it. It is a composite signal — cert on disk
-		// AND caBundle injected — so a pod that reports ready is one the
-		// apiserver can actually complete a handshake with.
-		gomega.Eventually(func() bool {
-			select {
-			case <-certsReady:
-				return true
-			default:
-				return false
-			}
-		}, timeout, interval).Should(gomega.BeTrue(),
-			"the rotator never reported the certificate ready")
-
+	// No Eventually in the three specs below, and that is the property under
+	// test rather than an economy. Bootstrap returned in BeforeSuite, and its
+	// contract is that the admission path is already usable when it does — a
+	// certificate that only turns up a moment later is one the controllers and
+	// the webhook server would have started without.
+	ginkgo.It("has the certificate on disk before anything else starts", func() {
 		// The two names controller-runtime's webhook server loads.
 		for _, name := range []string{"tls.crt", "tls.key"} {
 			_, err := os.Stat(filepath.Join(certDir, name))
@@ -46,13 +37,11 @@ var _ = ginkgo.Describe("Internal webhook certificate management", func() {
 		// projection of it. Without these keys a restart would mint a new CA and
 		// admission would break until the new bundle was injected.
 		secret := &corev1.Secret{}
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(k8sClient.Get(suiteCtx,
-				client.ObjectKey{Namespace: certNamespace, Name: secretName}, secret)).To(gomega.Succeed())
-			for _, key := range []string{"ca.crt", "ca.key", "tls.crt", "tls.key"} {
-				g.Expect(secret.Data).To(gomega.HaveKey(key))
-			}
-		}, timeout, interval).Should(gomega.Succeed())
+		gomega.Expect(k8sClient.Get(suiteCtx,
+			client.ObjectKey{Namespace: certNamespace, Name: secretName}, secret)).To(gomega.Succeed())
+		for _, key := range []string{"ca.crt", "ca.key", "tls.crt", "tls.key"} {
+			gomega.Expect(secret.Data).To(gomega.HaveKey(key))
+		}
 	})
 
 	ginkgo.It("injects a caBundle that verifies what the webhook serves", func() {
@@ -60,17 +49,14 @@ var _ = ginkgo.Describe("Internal webhook certificate management", func() {
 		// serving cert that are each well-formed but unrelated: the apiserver
 		// dials the Service and validates the served chain against this
 		// caBundle, so a mismatch is a hard admission failure.
-		var caBundle []byte
-		gomega.Eventually(func(g gomega.Gomega) {
-			cfg := &admissionregistrationv1.ValidatingWebhookConfiguration{}
-			g.Expect(k8sClient.Get(suiteCtx,
-				client.ObjectKey{Name: webhookConfigName}, cfg)).To(gomega.Succeed())
-			g.Expect(cfg.Webhooks).To(gomega.HaveLen(1))
-			caBundle = cfg.Webhooks[0].ClientConfig.CABundle
-			g.Expect(caBundle).NotTo(gomega.BeEmpty())
-			g.Expect(string(caBundle)).NotTo(gomega.Equal(placeholderCABundle),
-				"the placeholder caBundle was never replaced")
-		}, timeout, interval).Should(gomega.Succeed())
+		cfg := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+		gomega.Expect(k8sClient.Get(suiteCtx,
+			client.ObjectKey{Name: webhookConfigName}, cfg)).To(gomega.Succeed())
+		gomega.Expect(cfg.Webhooks).To(gomega.HaveLen(1))
+		caBundle := cfg.Webhooks[0].ClientConfig.CABundle
+		gomega.Expect(caBundle).NotTo(gomega.BeEmpty())
+		gomega.Expect(string(caBundle)).NotTo(gomega.Equal(placeholderCABundle),
+			"the placeholder caBundle was never replaced")
 
 		roots := x509.NewCertPool()
 		gomega.Expect(roots.AppendCertsFromPEM(caBundle)).To(gomega.BeTrue(),

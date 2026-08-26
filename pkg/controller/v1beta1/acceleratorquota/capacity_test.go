@@ -2,16 +2,20 @@ package acceleratorquota
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
@@ -284,6 +288,76 @@ func TestReconcileCreatesTheRoot(t *testing.T) {
 			}
 			if root.Spec.ParentRef != nil {
 				t.Errorf("the created root has a parentRef: %+v", root.Spec.ParentRef)
+			}
+		})
+	}
+}
+
+// The reserved-root create is gated by this component's own fail-closed webhook,
+// so at startup the apiserver refuses it until the replica is a ready endpoint
+// of its own webhook Service. That is a wait, not a failure — surfacing it would
+// answer a self-clearing condition with a stack trace per attempt — while
+// anything else the apiserver refuses still has to reach an operator.
+func TestReconcileWaitsOutItsOwnWebhook(t *testing.T) {
+	tests := []struct {
+		name             string
+		createErr        error
+		wantErr          bool
+		wantRequeueAfter time.Duration
+	}{
+		{
+			name: "an unreachable webhook is waited out quietly",
+			createErr: apierrors.NewInternalError(errors.New(
+				`failed calling webhook "acceleratorquota.ome-quota-manager.validator": ` +
+					`failed to call webhook: Post "https://svc.ns.svc:443/validate": ` +
+					`dial tcp 10.0.0.1:443: connect: connection refused`)),
+			wantRequeueAfter: rootBootstrapRetry,
+		},
+		{
+			name: "no endpoints yet is the same wait",
+			createErr: apierrors.NewInternalError(errors.New(
+				`failed calling webhook "acceleratorquota.ome-quota-manager.validator": ` +
+					`failed to call webhook: Post "https://svc.ns.svc:443/validate": ` +
+					`no endpoints available for service "svc"`)),
+			wantRequeueAfter: rootBootstrapRetry,
+		},
+		{
+			name:      "a denied create surfaces",
+			createErr: apierrors.NewForbidden(quotaGR, rootName, errors.New("no create grant")),
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := capacityScheme(t)
+			c := fake.NewClientBuilder().
+				WithScheme(s).
+				WithStatusSubresource(&v1beta1.AcceleratorQuota{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+						return tc.createErr
+					},
+				}).
+				Build()
+			r := &Reconciler{
+				Client: c, Scheme: s, Log: logf.Log.WithName("test"), APIReader: c,
+				Options:  tree.Options{RootName: rootName, MaxDepth: 5},
+				Capacity: derive,
+			}
+
+			got, err := r.Reconcile(context.Background(), ctrl.Request{})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Reconcile() = %+v, nil; want the refusal to surface", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Reconcile() = %v, want the wait to be absorbed", err)
+			}
+			if got.RequeueAfter != tc.wantRequeueAfter {
+				t.Errorf("RequeueAfter = %v, want %v", got.RequeueAfter, tc.wantRequeueAfter)
 			}
 		})
 	}

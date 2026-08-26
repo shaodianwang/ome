@@ -215,6 +215,34 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+	kubeConfig := ctrl.GetConfigOrDie()
+
+	certOpts := quotacert.Options{
+		Namespace:         opts.certNamespace,
+		SecretName:        opts.certSecretName,
+		ServiceName:       opts.webhookServiceName,
+		WebhookConfigName: opts.webhookConfigName,
+		CertDir:           opts.webhookCertDir,
+		CAName:            opts.caName,
+		CAOrganization:    opts.caOrganization,
+	}
+	internalCerts := opts.enableWebhook && opts.internalCertManagement
+	if internalCerts {
+		setupLog.Info("Setting up internal cert management",
+			"secret", opts.certSecretName, "service", opts.webhookServiceName,
+			"webhookConfig", opts.webhookConfigName)
+		// Before the real manager, not on it. The controllers that manager runs
+		// write through this component's own fail-closed webhook, so starting
+		// them against a webhook whose certificate does not exist yet turns the
+		// first seconds into refused writes. This blocks until the cert is on
+		// disk and the caBundle is injected.
+		if err := quotacert.Bootstrap(ctx, kubeConfig, certOpts, opts.probeAddr); err != nil {
+			setupLog.Error(err, "unable to set up internal cert management")
+			os.Exit(1)
+		}
+	}
+
 	mgrOpts := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: opts.metricsAddr},
@@ -228,10 +256,18 @@ func main() {
 			CertDir: opts.webhookCertDir,
 		})
 	}
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
+	mgr, err := ctrl.NewManager(kubeConfig, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+	if internalCerts {
+		// Ongoing rotation, and the watch that puts the caBundle back after a
+		// chart re-apply resets it to the placeholder.
+		if err := quotacert.Manage(mgr, certOpts); err != nil {
+			setupLog.Error(err, "unable to set up certificate rotation")
+			os.Exit(1)
+		}
 	}
 
 	setupLog.Info("Setting up AcceleratorQuota controller",
@@ -294,73 +330,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	// certsReady is closed once the serving cert is on disk and the caBundle is
-	// injected. Without internal cert management the cert is already mounted, so
-	// there is nothing to wait for.
-	certsReady := make(chan struct{})
-	if opts.enableWebhook && opts.internalCertManagement {
-		setupLog.Info("Setting up internal cert management",
-			"secret", opts.certSecretName, "service", opts.webhookServiceName,
-			"webhookConfig", opts.webhookConfigName)
-		if err := quotacert.Manage(mgr, quotacert.Options{
-			Namespace:         opts.certNamespace,
-			SecretName:        opts.certSecretName,
-			ServiceName:       opts.webhookServiceName,
-			WebhookConfigName: opts.webhookConfigName,
-			CertDir:           opts.webhookCertDir,
-			CAName:            opts.caName,
-			CAOrganization:    opts.caOrganization,
-		}, certsReady); err != nil {
-			setupLog.Error(err, "unable to set up internal cert management")
-			os.Exit(1)
-		}
-	} else {
-		close(certsReady)
-	}
-
+	readyz := healthz.Ping
 	if opts.enableWebhook {
-		// Registered from a goroutine that waits on the cert, so manager startup
-		// is not blocked: the rotator itself is a manager Runnable, so waiting
-		// inline here would deadlock — nothing would generate the cert we are
-		// waiting for.
-		go func() {
-			quotacert.WaitForReady(setupLog, certsReady)
-			setupLog.Info("Registering AcceleratorQuota validating webhook")
-			// The same Options the controller uses: admission and reconcile must
-			// agree on what a valid tree is, or a write the webhook admits goes
-			// straight to Degraded.
-			mgr.GetWebhookServer().Register("/validate-ome-io-v1beta1-acceleratorquota", &webhook.Admission{
-				Handler: &quotawebhook.Validator{
-					Client:  mgr.GetAPIReader(),
-					Decoder: admission.NewDecoder(mgr.GetScheme()),
-					Options: r.Options,
-				},
-			})
-		}()
+		setupLog.Info("Registering AcceleratorQuota validating webhook")
+		// Registered before the manager starts, so the webhook server joins the
+		// runnable group controller-runtime brings up ahead of the controllers.
+		// The same Options the controller uses: admission and reconcile must
+		// agree on what a valid tree is, or a write the webhook admits goes
+		// straight to Degraded.
+		mgr.GetWebhookServer().Register("/validate-ome-io-v1beta1-acceleratorquota", &webhook.Admission{
+			Handler: &quotawebhook.Validator{
+				Client:  mgr.GetAPIReader(),
+				Decoder: admission.NewDecoder(mgr.GetScheme()),
+				Options: r.Options,
+			},
+		})
+		// Ready means the apiserver can actually reach this replica: the webhook
+		// Service routes only to ready pods, and the configuration is
+		// failurePolicy=Fail, so reporting ready before the listener is up turns
+		// the first quota writes into TLS errors instead of decisions.
+		readyz = func(req *http.Request) error {
+			return mgr.GetWebhookServer().StartedChecker()(req)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up the health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("certs", func(*http.Request) error {
-		select {
-		case <-certsReady:
-			return nil
-		default:
-			return fmt.Errorf("webhook certificate is not ready")
-		}
-	}); err != nil {
-		setupLog.Error(err, "unable to set up the certificate readiness check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", readyz); err != nil {
 		setupLog.Error(err, "unable to set up the readiness check")
 		os.Exit(1)
 	}
 
 	setupLog.Info("Starting ome-quota-manager", "mode", mode)
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
