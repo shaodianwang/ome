@@ -99,10 +99,6 @@ type BudgetView struct {
 	// state, not a pending one.
 	FromSpec bool `json:"fromSpec,omitempty"`
 
-	// EffectiveCeiling is the relaxed ceiling a bursting leaf can reach. Set
-	// only when a borrowingLimit is configured.
-	EffectiveCeiling *resource.Quantity `json:"effectiveCeiling,omitempty"`
-
 	Admitted *resource.Quantity `json:"admitted,omitempty"`
 	Borrowed *resource.Quantity `json:"borrowed,omitempty"`
 }
@@ -246,9 +242,6 @@ func budgetViews(q *v1beta1.AcceleratorQuota) []BudgetView {
 		bv.FromSpec = false
 		bv.Admitted = quantityPtr(b.Admitted)
 		bv.Borrowed = quantityPtr(b.Borrowed)
-		if b.EffectiveCeiling != nil {
-			bv.EffectiveCeiling = quantityPtr(*b.EffectiveCeiling)
-		}
 	}
 
 	sort.Slice(order, func(i, j int) bool {

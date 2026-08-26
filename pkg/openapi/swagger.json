@@ -72,10 +72,6 @@
           "description": "Borrowed is the admitted quantity above the nominal share, taken from idle siblings and reclaimable on contention.",
           "$ref": "#/definitions/resource.Quantity"
         },
-        "effectiveCeiling": {
-          "description": "EffectiveCeiling is the relaxed ceiling a bursting leaf can actually reach — nominal plus borrowable headroom, summed over the clusters it has a share on. Set only when a borrowingLimit is configured, so the shift from hard cap to floor-plus-overage is explicit rather than silent.",
-          "$ref": "#/definitions/resource.Quantity"
-        },
         "nominal": {
           "description": "Nominal is the resolved allowance for this plane: the fleet total where the tree is authored, this cluster's share on a projection.",
           "$ref": "#/definitions/resource.Quantity"

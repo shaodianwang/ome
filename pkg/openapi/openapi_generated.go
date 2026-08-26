@@ -273,12 +273,6 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorBudgetStatus(ref common.ReferenceCal
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},
-					"effectiveCeiling": {
-						SchemaProps: spec.SchemaProps{
-							Description: "EffectiveCeiling is the relaxed ceiling a bursting leaf can actually reach — nominal plus borrowable headroom, summed over the clusters it has a share on. Set only when a borrowingLimit is configured, so the shift from hard cap to floor-plus-overage is explicit rather than silent.",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
 					"admitted": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Admitted is the quantity of this flavor currently admitted against the materialized queues, including anything borrowed.",

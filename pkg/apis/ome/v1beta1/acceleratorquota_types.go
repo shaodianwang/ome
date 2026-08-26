@@ -528,13 +528,6 @@ type AcceleratorBudgetStatus struct {
 	// +optional
 	Nominal resource.Quantity `json:"nominal,omitempty"`
 
-	// EffectiveCeiling is the relaxed ceiling a bursting leaf can actually
-	// reach — nominal plus borrowable headroom, summed over the clusters it has
-	// a share on. Set only when a borrowingLimit is configured, so the shift
-	// from hard cap to floor-plus-overage is explicit rather than silent.
-	// +optional
-	EffectiveCeiling *resource.Quantity `json:"effectiveCeiling,omitempty"`
-
 	// Admitted is the quantity of this flavor currently admitted against the
 	// materialized queues, including anything borrowed.
 	// +optional

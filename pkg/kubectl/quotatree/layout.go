@@ -32,7 +32,7 @@ func (l layout) header() row {
 	names = append(names, "NOMINAL", "ADMITTED")
 	if l.wide {
 		names = append(names,
-			"BORROWED", "CEILING", "ALLOCATABLE", "PEAK",
+			"BORROWED", "ALLOCATABLE", "PEAK",
 			"READY", "DEGRADED", "MATERIALIZED",
 			"TIER", "NAMESPACES", "PATH",
 		)
@@ -104,7 +104,6 @@ func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first 
 	observed := n.capacityFor(b.ResourceName, b.ResourceFlavor)
 	cells = append(cells,
 		quantityCell(b.Borrowed),
-		quantityCell(b.EffectiveCeiling),
 		quantityCell(observed.Allocatable),
 		quantityCell(observed.HighWaterMark),
 	)

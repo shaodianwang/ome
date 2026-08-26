@@ -186,7 +186,7 @@ func TestRenderColorWrapsWithoutBreakingAlignment(t *testing.T) {
 func TestRenderWideAddsTheDetailColumns(t *testing.T) {
 	got := render(t, buildView(t, healthyFleet(), 0), RenderOptions{Wide: true})
 
-	for _, col := range []string{"BORROWED", "CEILING", "ALLOCATABLE", "PEAK", "DEGRADED", "MATERIALIZED", "TIER", "NAMESPACES", "PATH"} {
+	for _, col := range []string{"BORROWED", "ALLOCATABLE", "PEAK", "DEGRADED", "MATERIALIZED", "TIER", "NAMESPACES", "PATH"} {
 		if !strings.Contains(got, col) {
 			t.Errorf("wide output missing %s column", col)
 		}

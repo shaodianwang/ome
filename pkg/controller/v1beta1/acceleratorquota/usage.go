@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/resource"
-
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/backend"
 	"github.com/ome-projects/ome/pkg/quota/tree"
@@ -76,19 +74,11 @@ func equalBudgets(a, b []v1beta1.AcceleratorBudgetStatus) bool {
 			x.Nominal.Cmp(y.Nominal) != 0 ||
 			x.Admitted.Cmp(y.Admitted) != 0 ||
 			x.Reserved.Cmp(y.Reserved) != 0 ||
-			x.Borrowed.Cmp(y.Borrowed) != 0 ||
-			!equalQuantityPtr(x.EffectiveCeiling, y.EffectiveCeiling) {
+			x.Borrowed.Cmp(y.Borrowed) != 0 {
 			return false
 		}
 	}
 	return true
-}
-
-func equalQuantityPtr(a, b *resource.Quantity) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.Cmp(*b) == 0
 }
 
 // budgetStatus pairs each authored budget with what is being held against it.

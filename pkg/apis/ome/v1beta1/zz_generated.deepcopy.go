@@ -55,11 +55,6 @@ func (in *AcceleratorBudget) DeepCopy() *AcceleratorBudget {
 func (in *AcceleratorBudgetStatus) DeepCopyInto(out *AcceleratorBudgetStatus) {
 	*out = *in
 	out.Nominal = in.Nominal.DeepCopy()
-	if in.EffectiveCeiling != nil {
-		in, out := &in.EffectiveCeiling, &out.EffectiveCeiling
-		x := (*in).DeepCopy()
-		*out = &x
-	}
 	out.Admitted = in.Admitted.DeepCopy()
 	out.Reserved = in.Reserved.DeepCopy()
 	out.Borrowed = in.Borrowed.DeepCopy()
