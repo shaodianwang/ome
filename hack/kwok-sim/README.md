@@ -61,7 +61,7 @@ the ones you are working on; repeat it for more than one.
 |---|---|---|---|
 | `manager` | `ome-manager` | `ome-resources` | cert-manager, the model and runtime fixtures |
 | `scheduler` | `ome-scheduler` | `ome-scheduler` | the scheduler-plugins `PodGroup` CRD |
-| `quota-manager` | `ome-quota-manager` | `ome-quota-manager` | the Kueue CRDs, the `ResourceFlavor` fixture |
+| `quota-manager` | `ome-quota-manager` | `ome-quota-manager` | the Kueue CRDs, the `ResourceFlavor` fixture; Kueue itself with `--with-kueue` |
 
 ```sh
 hack/kwok-sim/up.sh                                    # all three
@@ -301,13 +301,50 @@ without one, every fake node's chips come back *unattributed* and the root's
 either a missing flavor or a labelling mistake, and both look identical to a
 shrinking fleet unless they are named.
 
-Only the Kueue **CRDs** are installed, not Kueue itself. Nothing here admits a
-workload, and the types are all the quota plane reads today. They are vendored
-by `make kueue-crds` from the version in `.kueue-crd-version` — the one the
-fleet runs, which is ahead of the `sigs.k8s.io/kueue` pin in `go.mod` — into the
-same gitignored `tests/integration/dep-crds/` tree as the `PodGroup` CRD. When
-that version cannot be fetched the target falls back to the pin, so the copy is
-still offline.
+By default only the Kueue **CRDs** are installed, not Kueue itself. Nothing then
+admits a workload, and the types are all the quota plane reads to derive
+capacity. They are vendored by `make kueue-crds` from the version in
+`.kueue-crd-version` — the one the fleet runs, which is ahead of the
+`sigs.k8s.io/kueue` pin in `go.mod` — into the same gitignored
+`tests/integration/dep-crds/` tree as the `PodGroup` CRD. When that version
+cannot be fetched the target falls back to the pin, so the copy is still
+offline.
+
+### `--with-kueue`
+
+`--with-kueue` installs Kueue itself — controller, webhooks and CRDs — so a
+rendered `ClusterQueue` is judged by the thing that judges it in production
+rather than by our reading of its API. It goes `Active`, gates pods, admits
+them, and reports the usage the quota plane reads back.
+
+It is worth understanding what this covers that nothing else does. Every other
+Kueue-touching test links Kueue **in process from `go.mod`**, so they all run the
+version OME *compiles* against. This runs the version the fleet *deploys*, taken
+from `.kueue-crd-version`, so the controller and the CRDs move together. The two
+differ deliberately and permanently: the pin is held back by the Kubernetes and
+controller-runtime versions this repo is on.
+
+Opt-in rather than the default, because it pulls an image and needs the
+`quota-manager` component. Three details it has to get right, each of which
+fails in a way that is easy to misread:
+
+- **The image is saved platform-scoped and loaded as an archive**, unlike the
+  images this script builds. Two reasons, and each fails in a way that reads as
+  something else: a pulled multi-arch ref carries attestation manifests, so
+  `kind load docker-image` fails with `content digest ... not found` — the digest
+  it wants is an attestation, not a layer; and the platform is taken from the
+  docker daemon rather than assumed, because exporting a platform the local
+  image does not have fails with `no suitable export target found`, which looks
+  like a registry problem rather than an architecture one. Override the ref with
+  `KUEUE_IMAGE` if you have it somewhere reachable.
+- **A ready pod is not a serving webhook**, and `helm --wait` only knows about
+  the pod. Kueue generates its own certificate in process and its webhooks are
+  `failurePolicy: Fail`, so until the listener accepts TLS every
+  `ResourceFlavor` and `ClusterQueue` write is rejected with `connection
+  refused`. `up.sh` probes it by attempting a server-side dry-run apply, not by
+  watching endpoints: the pod passes its readiness probe before the webhook
+  server has bound, so a ready `EndpointSlice` returns while the very next apply
+  still fails.
 
 The webhook needs no cert-manager: `quotaManager.webhook.internalCertManagement`
 is on by default, so the component generates its own serving cert and writes its

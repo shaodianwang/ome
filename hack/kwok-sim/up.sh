@@ -4,6 +4,7 @@
 # Usage:
 #   hack/kwok-sim/up.sh [--skip-build] [--cluster NAME] [--cubes 4x4x4,2x2x2]
 #                       [--component NAME]... [--no-scheduler] [--with-isvcs]
+#                       [--with-kueue]
 #
 #   --component NAME
 #                   build and deploy only this OME component; repeat the flag
@@ -16,6 +17,7 @@
 #                                    and the ResourceFlavor the fleet maps to.
 #                                    No AcceleratorQuota is created; the
 #                                    controller makes its own reserved root.
+#                                    Add --with-kueue for Kueue itself.
 #                   The simulator itself — kind, kwok, the fake nodes, the OME
 #                   CRDs — is ensured on every run whatever is selected, so one
 #                   component can be re-rolled against a cluster already up.
@@ -26,6 +28,19 @@
 #                   README on why strict + ome-scheduler wedges.
 #   --with-isvcs    also apply fixtures/2*-isvc-*.yaml and wait for them.
 #                   Needs the manager component.
+#   --with-kueue    also install Kueue itself, not just its CRDs, so a rendered
+#                   ClusterQueue is judged by the thing that judges it in
+#                   production: it goes Active, gates pods, admits them, and
+#                   reports usage the quota plane can read back. Needs the
+#                   quota-manager component, and needs to pull the Kueue image,
+#                   so it is opt-in rather than the default.
+#
+#                   The version comes from .kueue-crd-version -- the version the
+#                   FLEET runs -- not from the sigs.k8s.io/kueue pin in go.mod,
+#                   which is held back by the Kubernetes and controller-runtime
+#                   versions this repo is on. Testing against the version we
+#                   compile with would exercise the one combination production
+#                   never runs.
 #
 # Environment:
 #   OME_KWOK_CLUSTER   kind cluster name        (default: ome-kwok)
@@ -33,6 +48,8 @@
 #   KIND_NODE_IMAGE    kind node image          (default below)
 #   CERT_MANAGER_VERSION
 #   KWOK_CHART_VERSION
+#   KUEUE_IMAGE        Kueue controller image   (default: the release image at
+#                      the version in .kueue-crd-version)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -59,6 +76,7 @@ TOPOLOGY_KEY="cloud.google.com/gke-nodepool"
 SKIP_BUILD=0
 NO_SCHEDULER=0
 WITH_ISVCS=0
+WITH_KUEUE=0
 TOPOLOGY_MODE=""
 ALL_COMPONENTS="manager scheduler quota-manager"
 REQUESTED=""
@@ -79,6 +97,7 @@ while [ $# -gt 0 ]; do
     --no-scheduler) NO_SCHEDULER=1; shift ;;
     --topology) TOPOLOGY_MODE="$2"; shift 2 ;;
     --with-isvcs) WITH_ISVCS=1; shift ;;
+    --with-kueue) WITH_KUEUE=1; shift ;;
     -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -111,6 +130,13 @@ done
 
 WITH_MANAGER=0
 WITH_SCHEDULER=0
+# Kueue is installed for the quota plane's benefit; without it nothing here
+# reads a ClusterQueue and the install is pure cost.
+if [ "$WITH_KUEUE" -eq 1 ]; then
+  in_list quota-manager "$COMPONENTS" || {
+    echo "FATAL: --with-kueue needs the quota-manager component" >&2; exit 1; }
+fi
+
 WITH_QUOTA=0
 in_list manager "$COMPONENTS" && WITH_MANAGER=1
 in_list scheduler "$COMPONENTS" && WITH_SCHEDULER=1
@@ -207,7 +233,89 @@ fi
 # are installed, not Kueue itself: nothing here admits a workload. Vendored by
 # `make kueue-crds` from .kueue-crd-version, into the same gitignored directory
 # as PodGroup.
-if [ "$WITH_QUOTA" -eq 1 ]; then
+KUEUE_VERSION="$(tr -d '[:space:]' < .kueue-crd-version)"
+
+if [ "$WITH_QUOTA" -eq 1 ] && [ "$WITH_KUEUE" -eq 1 ]; then
+  echo "==> Kueue ${KUEUE_VERSION} (controller, webhooks and CRDs)"
+
+  # The chart ships inside the module, so this needs no chart repo and works
+  # offline once the module is in the cache. Sourced at KUEUE_VERSION rather
+  # than at the go.mod pin: the pin is what OME COMPILES against and lags the
+  # fleet deliberately, and installing it here would test the one pairing
+  # production never runs.
+  KUEUE_CHART="$(go list -m -mod=mod -f '{{.Dir}}' "sigs.k8s.io/kueue@${KUEUE_VERSION}" 2>/dev/null)/charts/kueue"
+  [ -d "$KUEUE_CHART" ] || {
+    echo "FATAL: no Kueue chart for ${KUEUE_VERSION}; run 'go mod download sigs.k8s.io/kueue@${KUEUE_VERSION}' then retry" >&2
+    exit 1; }
+
+  # The node has no egress, so the image is pulled on the host and side-loaded.
+  KUEUE_IMAGE="${KUEUE_IMAGE:-registry.k8s.io/kueue/kueue:${KUEUE_VERSION}}"
+  KUEUE_TAR="$(mktemp -t kueue-image-XXXXXX.tar)"
+
+  # Taken from the daemon rather than assumed. The kind node runs the host's
+  # architecture, so an amd64 image is useless on an arm64 laptop -- and asking
+  # to export a platform the local image does not have fails with "no suitable
+  # export target found", which reads like a registry problem rather than an
+  # architecture one.
+  KUEUE_ARCH="$(docker version --format '{{.Server.Arch}}')"
+  [ -n "$KUEUE_ARCH" ] || { echo "FATAL: cannot determine the docker daemon's architecture" >&2; exit 1; }
+
+  # Matched on architecture, not merely on presence: a ref already pulled for
+  # the wrong platform would otherwise skip the pull and fail at the export.
+  if [ "$(docker image inspect -f '{{.Architecture}}' "$KUEUE_IMAGE" 2>/dev/null)" != "$KUEUE_ARCH" ]; then
+    echo "    pulling ${KUEUE_IMAGE} (${KUEUE_ARCH})"
+    docker pull --platform "linux/${KUEUE_ARCH}" "$KUEUE_IMAGE" >/dev/null || {
+      echo "FATAL: cannot pull ${KUEUE_IMAGE} for linux/${KUEUE_ARCH}. Set KUEUE_IMAGE to a" >&2
+      echo "       reachable ref, or pull it by hand and re-run; the kind node has no egress" >&2
+      echo "       of its own." >&2
+      exit 1; }
+  fi
+
+  # Saved platform-scoped and loaded as an archive, unlike the images this
+  # script builds. A pulled multi-arch ref carries attestation manifests, and
+  # `kind load docker-image` fails importing them with "content digest not
+  # found" -- the digest it wants is an attestation, not a layer.
+  docker save --platform "linux/${KUEUE_ARCH}" "$KUEUE_IMAGE" -o "$KUEUE_TAR"
+  kind load image-archive "$KUEUE_TAR" --name "$CLUSTER" >/dev/null
+  rm -f "$KUEUE_TAR"
+
+  # Installed with `helm upgrade --install`, the same as every other component
+  # here. Helm keeps its state in a release secret rather than in a
+  # last-applied-configuration annotation, so Kueue's Workload CRD -- far past
+  # the 256KiB a client-side kubectl apply has to fit into -- installs without
+  # any special handling.
+  helm upgrade --install kueue "$KUEUE_CHART" \
+    --kube-context "$KCTX" \
+    --namespace kueue-system --create-namespace \
+    --set "controllerManager.manager.image.repository=${KUEUE_IMAGE%:*}" \
+    --set "controllerManager.manager.image.tag=${KUEUE_IMAGE##*:}" \
+    --set controllerManager.manager.image.pullPolicy=Never \
+    --set enableCertManager=false \
+    "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
+
+  # A ready pod is not a serving webhook, and --wait only knows about the pod.
+  # Kueue generates its own certificate in process and its webhooks are
+  # failurePolicy=Fail, so until the listener accepts TLS every ResourceFlavor
+  # and ClusterQueue write -- the quota plane's included -- is rejected with
+  # "connection refused".
+  #
+  # Probed by attempting a write rather than by watching endpoints: the pod
+  # passes its readiness probe before the webhook server has bound, so a ready
+  # EndpointSlice returns while the very next apply still fails. A server-side
+  # dry-run runs the admission chain without creating anything, which is the
+  # same question the next step asks.
+  echo "==> wait for the Kueue webhook to admit"
+  KUEUE_PROBE='{"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"ResourceFlavor","metadata":{"name":"kwok-sim-webhook-probe"}}'
+  for _ in $(seq 90); do
+    printf '%s' "$KUEUE_PROBE" | k apply --dry-run=server -f - >/dev/null 2>&1 && break
+    sleep 2
+  done
+  printf '%s' "$KUEUE_PROBE" | k apply --dry-run=server -f - >/dev/null 2>&1 || {
+    echo "FATAL: Kueue's webhook never began admitting; check" >&2
+    echo "       'kubectl -n kueue-system logs deploy/kueue-controller-manager'" >&2
+    exit 1; }
+
+elif [ "$WITH_QUOTA" -eq 1 ]; then
   echo "==> Kueue CRDs"
   KUEUE_CRDS=tests/integration/dep-crds/kueue
   # Probed by file, not by directory: `make kueue-crds` mkdir -p's before it
@@ -221,18 +329,26 @@ if [ "$WITH_QUOTA" -eq 1 ]; then
   # apply has to fit into the last-applied-configuration annotation.
   k apply --server-side --force-conflicts -f "$KUEUE_CRDS" >/dev/null
 
-  # Before the manager starts, not after it. The controller reconciles on
-  # AcceleratorQuota and Node events, and creating a ResourceFlavor is neither —
-  # so a flavor applied afterwards stays invisible until the next node event or
-  # the resync tick, leaving a fresh cluster reporting no capacity for minutes.
-  # Applying it here means it is already there for the first reconcile.
-  #
-  # No AcceleratorQuota is applied, here or anywhere: a tree is what an operator
-  # is here to write, so it is left alone exactly as the ISVCs are, and the
-  # controller creates the reserved root itself. The flavor is not a tree — it
-  # describes the hardware, which this simulator owns, and without it every fake
-  # chip is unattributed and the root reports nothing, which reads as a broken
-  # component rather than an empty fleet.
+fi
+
+# Outside the branches above, because the flavor belongs to the quota plane
+# rather than to whichever of them installed the Kueue types: with --with-kueue
+# it comes from the chart, without it from dep-crds, and either way the flavor
+# is the same requirement.
+#
+# Before the manager starts, not after it. The controller reconciles on
+# AcceleratorQuota and Node events, and creating a ResourceFlavor is neither —
+# so a flavor applied afterwards stays invisible until the next node event or
+# the resync tick, leaving a fresh cluster reporting no capacity for minutes.
+# Applying it here means it is already there for the first reconcile.
+#
+# No AcceleratorQuota is applied, here or anywhere: a tree is what an operator
+# is here to write, so it is left alone exactly as the ISVCs are, and the
+# controller creates the reserved root itself. The flavor is not a tree — it
+# describes the hardware, which this simulator owns, and without it every fake
+# chip is unattributed and the root reports nothing, which reads as a broken
+# component rather than an empty fleet.
+if [ "$WITH_QUOTA" -eq 1 ]; then
   echo "==> ResourceFlavor (no AcceleratorQuota; the controller makes its own root)"
   k apply -f hack/kwok-sim/fixtures/30-resourceflavor.yaml >/dev/null
 fi
