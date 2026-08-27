@@ -895,7 +895,7 @@ mc-realkueue: envtest dep-crds ## 🧪 Run the OEP-0018 real-Kueue multi-cluster
 test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND-backed integration tests..."
 	@command -v kind >/dev/null 2>&1 || { \
-		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
 	@docker info >/dev/null 2>&1 || { \
@@ -920,7 +920,7 @@ OME_EVAL_NAMESPACE ?= sandbox
 test-kind-eval: dep-crds ## 🧪 Run migrated OMENative eval cases against a chart-installed OME
 	@echo "🧪 Running deployed OME eval tests..."
 	@command -v kind >/dev/null 2>&1 || { \
-		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
 	@docker info >/dev/null 2>&1 || { \
@@ -937,7 +937,7 @@ test-kind-eval: dep-crds ## 🧪 Run migrated OMENative eval cases against a cha
 test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND IR-managed OMENative tests..."
 	@command -v kind >/dev/null 2>&1 || { \
-		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
 	@docker info >/dev/null 2>&1 || { \
@@ -961,7 +961,7 @@ test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENa
 test-kind-raw: xet-build dep-crds ## 🧪 Run KIND-backed RawDeployment tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND RawDeployment tests..."
 	@command -v kind >/dev/null 2>&1 || { \
-		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
 	@docker info >/dev/null 2>&1 || { \
@@ -984,7 +984,7 @@ PERM_PROCS ?= 2
 .PHONY: test-kind-perm-up
 test-kind-perm-up: dep-crds ## 🧪 Bring up the perm KIND cluster + CRDs + fake-serving images (no specs); then run the external manager
 	@command -v kind >/dev/null 2>&1 || { \
-		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
 	@docker info >/dev/null 2>&1 || { \
@@ -1013,7 +1013,7 @@ test-kind-perm-up: dep-crds ## 🧪 Bring up the perm KIND cluster + CRDs + fake
 .PHONY: test-kind-perm
 test-kind-perm: dep-crds ## 🧪 Run the watch-driven OMENative rollout specs in parallel (needs test-kind-perm-up + an external manager)
 	@command -v kind >/dev/null 2>&1 || { \
-		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
 	@kind get clusters 2>/dev/null | grep -qx ome-coord-kind || { \

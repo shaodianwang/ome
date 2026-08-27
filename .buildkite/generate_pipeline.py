@@ -565,6 +565,7 @@ def _package_kind_test_image_step() -> str:
     return (
         '  - label: ":package: Package exact Go KIND runner"\n'
         '    key: "package-kind-test-image"\n'
+        f"{_gh_status('package-kind-test-image', indent=4)}\n"
         f"{dependencies}"
         f"{_auto_retry(indent=4)}\n"
         "    env:\n"
@@ -841,6 +842,7 @@ def ci_steps() -> str:
             artifact_paths:
               - ".buildkite/artifacts/omenative-kind-test.tgz"
               - ".buildkite/artifacts/multicluster-kind-test.tgz"
+              - ".buildkite/artifacts/kind"
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:

@@ -28,10 +28,16 @@ FROM ${GO_BUILDER_IMAGE}
 
 ARG TARGETARCH
 ARG DOCKER_VERSION=28.0.1
-ARG KIND_VERSION=v0.27.0
-ARG KIND_NODE_TAG=v1.32.2
+# Fallbacks only. package_kind_test_image.sh appends the kind binary and the
+# node tarball the run actually uses, read from hack/internal/tools/go.mod and
+# .kind-node-image on the branch under test — this image is a main-only
+# artifact, so a bump baked only here would never reach the branch that needs
+# it. Keep these tracking those two files anyway, for anyone who runs the image
+# standalone (the validation Job does).
+ARG KIND_VERSION=v0.32.0
+ARG KIND_NODE_TAG=v1.35.5
 ARG CRANE_VERSION=v0.20.2
-ARG HELM_VERSION=v3.17.3
+ARG HELM_VERSION=v3.20.2
 ARG FAKE_SERVING_BUILD_IMAGE=golang:1.25
 ARG FAKE_SERVING_BASE_IMAGE=gcr.io/distroless/static:nonroot
 ARG CERT_MANAGER_VERSION=v1.16.2

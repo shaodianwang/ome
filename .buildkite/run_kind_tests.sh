@@ -140,25 +140,27 @@ export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/go/bin:$PATH"
 make xet-build
 export LD_LIBRARY_PATH="$(pwd)/pkg/xet/target/release"
 
-# kind binary, installed from the Go module proxy. Pin to a known-good
-# release and bump deliberately — each bump can shift the kubelet /
-# containerd versions inside the node container, and the default in
-# KIND_NODE_IMAGE below must move in lockstep with the pinned kind
-# release's bundled default.
-KIND_VERSION="${KIND_VERSION:-v0.27.0}"
+# kind binary, installed from the Go module proxy at the version
+# hack/internal/tools/go.mod pins — the same one `make kind` installs.
+# Bump it there and deliberately: each bump can shift the kubelet /
+# containerd versions inside the node container.
+KIND_VERSION="${KIND_VERSION:-$(awk '$1 == "sigs.k8s.io/kind" { print $2; exit }' \
+  hack/internal/tools/go.mod)}"
 go install sigs.k8s.io/kind@${KIND_VERSION}
 echo "--- kind --version ---"
 kind --version
 
 # Pre-pull the kind node image so `kind create cluster --wait` doesn't
-# burn its timeout on a ~900MB pull on a cold host. The digest-pinned
-# default MUST equal the pinned kind release's bundled default (see
-# pkg/apis/config/defaults/image.go in sigs.k8s.io/kind@$KIND_VERSION)
-# because that's what an unset KIND_NODE_IMAGE boots. When the env var
-# IS set (e.g. to point at a registry mirror), kindutil passes it to
-# `kind create cluster --image`, so the pre-pull and the cluster agree
-# either way — export it so the go-test process sees the same value.
-KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f}"
+# burn its timeout on a ~900MB pull on a cold host. This queue has
+# egress, so it takes the digest-pinned ref verbatim. Two constraints on
+# .kind-node-image: its minor tracks .envtest-k8s-version, so the KIND
+# and envtest lanes exercise the same Kubernetes API; and the tag+digest
+# must be one the pinned kind release publishes a node image for (its
+# release notes list them). When the env var IS set (e.g. to point at a
+# registry mirror), kindutil passes it to `kind create cluster --image`,
+# so the pre-pull and the cluster agree either way — export it so the
+# go-test process sees the same value.
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-$(tr -d '[:space:]' <.kind-node-image)}"
 export KIND_NODE_IMAGE
 docker pull -q "$KIND_NODE_IMAGE" || {
   echo "FATAL: failed to pull kind node image $KIND_NODE_IMAGE." >&2

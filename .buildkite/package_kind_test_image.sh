@@ -33,6 +33,8 @@ for bundle in $artifact_bundles; do
   buildkite-agent artifact download ".buildkite/artifacts/$bundle" . --step test
   test -s ".buildkite/artifacts/$bundle"
 done
+buildkite-agent artifact download ".buildkite/artifacts/kind" . --step test
+test -s .buildkite/artifacts/kind
 
 if ! command -v crane >/dev/null 2>&1; then
   case "$(uname -m)" in
@@ -73,10 +75,51 @@ echo "--- pull ${kueue_image}"
 crane pull --platform linux/amd64 "$kueue_image" "$stage/images/kueue.tar"
 crane validate --tarball "$stage/images/kueue.tar"
 
-# /images already exists in the base; mktemp's 0700 would otherwise be layered
-# over it and hide the baked tarballs from a non-root runner.
-chmod 755 "$stage/images"
-tar -C "$stage" -cf "$stage/kind-test.layer.tar" kind-test images
+# The kind binary and node image ship in this layer for the same reason Kueue
+# does, and it is load-bearing for them specifically: a bump to either is only
+# useful on the branch that raises the KIND_NODE_IMAGE the runner asks for, and
+# the base image that would otherwise carry them is a main-only artifact. Both
+# paths shadow the base's copies, so what the runner boots is whatever this
+# commit pins. Without that, the runner asks for a node image it has no egress
+# to fetch and dies in `kind create cluster`.
+#
+# .kind-node-image is the single source of truth for the node image, the way
+# .envtest-k8s-version is for the envtest control plane; its minor tracks that
+# file so the KIND and envtest lanes exercise the same Kubernetes API. The kind
+# version comes from hack/internal/tools/go.mod, which is also what `make kind`
+# installs — read with awk so this step needs no Go toolchain.
+node_image=$(tr -d '[:space:]' <.kind-node-image)
+[ -n "$node_image" ] || { echo ".kind-node-image is empty" >&2; exit 1; }
+node_tag=${node_image%@*}
+node_digest=${node_image#*@}
+# Pull by tag, not by digest: a digest ref carries no RepoTags, so the tarball
+# would `docker load` untagged and kind would try to fetch the image it was
+# just handed. Verifying the digest first keeps the pin honest.
+if [ "$node_digest" != "$node_image" ]; then
+  resolved=$(crane digest "$node_tag")
+  [ "$resolved" = "$node_digest" ] || {
+    echo "FATAL: $node_tag resolves to $resolved, not the pinned $node_digest" >&2
+    exit 1
+  }
+fi
+echo "--- pull ${node_image}"
+crane pull --platform linux/amd64 "$node_tag" "$stage/images/kindest-node.tar"
+crane validate --tarball "$stage/images/kindest-node.tar"
+
+# The kind binary is built by the test step, which has the Go toolchain and
+# the module proxy; this container has neither, and the kind release CDN
+# answers 403 through the egress filter. Registries and the artifact store are
+# the two transports that work here, and both are already load-bearing above.
+mkdir -p "$stage/usr/local/bin"
+cp .buildkite/artifacts/kind "$stage/usr/local/bin/kind"
+chmod 755 "$stage/usr/local/bin/kind"
+echo "--- kind $("$stage/usr/local/bin/kind" --version)"
+
+# /images and /usr/local/bin already exist in the base; mktemp's 0700 would
+# otherwise be layered over them and hide the baked content from a non-root
+# runner.
+chmod 755 "$stage/images" "$stage/usr" "$stage/usr/local" "$stage/usr/local/bin"
+tar -C "$stage" -cf "$stage/kind-test.layer.tar" kind-test images usr
 
 echo "--- publish ${target} from kind-ci:${base_tag} ---"
 crane append --platform linux/amd64 \

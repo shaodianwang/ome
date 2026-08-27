@@ -62,7 +62,7 @@ TAG="${OME_IMAGE_TAG:-kind-local}"
 # scheduler is the upstream kube-scheduler built as a library, so its plugin API
 # is pinned to one minor (scheduler/go.mod tracks k8s 1.35.4) and the node has to
 # match. --no-scheduler frees you to run any version.
-KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.35.1}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-$(tr -d '[:space:]' <.kind-node-image)}"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 KWOK_CHART_VERSION="${KWOK_CHART_VERSION:-0.3.0}"
 CUBES="4x4x4,2x2x2"

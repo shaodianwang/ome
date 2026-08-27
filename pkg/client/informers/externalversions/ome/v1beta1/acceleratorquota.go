@@ -40,7 +40,7 @@ func NewAcceleratorQuotaInformer(client versioned.Interface, resyncPeriod time.D
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredAcceleratorQuotaInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -65,7 +65,7 @@ func NewFilteredAcceleratorQuotaInformer(client versioned.Interface, resyncPerio
 				}
 				return client.OmeV1beta1().AcceleratorQuotas().Watch(ctx, options)
 			},
-		},
+		}, client),
 		&apisomev1beta1.AcceleratorQuota{},
 		resyncPeriod,
 		indexers,

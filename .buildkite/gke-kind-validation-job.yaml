@@ -83,9 +83,9 @@ spec:
             - name: DOCKER_HOST
               value: tcp://127.0.0.1:2375
             - name: KIND_VERSION
-              value: v0.27.0
+              value: v0.32.0
             - name: KIND_NODE_IMAGE
-              value: kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f
+              value: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |

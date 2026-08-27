@@ -120,8 +120,9 @@ docker run --rm --privileged busybox sh -c '
 ' || echo "WARN: could not raise inotify limits; continuing at daemon defaults" >&2
 
 # kind uses the loaded node image (no pull) because KIND_NODE_IMAGE names it and
-# it is already present on the dind daemon.
-KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.32.2}"
+# it is already present on the dind daemon. Tag-only: the tarball loads under
+# its RepoTag, and a digest ref would send kind to a registry it cannot reach.
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-$(tr -d '[:space:]' <.kind-node-image | cut -d@ -f1)}"
 export KIND_NODE_IMAGE
 # Legacy builder (BUILDKIT=0) so the suite's `docker build` of fake-serving uses
 # the loaded golang/distroless bases without attempting a registry pull.

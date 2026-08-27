@@ -80,7 +80,7 @@ make test-kind-clean                            # delete leftover clusters
 ```
 
 `make test-kind` requires `docker` running on the host and a `kind`
-binary on PATH (`go install sigs.k8s.io/kind@v0.27.0`). It sets
+binary on PATH (`make kind` installs the pinned version to `bin/`). It sets
 `KIND_KEEP_CLUSTER=true` by default so the cluster is reused across
 runs — set `KIND_RECREATE=true` to force a fresh one.
 

@@ -164,6 +164,21 @@ kubectl -n <agent-ns> create secret generic buildkite-agent-token \
   time; it rebuilds every main build, so caches track `go.mod`/`Cargo.lock`. A
   PR that changes deps but doesn't rebuild `kind-ci` first could miss modules
   (`GOPROXY=off` fails fast, so it's visible, not silent).
-- **Node-image pin**: `KIND_NODE_TAG` in `dockerfiles/kind-ci.Dockerfile` and
-  `KIND_NODE_IMAGE` in `run_kind_tests_gke.sh` must stay in lockstep with the
-  pinned `kind` release's bundled default.
+## Version pins
+
+`.kind-node-image` at the repo root is the single source of truth for the node
+image, the way `.envtest-k8s-version` is for the envtest control plane. The kind
+binary comes from the `sigs.k8s.io/kind` require in `hack/internal/tools/go.mod`
+— the same pin `make kind` installs. Two constraints when bumping: the node
+image's minor must match `.envtest-k8s-version`, so the KIND and envtest lanes
+exercise the same Kubernetes API; and the pinned `kind` release must publish a
+node image for that tag (its release notes list them).
+
+`package_kind_test_image.sh` reads both files and appends the binary and the
+node tarball to the runner image, shadowing the copies `kind-ci` bakes. That
+indirection is load-bearing, not tidiness: `kind-ci` only builds and mirrors
+from `main`, and a PR branch's runner is assembled on top of `kind-ci:latest`.
+A pin baked only into the Dockerfile therefore cannot reach the branch that
+raises it — the runner asks for a node image it has no egress to fetch and dies
+in `kind create cluster`. The `ARG`s in `dockerfiles/kind-ci.Dockerfile` are
+fallbacks for standalone use of the image; keep them tracking the two files.

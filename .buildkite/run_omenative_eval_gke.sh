@@ -80,6 +80,11 @@ for archive in kindest-node busybox ome-manager ome-agent canary-metrics; do
   docker load -i "$path"
 done
 
+# Tag-only: kindest-node.tar loads under its RepoTag, and this agent has no
+# egress to resolve a digest ref.
+node_image=$(tr -d '[:space:]' <.kind-node-image | cut -d@ -f1)
+[ -n "$node_image" ] || { echo ".kind-node-image is empty" >&2; exit 1; }
+
 manager_ref="${repo}/ome-manager:${short_sha}"
 agent_ref="${repo}/ome-agent:${short_sha}"
 metrics_ref="${repo}/canary-metrics:${short_sha}"
@@ -116,7 +121,7 @@ nodes:
 EOF
 
 echo "--- create three-node KIND cluster ---"
-kind create cluster --name "$cluster" --image kindest/node:v1.32.2 \
+kind create cluster --name "$cluster" --image "$node_image" \
   --config "${tmp_dir}/kind.yaml" --wait 180s
 kind get kubeconfig --name "$cluster" >"$kubeconfig"
 

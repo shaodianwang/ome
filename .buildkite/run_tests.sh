@@ -136,3 +136,24 @@ package_kind_bundle omenative-kind-test.tgz omenative_coordination_kind.test \
   ./tests/integration/singlecluster/controller/omenative_coordination_kind
 package_kind_bundle multicluster-kind-test.tgz scaleout_kind.test \
   ./tests/integration/multicluster/scaleout_kind
+
+# The kind binary rides along as an artifact for the same reason the suite
+# binaries do: it is built here, where the Go toolchain and the module proxy
+# are available, and consumed where neither is. The packaging step that puts
+# it in the KIND runner image can reach registries and the Buildkite artifact
+# store but not the kind release CDN, and the copy baked into kind-ci is a
+# main-only artifact that a branch raising the pin cannot refresh.
+#
+# The version is the sigs.k8s.io/kind require in hack/internal/tools/go.mod —
+# the same pin `make kind` installs — so CI and a developer's laptop run one
+# kind. Built as its own module so nothing here perturbs the root go.mod.
+kind_version=$(awk '$1 == "sigs.k8s.io/kind" { print $2; exit }' \
+  hack/internal/tools/go.mod)
+case "$kind_version" in
+  v*) ;;
+  *) echo "no sigs.k8s.io/kind version in hack/internal/tools/go.mod" >&2; exit 1 ;;
+esac
+echo "--- build kind $kind_version ---"
+GOBIN="$PWD/$kind_artifact_dir" GOFLAGS= go install "sigs.k8s.io/kind@$kind_version"
+test -x "$kind_artifact_dir/kind"
+"$kind_artifact_dir/kind" --version
