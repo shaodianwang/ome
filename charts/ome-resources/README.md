@@ -230,8 +230,12 @@ For long-term observability, deploy a separate full Prometheus stack
 
 `ome.multiclusterAccess.enabled=true` installs a ServiceAccount and long-lived
 token Secret that a control-plane InferenceDeploymentOperator can use to manage
-OME resources in this workload cluster. The RBAC is scoped to OME
-`InferenceService` and `ClusterServingRuntime` resources.
+OME resources in this workload cluster. The RBAC is scoped to writing derived
+`InferenceService` resources, plus read-only access to the `InferenceReplica`,
+`ClusterServingRuntime`, `Pod` and `PodGroup` resources the control plane reads
+to observe admission. Placement stalls in `Racing` without the
+`InferenceReplica` read: the per-component IR status is the admission signal
+that selects a winner.
 
 ## Default Runtime
 

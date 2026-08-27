@@ -346,3 +346,15 @@ fi
 if grep -Fq 'acceleratorquotas' <<<"${rendered}"; then
   fail "quota RBAC leaked into the ome-manager role; it belongs to charts/ome-quota-manager"
 fi
+
+# The control plane selects a placement winner from the per-component
+# InferenceReplica status it reads on each workload cluster, so the
+# multicluster-access ClusterRole must grant it. Without the grant every read is
+# forbidden, fan-out still succeeds, and placement never leaves Racing — a
+# failure mode no lane in the test matrix reproduces, because they all
+# authenticate as cluster-admin rather than as this ServiceAccount.
+multicluster_access="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --show-only templates/ome-controller/rbac/multicluster_access.yaml)"
+grep -Fqx '  - inferencereplicas' <<<"${multicluster_access}" ||
+  fail "multicluster-access ClusterRole does not grant inferencereplicas"

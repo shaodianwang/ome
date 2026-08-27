@@ -51,6 +51,19 @@ rules:
   - patch
   - update
   - watch
+# InferenceReplicas: read-only. The per-component IR status on the workload
+# cluster is the authoritative admission signal the placement controller reads
+# to select a winner and to count admitted replicas per home; the derived
+# ISVC's status does not carry it. IRs are projected by the workload cluster's
+# own reconciler, so the control plane never writes them.
+- apiGroups:
+  - ome.io
+  resources:
+  - inferencereplicas
+  verbs:
+  - get
+  - list
+  - watch
 # ClusterServingRuntimes: read-only. The control plane never writes runtimes
 # on workload clusters (those are managed per-cluster via GitOps); it only
 # reads them for runtime context. Write verbs were over-broad blast radius.
