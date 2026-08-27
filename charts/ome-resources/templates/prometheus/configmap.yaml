@@ -68,10 +68,15 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_ome_io_inferenceservice]
             regex: .+
             action: keep
-          # Drop pods that are not yet running (avoids scrape errors
-          # during pod startup; KEDA reads instantaneous values).
+          # Only Running and Ready pods (KEDA reads instantaneous values).
+          # Phase alone still admits a pod that is loading model weights: its
+          # metrics endpoint is not listening yet, so it reports a scrape
+          # failure for the whole load window.
           - source_labels: [__meta_kubernetes_pod_phase]
             regex: Running
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ready]
+            regex: "true"
             action: keep
           {{- if .Values.prometheus.requireScrapeAnnotation }}
           # An explicit standard opt-out wins over the OME-level opt-in.
