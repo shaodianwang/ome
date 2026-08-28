@@ -25,6 +25,7 @@ export interface Route {
 
 const PANEL_TO_SLUG: Record<PanelKey, string> = {
   fleet: "",
+  attention: "attention",
   workloads: "deployments",
   models: "models",
   runtimes: "runtimes",
@@ -34,6 +35,7 @@ const PANEL_TO_SLUG: Record<PanelKey, string> = {
 const SLUG_TO_PANEL: Record<string, PanelKey> = {
   "": "fleet",
   fleet: "fleet",
+  attention: "attention",
   deployments: "workloads",
   models: "models",
   runtimes: "runtimes",

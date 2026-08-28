@@ -13,6 +13,7 @@ use axum::{
 
 use crate::app_context::AppState;
 
+pub mod attention;
 pub mod capacity;
 pub mod chat;
 pub mod clusters;
@@ -35,6 +36,7 @@ pub fn routes() -> Router<AppState> {
         .route("/livez", get(health::livez))
         .route("/readyz", get(health::readyz))
         .route("/v1/clusters", get(clusters::list))
+        .route("/v1/attention", get(attention::list))
         .route("/v1/capacity", get(capacity::report))
         .route("/v1/events", get(events::list))
         .route("/v1/stream", get(events::stream))

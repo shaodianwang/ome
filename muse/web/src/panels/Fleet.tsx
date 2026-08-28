@@ -54,10 +54,14 @@ const sourceIssue = (
 export function Fleet({
   openDeployments,
   openDeployment,
+  openModel,
+  openAttention,
   openCapacityCluster,
 }: {
   openDeployments: (f: DepFilter) => void;
   openDeployment: (s: Selected) => void;
+  openModel: (s: Selected) => void;
+  openAttention: () => void;
   openCapacityCluster: (cluster: string) => void;
 }) {
   const [fCluster, setFCluster] = useState("all");
@@ -80,6 +84,11 @@ export function Fleet({
     intervalMs: 30_000,
   });
   const events = useEventFeed(30);
+  const attention = useLive(api.attention, {
+    kinds: ["InferenceService", "Pod", "BaseModel", "ClusterBaseModel", "Cluster"],
+    throttleMs: 5_000,
+    intervalMs: 30_000,
+  });
   const cfg = useLive(api.config, { kinds: [] });
   const metricsOn = !!cfg.data?.fleetMetrics;
   const metricsCluster = fCluster === "all" ? undefined : fCluster;
@@ -106,6 +115,11 @@ export function Fleet({
   );
 
   const health = deploymentHealth(scope.isvcs);
+  // Triage findings, scoped by the cluster filter only — model/accelerator
+  // filters have no meaning for cluster- or model-level findings.
+  const attnItems = (attention.data?.items ?? []).filter(
+    (a) => fCluster === "all" || a.cluster === fCluster,
+  );
   const availPct = health.total ? (health.ready / health.total) * 100 : null;
   const policy = cfg.data?.dashboardPolicy;
   const availabilityTone = lowerThresholdTone(availPct, policy?.availability);
@@ -657,50 +671,57 @@ export function Fleet({
           </table>
         </Card>
         <Card
-          title={`Needs attention · ${n(health.attention.length)}`}
+          title={`Needs attention · ${n(attnItems.length)}`}
           actions={
             <span className="right">
-              <button className="linkbtn" onClick={() => openDeployments("attention")}>
+              <button className="linkbtn" onClick={openAttention}>
                 see all →
               </button>
             </span>
           }
         >
-          {health.attention.length ? (
+          {attnItems.length ? (
             <ul className="attn-list wide">
-              {health.attention.slice(0, 8).map((a, i) => (
+              {attnItems.slice(0, 8).map((a, i) => (
                 <li key={i}>
                   <button
                     type="button"
                     className="attn-open"
-                    onClick={() =>
-                      openDeployment({
-                        cluster: a.cluster,
-                        kind: "InferenceService",
-                        name: a.name,
-                        namespace: a.namespace,
-                      })
-                    }
+                    onClick={() => {
+                      if (a.category === "cluster") openCapacityCluster(a.cluster);
+                      else if (a.category === "model")
+                        openModel({
+                          cluster: a.cluster,
+                          kind: a.kind === "ClusterBaseModel" ? "ClusterBaseModel" : "BaseModel",
+                          name: a.name,
+                          namespace: a.namespace,
+                        });
+                      else
+                        openDeployment({
+                          cluster: a.cluster,
+                          kind: "InferenceService",
+                          name: a.name,
+                          namespace: a.namespace,
+                        });
+                    }}
                   >
-                    <Dot tone="red" />
+                    <Dot tone={a.severity === "critical" ? "red" : "amber"} />
                     <span className="mono">{a.name}</span>
                     <span className="muted">{a.cluster}</span>
-                    {a.reason ? <span className="attn-reason">{a.reason}</span> : null}
+                    <span className="attn-reason">{a.summary}</span>
                   </button>
                 </li>
               ))}
             </ul>
           ) : (
             <div className="muted attn-none">
-              {isvcs.error
-                ? isvcs.data
+              {attention.error
+                ? attention.data
                   ? "Status refresh failed; no active alerts in the last snapshot."
-                  : "Deployment status is unavailable."
-                : isvcs.loading && !isvcs.data
-                  ? "Loading deployment status…"
-                  : health.total
-                    ? "All deployments in scope are healthy."
-                    : "No deployments in scope."}
+                  : "Attention data is unavailable."
+                : attention.loading && !attention.data
+                  ? "Loading…"
+                  : "Nothing needs attention in scope."}
             </div>
           )}
         </Card>

@@ -1119,6 +1119,9 @@ function LogStreamBox({
       source.close();
       window.clearInterval(flush);
     };
+    // Reconnect only when the stream's identity changes — the scalar fields, not
+    // the ref object, whose identity changes on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamRef.cluster, streamRef.name, streamRef.namespace, scope.component, scope.pod, session]);
 
   useEffect(() => {

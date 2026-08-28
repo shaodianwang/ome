@@ -1268,7 +1268,7 @@ pub(crate) fn pod_accelerators(pod: &Pod) -> i64 {
 /// (`Unschedulable`), a container's waiting/terminated reason
 /// (`ImagePullBackOff`, `CrashLoopBackOff`, …), or the pod-level not-Ready
 /// reason (`ContainersNotReady`). `None` for a healthy pod.
-fn pod_problem_reason(pod: &Pod) -> Option<String> {
+pub(crate) fn pod_problem_reason(pod: &Pod) -> Option<String> {
     let status = pod.status.as_ref()?;
     let condition_reason = |cond_type: &str| {
         status
@@ -1977,6 +1977,26 @@ pub struct ChatParams {
 // ===========================================================================
 // Response envelopes.
 // ===========================================================================
+
+/// One fleet-triage finding: something an operator should look at now, with
+/// enough context to jump straight to the page that diagnoses it.
+#[derive(Serialize)]
+pub struct AttentionItem {
+    /// `critical` (definitively broken) or `warning` (degraded / needs a human).
+    pub severity: &'static str,
+    /// The finding's domain: `cluster`, `deployment`, `rollout`, `pods`, `model`.
+    pub category: &'static str,
+    pub cluster: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Resource kind for click-through (`InferenceService`, `BaseModel`, …).
+    pub kind: &'static str,
+    pub name: String,
+    /// One line of "why this is here".
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
 
 /// A list response: `{ kind?, count, items }`. Items are pre-projected (each
 /// already carries its owning `cluster`), so they're held as raw JSON.

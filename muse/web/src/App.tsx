@@ -5,6 +5,7 @@ import { clusterLagDetail, summarizeClusterCaches } from "./clusterStatus";
 import { DataNotice } from "./components";
 import {
   BrandMark,
+  IconAttention,
   IconCapacity,
   IconFleet,
   IconModels,
@@ -14,6 +15,7 @@ import {
   Menu,
 } from "./icons";
 import { useLive } from "./live";
+import { Attention } from "./panels/Attention";
 import { Capacity } from "./panels/Capacity";
 import { Fleet } from "./panels/Fleet";
 import { isLegacySelected } from "./resource";
@@ -25,11 +27,13 @@ import { Workloads } from "./panels/Workloads";
 import { useRoute } from "./route";
 import type { Route } from "./route";
 
-export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "capacity" | "system";
+export type PanelKey =
+  "fleet" | "attention" | "workloads" | "models" | "runtimes" | "capacity" | "system";
 export type DepFilter = "all" | "attention" | "rolling" | "ready";
 
 const LABELS: Record<PanelKey, string> = {
   fleet: "Fleet",
+  attention: "Attention",
   workloads: "Deployments",
   models: "Models",
   runtimes: "Runtimes",
@@ -137,6 +141,7 @@ export default function App() {
 
         <nav className="nav" aria-label="Primary">
           {navItem("fleet", "Fleet", IconFleet)}
+          {navItem("attention", "Attention", IconAttention)}
           {navItem("workloads", "Deployments", IconWorkloads)}
           {navItem("models", "Models", IconModels)}
           {navItem("runtimes", "Runtimes", IconRuntimes)}
@@ -199,10 +204,19 @@ export default function App() {
               detail={clusterLagDetail(items)}
             />
           ) : null}
+          {panel === "attention" && (
+            <Attention
+              openDeployment={openDeployment}
+              openModel={openModel}
+              openCapacityCluster={openCapacityCluster}
+            />
+          )}
           {panel === "fleet" && (
             <Fleet
               openDeployments={openDeployments}
               openDeployment={openDeployment}
+              openModel={openModel}
+              openAttention={() => goto("attention")}
               openCapacityCluster={openCapacityCluster}
             />
           )}

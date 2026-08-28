@@ -114,6 +114,20 @@ export interface PlacementUnits {
   fragments: Fragment[];
 }
 
+/** One fleet-triage finding, with click-through context. */
+export interface AttentionItem {
+  severity: "critical" | "warning";
+  category: "cluster" | "deployment" | "rollout" | "pods" | "model";
+  cluster: string;
+  namespace?: string;
+  /** Resource kind for click-through ("InferenceService", "BaseModel", ...). */
+  kind: string;
+  name: string;
+  /** One line of why this is here. */
+  summary: string;
+  detail?: string;
+}
+
 export interface ListResp<T> {
   count: number;
   items: T[];
@@ -721,6 +735,7 @@ function metricsPath(request: MetricsRequest): string {
 
 export const api = {
   clusters: () => getJSON<ClustersResp>("/v1/clusters"),
+  attention: () => getJSON<ListResp<AttentionItem>>("/v1/attention"),
   capacity: () => getJSON<CapacityResp>("/v1/capacity"),
   capacityForCluster: (name: string) =>
     getJSON<CapacityResp>(`/v1/capacity?cluster=${encodeURIComponent(name)}`),
