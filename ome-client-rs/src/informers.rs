@@ -101,6 +101,10 @@ impl Prune for Node {
     }
 }
 
+/// Pod label carrying the owning InferenceService's name; the operator stamps it
+/// on every serving pod it creates.
+pub const INFERENCE_SERVICE_POD_LABEL: &str = "ome.io/inferenceservice";
+
 impl Prune for Pod {
     fn prune(&mut self) {
         drop_managed_fields(self);
@@ -113,7 +117,25 @@ impl Prune for Pod {
         // which is the bulk of a Pod and, at ~10^5 pods, the bulk of the whole
         // cache. A future Pod reader must widen this prune to keep the fields it
         // needs.
+        //
+        // Diagnosis detail is read only for pods an InferenceService owns; on a
+        // shared cluster those are a small fraction of all pods. Everything else
+        // keeps just the capacity fields — retaining status detail fleet-wide
+        // scales cache RSS with the cluster's total pod count, not OME's.
+        let diagnosable = self
+            .metadata
+            .labels
+            .as_ref()
+            .is_some_and(|labels| labels.contains_key(INFERENCE_SERVICE_POD_LABEL));
         self.metadata.annotations = None;
+        // No reader walks pod ownership chains — owning workloads are resolved
+        // through the operator's labels instead.
+        self.metadata.owner_references = None;
+        // Labels are read only through the operator's own keys, so pods no
+        // InferenceService owns don't need any.
+        if !diagnosable {
+            self.metadata.labels = None;
+        }
         if let Some(spec) = self.spec.take() {
             self.spec = Some(PodSpec {
                 node_name: spec.node_name,
@@ -134,7 +156,7 @@ impl Prune for Pod {
                 phase: status.phase,
                 // Reasons only (Unschedulable, ContainersNotReady, …): a few
                 // fixed-size strings per pod. Messages are unbounded prose.
-                conditions: status.conditions.map(|conditions| {
+                conditions: status.conditions.filter(|_| diagnosable).map(|conditions| {
                     conditions
                         .into_iter()
                         .map(|c| PodCondition {
@@ -149,39 +171,41 @@ impl Prune for Pod {
                 // (ImagePullBackOff, CrashLoopBackOff, exit codes), and the last
                 // termination (why a restarted container died: OOMKilled, exit
                 // code) — again without their message strings.
-                container_statuses: status.container_statuses.map(|statuses| {
-                    statuses
-                        .into_iter()
-                        .map(|cs| ContainerStatus {
-                            name: cs.name,
-                            ready: cs.ready,
-                            restart_count: cs.restart_count,
-                            state: cs.state.map(|s| ContainerState {
-                                running: s.running,
-                                waiting: s.waiting.map(|w| ContainerStateWaiting {
-                                    reason: w.reason,
-                                    ..Default::default()
+                container_statuses: status.container_statuses.filter(|_| diagnosable).map(
+                    |statuses| {
+                        statuses
+                            .into_iter()
+                            .map(|cs| ContainerStatus {
+                                name: cs.name,
+                                ready: cs.ready,
+                                restart_count: cs.restart_count,
+                                state: cs.state.map(|s| ContainerState {
+                                    running: s.running,
+                                    waiting: s.waiting.map(|w| ContainerStateWaiting {
+                                        reason: w.reason,
+                                        ..Default::default()
+                                    }),
+                                    terminated: s.terminated.map(|t| ContainerStateTerminated {
+                                        exit_code: t.exit_code,
+                                        reason: t.reason,
+                                        ..Default::default()
+                                    }),
                                 }),
-                                terminated: s.terminated.map(|t| ContainerStateTerminated {
-                                    exit_code: t.exit_code,
-                                    reason: t.reason,
-                                    ..Default::default()
+                                last_state: cs.last_state.map(|s| ContainerState {
+                                    running: None,
+                                    waiting: None,
+                                    terminated: s.terminated.map(|t| ContainerStateTerminated {
+                                        exit_code: t.exit_code,
+                                        reason: t.reason,
+                                        finished_at: t.finished_at,
+                                        ..Default::default()
+                                    }),
                                 }),
-                            }),
-                            last_state: cs.last_state.map(|s| ContainerState {
-                                running: None,
-                                waiting: None,
-                                terminated: s.terminated.map(|t| ContainerStateTerminated {
-                                    exit_code: t.exit_code,
-                                    reason: t.reason,
-                                    finished_at: t.finished_at,
-                                    ..Default::default()
-                                }),
-                            }),
-                            ..Default::default()
-                        })
-                        .collect()
-                }),
+                                ..Default::default()
+                            })
+                            .collect()
+                    },
+                ),
                 ..Default::default()
             });
         }
@@ -514,6 +538,10 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p".into()),
                 namespace: Some("ns".into()),
+                labels: Some(BTreeMap::from([(
+                    INFERENCE_SERVICE_POD_LABEL.to_string(),
+                    "svc".to_string(),
+                )])),
                 annotations: Some(BTreeMap::from([("big".into(), "x".repeat(10_000))])),
                 managed_fields: Some(vec![ManagedFieldsEntry::default()]),
                 ..Default::default()
@@ -613,6 +641,67 @@ mod tests {
         assert!(last.container_id.is_none());
         assert!(cs.image.is_empty());
         assert!(cs.image_id.is_empty());
+    }
+
+    #[test]
+    fn pod_prune_strips_status_detail_from_pods_no_inferenceservice_owns() {
+        let requests = BTreeMap::from([("nvidia.com/gpu".to_string(), Quantity("8".to_string()))]);
+        let mut pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("bystander".into()),
+                namespace: Some("ns".into()),
+                labels: Some(BTreeMap::from([("app".to_string(), "batch".to_string())])),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some("node-1".into()),
+                containers: vec![Container {
+                    name: "c".into(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".into(),
+                    status: "True".into(),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "c".into(),
+                    ready: true,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        pod.prune();
+
+        // Capacity fields survive; the diagnosis-only status detail does not.
+        let spec = pod.spec.as_ref().unwrap();
+        assert_eq!(spec.node_name.as_deref(), Some("node-1"));
+        assert_eq!(
+            spec.containers[0]
+                .resources
+                .as_ref()
+                .unwrap()
+                .requests
+                .as_ref()
+                .unwrap()["nvidia.com/gpu"]
+                .0,
+            "8"
+        );
+        let status = pod.status.as_ref().unwrap();
+        assert_eq!(status.phase.as_deref(), Some("Running"));
+        assert!(status.conditions.is_none());
+        assert!(status.container_statuses.is_none());
+        assert!(pod.metadata.labels.is_none());
     }
 
     #[test]

@@ -265,17 +265,18 @@ serviceAccount:
   annotations: {} # e.g. a Meta service identity for gateway/manifold auth later
 
 # muse-server holds one informer cache per aggregated cluster; the Pod cache
-# dominates but is pruned to just the capacity-rollup fields, so a ~150k-pod fleet
-# measures ~2Gi/replica (~0.25 cores steady). Requests track that; the limit keeps
-# headroom for the initial-list spike. Memory still scales ~linearly with pod
-# count — raise the limit for a substantially larger fleet.
+# dominates but is pruned to just the capacity-rollup fields, so it measures
+# ~2Gi/replica per 150k pods watched (~0.25 cores steady). Memory scales
+# ~linearly with the summed pod count of every aggregated cluster — size
+# requests at ~15KiB x total pods and keep limit headroom for the initial-list
+# spike, or the pod OOM-loops on startup without ever settling.
 resources:
   requests:
     cpu: 500m
-    memory: 2Gi
+    memory: 10Gi
   limits:
     cpu: "2"
-    memory: 6Gi
+    memory: 14Gi
 
 podAnnotations: {}
 
