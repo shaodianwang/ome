@@ -233,6 +233,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             sse_keep_alive: config
                 .sse_keep_alive_secs
                 .map(|seconds| Duration::from_secs(seconds.get())),
+            attention_stuck_step_secs: config.attention_stuck_step_secs.map(|secs| secs.get()),
             capacity_limits: rollup::CapacityLimits {
                 max_fragments: config.capacity_max_fragments,
                 max_consumers: config.capacity_max_consumers,

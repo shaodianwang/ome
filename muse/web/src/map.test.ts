@@ -527,6 +527,12 @@ describe("canaryNote", () => {
       "canary step 1 · 5% traffic · 1 check failing",
     );
   });
+
+  it("includes how long the canary has sat in its step", () => {
+    expect(canaryNote({ currentStep: 2, trafficWeight: 25, stepAge: "3h", failedChecks: 1 })).toBe(
+      "canary step 2 · 25% traffic · in step 3h · 1 check failing",
+    );
+  });
 });
 
 describe("shortRevision", () => {

@@ -49,6 +49,9 @@ pub struct AppState {
     /// Optional heartbeat interval shared by every SSE endpoint. Deployment config
     /// owns this value; `None` leaves an otherwise valid stream event-driven.
     sse_keep_alive: Option<Duration>,
+    /// Age at which a canary sitting in one step becomes a fleet-triage finding.
+    /// `None` disables step-age detection; deployment config owns the policy.
+    attention_stuck_step_secs: Option<u64>,
     dashboard_policy: Option<DashboardPolicy>,
     metrics_time_ranges: Option<MetricsTimeRanges>,
     /// OME control-plane components the System panel reports on. Empty ⇒ the panel
@@ -70,6 +73,7 @@ pub struct AppStateConfig {
     pub pod_log_stream: Option<crate::config::PodLogStreamConfig>,
     pub refresh: Duration,
     pub sse_keep_alive: Option<Duration>,
+    pub attention_stuck_step_secs: Option<u64>,
     pub capacity_limits: rollup::CapacityLimits,
     pub dashboard_policy: Option<DashboardPolicy>,
     pub metrics_time_ranges: Option<MetricsTimeRanges>,
@@ -103,6 +107,7 @@ impl AppState {
             pod_log_stream: config.pod_log_stream,
             metrics_refresh: config.refresh,
             sse_keep_alive: config.sse_keep_alive,
+            attention_stuck_step_secs: config.attention_stuck_step_secs,
             dashboard_policy: config.dashboard_policy,
             metrics_time_ranges: config.metrics_time_ranges,
             system_components: config.system_components,
@@ -299,6 +304,12 @@ impl AppState {
     /// Configured interval between SSE keep-alive comments, if any.
     pub fn sse_keep_alive_interval(&self) -> Option<Duration> {
         self.sse_keep_alive
+    }
+
+    /// Age at which a canary sitting in one step becomes a triage finding;
+    /// `None` disables step-age detection.
+    pub fn attention_stuck_step_secs(&self) -> Option<u64> {
+        self.attention_stuck_step_secs
     }
 
     /// Optional UI health classification policy. Missing categories are neutral.

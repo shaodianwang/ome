@@ -372,13 +372,16 @@ export function transitionLabel(t: { from?: string; to: string }): string {
   return t.from ? `${tail(t.from)} → ${tail(t.to)}` : `→ ${tail(t.to)}`;
 }
 
-/** One-line canary summary: "canary step 3 · 25% traffic · 2 checks failing". */
+/** One-line canary summary:
+ *  "canary step 3 · 25% traffic · in step 2h · 2 checks failing". */
 export function canaryNote(c: {
   currentStep: number;
   trafficWeight: number;
   failedChecks?: number;
+  stepAge?: string;
 }): string {
   const parts = [`canary step ${c.currentStep}`, `${c.trafficWeight}% traffic`];
+  if (c.stepAge) parts.push(`in step ${c.stepAge}`);
   if (c.failedChecks) {
     parts.push(`${c.failedChecks} ${c.failedChecks === 1 ? "check" : "checks"} failing`);
   }

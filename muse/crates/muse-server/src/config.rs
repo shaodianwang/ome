@@ -566,6 +566,15 @@ pub struct Config {
     #[arg(long = "sse-keep-alive-secs", env = "MUSE_SSE_KEEP_ALIVE_SECS")]
     pub sse_keep_alive_secs: Option<NonZeroU64>,
 
+    /// Age at which a canary sitting in one step becomes a fleet-triage finding
+    /// ("canary stuck at step N"). No binary default: absent config disables
+    /// step-age detection; the deployment chart supplies the fleet's policy.
+    #[arg(
+        long = "attention-stuck-step-secs",
+        env = "MUSE_ATTENTION_STUCK_STEP_SECS"
+    )]
+    pub attention_stuck_step_secs: Option<NonZeroU64>,
+
     /// Backstop interval for a capacity recompute when no informer signal arrives.
     #[arg(
         long = "capacity-backstop-secs",

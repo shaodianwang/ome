@@ -974,8 +974,8 @@ fn placement_of(p: &InferenceServiceStatusPlacement) -> PlacementView {
     }
 }
 
-/// A canary rollout in flight: which step, the observed traffic weight, and how
-/// many analysis checks are currently failing (absent when none are).
+/// A canary rollout in flight: which step, the observed traffic weight, how
+/// long it has sat in that step, and which analysis checks are failing.
 #[derive(Serialize)]
 pub struct CanaryView {
     #[serde(rename = "currentStep")]
@@ -984,16 +984,58 @@ pub struct CanaryView {
     pub traffic_weight: i32,
     #[serde(skip_serializing_if = "Option::is_none", rename = "failedChecks")]
     pub failed_checks: Option<i32>,
+    /// Humanized time in the current step (from `stepEnteredTime`).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "stepAge")]
+    pub step_age: Option<String>,
+    /// The analysis checks currently failing, most recent status first as
+    /// reported. Empty (omitted) when everything passes.
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "failingChecks")]
+    pub failing_checks: Vec<CanaryCheckView>,
+}
+
+/// One failing canary analysis check: what was measured against what.
+#[derive(Serialize)]
+pub struct CanaryCheckView {
+    pub name: String,
+    /// The gate it must satisfy, e.g. "<= 0.5".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl CanaryView {
-    fn of(c: &InferenceServiceStatusCanary) -> Self {
+    pub(crate) fn of(c: &InferenceServiceStatusCanary) -> Self {
         Self {
             current_step: c.current_step,
             traffic_weight: c.observed_traffic_weight,
             failed_checks: c.analysis_failed_checks.filter(|&n| n > 0),
+            step_age: c.step_entered_time.as_deref().and_then(since_status_time),
+            failing_checks: failing_checks(c),
         }
     }
+}
+
+/// The failing entries of a canary's analysis results, projected for display.
+pub(crate) fn failing_checks(c: &InferenceServiceStatusCanary) -> Vec<CanaryCheckView> {
+    c.metric_results
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| CanaryCheckView {
+            name: r.name.clone(),
+            threshold: match (r.operator.as_deref(), r.threshold.as_deref()) {
+                (Some(op), Some(t)) => Some(format!("{op} {t}")),
+                (None, Some(t)) => Some(t.to_owned()),
+                _ => None,
+            },
+            value: r.value.clone().filter(|s| !s.is_empty()),
+            message: r.message.clone().filter(|s| !s.is_empty()),
+        })
+        .collect()
 }
 
 /// Full InferenceService detail for the console drawer: the overview (which
@@ -1325,10 +1367,18 @@ fn humanize_mem(quantity: &str) -> Option<String> {
 /// Humanized elapsed time since a k8s `Time`. k8s_openapi's `Time` wraps a
 /// `jiff::Timestamp`; compare its epoch seconds against wall-clock seconds.
 fn since(time: &Time) -> Option<String> {
+    Some(humanize_secs(secs_since(time)?))
+}
+
+/// Whole seconds elapsed since `time`; clamped at zero for clock skew.
+fn secs_since(time: &Time) -> Option<i64> {
     let then = time.0.as_second();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
-    let secs = (now - then).max(0);
-    Some(if secs >= 86_400 {
+    Some((now - then).max(0))
+}
+
+fn humanize_secs(secs: i64) -> String {
+    if secs >= 86_400 {
         format!("{}d", secs / 86_400)
     } else if secs >= 3_600 {
         format!("{}h", secs / 3_600)
@@ -1336,7 +1386,23 @@ fn since(time: &Time) -> Option<String> {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")
-    })
+    }
+}
+
+/// Some status fields carry RFC 3339 timestamps as plain strings; parse through
+/// the Kubernetes `Time` deserializer so they follow the same clock handling.
+fn parse_status_time(s: &str) -> Option<Time> {
+    serde_json::from_value(Value::String(s.to_owned())).ok()
+}
+
+/// Whole seconds elapsed since an RFC 3339 status timestamp.
+pub(crate) fn secs_since_status_time(s: &str) -> Option<i64> {
+    secs_since(&parse_status_time(s)?)
+}
+
+/// Humanized elapsed time since an RFC 3339 status timestamp.
+pub(crate) fn since_status_time(s: &str) -> Option<String> {
+    Some(humanize_secs(secs_since_status_time(s)?))
 }
 
 /// Humanized object age from its creation timestamp.
@@ -1786,5 +1852,29 @@ mod tests {
         }))
         .expect("canary fixture deserializes");
         assert_eq!(CanaryView::of(&failing).failed_checks, Some(2));
+    }
+
+    #[test]
+    fn canary_view_carries_step_age_and_failing_checks() {
+        let canary: InferenceServiceStatusCanary = serde_json::from_value(serde_json::json!({
+            "currentStep": 3,
+            "observedTrafficWeight": 25,
+            "stepEnteredTime": "2020-01-01T00:00:00Z",
+            "metricResults": [
+                { "name": "error_rate", "passed": false, "operator": "<=",
+                  "threshold": "0.5", "value": "2.1", "message": "over budget" },
+                { "name": "latency_p99", "passed": true, "threshold": "800ms" }
+            ]
+        }))
+        .expect("canary fixture deserializes");
+        let view = CanaryView::of(&canary);
+        // Entered years ago → a day-granularity age, never a raw timestamp.
+        assert!(view.step_age.as_deref().is_some_and(|a| a.ends_with('d')));
+        assert_eq!(view.failing_checks.len(), 1);
+        let check = to_val(&view.failing_checks[0]);
+        assert_eq!(check.get("name"), Some(&Value::from("error_rate")));
+        assert_eq!(check.get("threshold"), Some(&Value::from("<= 0.5")));
+        assert_eq!(check.get("value"), Some(&Value::from("2.1")));
+        assert_eq!(check.get("message"), Some(&Value::from("over budget")));
     }
 }

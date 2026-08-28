@@ -15,15 +15,19 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use ome_client::{k8s_openapi::api::core::v1::Pod, InferenceService};
+use ome_client::{
+    inferenceservices::InferenceServiceStatusCanary, k8s_openapi::api::core::v1::Pod,
+    InferenceService,
+};
 
 use super::error::ApiError;
 use crate::{
     app_context::AppState,
     informers::CacheSyncState,
     protocol::{
-        isvc_owner, pod_problem_reason, to_val, AttentionItem, BaseModelDetail, Category,
-        InferenceServiceView, Listing, Severity, ViewParams,
+        failing_checks, isvc_owner, pod_problem_reason, secs_since_status_time, since_status_time,
+        to_val, AttentionItem, BaseModelDetail, CanaryCheckView, Category, InferenceServiceView,
+        Listing, Severity, ViewParams,
     },
 };
 
@@ -69,7 +73,7 @@ pub async fn list(
             continue;
         }
         for isvc in c.inference_services.list() {
-            deployment_items(&c.name, &isvc, &mut items);
+            deployment_items(&c.name, &isvc, st.attention_stuck_step_secs(), &mut items);
         }
         pod_items(&c.name, &c.pods.list(), &mut items);
         for m in c.base_models.list() {
@@ -127,7 +131,12 @@ fn cluster_item(name: &str, cache: &CacheSyncState) -> Option<AttentionItem> {
     })
 }
 
-fn deployment_items(cluster: &str, isvc: &InferenceService, out: &mut Vec<AttentionItem>) {
+fn deployment_items(
+    cluster: &str,
+    isvc: &InferenceService,
+    stuck_step_secs: Option<u64>,
+    out: &mut Vec<AttentionItem>,
+) {
     let view = InferenceServiceView::of(isvc);
     if view.ready == Some(false) {
         out.push(AttentionItem {
@@ -144,6 +153,7 @@ fn deployment_items(cluster: &str, isvc: &InferenceService, out: &mut Vec<Attent
             detail: view.message.clone(),
         });
     }
+    let mut phase_reported = false;
     for component in &view.components {
         let Some(phase) = component.rollout_phase.as_deref() else {
             continue;
@@ -154,6 +164,7 @@ fn deployment_items(cluster: &str, isvc: &InferenceService, out: &mut Vec<Attent
             "RollingBack" => (Severity::Warning, "rolling back"),
             _ => continue,
         };
+        phase_reported = true;
         out.push(AttentionItem {
             severity,
             category: Category::Rollout,
@@ -165,6 +176,92 @@ fn deployment_items(cluster: &str, isvc: &InferenceService, out: &mut Vec<Attent
             detail: None,
         });
     }
+    if let Some(canary) = isvc.status.as_ref().and_then(|s| s.canary.as_ref()) {
+        canary_items(cluster, &view, canary, stuck_step_secs, phase_reported, out);
+    }
+}
+
+/// Canary wedge findings. The phase findings above catch Failed / Paused /
+/// RollingBack; this catches the two ways an *active* canary stops making
+/// progress — its analysis checks are failing, or its step has sat unchanged
+/// past `stuck_step_secs` (None disables age detection). A canary that is both
+/// stuck and failing checks cannot advance without an operator, so it
+/// escalates to critical.
+fn canary_items(
+    cluster: &str,
+    view: &InferenceServiceView,
+    canary: &InferenceServiceStatusCanary,
+    stuck_step_secs: Option<u64>,
+    phase_reported: bool,
+    out: &mut Vec<AttentionItem>,
+) {
+    let failing = failing_checks(canary);
+    // The counter is authoritative even when per-check results are pruned.
+    let failing_count = failing
+        .len()
+        .max(canary.analysis_failed_checks.unwrap_or(0).max(0) as usize);
+    let step_age = canary.step_entered_time.as_deref();
+    let stuck = !phase_reported
+        && matches!(
+            (stuck_step_secs, step_age.and_then(secs_since_status_time)),
+            (Some(threshold), Some(secs))
+                if secs >= i64::try_from(threshold).unwrap_or(i64::MAX)
+        );
+    if !stuck && failing_count == 0 {
+        return;
+    }
+    let checks = |n: usize| format!("{n} check{} failing", if n == 1 { "" } else { "s" });
+    let (severity, summary) = if stuck {
+        let age = step_age
+            .and_then(since_status_time)
+            .unwrap_or_else(|| "a while".to_owned());
+        let stuck_at = format!("canary stuck at step {} for {age}", canary.current_step);
+        if failing_count > 0 {
+            (
+                Severity::Critical,
+                format!("{stuck_at} — {}", checks(failing_count)),
+            )
+        } else {
+            (Severity::Warning, stuck_at)
+        }
+    } else {
+        (
+            Severity::Warning,
+            format!("canary: {}", checks(failing_count)),
+        )
+    };
+    out.push(AttentionItem {
+        severity,
+        category: Category::Rollout,
+        cluster: cluster.to_owned(),
+        namespace: view.namespace.clone(),
+        kind: "InferenceService",
+        name: view.name.clone(),
+        summary,
+        detail: (!failing.is_empty()).then(|| {
+            failing
+                .iter()
+                .map(describe_check)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }),
+    });
+}
+
+/// One failing check as a sentence fragment: "gpu_error_rate (want <= 0.5, got
+/// 2.1): error budget exhausted".
+fn describe_check(c: &CanaryCheckView) -> String {
+    let mut s = c.name.clone();
+    match (&c.threshold, &c.value) {
+        (Some(t), Some(v)) => s.push_str(&format!(" (want {t}, got {v})")),
+        (Some(t), None) => s.push_str(&format!(" (want {t})")),
+        (None, Some(v)) => s.push_str(&format!(" (got {v})")),
+        (None, None) => {}
+    }
+    if let Some(m) = &c.message {
+        s.push_str(&format!(": {m}"));
+    }
+    s
 }
 
 /// Aggregate stuck pods per owning deployment: one item per deployment naming
@@ -289,8 +386,106 @@ mod tests {
         ContainerState, ContainerStateWaiting, ContainerStatus, Pod, PodCondition, PodStatus,
     };
 
+    use serde_json::{json, Value};
+
     use super::*;
     use crate::protocol::INFERENCE_SERVICE_POD_LABEL;
+
+    /// A minimal InferenceService whose status is the given JSON.
+    fn isvc_with_status(status: Value) -> InferenceService {
+        serde_json::from_value(json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "svc", "namespace": "ns" },
+            "spec": {},
+            "status": status,
+        }))
+        .expect("fixture deserializes")
+    }
+
+    /// A canary far past any reasonable step age (entered in 2020).
+    fn old_canary(failed_checks: i32) -> Value {
+        json!({
+            "currentStep": 2,
+            "observedTrafficWeight": 25,
+            "stepEnteredTime": "2020-01-01T00:00:00Z",
+            "analysisFailedChecks": failed_checks,
+            "metricResults": (0..failed_checks).map(|i| json!({
+                "name": format!("check-{i}"),
+                "passed": false,
+                "operator": "<=",
+                "threshold": "0.5",
+                "value": "2.1",
+                "message": "over budget"
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn stuck_canary_step_warns_and_escalates_with_failing_checks() {
+        // Old step, threshold armed, nothing failing → warning.
+        let isvc = isvc_with_status(json!({ "canary": old_canary(0) }));
+        let mut items = Vec::new();
+        deployment_items("c1", &isvc, Some(60), &mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].severity, Severity::Warning);
+        assert_eq!(items[0].category, Category::Rollout);
+        assert!(items[0].summary.starts_with("canary stuck at step 2 for "));
+        assert!(items[0].detail.is_none());
+
+        // Stuck *and* failing checks → cannot advance on its own → critical.
+        let isvc = isvc_with_status(json!({ "canary": old_canary(2) }));
+        let mut items = Vec::new();
+        deployment_items("c1", &isvc, Some(60), &mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].severity, Severity::Critical);
+        assert!(items[0].summary.contains("2 checks failing"));
+        let detail = items[0].detail.as_deref().expect("failing checks listed");
+        assert!(detail.contains("check-0 (want <= 0.5, got 2.1): over budget"));
+    }
+
+    #[test]
+    fn failing_checks_alone_warn_even_without_step_age_policy() {
+        let mut canary = old_canary(1);
+        canary["stepEnteredTime"] = Value::Null;
+        let isvc = isvc_with_status(json!({ "canary": canary }));
+        let mut items = Vec::new();
+        deployment_items("c1", &isvc, None, &mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].severity, Severity::Warning);
+        assert_eq!(items[0].summary, "canary: 1 check failing");
+    }
+
+    #[test]
+    fn step_age_detection_stays_off_without_a_threshold() {
+        let isvc = isvc_with_status(json!({ "canary": old_canary(0) }));
+        let mut items = Vec::new();
+        deployment_items("c1", &isvc, None, &mut items);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn healthy_fresh_canary_is_not_a_finding() {
+        // Step entered in 2020, but the threshold is far larger than the age.
+        let isvc = isvc_with_status(json!({ "canary": old_canary(0) }));
+        let mut items = Vec::new();
+        deployment_items("c1", &isvc, Some(u64::MAX), &mut items);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn stuck_step_defers_to_an_already_reported_phase() {
+        // Paused already produces "awaiting promotion" — a stuck-step item on
+        // top of it would say the same thing twice.
+        let isvc = isvc_with_status(json!({
+            "canary": old_canary(0),
+            "components": { "engine": { "rolloutPhase": "Paused" } },
+        }));
+        let mut items = Vec::new();
+        deployment_items("c1", &isvc, Some(60), &mut items);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].summary.contains("awaiting promotion"));
+    }
 
     fn labelled_pod(name: &str, owner: &str, status: PodStatus) -> std::sync::Arc<Pod> {
         let mut pod = Pod::default();

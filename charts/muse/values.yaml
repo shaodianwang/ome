@@ -50,6 +50,10 @@ config:
   liveInvalidationBatchMs: 1000
   # Heartbeat for idle SSE connections. The binary has no baked interval.
   sseKeepAliveSecs: 10
+  # Age at which a canary sitting in one step becomes a fleet-triage finding
+  # ("canary stuck at step N"). The binary has no baked threshold; set to null
+  # to disable step-age detection.
+  attentionStuckStepSecs: 1800
   capacityBackstopSecs: 120
   # Bound the operator-facing drill-down arrays in each capacity response.
   capacityMaxFragments: 12

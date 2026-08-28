@@ -416,10 +416,19 @@ function OverviewPane({
               <Gauge pct={d.canary.trafficWeight} />
               <p className="panel-note">
                 {d.canary.trafficWeight}% of traffic on the new revision.
-                {d.canary.failedChecks
+                {d.canary.failedChecks && !d.canary.failingChecks?.length
                   ? ` ${n(d.canary.failedChecks)} analysis ${d.canary.failedChecks === 1 ? "check is" : "checks are"} failing.`
                   : ""}
               </p>
+              {d.canary.failingChecks?.map((c) => (
+                <div className="detail-load" key={c.name}>
+                  <Dot tone="red" />
+                  <span className="mono">{c.name}</span>
+                  {c.threshold ? <span className="muted">want {c.threshold}</span> : null}
+                  {c.value ? <span className="muted">· got {c.value}</span> : null}
+                  {c.message ? <span> — {c.message}</span> : null}
+                </div>
+              ))}
             </Card>
           ) : null}
 

@@ -77,6 +77,10 @@ spec:
             - name: MUSE_SSE_KEEP_ALIVE_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.attentionStuckStepSecs }}
+            - name: MUSE_ATTENTION_STUCK_STEP_SECS
+              value: {{ . | quote }}
+            {{- end }}
             - name: MUSE_CAPACITY_BACKSTOP_SECS
               value: {{ .Values.config.capacityBackstopSecs | quote }}
             - name: MUSE_CAPACITY_MAX_FRAGMENTS

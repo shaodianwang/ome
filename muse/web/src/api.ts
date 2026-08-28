@@ -309,6 +309,19 @@ export interface CanaryItem {
   trafficWeight: number;
   /** Analysis checks currently failing; absent when none are. */
   failedChecks?: number;
+  /** Humanized time in the current step, e.g. "2h". */
+  stepAge?: string;
+  /** The failing analysis checks, when reported. */
+  failingChecks?: CanaryCheck[];
+}
+
+/** One failing canary analysis check: what was measured against what. */
+export interface CanaryCheck {
+  name: string;
+  /** The gate it must satisfy, e.g. "<= 0.5". */
+  threshold?: string;
+  value?: string;
+  message?: string;
 }
 
 /** Full ISVC detail (drawer): the overview plus conditions and placement. */
