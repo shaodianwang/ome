@@ -230,9 +230,10 @@ func ApplyKueueQuota(ctx context.Context, c client.Client, namespace, queueName,
 // pass this into Framework.ExtraWebhookPaths. The Kueue webhook manifests
 // are NOT vendored into dep-crds (that dir is CRDs-only).
 //
-// The directory is resolved with `go list -m`, the same way the kueue-crds
-// Makefile target locates the CRDs, so a go.mod kueue bump needs no edit here
-// and a module cache holding several Kueue versions cannot serve manifests
+// The directory is resolved with `go list -m` against the go.mod pin, NOT the
+// fleet version the CRDs are vendored from: these manifests configure the
+// webhook server StartKueue runs in-process, which is the module's own code. A
+// module cache holding several Kueue versions therefore cannot serve manifests
 // from the wrong one. It returns ("", error) when the module dir cannot be
 // located.
 func KueueWebhookDir() (string, error) {

@@ -37,8 +37,12 @@ const KueueManagedLabel = "ome.io/kueue-managed"
 
 // kueueInstallDir holds the manifest rendered by `make kueue-install`, relative
 // to the repo root. Gitignored and vendored like the other dep-crds, because it
-// is derived from the Kueue version in go.mod.
+// is derived from the Kueue version in kueueVersionFile.
 const kueueInstallDir = "tests/integration/dep-crds/kueue-install"
+
+// kueueVersionFile pins the Kueue version the fleet runs, relative to the repo
+// root.
+const kueueVersionFile = ".kueue-crd-version"
 
 // kueueRolloutTimeout bounds the wait for the controller to become Available.
 // Generous: the node has to unpack the image before the container starts.
@@ -75,6 +79,15 @@ func InstallKueue(ctx context.Context, cfg *rest.Config, clusterName string) err
 	if err != nil {
 		return err
 	}
+	// Drift guard: the image comes from the committed pin, the manifest from a
+	// gitignored render that survives a branch switch. One left from an earlier
+	// pin deploys a Kueue the node was never handed.
+	if !strings.Contains(string(raw), "image: "+image) {
+		return fmt.Errorf(
+			"InstallKueue: %s does not deploy %s — the rendered manifest predates the "+
+				"current %s; re-run `make kueue-install`", manifest, image, kueueVersionFile)
+	}
+
 	if err := kindutil.LoadImage(ctx, clusterName, image); err != nil {
 		return fmt.Errorf("InstallKueue: load %s into %s: %w", image, clusterName, err)
 	}
@@ -87,18 +100,17 @@ func InstallKueue(ctx context.Context, cfg *rest.Config, clusterName string) err
 	return waitForKueueReady(ctx, cfg, clusterName)
 }
 
-// kueueImage reads the version `make kueue-install` recorded and pairs it with
-// the same repository the manifest was rendered against, so the loaded image
-// and the deployment's image ref cannot disagree.
+// kueueImage pairs the pinned Kueue version with the repository the manifest
+// was rendered against. Taken from the pin rather than the rendered output, so
+// the caller can reject a manifest that disagrees.
 func kueueImage(root string) (string, error) {
-	versionFile := filepath.Join(root, kueueInstallDir, "version")
-	raw, err := os.ReadFile(versionFile) //nolint:gosec // fixed, repo-relative path
+	raw, err := os.ReadFile(filepath.Join(root, kueueVersionFile)) //nolint:gosec // fixed, repo-relative path
 	if err != nil {
-		return "", fmt.Errorf("InstallKueue: read %s (run `make kueue-install`): %w", versionFile, err)
+		return "", fmt.Errorf("InstallKueue: read %s: %w", kueueVersionFile, err)
 	}
 	version := strings.TrimSpace(string(raw))
 	if version == "" {
-		return "", fmt.Errorf("InstallKueue: %s is empty", versionFile)
+		return "", fmt.Errorf("InstallKueue: %s is empty", kueueVersionFile)
 	}
 	repo := os.Getenv("KUEUE_IMAGE_REPO")
 	if repo == "" {

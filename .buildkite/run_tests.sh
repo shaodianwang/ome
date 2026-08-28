@@ -115,8 +115,8 @@ package_kind_bundle() {
   # Only the gitignored, vendored dep-crds travel with the bundle; the committed
   # ones (prometheus-operator, envoy-gateway) arrive with the agent's checkout.
   # kueue-install is a rendered install manifest rather than a CRD set, and it
-  # is derived from the Kueue version in go.mod, so it has to be the one built
-  # from this commit.
+  # is derived from the Kueue version in .kueue-crd-version, so it has to be the
+  # one built from this commit.
   cp -R tests/integration/dep-crds/keda "$stage/dep-crds/"
   cp -R tests/integration/dep-crds/scheduler-plugins "$stage/dep-crds/"
   cp -R tests/integration/dep-crds/kueue-install "$stage/dep-crds/"

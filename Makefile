@@ -66,7 +66,10 @@ ifeq ($(ENVTEST_K8S_VERSION),)
 $(error cannot read .envtest-k8s-version)
 endif
 
-# Kueue version whose CRD schemas the integration suites validate against.
+# Kueue version the integration suites run against: the schemas the envtest
+# suites validate objects with, and the controller the KIND suites install.
+# (The envtest harness runs Kueue's controllers in-process, so that code is
+# whatever go.mod pins.)
 # .kueue-crd-version is the single source of truth and tracks the version the
 # FLEET runs, which is deliberately ahead of the sigs.k8s.io/kueue pin in
 # go.mod — that pin is held back by the Kubernetes and controller-runtime
@@ -657,6 +660,13 @@ KUEUE_IMAGE_REPO ?= registry.k8s.io/kueue/kueue
 KUEUE_MANAGED_LABEL ?= ome.io/kueue-managed
 DEP_CRDS_DIR := tests/integration/dep-crds
 
+# Shell snippet printing the extracted module source for KUEUE_CRD_VERSION.
+# `go list` reports a path only for a module already extracted, so the download
+# is what makes this work on a clean checkout; GOTOOLCHAIN=auto because a
+# version ahead of the go.mod pin can declare a newer go directive.
+KUEUE_MOD_DIR = GOTOOLCHAIN=auto go mod download sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION) >/dev/null || true ; \
+	go list -m -mod=mod -f "{{.Dir}}" sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION) 2>/dev/null
+
 # Each <bundle>-crds target: copies CRD YAMLs from the corresponding
 # go.mod module into tests/integration/dep-crds/<bundle>/. Tests point
 # at these directories (envtest via framework.OptionalCRDBundle, KIND via
@@ -685,16 +695,14 @@ kueue-install: kustomize ## Render the Kueue install manifest for the KIND suite
 	@# observe admission. Rendered here rather than in the test so CI ships a
 	@# static file — the GKE agents have no kustomize and no egress.
 	@mkdir -p $(DEP_CRDS_DIR)/kueue-install
-	@KUEUE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/kueue 2>/dev/null) ; \
-	if [ -z "$$KUEUE_DIR" ]; then echo "sigs.k8s.io/kueue not in go.mod; skipping kueue-install" >&2; exit 0; fi ; \
-	KUEUE_VERSION=$$(go list -m -mod=readonly -f "{{.Version}}" sigs.k8s.io/kueue) ; \
+	@KUEUE_DIR=$$($(KUEUE_MOD_DIR)) ; \
+	if [ -z "$$KUEUE_DIR" ]; then echo "cannot fetch sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION); skipping kueue-install" >&2; exit 0; fi ; \
 	$(KUSTOMIZE) build "$$KUEUE_DIR/config/default" \
-		| sed -E "s#image: .*/kueue/kueue:.*#image: $(KUEUE_IMAGE_REPO):$$KUEUE_VERSION#" \
+		| sed -E "s#image: .*/kueue/kueue:.*#image: $(KUEUE_IMAGE_REPO):$(KUEUE_CRD_VERSION)#" \
 		| sed -E "s#imagePullPolicy: Always#imagePullPolicy: IfNotPresent#" \
 		| sed -E "s#^(    kind: Configuration)\$$#\\1\\n    managedJobsNamespaceSelector:\\n      matchLabels:\\n        $(KUEUE_MANAGED_LABEL): \"true\"#" \
 		> $(DEP_CRDS_DIR)/kueue-install/kueue.yaml ; \
-	echo "$$KUEUE_VERSION" > $(DEP_CRDS_DIR)/kueue-install/version ; \
-	echo "✅ Rendered Kueue $$KUEUE_VERSION install manifest to $(DEP_CRDS_DIR)/kueue-install/"
+	echo "✅ Rendered Kueue $(KUEUE_CRD_VERSION) install manifest to $(DEP_CRDS_DIR)/kueue-install/"
 
 .PHONY: gateway-api-crds
 gateway-api-crds: ## Vendor sigs.k8s.io/gateway-api standard-channel CRDs (HTTPRoute)
@@ -716,15 +724,13 @@ scheduler-plugins-crds: ## Vendor sigs.k8s.io/scheduler-plugins CRDs (scheduling
 kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor, ClusterQueue, LocalQueue, Workload, … for the OEP-0018 real-Kueue envtest harness)
 	@mkdir -p $(DEP_CRDS_DIR)/kueue
 	@# Sourced from $(KUEUE_CRD_VERSION), not the go.mod pin: the suites must
-	@# validate against the schema the fleet's apiserver enforces. Falls back to
-	@# the pin when that version cannot be fetched, so an offline build still
-	@# runs the suites rather than failing to vendor anything.
-	@KUEUE_DIR=$$(go list -m -mod=mod -f "{{.Dir}}" sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION) 2>/dev/null) ; \
+	@# validate against the schema the fleet's apiserver enforces. When that
+	@# version cannot be fetched, vendor nothing rather than an older schema.
+	@KUEUE_DIR=$$($(KUEUE_MOD_DIR)) ; \
 	if [ -z "$$KUEUE_DIR" ]; then \
-		echo "⚠️  cannot fetch sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION); falling back to the go.mod pin" >&2 ; \
-		KUEUE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/kueue 2>/dev/null) ; \
+		echo "cannot fetch sigs.k8s.io/kueue@$(KUEUE_CRD_VERSION); skipping kueue-crds" >&2 ; \
+		rm -f $(DEP_CRDS_DIR)/kueue/*.yaml ; exit 0 ; \
 	fi ; \
-	if [ -z "$$KUEUE_DIR" ]; then echo "sigs.k8s.io/kueue not in go.mod; skipping kueue-crds" >&2; exit 0; fi ; \
 	cp -f "$$KUEUE_DIR/config/components/crd/bases/"*.yaml $(DEP_CRDS_DIR)/kueue/ ; \
 	echo "✅ Vendored Kueue CRDs from $$KUEUE_DIR to $(DEP_CRDS_DIR)/kueue/"
 

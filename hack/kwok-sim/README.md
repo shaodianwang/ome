@@ -320,8 +320,7 @@ capacity. They are vendored by `make kueue-crds` from the version in
 `.kueue-crd-version` — the one the fleet runs, which is ahead of the
 `sigs.k8s.io/kueue` pin in `go.mod` — into the same gitignored
 `tests/integration/dep-crds/` tree as the `PodGroup` CRD. When that version
-cannot be fetched the target falls back to the pin, so the copy is still
-offline.
+cannot be fetched the target vendors nothing rather than an older schema.
 
 ### `--with-kueue`
 
@@ -583,8 +582,8 @@ Things `up.sh` does that are not obvious, if you are reproducing it by hand:
   tracked, each with a `SOURCE` file. `up.sh` runs `make scheduler-plugins-crds`
   or `make kueue-crds` when one is missing. `scheduler-plugins` copies from the
   `go.mod` module in the local module cache and needs no network; `kueue` reads
-  `.kueue-crd-version` and falls back to that cached pin when it cannot fetch
-  it. `PodGroup` is required for `ome-scheduler` and merely wanted otherwise
+  `.kueue-crd-version` and vendors nothing when it cannot fetch that version.
+  `PodGroup` is required for `ome-scheduler` and merely wanted otherwise
   (without it OME stamps `GangSchedulingUnavailable=True` and a gang can land
   partially); the Kueue CRDs are required for `ome-quota-manager`, which cannot
   attribute capacity to a flavor it cannot read.

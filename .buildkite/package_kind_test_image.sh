@@ -62,14 +62,12 @@ done
 # pulled here rather than baked into kind-ci because the image build only pushes
 # on main: a kind-ci change cannot be exercised on the branch that needs it.
 #
-# The tag comes from the manifest the bundle already carries, which `make
-# kueue-install` rendered from go.mod — so the loaded image and the Deployment's
-# image ref are the same by construction. /images is where the runner looks,
-# matching the tarballs kind-ci bakes in.
-kueue_version=$(tar -xzOf ".buildkite/artifacts/multicluster-kind-test.tgz" \
-  ./dep-crds/kueue-install/version)
-kueue_version=$(printf '%s' "$kueue_version" | tr -d '[:space:]')
-[ -n "$kueue_version" ] || { echo "multi-cluster bundle has no Kueue version" >&2; exit 1; }
+# The tag comes from .kueue-crd-version, the same file `make kueue-install`
+# rendered the bundled manifest from at this commit — so the loaded image and
+# the Deployment's image ref are the same by construction. /images is where the
+# runner looks, matching the tarballs kind-ci bakes in.
+kueue_version=$(tr -d '[:space:]' <.kueue-crd-version)
+[ -n "$kueue_version" ] || { echo ".kueue-crd-version is empty" >&2; exit 1; }
 kueue_image="${KUEUE_IMAGE_REPO:-registry.k8s.io/kueue/kueue}:${kueue_version}"
 echo "--- pull ${kueue_image}"
 crane pull --platform linux/amd64 "$kueue_image" "$stage/images/kueue.tar"
