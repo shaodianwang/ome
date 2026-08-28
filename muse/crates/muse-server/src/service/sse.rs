@@ -2,9 +2,12 @@
 
 use std::{convert::Infallible, time::Duration};
 
-use axum::response::{
-    sse::{Event, KeepAlive, Sse},
-    IntoResponse, Response,
+use axum::{
+    http::header::{HeaderName, HeaderValue, CACHE_CONTROL},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
 };
 use tokio_stream::{Stream, StreamExt};
 
@@ -22,10 +25,25 @@ where
 {
     let hello = tokio_stream::once(Ok::<_, Infallible>(Event::default().comment("connected")));
     let stream = hello.chain(stream);
-    match keep_alive {
+    let mut response = match keep_alive {
         Some(interval) => Sse::new(stream)
             .keep_alive(KeepAlive::new().interval(interval))
             .into_response(),
         None => Sse::new(stream).into_response(),
-    }
+    };
+    // A buffering proxy between the browser and this server holds an SSE body
+    // until a size threshold a trickle of events never reaches, which reads as
+    // a hung stream. `no-transform` forbids intermediaries from recoding or
+    // aggregating the body, and `X-Accel-Buffering: no` disables per-response
+    // buffering in nginx-family proxies. Harmless where no proxy is involved.
+    let headers = response.headers_mut();
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
