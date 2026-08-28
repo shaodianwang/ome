@@ -18,8 +18,9 @@ use kube::Resource;
 use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
 
 use crate::protocol::{
-    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, Consumer, Fragment,
-    GpuView, GroupCapacity, NodeCounts, PlacementUnits, Topology, UnitBox,
+    first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, Consumer,
+    DeploymentConsumer, Fragment, GpuView, GroupCapacity, NodeCounts, PlacementUnits, Topology,
+    UnitBox, INFERENCE_SERVICE_POD_LABEL,
 };
 
 /// Accelerator kinds tracked separately (a pod/node never mixes them in practice).
@@ -95,13 +96,20 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
     let mut pending: BTreeMap<&'static str, (i64, i64)> = BTreeMap::new();
     // Lost capacity: accelerators on NotReady/cordoned nodes (kind -> accel, nodes).
     let mut unavail: BTreeMap<&'static str, (i64, usize)> = BTreeMap::new();
-    // Top consumers: chips held by scheduled pods, per (namespace, kind).
+    // Top consumers: chips held by scheduled pods, per (namespace, kind) and —
+    // for pods carrying the ownership label — per (namespace, InferenceService, kind).
     let mut consumers: BTreeMap<(String, &'static str), (i64, i64)> = BTreeMap::new();
+    let mut deployment_consumers: BTreeMap<DeploymentKey, (i64, i64)> = BTreeMap::new();
 
     for cluster in clusters {
         let allocated = accel_allocated_by_node(&cluster.pods);
         accumulate_pending(&cluster.pods, &mut pending);
-        accumulate_consumers(&cluster.pods, &mut consumers);
+        accumulate_consumers(
+            &cluster.name,
+            &cluster.pods,
+            &mut consumers,
+            &mut deployment_consumers,
+        );
 
         for node in &cluster.nodes {
             let name = node.meta().name.clone().unwrap_or_default();
@@ -220,6 +228,10 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
         gpu_racks: domain_units(clusters, "gpu", &topo.nvlink_labels),
         tpu_subblocks: domain_units(clusters, "tpu", &topo.nvlink_labels),
         consumers: top_consumers(consumers, limits.max_consumers),
+        consumers_by_deployment: top_deployment_consumers(
+            deployment_consumers,
+            limits.max_consumers,
+        ),
     }
 }
 
@@ -457,10 +469,19 @@ fn accumulate_pending(pods: &[Arc<Pod>], out: &mut BTreeMap<&'static str, (i64, 
     }
 }
 
-/// Sum accelerator chips held by *scheduled* pods, per (namespace, kind) — who is
-/// actually occupying the cluster's accelerators. A Pending/unscheduled pod isn't
-/// holding capacity yet, so it's excluded (that's [`accumulate_pending`]'s job).
-fn accumulate_consumers(pods: &[Arc<Pod>], out: &mut BTreeMap<(String, &'static str), (i64, i64)>) {
+/// Full identity of one deployment's consumption: (cluster, namespace, service, kind).
+type DeploymentKey = (String, String, String, &'static str);
+
+/// Sum accelerator chips held by *scheduled* pods — who is actually occupying the
+/// cluster's accelerators — per (namespace, kind), and per owning InferenceService
+/// for pods that carry the operator's ownership label. A Pending/unscheduled pod
+/// isn't holding capacity yet, so it's excluded (that's [`accumulate_pending`]'s job).
+fn accumulate_consumers(
+    cluster: &str,
+    pods: &[Arc<Pod>],
+    out: &mut BTreeMap<(String, &'static str), (i64, i64)>,
+    by_deployment: &mut BTreeMap<DeploymentKey, (i64, i64)>,
+) {
     for pod in pods {
         let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
         if matches!(phase, Some("Succeeded" | "Failed")) {
@@ -473,6 +494,12 @@ fn accumulate_consumers(pods: &[Arc<Pod>], out: &mut BTreeMap<(String, &'static 
             continue;
         }
         let ns = pod.metadata.namespace.clone().unwrap_or_default();
+        let owner = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(INFERENCE_SERVICE_POD_LABEL))
+            .filter(|o| !o.is_empty());
         for kind in KINDS {
             let req: i64 = spec
                 .containers
@@ -485,6 +512,13 @@ fn accumulate_consumers(pods: &[Arc<Pod>], out: &mut BTreeMap<(String, &'static 
                 let e = out.entry((ns.clone(), kind)).or_insert((0, 0));
                 e.0 += req;
                 e.1 += 1;
+                if let Some(owner) = owner {
+                    let e = by_deployment
+                        .entry((cluster.to_owned(), ns.clone(), owner.clone(), kind))
+                        .or_insert((0, 0));
+                    e.0 += req;
+                    e.1 += 1;
+                }
             }
         }
     }
@@ -508,6 +542,34 @@ fn top_consumers(
         b.accelerators
             .cmp(&a.accelerators)
             .then(a.namespace.cmp(&b.namespace))
+    });
+    out.truncate(max_consumers);
+    out
+}
+
+/// Flatten the per-deployment consumer map into the top-N services by chips held.
+fn top_deployment_consumers(
+    map: BTreeMap<DeploymentKey, (i64, i64)>,
+    max_consumers: usize,
+) -> Vec<DeploymentConsumer> {
+    let mut out: Vec<DeploymentConsumer> = map
+        .into_iter()
+        .map(
+            |((cluster, namespace, name, kind), (accelerators, pods))| DeploymentConsumer {
+                cluster,
+                namespace,
+                name,
+                kind: kind.to_owned(),
+                accelerators,
+                pods,
+            },
+        )
+        .collect();
+    out.sort_by(|a, b| {
+        b.accelerators
+            .cmp(&a.accelerators)
+            .then(a.namespace.cmp(&b.namespace))
+            .then(a.name.cmp(&b.name))
     });
     out.truncate(max_consumers);
     out
@@ -557,6 +619,7 @@ mod tests {
     use super::{build, CapacityLimits, ClusterData};
     use crate::protocol::{
         AccelLost, CapacityReport, GroupCapacity, PlacementUnits, Topology, UnitBox,
+        INFERENCE_SERVICE_POD_LABEL,
     };
 
     const ISLAND_LABEL: &str = "capacity.test/island";
@@ -851,6 +914,62 @@ mod tests {
         assert_eq!(report.consumers.len(), 2);
         assert_eq!(report.consumers[0].namespace, "tenant-3");
         assert_eq!(report.consumers[1].namespace, "tenant-2");
+    }
+
+    /// A pod stamped with the operator's ownership label, as the InferenceService
+    /// controller creates them.
+    fn owned_pod(
+        name: &str,
+        node_name: &str,
+        kind: &str,
+        chips: i64,
+        namespace: &str,
+        isvc: &str,
+    ) -> Arc<Pod> {
+        let mut pod = (*pod_in_namespace(name, node_name, kind, chips, namespace)).clone();
+        pod.metadata.labels = Some(BTreeMap::from([(
+            INFERENCE_SERVICE_POD_LABEL.to_owned(),
+            isvc.to_owned(),
+        )]));
+        Arc::new(pod)
+    }
+
+    #[test]
+    fn consumers_attribute_labelled_pods_to_their_deployment() {
+        let nodes = (0..3)
+            .map(|index| {
+                node(
+                    &format!("gpu-{index}"),
+                    "gpu",
+                    8,
+                    Availability::Healthy,
+                    Placement {
+                        island: "island-a",
+                        domain: "domain-a",
+                        tpu_slice: None,
+                    },
+                )
+            })
+            .collect();
+        let pods = vec![
+            owned_pod("kimi-engine-0", "gpu-0", "gpu", 4, "sandbox", "kimi"),
+            owned_pod("kimi-decoder-0", "gpu-1", "gpu", 2, "sandbox", "kimi"),
+            // Unlabelled (non-OME) pod: namespace consumers only.
+            pod_in_namespace("batch-0", "gpu-2", "gpu", 8, "sandbox"),
+        ];
+        let report = build(&[cluster(nodes, pods)], &topology(), limits());
+
+        assert_eq!(report.consumers.len(), 1);
+        assert_eq!(report.consumers[0].namespace, "sandbox");
+        assert_eq!(report.consumers[0].accelerators, 14);
+        assert_eq!(report.consumers_by_deployment.len(), 1);
+        let by_deployment = &report.consumers_by_deployment[0];
+        assert_eq!(by_deployment.cluster, "cluster-a");
+        assert_eq!(by_deployment.namespace, "sandbox");
+        assert_eq!(by_deployment.name, "kimi");
+        assert_eq!(by_deployment.kind, "gpu");
+        assert_eq!(by_deployment.accelerators, 6);
+        assert_eq!(by_deployment.pods, 2);
     }
 
     #[test]

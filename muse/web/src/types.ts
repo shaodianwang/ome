@@ -1,7 +1,7 @@
 // View-model types for the MUSE console — the shapes the panels render, mapped
 // from the muse read-plane API (see src/map.ts and src/api.ts).
 
-import type { ResourceRef } from "./resource";
+import type { ResourceRef, Selected } from "./resource";
 export type Tone = "green" | "amber" | "red" | "blue" | "violet" | "cyan" | "slate";
 export type BarTone = "" | "green" | "amber" | "red" | "violet";
 
@@ -18,6 +18,9 @@ export interface FeedItem {
   rest: string;
   meta: string;
   when: string;
+  /** Full identity for click-through, when the event names a deployment that
+   *  still exists (deletions have nothing to open). */
+  sel?: Selected;
 }
 
 /** Fleet · active rollouts */
@@ -25,12 +28,27 @@ export interface Rollout {
   name: string;
   namespace?: string;
   barTone: BarTone;
+  /** Real progress: ready/total replicas across the components mid-rollout. */
   barPct: number;
   barStriped?: boolean;
   note: string;
   gate: Pill;
   cluster: string;
   started: string;
+  /** Per-component rollout state (phase + revision), for the expanded card. */
+  components?: ComponentCell[];
+  /** Full identity for click-through to the deployment. */
+  sel: Selected;
+}
+
+/** One component's replica state, rendered as a compact chip. */
+export interface ComponentCell {
+  name: string;
+  /** Short display label, e.g. "eng 245/251" (with "→N" when scaling). */
+  label: string;
+  tone: "ok" | "warn" | "bad";
+  phase?: string;
+  revision?: string;
 }
 
 /** Workloads · table row */
@@ -47,6 +65,14 @@ export interface WorkloadRow {
   endpoint?: string;
   /** Rolled-up ready/desired replicas across Components, with a health tone. */
   replicas: { label: string; tone: Tone };
+  /** Per-component replica chips (engine / decoder / router), when reported. */
+  components: ComponentCell[];
+  /** Deployment mode (OMENative / RawDeployment / …), when reported. */
+  mode?: string;
+  /** Accelerator chips currently held by the deployment's scheduled pods. */
+  accelerators?: number;
+  /** Whether any component is mid-rollout (non-Stable rollout phase). */
+  rolling: boolean;
   /** Model-load summary (e.g. "12 loaded", "2 failed"), when known. */
   load?: string;
   /** Why it isn't ready (coarse reason), shown only when not ready. */

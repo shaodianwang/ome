@@ -151,8 +151,7 @@ fn pod_selector(
 }
 
 /// The pods backing a component: those in its namespace matching any matched
-/// object's pod selector. Restarts/readiness are unavailable (the Pod cache
-/// prunes container statuses), so only name, phase, and node are reported.
+/// object's pod selector, reported as name, phase, and node.
 fn component_pods(
     pods: &Lister<Pod>,
     namespace: &str,

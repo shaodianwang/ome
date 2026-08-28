@@ -6,8 +6,29 @@ import { Copy } from "./icons";
 import type { Selected } from "./resource";
 import { argLines } from "./runtime";
 import type { BarTone, Tone } from "./types";
-import { COPY_FEEDBACK_MS, num } from "./util";
+import { copyText, COPY_FEEDBACK_MS, num } from "./util";
 import { Track } from "./viz";
+
+/** A one-click "copy this kubectl command" chip. muse never runs it — the
+ *  operator runs it with their own (RBAC'd, audited) credentials. */
+export function CopyCmd({ label, cmd }: { label: string; cmd: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="copybtn"
+      title={cmd}
+      onClick={async () => {
+        if (await copyText(cmd)) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+        }
+      }}
+    >
+      {copied ? "✓ copied" : label}
+    </button>
+  );
+}
 
 export function Pill({ tone, label, style }: { tone: Tone; label: string; style?: CSSProperties }) {
   return (

@@ -11,6 +11,7 @@ import { ResourceTable } from "../ResourceTable";
 import { isLegacySelected, resourceKey, sameResource, selectionKey } from "../resource";
 import type { RouteSelected, Selected } from "../resource";
 import { fmtRes, imageShort, isDisaggregated, isMultiNode, serves } from "../runtime";
+import { ageToSecs } from "../util";
 import { Card } from "../viz";
 
 type RuntimeRow = RuntimeItem & {
@@ -70,6 +71,21 @@ const COLUMNS: Column<RuntimeRow>[] = [
     cellClass: "num",
     render: (r) => <span className={`use-chip ${r.used ? "on" : ""}`}>{r.used || "—"}</span>,
     sort: (r) => r.used,
+  },
+  {
+    key: "cluster",
+    label: "Cluster",
+    cellClass: "mono cell-sm muted",
+    render: (r) => r.cluster,
+    sort: (r) => r.cluster.toLowerCase(),
+  },
+  {
+    key: "age",
+    label: "Age",
+    right: true,
+    cellClass: "num muted",
+    render: (r) => r.age ?? "—",
+    sort: (r) => ageToSecs(r.age ?? ""),
   },
 ];
 

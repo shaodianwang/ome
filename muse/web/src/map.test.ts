@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import {
+  componentCells,
   componentTone,
   conditionRank,
+  isRolling,
   loadSummary,
   modelUsage,
   replicaRollup,
+  rolloutProgress,
   runtimeReference,
   runtimeUsage,
   shortRevision,
@@ -19,7 +22,7 @@ import { resourceKey } from "./resource";
 import { matches } from "./util";
 
 describe("toRollouts", () => {
-  it("maps a progressing InferenceService to an in-progress card", () => {
+  it("fuses real replica progress and component state from the matching deployment", () => {
     const items: RolloutItem[] = [
       {
         cluster: "cw",
@@ -30,10 +33,67 @@ describe("toRollouts", () => {
         reason: "EngineNotReady",
       },
     ];
-    const [r] = toRollouts(items);
+    const isvcs: IsvcItem[] = [
+      {
+        cluster: "cw",
+        name: "r1",
+        namespace: "team-a",
+        components: [
+          {
+            name: "engine",
+            readyReplicas: 3,
+            totalReplicas: 4,
+            rolloutPhase: "Progressing",
+            revision: "r1-engine-rev-abc",
+          },
+          { name: "router", readyReplicas: 1, totalReplicas: 1 },
+        ],
+      },
+    ];
+    const [r] = toRollouts(items, isvcs);
     expect(r.gate.tone).toBe("amber");
     expect(r.note).toBe("EngineNotReady");
     expect(r.namespace).toBe("team-a");
+    expect(r.barPct).toBe(80); // 4/5 replicas ready — real progress, not a constant
+    expect(r.sel).toEqual({
+      cluster: "cw",
+      kind: "InferenceService",
+      name: "r1",
+      namespace: "team-a",
+    });
+    expect(r.components?.map((c) => c.label)).toEqual(["engine 3/4", "router 1/1"]);
+  });
+
+  it("degrades to zero progress when the deployment row is missing", () => {
+    const [r] = toRollouts([{ cluster: "cw", name: "gone", ready: false }], []);
+    expect(r.barPct).toBe(0);
+    expect(r.components).toEqual([]);
+  });
+});
+
+describe("rollout fusion helpers", () => {
+  it("computes progress from lifecycle counts only", () => {
+    expect(rolloutProgress(undefined)).toBeNull();
+    expect(rolloutProgress([{ name: "e" }])).toBeNull();
+    expect(
+      rolloutProgress([
+        { name: "e", readyReplicas: 240, totalReplicas: 251 },
+        { name: "d", readyReplicas: 61, totalReplicas: 65 },
+      ]),
+    ).toBe(95);
+  });
+
+  it("marks scale-ups in flight on the component chip", () => {
+    const [cell] = componentCells([
+      { name: "engine", readyReplicas: 8, totalReplicas: 8, desiredReplicas: 16 },
+    ]);
+    expect(cell.label).toBe("engine 8/8→16");
+  });
+
+  it("detects a rollout from any non-Stable component phase", () => {
+    expect(isRolling([{ name: "e", rolloutPhase: "Stable" }])).toBe(false);
+    expect(isRolling([{ name: "e", rolloutPhase: "Progressing" }])).toBe(true);
+    expect(isRolling([{ name: "e" }])).toBe(false);
   });
 });
 

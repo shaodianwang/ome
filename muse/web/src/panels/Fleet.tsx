@@ -14,7 +14,7 @@ import type { FleetNoticeIssue } from "../dataState";
 import { scopeFleet, unambiguousDeploymentRef } from "../fleet";
 import type { Selected } from "../resource";
 import { useEventFeed, useLive, useMetrics } from "../live";
-import { deploymentHealth, toFeed, toRollouts } from "../map";
+import { COMPONENT_TONE_CLASS, deploymentHealth, toFeed, toRollouts } from "../map";
 import {
   fleetTotals,
   metricsQueryRangeSeconds,
@@ -54,9 +54,11 @@ const sourceIssue = (
 export function Fleet({
   openDeployments,
   openDeployment,
+  openCapacityCluster,
 }: {
   openDeployments: (f: DepFilter) => void;
   openDeployment: (s: Selected) => void;
+  openCapacityCluster: (cluster: string) => void;
 }) {
   const [fCluster, setFCluster] = useState("all");
   const [fModel, setFModel] = useState("all");
@@ -108,7 +110,10 @@ export function Fleet({
   const policy = cfg.data?.dashboardPolicy;
   const availabilityTone = lowerThresholdTone(availPct, policy?.availability);
   const feed = toFeed(scope.events);
-  const rolloutCards = toRollouts(scope.rollouts);
+  const rolloutCards = toRollouts(scope.rollouts, scope.isvcs);
+  const topConsumers = (capacity.data?.consumersByDeployment ?? [])
+    .filter((c) => fCluster === "all" || c.cluster === fCluster)
+    .slice(0, 8);
   const metricState = metricsHealth(scope.metrics);
   const hasQps = metricAvailable(scope.metrics, "request_rate");
   const hasLatency = metricAvailable(scope.metrics, "latency_p99");
@@ -224,12 +229,16 @@ export function Fleet({
   const maxFabric = maxAt(scope.byIsland);
   const placeKinds = [...new Set([...maxRack.keys(), ...maxFabric.keys()])].sort();
 
-  // Per-cluster deployment breakdown (scoped).
+  // Per-cluster deployment breakdown (scoped), joined with cluster inventory so
+  // the table doubles as a fleet map (nodes / accel nodes / k8s version).
   const byCluster = scope.clusters
     .map((c) => {
       const items = scope.isvcs.filter((i) => i.cluster === c.name);
       return {
         name: c.name,
+        nodes: c.nodes,
+        acceleratorNodes: c.acceleratorNodes,
+        version: c.version,
         total: items.length,
         ready: items.filter((i) => i.ready === true).length,
         rolling: scope.rollouts.filter((r) => r.cluster === c.name && !r.ready).length,
@@ -480,14 +489,21 @@ export function Fleet({
         <Card title="Allocation by cluster" sub="load · free">
           <div className="urows">
             {clusterRows.map((c) => (
-              <UtilRow
+              <button
+                type="button"
+                className="urow-open"
                 key={c.name}
-                name={c.name}
-                tag={c.kind}
-                pct={c.pct}
-                tone={upperThresholdTone(c.pct, policy?.utilization)}
-                value={`${n(c.free)} free`}
-              />
+                title="open Capacity"
+                onClick={() => openCapacityCluster(c.name)}
+              >
+                <UtilRow
+                  name={c.name}
+                  tag={c.kind}
+                  pct={c.pct}
+                  tone={upperThresholdTone(c.pct, policy?.utilization)}
+                  value={`${n(c.free)} free`}
+                />
+              </button>
             ))}
             {clusterRows.length === 0 ? (
               <div className="muted urow-empty">
@@ -546,6 +562,49 @@ export function Fleet({
 
       <h2 className="sec">Deployments</h2>
       <div className="grid g2">
+        <Card title="Top consumers" sub="accelerators held · by deployment">
+          {topConsumers.length ? (
+            <table className="place-tbl">
+              <thead>
+                <tr>
+                  <th>Deployment</th>
+                  <th>Cluster</th>
+                  <th>Kind</th>
+                  <th className="tnum">Pods</th>
+                  <th className="tnum">Accels</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topConsumers.map((c) => (
+                  <tr
+                    key={`${c.cluster}/${c.namespace}/${c.name}/${c.kind}`}
+                    className="link"
+                    onClick={() =>
+                      openDeployment({
+                        cluster: c.cluster,
+                        kind: "InferenceService",
+                        name: c.name,
+                        namespace: c.namespace,
+                      })
+                    }
+                  >
+                    <td className="mono">
+                      {c.name} <span className="muted">{c.namespace}</span>
+                    </td>
+                    <td className="mono muted">{c.cluster}</td>
+                    <td>{c.kind.toUpperCase()}</td>
+                    <td className="tnum">{c.pods}</td>
+                    <td className="tnum">{c.accelerators.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="muted attn-none">
+              {emptyText(capacity, "Loading…", "No deployment-attributed consumption.")}
+            </div>
+          )}
+        </Card>
         <Card
           title="By cluster"
           actions={
@@ -560,16 +619,25 @@ export function Fleet({
             <thead>
               <tr>
                 <th>Cluster</th>
-                <th>Total</th>
-                <th>Ready</th>
-                <th>Rolling</th>
-                <th>Attention</th>
+                <th className="tnum">Nodes</th>
+                <th className="tnum">Accel</th>
+                <th className="tnum">Deploys</th>
+                <th className="tnum">Ready</th>
+                <th className="tnum">Rolling</th>
+                <th className="tnum">Attention</th>
               </tr>
             </thead>
             <tbody>
               {byCluster.map((c) => (
-                <tr key={c.name}>
+                <tr
+                  key={c.name}
+                  className="link"
+                  title={c.version ? `Kubernetes ${c.version} · open Capacity` : "open Capacity"}
+                  onClick={() => openCapacityCluster(c.name)}
+                >
                   <td className="mono">{c.name}</td>
+                  <td className="tnum">{c.nodes.toLocaleString()}</td>
+                  <td className="tnum">{c.acceleratorNodes.toLocaleString()}</td>
                   <td className="tnum">{c.total}</td>
                   <td className={c.ready ? "tnum txt-ok" : "tnum"}>{c.ready}</td>
                   <td className="tnum">{c.rolling || <span className="muted">—</span>}</td>
@@ -580,7 +648,7 @@ export function Fleet({
               ))}
               {byCluster.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="muted">
+                  <td colSpan={7} className="muted">
                     {emptyText(clusters, "Loading…", "No clusters")}
                   </td>
                 </tr>
@@ -605,7 +673,14 @@ export function Fleet({
                   <button
                     type="button"
                     className="attn-open"
-                    onClick={() => openDeployments("attention")}
+                    onClick={() =>
+                      openDeployment({
+                        cluster: a.cluster,
+                        kind: "InferenceService",
+                        name: a.name,
+                        namespace: a.namespace,
+                      })
+                    }
                   >
                     <Dot tone="red" />
                     <span className="mono">{a.name}</span>
@@ -637,14 +712,34 @@ export function Fleet({
           {rolloutCards.length ? (
             <div className="urows">
               {rolloutCards.map((r) => (
-                <UtilRow
+                <button
+                  type="button"
+                  className="urow-open"
                   key={`${r.cluster}/${r.namespace ?? ""}/${r.name}`}
-                  name={r.name}
-                  tag={r.namespace}
-                  pct={r.barPct ?? 0}
-                  tone={r.barTone || "amber"}
-                  value={r.note}
-                />
+                  onClick={() => openDeployment(r.sel)}
+                >
+                  <UtilRow
+                    name={r.name}
+                    tag={r.namespace}
+                    pct={r.barPct ?? 0}
+                    tone={r.barTone || "amber"}
+                    value={r.note}
+                  />
+                  {r.components?.length ? (
+                    <span className="comp-cells rollout-comps">
+                      {r.components.map((c) => (
+                        <span
+                          key={c.name}
+                          className={`repl ${COMPONENT_TONE_CLASS[c.tone]}`}
+                          title={c.revision}
+                        >
+                          {c.label}
+                          {c.phase && c.phase !== "Stable" ? ` · ${c.phase}` : ""}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                </button>
               ))}
             </div>
           ) : (
@@ -681,8 +776,8 @@ export function Fleet({
             </span>
           </div>
           <div className="card-body feed">
-            {feed.map((f, i) => (
-              <div className="feed-item" key={i}>
+            {feed.map((f, i) => {
+              const body = (
                 <div className="feed-body">
                   <div className="row1">
                     <div className="t">
@@ -693,8 +788,22 @@ export function Fleet({
                   </div>
                   <div className="m mono">{f.meta}</div>
                 </div>
-              </div>
-            ))}
+              );
+              return f.sel ? (
+                <button
+                  type="button"
+                  className="feed-item urow-open"
+                  key={i}
+                  onClick={() => f.sel && openDeployment(f.sel)}
+                >
+                  {body}
+                </button>
+              ) : (
+                <div className="feed-item" key={i}>
+                  {body}
+                </div>
+              );
+            })}
             {feed.length === 0 ? (
               <div className="muted attn-none">
                 {emptyText(events, "Loading…", "No recent activity")}

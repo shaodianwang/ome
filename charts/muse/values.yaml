@@ -138,6 +138,21 @@ config:
         issuerName: prodra
         name: "" # empty ⇒ derived <cluster>/<namespace>/<serviceAccount> from the release; set to override
         type: MKS_SERVICEACCOUNT
+  # On-demand pod inspection: live pod status, Events, and bounded log tails,
+  # fetched per click on the deployment pods view. A deliberate exception to the
+  # informer-only rule — one object per request, hard-bounded. Disabled unless
+  # all three values are set. Remote-cluster kubeconfig identities need get on
+  # pods/log and list on events for the full view; without them the pod status
+  # still renders and events/logs degrade per-request.
+  podInspect:
+    timeoutSecs: 10
+    logTailLines: 500
+    logMaxBytes: 262144
+    # Live log streaming (stern-style follow across a component's pods),
+    # multiplexed over one SSE response. Bounded per session; requires the
+    # inspection values above.
+    streamMaxPods: 20
+    streamMaxSecs: 900
   # On-demand monitoring through the shared PromQL Query Gateway. The
   # endpoint, trust, cluster identity, cache, and overload policy are deployment
   # config; muse-server has no compiled operational defaults.

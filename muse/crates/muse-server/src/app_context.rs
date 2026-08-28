@@ -40,6 +40,11 @@ pub struct AppState {
     chat: Option<Arc<ChatProxy>>,
     /// Optional Query Gateway client/cache. `None` leaves console metrics off.
     metrics: Option<Arc<MetricsBackend>>,
+    /// Optional on-demand pod-inspection policy. `None` leaves the endpoints off;
+    /// inventory keeps serving from the informer caches either way.
+    pod_inspect: Option<crate::config::PodInspectConfig>,
+    /// Optional live log-streaming policy (requires pod inspection).
+    pod_log_stream: Option<crate::config::PodLogStreamConfig>,
     metrics_refresh: Duration,
     /// Optional heartbeat interval shared by every SSE endpoint. Deployment config
     /// owns this value; `None` leaves an otherwise valid stream event-driven.
@@ -61,6 +66,8 @@ struct CapacitySnapshot {
 /// constructor stays readable as services are added.
 pub struct AppStateConfig {
     pub metrics: Option<MetricsBackend>,
+    pub pod_inspect: Option<crate::config::PodInspectConfig>,
+    pub pod_log_stream: Option<crate::config::PodLogStreamConfig>,
     pub refresh: Duration,
     pub sse_keep_alive: Option<Duration>,
     pub capacity_limits: rollup::CapacityLimits,
@@ -92,6 +99,8 @@ impl AppState {
             signal,
             chat: chat.map(Arc::new),
             metrics: config.metrics.map(Arc::new),
+            pod_inspect: config.pod_inspect,
+            pod_log_stream: config.pod_log_stream,
             metrics_refresh: config.refresh,
             sse_keep_alive: config.sse_keep_alive,
             dashboard_policy: config.dashboard_policy,
@@ -225,6 +234,16 @@ impl AppState {
                 ApiError::Unavailable(format!("capacity snapshot for cluster {name} is not ready"))
             }),
         }
+    }
+
+    /// The on-demand pod-inspection policy, when configured.
+    pub fn pod_inspect(&self) -> Option<crate::config::PodInspectConfig> {
+        self.pod_inspect
+    }
+
+    /// The live log-streaming policy, when configured.
+    pub fn pod_log_stream(&self) -> Option<crate::config::PodLogStreamConfig> {
+        self.pod_log_stream
     }
 
     /// Whether the Query Gateway client is configured.

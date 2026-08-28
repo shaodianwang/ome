@@ -57,6 +57,20 @@ export interface CapacityResp {
   gpuRacks?: UnitBox[];
   /** Top accelerator consumers on this cluster (by namespace), most chips first. */
   consumers?: { namespace: string; kind: string; accelerators: number; pods: number }[];
+  /** Top accelerator consumers by owning InferenceService, most chips first.
+   *  Pods without the ownership label (non-OME workloads) appear only in
+   *  `consumers`. */
+  consumersByDeployment?: DeploymentConsumer[];
+}
+
+/** A top accelerator consumer attributed to one InferenceService. */
+export interface DeploymentConsumer {
+  cluster: string;
+  namespace: string;
+  name: string;
+  kind: string;
+  accelerators: number;
+  pods: number;
 }
 
 /** One carve-able domain (a TPU subblock or GPU NVLink rack) for the heatmap: id,
@@ -162,6 +176,96 @@ export interface IsvcItem {
   reason?: string;
   message?: string;
   age?: string;
+  /** Accelerator chips currently held by this service's scheduled pods. */
+  accelerators?: number;
+}
+
+/** One container of an InferenceService pod, for the expanded row. */
+export interface IsvcPodContainer {
+  name: string;
+  ready: boolean;
+  restarts: number;
+  /** Current state: "running" | "waiting" | "terminated". */
+  state?: string;
+  /** Current waiting/terminated reason (`CrashLoopBackOff`, …). */
+  reason?: string;
+  /** Why the previous run ended (`OOMKilled`, `exit 137`). */
+  lastRestart?: string;
+}
+
+/** One pod of an InferenceService (`GET /v1/inferenceservices/{name}/pods`):
+ *  identity, health, and — when stuck or restarting — why. */
+export interface IsvcPod {
+  name: string;
+  component?: string;
+  phase?: string;
+  ready: boolean;
+  restarts: number;
+  /** Why the pod is stuck: the scheduling failure (`Unschedulable`), a container
+   *  waiting/terminated reason (`ImagePullBackOff`, `CrashLoopBackOff`, …), or
+   *  the pod-level not-Ready reason. Absent for a healthy pod. */
+  reason?: string;
+  /** Why the most-restarted container's previous run ended. */
+  lastRestart?: string;
+  node?: string;
+  accelerators?: number;
+  age?: string;
+  containers?: IsvcPodContainer[];
+}
+
+/** The pods response: cached pods of one InferenceService, problems first. */
+export interface IsvcPodsResp {
+  cluster: string;
+  namespace: string;
+  name: string;
+  count: number;
+  pods: IsvcPod[];
+}
+
+/** One Kubernetes Event about a pod — the "why" narrative (BackOff, probe
+ *  failures, kills) the status fields can't carry. */
+export interface PodEvent {
+  type?: string;
+  reason?: string;
+  message?: string;
+  count?: number;
+  lastSeen?: string;
+}
+
+/** One container from the live pod fetch: full messages and the previous run's
+ *  exit (what/when/why). */
+export interface PodInspectContainer {
+  name: string;
+  ready: boolean;
+  restarts: number;
+  state?: string;
+  reason?: string;
+  message?: string;
+  runningFor?: string;
+  lastExit?: string;
+  lastExitAt?: string;
+  lastExitMessage?: string;
+}
+
+/** Live, per-click inspection of one pod: full condition/state messages plus
+ *  its recent Events. */
+export interface PodInspect {
+  cluster: string;
+  name: string;
+  conditions?: ConditionItem[];
+  containers?: PodInspectContainer[];
+  events?: PodEvent[];
+}
+
+/** A bounded log tail of one pod's current or previous run. */
+export interface PodLogs {
+  cluster: string;
+  namespace: string;
+  pod: string;
+  container?: string;
+  previous: boolean;
+  tail: number;
+  text: string;
 }
 
 export interface PlacementCandidate {
@@ -298,7 +402,13 @@ export interface NodeItem {
 export interface NodeDetail extends NodeItem {
   conditions?: ConditionItem[];
   taints?: { key: string; value?: string; effect: string }[];
-  podsOnNode?: { namespace: string; name: string; accelerators?: number }[];
+  podsOnNode?: {
+    namespace: string;
+    name: string;
+    accelerators?: number;
+    /** Owning InferenceService, for OME serving pods. */
+    deployment?: string;
+  }[];
 }
 
 export interface EventItem {
@@ -330,8 +440,7 @@ export interface RolloutItem {
  *  OEP-0021.2). `status` distinguishes `missing` (expected but absent) and
  *  `unknown` (scaled to zero) from a live `degraded`/`unavailable`. */
 export type ComponentStatus = "healthy" | "degraded" | "unavailable" | "missing" | "unknown";
-/** One pod backing a system component (name/phase/node; restarts + readiness are
- *  not carried — the shared Pod cache prunes container statuses). */
+/** One pod backing a system component (name/phase/node — a liveness glance). */
 export interface SystemPod {
   name: string;
   phase: string;
@@ -398,6 +507,15 @@ export interface AppConfig {
   chatTimeoutSecs?: number;
   /** Browser-side grace beyond the server timeout, supplied by deployment config. */
   chatClientGraceSecs?: number;
+  /** Whether on-demand pod inspection (live status, events, log tails) is
+   *  configured; the console hides those affordances when false. */
+  podInspect?: boolean;
+  /** Log-tail line cap for pod inspection, when configured. */
+  podLogTailLines?: number;
+  /** Whether live log streaming is configured. */
+  podLogStream?: boolean;
+  /** Pods one stream session follows at most, when streaming is configured. */
+  podLogStreamMaxPods?: number;
   /** Whether the metrics proxy is configured server-side; panels hide when false. */
   metrics?: boolean;
   /** Whether the catalog can safely attribute fleet-wide metrics. */
@@ -462,6 +580,21 @@ const at = (path: string) => BASE + path.replace(/^\//, "");
 
 /** SSE endpoint for named activity and query-invalidation events (see `live.ts`). */
 export const STREAM_URL = at("/v1/stream");
+
+/** SSE endpoint following logs live across a deployment's pods (stern-style):
+ *  `line` events carry `{pod, line}`, `notice` events carry `{message}`. */
+export function logStreamUrl(
+  ref: Selected,
+  opts: { component?: string; pod?: string; grep?: string; tail?: number } = {},
+): string {
+  const sp = new URLSearchParams({ cluster: ref.cluster });
+  if (ref.namespace) sp.set("namespace", ref.namespace);
+  if (opts.component) sp.set("component", opts.component);
+  if (opts.pod) sp.set("pod", opts.pod);
+  if (opts.grep) sp.set("grep", opts.grep);
+  if (opts.tail != null) sp.set("tail", String(opts.tail));
+  return at(`/v1/inferenceservices/${enc(ref.name)}/logs/stream?${sp}`);
+}
 
 /**
  * Parse a response body as JSON, turning a non-JSON payload into a legible error
@@ -608,6 +741,25 @@ export const api = {
   // full identity. Namespace remains optional for backward-compatible deep links.
   inferenceService: (ref: Selected) =>
     getJSON<IsvcDetail>(resourcePath({ ...ref, kind: "InferenceService" })),
+  // The service's cached pods, for the deployment diagnosis view.
+  inferenceServicePods: (ref: Selected) =>
+    getJSON<IsvcPodsResp>(`/v1/inferenceservices/${enc(ref.name)}/pods?${resourceParams(ref)}`),
+  // Live per-click inspection of one pod (status with full messages + Events).
+  inferenceServicePodInspect: (ref: Selected, pod: string) =>
+    getJSON<PodInspect>(
+      `/v1/inferenceservices/${enc(ref.name)}/pods/${enc(pod)}?${resourceParams(ref)}`,
+    ),
+  // Bounded log tail of one pod's current or previous run.
+  inferenceServicePodLogs: (
+    ref: Selected,
+    pod: string,
+    opts: { container?: string; previous?: boolean } = {},
+  ) => {
+    const sp = resourceParams(ref);
+    if (opts.container) sp.set("container", opts.container);
+    if (opts.previous) sp.set("previous", "true");
+    return getJSON<PodLogs>(`/v1/inferenceservices/${enc(ref.name)}/pods/${enc(pod)}/logs?${sp}`);
+  },
   model: (ref: Selected) => getJSON<ModelDetail>(resourcePath(ref)),
   legacyModel: (cluster: string, name: string) =>
     fallbackOnNotFound(

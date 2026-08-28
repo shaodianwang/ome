@@ -22,6 +22,15 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "pods"]
     verbs: ["get", "list", "watch"]
+  # On-demand pod inspection: bounded log tails and per-pod Events. Read-only,
+  # per-click. Remote workload clusters read via their mounted kubeconfig, whose
+  # identity must carry the same permissions for the full drill-down.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
   # OME control-plane workloads for the System panel (OEP-0021.2): desired-vs-ready
   # health of the controller / scheduler / webhook / model-agent. Read-only.
   # Remote workload clusters read via their mounted kubeconfig, whose identity must

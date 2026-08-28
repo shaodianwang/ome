@@ -12,7 +12,7 @@ import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
 import { isLegacySelected, resourceKey, sameResource, selectionKey } from "../resource";
 import type { RouteSelected, Selected } from "../resource";
-import { num } from "../util";
+import { ageToSecs, num } from "../util";
 
 type ModelRow = ModelItem & { kind: "BaseModel" | "ClusterBaseModel"; used: number };
 
@@ -87,6 +87,21 @@ const COLUMNS: Column<ModelRow>[] = [
     cellClass: "num",
     render: (m) => <span className={`use-chip ${m.used ? "on" : ""}`}>{m.used || "—"}</span>,
     sort: (m) => m.used,
+  },
+  {
+    key: "cluster",
+    label: "Cluster",
+    cellClass: "mono cell-sm muted",
+    render: (m) => m.cluster,
+    sort: (m) => m.cluster.toLowerCase(),
+  },
+  {
+    key: "age",
+    label: "Age",
+    right: true,
+    cellClass: "num muted",
+    render: (m) => m.age ?? "—",
+    sort: (m) => ageToSecs(m.age ?? ""),
   },
 ];
 
@@ -205,6 +220,39 @@ export function Models({
   );
 }
 
+/** Model onboarding progress: node download counts and any failing condition.
+ *  This is the dominant wait state for a new BaseModel — a bare "Importing"
+ *  pill with no counts tells the operator nothing. */
+function DownloadProgress({ d }: { d: ModelDetail }) {
+  const failing = (d.conditions ?? []).filter((c) => c.status === "False");
+  const counts = d.nodesReady != null || d.nodesFailed != null;
+  if (!counts && !failing.length) return null;
+  return (
+    <Section title="Onboarding">
+      {counts ? (
+        <Facts
+          items={[
+            ["Nodes ready", d.nodesReady != null ? num(d.nodesReady) : null],
+            [
+              "Nodes failed",
+              d.nodesFailed ? <span className="txt-bad">{num(d.nodesFailed)}</span> : null,
+            ],
+          ]}
+        />
+      ) : null}
+      {failing.map((c, i) => (
+        <div className="notice bad" key={`${c.type}-${i}`}>
+          <b>
+            {c.type}
+            {c.reason ? ` · ${c.reason}` : ""}
+          </b>
+          {c.message ? <div>{c.message}</div> : null}
+        </div>
+      ))}
+    </Section>
+  );
+}
+
 /** Facts from a model's parsed configuration (primitive values only, capped). */
 function configFacts(cfg?: Record<string, unknown>): [string, ReactNode][] {
   if (!cfg) return [];
@@ -276,6 +324,8 @@ function ModelDrawer({
             </span>
             {d.disabled ? <span className="tag warn">disabled</span> : null}
           </div>
+
+          <DownloadProgress d={d} />
 
           <Section title="Overview">
             <Facts

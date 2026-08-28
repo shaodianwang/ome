@@ -34,7 +34,10 @@ use tokio::sync::broadcast;
 pub use kube::runtime::reflector::Store;
 
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
-use k8s_openapi::api::core::v1::{Container, Node, Pod, PodSpec, PodStatus};
+use k8s_openapi::api::core::v1::{
+    Container, ContainerState, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus,
+    Node, Pod, PodCondition, PodSpec, PodStatus,
+};
 
 use crate::listers::Lister;
 use crate::{
@@ -101,13 +104,15 @@ impl Prune for Node {
 impl Prune for Pod {
     fn prune(&mut self) {
         drop_managed_fields(self);
-        // Cached Pods have two readers: the capacity rollup (node name, container
-        // resource requests, phase) and InferenceService runtime attribution
-        // (labels — an auto-selected runtime is recorded only there). Keep those
-        // and drop everything else — env, volumes, probes, ports, init containers,
-        // status conditions/containerStatuses, annotations — which is the bulk of a
-        // Pod and, at ~10^5 pods, the bulk of the whole cache. A future Pod reader
-        // must widen this prune to keep the fields it needs.
+        // Cached Pods have three readers: the capacity rollup (node name, container
+        // resource requests, phase), InferenceService runtime attribution (labels —
+        // an auto-selected runtime is recorded only there), and the deployment pods
+        // diagnosis view (condition + container-state reasons, readiness, restart
+        // counts). Keep those and drop everything else — env, volumes, probes,
+        // ports, init containers, annotations, and every free-form message string —
+        // which is the bulk of a Pod and, at ~10^5 pods, the bulk of the whole
+        // cache. A future Pod reader must widen this prune to keep the fields it
+        // needs.
         self.metadata.annotations = None;
         if let Some(spec) = self.spec.take() {
             self.spec = Some(PodSpec {
@@ -127,6 +132,56 @@ impl Prune for Pod {
         if let Some(status) = self.status.take() {
             self.status = Some(PodStatus {
                 phase: status.phase,
+                // Reasons only (Unschedulable, ContainersNotReady, …): a few
+                // fixed-size strings per pod. Messages are unbounded prose.
+                conditions: status.conditions.map(|conditions| {
+                    conditions
+                        .into_iter()
+                        .map(|c| PodCondition {
+                            type_: c.type_,
+                            status: c.status,
+                            reason: c.reason,
+                            ..Default::default()
+                        })
+                        .collect()
+                }),
+                // Readiness, restart counts, waiting/terminated reasons
+                // (ImagePullBackOff, CrashLoopBackOff, exit codes), and the last
+                // termination (why a restarted container died: OOMKilled, exit
+                // code) — again without their message strings.
+                container_statuses: status.container_statuses.map(|statuses| {
+                    statuses
+                        .into_iter()
+                        .map(|cs| ContainerStatus {
+                            name: cs.name,
+                            ready: cs.ready,
+                            restart_count: cs.restart_count,
+                            state: cs.state.map(|s| ContainerState {
+                                running: s.running,
+                                waiting: s.waiting.map(|w| ContainerStateWaiting {
+                                    reason: w.reason,
+                                    ..Default::default()
+                                }),
+                                terminated: s.terminated.map(|t| ContainerStateTerminated {
+                                    exit_code: t.exit_code,
+                                    reason: t.reason,
+                                    ..Default::default()
+                                }),
+                            }),
+                            last_state: cs.last_state.map(|s| ContainerState {
+                                running: None,
+                                waiting: None,
+                                terminated: s.terminated.map(|t| ContainerStateTerminated {
+                                    exit_code: t.exit_code,
+                                    reason: t.reason,
+                                    finished_at: t.finished_at,
+                                    ..Default::default()
+                                }),
+                            }),
+                            ..Default::default()
+                        })
+                        .collect()
+                }),
                 ..Default::default()
             });
         }
@@ -447,9 +502,11 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, ObjectMeta};
     use std::collections::BTreeMap;
 
-    // The capacity rollup reads only pod node_name, container resource requests,
-    // and phase. Prune must keep exactly those and drop the rest — this test is the
-    // contract, so a future prune change can't silently break capacity numbers.
+    // The capacity rollup reads pod node_name, container resource requests, and
+    // phase; the diagnosis views additionally read condition and container-state
+    // reasons, readiness, and restart counts. Prune must keep exactly those and
+    // drop the rest — every unbounded message string in particular — so a future
+    // prune change can't silently break capacity numbers or blow up cache memory.
     #[test]
     fn pod_prune_keeps_capacity_fields_drops_the_rest() {
         let requests = BTreeMap::from([("nvidia.com/gpu".to_string(), Quantity("8".to_string()))]);
@@ -484,7 +541,38 @@ mod tests {
             }),
             status: Some(PodStatus {
                 phase: Some("Running".into()),
-                conditions: Some(vec![Default::default()]),
+                conditions: Some(vec![PodCondition {
+                    type_: "PodScheduled".into(),
+                    status: "False".into(),
+                    reason: Some("Unschedulable".into()),
+                    message: Some("x".repeat(10_000)),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "c".into(),
+                    ready: false,
+                    restart_count: 3,
+                    image: "img".into(),
+                    image_id: "sha256:deadbeef".into(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("CrashLoopBackOff".into()),
+                            message: Some("x".repeat(10_000)),
+                        }),
+                        ..Default::default()
+                    }),
+                    last_state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 137,
+                            reason: Some("OOMKilled".into()),
+                            message: Some("x".repeat(10_000)),
+                            container_id: Some("containerd://deadbeef".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
                 ..Default::default()
             }),
         };
@@ -493,21 +581,38 @@ mod tests {
 
         let spec = pod.spec.as_ref().unwrap();
         assert_eq!(spec.node_name.as_deref(), Some("node-1"));
-        assert_eq!(
-            pod.status.as_ref().unwrap().phase.as_deref(),
-            Some("Running")
-        );
+        let status = pod.status.as_ref().unwrap();
+        assert_eq!(status.phase.as_deref(), Some("Running"));
         let c = &spec.containers[0];
         assert_eq!(
             c.resources.as_ref().unwrap().requests.as_ref().unwrap()["nvidia.com/gpu"].0,
             "8"
         );
-        // Heavy fields no reader needs are gone.
+
+        // Diagnosis fields survive: condition + container-state reasons,
+        // readiness, restart counts, and the last-termination cause.
+        let cond = &status.conditions.as_ref().unwrap()[0];
+        assert_eq!(cond.reason.as_deref(), Some("Unschedulable"));
+        let cs = &status.container_statuses.as_ref().unwrap()[0];
+        assert_eq!(cs.restart_count, 3);
+        assert!(!cs.ready);
+        let waiting = cs.state.as_ref().unwrap().waiting.as_ref().unwrap();
+        assert_eq!(waiting.reason.as_deref(), Some("CrashLoopBackOff"));
+        let last = cs.last_state.as_ref().unwrap().terminated.as_ref().unwrap();
+        assert_eq!(last.exit_code, 137);
+        assert_eq!(last.reason.as_deref(), Some("OOMKilled"));
+
+        // Heavy fields no reader needs are gone — message strings especially.
         assert!(pod.metadata.annotations.is_none());
         assert!(pod.metadata.managed_fields.is_none());
         assert!(spec.volumes.is_none());
         assert!(c.env.is_none());
-        assert!(pod.status.as_ref().unwrap().conditions.is_none());
+        assert!(cond.message.is_none());
+        assert!(waiting.message.is_none());
+        assert!(last.message.is_none());
+        assert!(last.container_id.is_none());
+        assert!(cs.image.is_empty());
+        assert!(cs.image_id.is_empty());
     }
 
     #[test]

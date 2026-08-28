@@ -2,7 +2,7 @@ import type { DepFilter } from "../App";
 import { api } from "../api";
 import { hasUnambiguousDeploymentMetricIdentity } from "../fleet";
 import { useLive } from "../live";
-import { toWorkloadRows } from "../map";
+import { COMPONENT_TONE_CLASS, toWorkloadRows } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
 import { resourceKey } from "../resource";
@@ -35,23 +35,50 @@ const COLUMNS: Column<WorkloadRow>[] = [
     key: "model",
     label: "Model",
     cellClass: "mono cell-sm",
-    render: (w) => w.model,
+    render: (w) => (
+      <>
+        {w.model}
+        {w.load ? <span className="cell-sub muted">{w.load}</span> : null}
+      </>
+    ),
     sort: (w) => w.model.toLowerCase(),
+  },
+  {
+    key: "runtime",
+    label: "Runtime",
+    cellClass: "mono cell-sm muted",
+    render: (w) => w.runtime,
+    sort: (w) => w.runtime.toLowerCase(),
   },
   {
     key: "replicas",
     label: "Replicas",
-    right: true,
     cellClass: "num",
-    render: (w) => <span className={`repl ${w.replicas.tone}`}>{w.replicas.label}</span>,
+    render: (w) =>
+      w.components.length > 0 ? (
+        <span className="comp-cells">
+          {w.components.map((c) => (
+            <span
+              key={c.name}
+              className={`repl ${COMPONENT_TONE_CLASS[c.tone]}`}
+              title={c.revision}
+            >
+              {c.label}
+            </span>
+          ))}
+        </span>
+      ) : (
+        <span className={`repl ${w.replicas.tone}`}>{w.replicas.label}</span>
+      ),
     sort: (w) => numOr(w.replicas.label),
   },
   {
-    key: "loaded",
-    label: "Load",
-    cellClass: "cell-sm muted",
-    render: (w) => w.load ?? "—",
-    sort: (w) => numOr(w.load ?? ""),
+    key: "accels",
+    label: "Accels",
+    right: true,
+    cellClass: "num",
+    render: (w) => (w.accelerators != null ? w.accelerators.toLocaleString() : "—"),
+    sort: (w) => w.accelerators ?? -1,
   },
   {
     key: "endpoint",
@@ -73,6 +100,13 @@ const COLUMNS: Column<WorkloadRow>[] = [
         <span className="muted">—</span>
       ),
     sort: (w) => (w.endpoint ?? "").toLowerCase(),
+  },
+  {
+    key: "mode",
+    label: "Mode",
+    cellClass: "cell-sm muted",
+    render: (w) => w.mode ?? "—",
+    sort: (w) => (w.mode ?? "").toLowerCase(),
   },
   {
     key: "cluster",
@@ -98,6 +132,12 @@ const TABS: Tab<WorkloadRow>[] = [
     label: "Needs attention",
     match: (w) => w.status.tone === "red",
     empty: "Nothing needs attention.",
+  },
+  {
+    key: "rolling",
+    label: "Rolling out",
+    match: (w) => w.rolling,
+    empty: "No rollouts in progress.",
   },
   {
     key: "ready",
@@ -163,8 +203,8 @@ export function Workloads({
       rows={toWorkloadRows(isvcs.data?.items ?? [])}
       status={isvcs}
       noun="deployments"
-      searchPlaceholder="Filter by name, namespace, or model…"
-      searchFields={(w) => [w.name, w.namespace, w.model, w.cluster]}
+      searchPlaceholder="Filter by name, namespace, model, or runtime…"
+      searchFields={(w) => [w.name, w.namespace, w.model, w.runtime, w.cluster]}
       clusterOf={(w) => w.cluster}
       rowKey={(w) => w.id}
       rowTone={(w) => w.status.tone}

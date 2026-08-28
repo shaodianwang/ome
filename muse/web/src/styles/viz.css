@@ -1230,12 +1230,14 @@ th.right .sort-arrow {
   overflow-wrap: anywhere;
 }
 
+/* Overview layout: short cards (components, conditions, details, invoke)
+ * stacked on the left; the pods card fills the right column at exactly the
+ * left stack's height and scrolls internally — pod count never stretches
+ * the page. The absolute fill keeps the pods card out of the grid's row
+ * sizing, so the left column alone decides the height. */
 .deployment-workspace {
   display: grid;
-  grid-template:
-    "health invoke" auto
-    "details invoke" 1fr /
-    minmax(0, 1fr) minmax(0, 1fr);
+  grid-template: "health pods" auto / minmax(0, 1fr) minmax(0, 1.25fr);
   gap: var(--s4);
   align-items: stretch;
 }
@@ -1246,12 +1248,38 @@ th.right .sort-arrow {
   gap: var(--s4);
   min-width: 0;
 }
-.deployment-details {
-  grid-area: details;
+.deployment-pods {
+  grid-area: pods;
   min-width: 0;
+  position: relative;
+  min-height: 420px;
 }
-.deployment-details > .card {
-  height: 100%;
+.deployment-pods > .card {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.deployment-pods > .card > .card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pods-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.pods-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-2);
+  z-index: 1;
+}
+.deployment-details {
+  min-width: 0;
 }
 .deployment-details .facts {
   grid-template-columns: 100px minmax(0, 1fr);
@@ -1261,14 +1289,6 @@ th.right .sort-arrow {
   flex-direction: column;
   gap: var(--s2);
 }
-.deployment-invoke {
-  grid-area: invoke;
-  display: flex;
-  flex-direction: column;
-}
-.deployment-invoke > .card-body {
-  flex: 1;
-}
 .deployment-runtime {
   margin-top: var(--s4);
 }
@@ -1276,9 +1296,18 @@ th.right .sort-arrow {
   .deployment-workspace {
     grid-template:
       "health"
-      "details"
-      "invoke" /
+      "pods" /
       minmax(0, 1fr);
+  }
+  /* Single column: no left stack to mirror — bound the table height instead. */
+  .deployment-pods {
+    min-height: 0;
+  }
+  .deployment-pods > .card {
+    position: static;
+  }
+  .pods-scroll {
+    max-height: 60vh;
   }
 }
 
@@ -1374,6 +1403,245 @@ th.right .sort-arrow {
 }
 .cond-tile.off {
   color: var(--fg-3);
+}
+.cond-tile {
+  flex-wrap: wrap;
+}
+/* Failing condition's message, shown in full under the type/reason line. */
+.cond-tile .ct-message {
+  flex-basis: 100%;
+  color: var(--red);
+  font-size: var(--t-xs);
+  padding-left: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* Deployment pods table: long generated names truncate, problems read first. */
+.pods-tbl .pod-name {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pods-tbl .pod-node {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pods-tbl tr.pod-bad td {
+  background: var(--red-dim);
+}
+/* Collapsed healthy-majority rollup above the pods filters. */
+.pods-rollup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: var(--s3);
+  font-size: var(--t-sm);
+}
+.pods-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s2);
+  font-size: var(--t-sm);
+}
+.pods-pager .linkbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Expanded pod row: containers + copy-paste kubectl actions. */
+.pod-expand td {
+  background: var(--bg-2);
+  padding: var(--s3);
+}
+.pod-containers {
+  list-style: none;
+  margin: 0 0 var(--s2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--t-sm);
+}
+.pod-containers li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.pod-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+.pod-actions .copybtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.pod-inspect {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+/* Diagnosis headline: the single most important warning, up top. */
+.pod-headline {
+  display: flex;
+  gap: var(--s2);
+  align-items: baseline;
+  background: var(--red-dim);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
+  border-radius: 6px;
+  padding: var(--s2) var(--s3);
+  font-size: var(--t-sm);
+}
+.pod-headline b {
+  color: var(--red);
+}
+.pod-count {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+/* Containers | Events, side by side where width allows. */
+.pod-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--s3);
+  align-items: start;
+}
+.pod-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+.pod-container-line {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+.pod-kv {
+  display: flex;
+  gap: var(--s2);
+  padding-left: 16px;
+  font-size: var(--t-sm);
+}
+.pod-kv .lbl {
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  align-self: center;
+}
+.pod-event-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.pod-event-head .right {
+  margin-left: auto;
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+.pod-event + .pod-event {
+  border-top: 1px solid var(--border);
+  padding-top: var(--s2);
+}
+.pod-actions-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 var(--s2);
+}
+/* Full state/exit messages under a container line. */
+.pod-msg {
+  flex-basis: 100%;
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  padding-left: 16px;
+  overflow-wrap: anywhere;
+}
+.pod-containers li {
+  flex-wrap: wrap;
+}
+/* Pod events: the k8s narrative, warnings highlighted. */
+.pod-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--t-sm);
+}
+.pod-event {
+  overflow-wrap: anywhere;
+}
+.pod-event.bad {
+  color: var(--red);
+}
+/* Inline log tail: filter bar + scrollable, level-tinted lines. */
+.pod-logs-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+.pod-logs-head .eyebrow {
+  white-space: nowrap;
+}
+.pod-logs-head .muted {
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+.pod-logs-body {
+  max-height: 360px;
+  overflow: auto;
+  background: var(--bg-1, #0d0f12);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: var(--s2);
+}
+.log-line {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.log-line.err {
+  color: var(--red);
+}
+.log-line.warn {
+  color: var(--amber);
+}
+.log-line.dim {
+  color: var(--fg-3);
+}
+/* Live stream: fills the pods card in place of the table. */
+.pod-stream {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pod-stream .pod-logs-body {
+  flex: 1;
+  max-height: none;
+}
+.stream-pod {
+  font-weight: 600;
+}
+.stream-notice {
+  font-size: var(--t-xs);
+  margin-bottom: var(--s1);
+}
+@media (max-width: 1000px) {
+  /* Single column: the pods card has no fixed height — bound the stream instead. */
+  .pod-stream .pod-logs-body {
+    max-height: 60vh;
+  }
 }
 @media (max-width: 700px) {
   .comp-tiles,

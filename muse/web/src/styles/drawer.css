@@ -42,6 +42,40 @@ table.tbl tbody tr.rowlink:hover {
 .repl.slate {
   color: var(--fg-3);
 }
+.repl.red {
+  color: var(--red);
+}
+/* Per-component replica chips inside one table cell. */
+.comp-cells {
+  display: inline-flex;
+  gap: 10px;
+  white-space: nowrap;
+}
+/* A whole utilization row acting as a link (rollout card → deployment). */
+.urow-open {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-align: inherit;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.urow-open .rollout-comps {
+  margin-top: 4px;
+  font-size: var(--t-xs);
+}
+/* Sortable column headers (replica table). */
+.th-sort {
+  font: inherit;
+  color: inherit;
+}
+.th-sort.active {
+  color: var(--accent-2);
+}
 .endpoint-cell {
   max-width: 220px;
 }

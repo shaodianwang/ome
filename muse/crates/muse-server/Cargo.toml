@@ -13,6 +13,8 @@ path = "src/main.rs"
 anyhow = "1.0.103"
 axum = "0.8.9"
 clap = { version = "4", features = ["derive", "env"] }
+# AsyncBufReadExt::lines over kube's (futures-io) log streams.
+futures-util = "0.3"
 # http-proxy: respect HTTP(S)_PROXY/NO_PROXY so a remote cluster reachable only
 # via a corporate proxy works (e.g. msl-cw-use2-dev-2).
 kube = { version = "4.0.0", features = ["client", "runtime", "rustls-tls", "http-proxy"] }

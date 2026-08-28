@@ -25,7 +25,7 @@ import { useRoute } from "./route";
 import type { Route } from "./route";
 
 export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "capacity" | "system";
-export type DepFilter = "all" | "attention" | "ready";
+export type DepFilter = "all" | "attention" | "rolling" | "ready";
 
 const LABELS: Record<PanelKey, string> = {
   fleet: "Fleet",
@@ -68,6 +68,7 @@ export default function App() {
   const openDeployment = (s: Selected) => navigate({ panel: "workloads", sel: s });
   const openModel = (s: Selected) => navigate({ panel: "models", sel: s });
   const openRuntime = (s: Selected) => navigate({ panel: "runtimes", sel: s });
+  const openCapacityCluster = (c: string) => navigate({ panel: "capacity", cluster: c });
 
   // Sidebar connection status, from the same read plane the panels use.
   const clusters = useLive(api.clusters, {
@@ -187,7 +188,11 @@ export default function App() {
 
         <div className="content">
           {panel === "fleet" && (
-            <Fleet openDeployments={openDeployments} openDeployment={openDeployment} />
+            <Fleet
+              openDeployments={openDeployments}
+              openDeployment={openDeployment}
+              openCapacityCluster={openCapacityCluster}
+            />
           )}
           {panel === "workloads" && (
             <Workloads
@@ -217,7 +222,9 @@ export default function App() {
               openDeployment={openDeployment}
             />
           )}
-          {panel === "capacity" && <Capacity />}
+          {panel === "capacity" && (
+            <Capacity openDeployment={openDeployment} initialCluster={route.cluster} />
+          )}
           {panel === "system" && <System />}
         </div>
       </div>

@@ -6,7 +6,7 @@
 import type { ComponentItem, ConditionItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import { resourceKey, selectResource } from "./resource";
 import type { ResourceRef, Selected } from "./resource";
-import type { FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
+import type { ComponentCell, FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
 import { ago } from "./util";
 
 // ---- Fleet ----------------------------------------------------------------
@@ -46,21 +46,58 @@ export function toFeed(events: EventItem[]): FeedItem[] {
     rest: ` ${HUMAN_KIND[e.kind] ?? "resource"} ${e.action === "deleted" ? "removed" : "updated"}`,
     meta: e.cluster,
     when: ago(e.at),
+    sel:
+      e.kind === "InferenceService" && e.action !== "deleted"
+        ? { cluster: e.cluster, kind: "InferenceService", name: e.name, namespace: e.namespace }
+        : undefined,
   }));
 }
 
-export function toRollouts(rollouts: RolloutItem[]): Rollout[] {
-  return rollouts.map((r) => ({
-    name: r.name,
-    namespace: r.namespace,
-    barTone: "amber",
-    barPct: r.ready ? 90 : 45,
-    barStriped: true,
-    note: r.message ?? r.reason ?? "rolling out",
-    gate: r.ready ? { label: "Ready", tone: "green" } : { label: "In progress", tone: "amber" },
-    cluster: r.cluster,
-    started: r.age ?? "—",
-  }));
+/** Ready-vs-total replica progress across components, as a 0–100 percentage.
+ *  `null` when no component reports lifecycle counts. */
+export function rolloutProgress(components?: ComponentItem[]): number | null {
+  let ready = 0;
+  let total = 0;
+  for (const c of components ?? []) {
+    const r = componentReplicas(c);
+    if (r.total != null) {
+      ready += Math.min(r.ready ?? 0, r.total);
+      total += r.total;
+    }
+  }
+  if (total === 0) return null;
+  return Math.round((100 * ready) / total);
+}
+
+/** Fuse the rollouts listing with the deployment rows it refers to, so the cards
+ *  carry real replica progress and per-component rollout state instead of a
+ *  fabricated bar. */
+export function toRollouts(rollouts: RolloutItem[], isvcs: IsvcItem[]): Rollout[] {
+  const byId = new Map(isvcs.map((s) => [`${s.cluster}/${s.namespace ?? ""}/${s.name}`, s]));
+  return rollouts.map((r) => {
+    const isvc = byId.get(`${r.cluster}/${r.namespace ?? ""}/${r.name}`);
+    const pct = rolloutProgress(isvc?.components);
+    return {
+      name: r.name,
+      namespace: r.namespace,
+      barTone: "amber" as const,
+      barPct: pct ?? 0,
+      barStriped: !r.ready,
+      note: r.message ?? r.reason ?? "rolling out",
+      gate: r.ready
+        ? { label: "Ready", tone: "green" as const }
+        : { label: "In progress", tone: "amber" as const },
+      cluster: r.cluster,
+      started: r.age ?? "—",
+      components: componentCells(isvc?.components),
+      sel: {
+        cluster: r.cluster,
+        kind: "InferenceService" as const,
+        name: r.name,
+        namespace: r.namespace,
+      },
+    };
+  });
 }
 
 // ---- Workloads ------------------------------------------------------------
@@ -133,6 +170,47 @@ export function componentTone(c: ComponentItem): "ok" | "warn" | "bad" {
   return c.ready === false || r < t ? "warn" : "ok";
 }
 
+/** Component-chip tone → the `repl` color classes tables already use. */
+export const COMPONENT_TONE_CLASS: Record<ComponentCell["tone"], string> = {
+  ok: "green",
+  warn: "amber",
+  bad: "red",
+};
+
+/** Per-component replica chips: "engine 245/251" with a health tone, plus "→N"
+ *  when the autoscaler wants a different total than currently exists (scale in
+ *  flight). Component names render in full — abbreviations read as noise. */
+export function componentCells(components?: ComponentItem[]): ComponentCell[] {
+  return (components ?? []).map((c) => {
+    const { ready, total } = componentReplicas(c);
+    let counts = total != null ? `${ready ?? 0}/${total}` : ready != null ? `${ready}` : "—";
+    if (
+      c.desiredReplicas != null &&
+      c.totalReplicas != null &&
+      c.desiredReplicas !== c.totalReplicas
+    ) {
+      counts += `→${c.desiredReplicas}`;
+    }
+    const toneMap: Record<ReturnType<typeof componentTone>, ComponentCell["tone"]> = {
+      ok: "ok",
+      warn: "warn",
+      bad: "bad",
+    };
+    return {
+      name: c.name,
+      label: `${c.name} ${counts}`,
+      tone: toneMap[componentTone(c)],
+      phase: c.rolloutPhase,
+      revision: c.revision,
+    };
+  });
+}
+
+/** Whether any component reports a rollout in progress (a non-Stable phase). */
+export function isRolling(components?: ComponentItem[]): boolean {
+  return (components ?? []).some((c) => c.rolloutPhase != null && c.rolloutPhase !== "Stable");
+}
+
 /** A short model-load summary: loaded/failed copies, else a non-steady state. */
 export function loadSummary(s: IsvcItem): string | undefined {
   const parts: string[] = [];
@@ -158,10 +236,14 @@ export function toWorkloadRows(isvcs: IsvcItem[]): WorkloadRow[] {
       namespace: s.namespace,
       model: s.model ?? "—",
       modelRef: s.modelRef,
-      runtime: s.runtime ?? "—",
+      runtime: s.resolvedRuntimeRef?.name ?? s.runtime ?? "—",
       runtimeRef: runtimeRefOf(s),
       endpoint: s.url,
       replicas: replicaRollup(s.components),
+      components: componentCells(s.components),
+      mode: s.deploymentMode,
+      accelerators: s.accelerators,
+      rolling: isRolling(s.components),
       load: loadSummary(s),
       reason: s.ready === false ? s.reason : undefined,
       age: s.age ?? "—",

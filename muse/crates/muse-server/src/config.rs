@@ -881,12 +881,58 @@ pub struct Config {
     #[arg(long = "metrics-queries-file", env = "MUSE_METRICS_QUERIES_FILE")]
     pub metrics_queries_file: Option<PathBuf>,
 
+    /// Maximum seconds for one on-demand pod-inspection apiserver call (live pod
+    /// status, events, or a log tail). Pod inspection is a deliberate exception
+    /// to the informer-only rule — strictly per-click, one object, bounded — and
+    /// stays disabled unless all three `pod-*` values are configured.
+    #[arg(
+        long = "pod-inspect-timeout-secs",
+        env = "MUSE_POD_INSPECT_TIMEOUT_SECS"
+    )]
+    pub pod_inspect_timeout_secs: Option<NonZeroU64>,
+
+    /// Log-tail line cap for pod inspection: requests are clamped to this many
+    /// trailing lines.
+    #[arg(long = "pod-log-tail-lines", env = "MUSE_POD_LOG_TAIL_LINES")]
+    pub pod_log_tail_lines: Option<NonZeroUsize>,
+
+    /// Maximum bytes accepted from one pod log fetch.
+    #[arg(long = "pod-log-max-bytes", env = "MUSE_POD_LOG_MAX_BYTES")]
+    pub pod_log_max_bytes: Option<NonZeroU64>,
+
+    /// Maximum pods followed by one live log-stream session (a component can be
+    /// hundreds of pods; a session follows at most this many). Streaming also
+    /// requires the `pod-*` inspection values and stays disabled without them.
+    #[arg(long = "pod-log-stream-max-pods", env = "MUSE_POD_LOG_STREAM_MAX_PODS")]
+    pub pod_log_stream_max_pods: Option<NonZeroUsize>,
+
+    /// Hard wall-clock cap (seconds) on one live log-stream session.
+    #[arg(long = "pod-log-stream-max-secs", env = "MUSE_POD_LOG_STREAM_MAX_SECS")]
+    pub pod_log_stream_max_secs: Option<NonZeroU64>,
+
     /// Directory of the built web console (the SPA) to serve at `/`, with the
     /// API under `/v1`. Unset ⇒ API-only (the console is served elsewhere). The
     /// container image bakes the bundle in and sets this; override to point at
     /// your own build.
     #[arg(long = "web-dir", env = "MUSE_WEB_DIR")]
     pub web_dir: Option<PathBuf>,
+}
+
+/// Effective on-demand pod-inspection policy; `None` leaves the feature off and
+/// the rest of the read plane untouched.
+#[derive(Clone, Copy, Debug)]
+pub struct PodInspectConfig {
+    pub timeout: std::time::Duration,
+    pub log_tail_lines: usize,
+    pub log_max_bytes: u64,
+}
+
+/// Effective live log-streaming policy (on top of [`PodInspectConfig`]);
+/// `None` leaves the streaming endpoint off.
+#[derive(Clone, Copy, Debug)]
+pub struct PodLogStreamConfig {
+    pub max_pods: usize,
+    pub max_duration: std::time::Duration,
 }
 
 impl Config {
@@ -985,6 +1031,27 @@ impl Config {
             max_series,
             max_scope_pods,
         }))
+    }
+
+    /// Build the effective pod-inspection policy. Enabling it without every
+    /// bound explicit is a configuration error the caller reports by leaving the
+    /// feature disabled; no limit is invented here.
+    pub fn pod_inspect_config(&self) -> Option<PodInspectConfig> {
+        Some(PodInspectConfig {
+            timeout: std::time::Duration::from_secs(self.pod_inspect_timeout_secs?.get()),
+            log_tail_lines: self.pod_log_tail_lines?.get(),
+            log_max_bytes: self.pod_log_max_bytes?.get(),
+        })
+    }
+
+    /// Build the effective log-streaming policy; requires the base inspection
+    /// policy plus both stream bounds.
+    pub fn pod_log_stream_config(&self) -> Option<PodLogStreamConfig> {
+        self.pod_inspect_config()?;
+        Some(PodLogStreamConfig {
+            max_pods: self.pod_log_stream_max_pods?.get(),
+            max_duration: std::time::Duration::from_secs(self.pod_log_stream_max_secs?.get()),
+        })
     }
 
     /// The clusters to watch — the configured list, or the ambient config under

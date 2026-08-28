@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 
 import type { DashboardPolicy, MetricsSourceState, MetricsTimeRanges } from "../api";
@@ -12,11 +12,32 @@ import {
 } from "../metrics";
 import type { IsvcMetrics, MetricPoint } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
-import { replicaIdentity, selectReplica } from "../replicaMetrics";
-import type { ReplicaDiagnostics } from "../replicaMetrics";
+import type { ReplicaDiagnostics, ReplicaPerfRow } from "../replicaMetrics";
 import { ago, fmtErrPct, fmtInt, fmtLatency, fmtPct, fmtRate } from "../util";
 import { Card, Distribution, Dot, FilterChip, MetricChart, Spark, StatTile } from "../viz";
 import type { Series } from "../viz";
+
+/** Replica-table columns; all metric columns sort descending (hottest first). */
+const REPLICA_COLUMNS = [
+  { key: "pod", label: "Pod" },
+  { key: "qps", label: "QPS" },
+  { key: "p99", label: "p99" },
+  { key: "ttft", label: "TTFT" },
+  { key: "throughput", label: "tok/s" },
+  { key: "running", label: "In-flight" },
+  { key: "queued", label: "Queued" },
+  { key: "kvCache", label: "KV cache" },
+] as const;
+type ReplicaSortKey = (typeof REPLICA_COLUMNS)[number]["key"];
+
+/** Comparative sort: name ascending, metrics descending so outliers surface. */
+function sortReplicas(rows: ReplicaPerfRow[], key: ReplicaSortKey): ReplicaPerfRow[] {
+  return [...rows].sort((a, b) =>
+    key === "pod"
+      ? a.pod.localeCompare(b.pod) || a.component.localeCompare(b.component)
+      : (b[key] ?? -1) - (a[key] ?? -1) || a.pod.localeCompare(b.pod),
+  );
+}
 
 const ACCENT = "var(--accent-2)";
 const RED = "var(--red)";
@@ -82,13 +103,12 @@ export function Monitoring({
   updatedAt?: number;
   source?: MetricsSourceState;
 }) {
-  const [selectedReplicaIdentity, setSelectedReplicaIdentity] = useState("");
+  const [replicaSort, setReplicaSort] = useState<ReplicaSortKey>("qps");
   const activeTimeRange =
     timeRanges?.options.find((option) => option.id === selectedTimeRangeId) ??
     timeRanges?.options.find((option) => option.id === timeRanges.default);
   const visibleMetrics = activeTimeRange ? sliceIsvcMetrics(m, activeTimeRange.seconds) : m;
-  const selectedReplica = selectReplica(replicas.rows, selectedReplicaIdentity);
-  const activeReplicaIdentity = selectedReplica ? replicaIdentity(selectedReplica) : "";
+  const sortedReplicas = sortReplicas(replicas.rows, replicaSort);
   const timeRangeControl = activeTimeRange ? (
     <div className="filters">
       <FilterChip
@@ -116,12 +136,6 @@ export function Monitoring({
       detail={`${failedQueryCount} of ${queryCount} query results failed${updatedAt ? `; snapshot updated ${ago(updatedAt)}` : ""}.`}
     />
   ) : null;
-
-  useEffect(() => {
-    if (selectedReplicaIdentity !== activeReplicaIdentity) {
-      setSelectedReplicaIdentity(activeReplicaIdentity);
-    }
-  }, [activeReplicaIdentity, selectedReplicaIdentity]);
 
   const hasAnyServingData = m.present || replicas.rows.length > 0;
   const hasVisibleData = visibleMetrics.present || replicas.rows.length > 0;
@@ -245,47 +259,43 @@ export function Monitoring({
             title="Engine replicas"
             sub={`${replicas.rows.length} replica${replicas.rows.length === 1 ? "" : "s"} · current metrics${updatedAt ? ` · updated ${ago(updatedAt)}` : ""}`}
           >
-            {selectedReplica ? (
-              <>
-                <div className="replica-controls">
-                  <FilterChip
-                    label="Replica"
-                    value={activeReplicaIdentity}
-                    options={replicas.rows.map((row) => ({
-                      value: replicaIdentity(row),
-                      label: `${row.pod} · ${row.component}`,
-                    }))}
-                    onChange={setSelectedReplicaIdentity}
-                  />
-                  <div className="replica-context">
-                    <span>
-                      <span className="eyebrow">Component</span> {selectedReplica.component}
-                    </span>
-                    <span>
-                      <span className="eyebrow">Namespace</span>{" "}
-                      <span className="mono">{selectedReplica.namespace}</span>
-                    </span>
-                  </div>
-                </div>
-                <div
-                  className="tiles replica-metrics"
-                  role="group"
-                  aria-label={`Metrics for pod ${selectedReplica.pod}, component ${selectedReplica.component}, namespace ${selectedReplica.namespace}`}
-                >
-                  <StatTile label="QPS" value={fmtRate(selectedReplica.qps)} />
-                  <StatTile label="p99" value={fmtLatency(selectedReplica.p99)} />
-                  <StatTile label="TTFT" value={fmtLatency(selectedReplica.ttft)} />
-                  <StatTile label="tok/s" value={fmtRate(selectedReplica.throughput)} />
-                  <StatTile label="In-flight" value={fmtInt(selectedReplica.running)} />
-                  <StatTile label="Queued" value={fmtInt(selectedReplica.queued)} />
-                  <StatTile
-                    label="KV cache"
-                    value={
-                      selectedReplica.kvCache == null ? "—" : fmtPct(selectedReplica.kvCache * 100)
-                    }
-                  />
-                </div>
-              </>
+            {sortedReplicas.length ? (
+              <table className="place-tbl replica-tbl">
+                <thead>
+                  <tr>
+                    {REPLICA_COLUMNS.map((col) => (
+                      <th key={col.key} className={col.key === "pod" ? undefined : "tnum"}>
+                        <button
+                          type="button"
+                          className={`linkbtn th-sort${replicaSort === col.key ? " active" : ""}`}
+                          onClick={() => setReplicaSort(col.key)}
+                          title={`sort by ${col.label}`}
+                        >
+                          {col.label}
+                        </button>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedReplicas.map((row) => (
+                    <tr key={`${row.namespace}/${row.pod}/${row.component}`}>
+                      <td className="mono pod-name" title={row.pod}>
+                        {row.pod} <span className="muted">{row.component}</span>
+                      </td>
+                      <td className="tnum">{fmtRate(row.qps)}</td>
+                      <td className="tnum">{fmtLatency(row.p99)}</td>
+                      <td className="tnum">{fmtLatency(row.ttft)}</td>
+                      <td className="tnum">{fmtRate(row.throughput)}</td>
+                      <td className="tnum">{fmtInt(row.running)}</td>
+                      <td className="tnum">{fmtInt(row.queued)}</td>
+                      <td className="tnum">
+                        {row.kvCache == null ? "—" : fmtPct(row.kvCache * 100)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             ) : (
               <div className="muted attn-none">No engine replica metrics in this snapshot.</div>
             )}

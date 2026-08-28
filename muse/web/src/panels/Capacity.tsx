@@ -11,12 +11,13 @@ import type {
   UnitBox,
 } from "../api";
 import type { Tone } from "../types";
-import { Bar, DataNotice, EmptyRow, Pager } from "../components";
+import { Bar, CopyCmd, DataNotice, EmptyRow, Pager } from "../components";
 import { loadClusterCapacity } from "../dataState";
 import type { ClusterCapacityState } from "../dataState";
 import { useLive } from "../live";
+import type { Selected } from "../resource";
 import { upperThresholdTone } from "../policy";
-import { ago, copyText, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct } from "../util";
+import { ago, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct } from "../util";
 import { Card, Distribution, Dot, Gauge, StatTile, UtilRow } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
@@ -434,27 +435,6 @@ function labeler(ids: string[]): (id: string) => string {
   };
 }
 
-/** A one-click "copy this kubectl command" chip. muse never runs it — the operator
- *  runs it with their own (RBAC'd, audited) credentials. */
-function CopyCmd({ label, cmd }: { label: string; cmd: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      className="copybtn"
-      title={cmd}
-      onClick={async () => {
-        if (await copyText(cmd)) {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }
-      }}
-    >
-      {copied ? "✓ copied" : label}
-    </button>
-  );
-}
-
 // Conditions where `True` means trouble (standard k8s node pressures).
 const BAD_WHEN_TRUE = ["MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable"];
 
@@ -467,7 +447,14 @@ function condTone(c: { type: string; status: string }): string {
   return "";
 }
 
-export function Capacity() {
+export function Capacity({
+  openDeployment,
+  initialCluster,
+}: {
+  openDeployment: (s: Selected) => void;
+  /** Deep-linked cluster tab (from the route); "" / undefined = fleet view. */
+  initialCluster?: string;
+}) {
   const [kind, setKind] = useState<Kind>("all");
   const [dim, setDim] = useState<Dim>("cluster");
   const [q, setQ] = useState("");
@@ -477,7 +464,7 @@ export function Capacity() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
-  const [tab, setTab] = useState(""); // "" = all clusters; else a cluster name
+  const [tab, setTab] = useState(initialCluster ?? ""); // "" = all clusters; else a cluster name
   const [nodes, setNodes] = useState<NodeItem[]>([]);
   const [nodesLoading, setNodesLoading] = useState(false);
   const [nodesError, setNodesError] = useState<string | null>(null);
@@ -581,6 +568,12 @@ export function Capacity() {
   // Per-cluster drill-downs (only when a single cluster tab is active).
   const consumers = tab ? (caps[0]?.cap.consumers ?? []) : [];
   const maxConsumer = Math.max(1, ...consumers.map((c) => c.accelerators));
+  // Deployment-attributed consumption works fleet-wide: every per-cluster
+  // response carries its own top list; flatten and re-rank across the scope.
+  const deploymentConsumers = caps
+    .flatMap(({ cap }) => cap.consumersByDeployment ?? [])
+    .sort((a, b) => b.accelerators - a.accelerators)
+    .slice(0, 10);
   // Node-health breakdown, from the selected cluster's accelerator nodes.
   const issueCounts = new Map<string, number>();
   let unhealthyAccel = 0;
@@ -998,6 +991,52 @@ export function Capacity() {
         </div>
       ) : null}
 
+      <Card title="Top deployments" sub="accelerators held · click to open">
+        {deploymentConsumers.length ? (
+          <table className="place-tbl">
+            <thead>
+              <tr>
+                <th>Deployment</th>
+                <th>Cluster</th>
+                <th>Kind</th>
+                <th className="tnum">Pods</th>
+                <th className="tnum">Accels</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deploymentConsumers.map((c) => (
+                <tr
+                  key={`${c.cluster}/${c.namespace}/${c.name}/${c.kind}`}
+                  className="link"
+                  onClick={() =>
+                    openDeployment({
+                      cluster: c.cluster,
+                      kind: "InferenceService",
+                      name: c.name,
+                      namespace: c.namespace,
+                    })
+                  }
+                >
+                  <td className="mono">
+                    {c.name} <span className="muted">{c.namespace}</span>
+                  </td>
+                  <td className="mono muted">{c.cluster}</td>
+                  <td>{c.kind.toUpperCase()}</td>
+                  <td className="tnum">{c.pods}</td>
+                  <td className="tnum">{c.accelerators.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="panel-note">
+            {hasCapacity
+              ? "No deployment-attributed accelerator consumption in scope."
+              : "Waiting for capacity data."}
+          </p>
+        )}
+      </Card>
+
       <PlacementCapacity tiers={placeTiers} />
 
       {active ? (
@@ -1126,11 +1165,28 @@ export function Capacity() {
                                   </div>
                                   {detail.podsOnNode?.length ? (
                                     <ul className="node-pods">
-                                      {detail.podsOnNode.slice(0, 12).map((p, i) => (
+                                      {detail.podsOnNode.slice(0, 20).map((p, i) => (
                                         <li key={i}>
-                                          <span className="mono">
-                                            {p.namespace}/{p.name}
-                                          </span>
+                                          {p.deployment ? (
+                                            <button
+                                              className="linkbtn mono"
+                                              title={`open deployment ${p.deployment}`}
+                                              onClick={() =>
+                                                openDeployment({
+                                                  cluster: detail.cluster,
+                                                  kind: "InferenceService",
+                                                  name: p.deployment ?? "",
+                                                  namespace: p.namespace,
+                                                })
+                                              }
+                                            >
+                                              {p.namespace}/{p.name}
+                                            </button>
+                                          ) : (
+                                            <span className="mono">
+                                              {p.namespace}/{p.name}
+                                            </span>
+                                          )}
                                           {p.accelerators ? (
                                             <span className="node-pod-accel tnum">
                                               {n(p.accelerators)}

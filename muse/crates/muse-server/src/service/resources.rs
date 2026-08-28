@@ -29,10 +29,10 @@ use crate::{
     app_context::AppState,
     informers::ClusterState,
     protocol::{
-        sum_accel, tagged, BaseModelDetail, BaseModelView, FineTunedWeightView,
+        pod_accelerators, sum_accel, tagged, BaseModelDetail, BaseModelView, FineTunedWeightView,
         InferenceServiceDetail, InferenceServiceView, ListParams, Listing, NodeDetail, NodePod,
         NodeView, ResolvedRuntimeRefView, ResourceSummary, RuntimeDetail, RuntimeView, Topology,
-        ViewParams,
+        ViewParams, INFERENCE_SERVICE_POD_LABEL,
     },
     rollup,
 };
@@ -146,20 +146,18 @@ where
     }
 }
 
-/// Pod label carrying the owning InferenceService's name; the operator stamps it
-/// on every serving pod it creates.
-const INFERENCE_SERVICE_POD_LABEL: &str = "ome.io/inferenceservice";
-
 /// Pod label carrying the resolved runtime's name. For an auto-selected runtime
 /// (no `spec.runtime`) this label is the only record of the operator's choice —
 /// nothing on the InferenceService itself names it.
 const SERVING_RUNTIME_POD_LABEL: &str = "serving-runtime";
 
 /// List rows for one cluster's InferenceServices, each with its runtime identity
-/// resolved against the runtime caches. Rows resolve from the spec only — the
-/// pod-label fallback would cost a pod-cache scan per row, so it is reserved for
-/// the single-object detail view.
+/// resolved against the runtime caches and the accelerator chips its pods hold
+/// (one pod-cache scan for the whole listing). Runtime identity resolves from the
+/// spec only — the pod-label fallback would cost a pod scan per row, so it is
+/// reserved for the single-object detail view.
 fn isvc_rows(c: &ClusterState) -> Vec<Value> {
+    let held = accel_held_by_isvc(&c.pods.list());
     c.inference_services
         .list()
         .iter()
@@ -167,9 +165,52 @@ fn isvc_rows(c: &ClusterState) -> Vec<Value> {
             let mut view = InferenceServiceView::of(isvc);
             view.resolved_runtime_ref =
                 resolved_runtime_ref(isvc, &c.serving_runtimes, &c.cluster_serving_runtimes, None);
+            view.accelerators = held
+                .get(&(
+                    isvc.meta().namespace.clone().unwrap_or_default(),
+                    view.name.clone(),
+                ))
+                .copied();
             tagged(view, &c.name)
         })
         .collect()
+}
+
+/// Accelerator chips held per (namespace, InferenceService) by scheduled,
+/// non-terminal pods carrying the ownership label.
+fn accel_held_by_isvc(pods: &[Arc<Pod>]) -> BTreeMap<(String, String), i64> {
+    let mut out: BTreeMap<(String, String), i64> = BTreeMap::new();
+    for pod in pods {
+        let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+        if matches!(phase, Some("Succeeded" | "Failed")) {
+            continue;
+        }
+        if pod
+            .spec
+            .as_ref()
+            .and_then(|s| s.node_name.as_ref())
+            .is_none()
+        {
+            continue;
+        }
+        let Some(owner) = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(INFERENCE_SERVICE_POD_LABEL))
+        else {
+            continue;
+        };
+        let chips = pod_accelerators(pod);
+        if chips > 0 {
+            *out.entry((
+                pod.metadata.namespace.clone().unwrap_or_default(),
+                owner.clone(),
+            ))
+            .or_insert(0) += chips;
+        }
+    }
+    out
 }
 
 /// Detail for one named InferenceService (or the raw object when `raw`), with its
@@ -187,6 +228,11 @@ fn isvc_detail(c: &ClusterState, name: &str, namespace: Option<&str>, raw: bool)
             &c.cluster_serving_runtimes,
             Some(&c.pods),
         );
+        if let Some(ns) = isvc.meta().namespace.as_deref() {
+            detail.view.accelerators = accel_held_by_isvc(&c.pods.list_namespaced(ns))
+                .get(&(ns.to_owned(), detail.view.name.clone()))
+                .copied();
+        }
         tagged(detail, &c.name)
     })
 }
@@ -356,6 +402,12 @@ fn node_detail(c: &ClusterState, name: &str, raw: bool, topo: &Topology) -> Opti
                     namespace: p.metadata.namespace.clone().unwrap_or_default(),
                     name: p.metadata.name.clone().unwrap_or_default(),
                     accelerators: (accel > 0).then_some(accel),
+                    deployment: p
+                        .metadata
+                        .labels
+                        .as_ref()
+                        .and_then(|l| l.get(INFERENCE_SERVICE_POD_LABEL))
+                        .cloned(),
                 }
             })
             .collect();

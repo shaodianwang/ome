@@ -47,6 +47,10 @@ pub struct ClusterState {
     pub name: String,
     /// Apiserver `gitVersion` (e.g. "v1.35.6"), captured at connect time.
     pub version: String,
+    /// The cluster's kube client, retained for the few explicitly on-demand,
+    /// bounded reads (per-pod inspection: live status, events, log tails).
+    /// Inventory endpoints must keep reading the informer caches, never this.
+    pub client: kube::Client,
     pub inference_services: Lister<InferenceService>,
     pub base_models: Lister<BaseModel>,
     pub serving_runtimes: Lister<ServingRuntime>,
@@ -185,6 +189,7 @@ pub struct SystemKinds {
 pub fn build_cluster_state(
     name: String,
     version: String,
+    client: kube::Client,
     factory: &SharedInformerFactory,
     ome: &HashSet<String>,
     system_kinds: SystemKinds,
@@ -293,6 +298,7 @@ pub fn build_cluster_state(
         daemon_sets: warm_system::<DaemonSet>(factory, system_kinds.daemon_sets, i("DaemonSet")),
         name,
         version,
+        client,
         cache: CacheState::default(),
     };
     (state, readies)

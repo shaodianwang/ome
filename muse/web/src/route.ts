@@ -16,7 +16,8 @@ export interface Route {
   sel?: RouteSelected;
   /** Deployments list tab. */
   filter?: DepFilter;
-  /** Deployments list cluster filter (empty/undefined = all clusters). */
+  /** Cluster scope: the Deployments list filter, or the Capacity cluster tab
+   *  (empty/undefined = all clusters). */
   cluster?: string;
   /** Deployments list search query. */
   q?: string;
@@ -88,11 +89,13 @@ export function parseRoute(
   }
   if (panel === "workloads") {
     const tab = sp.get("tab");
-    if (tab === "attention" || tab === "ready") route.filter = tab;
-    const cluster = sp.get("cluster");
-    if (cluster) route.cluster = cluster;
+    if (tab === "attention" || tab === "rolling" || tab === "ready") route.filter = tab;
     const q = sp.get("q");
     if (q) route.q = q;
+  }
+  if (panel === "workloads" || panel === "capacity") {
+    const cluster = sp.get("cluster");
+    if (cluster) route.cluster = cluster;
   }
   return route;
 }

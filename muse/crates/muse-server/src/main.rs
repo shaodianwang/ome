@@ -227,6 +227,8 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         chat,
         app_context::AppStateConfig {
             metrics: metrics_backend,
+            pod_inspect: config.pod_inspect_config(),
+            pod_log_stream: config.pod_log_stream_config(),
             refresh: Duration::from_secs(config.metrics_refresh_secs),
             sse_keep_alive: config
                 .sse_keep_alive_secs
@@ -321,6 +323,7 @@ async fn build_cluster(
     let (state, readies) = informers::build_cluster_state(
         cluster_ref.name.clone(),
         info.git_version.clone(),
+        client.clone(),
         &factory,
         &ome,
         system_kinds,
