@@ -215,7 +215,17 @@ function PodRow({
     <Fragment>
       <tr className={`link${bad ? " pod-bad" : ""}`} onClick={onToggle}>
         <td className="mono pod-name" title={p.name}>
-          {p.name}
+          <button
+            type="button"
+            className="row-open"
+            aria-expanded={expanded}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
+          >
+            {p.name}
+          </button>
         </td>
         <td>{p.component ?? "—"}</td>
         <td>

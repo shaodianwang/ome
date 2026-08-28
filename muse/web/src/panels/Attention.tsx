@@ -116,8 +116,17 @@ export function Attention({
                   shown.map((i, idx) => (
                     <tr className="link" key={idx} onClick={() => open(i)}>
                       <td>
-                        <Dot tone={i.severity === "critical" ? "red" : "amber"} />{" "}
-                        {i.severity === "critical" ? "Critical" : "Warning"}
+                        <button
+                          type="button"
+                          className="row-open"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            open(i);
+                          }}
+                        >
+                          <Dot tone={i.severity === "critical" ? "red" : "amber"} />{" "}
+                          {i.severity === "critical" ? "Critical" : "Warning"}
+                        </button>
                       </td>
                       <td className="muted">{CATEGORY_LABEL[i.category]}</td>
                       <td className="mono">{i.name}</td>

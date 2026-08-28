@@ -295,36 +295,6 @@ table.tbl tbody tr.rowlink:hover {
 .mini-feed li:last-child {
   border-bottom: none;
 }
-
-/* model cards as buttons + source / usage badges */
-button.mcard {
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  display: block;
-  width: 100%;
-  transition:
-    border-color 0.12s,
-    background 0.12s;
-}
-button.mcard:hover {
-  border-color: var(--border-2);
-  background: var(--panel-2);
-}
-.mcard .mh {
-  padding: var(--s4) var(--s5) 0;
-}
-.mcard .mmeta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px var(--s5) 0;
-}
-.mcard .specs {
-  border-bottom: none;
-  padding: 12px var(--s5) var(--s5);
-}
 .src-badge {
   font-size: var(--t-xs);
   font-family: var(--mono);

@@ -470,7 +470,16 @@ export function Fleet({
                     onClick={() => openDeployment(isvcSelected(c.cluster, c.name, c.namespace))}
                   >
                     <td className="mono">
-                      {c.name} <span className="muted">{c.namespace}</span>
+                      <button
+                        type="button"
+                        className="row-open"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openDeployment(isvcSelected(c.cluster, c.name, c.namespace));
+                        }}
+                      >
+                        {c.name} <span className="muted">{c.namespace}</span>
+                      </button>
                     </td>
                     <td className="mono muted">{c.cluster}</td>
                     <td>{c.kind.toUpperCase()}</td>
@@ -516,7 +525,18 @@ export function Fleet({
                   title={c.version ? `Kubernetes ${c.version} · open Capacity` : "open Capacity"}
                   onClick={() => openCapacityCluster(c.name)}
                 >
-                  <td className="mono">{c.name}</td>
+                  <td className="mono">
+                    <button
+                      type="button"
+                      className="row-open"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openCapacityCluster(c.name);
+                      }}
+                    >
+                      {c.name}
+                    </button>
+                  </td>
                   <td className="tnum">{c.nodes.toLocaleString()}</td>
                   <td className="tnum">{c.acceleratorNodes.toLocaleString()}</td>
                   <td className="tnum">{c.total}</td>
