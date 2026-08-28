@@ -135,6 +135,16 @@ impl AppState {
         }
     }
 
+    /// Validate that a named cluster is configured, regardless of its cache
+    /// state — for endpoints that report on non-ready clusters too.
+    pub fn validate_cluster(&self, name: &str) -> Result<(), ApiError> {
+        if self.clusters.iter().any(|cluster| cluster.name == name) {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound(format!("unknown cluster: {name}")))
+        }
+    }
+
     /// Why an unscoped read cannot be served: every cluster's sync state, so the
     /// operator sees which cluster is stuck and why instead of a generic 503.
     fn no_ready_cluster_detail(&self) -> String {

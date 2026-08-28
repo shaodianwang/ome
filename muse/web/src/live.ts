@@ -110,6 +110,30 @@ export interface LiveOptions {
   throttleMs?: number;
 }
 
+/** Options for the fleet-triage attention feed, shared by every panel that
+ *  renders it so they all refresh on the same cadence. */
+export const ATTENTION_LIVE_OPTIONS: LiveOptions = {
+  kinds: ["InferenceService", "Pod", "BaseModel", "ClusterBaseModel", "Cluster"],
+  throttleMs: 5_000,
+  intervalMs: 30_000,
+};
+
+/** Options for the InferenceService list on the panels that render it directly
+ *  (Fleet, Deployments). */
+export const ISVC_LIVE_OPTIONS: LiveOptions = {
+  kinds: ["InferenceService"],
+  throttleMs: 5_000,
+  intervalMs: 30_000,
+};
+
+/** Options for the InferenceService list consumed as a cross-reference
+ *  (Models / Runtimes usage counts) — throttled slower than the list panels. */
+export const ISVC_USAGE_LIVE_OPTIONS: LiveOptions = {
+  kinds: ["InferenceService"],
+  throttleMs: 8_000,
+  intervalMs: 30_000,
+};
+
 /**
  * Fetch `fetcher()` once, then refetch when a relevant SSE event arrives (and
  * optionally on a slow interval). The fetcher and options are read through refs,

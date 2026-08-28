@@ -30,10 +30,24 @@ export function CopyCmd({ label, cmd }: { label: string; cmd: string }) {
   );
 }
 
-export function Pill({ tone, label, style }: { tone: Tone; label: string; style?: CSSProperties }) {
+/** A status pill. `dot` hides the leading status dot for purely-textual pills
+ *  (scope/topology tags). */
+export function Pill({
+  tone,
+  label,
+  title,
+  style,
+  dot = true,
+}: {
+  tone: Tone;
+  label: string;
+  title?: string;
+  style?: CSSProperties;
+  dot?: boolean;
+}) {
   return (
-    <span className={`pill ${tone}`} style={style}>
-      <span className="pdot" />
+    <span className={`pill ${tone}`} title={title} style={style}>
+      {dot ? <span className="pdot" /> : null}
       {label}
     </span>
   );
@@ -69,6 +83,34 @@ export function ClusterFilter({
           </option>
         ))}
       </select>
+    </div>
+  );
+}
+
+/** The standard filter-bar search box: a growable input, optionally with a
+ *  leading icon. */
+export function SearchInput({
+  ariaLabel,
+  placeholder,
+  value,
+  onChange,
+  icon,
+}: {
+  ariaLabel: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  icon?: ReactNode;
+}) {
+  return (
+    <div className="input grow">
+      {icon}
+      <input
+        aria-label={ariaLabel}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
     </div>
   );
 }
@@ -114,6 +156,43 @@ export function DataNotice({
       ) : null}
     </div>
   );
+}
+
+/** Stale-data notice for a snapshot-holding query: warn while refreshes fail but
+ *  the last snapshot is still on screen; escalate to danger when nothing has
+ *  loaded (omit `unavailableTitle` to render nothing in that case). Renders
+ *  nothing while the query is healthy. */
+export function StaleNotice({
+  error,
+  hasData,
+  title,
+  detail,
+  unavailableTitle,
+  unavailableDetail,
+  onRetry,
+}: {
+  error: string | null;
+  hasData: boolean;
+  title: string;
+  detail?: ReactNode;
+  unavailableTitle?: string;
+  unavailableDetail?: ReactNode;
+  onRetry?: () => void;
+}) {
+  if (!error) return null;
+  const action = onRetry ? { label: "Retry", onClick: onRetry } : undefined;
+  if (!hasData) {
+    if (!unavailableTitle) return null;
+    return (
+      <DataNotice
+        tone="danger"
+        title={unavailableTitle}
+        detail={unavailableDetail}
+        action={action}
+      />
+    );
+  }
+  return <DataNotice tone="warning" title={title} detail={detail} action={action} />;
 }
 
 const PAGE_SIZES = [25, 50, 100];

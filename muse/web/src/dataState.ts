@@ -1,4 +1,5 @@
 import type { CapacityResp, ClusterItem, ClustersResp, MetricsSnapshot } from "./api";
+import { ago } from "./util";
 
 export interface ClusterCapacityState {
   name: string;
@@ -181,4 +182,82 @@ export function metricAvailable(snapshot: MetricsSnapshot | null, queryId: strin
   });
 }
 
-/** Derive transport state without letting the GET fallback race the live stream. */
+/** One data source's contribution to a page notice: a failing refresh is a
+ *  warning while a snapshot is still shown, danger once nothing is available. */
+export const sourceIssue = (
+  domain: string,
+  error: string | null,
+  hasSnapshot: boolean,
+): FleetNoticeIssue | null =>
+  error
+    ? {
+        domain,
+        message: hasSnapshot ? "refresh failed; showing the last snapshot" : "unavailable",
+        tone: hasSnapshot ? "warning" : "danger",
+      }
+    : null;
+
+export interface FleetNoticeSource {
+  domain: string;
+  error: string | null;
+  hasSnapshot: boolean;
+}
+
+export interface FleetNoticeState {
+  notice: FleetNoticeSummary | null;
+  /** Whether any plain data source is failing — drives the Retry action. */
+  hasSourceIssues: boolean;
+}
+
+/** Assemble the Fleet page's single data-health notice: plain source failures,
+ *  the live-stream state, metrics transport, per-query failures, and cluster
+ *  metrics coverage, collapsed into one summary. */
+export function fleetNoticeState(inputs: {
+  sources: FleetNoticeSource[];
+  streamReconnecting: boolean;
+  hasStreamedEvents: boolean;
+  metricsOn: boolean;
+  metricsError: string | null;
+  metrics: MetricsSnapshot | null;
+}): FleetNoticeState {
+  const sourceIssues = [
+    ...inputs.sources.map((source) => sourceIssue(source.domain, source.error, source.hasSnapshot)),
+    inputs.streamReconnecting
+      ? {
+          domain: "Activity stream",
+          message: inputs.hasStreamedEvents
+            ? "reconnecting; loaded events remain visible"
+            : "reconnecting",
+          tone: "warning" as const,
+        }
+      : null,
+  ].filter((issue): issue is FleetNoticeIssue => issue != null);
+  const metricState = metricsHealth(inputs.metrics);
+  const metricsTransportIssue: FleetNoticeIssue | null =
+    inputs.metricsOn && inputs.metricsError
+      ? {
+          domain: "Metrics refresh",
+          message:
+            metricState.ready && inputs.metrics
+              ? `${inputs.metricsError} Showing the snapshot from ${ago(inputs.metrics.updatedAt)}`
+              : inputs.metricsError,
+          tone: metricState.ready ? "warning" : "danger",
+        }
+      : null;
+  const queryableMetricClusters = Object.keys(inputs.metrics?.clusters ?? {}).filter((cluster) => {
+    const source = inputs.metrics?.sources?.[cluster];
+    return source == null || source.status === "available";
+  }).length;
+  const queryIssue = inputs.metricsOn
+    ? metricsQueryIssue(metricState, queryableMetricClusters)
+    : null;
+  const metricsCoverageIssues = inputs.metricsOn ? metricsSourceIssues(inputs.metrics) : [];
+  return {
+    notice: summarizeFleetIssues(
+      [...sourceIssues, metricsTransportIssue, ...metricsCoverageIssues, queryIssue].filter(
+        (issue): issue is FleetNoticeIssue => issue != null,
+      ),
+    ),
+    hasSourceIssues: sourceIssues.length > 0,
+  };
+}

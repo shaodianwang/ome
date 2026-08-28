@@ -212,29 +212,11 @@
 .select:hover {
   border-color: var(--border-2);
 }
-.select .env-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--amber);
-}
-.select.prod .env-dot {
-  background: var(--green);
-}
 .select .chev {
   color: var(--fg-3);
 }
 
 /* cloud filter chips */
-.chipbar {
-  display: flex;
-  align-items: center;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 3px;
-  gap: 2px;
-}
 .chip {
   font-size: var(--t-sm);
   color: var(--fg-2);

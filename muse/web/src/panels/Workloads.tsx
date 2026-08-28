@@ -1,11 +1,11 @@
 import type { DepFilter } from "../App";
 import { api } from "../api";
 import { hasUnambiguousDeploymentMetricIdentity } from "../fleet";
-import { useLive } from "../live";
+import { ISVC_LIVE_OPTIONS, useLive } from "../live";
 import { COMPONENT_TONE_CLASS, toWorkloadRows } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
-import { resourceKey } from "../resource";
+import { isvcSelected, resourceKey } from "../resource";
 import type { Selected } from "../resource";
 import type { WorkloadRow } from "../types";
 import { ageToSecs, hostOf } from "../util";
@@ -170,11 +170,7 @@ export function Workloads({
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
 }) {
-  const isvcs = useLive(api.inferenceServices, {
-    kinds: ["InferenceService"],
-    throttleMs: 5_000,
-    intervalMs: 30_000,
-  });
+  const isvcs = useLive(api.inferenceServices, ISVC_LIVE_OPTIONS);
 
   if (selected) {
     const metricIdentity: DeploymentMetricIdentity = isvcs.error
@@ -208,14 +204,7 @@ export function Workloads({
       clusterOf={(w) => w.cluster}
       rowKey={(w) => w.id}
       rowTone={(w) => w.status.tone}
-      onRowClick={(w) =>
-        setSelected({
-          cluster: w.cluster,
-          kind: "InferenceService",
-          name: w.name,
-          namespace: w.namespace,
-        })
-      }
+      onRowClick={(w) => setSelected(isvcSelected(w.cluster, w.name, w.namespace))}
       columns={COLUMNS}
       tabs={TABS}
       filter={filter}

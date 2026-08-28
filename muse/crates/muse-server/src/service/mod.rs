@@ -25,6 +25,7 @@ pub mod metrics;
 pub mod pods;
 pub mod resources;
 pub mod rollouts;
+mod runtime_ref;
 mod sse;
 pub mod system;
 

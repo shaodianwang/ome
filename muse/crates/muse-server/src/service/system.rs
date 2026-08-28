@@ -16,9 +16,14 @@ use axum::{
 };
 use kube::Resource;
 use ome_client::{
-    k8s_openapi::api::{
-        apps::v1::{DaemonSet, Deployment, DeploymentCondition, DeploymentStatus},
-        core::v1::Pod,
+    k8s_openapi::{
+        api::{
+            apps::v1::{
+                DaemonSet, DaemonSetCondition, Deployment, DeploymentCondition, DeploymentStatus,
+            },
+            core::v1::Pod,
+        },
+        apimachinery::pkg::apis::meta::v1::LabelSelector,
     },
     listers::Lister,
 };
@@ -28,7 +33,7 @@ use crate::{
     app_context::AppState,
     informers::ClusterState,
     protocol::{
-        tagged, ComponentHealth, ConditionView, ListParams, Listing, SystemComponent,
+        nonempty, tagged, ComponentHealth, ConditionView, ListParams, Listing, SystemComponent,
         SystemComponentKind, SystemComponentRow, SystemPodView,
     },
 };
@@ -66,9 +71,6 @@ struct Health {
     message: Option<String>,
 }
 
-/// Resolve a descriptor's objects on one cluster and derive its row. Zero matched
-/// objects on an in-scope cluster is `missing` — the descriptor names a component
-/// that is not there.
 /// The per-kind resolution of a descriptor on one cluster: health per matched
 /// object, plus the drawer detail (object names, workload conditions, and each
 /// object's pod selector for finding backing pods).
@@ -79,32 +81,49 @@ struct Matched {
     selectors: Vec<BTreeMap<String, String>>,
 }
 
+/// Resolve a descriptor's objects on one cluster, projecting each through the
+/// kind's health/conditions/selector accessors. Zero matched objects on an
+/// in-scope cluster later reads as `missing` — the descriptor names a component
+/// that is not there.
+fn resolve<K>(
+    lister: &Lister<K>,
+    component: &SystemComponent,
+    health: impl Fn(&K) -> Health,
+    conditions: impl Fn(&K) -> Vec<ConditionView>,
+    selector: impl Fn(&K) -> BTreeMap<String, String>,
+) -> Matched
+where
+    K: Resource<DynamicType = ()> + Clone + 'static,
+{
+    let objs = match_objects(lister, component);
+    Matched {
+        healths: objs.iter().map(|o| health(o)).collect(),
+        objects: object_names(&objs),
+        conditions: objs.iter().flat_map(|o| conditions(o)).collect(),
+        selectors: objs.iter().map(|o| selector(o)).collect(),
+    }
+}
+
 fn evaluate(component: &SystemComponent, cluster: &ClusterState) -> SystemComponentRow {
     let matched = match component.kind {
-        SystemComponentKind::Deployment => {
-            let objs = match_objects(&cluster.deployments, component);
-            Matched {
-                healths: objs.iter().map(|d| deployment_health(d)).collect(),
-                objects: object_names(&objs),
-                conditions: objs.iter().flat_map(|d| deployment_conditions(d)).collect(),
-                selectors: objs
-                    .iter()
-                    .map(|d| pod_selector(d.spec.as_ref().map(|s| &s.selector)))
-                    .collect(),
-            }
-        }
-        SystemComponentKind::DaemonSet => {
-            let objs = match_objects(&cluster.daemon_sets, component);
-            Matched {
-                healths: objs.iter().map(|d| daemonset_health(d)).collect(),
-                objects: object_names(&objs),
-                conditions: objs.iter().flat_map(|d| daemonset_conditions(d)).collect(),
-                selectors: objs
-                    .iter()
-                    .map(|d| pod_selector(d.spec.as_ref().map(|s| &s.selector)))
-                    .collect(),
-            }
-        }
+        SystemComponentKind::Deployment => resolve(
+            &cluster.deployments,
+            component,
+            deployment_health,
+            |d: &Deployment| {
+                workload_conditions(d.status.as_ref().and_then(|s| s.conditions.as_deref()))
+            },
+            |d: &Deployment| pod_selector(d.spec.as_ref().map(|s| &s.selector)),
+        ),
+        SystemComponentKind::DaemonSet => resolve(
+            &cluster.daemon_sets,
+            component,
+            daemonset_health,
+            |d: &DaemonSet| {
+                workload_conditions(d.status.as_ref().and_then(|s| s.conditions.as_deref()))
+            },
+            |d: &DaemonSet| pod_selector(d.spec.as_ref().map(|s| &s.selector)),
+        ),
     };
     let Matched {
         healths,
@@ -142,9 +161,7 @@ fn object_names<K: Resource<DynamicType = ()>>(objs: &[Arc<K>]) -> Vec<String> {
 }
 
 /// A workload's pod selector `matchLabels` (empty when unset).
-fn pod_selector(
-    selector: Option<&ome_client::k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector>,
-) -> BTreeMap<String, String> {
+fn pod_selector(selector: Option<&LabelSelector>) -> BTreeMap<String, String> {
     selector
         .and_then(|s| s.match_labels.clone())
         .unwrap_or_default()
@@ -184,48 +201,31 @@ fn component_pods(
     out
 }
 
-/// Project a Deployment's status conditions for the drawer.
-fn deployment_conditions(d: &Deployment) -> Vec<ConditionView> {
-    d.status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .map(|cs| {
-            cs.iter()
-                .map(|c| condition_view(&c.type_, &c.status, &c.reason, &c.message))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The condition shape shared by the apps/v1 workload kinds, which are
+/// structurally identical but unrelated types in k8s-openapi.
+trait WorkloadCondition {
+    fn view(&self) -> ConditionView;
 }
 
-/// Project a DaemonSet's status conditions for the drawer.
-fn daemonset_conditions(d: &DaemonSet) -> Vec<ConditionView> {
-    d.status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .map(|cs| {
-            cs.iter()
-                .map(|c| condition_view(&c.type_, &c.status, &c.reason, &c.message))
-                .collect()
-        })
-        .unwrap_or_default()
+macro_rules! workload_condition {
+    ($($ty:ty),*) => {$(
+        impl WorkloadCondition for $ty {
+            fn view(&self) -> ConditionView {
+                ConditionView::new(
+                    &self.type_,
+                    &self.status,
+                    self.reason.clone(),
+                    self.message.clone(),
+                )
+            }
+        }
+    )*};
 }
+workload_condition!(DeploymentCondition, DaemonSetCondition);
 
-fn condition_view(
-    type_: &str,
-    status: &str,
-    reason: &Option<String>,
-    message: &Option<String>,
-) -> ConditionView {
-    ConditionView {
-        type_: type_.to_owned(),
-        status: status.to_owned(),
-        reason: nonempty(reason.clone()),
-        message: nonempty(message.clone()),
-    }
-}
-
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|v| !v.is_empty())
+/// Project a workload's status conditions for the drawer.
+fn workload_conditions<C: WorkloadCondition>(conds: Option<&[C]>) -> Vec<ConditionView> {
+    conds.unwrap_or_default().iter().map(C::view).collect()
 }
 
 /// A human explanation for a `missing` component — what the descriptor looked for.
@@ -329,35 +329,21 @@ fn deployment_health(d: &Deployment) -> Health {
     // (desired 0) and Unavailable (ready 0) already dominate. Applied in priority
     // order — the first problem found sets the reason.
     if matches!(health, ComponentHealth::Healthy | ComponentHealth::Degraded) {
-        // Stale spec: the controller hasn't observed the latest generation, so the
-        // replica counts describe the previous spec — a "healthy" read is not
-        // trustworthy yet.
-        if let (Some(observed), Some(generation)) = (
+        if let Some(stale) = rollout_staleness(
             status.and_then(|s| s.observed_generation),
             d.meta().generation,
+            updated.unwrap_or(0),
+            desired,
         ) {
-            if observed < generation {
-                health = ComponentHealth::Degraded;
-                reason = Some(format!(
-                    "controller has not observed generation {generation} (observed {observed})"
-                ));
-            }
-        }
-        // Incomplete rollout: fewer updated replicas than desired (old replicas can
-        // still report ready == desired while the new revision hasn't rolled out).
-        if reason.is_none() && updated.unwrap_or(0) < desired {
             health = ComponentHealth::Degraded;
-            reason = Some(format!(
-                "rollout incomplete: {}/{desired} updated",
-                updated.unwrap_or(0)
-            ));
+            reason = Some(stale);
         }
         // Stalled rollout: Progressing=False (e.g. ProgressDeadlineExceeded).
         if reason.is_none() {
             if let Some(c) = deployment_condition(status, "Progressing") {
                 if c.status != "True" {
                     health = ComponentHealth::Degraded;
-                    reason = nonempty(c.message.clone())
+                    reason = nonempty(c.message.as_ref())
                         .or_else(|| Some("rollout is not progressing".to_owned()));
                 }
             }
@@ -370,7 +356,7 @@ fn deployment_health(d: &Deployment) -> Health {
                 Some(c) => {
                     health = ComponentHealth::Degraded;
                     reason =
-                        nonempty(c.message.clone()).or_else(|| Some("not available".to_owned()));
+                        nonempty(c.message.as_ref()).or_else(|| Some("not available".to_owned()));
                 }
                 None => {
                     health = ComponentHealth::Degraded;
@@ -412,8 +398,30 @@ fn first_problem_message(status: Option<&DeploymentStatus>) -> Option<String> {
     ["Available", "Progressing"].into_iter().find_map(|type_| {
         deployment_condition(status, type_)
             .filter(|c| c.status != "True")
-            .and_then(|c| nonempty(c.message.clone()))
+            .and_then(|c| nonempty(c.message.as_ref()))
     })
+}
+
+/// Why healthy-looking counts still mean a degraded rollout, shared by both
+/// workload kinds. A stale spec — the controller hasn't observed the latest
+/// generation, so the counts describe the previous spec — makes a "healthy"
+/// read untrustworthy; otherwise fewer updated replicas than desired means the
+/// new revision hasn't rolled out (old replicas can still report ready ==
+/// desired). `None` when neither applies.
+fn rollout_staleness(
+    observed: Option<i64>,
+    generation: Option<i64>,
+    updated: i32,
+    desired: i32,
+) -> Option<String> {
+    if let (Some(observed), Some(generation)) = (observed, generation) {
+        if observed < generation {
+            return Some(format!(
+                "controller has not observed generation {generation} (observed {observed})"
+            ));
+        }
+    }
+    (updated < desired).then(|| format!("rollout incomplete: {updated}/{desired} updated"))
 }
 
 /// Health of one DaemonSet, using the desired/ready node counts. A DaemonSet with
@@ -428,23 +436,15 @@ fn daemonset_health(d: &DaemonSet) -> Health {
     let mut health = classify(desired, ready);
     let mut reason: Option<String> = None;
     if matches!(health, ComponentHealth::Healthy | ComponentHealth::Degraded) {
-        if let (Some(observed), Some(generation)) = (
+        // A missing updated count reads as complete (unlike Deployments).
+        if let Some(stale) = rollout_staleness(
             status.and_then(|s| s.observed_generation),
             d.meta().generation,
+            updated.unwrap_or(desired),
+            desired,
         ) {
-            if observed < generation {
-                health = ComponentHealth::Degraded;
-                reason = Some(format!(
-                    "controller has not observed generation {generation} (observed {observed})"
-                ));
-            }
-        }
-        if reason.is_none() && updated.unwrap_or(desired) < desired {
             health = ComponentHealth::Degraded;
-            reason = Some(format!(
-                "rollout incomplete: {}/{desired} updated",
-                updated.unwrap_or(0)
-            ));
+            reason = Some(stale);
         }
     }
     let message = match health {

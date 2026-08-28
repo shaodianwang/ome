@@ -2,18 +2,22 @@ import { useState } from "react";
 
 import type { DepFilter } from "../App";
 import { api } from "../api";
+import type { AttentionItem, IsvcItem } from "../api";
+import { openAttentionItem } from "../attention";
+import type { AttentionHandlers } from "../attention";
 import { DataNotice } from "../components";
-import {
-  metricAvailable,
-  metricsHealth,
-  metricsQueryIssue,
-  metricsSourceIssues,
-  summarizeFleetIssues,
-} from "../dataState";
-import type { FleetNoticeIssue } from "../dataState";
+import { fleetNoticeState, metricAvailable, metricsHealth } from "../dataState";
+import type { MetricsHealth } from "../dataState";
 import { scopeFleet, unambiguousDeploymentRef } from "../fleet";
+import { isvcSelected } from "../resource";
 import type { Selected } from "../resource";
-import { useEventFeed, useLive, useMetrics } from "../live";
+import {
+  ATTENTION_LIVE_OPTIONS,
+  ISVC_LIVE_OPTIONS,
+  useEventFeed,
+  useLive,
+  useMetrics,
+} from "../live";
 import { COMPONENT_TONE_CLASS, deploymentHealth, toFeed, toRollouts } from "../map";
 import {
   fleetTotals,
@@ -22,6 +26,7 @@ import {
   perfRows,
   ratioSeries,
 } from "../metrics";
+import type { PerfRow } from "../metrics";
 import { lowerThresholdTone, upperThresholdTone } from "../policy";
 import {
   ago,
@@ -31,25 +36,13 @@ import {
   fmtPct,
   fmtRate,
   num as n,
+  staleEmptyText,
   UNASSIGNED_GROUP,
   utilPct,
 } from "../util";
 import { Card, Dot, FilterChip, Gauge, Spark, StatTile, UtilRow } from "../viz";
 
 const kpct = (a: { allocatable: number; allocated: number }) => utilPct(a);
-
-const sourceIssue = (
-  domain: string,
-  error: string | null,
-  hasSnapshot: boolean,
-): FleetNoticeIssue | null =>
-  error
-    ? {
-        domain,
-        message: hasSnapshot ? "refresh failed; showing the last snapshot" : "unavailable",
-        tone: hasSnapshot ? "warning" : "danger",
-      }
-    : null;
 
 export function Fleet({
   openDeployments,
@@ -73,22 +66,10 @@ export function Fleet({
     intervalMs: 30_000,
   });
   const capacity = useLive(api.capacity, { kinds: ["Capacity"], intervalMs: 30_000 });
-  const isvcs = useLive(api.inferenceServices, {
-    kinds: ["InferenceService"],
-    throttleMs: 5_000,
-    intervalMs: 30_000,
-  });
-  const rollouts = useLive(api.rollouts, {
-    kinds: ["InferenceService"],
-    throttleMs: 5_000,
-    intervalMs: 30_000,
-  });
+  const isvcs = useLive(api.inferenceServices, ISVC_LIVE_OPTIONS);
+  const rollouts = useLive(api.rollouts, ISVC_LIVE_OPTIONS);
   const events = useEventFeed(30);
-  const attention = useLive(api.attention, {
-    kinds: ["InferenceService", "Pod", "BaseModel", "ClusterBaseModel", "Cluster"],
-    throttleMs: 5_000,
-    intervalMs: 30_000,
-  });
+  const attention = useLive(api.attention, ATTENTION_LIVE_OPTIONS);
   const cfg = useLive(api.config, { kinds: [] });
   const metricsOn = !!cfg.data?.fleetMetrics;
   const metricsCluster = fCluster === "all" ? undefined : fCluster;
@@ -132,45 +113,21 @@ export function Fleet({
   const hasQps = metricAvailable(scope.metrics, "request_rate");
   const hasLatency = metricAvailable(scope.metrics, "latency_p99");
   const hasErrors = hasQps && metricAvailable(scope.metrics, "error_rate");
-  const sourceIssues = [
-    sourceIssue("Clusters", clusters.error, clusters.data != null),
-    sourceIssue("Capacity", capacity.error, capacity.data != null),
-    sourceIssue("Deployments", isvcs.error, isvcs.data != null),
-    sourceIssue("Rollouts", rollouts.error, rollouts.data != null),
-    sourceIssue("Activity history", events.error, events.events.length > 0),
-    sourceIssue("Configuration", cfg.error, cfg.data != null),
-    events.connection === "reconnecting"
-      ? {
-          domain: "Activity stream",
-          message: events.events.length
-            ? "reconnecting; loaded events remain visible"
-            : "reconnecting",
-          tone: "warning" as const,
-        }
-      : null,
-  ].filter((issue): issue is FleetNoticeIssue => issue != null);
-  const metricsTransportIssue: FleetNoticeIssue | null =
-    metricsOn && metrics.error
-      ? {
-          domain: "Metrics refresh",
-          message:
-            metricState.ready && scope.metrics
-              ? `${metrics.error} Showing the snapshot from ${ago(scope.metrics.updatedAt)}`
-              : metrics.error,
-          tone: metricState.ready ? "warning" : "danger",
-        }
-      : null;
-  const queryableMetricClusters = Object.keys(scope.metrics?.clusters ?? {}).filter((cluster) => {
-    const source = scope.metrics?.sources?.[cluster];
-    return source == null || source.status === "available";
-  }).length;
-  const queryIssue = metricsOn ? metricsQueryIssue(metricState, queryableMetricClusters) : null;
-  const metricsCoverageIssues = metricsOn ? metricsSourceIssues(scope.metrics) : [];
-  const fleetNotice = summarizeFleetIssues(
-    [...sourceIssues, metricsTransportIssue, ...metricsCoverageIssues, queryIssue].filter(
-      (issue): issue is FleetNoticeIssue => issue != null,
-    ),
-  );
+  const { notice: fleetNotice, hasSourceIssues } = fleetNoticeState({
+    sources: [
+      { domain: "Clusters", error: clusters.error, hasSnapshot: clusters.data != null },
+      { domain: "Capacity", error: capacity.error, hasSnapshot: capacity.data != null },
+      { domain: "Deployments", error: isvcs.error, hasSnapshot: isvcs.data != null },
+      { domain: "Rollouts", error: rollouts.error, hasSnapshot: rollouts.data != null },
+      { domain: "Activity history", error: events.error, hasSnapshot: events.events.length > 0 },
+      { domain: "Configuration", error: cfg.error, hasSnapshot: cfg.data != null },
+    ],
+    streamReconnecting: events.connection === "reconnecting",
+    hasStreamedEvents: events.events.length > 0,
+    metricsOn,
+    metricsError: metrics.error,
+    metrics: scope.metrics,
+  });
   const retrySources = () => {
     clusters.refetch();
     capacity.refetch();
@@ -275,7 +232,7 @@ export function Fleet({
           tone={fleetNotice.tone}
           title={fleetNotice.title}
           detail={fleetNotice.detail}
-          action={sourceIssues.length ? { label: "Retry", onClick: retrySources } : undefined}
+          action={hasSourceIssues ? { label: "Retry", onClick: retrySources } : undefined}
         />
       ) : null}
 
@@ -380,99 +337,16 @@ export function Fleet({
               <span className="who">· updated {ago(scope.metrics.updatedAt)}</span>
             ) : null}
           </h2>
-          <Card
-            title="Deployments by traffic"
-            actions={
-              <span className="right">
-                <button className="linkbtn" onClick={() => openDeployments("all")}>
-                  open Deployments →
-                </button>
-              </span>
-            }
-          >
-            {perf.length ? (
-              <>
-                <table className="place-tbl perf-tbl">
-                  <thead>
-                    <tr>
-                      <th>Deployment</th>
-                      <th>Cluster</th>
-                      <th>QPS {rangeLabel ? <span className="muted">{rangeLabel}</span> : null}</th>
-                      <th>p50</th>
-                      <th>p99</th>
-                      <th>TTFT</th>
-                      <th>tok/s</th>
-                      <th>Err%</th>
-                      <th>GPU util</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {perf.slice(0, 12).map((r) => {
-                      const target = unambiguousDeploymentRef(
-                        scope.isvcs,
-                        r.cluster,
-                        r.namespace,
-                        r.isvc,
-                      );
-                      return (
-                        <tr
-                          key={`${r.cluster}/${r.namespace ?? ""}/${r.isvc}`}
-                          className={target ? "link" : undefined}
-                          onClick={() => target && openDeployment(target)}
-                        >
-                          <td className="mono">
-                            {target ? (
-                              <button
-                                type="button"
-                                className="row-open"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openDeployment(target);
-                                }}
-                              >
-                                {r.namespace ? `${r.namespace}/${r.isvc}` : r.isvc}
-                              </button>
-                            ) : r.namespace ? (
-                              `${r.namespace}/${r.isvc}`
-                            ) : (
-                              r.isvc
-                            )}
-                          </td>
-                          <td className="muted">{r.cluster}</td>
-                          <td className="tnum">{fmtRate(r.qps)}</td>
-                          <td className="tnum">{fmtLatency(r.p50)}</td>
-                          <td className="tnum">{fmtLatency(r.p99)}</td>
-                          <td className="tnum">{fmtLatency(r.ttft)}</td>
-                          <td className="tnum">{fmtRate(r.throughput)}</td>
-                          <td className="tnum">{fmtPct(r.errPct)}</td>
-                          <td className="tnum muted">
-                            {r.gpuUtil == null ? "—" : `${Math.round(r.gpuUtil)}%`}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                {perf.length > 12 ? (
-                  <p className="panel-note">
-                    Showing top 12 of {n(perf.length)} by traffic · open Deployments for all.
-                  </p>
-                ) : null}
-              </>
-            ) : (
-              <div className="muted attn-none">
-                {metrics.error && !metricState.ready
-                  ? "Serving metrics are unavailable."
-                  : metrics.loading || !metricState.ready
-                    ? "Loading serving metrics…"
-                    : metricState.queryCount === 0
-                      ? "No metrics query results."
-                      : metricState.failedQueryCount === metricState.queryCount
-                        ? "All serving metric queries failed."
-                        : "No serving traffic in the selected window."}
-              </div>
-            )}
-          </Card>
+          <PerfTable
+            perf={perf}
+            rangeLabel={rangeLabel}
+            isvcs={scope.isvcs}
+            metricsError={metrics.error}
+            metricsLoading={metrics.loading}
+            metricState={metricState}
+            openDeployment={openDeployment}
+            openDeployments={openDeployments}
+          />
         </>
       ) : null}
 
@@ -593,14 +467,7 @@ export function Fleet({
                   <tr
                     key={`${c.cluster}/${c.namespace}/${c.name}/${c.kind}`}
                     className="link"
-                    onClick={() =>
-                      openDeployment({
-                        cluster: c.cluster,
-                        kind: "InferenceService",
-                        name: c.name,
-                        namespace: c.namespace,
-                      })
-                    }
+                    onClick={() => openDeployment(isvcSelected(c.cluster, c.name, c.namespace))}
                   >
                     <td className="mono">
                       {c.name} <span className="muted">{c.namespace}</span>
@@ -670,61 +537,12 @@ export function Fleet({
             </tbody>
           </table>
         </Card>
-        <Card
-          title={`Needs attention · ${n(attnItems.length)}`}
-          actions={
-            <span className="right">
-              <button className="linkbtn" onClick={openAttention}>
-                see all →
-              </button>
-            </span>
-          }
-        >
-          {attnItems.length ? (
-            <ul className="attn-list wide">
-              {attnItems.slice(0, 8).map((a, i) => (
-                <li key={i}>
-                  <button
-                    type="button"
-                    className="attn-open"
-                    onClick={() => {
-                      if (a.category === "cluster") openCapacityCluster(a.cluster);
-                      else if (a.category === "model")
-                        openModel({
-                          cluster: a.cluster,
-                          kind: a.kind === "ClusterBaseModel" ? "ClusterBaseModel" : "BaseModel",
-                          name: a.name,
-                          namespace: a.namespace,
-                        });
-                      else
-                        openDeployment({
-                          cluster: a.cluster,
-                          kind: "InferenceService",
-                          name: a.name,
-                          namespace: a.namespace,
-                        });
-                    }}
-                  >
-                    <Dot tone={a.severity === "critical" ? "red" : "amber"} />
-                    <span className="mono">{a.name}</span>
-                    <span className="muted">{a.cluster}</span>
-                    <span className="attn-reason">{a.summary}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="muted attn-none">
-              {attention.error
-                ? attention.data
-                  ? "Status refresh failed; no active alerts in the last snapshot."
-                  : "Attention data is unavailable."
-                : attention.loading && !attention.data
-                  ? "Loading…"
-                  : "Nothing needs attention in scope."}
-            </div>
-          )}
-        </Card>
+        <AttentionCard
+          items={attnItems}
+          status={attention}
+          openAttention={openAttention}
+          handlers={{ openDeployment, openModel, openCapacityCluster }}
+        />
       </div>
 
       <h2 className="sec">Rollouts &amp; activity</h2>
@@ -765,13 +583,12 @@ export function Fleet({
             </div>
           ) : (
             <div className="muted attn-none">
-              {rollouts.error
-                ? rollouts.data
-                  ? "Rollout refresh failed; no active rollouts in the last snapshot."
-                  : "Rollout status is unavailable."
-                : rollouts.loading
-                  ? "Loading…"
-                  : "Nothing rolling out."}
+              {staleEmptyText(rollouts, {
+                stale: "Rollout refresh failed; no active rollouts in the last snapshot.",
+                unavailable: "Rollout status is unavailable.",
+                loading: "Loading…",
+                empty: "Nothing rolling out.",
+              })}
             </div>
           )}
         </Card>
@@ -834,5 +651,173 @@ export function Fleet({
         </div>
       </div>
     </section>
+  );
+}
+
+/** The Deployments-by-traffic table: the busiest deployments with their serving
+ *  KPIs, each row linking to its detail when the identity is unambiguous. */
+function PerfTable({
+  perf,
+  rangeLabel,
+  isvcs,
+  metricsError,
+  metricsLoading,
+  metricState,
+  openDeployment,
+  openDeployments,
+}: {
+  perf: PerfRow[];
+  rangeLabel: string | null;
+  isvcs: IsvcItem[];
+  metricsError: string | null;
+  metricsLoading: boolean;
+  metricState: MetricsHealth;
+  openDeployment: (s: Selected) => void;
+  openDeployments: (f: DepFilter) => void;
+}) {
+  return (
+    <Card
+      title="Deployments by traffic"
+      actions={
+        <span className="right">
+          <button className="linkbtn" onClick={() => openDeployments("all")}>
+            open Deployments →
+          </button>
+        </span>
+      }
+    >
+      {perf.length ? (
+        <>
+          <table className="place-tbl perf-tbl">
+            <thead>
+              <tr>
+                <th>Deployment</th>
+                <th>Cluster</th>
+                <th>QPS {rangeLabel ? <span className="muted">{rangeLabel}</span> : null}</th>
+                <th>p50</th>
+                <th>p99</th>
+                <th>TTFT</th>
+                <th>tok/s</th>
+                <th>Err%</th>
+                <th>GPU util</th>
+              </tr>
+            </thead>
+            <tbody>
+              {perf.slice(0, 12).map((r) => {
+                const target = unambiguousDeploymentRef(isvcs, r.cluster, r.namespace, r.isvc);
+                return (
+                  <tr
+                    key={`${r.cluster}/${r.namespace ?? ""}/${r.isvc}`}
+                    className={target ? "link" : undefined}
+                    onClick={() => target && openDeployment(target)}
+                  >
+                    <td className="mono">
+                      {target ? (
+                        <button
+                          type="button"
+                          className="row-open"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openDeployment(target);
+                          }}
+                        >
+                          {r.namespace ? `${r.namespace}/${r.isvc}` : r.isvc}
+                        </button>
+                      ) : r.namespace ? (
+                        `${r.namespace}/${r.isvc}`
+                      ) : (
+                        r.isvc
+                      )}
+                    </td>
+                    <td className="muted">{r.cluster}</td>
+                    <td className="tnum">{fmtRate(r.qps)}</td>
+                    <td className="tnum">{fmtLatency(r.p50)}</td>
+                    <td className="tnum">{fmtLatency(r.p99)}</td>
+                    <td className="tnum">{fmtLatency(r.ttft)}</td>
+                    <td className="tnum">{fmtRate(r.throughput)}</td>
+                    <td className="tnum">{fmtPct(r.errPct)}</td>
+                    <td className="tnum muted">
+                      {r.gpuUtil == null ? "—" : `${Math.round(r.gpuUtil)}%`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {perf.length > 12 ? (
+            <p className="panel-note">
+              Showing top 12 of {n(perf.length)} by traffic · open Deployments for all.
+            </p>
+          ) : null}
+        </>
+      ) : (
+        <div className="muted attn-none">
+          {metricsError && !metricState.ready
+            ? "Serving metrics are unavailable."
+            : metricsLoading || !metricState.ready
+              ? "Loading serving metrics…"
+              : metricState.queryCount === 0
+                ? "No metrics query results."
+                : metricState.failedQueryCount === metricState.queryCount
+                  ? "All serving metric queries failed."
+                  : "No serving traffic in the selected window."}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** The Needs-attention card: the most severe triage findings in scope, each
+ *  linking to the page that diagnoses it. */
+function AttentionCard({
+  items,
+  status,
+  openAttention,
+  handlers,
+}: {
+  items: AttentionItem[];
+  status: { loading: boolean; error: string | null; data: unknown };
+  openAttention: () => void;
+  handlers: AttentionHandlers;
+}) {
+  return (
+    <Card
+      title={`Needs attention · ${n(items.length)}`}
+      actions={
+        <span className="right">
+          <button className="linkbtn" onClick={openAttention}>
+            see all →
+          </button>
+        </span>
+      }
+    >
+      {items.length ? (
+        <ul className="attn-list wide">
+          {items.slice(0, 8).map((a, i) => (
+            <li key={i}>
+              <button
+                type="button"
+                className="attn-open"
+                onClick={() => openAttentionItem(a, handlers)}
+              >
+                <Dot tone={a.severity === "critical" ? "red" : "amber"} />
+                <span className="mono">{a.name}</span>
+                <span className="muted">{a.cluster}</span>
+                <span className="attn-reason">{a.summary}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="muted attn-none">
+          {staleEmptyText(status, {
+            stale: "Status refresh failed; no active alerts in the last snapshot.",
+            unavailable: "Attention data is unavailable.",
+            loading: "Loading…",
+            empty: "Nothing needs attention in scope.",
+          })}
+        </div>
+      )}
+    </Card>
   );
 }

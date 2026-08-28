@@ -105,15 +105,12 @@ body {
 .tnum {
   font-variant-numeric: tabular-nums;
 }
-/* state-encoding text color utilities (green ok / red bad / amber warn) */
+/* state-encoding text color utilities (green ok / red bad) */
 .txt-ok {
   color: var(--green);
 }
 .txt-bad {
   color: var(--red);
-}
-.txt-warn {
-  color: var(--amber);
 }
 .eyebrow {
   font-size: var(--t-sm);

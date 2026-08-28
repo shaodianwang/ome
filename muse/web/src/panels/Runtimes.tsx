@@ -4,7 +4,7 @@ import { api } from "../api";
 import type { IsvcItem, RuntimeDetail, RuntimeItem } from "../api";
 import { CommandBlock, EnvList, Pill, RefList } from "../components";
 import { Copyable, Facts } from "../drawer";
-import { useLive } from "../live";
+import { ISVC_USAGE_LIVE_OPTIONS, useLive } from "../live";
 import { runtimeReference, runtimeUsage } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
@@ -44,7 +44,7 @@ const COLUMNS: Column<RuntimeRow>[] = [
         {isDisaggregated(r) ? <span className="tag">PD</span> : null}
         {r.disabled ? <span className="tag warn">disabled</span> : null}
         <span className="cell-sub">
-          <span className="pill slate">{scopeLabel(r)}</span>
+          <Pill tone="slate" dot={false} label={scopeLabel(r)} />
         </span>
       </>
     ),
@@ -136,11 +136,7 @@ export function Runtimes({
     throttleMs: 8_000,
     intervalMs: 30_000,
   });
-  const isvcs = useLive(api.inferenceServices, {
-    kinds: ["InferenceService"],
-    throttleMs: 8_000,
-    intervalMs: 30_000,
-  });
+  const isvcs = useLive(api.inferenceServices, ISVC_USAGE_LIVE_OPTIONS);
   const [filter, setFilter] = useState("all");
 
   const usage = runtimeUsage(isvcs.data?.items ?? []);

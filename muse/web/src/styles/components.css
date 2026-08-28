@@ -339,41 +339,6 @@ table.tbl thead th.right {
 .feed-item:last-child {
   border-bottom: none;
 }
-.feed-ic {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  color: var(--fg-2);
-}
-.feed-ic svg {
-  width: 14px;
-  height: 14px;
-}
-.feed-ic.green {
-  color: var(--green);
-  border-color: color-mix(in srgb, var(--green) 30%, transparent);
-  background: var(--green-dim);
-}
-.feed-ic.blue {
-  color: var(--accent-2);
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  background: var(--accent-dim);
-}
-.feed-ic.violet {
-  color: var(--violet);
-  border-color: color-mix(in srgb, var(--violet) 30%, transparent);
-  background: var(--violet-dim);
-}
-.feed-ic.amber {
-  color: var(--amber);
-  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
-  background: var(--amber-dim);
-}
 .feed-body {
   flex: 1;
   min-width: 0;
@@ -472,14 +437,6 @@ table.tbl thead th.right {
 .input select option {
   background: var(--panel);
 }
-.input .kbd {
-  font-size: 10px;
-  color: var(--fg-faint);
-  border: 1px solid var(--border);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: var(--mono);
-}
 
 @media (max-width: 720px) {
   .filterbar {
@@ -531,23 +488,6 @@ table.tbl thead th.right {
   display: grid;
   grid-template-columns: 1.4fr 1fr;
   gap: var(--s6);
-}
-.comp-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--s4);
-}
-.comp-card .ch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.comp-card .ch h4 {
-  margin: 0;
-  font-size: var(--t-md);
-  font-weight: 600;
 }
 .kv {
   display: grid;

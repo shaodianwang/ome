@@ -485,16 +485,6 @@ h2.sec {
 }
 
 /* ---- fleet home layout ---- */
-.tri-col {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--s4);
-}
-@media (max-width: 1100px) {
-  .tri-col {
-    grid-template-columns: 1fr;
-  }
-}
 .dots {
   display: flex;
   flex-wrap: wrap;
@@ -512,10 +502,6 @@ h2.sec {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-.attn-head {
-  margin-top: var(--s4);
-  margin-bottom: var(--s2);
 }
 .attn-list {
   list-style: none;
@@ -623,18 +609,6 @@ h2.sec {
   border-bottom: 0;
 }
 
-/* ---- deployments health strip ---- */
-.dep-health {
-  display: flex;
-  align-items: center;
-  gap: var(--s4);
-}
-.dep-health .dist {
-  max-width: 240px;
-}
-.dep-health .health-legend {
-  margin-top: 0;
-}
 .col-dot {
   width: 22px;
 }
@@ -686,47 +660,6 @@ h2.sec {
 .place-tbl b {
   font-size: var(--t-lg);
   font-weight: 400;
-}
-.replica-controls {
-  display: flex;
-  align-items: center;
-  gap: var(--s4);
-  flex-wrap: wrap;
-  margin-bottom: var(--s3);
-}
-.replica-controls .fv {
-  flex: 1 1 320px;
-  min-width: 0;
-  max-width: 460px;
-}
-.replica-controls .fv select {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: none;
-  font-family: var(--mono);
-}
-.replica-context {
-  display: flex;
-  gap: var(--s3);
-  flex-wrap: wrap;
-  color: var(--fg-2);
-  font-size: var(--t-sm);
-}
-.replica-context .eyebrow {
-  margin-right: var(--s1);
-}
-.tiles.replica-metrics {
-  grid-template-columns: repeat(7, minmax(86px, 1fr));
-  height: 72px;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.replica-metrics .tile {
-  justify-content: center;
-  padding: var(--s2) var(--s3);
-}
-.replica-metrics .tile-val {
-  font-size: var(--t-lg);
 }
 .fit-row {
   display: flex;
@@ -972,9 +905,6 @@ table.tbl .node-detail-row td {
 }
 
 /* ---- fleet: useful home ---- */
-.attn-card {
-  border-left: 3px solid var(--red);
-}
 .attn-list.wide {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1033,19 +963,6 @@ table.tbl .node-detail-row td {
 .seg button.active .seg-count {
   color: var(--fg-2);
 }
-.statusbtn {
-  background: none;
-  border: 0;
-  padding: 0;
-  font: inherit;
-  font-weight: 600;
-  color: var(--red);
-  cursor: pointer;
-}
-.statusbtn:hover {
-  text-decoration: underline;
-}
-
 /* sortable table headers + pager */
 th.sortable {
   user-select: none;

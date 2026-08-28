@@ -1,9 +1,4 @@
 /* model registry */
-.model-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
-  gap: var(--s4);
-}
 .mcard {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -41,9 +36,6 @@
   padding: 12px var(--s5);
   border-bottom: 1px solid var(--border);
 }
-.mcard .pipeline {
-  padding: 14px var(--s5) var(--s5);
-}
 .mcard .src-logo {
   width: 30px;
   height: 30px;
@@ -54,25 +46,10 @@
   font-size: 11px;
   font-weight: 700;
 }
-.src-hf {
-  background: #2a210a;
-  color: #ffd34d;
-  border: 1px solid #4a3a12;
-}
 .src-meta {
   background: #0f2547;
   color: #7fb3ff;
   border: 1px solid #1d3a63;
-}
-.src-s3 {
-  background: #102b1a;
-  color: #6fd99c;
-  border: 1px solid #1d4a30;
-}
-.src-oci {
-  background: #2e1510;
-  color: #ff8a6b;
-  border: 1px solid #4a2418;
 }
 
 /* onboarding pipeline */
@@ -140,49 +117,7 @@
   background: linear-gradient(90deg, var(--green), var(--accent));
 }
 
-.xfer {
-  margin-top: 14px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px var(--s4);
-}
-.xfer .xh {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: var(--t-sm);
-  margin-bottom: 9px;
-}
-.xfer .route {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--mono);
-  font-size: var(--t-xs);
-  color: var(--fg-2);
-}
-.xfer .route .arr {
-  color: var(--accent-2);
-}
-.xfer .stats {
-  display: flex;
-  gap: var(--s5);
-  margin-top: 9px;
-  font-size: var(--t-xs);
-  color: var(--fg-3);
-}
-.xfer .stats b {
-  color: var(--fg);
-  font-family: var(--mono);
-}
-
 /* RDMA heatmap */
-.island-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
-  gap: var(--s3);
-}
 .island {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -234,11 +169,6 @@
 }
 
 /* TPU slices */
-.slice-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
-  gap: var(--s3);
-}
 .slice {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -297,11 +227,6 @@
   border-radius: 3px;
 }
 
-.two-col {
-  display: grid;
-  grid-template-columns: 1.55fr 1fr;
-  gap: var(--s4);
-}
 hr.div {
   border: none;
   border-top: 1px solid var(--border);
@@ -393,7 +318,6 @@ td .free-strong {
 }
 
 @media (max-width: 1180px) {
-  .two-col,
   .detail-grid {
     grid-template-columns: 1fr;
   }

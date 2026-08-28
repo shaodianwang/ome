@@ -112,3 +112,14 @@ export function emptyText(
 ): string {
   return s.error ?? (s.loading ? loading : empty);
 }
+
+/** Message for an empty list slot backed by a snapshot-holding query: a failing
+ *  refresh reads differently depending on whether a last snapshot is still
+ *  shown. Callers pass the exact copy so wording stays panel-specific. */
+export function staleEmptyText(
+  s: { loading: boolean; error: string | null; data: unknown },
+  texts: { stale: string; unavailable: string; loading: string; empty: string },
+): string {
+  if (s.error) return s.data != null ? texts.stale : texts.unavailable;
+  return s.loading && s.data == null ? texts.loading : texts.empty;
+}

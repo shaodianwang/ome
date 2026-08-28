@@ -6,7 +6,7 @@ import type { FtwItem, IsvcItem, ModelDetail, ModelItem } from "../api";
 import { Pill, RefList } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
 import { Refresh } from "../icons";
-import { useLive } from "../live";
+import { ISVC_USAGE_LIVE_OPTIONS, useLive } from "../live";
 import { modelReference, modelUsage, stateTone } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
@@ -141,11 +141,7 @@ export function Models({
     throttleMs: 8_000,
     intervalMs: 30_000,
   });
-  const isvcs = useLive(api.inferenceServices, {
-    kinds: ["InferenceService"],
-    throttleMs: 8_000,
-    intervalMs: 30_000,
-  });
+  const isvcs = useLive(api.inferenceServices, ISVC_USAGE_LIVE_OPTIONS);
   const ftws = useLive(api.finetunedWeights, {
     kinds: ["FineTunedWeight"],
     throttleMs: 8_000,

@@ -1,5 +1,7 @@
 //! The wire protocol: every request query param and response body the console
-//! exchanges with muse-server, in one place.
+//! exchanges with muse-server, in one place (the capacity, pod, and
+//! system-component types live in this module's submodules and are re-exported
+//! here, so `crate::protocol` stays the single namespace).
 //!
 //! Response bodies are clean, stable projections of the raw k8s/CRD objects — a
 //! documented contract decoupled from CRD/Node internals (and a far smaller
@@ -7,6 +9,25 @@
 //! `GET /v1/{kind}/{name}?raw=true`. The projection builders (`…::of`) live here
 //! too; the modules that produce these responses (capacity, feed, resources)
 //! reference these types.
+
+mod capacity;
+mod pods;
+mod system;
+
+pub use capacity::{
+    first_label, node_accel, sum_accel, Accel, AccelDemand, AccelLost, CapacityReport, Consumer,
+    DeploymentConsumer, Fragment, GpuView, GroupCapacity, NodeCounts, PlacementUnits, Topology,
+    UnitBox,
+};
+pub(crate) use pods::{
+    isvc_owner, owned_by, pod_accelerators, pod_component, pod_problem_reason,
+    INFERENCE_SERVICE_POD_LABEL,
+};
+pub use pods::{IsvcPodView, IsvcPodsView, PodInspectView};
+pub use system::{
+    ComponentHealth, SystemComponent, SystemComponentKind, SystemComponentRow, SystemComponents,
+    SystemPodView,
+};
 
 use std::{
     collections::BTreeMap,
@@ -17,101 +38,14 @@ use kube::Resource;
 use ome_client::{
     inferenceservices::{InferenceServiceStatus, InferenceServiceStatusPlacement},
     k8s_openapi::{
-        api::core::v1::{ContainerStateTerminated, ContainerStatus, Event, Node, Pod},
-        apimachinery::pkg::{
-            api::resource::Quantity,
-            apis::meta::v1::{Condition, ObjectMeta, Time},
-        },
+        api::core::v1::Node,
+        apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time},
     },
     BaseModel, ClusterBaseModel, ClusterServingRuntime, FineTunedWeight, InferenceService,
     ServingRuntime,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-/// Accelerator accounting: schedulable total vs. claimed by pods (a count of
-/// chips of one kind — GPUs or TPUs).
-#[derive(Serialize, Clone, Copy, Default)]
-pub struct GpuView {
-    pub allocatable: i64,
-    pub allocated: i64,
-    pub free: i64,
-}
-
-impl GpuView {
-    pub fn new(allocatable: i64, allocated: i64) -> Self {
-        Self {
-            allocatable,
-            allocated,
-            free: (allocatable - allocated).max(0),
-        }
-    }
-    pub fn add(&mut self, other: &GpuView) {
-        self.allocatable += other.allocatable;
-        self.allocated += other.allocated;
-        self.free += other.free;
-    }
-}
-
-/// The accelerator "kind" of a resource key, or `None` if it isn't an
-/// accelerator. Pattern-based, so it's vendor-neutral: `nvidia.com/gpu`,
-/// `amd.com/gpu` → `"gpu"`; `google.com/tpu` → `"tpu"`. GPUs and TPUs are tracked
-/// separately — different units, never summed into one number.
-pub fn accel_kind(key: &str) -> Option<&'static str> {
-    match key.rsplit('/').next().unwrap_or(key) {
-        "gpu" => Some("gpu"),
-        "tpu" => Some("tpu"),
-        _ => None,
-    }
-}
-
-/// Sum the integer counts of accelerators of `kind` in a resource map.
-pub fn sum_accel(resources: &BTreeMap<String, Quantity>, kind: &str) -> i64 {
-    resources
-        .iter()
-        .filter(|(k, _)| accel_kind(k) == Some(kind))
-        .filter_map(|(_, q)| q.0.parse::<i64>().ok())
-        .sum()
-}
-
-/// A node's (or pod's) accelerator: its kind and total count — e.g. `("tpu", 4)`
-/// or `("gpu", 8)`. `None` if it exposes no accelerator; if more than one kind is
-/// present (unusual) the greater count wins.
-pub fn node_accel(resources: &BTreeMap<String, Quantity>) -> Option<(&'static str, i64)> {
-    let gpu = sum_accel(resources, "gpu");
-    let tpu = sum_accel(resources, "tpu");
-    match (gpu, tpu) {
-        (0, 0) => None,
-        (g, t) if t > g => Some(("tpu", t)),
-        (g, _) => Some(("gpu", g)),
-    }
-}
-
-/// A node's accelerator for the API: kind plus schedulable/claimed/free chips.
-#[derive(Serialize)]
-pub struct Accel {
-    pub kind: &'static str,
-    pub allocatable: i64,
-    pub allocated: i64,
-    pub free: i64,
-}
-
-/// The node labels muse groups capacity by: the RDMA island (outer level — the
-/// network fabric) and the NVLink domain (inner level — e.g. a GB300 NVL72 rack,
-/// which sits within one island). Each is a list of candidate label keys tried in
-/// order (first present wins), so one config covers clusters/providers that label
-/// topology differently.
-#[derive(Clone)]
-pub struct Topology {
-    pub island_labels: Vec<String>,
-    pub nvlink_labels: Vec<String>,
-}
-
-/// First present, non-empty value among candidate label keys (tried in order).
-pub fn first_label(labels: &BTreeMap<String, String>, keys: &[String]) -> Option<String> {
-    keys.iter()
-        .find_map(|k| labels.get(k).filter(|v| !v.is_empty()).cloned())
-}
 
 /// Generic overview row for any kind: identity + age.
 #[derive(Serialize)]
@@ -665,7 +599,7 @@ fn state_string<T: Serialize>(state: &T) -> String {
 }
 
 /// Non-empty owned copy of a string, or None.
-fn some_nonempty(s: &str) -> Option<String> {
+pub(crate) fn some_nonempty(s: &str) -> Option<String> {
     Some(s.to_owned()).filter(|s| !s.is_empty())
 }
 
@@ -681,19 +615,47 @@ pub struct ConditionView {
     pub message: Option<String>,
 }
 
+impl ConditionView {
+    /// Project a condition's fields, dropping empty reason/message.
+    pub(crate) fn new(
+        type_: &str,
+        status: &str,
+        reason: Option<String>,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            type_: type_.to_owned(),
+            status: status.to_owned(),
+            reason: reason.filter(|s| !s.is_empty()),
+            message: message.filter(|s| !s.is_empty()),
+        }
+    }
+}
+
 /// Project a slice of conditions into [`ConditionView`]s (empty reason/message
 /// dropped).
 fn conditions_of(conds: Option<&[Condition]>) -> Vec<ConditionView> {
     conds
         .unwrap_or_default()
         .iter()
-        .map(|c| ConditionView {
-            type_: c.type_.clone(),
-            status: c.status.clone(),
-            reason: some_nonempty(&c.reason),
-            message: some_nonempty(&c.message),
+        .map(|c| {
+            ConditionView::new(
+                &c.type_,
+                &c.status,
+                Some(c.reason.clone()),
+                Some(c.message.clone()),
+            )
         })
         .collect()
+}
+
+/// The `Ready` status condition of an InferenceService, when reported.
+fn ready_condition(status: &InferenceServiceStatus) -> Option<&Condition> {
+    status
+        .conditions
+        .as_ref()?
+        .iter()
+        .find(|c| c.type_ == "Ready")
 }
 
 /// One InferenceService Component (engine / decoder / router): readiness (from
@@ -776,11 +738,7 @@ fn components_of(status: &InferenceServiceStatus) -> Vec<ComponentView> {
 /// Why the service isn't ready: the `Ready` condition's reason/message when it is
 /// not True, else the model-load failure (if any). `(reason, message)`.
 fn not_ready_info(status: &InferenceServiceStatus) -> (Option<String>, Option<String>) {
-    if let Some(c) = status
-        .conditions
-        .as_ref()
-        .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
-    {
+    if let Some(c) = ready_condition(status) {
         if c.status != "True" {
             return (some_nonempty(&c.reason), some_nonempty(&c.message));
         }
@@ -854,14 +812,7 @@ impl InferenceServiceView {
     pub fn of(isvc: &InferenceService) -> Self {
         let meta = isvc.meta();
         let status = isvc.status.as_ref();
-        let ready = status
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|conds| {
-                conds
-                    .iter()
-                    .find(|c| c.type_ == "Ready")
-                    .map(|c| c.status == "True")
-            });
+        let ready = status.and_then(ready_condition).map(|c| c.status == "True");
         let (reason, message) = status.map(not_ready_info).unwrap_or((None, None));
         let model = status.and_then(|s| s.model_status.as_ref());
         let copies = model.and_then(|m| m.model_copies.as_ref());
@@ -1051,9 +1002,7 @@ impl RolloutView {
     pub fn progressing(isvc: &InferenceService) -> Option<Self> {
         let meta = isvc.meta();
         let status = isvc.status.as_ref();
-        let ready_cond = status
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"));
+        let ready_cond = status.and_then(ready_condition);
         let ready = ready_cond.map(|c| c.status == "True").unwrap_or(false);
         // Spec changed but not yet observed by the controller → still rolling out.
         let spec_pending = matches!(
@@ -1066,19 +1015,10 @@ impl RolloutView {
         Some(Self {
             name: meta.name.clone().unwrap_or_default(),
             namespace: meta.namespace.clone(),
-            deployment_mode: isvc
-                .spec
-                .deployment_mode
-                .as_ref()
-                .and_then(|m| serde_json::to_value(m).ok())
-                .and_then(|v| v.as_str().map(String::from)),
+            deployment_mode: isvc.spec.deployment_mode.as_ref().and_then(enum_str),
             ready,
-            reason: ready_cond
-                .map(|c| c.reason.clone())
-                .filter(|s| !s.is_empty()),
-            message: ready_cond
-                .map(|c| c.message.clone())
-                .filter(|s| !s.is_empty()),
+            reason: ready_cond.and_then(|c| some_nonempty(&c.reason)),
+            message: ready_cond.and_then(|c| some_nonempty(&c.message)),
             age: age(meta),
         })
     }
@@ -1242,382 +1182,6 @@ pub struct NodePod {
     pub deployment: Option<String>,
 }
 
-/// Pod label carrying the owning InferenceService's name; the operator stamps it
-/// on every serving pod it creates.
-pub(crate) const INFERENCE_SERVICE_POD_LABEL: &str = "ome.io/inferenceservice";
-
-/// Pod label carrying the serving component (engine / decoder / router).
-pub(crate) const COMPONENT_POD_LABEL: &str = "component";
-
-/// Accelerator chips (GPU + TPU) requested by a pod's containers.
-pub(crate) fn pod_accelerators(pod: &Pod) -> i64 {
-    pod.spec
-        .as_ref()
-        .map(|s| {
-            s.containers
-                .iter()
-                .filter_map(|c| c.resources.as_ref())
-                .filter_map(|r| r.requests.as_ref())
-                .map(|r| sum_accel(r, "gpu") + sum_accel(r, "tpu"))
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
-/// Why a pod is stuck, derived from its cached status: the scheduling failure
-/// (`Unschedulable`), a container's waiting/terminated reason
-/// (`ImagePullBackOff`, `CrashLoopBackOff`, …), or the pod-level not-Ready
-/// reason (`ContainersNotReady`). `None` for a healthy pod.
-pub(crate) fn pod_problem_reason(pod: &Pod) -> Option<String> {
-    let status = pod.status.as_ref()?;
-    let condition_reason = |cond_type: &str| {
-        status
-            .conditions
-            .as_ref()?
-            .iter()
-            .find(|c| c.type_ == cond_type && c.status == "False")
-            .and_then(|c| c.reason.clone())
-            .filter(|r| !r.is_empty())
-    };
-    if let Some(reason) = condition_reason("PodScheduled") {
-        return Some(reason);
-    }
-    for cs in status.container_statuses.iter().flatten() {
-        let Some(state) = cs.state.as_ref() else {
-            continue;
-        };
-        if let Some(reason) = state
-            .waiting
-            .as_ref()
-            .and_then(|w| w.reason.clone())
-            .filter(|r| !r.is_empty())
-        {
-            return Some(reason);
-        }
-        if let Some(terminated) = state.terminated.as_ref() {
-            if terminated.exit_code != 0 {
-                return Some(
-                    terminated
-                        .reason
-                        .clone()
-                        .filter(|r| !r.is_empty())
-                        .unwrap_or_else(|| "Error".to_owned()),
-                );
-            }
-        }
-    }
-    condition_reason("Ready")
-}
-
-/// Why a terminated container died: its reason (`OOMKilled`) or exit code.
-fn termination_label(terminated: &ContainerStateTerminated) -> String {
-    terminated
-        .reason
-        .clone()
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| format!("exit {}", terminated.exit_code))
-}
-
-/// One container of an InferenceService pod, for the expanded row: its own
-/// readiness, restart count, current state, and why its last run ended.
-#[derive(Serialize)]
-pub struct IsvcPodContainerView {
-    pub name: String,
-    pub ready: bool,
-    pub restarts: i32,
-    /// Current state: `running` / `waiting` / `terminated`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<&'static str>,
-    /// Current waiting/terminated reason (`CrashLoopBackOff`, …).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Why the previous run ended (`OOMKilled`, `exit 137`) — the answer to
-    /// "it restarted, but what was wrong?".
-    #[serde(skip_serializing_if = "Option::is_none", rename = "lastRestart")]
-    pub last_restart: Option<String>,
-}
-
-/// One pod of an InferenceService, for the deployment diagnosis view: identity,
-/// health, and — when stuck or restarting — why.
-#[derive(Serialize)]
-pub struct IsvcPodView {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    pub ready: bool,
-    pub restarts: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Why the most-restarted container's previous run ended.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "lastRestart")]
-    pub last_restart: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub accelerators: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub age: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub containers: Vec<IsvcPodContainerView>,
-}
-
-impl IsvcPodView {
-    pub fn of(pod: &Pod) -> Self {
-        let status = pod.status.as_ref();
-        let ready = status
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
-            .is_some_and(|c| c.status == "True");
-        let containers: Vec<IsvcPodContainerView> = status
-            .and_then(|s| s.container_statuses.as_ref())
-            .map(|statuses| {
-                statuses
-                    .iter()
-                    .map(|cs| {
-                        let state = cs.state.as_ref();
-                        let (state_label, reason) = match state {
-                            Some(s) if s.waiting.is_some() => (
-                                Some("waiting"),
-                                s.waiting.as_ref().and_then(|w| w.reason.clone()),
-                            ),
-                            Some(s) if s.terminated.is_some() => (
-                                Some("terminated"),
-                                s.terminated.as_ref().map(termination_label),
-                            ),
-                            Some(s) if s.running.is_some() => (Some("running"), None),
-                            _ => (None, None),
-                        };
-                        IsvcPodContainerView {
-                            name: cs.name.clone(),
-                            ready: cs.ready,
-                            restarts: cs.restart_count,
-                            state: state_label,
-                            reason: reason.filter(|r| !r.is_empty()),
-                            last_restart: cs
-                                .last_state
-                                .as_ref()
-                                .and_then(|s| s.terminated.as_ref())
-                                .map(termination_label),
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let restarts = containers.iter().map(|c| c.restarts).sum();
-        let last_restart = containers
-            .iter()
-            .filter(|c| c.last_restart.is_some())
-            .max_by_key(|c| c.restarts)
-            .and_then(|c| c.last_restart.clone());
-        let accel = pod_accelerators(pod);
-        Self {
-            name: pod.metadata.name.clone().unwrap_or_default(),
-            component: pod
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(COMPONENT_POD_LABEL))
-                .cloned(),
-            phase: status.and_then(|s| s.phase.clone()),
-            ready,
-            restarts,
-            reason: pod_problem_reason(pod),
-            last_restart,
-            node: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
-            accelerators: (accel > 0).then_some(accel),
-            age: age(&pod.metadata),
-            containers,
-        }
-    }
-
-    /// Whether this pod needs operator attention — used to sort problems first.
-    pub fn problematic(&self) -> bool {
-        !self.ready || self.reason.is_some() || self.restarts > 0
-    }
-}
-
-/// `GET /v1/inferenceservices/{name}/pods` — the service's cached pods,
-/// problems first.
-#[derive(Serialize)]
-pub struct IsvcPodsView {
-    pub namespace: String,
-    pub name: String,
-    pub count: usize,
-    pub pods: Vec<IsvcPodView>,
-}
-
-/// One Kubernetes Event about a pod, for the inspection drill-down: the "why"
-/// narrative (BackOff, probe failures, kills) the status fields can't carry.
-#[derive(Serialize)]
-pub struct PodEventView {
-    /// `Normal` or `Warning`.
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub type_: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    /// Occurrences of this event (kubelet deduplicates repeats).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<i32>,
-    /// Humanized time since the last occurrence.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "lastSeen")]
-    pub last_seen: Option<String>,
-}
-
-impl PodEventView {
-    pub fn of(event: &Event) -> Self {
-        Self {
-            type_: event.type_.clone(),
-            reason: event.reason.clone(),
-            message: event.message.clone().filter(|m| !m.is_empty()),
-            count: event.count,
-            last_seen: event
-                .last_timestamp
-                .as_ref()
-                .or(event.metadata.creation_timestamp.as_ref())
-                .and_then(since),
-        }
-    }
-}
-
-/// One container of a live-fetched pod: current state with its full message,
-/// and the previous run's exit (what/when/why) — the restart post-mortem.
-#[derive(Serialize)]
-pub struct PodInspectContainerView {
-    pub name: String,
-    pub ready: bool,
-    pub restarts: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// The current state's message, verbatim (live fetch — not the trimmed cache).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    /// How long the current run has been up, when running.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "runningFor")]
-    pub running_for: Option<String>,
-    /// Previous run's exit: `OOMKilled (exit 137)` / `exit 1`.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "lastExit")]
-    pub last_exit: Option<String>,
-    /// Humanized time since the previous run ended.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "lastExitAt")]
-    pub last_exit_at: Option<String>,
-    /// Previous run's termination message, verbatim.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "lastExitMessage")]
-    pub last_exit_message: Option<String>,
-}
-
-/// `GET /v1/inferenceservices/{name}/pods/{pod}` — a live, per-click apiserver
-/// read of one pod: full condition/state messages plus its recent Events.
-#[derive(Serialize)]
-pub struct PodInspectView {
-    pub name: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<ConditionView>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub containers: Vec<PodInspectContainerView>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<PodEventView>,
-}
-
-impl PodInspectView {
-    pub fn of(pod: &Pod, events: &[Event]) -> Self {
-        let status = pod.status.as_ref();
-        let conditions = status
-            .and_then(|s| s.conditions.as_ref())
-            .map(|conds| {
-                conds
-                    .iter()
-                    .map(|c| ConditionView {
-                        type_: c.type_.clone(),
-                        status: c.status.clone(),
-                        reason: c.reason.clone().filter(|r| !r.is_empty()),
-                        message: c.message.clone().filter(|m| !m.is_empty()),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let containers = status
-            .and_then(|s| s.container_statuses.as_ref())
-            .map(|statuses| {
-                statuses
-                    .iter()
-                    .map(|cs| {
-                        let none = (None, None, None, None);
-                        let (label, reason, message, running_for) = match cs.state.as_ref() {
-                            Some(s) => {
-                                if let Some(w) = s.waiting.as_ref() {
-                                    (Some("waiting"), w.reason.clone(), w.message.clone(), None)
-                                } else if let Some(t) = s.terminated.as_ref() {
-                                    (
-                                        Some("terminated"),
-                                        Some(termination_label(t)),
-                                        t.message.clone(),
-                                        None,
-                                    )
-                                } else if let Some(r) = s.running.as_ref() {
-                                    (
-                                        Some("running"),
-                                        None,
-                                        None,
-                                        r.started_at.as_ref().and_then(since),
-                                    )
-                                } else {
-                                    none
-                                }
-                            }
-                            None => none,
-                        };
-                        let last = cs.last_state.as_ref().and_then(|s| s.terminated.as_ref());
-                        Self::container_view(cs, label, reason, message, running_for, last)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self {
-            name: pod.metadata.name.clone().unwrap_or_default(),
-            conditions,
-            containers,
-            events: events.iter().map(PodEventView::of).collect(),
-        }
-    }
-
-    fn container_view(
-        cs: &ContainerStatus,
-        state: Option<&'static str>,
-        reason: Option<String>,
-        message: Option<String>,
-        running_for: Option<String>,
-        last: Option<&ContainerStateTerminated>,
-    ) -> PodInspectContainerView {
-        PodInspectContainerView {
-            name: cs.name.clone(),
-            ready: cs.ready,
-            restarts: cs.restart_count,
-            state,
-            reason: reason.filter(|r| !r.is_empty()),
-            message: message.filter(|m| !m.is_empty()),
-            running_for,
-            last_exit: last.map(|t| {
-                let label = termination_label(t);
-                if t.reason.as_deref().is_some_and(|r| !r.is_empty()) {
-                    format!("{label} (exit {})", t.exit_code)
-                } else {
-                    label
-                }
-            }),
-            last_exit_at: last.and_then(|t| t.finished_at.as_ref()).and_then(since),
-            last_exit_message: last
-                .and_then(|t| t.message.clone())
-                .filter(|m| !m.is_empty()),
-        }
-    }
-}
-
 /// Full node detail for the console drill-down: the overview plus status
 /// conditions, scheduling taints, and the pods currently on it.
 #[derive(Serialize)]
@@ -1674,11 +1238,8 @@ fn node_conditions(node: &Node) -> Vec<ConditionView> {
         .map(|cs| {
             cs.iter()
                 .filter(|c| c.type_ == "Ready" || c.status == "True")
-                .map(|c| ConditionView {
-                    type_: c.type_.clone(),
-                    status: c.status.clone(),
-                    reason: c.reason.clone().filter(|s| !s.is_empty()),
-                    message: c.message.clone().filter(|s| !s.is_empty()),
+                .map(|c| {
+                    ConditionView::new(&c.type_, &c.status, c.reason.clone(), c.message.clone())
                 })
                 .collect()
         })
@@ -1686,7 +1247,7 @@ fn node_conditions(node: &Node) -> Vec<ConditionView> {
 }
 
 /// A label value, treating absent and empty-string as the same (None).
-fn nonempty(value: Option<&String>) -> Option<String> {
+pub(crate) fn nonempty(value: Option<&String>) -> Option<String> {
     value.filter(|s| !s.is_empty()).cloned()
 }
 
@@ -1737,168 +1298,6 @@ fn since(time: &Time) -> Option<String> {
 /// Humanized object age from its creation timestamp.
 fn age(meta: &ObjectMeta) -> Option<String> {
     since(meta.creation_timestamp.as_ref()?)
-}
-
-// ===========================================================================
-// Capacity — the `GET /v1/capacity` response, built by `rollup::build`.
-// ===========================================================================
-
-/// Fleet-wide capacity report.
-#[derive(Serialize)]
-pub struct CapacityReport {
-    pub nodes: NodeCounts,
-    /// Schedulable accelerator totals — Ready, uncordoned Nodes only — one entry
-    /// per kind (e.g. `gpu`, `tpu`). Physical inventory excluded here is reported
-    /// in `unavailable`.
-    pub accelerators: Vec<GroupCapacity>,
-    #[serde(rename = "byCluster")]
-    pub by_cluster: Vec<GroupCapacity>,
-    #[serde(rename = "byIsland")]
-    pub by_island: Vec<GroupCapacity>,
-    #[serde(rename = "byNvlinkDomain")]
-    pub by_nvlink_domain: Vec<GroupCapacity>,
-    #[serde(rename = "byInstanceType")]
-    pub by_instance_type: Vec<GroupCapacity>,
-    /// Unscheduled accelerator demand — Pending pods not yet placed, by kind.
-    pub pending: Vec<AccelDemand>,
-    /// Accelerators on NotReady/cordoned nodes — present but unschedulable, by kind.
-    pub unavailable: Vec<AccelLost>,
-    /// TPU carve-able slices grouped by shape — how many whole slices are free now
-    /// vs partially used. Empty on clusters without GKE TPU partition labels.
-    #[serde(rename = "tpuSlices")]
-    pub tpu_slices: Vec<PlacementUnits>,
-    /// TPU subblocks — one entry per physical subblock (from the NVLink/ICI label),
-    /// for the heatmap grid. Empty without that label.
-    #[serde(rename = "tpuSubblocks")]
-    pub tpu_subblocks: Vec<UnitBox>,
-    /// GPU whole-node availability grouped by GPUs-per-node — how many entire nodes
-    /// are free (for a job needing a full box) vs partially used.
-    #[serde(rename = "gpuNodes")]
-    pub gpu_nodes: Vec<PlacementUnits>,
-    /// GPU racks — one entry per NVLink domain (from the NVLink label), for the
-    /// heatmap grid. Empty without that label.
-    #[serde(rename = "gpuRacks")]
-    pub gpu_racks: Vec<UnitBox>,
-    /// Top accelerator consumers on this cluster (by namespace), most chips first.
-    pub consumers: Vec<Consumer>,
-    /// Top accelerator consumers by owning InferenceService (pods carrying the
-    /// operator's ownership label), most chips first. Pods without the label —
-    /// non-OME workloads — appear only in the namespace list above.
-    #[serde(rename = "consumersByDeployment")]
-    pub consumers_by_deployment: Vec<DeploymentConsumer>,
-}
-
-/// One carve-able domain (a TPU subblock or a GPU NVLink rack) for the heatmap:
-/// its id, cluster, and chip occupancy. The console derives the state — free /
-/// partial / full / unhealthy — from `free`, `chips`, and `healthy`.
-#[derive(Serialize)]
-pub struct UnitBox {
-    pub id: String,
-    pub cluster: String,
-    pub chips: i64,
-    pub free: i64,
-    pub healthy: bool,
-}
-
-/// A top accelerator consumer on a cluster: a namespace, the accelerator kind, and
-/// how many chips its scheduled pods hold.
-#[derive(Serialize)]
-pub struct Consumer {
-    pub namespace: String,
-    pub kind: String,
-    pub accelerators: i64,
-    pub pods: i64,
-}
-
-/// A top accelerator consumer attributed to one InferenceService. Carries its
-/// cluster so fleet-wide rows stay clickable identities, not merged aggregates.
-#[derive(Serialize)]
-pub struct DeploymentConsumer {
-    pub cluster: String,
-    pub namespace: String,
-    pub name: String,
-    pub kind: String,
-    pub accelerators: i64,
-    pub pods: i64,
-}
-
-/// The occupancy breakdown of the carve-able units at one size — a TPU slice shape,
-/// a GPU node's GPU-count, or an NVLink domain's GPU-count. Every unit falls in
-/// exactly one bucket, so `total == free + fragmented + full + unhealthy`. This is
-/// what makes fragmentation legible: `free` is what a whole-unit job can land on
-/// (researcher), `fragmented` are the defrag targets (operator), and
-/// `stranded_chips` is the free capacity trapped inside them (product).
-#[derive(Serialize)]
-pub struct PlacementUnits {
-    /// Size label: a TPU shape ("2x2x2"), or the unit's chip/GPU count ("8", "72").
-    pub label: String,
-    /// Chips (TPU) or GPUs per unit of this size.
-    pub chips: i64,
-    pub total: i64,
-    /// Wholly free and schedulable — placeable for a job needing the whole unit.
-    pub free: i64,
-    /// Partially used (some chips busy, some free), all nodes schedulable.
-    pub fragmented: i64,
-    /// Fully allocated.
-    pub full: i64,
-    /// At least one node NotReady/cordoned — can't be scheduled regardless of usage.
-    pub unhealthy: i64,
-    /// Free chips trapped inside fragmented units — free, but can't serve a
-    /// whole-unit job of this size (the recoverable-by-defrag waste).
-    #[serde(rename = "strandedChips")]
-    pub stranded_chips: i64,
-    /// The most-stranded fragmented units, named — the operator's defrag shortlist.
-    pub fragments: Vec<Fragment>,
-}
-
-/// One fragmented carve-able unit, named for a drill-down: a TPU slice/partition id
-/// or an NVLink-domain/node name, its cluster, and how many of its chips are free.
-#[derive(Serialize)]
-pub struct Fragment {
-    pub id: String,
-    pub cluster: String,
-    pub free: i64,
-    pub chips: i64,
-}
-
-/// Unscheduled accelerator demand for one kind (Pending, not-yet-placed pods).
-#[derive(Serialize)]
-pub struct AccelDemand {
-    pub kind: String,
-    pub accelerators: i64,
-    pub pods: i64,
-}
-
-/// Accelerators that exist but can't be scheduled (on NotReady / cordoned nodes).
-#[derive(Serialize)]
-pub struct AccelLost {
-    pub kind: String,
-    pub accelerators: i64,
-    pub nodes: i64,
-}
-
-#[derive(Serialize, Default)]
-pub struct NodeCounts {
-    pub total: usize,
-    pub ready: usize,
-    /// Nodes that are both Ready and uncordoned.
-    pub schedulable: usize,
-    #[serde(rename = "acceleratorNodes")]
-    pub accelerator_nodes: usize,
-}
-
-/// Schedulable accelerator capacity for one group (a kind total, cluster, island,
-/// NVLink/ICI domain, or instance type), tagged with the accelerator `kind`.
-/// NotReady and cordoned Nodes are excluded from all four values and instead
-/// reported in [`CapacityReport::unavailable`].
-#[derive(Serialize)]
-pub struct GroupCapacity {
-    pub name: String,
-    pub kind: String,
-    pub nodes: usize,
-    pub allocatable: i64,
-    pub allocated: i64,
-    pub free: i64,
 }
 
 // ===========================================================================
@@ -1978,14 +1377,66 @@ pub struct ChatParams {
 // Response envelopes.
 // ===========================================================================
 
+/// How urgently a triage finding needs a human, ordered most severe first so
+/// the derived `Ord` is the triage sort order. Serializes via [`Self::as_str`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    /// Definitively broken.
+    Critical,
+    /// Degraded / needs a human.
+    Warning,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+impl Serialize for Severity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// A triage finding's domain, ordered so cluster-level problems outrank workload
+/// ones under the derived `Ord`. Serializes via [`Self::as_str`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Category {
+    Cluster,
+    Deployment,
+    Rollout,
+    Pods,
+    Model,
+}
+
+impl Category {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cluster => "cluster",
+            Self::Deployment => "deployment",
+            Self::Rollout => "rollout",
+            Self::Pods => "pods",
+            Self::Model => "model",
+        }
+    }
+}
+
+impl Serialize for Category {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// One fleet-triage finding: something an operator should look at now, with
 /// enough context to jump straight to the page that diagnoses it.
 #[derive(Serialize)]
 pub struct AttentionItem {
-    /// `critical` (definitively broken) or `warning` (degraded / needs a human).
-    pub severity: &'static str,
-    /// The finding's domain: `cluster`, `deployment`, `rollout`, `pods`, `model`.
-    pub category: &'static str,
+    pub severity: Severity,
+    pub category: Category,
     pub cluster: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -2111,143 +1562,6 @@ pub struct MetricsTimeRanges {
     pub options: Vec<MetricsTimeRangeOption>,
 }
 
-// ===========================================================================
-// System components (OEP-0021.2): an admin view of OME's own control plane.
-// ===========================================================================
-
-/// Which apps/v1 kind a system-component descriptor targets. The variant names
-/// are the wire values (`"Deployment"` / `"DaemonSet"`), matching the Kubernetes
-/// kind strings so descriptors read naturally.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum SystemComponentKind {
-    Deployment,
-    DaemonSet,
-}
-
-impl SystemComponentKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Deployment => "Deployment",
-            Self::DaemonSet => "DaemonSet",
-        }
-    }
-}
-
-/// One system component to watch, supplied entirely by deployment config — there
-/// is no baked-in component set, because the namespaces and label selectors that
-/// identify "the controller" or "the scheduler" are install- and provider-specific
-/// (repo hard blocker: no hardcoded magic values). Absent config ⇒ the System
-/// panel is empty, not wrong.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SystemComponent {
-    /// Display name, e.g. "Controller manager".
-    pub name: String,
-    /// Optional grouping for the panel, e.g. "control-plane".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    pub kind: SystemComponentKind,
-    pub namespace: String,
-    /// Match the workload by its exact object name. Preferred for control-plane
-    /// singletons, and required when the object carries no metadata labels of its
-    /// own (e.g. the OME model-agent DaemonSet labels only its pod template). One
-    /// of `resource_name` or `selector` must be set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_name: Option<String>,
-    /// Match the workload by its own metadata labels (all entries must be present).
-    /// Used when `resource_name` is absent.
-    #[serde(default)]
-    pub selector: BTreeMap<String, String>,
-    /// Clusters this component is expected on. Empty ⇒ every aggregated cluster.
-    /// The expected scope is what makes `missing` meaningful: a component absent
-    /// from a cluster it should run on is a real signal, not silence.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub clusters: Vec<String>,
-}
-
-impl SystemComponent {
-    /// Whether this component is expected on the named cluster.
-    pub fn applies_to(&self, cluster: &str) -> bool {
-        self.clusters.is_empty() || self.clusters.iter().any(|c| c == cluster)
-    }
-}
-
-/// The configured component set, parsed from one JSON array. A newtype (not a bare
-/// `Vec`) so clap treats `--system-components-json` as a single JSON value rather
-/// than a repeatable element flag.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct SystemComponents(pub Vec<SystemComponent>);
-
-/// Derived health of a system component, ordered best → worst so that
-/// `Iterator::max` implements the "worst-wins" aggregation rule: an operator
-/// scanning a roll-up must never see `healthy` while one instance is down.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ComponentHealth {
-    /// `ready == desired` and `desired > 0`.
-    Healthy,
-    /// `desired == 0` (scaled to zero / no eligible nodes) or an uninterpretable
-    /// status — honesty over a fabricated verdict.
-    Unknown,
-    /// `0 < ready < desired` — partially up (often a rollout in flight).
-    Degraded,
-    /// `desired > 0` and `ready == 0` — exists but nothing is serving.
-    Unavailable,
-    /// Expected on this cluster but no object matched — not deployed (or a stale
-    /// descriptor). The strongest actionable signal.
-    Missing,
-}
-
-impl ComponentHealth {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Healthy => "healthy",
-            Self::Unknown => "unknown",
-            Self::Degraded => "degraded",
-            Self::Unavailable => "unavailable",
-            Self::Missing => "missing",
-        }
-    }
-}
-
-/// One pod backing a system component: name, phase, and node — a liveness
-/// glance, not the full diagnosis view (that's the deployment pods endpoint).
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemPodView {
-    pub name: String,
-    pub phase: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
-}
-
-/// One row of `GET /v1/system`: a component's health on one cluster, plus the
-/// detail the console drawer renders (matched object names, workload conditions,
-/// and backing pods). The owning `cluster` is stamped on by [`tagged`].
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemComponentRow {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    pub kind: &'static str,
-    pub namespace: String,
-    pub status: &'static str,
-    pub desired: i32,
-    pub ready: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    /// The matched workload object name(s) on this cluster. Empty ⇒ `missing`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub objects: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<ConditionView>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub pods: Vec<SystemPodView>,
-}
-
 /// Console feature flags and display policy for `GET /v1/config`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2310,144 +1624,6 @@ pub fn tagged<T: Serialize>(view: T, cluster: &str) -> Value {
 mod tests {
     use super::*;
 
-    /// Pod fixture from bare JSON — the shapes the kubelet actually reports.
-    fn pod_from(value: Value) -> Pod {
-        serde_json::from_value(value).expect("pod fixture should deserialize")
-    }
-
-    #[test]
-    fn pod_problem_reason_prefers_scheduling_then_container_then_readiness() {
-        let unschedulable = pod_from(serde_json::json!({
-            "metadata": { "name": "p" },
-            "status": {
-                "phase": "Pending",
-                "conditions": [
-                    { "type": "PodScheduled", "status": "False", "reason": "Unschedulable" }
-                ]
-            }
-        }));
-        let view = IsvcPodView::of(&unschedulable);
-        assert_eq!(view.reason.as_deref(), Some("Unschedulable"));
-        assert!(view.problematic());
-
-        let image_pull = pod_from(serde_json::json!({
-            "metadata": { "name": "p" },
-            "status": {
-                "phase": "Pending",
-                "conditions": [
-                    { "type": "PodScheduled", "status": "True" },
-                    { "type": "Ready", "status": "False", "reason": "ContainersNotReady" }
-                ],
-                "containerStatuses": [{
-                    "name": "worker", "ready": false, "restartCount": 3,
-                    "image": "img", "imageID": "",
-                    "state": { "waiting": { "reason": "ImagePullBackOff" } }
-                }]
-            }
-        }));
-        let view = IsvcPodView::of(&image_pull);
-        assert_eq!(view.reason.as_deref(), Some("ImagePullBackOff"));
-        assert_eq!(view.restarts, 3);
-
-        let crashed = pod_from(serde_json::json!({
-            "metadata": { "name": "p" },
-            "status": {
-                "phase": "Running",
-                "containerStatuses": [{
-                    "name": "worker", "ready": false, "restartCount": 1,
-                    "image": "img", "imageID": "",
-                    "state": { "terminated": { "exitCode": 137 } }
-                }]
-            }
-        }));
-        assert_eq!(IsvcPodView::of(&crashed).reason.as_deref(), Some("Error"));
-
-        let not_ready = pod_from(serde_json::json!({
-            "metadata": { "name": "p" },
-            "status": {
-                "phase": "Running",
-                "conditions": [
-                    { "type": "Ready", "status": "False", "reason": "ContainersNotReady" }
-                ]
-            }
-        }));
-        assert_eq!(
-            IsvcPodView::of(&not_ready).reason.as_deref(),
-            Some("ContainersNotReady")
-        );
-    }
-
-    #[test]
-    fn restarted_pod_carries_why_the_previous_run_ended() {
-        let restarted = pod_from(serde_json::json!({
-            "metadata": { "name": "p" },
-            "status": {
-                "phase": "Running",
-                "conditions": [{ "type": "Ready", "status": "True" }],
-                "containerStatuses": [{
-                    "name": "worker", "ready": true, "restartCount": 1,
-                    "image": "img", "imageID": "",
-                    "state": { "running": {} },
-                    "lastState": { "terminated": { "exitCode": 137, "reason": "OOMKilled" } }
-                }]
-            }
-        }));
-        let view = IsvcPodView::of(&restarted);
-        assert!(view.ready);
-        assert!(view.reason.is_none());
-        assert_eq!(view.last_restart.as_deref(), Some("OOMKilled"));
-        // A restart with no reason string falls back to the exit code.
-        assert_eq!(view.containers.len(), 1);
-        assert_eq!(view.containers[0].state, Some("running"));
-        // Restarts alone mark the pod as needing a look.
-        assert!(view.problematic());
-
-        let unexplained = pod_from(serde_json::json!({
-            "metadata": { "name": "p" },
-            "status": {
-                "containerStatuses": [{
-                    "name": "worker", "ready": false, "restartCount": 2,
-                    "image": "img", "imageID": "",
-                    "lastState": { "terminated": { "exitCode": 1 } }
-                }]
-            }
-        }));
-        assert_eq!(
-            IsvcPodView::of(&unexplained).last_restart.as_deref(),
-            Some("exit 1")
-        );
-    }
-
-    #[test]
-    fn healthy_pod_projects_without_a_reason() {
-        let healthy = pod_from(serde_json::json!({
-            "metadata": { "name": "p", "labels": { "component": "engine" } },
-            "spec": {
-                "nodeName": "gpu-0",
-                "containers": [{
-                    "name": "worker",
-                    "resources": { "requests": { "nvidia.com/gpu": "4" } }
-                }]
-            },
-            "status": {
-                "phase": "Running",
-                "conditions": [{ "type": "Ready", "status": "True" }],
-                "containerStatuses": [{
-                    "name": "worker", "ready": true, "restartCount": 0,
-                    "image": "img", "imageID": "",
-                    "state": { "running": { } }
-                }]
-            }
-        }));
-        let view = IsvcPodView::of(&healthy);
-        assert!(view.ready);
-        assert!(view.reason.is_none());
-        assert!(!view.problematic());
-        assert_eq!(view.component.as_deref(), Some("engine"));
-        assert_eq!(view.node.as_deref(), Some("gpu-0"));
-        assert_eq!(view.accelerators, Some(4));
-    }
-
     #[test]
     fn resource_refs_preserve_scope_and_namespace() {
         let namespaced =
@@ -2469,6 +1645,28 @@ mod tests {
         assert!(cluster_runtime.namespace.is_none());
 
         assert!(resource_ref("shared", "OtherModel", Some("team-a")).is_none());
+    }
+
+    #[test]
+    fn attention_enums_serialize_to_their_wire_strings() {
+        for severity in [Severity::Critical, Severity::Warning] {
+            assert_eq!(
+                to_val(severity),
+                Value::String(severity.as_str().to_owned())
+            );
+        }
+        for category in [
+            Category::Cluster,
+            Category::Deployment,
+            Category::Rollout,
+            Category::Pods,
+            Category::Model,
+        ] {
+            assert_eq!(
+                to_val(category),
+                Value::String(category.as_str().to_owned())
+            );
+        }
     }
 
     #[test]

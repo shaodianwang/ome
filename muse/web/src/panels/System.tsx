@@ -7,7 +7,7 @@ import { useState } from "react";
 
 import { api } from "../api";
 import type { SystemComponentItem } from "../api";
-import { DataNotice } from "../components";
+import { DataNotice, StaleNotice } from "../components";
 import { Drawer, Facts, Section } from "../drawer";
 import { useLive } from "../live";
 import { fleetHealth, groupSummaries, statusTone, summarizeComponents } from "../systemStatus";
@@ -157,14 +157,15 @@ export function System() {
         </div>
       </div>
 
-      {live.error ? (
-        <DataNotice
-          tone={live.data ? "warning" : "danger"}
-          title={live.data ? "System status refresh failed" : "System status unavailable"}
-          detail={live.data ? `Showing the last snapshot. ${live.error}` : live.error}
-          action={{ label: "Retry", onClick: live.refetch }}
-        />
-      ) : null}
+      <StaleNotice
+        error={live.error}
+        hasData={live.data != null}
+        title="System status refresh failed"
+        detail={`Showing the last snapshot. ${live.error}`}
+        unavailableTitle="System status unavailable"
+        unavailableDetail={live.error}
+        onRetry={live.refetch}
+      />
 
       {!live.error && !live.loading && rows.length === 0 ? (
         <DataNotice

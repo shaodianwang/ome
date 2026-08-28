@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
-import { ClusterFilter, EmptyRow, Pager } from "./components";
+import { ClusterFilter, EmptyRow, Pager, SearchInput } from "./components";
 import { Search } from "./icons";
 import type { Tone } from "./types";
 import { emptyText, matches, num } from "./util";
@@ -147,15 +147,13 @@ export function ResourceTable<T>({
           ))}
         </div>
         <ClusterFilter clusters={clusters} value={cluster} onChange={setCluster} />
-        <div className="input grow">
-          <Search aria-hidden />
-          <input
-            aria-label={`Search ${noun}`}
-            placeholder={searchPlaceholder}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-        </div>
+        <SearchInput
+          ariaLabel={`Search ${noun}`}
+          placeholder={searchPlaceholder}
+          value={q}
+          onChange={setQ}
+          icon={<Search aria-hidden />}
+        />
       </div>
 
       <div className="card">

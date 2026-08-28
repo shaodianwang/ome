@@ -19,17 +19,22 @@ use tokio_stream::{
 use crate::{
     app_context::AppState,
     protocol::{to_val, ListParams, Listing},
-    service::sse,
+    service::{error::ApiError, sse},
 };
 
 /// `GET /v1/events` — recent resource changes observed across clusters (newest
-/// first), from the in-memory activity feed. `?cluster=` narrows it.
-pub async fn list(Query(params): Query<ListParams>, State(st): State<AppState>) -> Json<Listing> {
+/// first), from the in-memory activity feed. `?cluster=` narrows it; an unknown
+/// cluster is a 404.
+pub async fn list(
+    Query(params): Query<ListParams>,
+    State(st): State<AppState>,
+) -> Result<Json<Listing>, ApiError> {
     let mut items = st.feed.recent();
     if let Some(cluster) = params.cluster.as_deref() {
+        st.validate_cluster(cluster)?;
         items.retain(|e| e.cluster == cluster);
     }
-    Json(Listing::new(items.into_iter().map(to_val).collect()))
+    Ok(Json(Listing::new(items.into_iter().map(to_val).collect())))
 }
 
 /// `GET /v1/stream` — named Server-Sent Events for human-facing activity and

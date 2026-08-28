@@ -2,10 +2,11 @@ import { useState } from "react";
 
 import { api } from "../api";
 import type { AttentionItem } from "../api";
-import { DataNotice } from "../components";
-import { useLive } from "../live";
+import { openAttentionItem } from "../attention";
+import { SearchInput, StaleNotice } from "../components";
+import { ATTENTION_LIVE_OPTIONS, useLive } from "../live";
 import type { Selected } from "../resource";
-import { matches, num as n } from "../util";
+import { matches, num as n, staleEmptyText } from "../util";
 import { Card, Dot, FilterChip } from "../viz";
 
 const CATEGORY_LABEL: Record<AttentionItem["category"], string> = {
@@ -31,11 +32,7 @@ export function Attention({
   const [category, setCategory] = useState("all");
   const [cluster, setCluster] = useState("all");
   const [query, setQuery] = useState("");
-  const attention = useLive(api.attention, {
-    kinds: ["InferenceService", "Pod", "BaseModel", "ClusterBaseModel", "Cluster"],
-    throttleMs: 5_000,
-    intervalMs: 30_000,
-  });
+  const attention = useLive(api.attention, ATTENTION_LIVE_OPTIONS);
 
   const items = attention.data?.items ?? [];
   const clusters = [...new Set(items.map((i) => i.cluster))].sort();
@@ -48,40 +45,21 @@ export function Attention({
     .filter((i) => cluster === "all" || i.cluster === cluster)
     .filter((i) => matches(query, i.name, i.cluster, i.summary, i.detail));
 
-  const open = (i: AttentionItem) => {
-    if (i.category === "cluster") {
-      openCapacityCluster(i.cluster);
-    } else if (i.category === "model") {
-      openModel({
-        cluster: i.cluster,
-        kind: i.kind === "ClusterBaseModel" ? "ClusterBaseModel" : "BaseModel",
-        name: i.name,
-        namespace: i.namespace,
-      });
-    } else {
-      openDeployment({
-        cluster: i.cluster,
-        kind: "InferenceService",
-        name: i.name,
-        namespace: i.namespace,
-      });
-    }
-  };
+  const open = (i: AttentionItem) =>
+    openAttentionItem(i, { openDeployment, openModel, openCapacityCluster });
 
-  const stale = attention.error != null && attention.data != null;
   const sub = items.length
     ? `${n(criticals)} critical · ${n(items.length - criticals)} warning${items.length - criticals === 1 ? "" : "s"}`
     : undefined;
 
   return (
     <>
-      {stale ? (
-        <DataNotice
-          tone="warning"
-          title="Attention refresh failed"
-          detail="Showing the last successful snapshot."
-        />
-      ) : null}
+      <StaleNotice
+        error={attention.error}
+        hasData={attention.data != null}
+        title="Attention refresh failed"
+        detail="Showing the last successful snapshot."
+      />
       <Card title="Needs attention" sub={sub}>
         {items.length ? (
           <>
@@ -116,14 +94,12 @@ export function Attention({
                   onChange={setCluster}
                 />
               ) : null}
-              <div className="input grow">
-                <input
-                  aria-label="Filter findings"
-                  placeholder="Filter by name, cluster, or reason…"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
-              </div>
+              <SearchInput
+                ariaLabel="Filter findings"
+                placeholder="Filter by name, cluster, or reason…"
+                value={query}
+                onChange={setQuery}
+              />
             </div>
             <table className="place-tbl">
               <thead>
@@ -164,11 +140,12 @@ export function Attention({
           </>
         ) : (
           <div className="muted attn-none">
-            {attention.error && !attention.data
-              ? "Attention data is unavailable."
-              : attention.loading && !attention.data
-                ? "Loading…"
-                : "Nothing needs attention — the fleet is clean."}
+            {staleEmptyText(attention, {
+              stale: "Nothing needs attention — the fleet is clean.",
+              unavailable: "Attention data is unavailable.",
+              loading: "Loading…",
+              empty: "Nothing needs attention — the fleet is clean.",
+            })}
           </div>
         )}
       </Card>

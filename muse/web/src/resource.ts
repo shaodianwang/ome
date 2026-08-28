@@ -39,6 +39,11 @@ export function selectResource(cluster: string, ref: ResourceRef): Selected {
   return { cluster, ...ref };
 }
 
+/** InferenceService identity from its parts — the console's most common Selected. */
+export function isvcSelected(cluster: string, name: string, namespace?: string): Selected {
+  return { cluster, kind: "InferenceService", name, namespace };
+}
+
 export function isLegacySelected(ref: RouteSelected): ref is LegacySelected {
   return "legacy" in ref;
 }

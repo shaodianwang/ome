@@ -18,17 +18,6 @@ export interface ReplicaDiagnostics {
   rows: ReplicaPerfRow[];
 }
 
-export function replicaIdentity(row: ReplicaPerfRow): string {
-  return JSON.stringify([row.namespace, row.pod, row.component]);
-}
-
-export function selectReplica(
-  rows: ReplicaPerfRow[],
-  selectedIdentity: string,
-): ReplicaPerfRow | undefined {
-  return rows.find((row) => replicaIdentity(row) === selectedIdentity) ?? rows[0];
-}
-
 const REPLICA_QUERIES = [
   ["replica_request_rate", "qps"],
   ["replica_throughput_tokens", "throughput"],

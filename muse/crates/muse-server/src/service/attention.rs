@@ -15,15 +15,15 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use ome_client::{k8s_openapi::api::core::v1::Pod, BaseModel, ClusterBaseModel, InferenceService};
+use ome_client::{k8s_openapi::api::core::v1::Pod, InferenceService};
 
 use super::error::ApiError;
 use crate::{
     app_context::AppState,
     informers::CacheSyncState,
     protocol::{
-        pod_problem_reason, to_val, AttentionItem, BaseModelDetail, InferenceServiceView, Listing,
-        ViewParams, INFERENCE_SERVICE_POD_LABEL,
+        isvc_owner, pod_problem_reason, to_val, AttentionItem, BaseModelDetail, Category,
+        InferenceServiceView, Listing, Severity, ViewParams,
     },
 };
 
@@ -49,15 +49,16 @@ pub async fn list(
     Query(params): Query<ViewParams>,
     State(st): State<AppState>,
 ) -> Result<Json<Listing>, ApiError> {
+    if let Some(cluster) = params.cluster.as_deref() {
+        st.validate_cluster(cluster)?;
+    }
     let mut items = Vec::new();
-    let mut matched = false;
     for c in st.clusters.iter() {
         if let Some(want) = params.cluster.as_deref() {
             if c.name != want {
                 continue;
             }
         }
-        matched = true;
         let cache = c.cache.snapshot();
         if let Some(item) = cluster_item(&c.name, &cache) {
             items.push(item);
@@ -72,22 +73,21 @@ pub async fn list(
         }
         pod_items(&c.name, &c.pods.list(), &mut items);
         for m in c.base_models.list() {
-            model_item(&c.name, "BaseModel", base_model_facts(&m), &mut items);
+            model_item(
+                &c.name,
+                "BaseModel",
+                model_facts(&BaseModelDetail::of(&m)),
+                &mut items,
+            );
         }
         for m in c.cluster_base_models.list() {
             model_item(
                 &c.name,
                 "ClusterBaseModel",
-                cluster_base_model_facts(&m),
+                model_facts(&BaseModelDetail::of_cluster(&m)),
                 &mut items,
             );
         }
-    }
-    if params.cluster.is_some() && !matched {
-        return Err(ApiError::NotFound(format!(
-            "unknown cluster: {}",
-            params.cluster.as_deref().unwrap_or_default()
-        )));
     }
     sort_items(&mut items);
     Ok(Json(Listing::new(items.into_iter().map(to_val).collect())))
@@ -96,23 +96,9 @@ pub async fn list(
 /// Most severe first, then by domain (cluster-level problems outrank workload
 /// ones), then stably by cluster and name so the list doesn't jitter.
 fn sort_items(items: &mut [AttentionItem]) {
-    fn rank(item: &AttentionItem) -> (u8, u8) {
-        let severity = match item.severity {
-            "critical" => 0,
-            _ => 1,
-        };
-        let category = match item.category {
-            "cluster" => 0,
-            "deployment" => 1,
-            "rollout" => 2,
-            "pods" => 3,
-            _ => 4,
-        };
-        (severity, category)
-    }
     items.sort_by(|a, b| {
-        rank(a)
-            .cmp(&rank(b))
+        (a.severity, a.category)
+            .cmp(&(b.severity, b.category))
             .then_with(|| a.cluster.cmp(&b.cluster))
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -120,15 +106,18 @@ fn sort_items(items: &mut [AttentionItem]) {
 
 fn cluster_item(name: &str, cache: &CacheSyncState) -> Option<AttentionItem> {
     let (severity, summary) = match cache {
-        CacheSyncState::Failed(error) => ("critical", format!("cluster cache failed: {error}")),
-        CacheSyncState::TimedOut(error) => {
-            ("warning", format!("cluster cache sync timed out: {error}"))
+        CacheSyncState::Failed(error) => {
+            (Severity::Critical, format!("cluster cache failed: {error}"))
         }
+        CacheSyncState::TimedOut(error) => (
+            Severity::Warning,
+            format!("cluster cache sync timed out: {error}"),
+        ),
         CacheSyncState::Pending | CacheSyncState::Ready => return None,
     };
     Some(AttentionItem {
         severity,
-        category: "cluster",
+        category: Category::Cluster,
         cluster: name.to_owned(),
         namespace: None,
         kind: "Cluster",
@@ -142,8 +131,8 @@ fn deployment_items(cluster: &str, isvc: &InferenceService, out: &mut Vec<Attent
     let view = InferenceServiceView::of(isvc);
     if view.ready == Some(false) {
         out.push(AttentionItem {
-            severity: "critical",
-            category: "deployment",
+            severity: Severity::Critical,
+            category: Category::Deployment,
             cluster: cluster.to_owned(),
             namespace: view.namespace.clone(),
             kind: "InferenceService",
@@ -160,14 +149,14 @@ fn deployment_items(cluster: &str, isvc: &InferenceService, out: &mut Vec<Attent
             continue;
         };
         let (severity, why) = match phase {
-            "Failed" => ("critical", "rollout failed"),
-            "Paused" => ("warning", "rollout paused — awaiting promotion"),
-            "RollingBack" => ("warning", "rolling back"),
+            "Failed" => (Severity::Critical, "rollout failed"),
+            "Paused" => (Severity::Warning, "rollout paused — awaiting promotion"),
+            "RollingBack" => (Severity::Warning, "rolling back"),
             _ => continue,
         };
         out.push(AttentionItem {
             severity,
-            category: "rollout",
+            category: Category::Rollout,
             cluster: cluster.to_owned(),
             namespace: view.namespace.clone(),
             kind: "InferenceService",
@@ -187,12 +176,7 @@ fn pod_items(cluster: &str, pods: &[std::sync::Arc<Pod>], out: &mut Vec<Attentio
         if pod.metadata.deletion_timestamp.is_some() {
             continue;
         }
-        let Some(owner) = pod
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(INFERENCE_SERVICE_POD_LABEL))
-        else {
+        let Some(owner) = isvc_owner(pod) else {
             continue;
         };
         if pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded") {
@@ -205,7 +189,7 @@ fn pod_items(cluster: &str, pods: &[std::sync::Arc<Pod>], out: &mut Vec<Attentio
             continue;
         }
         let namespace = pod.metadata.namespace.clone().unwrap_or_default();
-        *per.entry((namespace, owner.clone()))
+        *per.entry((namespace, owner.to_owned()))
             .or_default()
             .entry(reason)
             .or_default() += 1;
@@ -223,8 +207,12 @@ fn pod_items(cluster: &str, pods: &[std::sync::Arc<Pod>], out: &mut Vec<Attentio
             .map(|(reason, count)| format!("{count} {reason}"))
             .collect();
         out.push(AttentionItem {
-            severity: if critical { "critical" } else { "warning" },
-            category: "pods",
+            severity: if critical {
+                Severity::Critical
+            } else {
+                Severity::Warning
+            },
+            category: Category::Pods,
             cluster: cluster.to_owned(),
             namespace: Some(namespace),
             kind: "InferenceService",
@@ -248,25 +236,15 @@ struct ModelFacts {
     failure: Option<String>,
 }
 
-fn base_model_facts(m: &BaseModel) -> ModelFacts {
-    let detail = BaseModelDetail::of(m);
+/// Extract the facts from a projected model detail (BaseModel and
+/// ClusterBaseModel share the [`BaseModelDetail`] shape).
+fn model_facts(detail: &BaseModelDetail) -> ModelFacts {
     ModelFacts {
         namespace: detail.view.namespace.clone(),
         name: detail.view.name.clone(),
         state: detail.view.state.clone(),
         nodes_failed: detail.nodes_failed.unwrap_or(0),
-        failure: failing_condition_message(&detail),
-    }
-}
-
-fn cluster_base_model_facts(m: &ClusterBaseModel) -> ModelFacts {
-    let detail = BaseModelDetail::of_cluster(m);
-    ModelFacts {
-        namespace: detail.view.namespace.clone(),
-        name: detail.view.name.clone(),
-        state: detail.view.state.clone(),
-        nodes_failed: detail.nodes_failed.unwrap_or(0),
-        failure: failing_condition_message(&detail),
+        failure: failing_condition_message(detail),
     }
 }
 
@@ -280,10 +258,10 @@ fn failing_condition_message(detail: &BaseModelDetail) -> Option<String> {
 
 fn model_item(cluster: &str, kind: &'static str, facts: ModelFacts, out: &mut Vec<AttentionItem>) {
     let (severity, summary) = if facts.state.as_deref() == Some("Failed") {
-        ("critical", "model download failed".to_owned())
+        (Severity::Critical, "model download failed".to_owned())
     } else if facts.nodes_failed > 0 {
         (
-            "warning",
+            Severity::Warning,
             format!(
                 "model download failed on {} node{}",
                 facts.nodes_failed,
@@ -295,7 +273,7 @@ fn model_item(cluster: &str, kind: &'static str, facts: ModelFacts, out: &mut Ve
     };
     out.push(AttentionItem {
         severity,
-        category: "model",
+        category: Category::Model,
         cluster: cluster.to_owned(),
         namespace: facts.namespace,
         kind,
@@ -312,6 +290,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::protocol::INFERENCE_SERVICE_POD_LABEL;
 
     fn labelled_pod(name: &str, owner: &str, status: PodStatus) -> std::sync::Arc<Pod> {
         let mut pod = Pod::default();
@@ -369,10 +348,10 @@ mod tests {
         pod_items("c1", &pods, &mut items);
         assert_eq!(items.len(), 2);
         let a = items.iter().find(|i| i.name == "svc-a").unwrap();
-        assert_eq!(a.severity, "critical");
+        assert_eq!(a.severity, Severity::Critical);
         assert_eq!(a.summary, "2 pods stuck: 2 CrashLoopBackOff");
         let b = items.iter().find(|i| i.name == "svc-b").unwrap();
-        assert_eq!(b.severity, "warning");
+        assert_eq!(b.severity, Severity::Warning);
         assert_eq!(b.summary, "1 pod stuck: 1 Unschedulable");
     }
 
@@ -382,18 +361,18 @@ mod tests {
         assert!(cluster_item("c1", &CacheSyncState::Ready).is_none());
         let failed = cluster_item("c1", &CacheSyncState::Failed("watch dropped".to_owned()))
             .expect("failed cache is a finding");
-        assert_eq!(failed.severity, "critical");
+        assert_eq!(failed.severity, Severity::Critical);
         let timed_out = cluster_item(
             "c1",
             &CacheSyncState::TimedOut("deadline exceeded".to_owned()),
         )
         .expect("timed-out cache is a finding");
-        assert_eq!(timed_out.severity, "warning");
+        assert_eq!(timed_out.severity, Severity::Warning);
     }
 
     #[test]
     fn items_sort_most_severe_first_then_by_domain() {
-        let item = |severity: &'static str, category: &'static str, name: &str| AttentionItem {
+        let item = |severity: Severity, category: Category, name: &str| AttentionItem {
             severity,
             category,
             cluster: "c1".to_owned(),
@@ -404,10 +383,10 @@ mod tests {
             detail: None,
         };
         let mut items = vec![
-            item("warning", "model", "m"),
-            item("critical", "pods", "p"),
-            item("warning", "cluster", "c"),
-            item("critical", "deployment", "d"),
+            item(Severity::Warning, Category::Model, "m"),
+            item(Severity::Critical, Category::Pods, "p"),
+            item(Severity::Warning, Category::Cluster, "c"),
+            item(Severity::Critical, Category::Deployment, "d"),
         ];
         sort_items(&mut items);
         let order: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();

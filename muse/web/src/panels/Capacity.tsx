@@ -11,10 +11,11 @@ import type {
   UnitBox,
 } from "../api";
 import type { Tone } from "../types";
-import { Bar, CopyCmd, DataNotice, EmptyRow, Pager } from "../components";
+import { Bar, CopyCmd, DataNotice, EmptyRow, Pager, SearchInput } from "../components";
 import { loadClusterCapacity } from "../dataState";
 import type { ClusterCapacityState } from "../dataState";
 import { useLive } from "../live";
+import { isvcSelected } from "../resource";
 import type { Selected } from "../resource";
 import { upperThresholdTone } from "../policy";
 import { ago, matches, num as n, shortId, UNASSIGNED_GROUP, utilPct } from "../util";
@@ -236,17 +237,15 @@ function UnitTable({ units, unit }: { units: UnitBox[]; unit: string }) {
   return (
     <div className="unit-table">
       <div className="filterbar">
-        <div className="input grow">
-          <input
-            aria-label={`Filter ${unit}s`}
-            placeholder={`Filter ${unit}s by name or cluster…`}
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setPage(0);
-            }}
-          />
-        </div>
+        <SearchInput
+          ariaLabel={`Filter ${unit}s`}
+          placeholder={`Filter ${unit}s by name or cluster…`}
+          value={q}
+          onChange={(value) => {
+            setQ(value);
+            setPage(0);
+          }}
+        />
       </div>
       <div className="tbl-wrap">
         <table className="tbl">
@@ -1008,14 +1007,7 @@ export function Capacity({
                 <tr
                   key={`${c.cluster}/${c.namespace}/${c.name}/${c.kind}`}
                   className="link"
-                  onClick={() =>
-                    openDeployment({
-                      cluster: c.cluster,
-                      kind: "InferenceService",
-                      name: c.name,
-                      namespace: c.namespace,
-                    })
-                  }
+                  onClick={() => openDeployment(isvcSelected(c.cluster, c.name, c.namespace))}
                 >
                   <td className="mono">
                     {c.name} <span className="muted">{c.namespace}</span>
@@ -1045,14 +1037,12 @@ export function Capacity({
           sub={`${n(nodeRows.length)} node${nodeRows.length === 1 ? "" : "s"} · unhealthy first`}
         >
           <div className="filterbar">
-            <div className="input grow">
-              <input
-                aria-label="Search nodes"
-                placeholder="Filter nodes by name, type, or issue…"
-                value={nodeQ}
-                onChange={(e) => setNodeQ(e.target.value)}
-              />
-            </div>
+            <SearchInput
+              ariaLabel="Search nodes"
+              placeholder="Filter nodes by name, type, or issue…"
+              value={nodeQ}
+              onChange={setNodeQ}
+            />
           </div>
           <div className="tbl-wrap">
             <table className="tbl">
@@ -1172,12 +1162,13 @@ export function Capacity({
                                               className="linkbtn mono"
                                               title={`open deployment ${p.deployment}`}
                                               onClick={() =>
-                                                openDeployment({
-                                                  cluster: detail.cluster,
-                                                  kind: "InferenceService",
-                                                  name: p.deployment ?? "",
-                                                  namespace: p.namespace,
-                                                })
+                                                openDeployment(
+                                                  isvcSelected(
+                                                    detail.cluster,
+                                                    p.deployment ?? "",
+                                                    p.namespace,
+                                                  ),
+                                                )
                                               }
                                             >
                                               {p.namespace}/{p.name}
@@ -1270,14 +1261,12 @@ export function Capacity({
             </button>
           ))}
         </div>
-        <div className="input grow">
-          <input
-            aria-label="Search capacity"
-            placeholder="Filter by cluster, name, or kind…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-        </div>
+        <SearchInput
+          ariaLabel="Search capacity"
+          placeholder="Filter by cluster, name, or kind…"
+          value={q}
+          onChange={setQ}
+        />
       </div>
       <p className="cap-help">{meta.help} Sorted by free capacity, most first.</p>
 

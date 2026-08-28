@@ -32,52 +32,59 @@ use crate::{
     config::PodInspectConfig,
     informers::ClusterState,
     protocol::{
-        tagged, IsvcPodView, IsvcPodsView, PodInspectView, ViewParams, COMPONENT_POD_LABEL,
-        INFERENCE_SERVICE_POD_LABEL,
+        owned_by, pod_component, tagged, IsvcPodView, IsvcPodsView, PodInspectView, ViewParams,
     },
 };
+
+/// The cluster owning the named InferenceService and the service's namespace,
+/// looked up across the selected clusters' caches; the canonical not-found
+/// error when no selected cluster caches it.
+fn find_isvc<'a>(
+    st: &'a AppState,
+    name: &str,
+    cluster: Option<&str>,
+    namespace: Option<&str>,
+) -> Result<(&'a ClusterState, String), ApiError> {
+    for c in st.select(cluster)? {
+        if let Some(isvc) = lookup_resource(&c.inference_services, name, namespace) {
+            return Ok((c, isvc.meta().namespace.clone().unwrap_or_default()));
+        }
+    }
+    Err(ApiError::NotFound(format!(
+        "inferenceservices/{name} not found"
+    )))
+}
 
 pub async fn list(
     Path(name): Path<String>,
     Query(params): Query<ViewParams>,
     State(st): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let selected = st.select(params.cluster.as_deref())?;
-    for c in selected {
-        let Some(isvc) = lookup_resource(&c.inference_services, &name, params.namespace.as_deref())
-        else {
-            continue;
-        };
-        let namespace = isvc.meta().namespace.clone().unwrap_or_default();
-        let mut pods: Vec<IsvcPodView> = c
-            .pods
-            .list_namespaced(&namespace)
-            .iter()
-            .filter(|pod| {
-                pod.metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|labels| labels.get(INFERENCE_SERVICE_POD_LABEL))
-                    .is_some_and(|owner| owner == &name)
-            })
-            .map(|pod| IsvcPodView::of(pod))
-            .collect();
-        pods.sort_by(|a, b| {
-            b.problematic()
-                .cmp(&a.problematic())
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        let view = IsvcPodsView {
-            namespace,
-            name: name.clone(),
-            count: pods.len(),
-            pods,
-        };
-        return Ok(Json(tagged(view, &c.name)));
-    }
-    Err(ApiError::NotFound(format!(
-        "inferenceservices/{name} not found"
-    )))
+    let (c, namespace) = find_isvc(
+        &st,
+        &name,
+        params.cluster.as_deref(),
+        params.namespace.as_deref(),
+    )?;
+    let mut pods: Vec<IsvcPodView> = c
+        .pods
+        .list_namespaced(&namespace)
+        .iter()
+        .filter(|pod| owned_by(pod, &name))
+        .map(|pod| IsvcPodView::of(pod))
+        .collect();
+    pods.sort_by(|a, b| {
+        b.problematic()
+            .cmp(&a.problematic())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let view = IsvcPodsView {
+        namespace,
+        name: name.clone(),
+        count: pods.len(),
+        pods,
+    };
+    Ok(Json(tagged(view, &c.name)))
 }
 
 /// Query params for the log-tail endpoint (`cluster`/`namespace` as everywhere,
@@ -106,30 +113,18 @@ fn resolve_owned_pod<'a>(
     let policy = st.pod_inspect().ok_or_else(|| {
         ApiError::Unavailable("pod inspection is not configured on this deployment".to_owned())
     })?;
-    let selected = st.select(cluster)?;
-    for c in selected {
-        let Some(owner) = lookup_resource(&c.inference_services, isvc, namespace) else {
-            continue;
-        };
-        let ns = owner.meta().namespace.clone().unwrap_or_default();
-        let owned = c.pods.list_namespaced(&ns).iter().any(|p| {
-            p.metadata.name.as_deref() == Some(pod)
-                && p.metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|labels| labels.get(INFERENCE_SERVICE_POD_LABEL))
-                    .is_some_and(|o| o == isvc)
-        });
-        if !owned {
-            return Err(ApiError::NotFound(format!(
-                "pod {pod} is not a cached pod of inferenceservices/{isvc}"
-            )));
-        }
-        return Ok((policy, c, ns));
+    let (c, ns) = find_isvc(st, isvc, cluster, namespace)?;
+    let owned = c
+        .pods
+        .list_namespaced(&ns)
+        .iter()
+        .any(|p| p.metadata.name.as_deref() == Some(pod) && owned_by(p, isvc));
+    if !owned {
+        return Err(ApiError::NotFound(format!(
+            "pod {pod} is not a cached pod of inferenceservices/{isvc}"
+        )));
     }
-    Err(ApiError::NotFound(format!(
-        "inferenceservices/{isvc} not found"
-    )))
+    Ok((policy, c, ns))
 }
 
 /// Map an on-demand apiserver call result: timeouts and transport failures are
@@ -275,130 +270,114 @@ pub async fn stream_logs(
     let stream_policy = st.pod_log_stream().ok_or_else(|| {
         ApiError::Unavailable("log streaming is not configured on this deployment".to_owned())
     })?;
-    let selected = st.select(q.cluster.as_deref())?;
-    for c in selected {
-        let Some(owner) = lookup_resource(&c.inference_services, &name, q.namespace.as_deref())
-        else {
-            continue;
-        };
-        let ns = owner.meta().namespace.clone().unwrap_or_default();
-        // Only scheduled pods have a kubelet to stream from.
-        let mut pods: Vec<String> = c
-            .pods
-            .list_namespaced(&ns)
-            .iter()
-            .filter(|p| {
-                let labels = p.metadata.labels.as_ref();
-                labels
-                    .and_then(|l| l.get(INFERENCE_SERVICE_POD_LABEL))
-                    .is_some_and(|o| o == &name)
-                    && q.component.as_deref().is_none_or(|component| {
-                        labels
-                            .and_then(|l| l.get(COMPONENT_POD_LABEL))
-                            .is_some_and(|c| c == component)
-                    })
-                    && q.pod
-                        .as_deref()
-                        .is_none_or(|pod| p.metadata.name.as_deref() == Some(pod))
-                    && p.spec.as_ref().is_some_and(|s| s.node_name.is_some())
-            })
-            .filter_map(|p| p.metadata.name.clone())
-            .collect();
-        pods.sort();
-        if pods.is_empty() {
-            return Err(ApiError::NotFound(format!(
-                "no running pods of inferenceservices/{name} match the requested scope"
-            )));
-        }
-        let total = pods.len();
-        pods.truncate(stream_policy.max_pods);
+    let (c, ns) = find_isvc(&st, &name, q.cluster.as_deref(), q.namespace.as_deref())?;
+    // Only scheduled pods have a kubelet to stream from.
+    let mut pods: Vec<String> = c
+        .pods
+        .list_namespaced(&ns)
+        .iter()
+        .filter(|p| {
+            owned_by(p, &name)
+                && q.component
+                    .as_deref()
+                    .is_none_or(|component| pod_component(p) == Some(component))
+                && q.pod
+                    .as_deref()
+                    .is_none_or(|pod| p.metadata.name.as_deref() == Some(pod))
+                && p.spec.as_ref().is_some_and(|s| s.node_name.is_some())
+        })
+        .filter_map(|p| p.metadata.name.clone())
+        .collect();
+    pods.sort();
+    if pods.is_empty() {
+        return Err(ApiError::NotFound(format!(
+            "no running pods of inferenceservices/{name} match the requested scope"
+        )));
+    }
+    let total = pods.len();
+    pods.truncate(stream_policy.max_pods);
 
-        let tail = q
-            .tail
-            .unwrap_or(policy.log_tail_lines)
-            .min(policy.log_tail_lines);
-        let grep = q.grep.as_ref().map(|g| g.to_lowercase());
-        let deadline = tokio::time::Instant::now() + stream_policy.max_duration;
-        let (tx, rx) = mpsc::channel::<SseEvent>(256);
-        let mut tasks = JoinSet::new();
-        for pod in &pods {
-            let api: Api<Pod> = Api::namespaced(c.client.clone(), &ns);
-            let tx = tx.clone();
-            let grep = grep.clone();
-            let pod = pod.clone();
-            let log_params = LogParams {
-                follow: true,
-                tail_lines: Some(tail as i64),
-                ..LogParams::default()
-            };
-            tasks.spawn(async move {
-                let reader =
-                    match tokio::time::timeout(policy.timeout, api.log_stream(&pod, &log_params))
-                        .await
-                    {
-                        Ok(Ok(reader)) => reader,
-                        Ok(Err(error)) => {
-                            let _ = tx.send(notice(format!("{pod}: {error}"))).await;
-                            return;
-                        }
-                        Err(_) => {
-                            let _ = tx.send(notice(format!("{pod}: connect timed out"))).await;
-                            return;
-                        }
-                    };
-                let mut lines = reader.lines();
-                loop {
-                    match tokio::time::timeout_at(deadline, lines.next()).await {
-                        // Session duration cap: stop following.
-                        Err(_) => break,
-                        Ok(Some(Ok(line))) => {
-                            if let Some(g) = &grep {
-                                if !line.to_lowercase().contains(g) {
-                                    continue;
-                                }
-                            }
-                            let event = SseEvent::default()
-                                .event("line")
-                                .json_data(json!({ "pod": pod, "line": line }))
-                                .unwrap_or_else(|_| SseEvent::default().comment("encode error"));
-                            // A failed send means the client disconnected.
-                            if tx.send(event).await.is_err() {
-                                break;
+    let tail = q
+        .tail
+        .unwrap_or(policy.log_tail_lines)
+        .min(policy.log_tail_lines);
+    let grep = q.grep.as_ref().map(|g| g.to_lowercase());
+    let deadline = tokio::time::Instant::now() + stream_policy.max_duration;
+    let (tx, rx) = mpsc::channel::<SseEvent>(256);
+    let mut tasks = JoinSet::new();
+    for pod in &pods {
+        let api: Api<Pod> = Api::namespaced(c.client.clone(), &ns);
+        let tx = tx.clone();
+        let grep = grep.clone();
+        let pod = pod.clone();
+        let log_params = LogParams {
+            follow: true,
+            tail_lines: Some(tail as i64),
+            ..LogParams::default()
+        };
+        tasks.spawn(async move {
+            let reader =
+                match tokio::time::timeout(policy.timeout, api.log_stream(&pod, &log_params)).await
+                {
+                    Ok(Ok(reader)) => reader,
+                    Ok(Err(error)) => {
+                        let _ = tx.send(notice(format!("{pod}: {error}"))).await;
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(notice(format!("{pod}: connect timed out"))).await;
+                        return;
+                    }
+                };
+            let mut lines = reader.lines();
+            loop {
+                match tokio::time::timeout_at(deadline, lines.next()).await {
+                    // Session duration cap: stop following.
+                    Err(_) => break,
+                    Ok(Some(Ok(line))) => {
+                        if let Some(g) = &grep {
+                            if !line.to_lowercase().contains(g) {
+                                continue;
                             }
                         }
-                        Ok(None) => {
-                            let _ = tx.send(notice(format!("{pod}: log stream ended"))).await;
-                            break;
-                        }
-                        Ok(Some(Err(error))) => {
-                            let _ = tx.send(notice(format!("{pod}: {error}"))).await;
+                        let event = SseEvent::default()
+                            .event("line")
+                            .json_data(json!({ "pod": pod, "line": line }))
+                            .unwrap_or_else(|_| SseEvent::default().comment("encode error"));
+                        // A failed send means the client disconnected.
+                        if tx.send(event).await.is_err() {
                             break;
                         }
                     }
+                    Ok(None) => {
+                        let _ = tx.send(notice(format!("{pod}: log stream ended"))).await;
+                        break;
+                    }
+                    Ok(Some(Err(error))) => {
+                        let _ = tx.send(notice(format!("{pod}: {error}"))).await;
+                        break;
+                    }
                 }
-            });
-        }
-        drop(tx);
-
-        let preface = notice(format!(
-            "streaming {} of {} matching pods{}",
-            pods.len(),
-            total,
-            if total > pods.len() {
-                " (per-session cap)"
-            } else {
-                ""
-            },
-        ));
-        let events = tokio_stream::once(Ok::<_, Infallible>(preface))
-            .chain(ReceiverStream::new(rx).map(Ok::<_, Infallible>));
-        let guarded = StreamGuard {
-            inner: events,
-            _tasks: tasks,
-        };
-        return Ok(sse::response(guarded, st.sse_keep_alive_interval()));
+            }
+        });
     }
-    Err(ApiError::NotFound(format!(
-        "inferenceservices/{name} not found"
-    )))
+    drop(tx);
+
+    let preface = notice(format!(
+        "streaming {} of {} matching pods{}",
+        pods.len(),
+        total,
+        if total > pods.len() {
+            " (per-session cap)"
+        } else {
+            ""
+        },
+    ));
+    let events = tokio_stream::once(Ok::<_, Infallible>(preface))
+        .chain(ReceiverStream::new(rx).map(Ok::<_, Infallible>));
+    let guarded = StreamGuard {
+        inner: events,
+        _tasks: tasks,
+    };
+    Ok(sse::response(guarded, st.sse_keep_alive_interval()))
 }

@@ -511,25 +511,3 @@ export function MetricChart({
     </Card>
   );
 }
-
-/** A card showing a bounded fraction (0..1) as a threshold gauge. */
-export function GaugeCard({
-  title,
-  frac,
-  tone,
-  sub,
-}: {
-  title: ReactNode;
-  frac: number | null;
-  tone?: BarTone;
-  sub?: ReactNode;
-}) {
-  if (frac == null) return null;
-  const p = Math.round(frac * 100);
-  return (
-    <Card title={title} sub={sub}>
-      <div className="chart-val">{p}%</div>
-      <Gauge pct={p} tone={tone} />
-    </Card>
-  );
-}

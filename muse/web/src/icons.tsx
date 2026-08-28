@@ -127,37 +127,6 @@ export const Refresh = (p: P) => (
   </svg>
 );
 
-export const Plus = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-  </svg>
-);
-
-export const Info = (p: P) => (
-  <svg {...base(p)}>
-    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth={1.7} />
-    <path d="M12 8v5m0 3h.01" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" />
-  </svg>
-);
-
-export const Upload = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M12 3v12m0-12l-4 4m4-4l4 4"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <path
-      d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-    />
-  </svg>
-);
-
 export const Close = (p: P) => (
   <svg {...base(p)}>
     <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
