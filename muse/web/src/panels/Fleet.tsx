@@ -18,7 +18,14 @@ import {
   useLive,
   useMetrics,
 } from "../live";
-import { COMPONENT_TONE_CLASS, deploymentHealth, toFeed, toRollouts } from "../map";
+import {
+  COMPONENT_TONE_CLASS,
+  canaryNote,
+  deploymentHealth,
+  toFeed,
+  toRollouts,
+  transitionLabel,
+} from "../map";
 import {
   fleetTotals,
   metricsQueryRangeSeconds,
@@ -584,16 +591,26 @@ export function Fleet({
                     tone={r.barTone || "amber"}
                     value={r.note}
                   />
-                  {r.components?.length ? (
+                  {r.components?.length || r.canary ? (
                     <span className="comp-cells rollout-comps">
-                      {r.components.map((c) => (
+                      {r.canary ? (
+                        <span className={`repl ${r.canary.failedChecks ? "red" : "amber"}`}>
+                          {canaryNote(r.canary)}
+                        </span>
+                      ) : null}
+                      {r.components?.map((c) => (
                         <span
                           key={c.name}
                           className={`repl ${COMPONENT_TONE_CLASS[c.tone]}`}
-                          title={c.revision}
+                          title={
+                            c.transition
+                              ? `${c.transition.from ?? "(new)"} → ${c.transition.to}`
+                              : c.revision
+                          }
                         >
                           {c.label}
                           {c.phase && c.phase !== "Stable" ? ` · ${c.phase}` : ""}
+                          {c.transition ? ` · ${transitionLabel(c.transition)}` : ""}
                         </span>
                       ))}
                     </span>

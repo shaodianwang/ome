@@ -9,13 +9,16 @@ import { Copyable, Facts } from "../drawer";
 import { useEventFeed, useLive, useMetrics } from "../live";
 import type { StreamConnectionState } from "../live";
 import {
+  canaryNote,
   componentReplicas,
   componentTone,
+  componentTransition,
   conditionRank,
   replicaRollup,
   runtimeRefOf,
   shortRevision,
   sortConditions,
+  transitionLabel,
 } from "../map";
 import { isvcMetrics, seriesOf } from "../metrics";
 import type { IsvcMetrics } from "../metrics";
@@ -329,7 +332,12 @@ function OverviewPane({
                   const { ready: readyCount, total } = componentReplicas(c);
                   const cur = readyCount ?? 0;
                   const des = total ?? 0;
-                  const pct = des > 0 ? Math.round((cur / des) * 100) : cur > 0 ? 100 : 0;
+                  const transition = componentTransition(c);
+                  // Mid-rollout, progress = Instances ready on the target
+                  // revision; old-revision pods keep `cur` high under surge.
+                  const prog =
+                    transition && c.updatedReadyReplicas != null ? c.updatedReadyReplicas : cur;
+                  const pct = des > 0 ? Math.round((prog / des) * 100) : prog > 0 ? 100 : 0;
                   const tone = componentTone(c);
                   const barTone = tone === "ok" ? "green" : tone === "warn" ? "amber" : "red";
                   return (
@@ -341,7 +349,14 @@ function OverviewPane({
                           {cur}/{des}
                         </span>
                       </div>
-                      {c.revision ? (
+                      {transition ? (
+                        <div
+                          className="ct-rev"
+                          title={`${transition.from ?? "(new)"} → ${transition.to}`}
+                        >
+                          {transitionLabel(transition)}
+                        </div>
+                      ) : c.revision ? (
                         <div className="ct-rev" title={c.revision}>
                           {shortRevision(c.revision)}
                         </div>
@@ -392,10 +407,13 @@ function OverviewPane({
           </Card>
 
           {d.canary ? (
-            <Card title="Rollout" sub={`canary · step ${d.canary.currentStep}`}>
+            <Card title="Rollout" sub={canaryNote(d.canary)}>
               <Gauge pct={d.canary.trafficWeight} />
               <p className="panel-note">
                 {d.canary.trafficWeight}% of traffic on the new revision.
+                {d.canary.failedChecks
+                  ? ` ${n(d.canary.failedChecks)} analysis ${d.canary.failedChecks === 1 ? "check is" : "checks are"} failing.`
+                  : ""}
               </p>
             </Card>
           ) : null}

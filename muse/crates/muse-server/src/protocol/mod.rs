@@ -36,7 +36,9 @@ use std::{
 
 use kube::Resource;
 use ome_client::{
-    inferenceservices::{InferenceServiceStatus, InferenceServiceStatusPlacement},
+    inferenceservices::{
+        InferenceServiceStatus, InferenceServiceStatusCanary, InferenceServiceStatusPlacement,
+    },
     k8s_openapi::{
         api::core::v1::Node,
         apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time},
@@ -682,6 +684,24 @@ pub struct ComponentView {
     pub rollout_phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// Revision the bulk of Instances currently run (`lifecycle.currentRevision`).
+    /// Differs from `updateRevision` only while a rollout is converging.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "currentRevision")]
+    pub current_revision: Option<String>,
+    /// Revision the rollout is converging to (`lifecycle.updateRevision`).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "updateRevision")]
+    pub update_revision: Option<String>,
+    /// Instances already on `updateRevision` (`lifecycle.updatedReplicas`).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "updatedReplicas")]
+    pub updated_replicas: Option<i32>,
+    /// Ready Instances on `updateRevision` (`lifecycle.updatedReadyReplicas`) —
+    /// the true measure of rollout progress while old-revision pods still count
+    /// toward `readyReplicas`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "updatedReadyReplicas"
+    )]
+    pub updated_ready_replicas: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
@@ -715,20 +735,31 @@ fn components_of(status: &InferenceServiceStatus) -> Vec<ComponentView> {
     };
     let mut out: Vec<ComponentView> = comps
         .iter()
-        .map(|(name, c)| ComponentView {
-            name: name.clone(),
-            ready: component_ready(status, name),
-            ready_replicas: c.lifecycle.as_ref().and_then(|l| l.ready_replicas),
-            total_replicas: c.lifecycle.as_ref().and_then(|l| l.replicas),
-            current_replicas: c.autoscaler.as_ref().and_then(|a| a.current_replicas),
-            desired_replicas: c.autoscaler.as_ref().and_then(|a| a.desired_replicas),
-            rollout_phase: c.rollout_phase.as_ref().and_then(enum_str),
-            revision: c
-                .latest_rolledout_revision
-                .clone()
-                .or_else(|| c.latest_ready_revision.clone())
-                .filter(|s| !s.is_empty()),
-            url: c.url.clone().filter(|s| !s.is_empty()),
+        .map(|(name, c)| {
+            let lifecycle = c.lifecycle.as_ref();
+            ComponentView {
+                name: name.clone(),
+                ready: component_ready(status, name),
+                ready_replicas: lifecycle.and_then(|l| l.ready_replicas),
+                total_replicas: lifecycle.and_then(|l| l.replicas),
+                current_replicas: c.autoscaler.as_ref().and_then(|a| a.current_replicas),
+                desired_replicas: c.autoscaler.as_ref().and_then(|a| a.desired_replicas),
+                rollout_phase: c.rollout_phase.as_ref().and_then(enum_str),
+                revision: c
+                    .latest_rolledout_revision
+                    .clone()
+                    .or_else(|| c.latest_ready_revision.clone())
+                    .filter(|s| !s.is_empty()),
+                current_revision: lifecycle
+                    .and_then(|l| l.current_revision.clone())
+                    .filter(|s| !s.is_empty()),
+                update_revision: lifecycle
+                    .and_then(|l| l.update_revision.clone())
+                    .filter(|s| !s.is_empty()),
+                updated_replicas: lifecycle.and_then(|l| l.updated_replicas),
+                updated_ready_replicas: lifecycle.and_then(|l| l.updated_ready_replicas),
+                url: c.url.clone().filter(|s| !s.is_empty()),
+            }
         })
         .collect();
     out.sort_by_key(|c| order(&c.name));
@@ -793,6 +824,10 @@ pub struct InferenceServiceView {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// In-flight canary rollout (step, observed traffic weight); absent outside
+    /// a canary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary: Option<CanaryView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
     /// Accelerator chips currently held by this service's scheduled pods. Filled
@@ -848,6 +883,7 @@ impl InferenceServiceView {
             failed_copies: copies.map(|c| c.failed_copies).filter(|&n| n > 0),
             reason,
             message,
+            canary: status.and_then(|s| s.canary.as_ref()).map(CanaryView::of),
             age: age(meta),
             accelerators: None,
             resolved_runtime_ref: None,
@@ -938,17 +974,31 @@ fn placement_of(p: &InferenceServiceStatusPlacement) -> PlacementView {
     }
 }
 
-/// A canary rollout in flight: which step and the observed traffic weight.
+/// A canary rollout in flight: which step, the observed traffic weight, and how
+/// many analysis checks are currently failing (absent when none are).
 #[derive(Serialize)]
 pub struct CanaryView {
     #[serde(rename = "currentStep")]
     pub current_step: i32,
     #[serde(rename = "trafficWeight")]
     pub traffic_weight: i32,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "failedChecks")]
+    pub failed_checks: Option<i32>,
 }
 
-/// Full InferenceService detail for the console drawer: the overview plus all
-/// status conditions, multi-cluster placement, and any in-flight canary.
+impl CanaryView {
+    fn of(c: &InferenceServiceStatusCanary) -> Self {
+        Self {
+            current_step: c.current_step,
+            traffic_weight: c.observed_traffic_weight,
+            failed_checks: c.analysis_failed_checks.filter(|&n| n > 0),
+        }
+    }
+}
+
+/// Full InferenceService detail for the console drawer: the overview (which
+/// carries any in-flight canary) plus all status conditions and multi-cluster
+/// placement.
 #[derive(Serialize)]
 pub struct InferenceServiceDetail {
     #[serde(flatten)]
@@ -957,8 +1007,6 @@ pub struct InferenceServiceDetail {
     pub conditions: Vec<ConditionView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placement: Option<PlacementView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub canary: Option<CanaryView>,
 }
 
 impl InferenceServiceDetail {
@@ -968,10 +1016,6 @@ impl InferenceServiceDetail {
             view: InferenceServiceView::of(isvc),
             conditions: conditions_of(status.and_then(|s| s.conditions.as_deref())),
             placement: status.and_then(|s| s.placement.as_ref()).map(placement_of),
-            canary: status.and_then(|s| s.canary.as_ref()).map(|c| CanaryView {
-                current_step: c.current_step,
-                traffic_weight: c.observed_traffic_weight,
-            }),
         }
     }
 }
@@ -1688,5 +1732,59 @@ mod tests {
         let value = serde_json::to_value(response).expect("config response serializes");
         assert_eq!(value.get("metricsRefreshSecs"), Some(&Value::from(15)));
         assert_eq!(value.get("fleetMetrics"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn component_views_split_revisions_and_surface_canary() {
+        let status: InferenceServiceStatus = serde_json::from_value(serde_json::json!({
+            "components": {
+                "engine": {
+                    "rolloutPhase": "Canarying",
+                    "latestReadyRevision": "svc-engine-rev-new2",
+                    "lifecycle": {
+                        "replicas": 5,
+                        "readyReplicas": 5,
+                        "currentRevision": "svc-engine-old1",
+                        "updateRevision": "svc-engine-new2",
+                        "updatedReplicas": 2,
+                        "updatedReadyReplicas": 1
+                    }
+                }
+            },
+            "canary": {
+                "currentStep": 2,
+                "observedTrafficWeight": 25,
+                "analysisFailedChecks": 0
+            }
+        }))
+        .expect("status fixture deserializes");
+
+        let comps = components_of(&status);
+        assert_eq!(comps.len(), 1);
+        let engine = to_val(&comps[0]);
+        assert_eq!(
+            engine.get("currentRevision"),
+            Some(&Value::from("svc-engine-old1"))
+        );
+        assert_eq!(
+            engine.get("updateRevision"),
+            Some(&Value::from("svc-engine-new2"))
+        );
+        assert_eq!(engine.get("updatedReplicas"), Some(&Value::from(2)));
+        assert_eq!(engine.get("updatedReadyReplicas"), Some(&Value::from(1)));
+
+        let canary = CanaryView::of(status.canary.as_ref().expect("canary present"));
+        assert_eq!(canary.current_step, 2);
+        assert_eq!(canary.traffic_weight, 25);
+        // Zero failing checks stay off the wire — only a live failure is signal.
+        assert!(canary.failed_checks.is_none());
+
+        let failing: InferenceServiceStatusCanary = serde_json::from_value(serde_json::json!({
+            "currentStep": 1,
+            "observedTrafficWeight": 5,
+            "analysisFailedChecks": 2
+        }))
+        .expect("canary fixture deserializes");
+        assert_eq!(CanaryView::of(&failing).failed_checks, Some(2));
     }
 }

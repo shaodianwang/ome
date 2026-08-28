@@ -2,7 +2,7 @@ import type { DepFilter } from "../App";
 import { api } from "../api";
 import { hasUnambiguousDeploymentMetricIdentity } from "../fleet";
 import { ISVC_LIVE_OPTIONS, useLive } from "../live";
-import { COMPONENT_TONE_CLASS, toWorkloadRows } from "../map";
+import { COMPONENT_TONE_CLASS, toWorkloadRows, transitionLabel } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
 import { isvcSelected, resourceKey } from "../resource";
@@ -61,9 +61,12 @@ const COLUMNS: Column<WorkloadRow>[] = [
             <span
               key={c.name}
               className={`repl ${COMPONENT_TONE_CLASS[c.tone]}`}
-              title={c.revision}
+              title={
+                c.transition ? `${c.transition.from ?? "(new)"} → ${c.transition.to}` : c.revision
+              }
             >
               {c.label}
+              {c.transition ? ` · ${transitionLabel(c.transition)}` : ""}
             </span>
           ))}
         </span>

@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import {
+  canaryNote,
   componentCells,
   componentTone,
+  componentTransition,
   conditionRank,
   isRolling,
   loadSummary,
@@ -17,6 +19,7 @@ import {
   toFeed,
   toRollouts,
   toWorkloadRows,
+  transitionLabel,
 } from "./map";
 import { resourceKey } from "./resource";
 import { matches } from "./util";
@@ -69,6 +72,14 @@ describe("toRollouts", () => {
     expect(r.barPct).toBe(0);
     expect(r.components).toEqual([]);
   });
+
+  it("carries the in-flight canary through the fusion", () => {
+    const [r] = toRollouts(
+      [{ cluster: "cw", name: "c1", ready: false }],
+      [{ cluster: "cw", name: "c1", canary: { currentStep: 2, trafficWeight: 25 } }],
+    );
+    expect(r.canary).toEqual({ currentStep: 2, trafficWeight: 25 });
+  });
 });
 
 describe("rollout fusion helpers", () => {
@@ -94,6 +105,70 @@ describe("rollout fusion helpers", () => {
     expect(isRolling([{ name: "e", rolloutPhase: "Stable" }])).toBe(false);
     expect(isRolling([{ name: "e", rolloutPhase: "Progressing" }])).toBe(true);
     expect(isRolling([{ name: "e" }])).toBe(false);
+  });
+
+  it("counts only target-revision Instances while a component converges", () => {
+    // Surge: all 5 old-revision pods are still ready, but only 1 Instance is
+    // ready on the target revision — the bar must not read 100%.
+    expect(
+      rolloutProgress([
+        {
+          name: "e",
+          readyReplicas: 5,
+          totalReplicas: 5,
+          currentRevision: "w-engine-old1",
+          updateRevision: "w-engine-new2",
+          updatedReplicas: 2,
+          updatedReadyReplicas: 1,
+        },
+      ]),
+    ).toBe(20);
+    // Missing updated counts fall back to ready — never zero out the bar.
+    expect(
+      rolloutProgress([
+        {
+          name: "e",
+          readyReplicas: 4,
+          totalReplicas: 5,
+          currentRevision: "w-engine-old1",
+          updateRevision: "w-engine-new2",
+        },
+      ]),
+    ).toBe(80);
+  });
+
+  it("exposes the revision transition only mid-rollout", () => {
+    expect(
+      componentTransition({
+        name: "engine",
+        currentRevision: "w-engine-old1",
+        updateRevision: "w-engine-new2",
+      }),
+    ).toEqual({ from: "w-engine-old1", to: "w-engine-new2" });
+    expect(
+      componentTransition({
+        name: "engine",
+        currentRevision: "w-engine-new2",
+        updateRevision: "w-engine-new2",
+      }),
+    ).toBeUndefined();
+    expect(componentTransition({ name: "engine" })).toBeUndefined();
+    // Initial rollout: nothing runs yet, so there is no `from`.
+    expect(componentTransition({ name: "engine", updateRevision: "w-engine-new2" })).toEqual({
+      from: undefined,
+      to: "w-engine-new2",
+    });
+
+    const [cell] = componentCells([
+      {
+        name: "engine",
+        readyReplicas: 5,
+        totalReplicas: 5,
+        currentRevision: "w-engine-old1",
+        updateRevision: "w-engine-new2",
+      },
+    ]);
+    expect(cell.transition).toEqual({ from: "w-engine-old1", to: "w-engine-new2" });
   });
 });
 
@@ -398,6 +473,26 @@ describe("toFeed", () => {
     expect(deleted.icon).toBe("warning");
     expect(deleted.tone).toBe("amber");
     expect(deleted.when).toBe("30s ago");
+  });
+});
+
+describe("transitionLabel", () => {
+  it("shows only the differing revision tails", () => {
+    expect(transitionLabel({ from: "w-engine-old1", to: "w-engine-new2" })).toBe("old1 → new2");
+    expect(transitionLabel({ to: "w-engine-new2" })).toBe("→ new2");
+    expect(transitionLabel({ from: "old", to: "new" })).toBe("old → new");
+  });
+});
+
+describe("canaryNote", () => {
+  it("summarizes step, traffic, and failing checks", () => {
+    expect(canaryNote({ currentStep: 3, trafficWeight: 25 })).toBe("canary step 3 · 25% traffic");
+    expect(canaryNote({ currentStep: 1, trafficWeight: 5, failedChecks: 2 })).toBe(
+      "canary step 1 · 5% traffic · 2 checks failing",
+    );
+    expect(canaryNote({ currentStep: 1, trafficWeight: 5, failedChecks: 1 })).toBe(
+      "canary step 1 · 5% traffic · 1 check failing",
+    );
   });
 });
 

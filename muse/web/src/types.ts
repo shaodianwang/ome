@@ -37,6 +37,8 @@ export interface Rollout {
   started: string;
   /** Per-component rollout state (phase + revision), for the expanded card. */
   components?: ComponentCell[];
+  /** In-flight canary (step, observed traffic weight, failing checks). */
+  canary?: { currentStep: number; trafficWeight: number; failedChecks?: number };
   /** Full identity for click-through to the deployment. */
   sel: Selected;
 }
@@ -49,6 +51,9 @@ export interface ComponentCell {
   tone: "ok" | "warn" | "bad";
   phase?: string;
   revision?: string;
+  /** Revision hashes mid-rollout: what the bulk runs → what it converges to.
+   *  `from` is absent on an initial rollout. Unset at steady state. */
+  transition?: { from?: string; to: string };
 }
 
 /** Workloads · table row */

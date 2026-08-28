@@ -1,7 +1,4 @@
 // Map muse read-plane responses into the view-model shapes the panels render.
-//
-// Sections with no backing endpoint (Workloads PD/canary detail, Models onboarding
-// pipeline) are left empty and the panels render a placeholder.
 
 import type { ComponentItem, ConditionItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import { resourceKey, selectResource } from "./resource";
@@ -53,15 +50,29 @@ export function toFeed(events: EventItem[]): FeedItem[] {
   }));
 }
 
+/** Revision change a component is converging through: what the bulk currently
+ *  runs → what the rollout targets. Undefined at steady state (revisions equal
+ *  or unreported). `from` is absent on an initial rollout. */
+export function componentTransition(c: ComponentItem): { from?: string; to: string } | undefined {
+  if (!c.updateRevision || c.updateRevision === c.currentRevision) return undefined;
+  return { from: c.currentRevision, to: c.updateRevision };
+}
+
 /** Ready-vs-total replica progress across components, as a 0–100 percentage.
- *  `null` when no component reports lifecycle counts. */
+ *  While a component converges to a new revision, only Instances ready on that
+ *  revision count — old-revision pods keep `readyReplicas` high under surge and
+ *  would fake a finished bar. `null` when no component reports counts. */
 export function rolloutProgress(components?: ComponentItem[]): number | null {
   let ready = 0;
   let total = 0;
   for (const c of components ?? []) {
     const r = componentReplicas(c);
     if (r.total != null) {
-      ready += Math.min(r.ready ?? 0, r.total);
+      const progressed =
+        componentTransition(c) && c.updatedReadyReplicas != null
+          ? c.updatedReadyReplicas
+          : (r.ready ?? 0);
+      ready += Math.min(progressed, r.total);
       total += r.total;
     }
   }
@@ -90,6 +101,7 @@ export function toRollouts(rollouts: RolloutItem[], isvcs: IsvcItem[]): Rollout[
       cluster: r.cluster,
       started: r.age ?? "—",
       components: componentCells(isvc?.components),
+      canary: isvc?.canary,
       sel: {
         cluster: r.cluster,
         kind: "InferenceService" as const,
@@ -202,6 +214,7 @@ export function componentCells(components?: ComponentItem[]): ComponentCell[] {
       tone: toneMap[componentTone(c)],
       phase: c.rolloutPhase,
       revision: c.revision,
+      transition: componentTransition(c),
     };
   });
 }
@@ -344,6 +357,30 @@ export function deploymentHealth(isvcs: IsvcItem[]): FleetHealth {
 export function shortRevision(revision: string): string {
   const i = revision.lastIndexOf("rev-");
   return i > 0 ? revision.slice(i) : revision;
+}
+
+/** Short display for a revision transition, e.g. "6b9f7d4 → 8c4e2a1". Revision
+ *  names end in the revision hash (the part after the last dash), so the tail
+ *  is what identifies them; the shared name prefix is noise at chip size. */
+export function transitionLabel(t: { from?: string; to: string }): string {
+  const tail = (s: string) => {
+    const i = s.lastIndexOf("-");
+    return i > 0 ? s.slice(i + 1) : s;
+  };
+  return t.from ? `${tail(t.from)} → ${tail(t.to)}` : `→ ${tail(t.to)}`;
+}
+
+/** One-line canary summary: "canary step 3 · 25% traffic · 2 checks failing". */
+export function canaryNote(c: {
+  currentStep: number;
+  trafficWeight: number;
+  failedChecks?: number;
+}): string {
+  const parts = [`canary step ${c.currentStep}`, `${c.trafficWeight}% traffic`];
+  if (c.failedChecks) {
+    parts.push(`${c.failedChecks} ${c.failedChecks === 1 ? "check" : "checks"} failing`);
+  }
+  return parts.join(" · ");
 }
 
 // ---- Models ---------------------------------------------------------------

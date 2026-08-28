@@ -154,6 +154,16 @@ export interface ComponentItem {
   desiredReplicas?: number;
   rolloutPhase?: string;
   revision?: string;
+  /** Revision the bulk of Instances currently run; differs from
+   *  `updateRevision` only while a rollout is converging. */
+  currentRevision?: string;
+  /** Revision the rollout is converging to. */
+  updateRevision?: string;
+  /** Instances already on `updateRevision`. */
+  updatedReplicas?: number;
+  /** Ready Instances on `updateRevision` — the true rollout progress while
+   *  old-revision pods still count toward `readyReplicas`. */
+  updatedReadyReplicas?: number;
   url?: string;
 }
 
@@ -189,6 +199,8 @@ export interface IsvcItem {
   failedCopies?: number;
   reason?: string;
   message?: string;
+  /** In-flight canary rollout; absent outside a canary. */
+  canary?: CanaryItem;
   age?: string;
   /** Accelerator chips currently held by this service's scheduled pods. */
   accelerators?: number;
@@ -295,13 +307,14 @@ export interface PlacementItem {
 export interface CanaryItem {
   currentStep: number;
   trafficWeight: number;
+  /** Analysis checks currently failing; absent when none are. */
+  failedChecks?: number;
 }
 
-/** Full ISVC detail (drawer): the overview plus conditions, placement, canary. */
+/** Full ISVC detail (drawer): the overview plus conditions and placement. */
 export interface IsvcDetail extends IsvcItem {
   conditions?: ConditionItem[];
   placement?: PlacementItem;
-  canary?: CanaryItem;
 }
 
 export interface ModelItem {
