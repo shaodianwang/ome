@@ -6,6 +6,19 @@ export interface ClusterCacheSummary {
   line: string;
 }
 
+/** Non-ready clusters as "name: status (error)" — the partial-data banner detail. */
+export function clusterLagDetail(items: ClusterItem[]): string {
+  return items
+    .filter((cluster) => !cluster.ready)
+    .map((cluster) => {
+      const status = cluster.status.replace("_", " ");
+      return cluster.error
+        ? `${cluster.name}: ${status} (${cluster.error})`
+        : `${cluster.name}: ${status}`;
+    })
+    .join(" · ");
+}
+
 /** Derive the connection indicator and detail line used by the active sidebar. */
 export function summarizeClusterCaches(items: ClusterItem[]): ClusterCacheSummary {
   const ready = items.filter((cluster) => cluster.ready).length;

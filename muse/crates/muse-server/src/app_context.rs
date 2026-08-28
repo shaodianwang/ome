@@ -115,29 +115,44 @@ impl AppState {
     /// Ready clusters matching `cluster` (one named cluster, or all when None).
     /// Explicitly selecting a known non-ready cluster is unavailable rather than
     /// exposing a partial informer cache as authoritative data. Unscoped fleet
-    /// reads wait until every cluster is settled and at least one is ready.
+    /// reads serve every ready cluster as soon as one exists — the console
+    /// surfaces which clusters are still syncing or failed instead of holding
+    /// the whole fleet offline behind its slowest cluster.
     pub fn select(&self, cluster: Option<&str>) -> Result<Vec<&ClusterState>, ApiError> {
         match cluster {
             Some(name) => self.ready_cluster(name).map(|cluster| vec![cluster]),
             None => {
-                self.ensure_fleet_ready()?;
-                Ok(self
+                let ready: Vec<&ClusterState> = self
                     .clusters
                     .iter()
                     .filter(|cluster| cluster.cache.snapshot().ready())
-                    .collect())
+                    .collect();
+                if ready.is_empty() {
+                    return Err(ApiError::Unavailable(self.no_ready_cluster_detail()));
+                }
+                Ok(ready)
             }
         }
     }
 
-    fn ensure_fleet_ready(&self) -> Result<(), ApiError> {
-        if self.caches_ready() {
-            Ok(())
-        } else {
-            Err(ApiError::Unavailable(
-                "fleet caches have not reached a settled usable state".to_owned(),
-            ))
+    /// Why an unscoped read cannot be served: every cluster's sync state, so the
+    /// operator sees which cluster is stuck and why instead of a generic 503.
+    fn no_ready_cluster_detail(&self) -> String {
+        if self.clusters.is_empty() {
+            return "no clusters are configured".to_owned();
         }
+        let parts: Vec<String> = self
+            .clusters
+            .iter()
+            .map(|cluster| {
+                let cache = cluster.cache.snapshot();
+                match cache.error() {
+                    Some(error) => format!("{}: {} ({error})", cluster.name, cache.status()),
+                    None => format!("{}: {}", cluster.name, cache.status()),
+                }
+            })
+            .collect();
+        format!("no cluster cache is ready — {}", parts.join(", "))
     }
 
     fn ready_cluster(&self, name: &str) -> Result<&ClusterState, ApiError> {
@@ -162,9 +177,9 @@ impl AppState {
         self.chat.as_deref()
     }
 
-    /// Whether every registered cluster has reached a settled initial-sync state
-    /// and at least one cluster is ready. A completed partial fleet remains usable,
-    /// but pending or wholly failed fleets must not serve authoritative-looking data.
+    /// Whether at least one cluster's informer cache is ready — the point at
+    /// which the read plane serves useful (possibly partial) fleet data. The
+    /// console reports the remaining clusters' sync state alongside the data.
     pub fn caches_ready(&self) -> bool {
         cache_fleet_ready(self.clusters.iter().map(|cluster| &cluster.cache))
     }
@@ -208,7 +223,11 @@ impl AppState {
             Some(name) => {
                 self.ready_cluster(name)?;
             }
-            None => self.ensure_fleet_ready()?,
+            None => {
+                if !self.caches_ready() {
+                    return Err(ApiError::Unavailable(self.no_ready_cluster_detail()));
+                }
+            }
         }
         let snap = loop {
             let snap = self
@@ -292,15 +311,7 @@ impl AppState {
 fn cache_fleet_ready<'a>(
     states: impl IntoIterator<Item = &'a crate::informers::CacheState>,
 ) -> bool {
-    let mut any_ready = false;
-    for cache in states {
-        let state = cache.snapshot();
-        if !state.settled() {
-            return false;
-        }
-        any_ready |= state.ready();
-    }
-    any_ready
+    states.into_iter().any(|cache| cache.snapshot().ready())
 }
 
 fn capacity_membership_matches<'a>(
@@ -324,18 +335,18 @@ mod tests {
     use crate::informers::CacheState;
 
     #[test]
-    fn cache_readiness_requires_a_ready_cluster_and_no_pending_clusters() {
+    fn cache_readiness_requires_at_least_one_ready_cluster() {
         let ready = CacheState::default();
         ready.mark_ready();
         let pending = CacheState::default();
 
         assert!(!cache_fleet_ready(std::iter::empty()));
         assert!(!cache_fleet_ready([&pending]));
-        assert!(!cache_fleet_ready([&ready, &pending]));
+        assert!(cache_fleet_ready([&ready, &pending]));
     }
 
     #[test]
-    fn cache_readiness_accepts_a_settled_partial_fleet() {
+    fn cache_readiness_accepts_a_partial_fleet() {
         let ready = CacheState::default();
         ready.mark_ready();
         let failed = CacheState::default();

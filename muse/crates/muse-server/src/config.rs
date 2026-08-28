@@ -443,6 +443,11 @@ pub fn validate_metrics_time_ranges_against_queries(
 }
 
 /// How an informer fetches its initial state from an apiserver.
+///
+/// Bandwidth note: the apiserver gzip-compresses large classic LIST responses
+/// but never streaming (WatchList) responses. On a bandwidth-constrained link,
+/// `paginated` therefore syncs large caches far faster; `streaming` trades that
+/// for lower apiserver memory pressure and is preferred in-cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ListStrategy {
     /// Stream the initial list (WatchList) on apiservers new enough to support it,

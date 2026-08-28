@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api } from "./api";
-import { summarizeClusterCaches } from "./clusterStatus";
+import { clusterLagDetail, summarizeClusterCaches } from "./clusterStatus";
+import { DataNotice } from "./components";
 import {
   BrandMark,
   IconCapacity,
@@ -187,6 +188,17 @@ export default function App() {
         </header>
 
         <div className="content">
+          {items.length > 0 && items.some((c) => !c.ready) ? (
+            <DataNotice
+              tone={items.some((c) => c.ready) ? "warning" : "danger"}
+              title={
+                items.some((c) => c.ready)
+                  ? `Partial fleet data — ${items.filter((c) => c.ready).length} of ${items.length} clusters ready`
+                  : "No cluster data yet"
+              }
+              detail={clusterLagDetail(items)}
+            />
+          ) : null}
           {panel === "fleet" && (
             <Fleet
               openDeployments={openDeployments}

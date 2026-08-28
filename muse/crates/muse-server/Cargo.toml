@@ -17,7 +17,10 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 # http-proxy: respect HTTP(S)_PROXY/NO_PROXY so a remote cluster reachable only
 # via a corporate proxy works (e.g. msl-cw-use2-dev-2).
-kube = { version = "4.0.0", features = ["client", "runtime", "rustls-tls", "http-proxy"] }
+# gzip: ask the apiserver to compress responses — a cluster-wide pod LIST is
+# ~10x smaller on the wire. Opt out per cluster via kubeconfig
+# `disable-compression`.
+kube = { version = "4.0.0", features = ["client", "runtime", "rustls-tls", "http-proxy", "gzip"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 ome-client = { path = "../../../ome-client-rs", features = ["runtime"] }

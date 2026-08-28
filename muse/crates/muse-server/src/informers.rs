@@ -86,12 +86,6 @@ impl CacheSyncState {
         matches!(self, Self::Ready)
     }
 
-    /// Whether startup can make a fleet-level readiness decision. A timeout is
-    /// settled but recoverable when the still-running initial sync completes.
-    pub fn settled(&self) -> bool {
-        !matches!(self, Self::Pending)
-    }
-
     pub fn status(&self) -> &'static str {
         match self {
             Self::Pending => "syncing",
