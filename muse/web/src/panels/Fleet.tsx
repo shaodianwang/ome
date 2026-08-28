@@ -186,6 +186,7 @@ export function Fleet({
       name: g.name,
       kind: g.kind,
       free: g.free,
+      allocatable: g.allocatable,
       pct: g.allocatable ? Math.round((g.allocated / g.allocatable) * 100) : 0,
     }))
     .sort((a, b) => b.pct - a.pct);
@@ -341,7 +342,9 @@ export function Fleet({
         <StatTile
           label="GPU allocated"
           value={gpu ? `${gpuPct}%` : "—"}
-          sub={gpu ? `${n(gpu.free)} free` : undefined}
+          sub={
+            gpu ? `${n(gpu.allocated)} / ${n(gpu.allocatable)} · ${n(gpu.free)} free` : undefined
+          }
           tone={gpuTone || undefined}
         />
       </div>
@@ -373,8 +376,9 @@ export function Fleet({
         <div className="panel-alert">
           <Dot tone="red" />
           <span>
-            <b>GPU {gpuPct}% allocated</b> — {gpu ? n(gpu.free) : 0} free. This view reflects
-            allocation because utilization telemetry is unavailable.
+            <b>GPU {gpuPct}% allocated</b> — {gpu ? n(gpu.free) : 0} of{" "}
+            {gpu ? n(gpu.allocatable) : 0} free. This view reflects allocation because utilization
+            telemetry is unavailable.
           </span>
         </div>
       ) : null}
@@ -383,12 +387,30 @@ export function Fleet({
           <div className="cap-line">
             <span className="cap-k">GPU</span>
             {gpu ? <Gauge pct={kpct(gpu)} tone={gpuTone} /> : <span className="muted">—</span>}
-            <span className="cap-free">{gpu ? `${n(gpu.free)} free` : "—"}</span>
+            <span className="cap-free">
+              {gpu ? (
+                <>
+                  {n(gpu.allocated)} / {n(gpu.allocatable)}
+                  <span className="cap-free-sub">{n(gpu.free)} free</span>
+                </>
+              ) : (
+                "—"
+              )}
+            </span>
           </div>
           <div className="cap-line">
             <span className="cap-k">TPU</span>
             {tpu ? <Gauge pct={kpct(tpu)} tone={tpuTone} /> : <span className="muted">—</span>}
-            <span className="cap-free">{tpu ? `${n(tpu.free)} free` : "—"}</span>
+            <span className="cap-free">
+              {tpu ? (
+                <>
+                  {n(tpu.allocated)} / {n(tpu.allocatable)}
+                  <span className="cap-free-sub">{n(tpu.free)} free</span>
+                </>
+              ) : (
+                "—"
+              )}
+            </span>
           </div>
           <p className="panel-note">Allocation only; utilization telemetry is unavailable.</p>
         </Card>
@@ -407,7 +429,7 @@ export function Fleet({
                   tag={c.kind}
                   pct={c.pct}
                   tone={upperThresholdTone(c.pct, policy?.utilization)}
-                  value={`${n(c.free)} free`}
+                  value={`${n(c.free)} of ${n(c.allocatable)} free`}
                 />
               </button>
             ))}

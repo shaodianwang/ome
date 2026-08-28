@@ -951,8 +951,12 @@ table.tbl .node-detail-row td {
   min-width: 78px;
   text-align: right;
   font-size: var(--t-sm);
-  color: var(--fg-3);
+  color: var(--fg-2);
   font-variant-numeric: tabular-nums;
+}
+.cap-free-sub {
+  display: block;
+  color: var(--fg-3);
 }
 /* deployments filter tabs + clickable status */
 .seg-count {
