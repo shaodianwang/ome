@@ -108,6 +108,7 @@ export function ClusterOverview({
 export function ClusterNodes({
   show,
   tab,
+  nodeQuery,
   nodes,
   nodesLoading,
   nodesError,
@@ -117,6 +118,8 @@ export function ClusterNodes({
 }: {
   show: boolean;
   tab: string;
+  /** Deep-linked filter (a node name or topology id); local edits take over. */
+  nodeQuery?: string;
   nodes: NodeItem[];
   nodesLoading: boolean;
   nodesError: string | null;
@@ -124,21 +127,38 @@ export function ClusterNodes({
   onPageSize: (size: number) => void;
   openDeployment: (s: Selected) => void;
 }) {
-  const [nodeQ, setNodeQ] = useState("");
+  const [nodeQ, setNodeQ] = useState(nodeQuery ?? "");
   const [nodePage, setNodePage] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
+  // Follow deep links that arrive while mounted (the card survives tab
+  // switches precisely so its state can be driven from outside).
+  useEffect(() => {
+    if (nodeQuery != null) setNodeQ(nodeQuery);
+  }, [nodeQuery]);
+
   useEffect(() => {
     setNodePage(0);
     setExpanded(null);
   }, [tab, nodeQ]);
 
-  // Node explorer: filtered, unhealthy-first, paged.
+  // Node explorer: filtered, unhealthy-first, paged. Topology ids (island /
+  // NVLink domain / zone) are searchable so capacity units can link here.
   const nodeRows = nodes
-    .filter((nd) => matches(nodeQ, nd.name, nd.instanceType, (nd.issues ?? []).join(" ")))
+    .filter((nd) =>
+      matches(
+        nodeQ,
+        nd.name,
+        nd.instanceType,
+        nd.island,
+        nd.nvlinkDomain,
+        nd.zone,
+        (nd.issues ?? []).join(" "),
+      ),
+    )
     .sort((a, b) => {
       const ai = a.issues?.length ? 1 : 0;
       const bi = b.issues?.length ? 1 : 0;

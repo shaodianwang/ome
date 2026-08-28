@@ -155,23 +155,29 @@ export function Workloads({
   setFilter,
   cluster,
   setCluster,
+  namespace,
+  setNamespace,
   query,
   setQuery,
   selected,
   setSelected,
   openModel,
   openRuntime,
+  openNode,
 }: {
   filter: DepFilter;
   setFilter: (f: DepFilter) => void;
   cluster: string;
   setCluster: (c: string) => void;
+  namespace: string;
+  setNamespace: (ns: string) => void;
   query: string;
   setQuery: (q: string) => void;
   selected: Selected | null;
   setSelected: (s: Selected | null) => void;
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
+  openNode: (cluster: string, node: string) => void;
 }) {
   const isvcs = useLive(api.inferenceServices, ISVC_LIVE_OPTIONS);
 
@@ -190,6 +196,7 @@ export function Workloads({
         onBack={() => setSelected(null)}
         openModel={openModel}
         openRuntime={openRuntime}
+        openNode={openNode}
         metricIdentity={metricIdentity}
       />
     );
@@ -205,6 +212,9 @@ export function Workloads({
       searchPlaceholder="Filter by name, namespace, model, or runtime…"
       searchFields={(w) => [w.name, w.namespace, w.model, w.runtime, w.cluster]}
       clusterOf={(w) => w.cluster}
+      namespaceOf={(w) => w.namespace}
+      namespace={namespace}
+      setNamespace={setNamespace}
       rowKey={(w) => w.id}
       rowTone={(w) => w.status.tone}
       onRowClick={(w) => setSelected(isvcSelected(w.cluster, w.name, w.namespace))}

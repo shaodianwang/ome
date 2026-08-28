@@ -50,12 +50,14 @@ export function DeploymentDetail({
   onBack,
   openModel,
   openRuntime,
+  openNode,
   metricIdentity,
 }: {
   sel: Selected;
   onBack: () => void;
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
+  openNode: (cluster: string, node: string) => void;
   metricIdentity: DeploymentMetricIdentity;
 }) {
   const [tab, setTab] = useState<TabId>("overview");
@@ -197,6 +199,7 @@ export function DeploymentDetail({
               chatClientGraceSecs={cfg.data?.chatClientGraceSecs}
               openModel={openModel}
               openRuntime={openRuntime}
+              openNode={openNode}
               goMonitoring={() => setTab("monitoring")}
             />
           ) : null}
@@ -267,6 +270,7 @@ function OverviewPane({
   chatClientGraceSecs,
   openModel,
   openRuntime,
+  openNode,
   goMonitoring,
 }: {
   d: IsvcDetail;
@@ -280,6 +284,7 @@ function OverviewPane({
   chatClientGraceSecs?: number;
   openModel: (sel: Selected) => void;
   openRuntime: (sel: Selected) => void;
+  openNode: (cluster: string, node: string) => void;
   goMonitoring: () => void;
 }) {
   const showMetrics = metricsOn && m.present;
@@ -482,7 +487,12 @@ function OverviewPane({
         </div>
 
         <div className="deployment-pods">
-          <PodsCard sel={sel} podInspect={podInspect} podLogStream={podLogStream} />
+          <PodsCard
+            sel={sel}
+            podInspect={podInspect}
+            podLogStream={podLogStream}
+            openNode={(node) => openNode(sel.cluster, node)}
+          />
         </div>
       </div>
 

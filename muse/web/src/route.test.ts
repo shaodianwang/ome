@@ -45,4 +45,20 @@ describe("resource routes", () => {
       panel: "models",
     });
   });
+
+  it("round-trips the capacity node-explorer deep link", () => {
+    const route = { panel: "capacity" as const, cluster: "member-a", q: "island-7" };
+    const path = routePath(route);
+    expect(path).toBe("/capacity?cluster=member-a&q=island-7");
+    const [pathname, query] = path.split("?");
+    expect(parseRoute(pathname, `?${query}`)).toEqual(route);
+  });
+
+  it("round-trips the deployments namespace filter", () => {
+    const route = { panel: "workloads" as const, ns: "team-a", q: "llama" };
+    const path = routePath(route);
+    expect(path).toBe("/deployments?ns=team-a&q=llama");
+    const [pathname, query] = path.split("?");
+    expect(parseRoute(pathname, `?${query}`)).toEqual(route);
+  });
 });

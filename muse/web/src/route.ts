@@ -19,7 +19,9 @@ export interface Route {
   /** Cluster scope: the Deployments list filter, or the Capacity cluster tab
    *  (empty/undefined = all clusters). */
   cluster?: string;
-  /** Deployments list search query. */
+  /** Deployments list namespace filter. */
+  ns?: string;
+  /** Search query: the Deployments list, or the Capacity node explorer. */
   q?: string;
 }
 
@@ -92,12 +94,14 @@ export function parseRoute(
   if (panel === "workloads") {
     const tab = sp.get("tab");
     if (tab === "attention" || tab === "rolling" || tab === "ready") route.filter = tab;
-    const q = sp.get("q");
-    if (q) route.q = q;
+    const ns = sp.get("ns");
+    if (ns) route.ns = ns;
   }
   if (panel === "workloads" || panel === "capacity") {
     const cluster = sp.get("cluster");
     if (cluster) route.cluster = cluster;
+    const q = sp.get("q");
+    if (q) route.q = q;
   }
   return route;
 }
@@ -115,6 +119,7 @@ export function routePath(r: Route): string {
   }
   if (r.filter && r.filter !== "all") sp.set("tab", r.filter);
   if (r.cluster) sp.set("cluster", r.cluster);
+  if (r.ns) sp.set("ns", r.ns);
   if (r.q) sp.set("q", r.q);
   const query = sp.toString();
   return query ? `${path}?${query}` : path;

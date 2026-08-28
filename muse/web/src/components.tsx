@@ -64,6 +64,34 @@ export function Bar(props: {
 }
 
 /** Cluster scope selector: "" = all clusters, else a specific cluster name. */
+/** A filter-bar dropdown scoping a list to one value of a field ("" = all). */
+export function SelectFilter({
+  ariaLabel,
+  allLabel,
+  options,
+  value,
+  onChange,
+}: {
+  ariaLabel: string;
+  allLabel: string;
+  options: string[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="input cluster-filter">
+      <select aria-label={ariaLabel} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{allLabel}</option>
+        {options.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export function ClusterFilter({
   clusters,
   value,
@@ -74,16 +102,13 @@ export function ClusterFilter({
   onChange: (v: string) => void;
 }) {
   return (
-    <div className="input cluster-filter">
-      <select aria-label="Cluster" value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">All clusters</option>
-        {clusters.map((c) => (
-          <option key={c} value={c}>
-            {c}
-          </option>
-        ))}
-      </select>
-    </div>
+    <SelectFilter
+      ariaLabel="Cluster"
+      allLabel="All clusters"
+      options={clusters}
+      value={value}
+      onChange={onChange}
+    />
   );
 }
 

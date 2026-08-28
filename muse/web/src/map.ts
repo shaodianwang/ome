@@ -1,7 +1,7 @@
 // Map muse read-plane responses into the view-model shapes the panels render.
 
 import type { ComponentItem, ConditionItem, EventItem, IsvcItem, RolloutItem } from "./api";
-import { resourceKey, selectResource } from "./resource";
+import { isResourceKind, resourceKey, selectResource } from "./resource";
 import type { ResourceRef, Selected } from "./resource";
 import type { ComponentCell, FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
 import { ago } from "./util";
@@ -43,9 +43,11 @@ export function toFeed(events: EventItem[]): FeedItem[] {
     rest: ` ${HUMAN_KIND[e.kind] ?? "resource"} ${e.action === "deleted" ? "removed" : "updated"}`,
     meta: e.cluster,
     when: ago(e.at),
+    // Every kind with a detail surface links to it; deleted resources have
+    // nowhere to land, so those rows stay inert.
     sel:
-      e.kind === "InferenceService" && e.action !== "deleted"
-        ? { cluster: e.cluster, kind: "InferenceService", name: e.name, namespace: e.namespace }
+      e.action !== "deleted" && isResourceKind(e.kind)
+        ? { cluster: e.cluster, kind: e.kind, name: e.name, namespace: e.namespace }
         : undefined,
   }));
 }

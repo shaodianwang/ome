@@ -65,10 +65,16 @@ const sortVal = (r: Row, k: SortKey): string | number =>
 export function Capacity({
   openDeployment,
   initialCluster,
+  nodeQuery,
+  openNode,
 }: {
   openDeployment: (s: Selected) => void;
   /** Deep-linked cluster tab (from the route); "" / undefined = fleet view. */
   initialCluster?: string;
+  /** Deep-linked node-explorer filter (a node name or topology id). */
+  nodeQuery?: string;
+  /** Navigates to a cluster's node explorer, pre-filtered. */
+  openNode: (cluster: string, query: string) => void;
 }) {
   const [kind, setKind] = useState<Kind>("all");
   const [dim, setDim] = useState<Dim>("cluster");
@@ -78,6 +84,13 @@ export function Capacity({
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
   const [tab, setTab] = useState(initialCluster ?? ""); // "" = all clusters; else a cluster name
+  // Deep links can arrive while the panel is mounted (node / unit
+  // click-throughs navigate here); follow them without clobbering local tab
+  // switches. `nodeQuery` is in the deps so re-linking into the same cluster
+  // with a new filter still lands on its tab.
+  useEffect(() => {
+    if (initialCluster != null) setTab(initialCluster);
+  }, [initialCluster, nodeQuery]);
   const [nodes, setNodes] = useState<NodeItem[]>([]);
   const [nodesLoading, setNodesLoading] = useState(false);
   const [nodesError, setNodesError] = useState<string | null>(null);
@@ -175,6 +188,15 @@ export function Capacity({
     .flatMap(({ cap }) => cap.consumersByDeployment ?? [])
     .sort((a, b) => b.accelerators - a.accelerators)
     .slice(0, 10);
+  // Deployment attribution needs labelled, scheduled pods; until any exist the
+  // per-namespace lists still answer "who holds capacity". Cluster comes from
+  // the response each row rode in on.
+  const namespaceConsumers = deploymentConsumers.length
+    ? []
+    : caps
+        .flatMap(({ name, cap }) => (cap.consumers ?? []).map((c) => ({ ...c, cluster: name })))
+        .sort((a, b) => b.accelerators - a.accelerators)
+        .slice(0, 10);
 
   // Demand (Pending pods waiting on capacity) + lost capacity (accelerators on
   // NotReady/cordoned nodes), summed across clusters.
@@ -438,7 +460,14 @@ export function Capacity({
         />
       ) : null}
 
-      <Card title="Top deployments" sub="accelerators held · click to open">
+      <Card
+        title={namespaceConsumers.length ? "Top consumers" : "Top deployments"}
+        sub={
+          namespaceConsumers.length
+            ? "accelerators held · by namespace"
+            : "accelerators held · click to open"
+        }
+      >
         {deploymentConsumers.length ? (
           <table className="place-tbl">
             <thead>
@@ -468,6 +497,33 @@ export function Capacity({
               ))}
             </tbody>
           </table>
+        ) : namespaceConsumers.length ? (
+          <table className="place-tbl">
+            <thead>
+              <tr>
+                <th>Namespace</th>
+                <th>Cluster</th>
+                <th>Kind</th>
+                <th className="tnum">Pods</th>
+                <th className="tnum">Accels</th>
+              </tr>
+            </thead>
+            <tbody>
+              {namespaceConsumers.map((c) => (
+                <tr
+                  key={`${c.cluster}/${c.namespace}/${c.kind}`}
+                  className="link"
+                  onClick={() => setTab(c.cluster)}
+                >
+                  <td className="mono">{c.namespace}</td>
+                  <td className="mono muted">{c.cluster}</td>
+                  <td>{c.kind.toUpperCase()}</td>
+                  <td className="tnum">{c.pods}</td>
+                  <td className="tnum">{c.accelerators.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         ) : (
           <p className="panel-note">
             {hasCapacity
@@ -477,11 +533,12 @@ export function Capacity({
         )}
       </Card>
 
-      <PlacementTiers caps={caps} />
+      <PlacementTiers caps={caps} onOpenUnit={openNode} />
 
       <ClusterNodes
         show={!!active}
         tab={tab}
+        nodeQuery={nodeQuery}
         nodes={nodes}
         nodesLoading={nodesLoading}
         nodesError={nodesError}
@@ -621,7 +678,7 @@ export function Capacity({
         onPageSize={setPageSize}
       />
 
-      <PlacementCard caps={caps} kindsPresent={kindsPresent} />
+      <PlacementCard caps={caps} kindsPresent={kindsPresent} onOpenUnit={openNode} />
     </section>
   );
 }

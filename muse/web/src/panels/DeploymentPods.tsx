@@ -25,10 +25,13 @@ export function PodsCard({
   sel,
   podInspect,
   podLogStream,
+  openNode,
 }: {
   sel: Selected;
   podInspect: boolean;
   podLogStream: boolean;
+  /** Opens the Capacity node explorer filtered to the given node. */
+  openNode: (node: string) => void;
 }) {
   const [component, setComponent] = useState("all");
   const [show, setShow] = useState<"problems" | "all">("problems");
@@ -143,6 +146,7 @@ export function PodsCard({
                   <th>Pod</th>
                   <th>Component</th>
                   <th>Phase</th>
+                  <th className="tnum">Ready</th>
                   <th className="tnum">Restarts</th>
                   <th>Reason</th>
                   <th>Node</th>
@@ -157,6 +161,7 @@ export function PodsCard({
                     podRef={deployRef}
                     podInspect={podInspect}
                     onStream={podLogStream ? (pod) => setStream({ pod }) : undefined}
+                    openNode={openNode}
                     expanded={expanded === p.name}
                     onToggle={() => setExpanded(expanded === p.name ? null : p.name)}
                   />
@@ -199,6 +204,7 @@ function PodRow({
   podRef,
   podInspect,
   onStream,
+  openNode,
   expanded,
   onToggle,
 }: {
@@ -206,11 +212,14 @@ function PodRow({
   podRef: Selected;
   podInspect: boolean;
   onStream?: (pod: string) => void;
+  openNode: (node: string) => void;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const bad = !p.ready || p.reason != null;
   const phaseTone = p.phase === "Running" && p.ready ? "green" : bad ? "red" : "amber";
+  const readyContainers = p.containers?.filter((c) => c.ready).length;
+  const node = p.node;
   return (
     <Fragment>
       <tr className={`link${bad ? " pod-bad" : ""}`} onClick={onToggle}>
@@ -230,20 +239,35 @@ function PodRow({
         <td>{p.component ?? "—"}</td>
         <td>
           <Dot tone={phaseTone} /> {p.phase ?? "—"}
-          {p.phase === "Running" && !p.ready ? <span className="muted"> · not ready</span> : null}
+        </td>
+        <td className={`tnum${!p.ready ? " txt-bad" : ""}`}>
+          {p.containers?.length ? `${readyContainers}/${p.containers.length}` : p.ready ? "✓" : "✗"}
         </td>
         <td className={`tnum${p.restarts > 0 ? " txt-bad" : ""}`}>{p.restarts || "—"}</td>
         <td className={p.reason ? "txt-bad" : "muted"}>
           {p.reason ?? (p.lastRestart ? `last: ${p.lastRestart}` : "—")}
         </td>
-        <td className="mono muted pod-node" title={p.node}>
-          {p.node ?? "unscheduled"}
+        <td className="mono pod-node" title={node ? `${node} · open in Capacity` : undefined}>
+          {node ? (
+            <button
+              type="button"
+              className="row-open"
+              onClick={(event) => {
+                event.stopPropagation();
+                openNode(node);
+              }}
+            >
+              {node}
+            </button>
+          ) : (
+            <span className="muted">unscheduled</span>
+          )}
         </td>
         <td className="tnum muted">{p.age ?? "—"}</td>
       </tr>
       {expanded ? (
         <tr className="pod-expand">
-          <td colSpan={7}>
+          <td colSpan={8}>
             <PodExpand p={p} podRef={podRef} podInspect={podInspect} onStream={onStream} />
           </td>
         </tr>

@@ -456,6 +456,39 @@ describe("runtimeReference", () => {
 describe("toFeed", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("links every kind with a detail surface, and nothing that is gone", () => {
+    const at = Math.floor(Date.now() / 1000);
+    const [isvc, model, runtime, ftw, deleted] = toFeed([
+      {
+        cluster: "cw",
+        kind: "InferenceService",
+        name: "a",
+        namespace: "ns",
+        action: "applied",
+        at,
+      },
+      { cluster: "cw", kind: "ClusterBaseModel", name: "b", action: "applied", at },
+      { cluster: "cw", kind: "ServingRuntime", name: "c", namespace: "ns", action: "applied", at },
+      { cluster: "cw", kind: "FineTunedWeight", name: "d", action: "applied", at },
+      { cluster: "cw", kind: "ClusterBaseModel", name: "e", action: "deleted", at },
+    ] as EventItem[]);
+    expect(isvc.sel).toEqual({
+      cluster: "cw",
+      kind: "InferenceService",
+      name: "a",
+      namespace: "ns",
+    });
+    expect(model.sel).toEqual({ cluster: "cw", kind: "ClusterBaseModel", name: "b" });
+    expect(runtime.sel).toEqual({
+      cluster: "cw",
+      kind: "ServingRuntime",
+      name: "c",
+      namespace: "ns",
+    });
+    expect(ftw.sel).toBeUndefined(); // no detail panel to land on
+    expect(deleted.sel).toBeUndefined();
+  });
+
   it("chooses icon/tone by kind and action, with relative time", () => {
     const now = Math.floor(Date.now() / 1000);
     vi.spyOn(Date, "now").mockReturnValue(now * 1000);

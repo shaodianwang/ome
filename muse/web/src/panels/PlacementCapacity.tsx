@@ -162,7 +162,15 @@ const STATE_TONE: Record<string, string> = {
 /** The coarse-tier drill-down: a filterable, paged table of individual units
  *  (racks / subblocks). Find one by name, or scan the backend's most-free-first
  *  order; names are reduced to their distinguishing part. */
-function UnitTable({ units, unit }: { units: UnitBox[]; unit: string }) {
+function UnitTable({
+  units,
+  unit,
+  onOpen,
+}: {
+  units: UnitBox[];
+  unit: string;
+  onOpen: (cluster: string, id: string) => void;
+}) {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(0);
   const [size, setSize] = useState(25);
@@ -198,9 +206,18 @@ function UnitTable({ units, unit }: { units: UnitBox[]; unit: string }) {
             {rows.slice(start, start + size).map((b, i) => {
               const s = unitState(b);
               return (
-                <tr key={i}>
-                  <td className="cell-name mono" title={b.id}>
-                    {label(b.id)}
+                <tr key={i} className="link" onClick={() => onOpen(b.cluster, b.id)}>
+                  <td className="cell-name mono" title={`${b.id} · open nodes`}>
+                    <button
+                      type="button"
+                      className="row-open"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpen(b.cluster, b.id);
+                      }}
+                    >
+                      {label(b.id)}
+                    </button>
                   </td>
                   <td className="mono muted">{b.cluster}</td>
                   <td className="num">
@@ -237,7 +254,13 @@ function UnitTable({ units, unit }: { units: UnitBox[]; unit: string }) {
 /** One summary row in the Placement-capacity table: tier · occupancy counts · mix
  *  bar. Expands to the drill-down — a unit table for coarse tiers, named examples
  *  for fine tiers. */
-function TierRow({ t }: { t: Tier }) {
+function TierRow({
+  t,
+  onOpenUnit,
+}: {
+  t: Tier;
+  onOpenUnit: (cluster: string, id: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const recoverable = t.chips > 0 ? Math.floor(t.stranded / t.chips) : 0;
   return (
@@ -287,17 +310,23 @@ function TierRow({ t }: { t: Tier }) {
                 </p>
               ) : null}
               {t.units ? (
-                <UnitTable units={t.units} unit={t.unit} />
+                <UnitTable units={t.units} unit={t.unit} onOpen={onOpenUnit} />
               ) : t.fragments && t.fragments.length ? (
                 <div className="frag-list">
                   <span className="frag-list-lbl">most fragmented {t.unit}s</span>
                   {t.fragments.slice(0, 8).map((f, i) => (
-                    <span className="frag-chip mono" key={i} title={f.id}>
+                    <button
+                      type="button"
+                      className="frag-chip mono row-open"
+                      key={i}
+                      title={`${f.id} · open nodes`}
+                      onClick={() => onOpenUnit(f.cluster, f.id)}
+                    >
                       {shortId(f.id)} <span className="muted">{f.cluster}</span>{" "}
                       <span className="tnum">
                         {n(f.chips - f.free)}/{n(f.chips)}
                       </span>
-                    </span>
+                    </button>
                   ))}
                 </div>
               ) : (
@@ -316,7 +345,13 @@ function TierRow({ t }: { t: Tier }) {
 /** The unified Placement-capacity section: a summary table of every placement tier
  *  (TPU slice/subblock, GPU node/rack), each row expandable to its drill-down.
  *  Replaces the old per-kind fragmentation cards. */
-function PlacementCapacity({ tiers }: { tiers: Tier[] }) {
+function PlacementCapacity({
+  tiers,
+  onOpenUnit,
+}: {
+  tiers: Tier[];
+  onOpenUnit: (cluster: string, id: string) => void;
+}) {
   if (!tiers.length) return null;
   return (
     <Card title="Placement capacity" sub="placeable units by tier · free vs fragmented">
@@ -342,7 +377,7 @@ function PlacementCapacity({ tiers }: { tiers: Tier[] }) {
           </thead>
           <tbody>
             {tiers.map((t) => (
-              <TierRow key={t.key} t={t} />
+              <TierRow key={t.key} t={t} onOpenUnit={onOpenUnit} />
             ))}
           </tbody>
         </table>
@@ -373,7 +408,14 @@ function labeler(ids: string[]): (id: string) => string {
 
 /** Derives the placement tiers from the scoped clusters' capacity and renders
  *  the Placement-capacity card. */
-export function PlacementTiers({ caps }: { caps: { cap: CapacityResp }[] }) {
+export function PlacementTiers({
+  caps,
+  onOpenUnit,
+}: {
+  caps: { cap: CapacityResp }[];
+  /** Opens the owning cluster's node explorer filtered to the unit's id. */
+  onOpenUnit: (cluster: string, id: string) => void;
+}) {
   // Carve-able placement units — whole TPU slices, GPU nodes, and GPU NVLink
   // domains that are entirely free vs partially used, summed across clusters.
   // Placement tiers for the summary table: fine tiers (slice/node) split by real
@@ -403,7 +445,7 @@ export function PlacementTiers({ caps }: { caps: { cap: CapacityResp }[] }) {
       domains((c) => c.gpuRacks),
     ),
   ].filter((t): t is Tier => t !== null);
-  return <PlacementCapacity tiers={placeTiers} />;
+  return <PlacementCapacity tiers={placeTiers} onOpenUnit={onOpenUnit} />;
 }
 
 /** The Placement card: the biggest schedulable block per topology tier and a
@@ -411,9 +453,12 @@ export function PlacementTiers({ caps }: { caps: { cap: CapacityResp }[] }) {
 export function PlacementCard({
   caps,
   kindsPresent,
+  onOpenUnit,
 }: {
   caps: { name: string; cap: CapacityResp }[];
   kindsPresent: string[];
+  /** Opens the owning cluster's node explorer filtered to the block's id. */
+  onOpenUnit: (cluster: string, id: string) => void;
 }) {
   const [fit, setFit] = useState("");
   const [fitKind, setFitKind] = useState("gpu");
@@ -554,7 +599,14 @@ export function PlacementCard({
           <ul className="place-toplist">
             {topBlocks.map((b, i) => (
               <li key={i}>
-                <span className="mono">{shortId(b.name)}</span>
+                <button
+                  type="button"
+                  className="row-open mono"
+                  title={`${b.name} · open nodes`}
+                  onClick={() => onOpenUnit(b.cluster, b.name)}
+                >
+                  {shortId(b.name)}
+                </button>
                 <span className="muted">{b.cluster}</span>
                 <span className="place-free tnum">
                   {n(b.free)} {b.kind.toUpperCase()}

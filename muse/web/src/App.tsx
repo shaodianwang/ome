@@ -48,6 +48,7 @@ export default function App() {
   const panel = route.panel;
   const depFilter: DepFilter = route.filter ?? "all";
   const depCluster = route.cluster;
+  const depNs = route.ns;
   const depQ = route.q;
   const sel = route.sel ?? null;
   const canonicalSel = sel && !isLegacySelected(sel) ? sel : null;
@@ -61,6 +62,7 @@ export default function App() {
     panel: "workloads",
     filter: depFilter,
     cluster: depCluster,
+    ns: depNs,
     q: depQ,
     ...over,
   });
@@ -74,6 +76,11 @@ export default function App() {
   const openModel = (s: Selected) => navigate({ panel: "models", sel: s });
   const openRuntime = (s: Selected) => navigate({ panel: "runtimes", sel: s });
   const openCapacityCluster = (c: string) => navigate({ panel: "capacity", cluster: c });
+  /** Capacity node explorer, pre-filtered — the target of node / island /
+   *  NVLink-domain click-throughs. `query` matches node names or topology ids. */
+  const openCapacityNode = (cluster: string, query: string) =>
+    navigate({ panel: "capacity", cluster, q: query });
+  const openDeploymentsSearch = (q: string) => navigate({ panel: "workloads", q });
 
   // Sidebar connection status, from the same read plane the panels use.
   const clusters = useLive(api.clusters, {
@@ -214,8 +221,10 @@ export default function App() {
           {panel === "fleet" && (
             <Fleet
               openDeployments={openDeployments}
+              openDeploymentsSearch={openDeploymentsSearch}
               openDeployment={openDeployment}
               openModel={openModel}
+              openRuntime={openRuntime}
               openAttention={() => goto("attention")}
               openCapacityCluster={openCapacityCluster}
             />
@@ -226,12 +235,15 @@ export default function App() {
               setFilter={(f) => navigate(wl({ filter: f }), { replace: true })}
               cluster={depCluster ?? ""}
               setCluster={(c) => navigate(wl({ cluster: c || undefined }), { replace: true })}
+              namespace={depNs ?? ""}
+              setNamespace={(ns) => navigate(wl({ ns: ns || undefined }), { replace: true })}
               query={depQ ?? ""}
               setQuery={(query) => navigate(wl({ q: query || undefined }), { replace: true })}
               selected={canonicalSel}
               setSelected={(s) => navigate(wl({ sel: s ?? undefined }))}
               openModel={openModel}
               openRuntime={openRuntime}
+              openNode={openCapacityNode}
             />
           )}
           {panel === "models" && (
@@ -249,7 +261,12 @@ export default function App() {
             />
           )}
           {panel === "capacity" && (
-            <Capacity openDeployment={openDeployment} initialCluster={route.cluster} />
+            <Capacity
+              openDeployment={openDeployment}
+              initialCluster={route.cluster}
+              nodeQuery={route.q}
+              openNode={openCapacityNode}
+            />
           )}
           {panel === "system" && <System />}
         </div>

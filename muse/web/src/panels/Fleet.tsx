@@ -53,14 +53,18 @@ const kpct = (a: { allocatable: number; allocated: number }) => utilPct(a);
 
 export function Fleet({
   openDeployments,
+  openDeploymentsSearch,
   openDeployment,
   openModel,
+  openRuntime,
   openAttention,
   openCapacityCluster,
 }: {
   openDeployments: (f: DepFilter) => void;
+  openDeploymentsSearch: (q: string) => void;
   openDeployment: (s: Selected) => void;
   openModel: (s: Selected) => void;
+  openRuntime: (s: Selected) => void;
   openAttention: () => void;
   openCapacityCluster: (cluster: string) => void;
 }) {
@@ -116,6 +120,13 @@ export function Fleet({
   const topConsumers = (capacity.data?.consumersByDeployment ?? [])
     .filter((c) => fCluster === "all" || c.cluster === fCluster)
     .slice(0, 8);
+  // Deployment attribution needs labelled, scheduled pods; until any exist the
+  // per-namespace list still answers "who holds capacity". Its fleet rows carry
+  // no cluster, so the fallback only applies to the all-clusters scope.
+  const namespaceConsumers =
+    topConsumers.length === 0 && fCluster === "all"
+      ? (capacity.data?.consumers ?? []).slice(0, 8)
+      : [];
   const metricState = metricsHealth(scope.metrics);
   const hasQps = metricAvailable(scope.metrics, "request_rate");
   const hasLatency = metricAvailable(scope.metrics, "latency_p99");
@@ -457,7 +468,14 @@ export function Fleet({
 
       <h2 className="sec">Deployments</h2>
       <div className="grid g2">
-        <Card title="Top consumers" sub="accelerators held · by deployment">
+        <Card
+          title="Top consumers"
+          sub={
+            namespaceConsumers.length
+              ? "accelerators held · by namespace"
+              : "accelerators held · by deployment"
+          }
+        >
           {topConsumers.length ? (
             <table className="place-tbl">
               <thead>
@@ -496,6 +514,42 @@ export function Fleet({
                 ))}
               </tbody>
             </table>
+          ) : namespaceConsumers.length ? (
+            <table className="place-tbl">
+              <thead>
+                <tr>
+                  <th>Namespace</th>
+                  <th>Kind</th>
+                  <th className="tnum">Pods</th>
+                  <th className="tnum">Accels</th>
+                </tr>
+              </thead>
+              <tbody>
+                {namespaceConsumers.map((c) => (
+                  <tr
+                    key={`${c.namespace}/${c.kind}`}
+                    className="link"
+                    onClick={() => openDeploymentsSearch(c.namespace)}
+                  >
+                    <td className="mono">
+                      <button
+                        type="button"
+                        className="row-open"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openDeploymentsSearch(c.namespace);
+                        }}
+                      >
+                        {c.namespace}
+                      </button>
+                    </td>
+                    <td>{c.kind.toUpperCase()}</td>
+                    <td className="tnum">{c.pods}</td>
+                    <td className="tnum">{c.accelerators.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           ) : (
             <div className="muted attn-none">
               {emptyText(capacity, "Loading…", "No deployment-attributed consumption.")}
@@ -516,6 +570,7 @@ export function Fleet({
             <thead>
               <tr>
                 <th>Cluster</th>
+                <th>Version</th>
                 <th className="tnum">Nodes</th>
                 <th className="tnum">Accel</th>
                 <th className="tnum">Deploys</th>
@@ -529,7 +584,7 @@ export function Fleet({
                 <tr
                   key={c.name}
                   className="link"
-                  title={c.version ? `Kubernetes ${c.version} · open Capacity` : "open Capacity"}
+                  title="open Capacity"
                   onClick={() => openCapacityCluster(c.name)}
                 >
                   <td className="mono">
@@ -544,6 +599,7 @@ export function Fleet({
                       {c.name}
                     </button>
                   </td>
+                  <td className="mono muted">{c.version ?? "—"}</td>
                   <td className="tnum">{c.nodes.toLocaleString()}</td>
                   <td className="tnum">{c.acceleratorNodes.toLocaleString()}</td>
                   <td className="tnum">{c.total}</td>
@@ -556,7 +612,7 @@ export function Fleet({
               ))}
               {byCluster.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="muted">
+                  <td colSpan={8} className="muted">
                     {emptyText(clusters, "Loading…", "No clusters")}
                   </td>
                 </tr>
@@ -664,12 +720,21 @@ export function Fleet({
                   <div className="m mono">{f.meta}</div>
                 </div>
               );
+              const openFeedItem = (sel: Selected) => {
+                if (sel.kind === "ServingRuntime" || sel.kind === "ClusterServingRuntime") {
+                  openRuntime(sel);
+                } else if (sel.kind === "BaseModel" || sel.kind === "ClusterBaseModel") {
+                  openModel(sel);
+                } else {
+                  openDeployment(sel);
+                }
+              };
               return f.sel ? (
                 <button
                   type="button"
                   className="feed-item urow-open"
                   key={i}
-                  onClick={() => f.sel && openDeployment(f.sel)}
+                  onClick={() => f.sel && openFeedItem(f.sel)}
                 >
                   {body}
                 </button>

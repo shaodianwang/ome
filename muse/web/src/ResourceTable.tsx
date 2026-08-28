@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
-import { ClusterFilter, EmptyRow, Pager, SearchInput } from "./components";
+import { ClusterFilter, EmptyRow, Pager, SearchInput, SelectFilter } from "./components";
 import { Search } from "./icons";
 import type { Tone } from "./types";
 import { emptyText, matches, num } from "./util";
@@ -50,6 +50,9 @@ export function ResourceTable<T>({
   setFilter,
   cluster: clusterProp,
   setCluster: setClusterProp,
+  namespaceOf,
+  namespace: namespaceProp,
+  setNamespace: setNamespaceProp,
   query: queryProp,
   setQuery: setQueryProp,
 }: {
@@ -73,15 +76,22 @@ export function ResourceTable<T>({
    *  they survive navigating into a detail and back. Absent → internal state. */
   cluster?: string;
   setCluster?: (c: string) => void;
+  /** Namespace of a row; providing it renders a namespace filter dropdown. */
+  namespaceOf?: (row: T) => string | undefined;
+  namespace?: string;
+  setNamespace?: (ns: string) => void;
   query?: string;
   setQuery?: (q: string) => void;
 }) {
   const [qState, setQState] = useState("");
   const [clusterState, setClusterState] = useState("");
+  const [namespaceState, setNamespaceState] = useState("");
   const q = queryProp ?? qState;
   const setQ = setQueryProp ?? setQState;
   const cluster = clusterProp ?? clusterState;
   const setCluster = setClusterProp ?? setClusterState;
+  const namespace = namespaceProp ?? namespaceState;
+  const setNamespace = setNamespaceProp ?? setNamespaceState;
   const [sortKey, setSortKey] = useState(columns.find((c) => c.sort)?.key ?? "");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(0);
@@ -90,10 +100,17 @@ export function ResourceTable<T>({
   // Back to the first page whenever the result set changes.
   useEffect(() => {
     setPage(0);
-  }, [q, cluster, filter, pageSize]);
+  }, [q, cluster, namespace, filter, pageSize]);
 
   const clusters = [...new Set(rows.map(clusterOf))].sort();
-  const scoped = rows.filter((r) => cluster === "" || clusterOf(r) === cluster);
+  const namespaces = namespaceOf
+    ? [...new Set(rows.map(namespaceOf).filter((ns): ns is string => !!ns))].sort()
+    : [];
+  const scoped = rows.filter(
+    (r) =>
+      (cluster === "" || clusterOf(r) === cluster) &&
+      (!namespaceOf || namespace === "" || namespaceOf(r) === namespace),
+  );
   const activeTab = tabs.find((t) => t.key === filter) ?? tabs[0];
   const filtered = scoped.filter(
     (r) => (activeTab ? activeTab.match(r) : true) && matches(q, ...searchFields(r)),
@@ -147,6 +164,15 @@ export function ResourceTable<T>({
           ))}
         </div>
         <ClusterFilter clusters={clusters} value={cluster} onChange={setCluster} />
+        {namespaceOf ? (
+          <SelectFilter
+            ariaLabel="Namespace"
+            allLabel="All namespaces"
+            options={namespaces}
+            value={namespace}
+            onChange={setNamespace}
+          />
+        ) : null}
         <SearchInput
           ariaLabel={`Search ${noun}`}
           placeholder={searchPlaceholder}
