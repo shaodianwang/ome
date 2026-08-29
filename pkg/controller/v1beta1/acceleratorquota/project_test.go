@@ -638,3 +638,61 @@ func TestProjectSweepsASubtreeChildrenFirst(t *testing.T) {
 		t.Errorf("delete order mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// The failure mode a live fleet hit, and the one the existing hold test could
+// not reach.
+//
+// When a member's apiserver dies, the registry deliberately keeps it connected
+// through a grace window -- correct damping for a transport, since a blip
+// should not tear down a working client. So Connected() still lists it and
+// ClientFor still returns a client; every call through that client simply
+// fails. The projector must treat that as "has not reported", because a split
+// taken without it hands its share to the survivors while it goes on holding
+// the projection it already has.
+//
+// The pre-existing fake modelled an unreachable member by removing it from both
+// Connected() and ClientFor at once, which is the one thing a dead apiserver
+// never does.
+func TestProjectHoldsWhenAMemberCannotBeRead(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	b := unreadableMember(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	// Nothing at all on the reachable member. 90 would be its correct share of a
+	// whole fleet; 120 would be the over-grant. Neither may be written while the
+	// basis is short a member.
+	if got := projectedOn(t, a); len(got) != 0 {
+		t.Errorf("projected %v onto member-a while member-b was unreadable; "+
+			"a split taken without member-b over-grants the fleet", got)
+	}
+}
+
+// unreadableMember is a member whose client exists and whose reads fail, which
+// is what a dead apiserver behind a still-connected transport looks like.
+func unreadableMember(t *testing.T, objs ...client.Object) workloadcluster.SelectivelyCachingClient {
+	t.Helper()
+	return cachingClient{fake.NewClientBuilder().
+		WithScheme(capacityScheme(t)).
+		WithObjects(objs...).
+		WithStatusSubresource(&v1beta1.AcceleratorQuota{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
+				...client.GetOption,
+			) error {
+				return errors.New("connection refused")
+			},
+		}).Build()}
+}

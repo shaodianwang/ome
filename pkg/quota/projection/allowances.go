@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/shares"
@@ -21,6 +22,67 @@ type Capacity struct {
 	ResourceName   string
 	ResourceFlavor string
 	Allocatable    resource.Quantity
+
+	// HighWaterMark is the damped reading a split divides by. Allocatable moves
+	// whenever a node is cordoned or replaced, and apportioning against it would
+	// move every tenant's share on the whole fleet whenever one node anywhere
+	// was drained. Zero means the member reports no mark, and Allocatable
+	// stands in.
+	HighWaterMark resource.Quantity
+
+	// ObservedAt is when the member took the reading, carried so a caller can
+	// report how stale a share's basis is.
+	ObservedAt *metav1.Time
+}
+
+// basis is the number this reading contributes to a proportional split.
+func (c Capacity) basis() resource.Quantity {
+	if c.HighWaterMark.IsZero() {
+		return c.Allocatable
+	}
+	return c.HighWaterMark
+}
+
+// Fleet is what the hub knows about its members on one pass.
+//
+// Registered and Reported are separate on purpose, and the difference between
+// them is the whole point of the type. A proportional split divides by the
+// fleet, so the set it OUGHT to have heard from is an input -- never inferred
+// from whoever happened to answer.
+type Fleet struct {
+	// Registered is every member an admin has registered, whatever its current
+	// reachability.
+	Registered []string
+
+	// Reported is the subset that answered this pass. A member registered but
+	// not reporting leaves every proportional budget unresolved: its capacity
+	// would otherwise leave the basis silently and every surviving member's
+	// share would grow to fill the gap, while the absent member still holds the
+	// projection it last received -- so the fleet would have granted more than
+	// the admin authorized, and the excess would surface only when the member
+	// came back.
+	Reported []string
+
+	// Capacity is what the reporting members hold. A member that answered and
+	// has none of a given (resource, flavor) pair simply has no entry for it and
+	// is apportioned nothing, which is a different thing from not answering.
+	Capacity []Capacity
+}
+
+// silent names the registered members that did not report.
+func (f Fleet) silent() []string {
+	reported := make(map[string]struct{}, len(f.Reported))
+	for _, c := range f.Reported {
+		reported[c] = struct{}{}
+	}
+	var out []string
+	for _, c := range f.Registered {
+		if _, ok := reported[c]; !ok {
+			out = append(out, c)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ResolveOptions carry the fleet-level defaults a node may fall back on.
@@ -55,16 +117,16 @@ type Resolution struct {
 // before members are up there is nothing to be proportional to — a startup
 // ordering, not a misconfiguration. Both land in Unresolved, but the message
 // says which, because one clears itself and the other needs an admin.
-func Resolve(t *tree.Tree, capacity []Capacity, opts ResolveOptions) Resolution {
+func Resolve(t *tree.Tree, fleet Fleet, opts ResolveOptions) Resolution {
 	out := Resolution{
 		ByCluster:  map[string][]Allowance{},
 		Unresolved: map[string]string{},
 	}
 
 	byPair := map[key][]shares.Weight{}
-	for _, c := range capacity {
+	for _, c := range fleet.Capacity {
 		k := key{c.ResourceName, c.ResourceFlavor}
-		byPair[k] = append(byPair[k], shares.Weight{Cluster: c.Cluster, Capacity: c.Allocatable})
+		byPair[k] = append(byPair[k], shares.Weight{Cluster: c.Cluster, Capacity: c.basis()})
 	}
 	for k := range byPair {
 		// Sorted so a split's tiebreak sees the same order however the caller
@@ -74,8 +136,9 @@ func Resolve(t *tree.Tree, capacity []Capacity, opts ResolveOptions) Resolution 
 		byPair[k] = w
 	}
 
+	silent := fleet.silent()
 	for _, leaf := range t.Leaves() {
-		resolved, reason := resolveLeaf(leaf, byPair, opts)
+		resolved, reason := resolveLeaf(leaf, byPair, silent, opts)
 		if reason != "" {
 			out.Unresolved[leaf.Name()] = reason
 			continue
@@ -108,7 +171,9 @@ type placed struct {
 }
 
 // resolveLeaf splits every budget on one leaf, or explains why it could not.
-func resolveLeaf(leaf *tree.Node, byPair map[key][]shares.Weight, opts ResolveOptions) ([]placed, string) {
+func resolveLeaf(leaf *tree.Node, byPair map[key][]shares.Weight,
+	silent []string, opts ResolveOptions,
+) ([]placed, string) {
 	var out []placed
 	for _, b := range leaf.Quota.Spec.Budgets {
 		policy := effectivePolicy(leaf.Quota, b, opts)
@@ -121,6 +186,16 @@ func resolveLeaf(leaf *tree.Node, byPair map[key][]shares.Weight, opts ResolveOp
 			out = append(out, attach(leaf.Name(), b, split)...)
 
 		case v1beta1.AcceleratorQuotaDistributionProportional:
+			// Before the arithmetic, not after: a basis missing a registered
+			// member divides the fleet total among whoever answered, which
+			// over-grants by exactly the absent member's share. Holding is wrong
+			// by at most the change an admin just made; splitting anyway is
+			// wrong by the whole of what is missing.
+			if len(silent) > 0 {
+				return nil, fmt.Sprintf(
+					"holding %s/%s: %v has not reported capacity, and splitting without it would over-grant the fleet",
+					b.ResourceName, b.ResourceFlavor, silent)
+			}
 			weights := byPair[key{b.ResourceName, b.ResourceFlavor}]
 			if len(weights) == 0 {
 				return nil, fmt.Sprintf(

@@ -103,16 +103,20 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 		return held, nil
 	}
 
-	capacity, unreadable := r.fleetCapacity(ctx, connected)
+	capacity, reported, unreadable := r.fleetCapacity(ctx, connected)
 	for cluster, err := range unreadable {
-		// A member whose capacity cannot be read still receives its explicit
-		// shares; only a proportional split needs the reading. Logged rather
-		// than failed for the same reason.
-		log.V(1).Info("member capacity unavailable, so proportional splits will wait",
+		// Logged, and also acted on: a member missing from Reported holds every
+		// proportional split below. Explicit shares are unaffected -- they are
+		// the admin's arithmetic and need no reading.
+		log.Info("member capacity unavailable, so proportional splits are held",
 			"cluster", cluster, "reason", err.Error())
 	}
 
-	resolution := projection.Resolve(built, capacity, projection.ResolveOptions{
+	resolution := projection.Resolve(built, projection.Fleet{
+		Registered: registered,
+		Reported:   reported,
+		Capacity:   capacity,
+	}, projection.ResolveOptions{
 		DefaultPolicy: r.Project.DefaultPolicy,
 	})
 
@@ -382,34 +386,47 @@ func (r *Reconciler) reapProjections(ctx context.Context, name string) error {
 // to read a member's nodes, and the grant it does hold covers quota objects
 // only. A member that has not reported yet is simply absent from the result,
 // which a proportional split reads as "wait", not as "zero".
-func (r *Reconciler) fleetCapacity(ctx context.Context, clusters []string) ([]projection.Capacity, map[string]error) {
+func (r *Reconciler) fleetCapacity(ctx context.Context, clusters []string,
+) ([]projection.Capacity, []string, map[string]error) {
 	var out []projection.Capacity
+	var reported []string
 	unreadable := map[string]error{}
 
 	for _, cluster := range clusters {
 		remote, ok := r.Project.Clusters.ClientFor(cluster)
 		if !ok {
+			// Connected() said it was there and ClientFor disagrees, so it
+			// dropped between the two. Not reported: a member that cannot be
+			// asked has not answered, and letting it fall out silently is what
+			// shrinks the basis.
+			unreadable[cluster] = errors.New("no client for this member")
 			continue
 		}
 		var root v1beta1.AcceleratorQuota
 		if err := remote.Get(ctx, types.NamespacedName{Name: r.Options.RootName}, &root); err != nil {
-			if !apierrors.IsNotFound(err) {
-				unreadable[cluster] = err
-			}
-			// A member that has not created its root yet is starting up, which
-			// is neither an error nor a reading of zero.
+			// Including NotFound. A member that has not created its root yet is
+			// starting up rather than broken, but it still has not reported, and
+			// a split taken without it hands its share to everyone else.
+			unreadable[cluster] = err
 			continue
 		}
+
+		// Answered. That is recorded even when the member holds none of the
+		// budgeted flavors: reporting nothing is a reading, and it apportions
+		// that member zero rather than removing it from the basis.
+		reported = append(reported, cluster)
 		for _, c := range root.Status.Capacity {
 			out = append(out, projection.Capacity{
 				Cluster:        cluster,
 				ResourceName:   c.ResourceName,
 				ResourceFlavor: c.ResourceFlavor,
 				Allocatable:    c.Allocatable.DeepCopy(),
+				HighWaterMark:  c.HighWaterMark.DeepCopy(),
+				ObservedAt:     c.ObservedAt.DeepCopy(),
 			})
 		}
 	}
-	return out, unreadable
+	return out, reported, unreadable
 }
 
 // authoredHere drops the copies other planes wrote, keeping only what an admin
