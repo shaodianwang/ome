@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -262,6 +263,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 	setConditions(&updated.Status, violation, isFrozen)
 	if r.Materialize.Enabled() {
 		setMaterializationStatus(&updated.Status, current.Generation, outcome, isFrozen, metav1.Now())
+		updated.Status.SourceGeneration = materializedSourceGeneration(current, updated.Status)
 	}
 
 	if equalStatus(current.Status, updated.Status) {
@@ -326,10 +328,45 @@ func setCondition(status *v1beta1.AcceleratorQuotaStatus, condition metav1.Condi
 // excluded deliberately: SetStatusCondition only moves LastTransitionTime when
 // the status actually flips, so comparing the rest is what makes a no-op pass a
 // genuine no-op.
+// materializedSourceGeneration echoes the generation the management plane
+// stamped on a projection, but only once this pass actually materialized it.
+//
+// The number is the only thing that makes remote progress comparable: a
+// projection's own generation is object-local and says nothing about which
+// source revision it reflects. Echoing it before the objects were written would
+// report progress that has not happened -- so a node that is frozen, or that
+// failed to materialize, keeps whatever it last earned rather than advancing.
+//
+// Empty on a node nobody projected: an admin-authored node has no source
+// elsewhere, and a number invented here would claim otherwise.
+func materializedSourceGeneration(current *v1beta1.AcceleratorQuota,
+	status v1beta1.AcceleratorQuotaStatus,
+) int64 {
+	stamped := current.Annotations[v1beta1.AcceleratorQuotaSourceGenerationAnnotation]
+	if stamped == "" {
+		return 0
+	}
+	if !apimeta.IsStatusConditionTrue(status.Conditions, v1beta1.AcceleratorQuotaMaterialized) {
+		return current.Status.SourceGeneration
+	}
+	// A projector writes this annotation, so an unparseable value means someone
+	// edited it by hand. Holding the previous number is more honest than
+	// reporting zero, which reads as "materialized nothing yet".
+	n, err := strconv.ParseInt(stamped, 10, 64)
+	if err != nil {
+		return current.Status.SourceGeneration
+	}
+	return n
+}
+
 func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
 	if a.ObservedGeneration != b.ObservedGeneration || a.Path != b.Path || a.Parent != b.Parent {
 		return false
 	}
+	if a.SourceGeneration != b.SourceGeneration {
+		return false
+	}
+
 	if !equalMaterialization(a.Materialization, b.Materialization) {
 		return false
 	}

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -531,5 +532,137 @@ func TestSetupWithManager(t *testing.T) {
 				t.Fatalf("error = %v, want %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A projection's own generation is object-local, so it says nothing about which
+// source revision the copy reflects. The echoed number is what makes remote
+// progress comparable from the management plane -- and it has to mean
+// "materialized", not "received", or the hub reads work that has not happened.
+func TestMaterializedSourceGeneration(t *testing.T) {
+	projected := func(stamp string, held int64) *v1beta1.AcceleratorQuota {
+		q := leaf("team", rootName)
+		if stamp != "" {
+			q.Annotations = map[string]string{
+				v1beta1.AcceleratorQuotaSourceGenerationAnnotation: stamp,
+			}
+		}
+		q.Status.SourceGeneration = held
+		return q
+	}
+	materialized := func(ok bool) v1beta1.AcceleratorQuotaStatus {
+		status := metav1.ConditionFalse
+		if ok {
+			status = metav1.ConditionTrue
+		}
+		return v1beta1.AcceleratorQuotaStatus{Conditions: []metav1.Condition{{
+			Type:               v1beta1.AcceleratorQuotaMaterialized,
+			Status:             status,
+			Reason:             "Test",
+			LastTransitionTime: metav1.Now(),
+		}}}
+	}
+
+	tests := []struct {
+		name    string
+		current *v1beta1.AcceleratorQuota
+		status  v1beta1.AcceleratorQuotaStatus
+		want    int64
+	}{
+		{
+			name:    "a materialized projection reports what it was given",
+			current: projected("7", 0),
+			status:  materialized(true),
+			want:    7,
+		},
+		{
+			// Received is not materialized. Reporting 9 here would tell the hub
+			// its newest revision is live on a member that has not written it.
+			name:    "a projection that has not materialized holds its last number",
+			current: projected("9", 7),
+			status:  materialized(false),
+			want:    7,
+		},
+		{
+			// An admin-authored node has no source anywhere else, so any number
+			// here would be an invention.
+			name:    "a locally authored node reports nothing",
+			current: projected("", 0),
+			status:  materialized(true),
+			want:    0,
+		},
+		{
+			// The annotation is the projector's to write, so a value that will
+			// not parse was edited by hand. Zero would read as "nothing
+			// materialized yet", which is worse than stale.
+			name:    "an unparseable stamp holds the last number rather than resetting",
+			current: projected("not-a-number", 4),
+			status:  materialized(true),
+			want:    4,
+		},
+		{
+			name:    "no Materialized condition at all is not materialized",
+			current: projected("9", 3),
+			status:  v1beta1.AcceleratorQuotaStatus{},
+			want:    3,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := materializedSourceGeneration(tc.current, tc.status); got != tc.want {
+				t.Errorf("materializedSourceGeneration() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The echo has to keep moving. Every field written to status needs a matching
+// entry in equalStatus, because the no-op short-circuit skips the patch
+// entirely when it thinks nothing changed -- so a field it does not compare is
+// written once and then frozen for the life of the object. That has already
+// happened once in this package, to Budgets.
+func TestSourceGenerationFollowsTheProjector(t *testing.T) {
+	stamp := func(q *v1beta1.AcceleratorQuota, gen string) *v1beta1.AcceleratorQuota {
+		q.Annotations = map[string]string{
+			v1beta1.AcceleratorQuotaSourceGenerationAnnotation: gen,
+		}
+		q.Labels = map[string]string{v1beta1.AcceleratorQuotaOriginLabel: "hub-1"}
+		return q
+	}
+
+	ctx := context.Background()
+	r, c := materializingReconciler(t, &recordingBackend{},
+		cohort(rootName, "", budget("100")),
+		stamp(leaf("team", rootName, budget("100")), "7"),
+	)
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	var got v1beta1.AcceleratorQuota
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if got.Status.SourceGeneration != 7 {
+		t.Fatalf("first pass: SourceGeneration = %d, want 7", got.Status.SourceGeneration)
+	}
+
+	// The hub re-projects a newer revision. Nothing else about the node moves --
+	// same spec, same generation, same conditions -- so this second pass is
+	// exactly the one a missing comparator entry would skip.
+	got.Annotations[v1beta1.AcceleratorQuotaSourceGenerationAnnotation] = "8"
+	if err := c.Update(ctx, &got); err != nil {
+		t.Fatalf("Update() = %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if got.Status.SourceGeneration != 8 {
+		t.Errorf("second pass: SourceGeneration = %d, want 8 -- the echo froze",
+			got.Status.SourceGeneration)
 	}
 }
