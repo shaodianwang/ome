@@ -3,6 +3,7 @@ package acceleratorquota
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -43,6 +45,17 @@ func (f *fakeRegistry) Connect(_ context.Context, name string, kubeconfig []byte
 func (f *fakeRegistry) Disconnect(name string) {
 	f.disconnect = append(f.disconnect, name)
 	delete(f.connected, name)
+}
+
+// Connected is what the Connector compares across a pass to decide whether the
+// reachable set moved, so it must reflect Connect and Disconnect immediately.
+func (f *fakeRegistry) Connected() []string {
+	out := make([]string, 0, len(f.connected))
+	for name := range f.connected {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func connectScheme(t *testing.T) *runtime.Scheme {
@@ -340,5 +353,120 @@ func TestConnectorDoesNotDropOnAReadFailure(t *testing.T) {
 	}
 	if len(reg.disconnect) != 0 {
 		t.Errorf("an unreadable registry dropped clients: %v", reg.disconnect)
+	}
+}
+
+// The projector holds every proportional split while a registered member is
+// missing from the basis, and nothing else tells it the fleet is whole again:
+// its own watches see AcceleratorQuota edits and a resync tick, neither of
+// which fires when a member reconnects. So the transport has to say so, or a
+// recovered fleet waits out the resync interval before a correct split appears.
+//
+// Only a MOVE in the reachable set counts. Connect is content-keyed and called
+// on every pass, so signalling whenever it runs would wake the whole fleet on
+// every member's health probe.
+func TestConnectorWakesTheProjectorOnlyWhenReachabilityMoves(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing []client.Object
+		already  map[string]string
+		req      string
+		wantWake bool
+	}{
+		{
+			name:     "a member becoming reachable wakes it",
+			existing: []client.Object{workloadCluster("member-a", true, "kc-a", "kubeconfig"), kubeconfigSecret("kc-a", "kubeconfig", "body")},
+			req:      "member-a",
+			wantWake: true,
+		},
+		{
+			// The steady state: the registry re-reconciles on every health
+			// probe and Connect is idempotent. Waking here would re-run the
+			// fleet once a minute per member for no news.
+			name:     "an already-connected member does not",
+			existing: []client.Object{workloadCluster("member-a", true, "kc-a", "kubeconfig"), kubeconfigSecret("kc-a", "kubeconfig", "body")},
+			already:  map[string]string{"member-a": "kubeconfig"},
+			req:      "member-a",
+			wantWake: false,
+		},
+		{
+			name:     "a member going unready wakes it",
+			existing: []client.Object{workloadCluster("member-a", false, "kc-a", "kubeconfig")},
+			already:  map[string]string{"member-a": "kubeconfig"},
+			req:      "member-a",
+			wantWake: true,
+		},
+		{
+			name:     "a deregistered member wakes it",
+			already:  map[string]string{"member-a": "kubeconfig"},
+			req:      "member-a",
+			wantWake: true,
+		},
+		{
+			// Already gone, so nothing moved.
+			name:     "a member that was never connected going away does not",
+			req:      "member-a",
+			wantWake: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newFakeRegistry()
+			for name, kc := range tc.already {
+				reg.connected[name] = kc
+			}
+			// Buffered past the one signal a pass can send, so a spurious second
+			// one shows up as a count rather than a block.
+			ch := make(chan event.GenericEvent, 4)
+
+			c := &Connector{
+				Client: fake.NewClientBuilder().
+					WithScheme(connectScheme(t)).
+					WithObjects(tc.existing...).Build(),
+				Log:      logf.Log.WithName("test"),
+				Clusters: reg,
+				Changed:  ch,
+				Root:     "root",
+			}
+			if _, err := c.Reconcile(context.Background(),
+				ctrl.Request{NamespacedName: types.NamespacedName{Name: tc.req}}); err != nil {
+				t.Fatalf("Reconcile() = %v", err)
+			}
+
+			switch got := len(ch); {
+			case tc.wantWake && got != 1:
+				t.Errorf("reachability moved but the projector was signalled %d times, want 1", got)
+			case !tc.wantWake && got != 0:
+				t.Errorf("nothing moved but the projector was signalled %d times, want 0", got)
+			}
+			if tc.wantWake {
+				evt := <-ch
+				if evt.Object.GetName() != "root" {
+					t.Errorf("signal named %q, want the root %q -- the projector keys its pass on it",
+						evt.Object.GetName(), "root")
+				}
+			}
+		})
+	}
+}
+
+// A Connector with nowhere to signal must still work: workload mode wires no
+// channel, and neither do most tests.
+func TestConnectorWithoutAChannel(t *testing.T) {
+	reg := newFakeRegistry()
+	c := &Connector{
+		Client: fake.NewClientBuilder().
+			WithScheme(connectScheme(t)).
+			WithObjects(workloadCluster("member-a", true, "kc-a", "kubeconfig"), kubeconfigSecret("kc-a", "kubeconfig", "body")).Build(),
+		Log:      logf.Log.WithName("test"),
+		Clusters: reg,
+	}
+	if _, err := c.Reconcile(context.Background(),
+		ctrl.Request{NamespacedName: types.NamespacedName{Name: "member-a"}}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	if _, ok := reg.connected["member-a"]; !ok {
+		t.Error("the member was not connected")
 	}
 }

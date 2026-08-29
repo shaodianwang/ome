@@ -8,9 +8,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -26,6 +29,7 @@ const defaultKubeConfigKey = "kubeconfig"
 type clusterRegistry interface {
 	Connect(ctx context.Context, name string, kubeconfig []byte) error
 	Disconnect(name string)
+	Connected() []string
 }
 
 // Connector keeps a cross-cluster transport in step with the WorkloadCluster
@@ -57,11 +61,60 @@ type Connector struct {
 	// running this controller inside ome-manager and handing that process the
 	// Kueue write grants a separate binary exists to keep off it.
 	Clusters clusterRegistry
+
+	// Changed is signalled when the set of connected members moves. The
+	// projector holds every split while any registered member is missing from
+	// the basis, and nothing else would tell it the fleet was whole again --
+	// its own watches see AcceleratorQuota edits and its resync tick, neither of
+	// which fires when a member comes back. Without this a recovered fleet waits
+	// out the resync interval before a correct split appears.
+	//
+	// Nil leaves the projector on its resync alone, which is what the workload
+	// mode and the unit tests want.
+	Changed chan<- event.GenericEvent
+
+	// Root is the object the signal names. The projector reconciles the whole
+	// tree from any node, so one key is enough and the root is the one node
+	// guaranteed to exist.
+	Root string
+}
+
+// notify wakes the projector, without blocking on it. A dropped signal costs a
+// resync interval, and blocking the transport's reconcile to guarantee delivery
+// would be the worse trade: the queue is drained by a controller that may be
+// mid-pass against the very member that just changed.
+func (c *Connector) notify() {
+	if c.Changed == nil || c.Root == "" {
+		return
+	}
+	evt := event.GenericEvent{Object: &v1beta1.AcceleratorQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: c.Root},
+	}}
+	select {
+	case c.Changed <- evt:
+	default:
+		c.Log.V(1).Info("projector wake-up dropped; the resync tick still covers it")
+	}
+}
+
+// membership is the connected set, for comparing one pass against the next.
+func (c *Connector) membership() sets.Set[string] {
+	return sets.New(c.Clusters.Connected()...)
 }
 
 // Reconcile mirrors one WorkloadCluster's reachability onto the transport.
 func (c *Connector) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := c.Log.WithValues("workloadcluster", req.Name)
+
+	// Connect is content-keyed and every pass calls it, so "did we call it" says
+	// nothing. Only a change in who is reachable is worth waking the projector
+	// for; otherwise every member's health probe would re-run the whole fleet.
+	before := c.membership()
+	defer func() {
+		if !before.Equal(c.membership()) {
+			c.notify()
+		}
+	}()
 
 	var wc v1beta1.WorkloadCluster
 	if err := c.Get(ctx, req.NamespacedName, &wc); err != nil {

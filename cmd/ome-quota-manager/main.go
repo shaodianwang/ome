@@ -26,6 +26,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -41,6 +42,12 @@ import (
 	"github.com/ome-projects/ome/pkg/quota/tree"
 	quotawebhook "github.com/ome-projects/ome/pkg/webhook/admission/acceleratorquota"
 )
+
+// transportWakeBuffer is how many transport changes may queue before one is
+// dropped. A fleet reconnecting at once is the burst worth absorbing; past that
+// a dropped signal costs one resync interval, and the pass it would have
+// triggered rebuilds the whole tree regardless.
+const transportWakeBuffer = 16
 
 var (
 	scheme   = runtime.NewScheme()
@@ -356,6 +363,7 @@ func main() {
 				"coverResources", opts.coverResources)
 		}
 	}
+	var setupOpts []acceleratorquota.Option
 	if mode == acceleratorquota.ModeManagement {
 		// The management plane's own transport. Not ome-manager's: a Manager is
 		// an in-process struct with no remote surface, so sharing one would mean
@@ -375,15 +383,25 @@ func main() {
 		// one writer, in ome-manager, whose grace and backoff state is in memory
 		// rather than leased, so a second one would flap the condition between
 		// two processes and lose the argument silently.
+		// Buffered because the send is non-blocking: the transport must not wait
+		// on a projector that may be mid-pass against the very member that just
+		// changed. Depth covers a fleet reconnecting at once; past that a
+		// dropped signal costs one resync interval, and the pass it would have
+		// triggered rebuilds the whole tree anyway.
+		transportChanged := make(chan event.GenericEvent, transportWakeBuffer)
 		connector := &acceleratorquota.Connector{
 			Client:   mgr.GetClient(),
 			Log:      ctrl.Log.WithName("AcceleratorQuotaConnector"),
 			Clusters: clusters,
+			Changed:  transportChanged,
+			Root:     v1beta1.AcceleratorQuotaRootName,
 		}
 		if err := connector.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create the cluster connector")
 			os.Exit(1)
 		}
+
+		setupOpts = append(setupOpts, acceleratorquota.WithTransportEvents(transportChanged))
 
 		r.Project = acceleratorquota.ProjectOptions{
 			Clusters:      clusters,
@@ -404,7 +422,7 @@ func main() {
 		}
 	}
 
-	if err := r.SetupWithManager(mgr); err != nil {
+	if err := r.SetupWithManager(mgr, setupOpts...); err != nil {
 		setupLog.Error(err, "unable to create the AcceleratorQuota controller")
 		os.Exit(1)
 	}

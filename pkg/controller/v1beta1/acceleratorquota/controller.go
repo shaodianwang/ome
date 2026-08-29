@@ -436,7 +436,26 @@ func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
 // queue would leave the second node reporting a stale condition until it
 // happened to be touched. Collapsing to one key also means a burst of edits
 // coalesces into a single rebuild.
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+// WithTransportEvents wires the channel the Connector signals when the set of
+// reachable members moves, so a fleet that becomes whole again is re-split at
+// once rather than on the next resync tick. Without it the controller is
+// poll-only, which is correct but slow to recover.
+func WithTransportEvents(ch <-chan event.GenericEvent) Option {
+	return func(o *options) { o.transportEvents = ch }
+}
+
+// Option configures SetupWithManager.
+type Option func(*options)
+
+type options struct {
+	transportEvents <-chan event.GenericEvent
+}
+
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
+	var cfg options
+	for _, o := range opts {
+		o(&cfg)
+	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
@@ -507,6 +526,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 			builder.WithPredicates(usageChanged),
 		)
+	}
+	if cfg.transportEvents != nil {
+		// Every event names the root and the pass rebuilds the whole tree, so a
+		// burst of reconnections collapses into one queued pass rather than one
+		// per member.
+		b = b.WatchesRawSource(source.Channel(cfg.transportEvents,
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName()}}}
+			})))
 	}
 	return b.Complete(r)
 }
