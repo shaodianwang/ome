@@ -245,7 +245,8 @@ type BaseModelSpec struct {
 	// ModelExtension is the common extension of the model
 	ModelExtensionSpec `json:",inline"`
 
-	// +optional Serving mode of the model, e.g., ["On-demand", "Dedicated"]
+	// ServingMode of the model, e.g., ["On-demand", "Dedicated"]
+	// +optional
 	// +listType=atomic
 	ServingMode []string `json:"servingMode,omitempty"`
 
@@ -319,13 +320,11 @@ const (
 )
 
 // ModelCapability enum
-// TODO: Remove legacy capabilities
-//
 // +kubebuilder:validation:Enum=TEXT_GENERATION;TEXT_SUMMARIZATION;TEXT_EMBEDDINGS;TEXT_RERANK;CHAT;VISION;EMBEDDING;RERANK;TEXT_TO_TEXT;TEXT_TO_AUDIO;TEXT_TO_IMAGE;TEXT_TO_VIDEO;IMAGE_TEXT_TO_TEXT;IMAGE_TEXT_TO_AUDIO;IMAGE_TEXT_TO_IMAGE;IMAGE_TEXT_TO_VIDEO;VIDEO_TEXT_TO_TEXT;VIDEO_TEXT_TO_AUDIO;AUDIO_TO_TEXT;AUDIO_TEXT_TO_TEXT;AUDIO_TO_AUDIO;AUDIO_TRANSLATION
 type ModelCapability string
 
 const (
-	// Legacy capabilities (to be deprecated)
+	// Deprecated: prefer the modality-pair values below.
 	ModelCapabilityTextGeneration    ModelCapability = "TEXT_GENERATION"
 	ModelCapabilityTextSummarization ModelCapability = "TEXT_SUMMARIZATION"
 	ModelCapabilityTextEmbeddings    ModelCapability = "TEXT_EMBEDDINGS"
@@ -333,7 +332,7 @@ const (
 	ModelCapabilityChat              ModelCapability = "CHAT"
 	ModelCapabilityVision            ModelCapability = "VISION"
 
-	// New capabilities (preferred naming)
+	// Preferred capability names, expressed as modality pairs.
 	ModelCapabilityEmbedding        ModelCapability = "EMBEDDING"
 	ModelCapabilityRerank           ModelCapability = "RERANK"
 	ModelCapabilityTextToText       ModelCapability = "TEXT_TO_TEXT"
@@ -498,7 +497,7 @@ const (
 
 // ModelCacheStatus reports the cluster-wide cache provider identity
 // for models that use a sharded distribution backend. In the lazy-
-// fetch flow, cluster_cache daemons pull bytes on demand at first
+// fetch flow, the sharded-cache daemons pull bytes on demand at first
 // inference, so there is no separate "placement progress" to report
 // — Backend + SourceUri are enough to identify the cache mapping.
 type ModelCacheStatus struct {

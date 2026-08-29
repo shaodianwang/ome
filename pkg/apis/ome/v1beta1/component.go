@@ -49,13 +49,10 @@ type ComponentExtensionSpec struct {
 
 	// Autoscaler configures the per-Component autoscaler dispatch and the
 	// underlying KEDA / HPA configuration. Takes priority over the legacy
-	// ome.io/autoscalerClass annotation for this Component. Alpha
-	//. The API may change without notice. This is the only
-	// supported way to configure per-Component autoscaling on an ISVC —
-	// the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum
-	// have been removed. Operators on the legacy shape MUST migrate to the
-	// per-Component Autoscaler block (Autoscaler.HPA.Metrics +
-	// MinReplicas / MaxReplicas).
+	// ome.io/autoscalerClass annotation for this Component, and is the
+	// only way to configure per-Component autoscaling: scale metrics live
+	// here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas
+	// above. Alpha. The API may change without notice.
 	// +optional
 	Autoscaler *ComponentAutoscaler `json:"autoscaler,omitempty"`
 }

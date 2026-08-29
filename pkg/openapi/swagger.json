@@ -309,7 +309,12 @@
             "default": {},
             "$ref": "#/definitions/v1.Condition"
           },
-          "x-kubernetes-list-type": "atomic"
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map",
+          "x-kubernetes-patch-merge-key": "type",
+          "x-kubernetes-patch-strategy": "merge"
         },
         "lastUpdated": {
           "description": "Last update time",
@@ -1063,7 +1068,7 @@
       "type": "object",
       "properties": {
         "authRef": {
-          "description": "AuthRef points at a Secret key (in the InferenceService's namespace) holding a bearer token sent as \"Authorization: Bearer \u003ctoken\u003e\". Omit for an unauthenticated Prometheus (the bundled one). TLS/mTLS is not yet supported.",
+          "description": "AuthRef points at a Secret key (in the InferenceService's namespace) holding a bearer token sent as \"Authorization: Bearer \u003ctoken\u003e\". Omit for an unauthenticated Prometheus (the bundled one). TLS/mTLS is not supported.",
           "$ref": "#/definitions/v1.SecretKeySelector"
         },
         "headers": {
@@ -1247,6 +1252,7 @@
           "type": "string"
         },
         "servingMode": {
+          "description": "ServingMode of the model, e.g., [\"On-demand\", \"Dedicated\"]",
           "type": "array",
           "items": {
             "type": "string",
@@ -1433,7 +1439,7 @@
       }
     },
     "v1beta1.ClusterProfileRef": {
-      "description": "ClusterProfileRef references a SIG-Multicluster cluster-inventory-api ClusterProfile. Phase 1 records the reference but does not yet resolve it.",
+      "description": "ClusterProfileRef references a SIG-Multicluster cluster-inventory-api ClusterProfile. The reference is recorded but not resolved.",
       "type": "object",
       "properties": {
         "name": {
@@ -1497,7 +1503,7 @@
       }
     },
     "v1beta1.ComponentAutoscaler": {
-      "description": "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha. The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields have been removed from ComponentExtensionSpec.",
+      "description": "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling on an InferenceService. Alpha. The API may change without notice.",
       "type": "object",
       "required": [
         "class"
@@ -1575,7 +1581,7 @@
           }
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "deploymentStrategy": {
@@ -1660,7 +1666,7 @@
           "$ref": "#/definitions/knative.URL"
         },
         "rolloutPhase": {
-          "description": "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+          "description": "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes without the rollout contract — e.g. RawDeployment).",
           "type": "string"
         },
         "scaleTargetRef": {
@@ -1798,7 +1804,7 @@
           "type": "boolean"
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "containers": {
@@ -2083,7 +2089,7 @@
           "x-kubernetes-list-type": "atomic"
         },
         "topologyKey": {
-          "description": "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users no longer hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
+          "description": "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users need not hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
           "type": "string"
         },
         "topologySpreadConstraints": {
@@ -2227,7 +2233,7 @@
           "type": "boolean"
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "containers": {
@@ -2512,7 +2518,7 @@
           "x-kubernetes-list-type": "atomic"
         },
         "topologyKey": {
-          "description": "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users no longer hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
+          "description": "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users need not hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
           "type": "string"
         },
         "topologySpreadConstraints": {
@@ -2692,7 +2698,7 @@
       }
     },
     "v1beta1.GroupBlueGreen": {
-      "description": "GroupBlueGreen surges the full new set alongside the old, waits for Ready, then flips traffic atomically. It is also the default progression a group falls back to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic steps (the flip is all-or-nothing); surge sequencing across Components is the group-level Order field, not a blue-green-specific knob. Empty today, reserved for future blue-green-specific options (e.g. a pre-flip verification window).",
+      "description": "GroupBlueGreen surges the full new set alongside the old, waits for Ready, then flips traffic atomically. It is also the default progression a group falls back to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic steps (the flip is all-or-nothing); surge sequencing across Components is the group-level Order field, not a blue-green-specific knob. Empty; reserved for blue-green-specific options (e.g. a pre-flip verification window).",
       "type": "object"
     },
     "v1beta1.GroupCanary": {
@@ -2853,7 +2859,7 @@
       "type": "object",
       "properties": {
         "maxUnavailable": {
-          "description": "MaxUnavailable caps in-rollout disruption. Accepts either a raw count or a percent string. When nil, the InferenceReplica controller falls back to its own default (currently 25%).",
+          "description": "MaxUnavailable caps in-rollout disruption. Accepts either a raw count or a percent string. When nil, the InferenceReplica controller falls back to its own default budget.",
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
         },
         "partition": {
@@ -2936,7 +2942,7 @@
       }
     },
     "v1beta1.InferenceReplicaStatus": {
-      "description": "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy LifecycleStatus shape so the dual-write window can byte-compare the two.",
+      "description": "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the LifecycleStatus shape so the ISVC's aggregated per-Component status is a verbatim projection of this block.",
       "type": "object",
       "properties": {
         "availableReplicas": {
@@ -2990,7 +2996,7 @@
           "x-kubernetes-list-type": "map"
         },
         "labelSelector": {
-          "description": "LabelSelector identifies pods of this InferenceReplica for the HPA scale subresource. Must match the legacy componentLabelSelectorString formula so existing HPAs continue to resolve unchanged.",
+          "description": "LabelSelector identifies pods of this InferenceReplica for the HPA scale subresource. Uses the same selector formula as the Component's pod labels, so HPAs targeting either the ISVC or the InferenceReplica resolve to the same pod set.",
           "type": "string"
         },
         "migrations": {
@@ -4104,7 +4110,7 @@
           "default": 0
         },
         "mode": {
-          "description": "Mode is the migration mechanism. Always `surge` in v1.",
+          "description": "Mode is the migration mechanism. Surge is the only defined mode.",
           "type": "string",
           "default": ""
         },
@@ -4237,7 +4243,7 @@
       }
     },
     "v1beta1.ModelCacheStatus": {
-      "description": "ModelCacheStatus reports the cluster-wide cache provider identity for models that use a sharded distribution backend. In the lazy- fetch flow, cluster_cache daemons pull bytes on demand at first inference, so there is no separate \"placement progress\" to report — Backend + SourceUri are enough to identify the cache mapping.",
+      "description": "ModelCacheStatus reports the cluster-wide cache provider identity for models that use a sharded distribution backend. In the lazy- fetch flow, the sharded-cache daemons pull bytes on demand at first inference, so there is no separate \"placement progress\" to report — Backend + SourceUri are enough to identify the cache mapping.",
       "type": "object",
       "properties": {
         "backend": {
@@ -4662,7 +4668,7 @@
           "type": "string"
         },
         "mode": {
-          "description": "Mode is the placement cardinality: Single (one cluster), All (every candidate), or Split (replicas distributed across clusters). Defaults to Single. All and Split are rejected by admission on a control plane whose build does not yet implement them.",
+          "description": "Mode is the placement cardinality: Single (one cluster), All (every candidate), or Split (replicas distributed across clusters). Defaults to Single. All and Split are rejected by admission on a control plane that does not implement them.",
           "type": "string"
         },
         "requirements": {
@@ -5101,7 +5107,7 @@
       }
     },
     "v1beta1.RolloutCoordinationGroup": {
-      "description": "RolloutCoordinationGroup binds a set of Components under one coordination policy.\n\nUnused — superseded by spec.rollout.groups[] (RolloutGroup); retained for compatibility, scheduled for removal.",
+      "description": "RolloutCoordinationGroup binds a set of Components under one coordination policy.\n\nSuperseded by spec.rollout.groups[] (RolloutGroup); retained for compatibility.",
       "type": "object",
       "required": [
         "components",
@@ -5240,7 +5246,7 @@
       }
     },
     "v1beta1.RolloutCoordinationSpec": {
-      "description": "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.\n\nUnused — superseded by spec.rollout (RolloutSpec); retained for compatibility, scheduled for removal.",
+      "description": "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.\n\nSuperseded by spec.rollout (RolloutSpec); retained for compatibility.",
       "type": "object",
       "properties": {
         "groups": {
@@ -5398,7 +5404,7 @@
           "type": "boolean"
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "config": {
@@ -5957,7 +5963,7 @@
           "default": ""
         },
         "proportional": {
-          "description": "Proportional configuration; required when Mode == \"proportional\".",
+          "description": "Proportional configuration; required when Mode == \"Proportional\".",
           "$ref": "#/definitions/v1beta1.ProportionalPolicy"
         }
       }
@@ -6024,7 +6030,7 @@
           "$ref": "#/definitions/v1.Affinity"
         },
         "annotations": {
-          "description": "Annotations that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
+          "description": "Annotations that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
           "type": "object",
           "additionalProperties": {
             "type": "string",
@@ -6072,7 +6078,7 @@
           "x-kubernetes-patch-strategy": "merge"
         },
         "labels": {
-          "description": "Labels that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
+          "description": "Labels that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
           "type": "object",
           "additionalProperties": {
             "type": "string",
@@ -6155,7 +6161,7 @@
           "$ref": "#/definitions/v1.Affinity"
         },
         "annotations": {
-          "description": "Annotations that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
+          "description": "Annotations that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
           "type": "object",
           "additionalProperties": {
             "type": "string",
@@ -6215,7 +6221,7 @@
           "x-kubernetes-patch-strategy": "merge"
         },
         "labels": {
-          "description": "Labels that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
+          "description": "Labels that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
           "type": "object",
           "additionalProperties": {
             "type": "string",
@@ -6317,7 +6323,7 @@
       }
     },
     "v1beta1.SplitSpec": {
-      "description": "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented default — no in-code magic values.",
+      "description": "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented defaults.",
       "type": "object",
       "properties": {
         "maxReplicasPerCluster": {
@@ -6434,11 +6440,11 @@
           "$ref": "#/definitions/v1beta1.ModelFrameworkSpec"
         },
         "modelType": {
-          "description": "DEPRECATED: This field is deprecated and will be removed in future releases.",
+          "description": "Deprecated: not consulted during runtime selection.",
           "type": "string"
         },
         "name": {
-          "description": "Name of the model",
+          "description": "Name of the model format this entry describes; matched against the model's format name during runtime selection. ModelFormat.Name is the preferred field for new runtimes.",
           "type": "string",
           "default": ""
         },

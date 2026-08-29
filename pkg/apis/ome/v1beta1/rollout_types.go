@@ -171,8 +171,8 @@ type RolloutGroupStep struct {
 // flips traffic atomically. It is also the default progression a group falls back
 // to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic
 // steps (the flip is all-or-nothing); surge sequencing across Components is the
-// group-level Order field, not a blue-green-specific knob. Empty today, reserved
-// for future blue-green-specific options (e.g. a pre-flip verification window).
+// group-level Order field, not a blue-green-specific knob. Empty; reserved for
+// blue-green-specific options (e.g. a pre-flip verification window).
 type GroupBlueGreen struct{}
 
 // GroupRollingUpdate replaces pods gradually, paced by the surge/unavailable
@@ -275,7 +275,7 @@ type AnalysisPrometheus struct {
 
 	// AuthRef points at a Secret key (in the InferenceService's namespace) holding
 	// a bearer token sent as "Authorization: Bearer <token>". Omit for an
-	// unauthenticated Prometheus (the bundled one). TLS/mTLS is not yet supported.
+	// unauthenticated Prometheus (the bundled one). TLS/mTLS is not supported.
 	// +optional
 	AuthRef *corev1.SecretKeySelector `json:"authRef,omitempty"`
 

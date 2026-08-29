@@ -234,7 +234,7 @@ type EngineSpec struct {
 	// into a single network / NVLink topology domain. When set on a
 	// multi-node component, OME auto-generates the per-instance
 	// worker→leader podAffinity that anchors every worker to its gang's
-	// leader on a node sharing this label value — so users no longer
+	// leader on a node sharing this label value — so users need not
 	// hand-write that affinity. Only meaningful for multi-node components;
 	// ignored for single-pod (no leader to anchor to). Unset means no
 	// auto-generated gang affinity.
@@ -285,7 +285,7 @@ type DecoderSpec struct {
 	// into a single network / NVLink topology domain. When set on a
 	// multi-node component, OME auto-generates the per-instance
 	// worker→leader podAffinity that anchors every worker to its gang's
-	// leader on a node sharing this label value — so users no longer
+	// leader on a node sharing this label value — so users need not
 	// hand-write that affinity. Only meaningful for multi-node components;
 	// ignored for single-pod (no leader to anchor to). Unset means no
 	// auto-generated gang affinity.

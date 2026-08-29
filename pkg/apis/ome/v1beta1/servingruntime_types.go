@@ -9,15 +9,15 @@ import (
 
 // +k8s:openapi-gen=true
 type SupportedModelFormat struct {
-	// TODO this field is being used as model format name, and this is not correct, we should deprecate this and use Name from ModelFormat
-	// Name of the model
+	// Name of the model format this entry describes; matched against the
+	// model's format name during runtime selection. ModelFormat.Name is
+	// the preferred field for new runtimes.
 	// +optional
 	Name string `json:"name"`
 	// ModelFormat of the model, e.g., "PyTorch", "TensorFlow", "ONNX", "SafeTensors"
 	// +required
 	ModelFormat *ModelFormat `json:"modelFormat"`
-	// +optional
-	// DEPRECATED: This field is deprecated and will be removed in future releases.
+	// Deprecated: not consulted during runtime selection.
 	// +optional
 	ModelType *string `json:"modelType,omitempty"`
 	// Version of the model format.
@@ -52,14 +52,13 @@ type SupportedModelFormat struct {
 	// +optional
 	AutoSelect *bool `json:"autoSelect,omitempty"`
 
-	// +kubebuilder:validation:Minimum=1
-
 	// Priority of this serving runtime for auto selection.
 	// This is used to select the serving runtime if more than one serving runtime supports the same model format.
 	// The value should be greater than zero.  The higher the value, the higher the priority.
 	// Priority is not considered if AutoSelect is either false or not specified.
 	// Priority can be overridden by specifying the runtime in the InferenceService.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
 	Priority *int32 `json:"priority,omitempty"`
 
 	// AcceleratorConfig provides accelerator-specific overrides for this model format
@@ -153,12 +152,12 @@ type ServingRuntimePodSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
-	// Labels that will be add to the pod.
+	// Labels that will be added to the pod.
 	// More info: http://kubernetes.io/docs/user-guide/labels
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Annotations that will be add to the pod.
+	// Annotations that will be added to the pod.
 	// More info: http://kubernetes.io/docs/user-guide/annotations
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`

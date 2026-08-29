@@ -693,7 +693,12 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorClassStatus(ref common.ReferenceCall
 					"conditions": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type":       "map",
+								"x-kubernetes-patch-merge-key": "type",
+								"x-kubernetes-patch-strategy":  "merge",
 							},
 						},
 						SchemaProps: spec.SchemaProps{
@@ -2047,7 +2052,7 @@ func schema_pkg_apis_ome_v1beta1_AnalysisPrometheus(ref common.ReferenceCallback
 					},
 					"authRef": {
 						SchemaProps: spec.SchemaProps{
-							Description: "AuthRef points at a Secret key (in the InferenceService's namespace) holding a bearer token sent as \"Authorization: Bearer <token>\". Omit for an unauthenticated Prometheus (the bundled one). TLS/mTLS is not yet supported.",
+							Description: "AuthRef points at a Secret key (in the InferenceService's namespace) holding a bearer token sent as \"Authorization: Bearer <token>\". Omit for an unauthenticated Prometheus (the bundled one). TLS/mTLS is not supported.",
 							Ref:         ref("k8s.io/api/core/v1.SecretKeySelector"),
 						},
 					},
@@ -2356,7 +2361,8 @@ func schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref common.ReferenceCallback) com
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Type: []string{"array"},
+							Description: "ServingMode of the model, e.g., [\"On-demand\", \"Dedicated\"]",
+							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
@@ -2689,7 +2695,7 @@ func schema_pkg_apis_ome_v1beta1_ClusterProfileRef(ref common.ReferenceCallback)
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ClusterProfileRef references a SIG-Multicluster cluster-inventory-api ClusterProfile. Phase 1 records the reference but does not yet resolve it.",
+				Description: "ClusterProfileRef references a SIG-Multicluster cluster-inventory-api ClusterProfile. The reference is recorded but not resolved.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"name": {
@@ -2805,7 +2811,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha. The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields have been removed from ComponentExtensionSpec.",
+				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling on an InferenceService. Alpha. The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"class": {
@@ -3017,7 +3023,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -3068,7 +3074,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"rolloutPhase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+							Description: "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes without the rollout contract — e.g. RawDeployment).",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -3840,7 +3846,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -3864,7 +3870,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"topologyKey": {
 						SchemaProps: spec.SchemaProps{
-							Description: "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users no longer hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
+							Description: "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users need not hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -4595,7 +4601,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -4619,7 +4625,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"topologyKey": {
 						SchemaProps: spec.SchemaProps{
-							Description: "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users no longer hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
+							Description: "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users need not hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -4882,7 +4888,7 @@ func schema_pkg_apis_ome_v1beta1_GroupBlueGreen(ref common.ReferenceCallback) co
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "GroupBlueGreen surges the full new set alongside the old, waits for Ready, then flips traffic atomically. It is also the default progression a group falls back to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic steps (the flip is all-or-nothing); surge sequencing across Components is the group-level Order field, not a blue-green-specific knob. Empty today, reserved for future blue-green-specific options (e.g. a pre-flip verification window).",
+				Description: "GroupBlueGreen surges the full new set alongside the old, waits for Ready, then flips traffic atomically. It is also the default progression a group falls back to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic steps (the flip is all-or-nothing); surge sequencing across Components is the group-level Order field, not a blue-green-specific knob. Empty; reserved for blue-green-specific options (e.g. a pre-flip verification window).",
 				Type:        []string{"object"},
 			},
 		},
@@ -5191,7 +5197,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref common.ReferenceCall
 					},
 					"maxUnavailable": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxUnavailable caps in-rollout disruption. Accepts either a raw count or a percent string. When nil, the InferenceReplica controller falls back to its own default (currently 25%).",
+							Description: "MaxUnavailable caps in-rollout disruption. Accepts either a raw count or a percent string. When nil, the InferenceReplica controller falls back to its own default budget.",
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
@@ -5320,7 +5326,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCall
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy LifecycleStatus shape so the dual-write window can byte-compare the two.",
+				Description: "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the LifecycleStatus shape so the ISVC's aggregated per-Component status is a verbatim projection of this block.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"observedGeneration": {
@@ -5395,7 +5401,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCall
 					},
 					"labelSelector": {
 						SchemaProps: spec.SchemaProps{
-							Description: "LabelSelector identifies pods of this InferenceReplica for the HPA scale subresource. Must match the legacy componentLabelSelectorString formula so existing HPAs continue to resolve unchanged.",
+							Description: "LabelSelector identifies pods of this InferenceReplica for the HPA scale subresource. Uses the same selector formula as the Component's pod labels, so HPAs targeting either the ISVC or the InferenceReplica resolve to the same pod set.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -7304,7 +7310,7 @@ func schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref common.ReferenceCallb
 					},
 					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Mode is the migration mechanism. Always `surge` in v1.",
+							Description: "Mode is the migration mechanism. Surge is the only defined mode.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -7543,7 +7549,7 @@ func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) 
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ModelCacheStatus reports the cluster-wide cache provider identity for models that use a sharded distribution backend. In the lazy- fetch flow, cluster_cache daemons pull bytes on demand at first inference, so there is no separate \"placement progress\" to report — Backend + SourceUri are enough to identify the cache mapping.",
+				Description: "ModelCacheStatus reports the cluster-wide cache provider identity for models that use a sharded distribution backend. In the lazy- fetch flow, the sharded-cache daemons pull bytes on demand at first inference, so there is no separate \"placement progress\" to report — Backend + SourceUri are enough to identify the cache mapping.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"backend": {
@@ -8290,7 +8296,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 				Properties: map[string]spec.Schema{
 					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Mode is the placement cardinality: Single (one cluster), All (every candidate), or Split (replicas distributed across clusters). Defaults to Single. All and Split are rejected by admission on a control plane whose build does not yet implement them.",
+							Description: "Mode is the placement cardinality: Single (one cluster), All (every candidate), or Split (replicas distributed across clusters). Defaults to Single. All and Split are rejected by admission on a control plane that does not implement them.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -9066,7 +9072,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutCoordinationGroup binds a set of Components under one coordination policy.\n\nUnused — superseded by spec.rollout.groups[] (RolloutGroup); retained for compatibility, scheduled for removal.",
+				Description: "RolloutCoordinationGroup binds a set of Components under one coordination policy.\n\nSuperseded by spec.rollout.groups[] (RolloutGroup); retained for compatibility.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"components": {
@@ -9326,7 +9332,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref common.ReferenceCal
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.\n\nUnused — superseded by spec.rollout (RolloutSpec); retained for compatibility, scheduled for removal.",
+				Description: "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.\n\nSuperseded by spec.rollout (RolloutSpec); retained for compatibility.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"groups": {
@@ -10146,7 +10152,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component, and is the only way to configure per-Component autoscaling: scale metrics live here (Autoscaler.HPA.Metrics), alongside MinReplicas / MaxReplicas above. Alpha. The API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -10591,7 +10597,7 @@ func schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref common.ReferenceCallback) com
 					},
 					"proportional": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Proportional configuration; required when Mode == \"proportional\".",
+							Description: "Proportional configuration; required when Mode == \"Proportional\".",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy"),
 						},
 					},
@@ -10797,7 +10803,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref common.ReferenceCallb
 					},
 					"labels": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Labels that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
+							Description: "Labels that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -10813,7 +10819,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref common.ReferenceCallb
 					},
 					"annotations": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Annotations that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
+							Description: "Annotations that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -11103,7 +11109,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref common.ReferenceCallback
 					},
 					"labels": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Labels that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
+							Description: "Labels that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -11119,7 +11125,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref common.ReferenceCallback
 					},
 					"annotations": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Annotations that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
+							Description: "Annotations that will be added to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -11266,7 +11272,7 @@ func schema_pkg_apis_ome_v1beta1_SplitSpec(ref common.ReferenceCallback) common.
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented default — no in-code magic values.",
+				Description: "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented defaults.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"replicas": {
@@ -11404,7 +11410,7 @@ func schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref common.ReferenceCallba
 				Properties: map[string]spec.Schema{
 					"name": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Name of the model",
+							Description: "Name of the model format this entry describes; matched against the model's format name during runtime selection. ModelFormat.Name is the preferred field for new runtimes.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -11418,7 +11424,7 @@ func schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref common.ReferenceCallba
 					},
 					"modelType": {
 						SchemaProps: spec.SchemaProps{
-							Description: "DEPRECATED: This field is deprecated and will be removed in future releases.",
+							Description: "Deprecated: not consulted during runtime selection.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

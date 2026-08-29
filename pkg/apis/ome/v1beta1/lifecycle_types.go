@@ -348,7 +348,7 @@ type MigrationHistoryEntry struct {
 	// +optional
 	ReplacementInstance *int32 `json:"replacementInstance,omitempty"`
 
-	// Mode is the migration mechanism. Always `surge` in v1.
+	// Mode is the migration mechanism. Surge is the only defined mode.
 	Mode MigrationMode `json:"mode"`
 
 	// Phase is the current lifecycle phase.

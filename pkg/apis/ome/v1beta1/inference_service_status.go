@@ -130,9 +130,8 @@ type ComponentStatusSpec struct {
 	// Component. One of Stable, Canarying,
 	// BlueGreenStandby, Pending, Paused, Promoting, RollingBack,
 	// RolledBack, Failed. Empty when no rollout is in flight on this
-	// Component (also empty for Components on deployment modes that
-	// haven't implemented the rollout contract yet — e.g. RawDeployment
-	// in alpha).
+	// Component (also empty for Components on deployment modes without
+	// the rollout contract — e.g. RawDeployment).
 	// +optional
 	// +kubebuilder:validation:Enum=Stable;Canarying;BlueGreenStandby;Pending;Paused;Promoting;RollingBack;RolledBack;Failed
 	RolloutPhase RolloutPhase `json:"rolloutPhase,omitempty"`

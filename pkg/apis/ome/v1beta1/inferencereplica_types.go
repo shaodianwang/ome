@@ -218,9 +218,8 @@ type InferenceReplicaPacing struct {
 	Partition *int32 `json:"partition,omitempty"`
 
 	// MaxUnavailable caps in-rollout disruption. Accepts either a
-	// raw count or a percent string. When nil, the
-	// InferenceReplica controller falls back to its own default
-	// (currently 25%).
+	// raw count or a percent string. When nil, the InferenceReplica
+	// controller falls back to its own default budget.
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
@@ -236,8 +235,9 @@ type InferenceReplicaPacing struct {
 
 // InferenceReplicaStatus is the observed state of one
 // InferenceReplica. The InferenceReplica controller is the sole
-// writer. Fields mirror the legacy LifecycleStatus shape so
-// the dual-write window can byte-compare the two.
+// writer. Fields mirror the LifecycleStatus shape so the ISVC's
+// aggregated per-Component status is a verbatim projection of this
+// block.
 // +kubebuilder:validation:XValidation:rule="(!has(self.instanceStatusEncoding) && !has(self.instanceStatusColumns)) || (has(self.instanceStatusEncoding) && self.instanceStatusEncoding == 'ColumnarV2' && has(self.instanceStatusColumns) && !has(self.instanceStatuses))",message="instance status encoding and payload must form a valid DenseV1 or ColumnarV2 representation"
 type InferenceReplicaStatus struct {
 	// ObservedGeneration is the InferenceReplica.metadata.generation
@@ -293,9 +293,9 @@ type InferenceReplicaStatus struct {
 	CollisionCount *int32 `json:"collisionCount,omitempty"`
 
 	// LabelSelector identifies pods of this InferenceReplica for the
-	// HPA scale subresource. Must match the legacy
-	// componentLabelSelectorString formula so existing HPAs continue
-	// to resolve unchanged.
+	// HPA scale subresource. Uses the same selector formula as the
+	// Component's pod labels, so HPAs targeting either the ISVC or the
+	// InferenceReplica resolve to the same pod set.
 	// +optional
 	LabelSelector string `json:"labelSelector,omitempty"`
 
