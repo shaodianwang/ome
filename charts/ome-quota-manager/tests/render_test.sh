@@ -279,4 +279,140 @@ if grep -Fq '"workloadclusters"' <<<"${work}"; then
   fail "workload mode was granted the registry it never reads"
 fi
 
+# --- a projecting plane can claim the nodes it projects ---
+
+# The projector puts a finalizer on every node it claims, which is an ordinary
+# patch of the object. Without the grant each pass fails forbidden before
+# anything is projected, and the fleet never leaves its authored state.
+mgmtProject="$(render --set quotaManager.mode=management \
+  --set quotaManager.projection.origin=hub-1 \
+  --set quotaManager.projection.fieldManager=proj \
+  --show-only templates/rbac.yaml)"
+
+# One rule spans two lines, and a newline inside a grep pattern makes it two
+# alternative patterns rather than one contiguous match — which would pass on
+# the resource name alone, whatever the verbs beside it. Flatten instead.
+flat() { tr '\n' ' ' | tr -s ' '; }
+claim='resources: ["acceleratorquotas"] verbs: ["patch"]'
+
+grep -Fq "${claim}" <<<"$(flat <<<"${mgmtProject}")" ||
+  fail "a projecting management plane cannot claim a node with a finalizer"
+
+# ...and one that is not projecting carries no write it cannot use.
+if grep -Fq "${claim}" <<<"$(flat <<<"${mgmt}")"; then
+  fail "management mode grants a spec write with no projector to use it"
+fi
+
+# --- projection is off until it is named, and never leaks into workload mode ---
+
+projectOn="$(render --set quotaManager.mode=management \
+  --set quotaManager.projection.origin=hub-1 \
+  --set quotaManager.projection.fieldManager=proj \
+  --set quotaManager.projection.defaultDistributionPolicy=Proportional \
+  --show-only templates/deployment.yaml)"
+# Counted, not merely found. A duplicated template block renders every flag
+# twice, which Go's flag parsing tolerates -- last wins -- so nothing downstream
+# would complain and a `grep -q` would pass while the args list carried each
+# projection flag two times over.
+for wanted in \
+  '--projection-origin=hub-1' \
+  '--projection-field-manager=proj' \
+  '--default-distribution-policy=Proportional'; do
+  seen="$(grep -Fc -- "${wanted}" <<<"${projectOn}" || true)"
+  [ "${seen}" = 1 ] ||
+    fail "management mode rendered ${wanted} ${seen} times, want exactly 1"
+done
+
+# An unmarked copy cannot be told from a node an admin authored on the member,
+# so projection must stay off until an origin is chosen deliberately.
+bare="$(render --set quotaManager.mode=management --show-only templates/deployment.yaml)"
+if grep -Fq -- '--projection-origin' <<<"${bare}"; then
+  fail "projection turned itself on without an origin"
+fi
+
+# A workload-mode manager holds no transport at all; the flags would be inert
+# at best and misleading at worst.
+leak="$(render --set quotaManager.mode=workload \
+  --set quotaManager.projection.origin=hub-1 --show-only templates/deployment.yaml)"
+if grep -Fq -- '--projection-origin' <<<"${leak}"; then
+  fail "projection flags leaked into workload mode"
+fi
+
+# Exec is opt-in, and naming no command still permits none.
+if grep -Fq -- '--allow-exec-credentials' <<<"${projectOn}"; then
+  fail "exec credentials were enabled without being asked for"
+fi
+# --- remote access is off unless asked for, grants narrowly, and mints no
+# --- non-expiring credential unless explicitly told to ---
+
+for unwanted in ome-quota-access quota-remote-access; do
+  if grep -Fq "${unwanted}" <<<"${default}"; then
+    fail "remote access rendered without being enabled (${unwanted})"
+  fi
+done
+
+# Only this template, so the local manager's own grants cannot be mistaken for
+# the remote ones. Comments are stripped: the file explains at length which
+# grants it deliberately omits, and prose about a rule must not read as the rule.
+remote_only() {
+  render --set quotaManager.mode=workload \
+    --set quotaManager.remoteAccess.enabled=true "$@" \
+    --show-only templates/remote_access.yaml | grep -v '^[[:space:]]*#'
+}
+
+remote="$(remote_only)"
+
+for wanted in \
+  'name: "ome-quota-access"' \
+  'resources: ["acceleratorquotas"]'; do
+  grep -Fq "${wanted}" <<<"${remote}" ||
+    fail "enabling remote access did not render ${wanted}"
+done
+
+# A token that never expires is the thing this chart should not hand out by
+# default. It is available for simulators, and only when asked for twice.
+if grep -Fq 'service-account-token' <<<"${remote}"; then
+  fail "enabling remote access minted a non-expiring token without being asked"
+fi
+grep -Fq 'service-account-token' \
+  <<<"$(remote_only --set quotaManager.remoteAccess.serviceAccount.staticToken=true)" ||
+  fail "opting into staticToken did not mint the token Secret"
+
+# The role must be bindable to an identity the platform already rotates, with
+# no in-cluster ServiceAccount at all.
+external="$(remote_only \
+  --set quotaManager.remoteAccess.serviceAccount.create=false \
+  --set 'quotaManager.remoteAccess.subjects[0].kind=User' \
+  --set 'quotaManager.remoteAccess.subjects[0].name=projector@example.com')"
+grep -Fq 'kind: "User"' <<<"${external}" ||
+  fail "an external subject was not bound"
+if grep -Fq 'kind: ServiceAccount' <<<"${external}"; then
+  fail "serviceAccount.create=false still rendered a ServiceAccount"
+fi
+
+# A role bound to nobody is a silent no-op, so it must not render at all.
+if render --set quotaManager.mode=workload \
+  --set quotaManager.remoteAccess.enabled=true \
+  --set quotaManager.remoteAccess.serviceAccount.create=false >/dev/null 2>&1; then
+  fail "remote access bound to nobody rendered instead of failing"
+fi
+
+# The whole point of a separate credential is that it can only write budgets.
+# A grant that let it create workloads, read the fleet's hardware, or touch
+# Kueue would make it interchangeable with ome-multicluster-access, and a leak
+# of either would then cost the same as a leak of both.
+#
+# Status on a member belongs to the workload-mode manager running there; a
+# remote writer cannot see what it would be overwriting.
+for forbidden in \
+  'acceleratorquotas/status' \
+  '"nodes"' \
+  '"pods"' \
+  '"inferenceservices"' \
+  'kueue.x-k8s.io'; do
+  if grep -Fq "${forbidden}" <<<"${remote}"; then
+    fail "the remote role reaches beyond projecting quota: ${forbidden}"
+  fi
+done
+
 echo "ome-quota-manager chart contracts OK"

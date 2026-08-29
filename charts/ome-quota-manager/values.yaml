@@ -215,3 +215,81 @@ quotaManager:
 
   metricsPort: 8080
   probePort: 8081
+
+  # Projecting the authored fleet tree onto workload clusters. Management mode
+  # only; a workload-mode manager holds no transport, which is what makes a
+  # projection unable to be re-projected.
+  #
+  # Off until origin and fieldManager are both set. Neither has a default, and
+  # deliberately so: an unmarked copy cannot be told from a node an admin
+  # authored on the member, so nothing could ever sweep it and the member's
+  # webhook would admit edits to it.
+  projection:
+    # Identity stamped on every copy this plane writes, and what its sweep
+    # selects on. Two planes projecting onto one member must not share it, or
+    # each will reap the other's work.
+    origin: ""
+
+    # Field manager owning what this plane applies on a member. Separate from
+    # the workload-mode fieldManager, which owns Kueue objects on a serving
+    # cluster: different objects, different clusters, and a shared name would
+    # make one plane's apply look like the other's.
+    fieldManager: ""
+
+    # Fallback split for a budget whose node declares no distribution:
+    # "Explicit" takes the admin's perCluster shares, "Proportional" divides by
+    # each member's reported capacity. Empty is not a policy -- such a budget is
+    # reported unresolved rather than split by a guess.
+    defaultDistributionPolicy: ""
+
+    # How a member's kubeconfig may authenticate. An exec plugin runs a binary
+    # from this process, so it is opt-in and the binary must be in this image;
+    # the alternative is a bearer token or client certificate inline in the
+    # kubeconfig. The allowlist is a second deliberate step, so enabling exec
+    # without naming a command still permits nothing.
+    execCredentials:
+      enabled: false
+      allowedCommands: []
+
+  # What a MANAGEMENT plane is allowed to do when it projects quota nodes onto
+  # this cluster. Install it on a workload cluster, alongside the workload-mode
+  # manager; a management plane has nothing to project onto itself, and a
+  # single-cluster install never needs it because the tree is authored locally.
+  #
+  # This grants PERMISSIONS. It does not decide how the management plane
+  # authenticates, which belongs to the platform: the transport accepts exec
+  # credential plugins (aws, gke-gcloud-auth-plugin and kubelogin are permitted
+  # by default), so a cloud workload identity needs no credential stored
+  # anywhere. Bind the role to whatever identity that produces via `subjects`.
+  #
+  # Separate from ome-multicluster-access on purpose. That is the placement
+  # plane's credential and can create workloads; this one can only write
+  # budgets. Neither should be able to do the other's job.
+  remoteAccess:
+    enabled: false
+    name: ome-quota-access
+
+    # Identities to bind the role to, beyond the ServiceAccount below. Use this
+    # for an identity your platform already issues and rotates — a cloud IAM
+    # principal, an OIDC subject, a client-certificate user:
+    #
+    #   subjects:
+    #   - kind: User
+    #     name: quota-projector@example.iam.gserviceaccount.com
+    #
+    # kind is User, Group or ServiceAccount; a ServiceAccount subject also needs
+    # a namespace.
+    subjects: []
+
+    serviceAccount:
+      # Create an in-cluster ServiceAccount of `name` and bind the role to it.
+      # Turn this off when `subjects` names an external identity instead.
+      create: true
+
+      # Also mint a ServiceAccount token Secret. It never expires, never
+      # rotates, and is readable by anyone who can read Secrets here, so it is
+      # off: it exists for simulators and for clusters predating TokenRequest.
+      #
+      # Without it, get a token with a lifetime when you need one:
+      #   kubectl -n <ns> create token ome-quota-access --duration=24h
+      staticToken: false

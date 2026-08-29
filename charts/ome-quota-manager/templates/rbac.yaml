@@ -54,6 +54,22 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "list", "watch"]
+{{- if and .Values.quotaManager.projection.origin .Values.quotaManager.projection.fieldManager }}
+# The finalizer that gates a node's deletion until its projections are reaped
+# off every member. A projecting plane claims each node before it writes
+# anything, so without this every pass fails on a forbidden patch and no tree is
+# ever projected.
+#
+# patch on the resource itself, not update on acceleratorquotas/finalizers: a
+# finalizer lives in metadata, so adding one is an ordinary patch of the object.
+#
+# Conditioned on the same two values the projector itself requires, so a
+# management plane configured not to project does not carry a write it cannot
+# use.
+- apiGroups: ["ome.io"]
+  resources: ["acceleratorquotas"]
+  verbs: ["patch"]
+{{- end }}
 {{- end }}
 {{- if and (eq (include "ome-quota-manager.mode" .) "workload") (include "ome-quota-manager.acceleratorResources" .) }}
 # Deriving the reserved root's capacity means measuring the cluster's silicon,

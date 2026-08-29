@@ -39,6 +39,21 @@ spec:
         - "--health-probe-addr=:{{ .Values.quotaManager.probePort }}"
         - "--leader-elect={{ .Values.quotaManager.leaderElect }}"
         - "--zap-log-level={{ .Values.quotaManager.logLevel }}"
+        {{- if eq (include "ome-quota-manager.mode" .) "management" }}
+        {{- with .Values.quotaManager.projection.origin }}
+        - "--projection-origin={{ . }}"
+        {{- end }}
+        {{- with .Values.quotaManager.projection.fieldManager }}
+        - "--projection-field-manager={{ . }}"
+        {{- end }}
+        {{- with .Values.quotaManager.projection.defaultDistributionPolicy }}
+        - "--default-distribution-policy={{ . }}"
+        {{- end }}
+        {{- if .Values.quotaManager.projection.execCredentials.enabled }}
+        - "--allow-exec-credentials=true"
+        - "--exec-credential-allowed-commands={{ join "," .Values.quotaManager.projection.execCredentials.allowedCommands }}"
+        {{- end }}
+        {{- end }}
         {{- if .Values.quotaManager.maxTreeDepth }}
         - "--max-tree-depth={{ .Values.quotaManager.maxTreeDepth }}"
         {{- end }}

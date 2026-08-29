@@ -35,6 +35,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	kueuebackend "github.com/ome-projects/ome/pkg/quota/backend/kueue"
 	quotacert "github.com/ome-projects/ome/pkg/quota/cert"
 	"github.com/ome-projects/ome/pkg/quota/tree"
@@ -99,6 +100,11 @@ type options struct {
 	certNamespace          string
 	certSecretName         string
 	webhookServiceName     string
+	projectionOrigin       string
+	projectionFieldManager string
+	defaultDistribution    string
+	allowExecCredentials   bool
+	execCredentialCommands string
 	webhookConfigName      string
 	caName                 string
 	caOrganization         string
@@ -161,6 +167,31 @@ func main() {
 		"Field manager that owns the Kueue objects this process applies, and the value of the "+
 			"managed-by label it selects them by. Two managers pointed at one cluster must not share "+
 			"it, or each will treat the other's objects as its own. Empty disables materialization.")
+	flag.StringVar(&opts.projectionOrigin, "projection-origin", opts.projectionOrigin,
+		"Identity this management plane stamps on every AcceleratorQuota it projects onto a member, "+
+			"and the value its sweep selects on. It is what tells a copy from a node an admin "+
+			"authored locally, so two planes projecting onto one member must not share it or each "+
+			"will reap the other's work. No compiled-in default: an unmarked copy is indistinguishable "+
+			"from a local node and could never be swept. Empty disables projection. Management mode only.")
+	flag.StringVar(&opts.projectionFieldManager, "projection-field-manager", opts.projectionFieldManager,
+		"Field manager owning the fields this plane applies on a member. Separate from --field-manager, "+
+			"which owns Kueue objects on a workload cluster: the two write different objects on "+
+			"different clusters, and sharing a name would make one plane's apply look like the other's. "+
+			"Empty disables projection. Management mode only.")
+	flag.StringVar(&opts.defaultDistribution, "default-distribution-policy", opts.defaultDistribution,
+		"Fleet-wide fallback split for a budget whose node declares no distribution: \"Explicit\" takes "+
+			"the admin's perCluster shares, \"Proportional\" divides by each member's reported capacity. "+
+			"Empty is not a policy — a budget with nowhere left to fall back to is reported unresolved "+
+			"rather than split by a guess. Management mode only.")
+	flag.BoolVar(&opts.allowExecCredentials, "allow-exec-credentials", opts.allowExecCredentials,
+		"Permit a member's kubeconfig to authenticate through an exec credential plugin. Off by "+
+			"default: an exec plugin runs a binary from this process, so it is opt-in and the binary "+
+			"must be present in this image. The alternative is a bearer token or client certificate "+
+			"inline in the kubeconfig. Management mode only.")
+	flag.StringVar(&opts.execCredentialCommands, "exec-credential-allowed-commands", opts.execCredentialCommands,
+		"Comma-separated plugin basenames an exec credential may invoke, e.g. "+
+			"\"aws,gke-gcloud-auth-plugin,kubelogin\". Empty allows none even with exec enabled, so the "+
+			"allowlist is a second deliberate step rather than a consequence of the first.")
 	flag.DurationVar(&opts.resyncInterval, "resync-interval", opts.resyncInterval,
 		"Re-run the tree checks on an otherwise-idle plane, so a violation only a clock can clear "+
 			"is noticed without an edit. 0 leaves reconciles purely event-driven.")
@@ -325,6 +356,54 @@ func main() {
 				"coverResources", opts.coverResources)
 		}
 	}
+	if mode == acceleratorquota.ModeManagement {
+		// The management plane's own transport. Not ome-manager's: a Manager is
+		// an in-process struct with no remote surface, so sharing one would mean
+		// running this controller inside ome-manager and handing that process
+		// the grants a separate binary exists to keep off it.
+		clusters := workloadcluster.NewManager(mgr.GetScheme())
+		clusters.SetExecCredentialPolicy(workloadcluster.ExecCredentialPolicy{
+			Allowed:         opts.allowExecCredentials,
+			AllowedCommands: splitAndTrim(opts.execCredentialCommands),
+		})
+		if err := mgr.Add(clusters); err != nil {
+			setupLog.Error(err, "unable to add the cluster transport")
+			os.Exit(1)
+		}
+
+		// Follows the registry and never writes it. WorkloadCluster status has
+		// one writer, in ome-manager, whose grace and backoff state is in memory
+		// rather than leased, so a second one would flap the condition between
+		// two processes and lose the argument silently.
+		connector := &acceleratorquota.Connector{
+			Client:   mgr.GetClient(),
+			Log:      ctrl.Log.WithName("AcceleratorQuotaConnector"),
+			Clusters: clusters,
+		}
+		if err := connector.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create the cluster connector")
+			os.Exit(1)
+		}
+
+		r.Project = acceleratorquota.ProjectOptions{
+			Clusters:      clusters,
+			Origin:        opts.projectionOrigin,
+			FieldManager:  opts.projectionFieldManager,
+			DefaultPolicy: v1beta1.AcceleratorQuotaDistributionPolicy(opts.defaultDistribution),
+		}
+		if r.Project.Enabled() {
+			setupLog.Info("Projecting the quota tree onto workload clusters",
+				"origin", r.Project.Origin,
+				"fieldManager", r.Project.FieldManager,
+				"defaultDistributionPolicy", r.Project.DefaultPolicy)
+		} else {
+			// Absent config disables rather than assuming, as everywhere else
+			// here: without an origin a copy could not be told from a local
+			// node, and nothing could ever sweep it.
+			setupLog.Info("Projection is off: set --projection-origin and --projection-field-manager to enable it")
+		}
+	}
+
 	if err := r.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create the AcceleratorQuota controller")
 		os.Exit(1)
