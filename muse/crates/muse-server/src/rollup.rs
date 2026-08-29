@@ -26,13 +26,8 @@ use crate::protocol::{
 /// Accelerator kinds tracked separately (a pod/node never mixes them in practice).
 const KINDS: [&str; 2] = ["gpu", "tpu"];
 
-/// GKE labels each TPU node with the carve-able slice it belongs to: the key
-/// `cloud.google.com/gke-tpu-partition-<shape>-id` encodes the slice shape, its
-/// value the slice instance. A fixed GKE API contract — like the `google.com/tpu`
-/// and `node.kubernetes.io/instance-type` keys read elsewhere — so it's matched
-/// directly off informer data rather than configured (it can't vary the way the
-/// island/NVLink label keys do across providers). Non-GKE nodes carry no such
-/// label and contribute no slices.
+/// GKE TPU labels used to select the partition ID for a node's provisioned slice.
+const TPU_TOPOLOGY_LABEL: &str = "cloud.google.com/gke-tpu-topology";
 const TPU_PARTITION_PREFIX: &str = "cloud.google.com/gke-tpu-partition-";
 const TPU_PARTITION_SUFFIX: &str = "-id";
 
@@ -192,9 +187,8 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
                 nodes: nodes as i64,
             })
             .collect(),
-        // TPU: a host carries a partition-id label for *every* slice shape it's
-        // part of (its own 2x2x1 and the 2x2x2 it shares with a neighbour), so emit
-        // one unit per label — bucketed by shape. GPU: the node itself is a unit
+        // TPU: only the partition matching the provisioned topology is a slice.
+        // GPU: the node itself is a unit
         // (bucketed by GPU count), and — where NVLink labels exist — so is the
         // whole domain (bucketed by domain GPU-count).
         tpu_slices: placement_units(
@@ -202,19 +196,21 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
             "tpu",
             limits.max_fragments,
             |cluster, _name, labels| {
+                let Some(shape) = labels.get(TPU_TOPOLOGY_LABEL) else {
+                    return Vec::new();
+                };
+                let key = format!("{TPU_PARTITION_PREFIX}{shape}{TPU_PARTITION_SUFFIX}");
                 labels
-                    .iter()
-                    .filter_map(|(k, id)| {
-                        let shape = k
-                            .strip_prefix(TPU_PARTITION_PREFIX)?
-                            .strip_suffix(TPU_PARTITION_SUFFIX)?;
-                        Some((
+                    .get(&key)
+                    .filter(|id| !id.is_empty())
+                    .map(|id| {
+                        vec![(
                             format!("{cluster}|{shape}|{id}"),
                             id.clone(),
-                            Some(shape.to_owned()),
-                        ))
+                            Some(shape.clone()),
+                        )]
                     })
-                    .collect()
+                    .unwrap_or_default()
             },
         ),
         gpu_nodes: placement_units(
@@ -315,12 +311,10 @@ fn node_available(node: &Node) -> bool {
 /// (free / fragmented / full / unhealthy) with the chips stranded inside fragmented
 /// units — the fragmentation a single "free" number hides.
 ///
-/// `unit_of(cluster, node, labels)` returns *every* unit a node belongs to as
-/// `(unique key, display id, optional size label)` — a list, because one node can
-/// belong to several (a TPU host is part of both its 2x2x1 and 2x2x2 slice). A
-/// `None` size label buckets by the unit's own chip count (GPU nodes / domains,
-/// which have no fixed shape); TPU passes the slice shape. The key is cluster-scoped
-/// so an id reused across clusters isn't merged.
+/// `unit_of(cluster, node, labels)` returns units as `(unique key, display id,
+/// optional size label)`. A `None` size label buckets by the unit's own chip count
+/// (GPU nodes / domains, which have no fixed shape); TPU passes the slice shape.
+/// The key is cluster-scoped so an id reused across clusters isn't merged.
 fn placement_units(
     clusters: &[ClusterData],
     want_kind: &str,
@@ -616,7 +610,7 @@ mod tests {
         apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
     };
 
-    use super::{build, CapacityLimits, ClusterData};
+    use super::{build, CapacityLimits, ClusterData, TPU_TOPOLOGY_LABEL};
     use crate::protocol::{
         AccelLost, CapacityReport, GroupCapacity, PlacementUnits, Topology, UnitBox,
         INFERENCE_SERVICE_POD_LABEL,
@@ -681,10 +675,17 @@ mod tests {
             ),
         ]);
         if let Some((shape, id)) = placement.tpu_slice {
+            labels.insert(TPU_TOPOLOGY_LABEL.to_owned(), shape.to_owned());
             labels.insert(
                 format!("cloud.google.com/gke-tpu-partition-{shape}-id"),
                 id.to_owned(),
             );
+            if shape == "2x2x2" {
+                labels.insert(
+                    "cloud.google.com/gke-tpu-partition-2x2x1-id".to_owned(),
+                    format!("{name}-2x2x1"),
+                );
+            }
         }
         let allocatable =
             BTreeMap::from([(accel_resource(kind).to_owned(), Quantity(chips.to_string()))]);
@@ -1075,7 +1076,7 @@ mod tests {
                 Placement {
                     island: "island-tpu",
                     domain: "domain-tpu",
-                    tpu_slice: Some(("2x2x1", "slice-a")),
+                    tpu_slice: Some(("2x2x2", "slice-a")),
                 },
             ),
             node(
@@ -1086,7 +1087,7 @@ mod tests {
                 Placement {
                     island: "island-tpu",
                     domain: "domain-tpu",
-                    tpu_slice: Some(("2x2x1", "slice-a")),
+                    tpu_slice: Some(("2x2x2", "slice-a")),
                 },
             ),
         ];
@@ -1148,7 +1149,8 @@ mod tests {
         assert_eq!(cordoned_gpu_domain.free, 0);
         assert!(!cordoned_gpu_domain.healthy);
 
-        let tpu_slice = placement(&report.tpu_slices, "2x2x1");
+        assert_eq!(report.tpu_slices.len(), 1);
+        let tpu_slice = placement(&report.tpu_slices, "2x2x2");
         assert_eq!(tpu_slice.chips, 8);
         assert_eq!(tpu_slice.total, 1);
         assert_eq!(tpu_slice.unhealthy, 1);
