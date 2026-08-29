@@ -92,8 +92,83 @@ var _ = ginkgo.Describe("A workload-mode quota plane against a real Kueue", func
 		gomega.Consistently(func(g gomega.Gomega) {
 			g.Expect(admittedOn(g, leafName)).To(gomega.Equal(int64(2 * perPod)))
 		}, "10s", interval).Should(gomega.Succeed())
+
+		// Deliberately last, and deliberately in this chain: a freeze is only
+		// meaningful once there is a good materialization to hold, and this is
+		// the only suite that has one standing in a real Kueue.
+		ginkgo.By("freezing rather than materializing a budget the cluster cannot honour")
+		// The parent moves first. Raising only the leaf would break containment
+		// and the node would freeze for that instead -- a different violation
+		// reaching the same condition, which would let this pass while proving
+		// nothing about capacity.
+		for _, name := range []string{tenantsName, leafName} {
+			raiseBudget(name, unaffordable)
+		}
+
+		gomega.Eventually(func(g gomega.Gomega) {
+			leaf := &v1beta1.AcceleratorQuota{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: leafName}, leaf)).To(gomega.Succeed())
+			g.Expect(degradedReason(leaf)).To(gomega.Equal(v1beta1.AcceleratorQuotaReasonCapacityExceeded),
+				"a budget above what the cluster reports must say so, not fail quietly")
+		}, timeout, interval).Should(gomega.Succeed())
+
+		// The queue keeps the number it was last able to honour. Writing the new
+		// one would let Kueue admit against hardware that is not there; deleting
+		// the queue would take a working tenant's grant away over a number
+		// nobody has spent yet. Consistently, not Eventually: the failure this
+		// guards against is a later pass quietly applying it.
+		gomega.Consistently(func(g gomega.Gomega) {
+			cq := &kueuev1beta2.ClusterQueue{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: leafName}, cq)).To(gomega.Succeed())
+			g.Expect(nominalQuotaOf(cq)).To(gomega.Equal(int64(nominal)))
+		}, "10s", interval).Should(gomega.Succeed())
+
+		ginkgo.By("keeping the work the frozen queue had already admitted")
+		expectAdmitted(leafName, 2*perPod)
 	})
 })
+
+// raiseBudget sets one node's accelerator budget, retrying the read-modify-write
+// against a controller writing status to the same object.
+func raiseBudget(name string, chips int64) {
+	ginkgo.GinkgoHelper()
+	gomega.Eventually(func(g gomega.Gomega) {
+		q := &v1beta1.AcceleratorQuota{}
+		g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: name}, q)).To(gomega.Succeed())
+		q.Spec.Budgets[0].Nominal = *resource.NewQuantity(chips, resource.DecimalSI)
+		g.Expect(k8sClient.Update(suiteCtx, q)).To(gomega.Succeed())
+	}, timeout, interval).Should(gomega.Succeed())
+}
+
+// degradedReason is the reason carried on a node's Degraded condition, or ""
+// when the node is not degraded.
+func degradedReason(q *v1beta1.AcceleratorQuota) string {
+	for _, c := range q.Status.Conditions {
+		if c.Type != v1beta1.AcceleratorQuotaDegraded {
+			continue
+		}
+		if c.Status == metav1.ConditionTrue {
+			return c.Reason
+		}
+		return ""
+	}
+	return ""
+}
+
+// nominalQuotaOf reads the accelerator's nominalQuota out of a rendered
+// ClusterQueue, or -1 when the queue covers no such resource.
+func nominalQuotaOf(cq *kueuev1beta2.ClusterQueue) int64 {
+	for _, group := range cq.Spec.ResourceGroups {
+		for _, flavor := range group.Flavors {
+			for _, r := range flavor.Resources {
+				if string(r.Name) == acceleratorResource {
+					return r.NominalQuota.Value()
+				}
+			}
+		}
+	}
+	return -1
+}
 
 // admit creates a queue-labeled workload and waits for Kueue to let it through.
 //

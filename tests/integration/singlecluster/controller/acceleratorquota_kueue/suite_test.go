@@ -71,6 +71,9 @@ const (
 	// admission moves a figure the first already set and a third has to wait.
 	nominal = 4
 	perPod  = 2
+	// Above the 8 chips the fake node reports, so a budget raised to it is
+	// affordable nowhere on this cluster.
+	unaffordable = 16
 	// installed is what the fake node reports. Comfortably above nominal:
 	// a budget over measured capacity freezes the node, and this suite is not
 	// about that check.
