@@ -78,14 +78,14 @@ data:
   #
   # - labels:      merged into each PodMonitor's metadata.labels (NOT
   #                spec.selector). Opts the monitor into a label-selecting
-  #                collector, e.g. a KTel/OTel target allocator whose
-  #                podMonitorSelector is {ktel.fb.com/scrape-tier: cluster}.
+  #                collector, e.g. an OTel target allocator whose
+  #                podMonitorSelector is {monitoring.example.com/scrape-tier: cluster}.
   # - relabelings: appended to every PodMetricsEndpoint so scraped series carry
   #                the same label schema as the legacy pod-annotation scrape.
   #
   # podMonitor: |-
   #   {
-  #     "labels": { "ktel.fb.com/scrape-tier": "cluster" },
+  #     "labels": { "monitoring.example.com/scrape-tier": "cluster" },
   #     "relabelings": [
   #       { "sourceLabels": ["__meta_kubernetes_pod_label_ome_io_inferenceservice"], "targetLabel": "inferenceservice" },
   #       { "sourceLabels": ["__meta_kubernetes_pod_label_component"], "targetLabel": "component" },
