@@ -9,6 +9,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 )
@@ -84,6 +85,35 @@ func WithDerivedISVCCache(controlPlaneID string) WorkloadClusterOption {
 // cluster on shutdown — no leaked background watches. Mirrors the cmd/manager
 // wiring; the returned Manager MUST be passed to SetupPlacement so the placer
 // reads the same live connections.
+// SetupQuotaTransport wires the management plane's OWN cross-cluster transport
+// and the connector that keeps it in step with the registry.
+//
+// A second Manager rather than the one SetupWorkloadCluster returns, mirroring
+// production: ome-quota-manager is a separate binary, so it cannot share an
+// in-process struct with ome-manager, and a suite that shared one would be
+// testing a wiring nothing ships. Two Managers is also what surfaces the real
+// costs — a second informer set per member, and a second client to keep in step.
+//
+// Deliberately NO second workloadcluster.Reconciler. That controller writes the
+// registry's Ready condition from in-memory grace and backoff state, so a second
+// one would flap the condition between two processes and lose the argument
+// silently. The connector only reads.
+func SetupQuotaTransport(_ context.Context, mgr ctrl.Manager) (*ClusterManager, error) {
+	clusterManager := workloadcluster.NewManager(mgr.GetScheme())
+	if err := mgr.Add(clusterManager); err != nil {
+		return nil, fmt.Errorf("SetupQuotaTransport: add cluster manager runnable: %w", err)
+	}
+	connector := &acceleratorquota.Connector{
+		Client:   mgr.GetClient(),
+		Log:      ctrl.Log.WithName("AcceleratorQuotaConnector"),
+		Clusters: clusterManager,
+	}
+	if err := connector.SetupWithManager(mgr); err != nil {
+		return nil, fmt.Errorf("SetupQuotaTransport: SetupWithManager: %w", err)
+	}
+	return clusterManager, nil
+}
+
 func SetupWorkloadCluster(_ context.Context, mgr ctrl.Manager, opts ...WorkloadClusterOption) (*ClusterManager, error) {
 	cfg := &workloadClusterOpts{}
 	for _, o := range opts {

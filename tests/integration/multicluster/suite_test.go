@@ -104,6 +104,9 @@ type cluster struct {
 	client   client.Client
 	ctx      context.Context
 	clusters *components.ClusterManager // set on the control plane only
+	// quotaClusters is the management plane's own transport, wired beside
+	// clusters so a spec can assert the two follow the registry independently.
+	quotaClusters *components.ClusterManager // set on the control plane only
 }
 
 func (c *cluster) teardown() {
@@ -197,7 +200,7 @@ func createCluster(withKueue bool) cluster {
 // cluster's createCluster has returned: the scheme is then fully registered and
 // stable, so the manager's cache informers read it without racing an Init.
 func startControlPlaneManager(c *cluster) {
-	var cm *components.ClusterManager
+	var cm, quotaCM *components.ClusterManager
 	err := c.fwk.StartManager(c.ctx, c.cfg, func(setupCtx context.Context, mgr ctrl.Manager) error {
 		m, err := components.SetupWorkloadCluster(setupCtx, mgr,
 			components.WithClusterHealthInterval(clusterHealthInterval),
@@ -215,10 +218,23 @@ func startControlPlaneManager(c *cluster) {
 			components.WithWinnerLostGracePeriod(winnerLostGrace)); err != nil {
 			return err
 		}
-		return components.SetupPlacementGC(setupCtx, mgr, m, controlPlaneID, gcInterval)
+		if err := components.SetupPlacementGC(setupCtx, mgr, m, controlPlaneID, gcInterval); err != nil {
+			return err
+		}
+		// The quota plane's own transport, beside the placement one rather than
+		// sharing it — the two run in separate binaries in production, and this
+		// is what proves a second Manager can follow the same registry without
+		// contending with the reconciler that owns it.
+		qcm, err := components.SetupQuotaTransport(setupCtx, mgr)
+		if err != nil {
+			return err
+		}
+		quotaCM = qcm
+		return nil
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane StartManager")
 	c.clusters = cm
+	c.quotaClusters = quotaCM
 }
 
 // startMemberManager wires + starts a member manager for the real-Kueue path:
