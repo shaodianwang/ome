@@ -1,0 +1,71 @@
+# A fleet tree split in proportion to what each member holds (OEP-0024).
+#
+#   root                 Cohort        192 chips, the fleet total
+#   └── sim-tenants      Cohort        192 chips, travels budget-less
+#       └── sim-serving  ClusterQueue  192 chips  ns kwok-sim
+#
+# Authored on the MANAGEMENT cluster only. fleet-up.sh does not apply it: a tree
+# is what an operator is here to write, and the fleet stands up without one.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/50-fleet-proportional.yaml
+#
+# The reserved root IS declared here, unlike in the single-cluster fixtures. A
+# member's own controller creates that member's root and derives its capacity
+# onto it, but the hub runs no such controller for itself: on a management plane
+# the root is the admin's to write, and without it the tiers below have no
+# parent to hang from and the tree never assembles.
+#
+# No node names a policy, so the manager's configured default applies —
+# fleet-up.sh sets Proportional. The split is taken against the capacity each
+# member reported on its own root, not against anything authored here:
+#
+#   member-a  two cubes, 128 chips  ->  128
+#   member-b  one cube,   64 chips  ->   64
+#
+# 192 is exactly what the two hold between them, so a correct split hands each
+# cluster precisely its own hardware. Any other pair of numbers means either the
+# arithmetic or the capacity read is wrong, which is why the members are
+# deliberately unequal.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+---
+# A grouping tier. It travels to both members as pure topology: a fleet total on
+# a grouping tier is a number no single cluster can hold, and a budget-less node
+# is unconstrained for containment there.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-tenants
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+---
+# The tenant. Its 192 is a fleet-wide figure; each member receives only its own
+# resolved share, and the copy that lands there carries no trace of the split.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  namespaces:
+  - kwok-sim
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192

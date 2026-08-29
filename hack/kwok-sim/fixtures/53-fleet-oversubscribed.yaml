@@ -1,0 +1,78 @@
+# A split one member cannot hold, to exercise the capacity guardrail (OEP-0024).
+#
+#   root                 Cohort        192 chips
+#   └── sim-tenants      Cohort        192 chips, travels budget-less
+#       └── sim-serving  ClusterQueue  192 chips  ns kwok-sim
+#                                      Explicit: member-a 64, member-b 128
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/53-fleet-oversubscribed.yaml
+#
+# This one is MEANT to fail, on one member and only one:
+#
+#   member-a  128 chips  <-   64   fine, materializes
+#   member-b   64 chips  <-  128   twice what it holds
+#
+# The hub admits it. Every check the webhook can make passes: the entries sum to
+# nominal, containment holds, the shape is legal. Whether a number fits is not
+# knowable where the tree is authored — capacity is a property of the member,
+# read from the member, so the refusal happens there.
+#
+# What to expect on member-b: Degraded with CapacityExceeded, and the previous
+# materialization FROZEN rather than replaced or deleted. A budget that cannot
+# be honoured must not quietly become a smaller one, and it must not take away a
+# grant that was working — so the last good state stands and an operator is told.
+# member-a is unaffected: members are independent, and one refusing a write
+# costs the fleet that member and nothing else.
+#
+# Apply 50-fleet-proportional.yaml first to see the freeze rather than an empty
+# member: with nothing materialized there is nothing to hold, and member-b just
+# reports Degraded with no queues.
+#
+# A shrinking budget never trips this check — the comparison is against a
+# high-water mark with a hysteresis band, so capacity that dips does not
+# invalidate a tree that was sound when it was written.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-tenants
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  namespaces:
+  - kwok-sim
+  distribution:
+    policy: Explicit
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+    perCluster:
+    - cluster: member-a
+      nominal: 64
+    - cluster: member-b
+      nominal: 128

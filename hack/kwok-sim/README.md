@@ -50,7 +50,9 @@ sim-4x4x4   http://sim-4x4x4.kwok-sim.svc.cluster.local:8080   True    demo-noop
   72 / 128 chips
 ```
 
-Tear down with `kind delete cluster --name ome-kwok`.
+Tear down with `hack/kwok-sim/down.sh`, which reads the same `--cluster` and
+`OME_KWOK_CLUSTER` the bring-up does — so it deletes the cluster you actually
+started, not whichever one the default names.
 
 ## Components
 

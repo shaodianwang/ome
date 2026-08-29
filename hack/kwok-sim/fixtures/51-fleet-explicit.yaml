@@ -1,0 +1,73 @@
+# A fleet tree split by numbers the admin wrote, not by capacity (OEP-0024).
+#
+#   root                 Cohort         96 chips
+#   └── sim-tenants      Cohort         96 chips, travels budget-less
+#       └── sim-serving  ClusterQueue   96 chips  ns kwok-sim
+#                                       Explicit: member-a 32, member-b 64
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/51-fleet-explicit.yaml
+#
+# The split is deliberately the INVERSE of the hardware. Proportional would give
+# the big member twice the small one (64 and 32); this gives the small member
+# twice the big one. So the two policies cannot be confused for each other here
+# — the numbers on the members say which one ran.
+#
+#   member-a  128 chips  ->  32   (Proportional would say 64)
+#   member-b   64 chips  ->  64   (Proportional would say 32)
+#
+# perCluster names WorkloadClusters, and its entries MUST sum to nominal: the
+# whole point of Explicit is that the admin's arithmetic is taken verbatim, so a
+# sum that disagrees with the total is a contradiction rather than a hint, and
+# the webhook rejects it. Try it: change one entry and re-apply.
+#
+# member-b lands exactly on its capacity, which is legal — the guardrail is
+# budget <= capacity, not budget < capacity. 53-fleet-oversubscribed.yaml is the
+# one that goes over.
+#
+# Policy is set at the node here (spec.distribution), which is the default for
+# every budget on it. 52-fleet-mixed.yaml sets it per budget instead.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 96
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-tenants
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 96
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  namespaces:
+  - kwok-sim
+  distribution:
+    policy: Explicit
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 96
+    perCluster:
+    - cluster: member-a
+      nominal: 32
+    - cluster: member-b
+      nominal: 64

@@ -23,6 +23,17 @@
 #                   component can be re-rolled against a cluster already up.
 #   --no-scheduler  skip ome-scheduler and use the default scheduler; implies
 #                   --topology strict, the full production contract.
+#   --no-nodes      skip kwok and the simulated nodes entirely. For a cluster
+#                   that carries no silicon of its own — a management plane
+#                   measures nothing locally, it reads what each member derived.
+#   --multicluster-role R
+#                   run ome-manager in a multi-cluster role; "control-plane" is
+#                   the only one. It turns ON the WorkloadCluster registry, whose
+#                   reconciler is the single writer of the Ready condition every
+#                   remote client waits for, and turns OFF the local
+#                   InferenceService, BaseModel and ServingRuntime controllers,
+#                   which would otherwise churn against an empty local catalog.
+#                   Needs the manager component.
 #   --topology M    podgroup (default) | plugin | strict — where slice
 #                   co-location comes from. See render-runtimes.sh, and the
 #                   README on why strict + ome-scheduler wedges.
@@ -56,6 +67,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 CLUSTER="${OME_KWOK_CLUSTER:-ome-kwok}"
+BLOCK=""
+IP_PREFIX=""
 TAG="${OME_IMAGE_TAG:-kind-local}"
 # 1.35, not the 1.34 a generic kind recipe would pick: charts/ome-scheduler
 # guards kubeVersion ">=1.35.0-0 <1.36.0-0" and refuses to render otherwise. The
@@ -75,6 +88,8 @@ OME_NS="ome"
 TOPOLOGY_KEY="cloud.google.com/gke-nodepool"
 SKIP_BUILD=0
 NO_SCHEDULER=0
+NO_NODES=0
+MC_ROLE=""
 WITH_ISVCS=0
 WITH_KUEUE=0
 TOPOLOGY_MODE=""
@@ -86,19 +101,28 @@ while [ $# -gt 0 ]; do
   # reports as "$2: unbound variable" — a bash internal, from a line number, for
   # what is an ordinary usage mistake.
   case "$1" in
-    --cluster|--cubes|--component|--topology)
+    --cluster|--cubes|--component|--topology|--block|--ip-prefix|--multicluster-role)
       [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;;
   esac
   case "$1" in
     --cluster) CLUSTER="$2"; shift 2 ;;
     --cubes) CUBES="$2"; shift 2 ;;
+    # Passed through to the node generator. Both are per-cluster salts, and they
+    # only matter once more than one simulated cluster shares a docker bridge:
+    # the generator derives node names from a hash of the block and hands out
+    # addresses from the prefix, so two clusters left at the defaults mint
+    # identically named nodes on identically numbered addresses.
+    --block) BLOCK="$2"; shift 2 ;;
+    --ip-prefix) IP_PREFIX="$2"; shift 2 ;;
     --component) REQUESTED="${REQUESTED} $2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --no-scheduler) NO_SCHEDULER=1; shift ;;
+    --no-nodes) NO_NODES=1; shift ;;
+    --multicluster-role) MC_ROLE="$2"; shift 2 ;;
     --topology) TOPOLOGY_MODE="$2"; shift 2 ;;
     --with-isvcs) WITH_ISVCS=1; shift ;;
     --with-kueue) WITH_KUEUE=1; shift ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -147,15 +171,36 @@ if [ "$WITH_ISVCS" -eq 1 ] && [ "$WITH_MANAGER" -eq 0 ]; then
   exit 2
 fi
 
+if [ -n "$MC_ROLE" ]; then
+  # The same value main.go accepts, checked here so a typo costs a second rather
+  # than a cluster: the manager exits on a bad role, but not until it boots.
+  [ "$MC_ROLE" = control-plane ] || {
+    echo "--multicluster-role must be control-plane, got: $MC_ROLE" >&2; exit 2; }
+  [ "$WITH_MANAGER" -eq 1 ] || {
+    echo "--multicluster-role needs the manager component; nothing else reads it" >&2; exit 2; }
+fi
+
+if [ "$NO_NODES" -eq 1 ] && [ "$WITH_ISVCS" -eq 1 ]; then
+  echo "--with-isvcs has nowhere to place a pod with --no-nodes" >&2
+  exit 2
+fi
+
 # plugin mode has no meaning without the plugin, and podgroup's override only
 # exists to work around it — so the default scheduler always runs strict.
 if [ -z "$TOPOLOGY_MODE" ]; then
   [ "$WITH_SCHEDULER" -eq 1 ] && TOPOLOGY_MODE=podgroup || TOPOLOGY_MODE=strict
 fi
 
-for tool in docker kind helm kubectl jq; do
+# kind is not in this list: resolve_kind below accepts bin/kind, which is where
+# `make kind` puts it, and requiring it on PATH as well would reject the setup
+# this repo actually asks for.
+for tool in docker helm kubectl jq; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool not on PATH" >&2; exit 1; }
 done
+
+. "$(dirname "${BASH_SOURCE[0]}")/lib/kind.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/fixtures.sh"
+resolve_kind
 
 KCTX="kind-${CLUSTER}"
 IMAGE="ome-manager:${TAG}"
@@ -179,14 +224,17 @@ echo "==> kind cluster ${CLUSTER}"
 # internet at all. Set KWOK_SIM_KEEP_PROXY=1 where the node genuinely needs one.
 kind_create() {
   if [ -n "${KWOK_SIM_KEEP_PROXY:-}" ]; then
-    kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE"
+    "$KIND" create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE"
   else
     env -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u no_proxy \
-      kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE"
+      "$KIND" create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE"
   fi
 }
-kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind_create
+"$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind_create
 
+if [ "$NO_NODES" -eq 1 ]; then
+  echo "==> no kwok, no simulated nodes"
+else
 echo "==> kwok"
 helm repo add kwok https://kwok.sigs.k8s.io/charts/ >/dev/null 2>&1 || true
 helm repo update kwok >/dev/null
@@ -213,7 +261,9 @@ kubectl --context "$KCTX" patch stage.kwok.x-k8s.io pod-complete --type=merge -p
 
 echo "==> simulated TPU nodes (${CUBES})"
 KWOK_SIM_CONTEXT="$KCTX" hack/kwok-sim/apply-tpu-nodes.sh --context "$KCTX" \
-  -- --cubes "$CUBES" --model "$MODEL"
+  -- --cubes "$CUBES" --model "$MODEL" \
+  ${BLOCK:+--block "$BLOCK"} ${IP_PREFIX:+--ip-prefix "$IP_PREFIX"}
+fi
 
 # Before OME, so the manager registers the scheme at startup rather than needing
 # a restart: it probes for optional CRDs once, on boot. Without PodGroup, OME
@@ -287,7 +337,7 @@ if [ "$WITH_QUOTA" -eq 1 ] && [ "$WITH_KUEUE" -eq 1 ]; then
   # `kind load docker-image` fails importing them with "content digest not
   # found" -- the digest it wants is an attestation, not a layer.
   docker save --platform "linux/${KUEUE_ARCH}" "$KUEUE_IMAGE" -o "$KUEUE_TAR"
-  kind load image-archive "$KUEUE_TAR" --name "$CLUSTER" >/dev/null
+  "$KIND" load image-archive "$KUEUE_TAR" --name "$CLUSTER" >/dev/null
   rm -f "$KUEUE_TAR"
 
   # Installed with `helm upgrade --install`, the same as every other component
@@ -362,6 +412,10 @@ fi
 if [ "$WITH_QUOTA" -eq 1 ]; then
   echo "==> ResourceFlavor (no AcceleratorQuota; the controller makes its own root)"
   k apply -f hack/kwok-sim/fixtures/30-resourceflavor.yaml >/dev/null
+  # Every namespace the quota fixtures bind, so any of them can be applied by
+  # hand and fully materialize. None is created by the tree itself: a leaf names
+  # a namespace, it does not own one.
+  ensure_namespaces "$KCTX" hack/kwok-sim/fixtures/3*-acceleratorquota*.yaml
 fi
 
 if [ "$WITH_MANAGER" -eq 1 ]; then
@@ -386,15 +440,15 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
 fi
 if [ "$WITH_MANAGER" -eq 1 ]; then
   echo "==> load ${IMAGE}"
-  kind load docker-image "$IMAGE" --name "$CLUSTER"
+  "$KIND" load docker-image "$IMAGE" --name "$CLUSTER"
 fi
 if [ "$WITH_SCHEDULER" -eq 1 ]; then
   echo "==> load ${SCHED_IMAGE}"
-  kind load docker-image "$SCHED_IMAGE" --name "$CLUSTER"
+  "$KIND" load docker-image "$SCHED_IMAGE" --name "$CLUSTER"
 fi
 if [ "$WITH_QUOTA" -eq 1 ]; then
   echo "==> load ${QUOTA_IMAGE}"
-  kind load docker-image "$QUOTA_IMAGE" --name "$CLUSTER"
+  "$KIND" load docker-image "$QUOTA_IMAGE" --name "$CLUSTER"
 fi
 
 # A rebuild reuses the tag, so the Deployment's image ref is byte-identical and
@@ -431,6 +485,12 @@ if [ "$WITH_MANAGER" -eq 1 ]; then
     --set ome.controller.resources.limits.cpu=2
     --set ome.controller.resources.limits.memory=2Gi
   )
+  if [ -n "$MC_ROLE" ]; then
+    HELM_ARGS+=(
+      --set ome.multicluster.enabled=true
+      --set ome.multicluster.role="$MC_ROLE"
+    )
+  fi
 
   # Two passes. The chart registers failurePolicy=Fail webhooks and, in the same
   # apply, a ClusterServingRuntime those webhooks intercept — which cannot succeed

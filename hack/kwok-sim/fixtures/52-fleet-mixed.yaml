@@ -1,0 +1,94 @@
+# Two tenants under one tier, each split by a different policy (OEP-0024).
+#
+#   root                Cohort        192 chips
+#   └── sim-tenants     Cohort        192 chips, travels budget-less
+#       ├── sim-serving ClusterQueue   96 chips  ns kwok-sim        Proportional
+#       └── sim-batch   ClusterQueue   48 chips  ns kwok-sim-batch  Explicit
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/52-fleet-mixed.yaml
+#
+# The policy is chosen per budget entry here (budgets[].policy) rather than per
+# node, which is the form that lets one leaf be Explicit on a reserved flavor
+# and Proportional on a fungible one. With a single flavor in this simulator the
+# same mechanism is shown across two leaves instead.
+#
+# What each member ends up with:
+#
+#              sim-serving   sim-batch   total   capacity
+#   member-a        64          16         80      128
+#   member-b        32          32         64       64
+#
+# sim-serving follows the hardware, 2:1. sim-batch inverts it, 1:2. Reading the
+# two side by side on one member is the point: the same tree, the same pass, two
+# different answers, and neither policy leaking into the other's numbers.
+#
+# Containment holds at sim-tenants: a parent's nominal must be at least the sum
+# of its children's per (resource, flavor), and 96 + 48 is within 192. The
+# webhook checks that at admission.
+#
+# kwok-sim-batch has to exist on both members before this binds it — a leaf
+# names a namespace, it does not create one, and without it the LocalQueue
+# cannot be written even though the ClusterQueue lands. fleet-up.sh creates
+# every namespace these fixtures bind, so applying this needs no second step.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-tenants
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 192
+---
+# Split against what each member reported. No policy named, so the manager's
+# configured default applies.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  namespaces:
+  - kwok-sim
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 96
+---
+# Split by the numbers below, whatever the hardware says.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: sim-batch
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: sim-tenants
+  namespaces:
+  - kwok-sim-batch
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    policy: Explicit
+    nominal: 48
+    perCluster:
+    - cluster: member-a
+      nominal: 16
+    - cluster: member-b
+      nominal: 32
