@@ -71,6 +71,17 @@ export function componentTransition(c: ComponentItem): { from?: string; to: stri
   return { from: c.currentRevision, to: c.updateRevision };
 }
 
+/** Explain a broken rollout-status invariant: the traffic entry marked latest
+ * should name the same revision as latestRolledoutRevision. */
+export function componentRolloutMismatch(c: ComponentItem): string | undefined {
+  if (!c.latestRolledoutRevision) return undefined;
+  const latestTraffic = c.traffic?.filter((target) => target.latestRevision) ?? [];
+  if (latestTraffic.length !== 1) return undefined;
+  const trafficRevision = latestTraffic[0].revisionName;
+  if (trafficRevision === c.latestRolledoutRevision) return undefined;
+  return `status mismatch: traffic marks ${shortRevision(trafficRevision)} latest, rollout reports ${shortRevision(c.latestRolledoutRevision)}`;
+}
+
 /** Ready-vs-total replica progress across components, as a 0–100 percentage.
  *  While a component converges to a new revision, only Instances ready on that
  *  revision count — old-revision pods keep `readyReplicas` high under surge and
@@ -93,28 +104,38 @@ export function rolloutProgress(components?: ComponentItem[]): number | null {
   return Math.round((100 * ready) / total);
 }
 
-/** Fuse the rollouts listing with the deployment rows it refers to, so the cards
- *  carry real replica progress and per-component rollout state instead of a
- *  fabricated bar. */
+/** Fuse rollout state with deployment inventory when needed for component
+ * replica detail. Canary traffic is the authoritative progress value when OME
+ * reports it; replica readiness is the fallback for other strategies. */
 export function toRollouts(rollouts: RolloutItem[], isvcs: IsvcItem[]): Rollout[] {
   const byId = new Map(isvcs.map((s) => [`${s.cluster}/${s.namespace ?? ""}/${s.name}`, s]));
   return rollouts.map((r) => {
     const isvc = byId.get(`${r.cluster}/${r.namespace ?? ""}/${r.name}`);
-    const pct = rolloutProgress(isvc?.components);
+    const components = r.components ?? isvc?.components;
+    const pct = r.progressPercent ?? rolloutProgress(components);
     return {
       name: r.name,
       namespace: r.namespace,
-      barTone: "amber" as const,
-      barPct: pct ?? 0,
-      barStriped: !r.ready,
-      note: r.message ?? r.reason ?? "rolling out",
+      barTone: r.state === "terminal" ? ("red" as const) : ("amber" as const),
+      barPct: pct ?? undefined,
+      barStriped: r.state === "active",
+      note: [
+        r.phase === "Reconciling" ? "Controller Reconciling" : `OME ${r.phase}`,
+        `Serving ${r.ready ? "Ready" : "NotReady"}`,
+        r.canary?.metricResults?.find((metric) => !metric.passed)?.name,
+        r.delivery ? `Argo ${r.delivery.resourceSyncStatus ?? r.delivery.syncStatus}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
       gate: r.ready
-        ? { label: "Ready", tone: "green" as const }
-        : { label: "In progress", tone: "amber" as const },
+        ? r.state === "terminal"
+          ? { label: r.phase, tone: "red" as const }
+          : { label: r.phase, tone: "amber" as const }
+        : { label: r.phase, tone: r.state === "terminal" ? ("red" as const) : ("amber" as const) },
       cluster: r.cluster,
-      started: r.age ?? "—",
-      components: componentCells(isvc?.components),
-      canary: isvc?.canary,
+      started: r.startedAt,
+      components: componentCells(components),
+      canary: r.canary ?? isvc?.canary,
       sel: {
         cluster: r.cluster,
         kind: "InferenceService" as const,

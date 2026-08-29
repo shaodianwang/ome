@@ -22,6 +22,7 @@
 
 mod activity;
 mod app_context;
+mod argo;
 mod chat_proxy;
 mod config;
 mod informers;
@@ -132,6 +133,16 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
             .live_invalidation_batch_ms
             .map(|millis| Duration::from_millis(millis.get())),
     );
+    let argo = match config.argo_namespace.as_deref() {
+        Some(namespace) => match argo::ArgoState::start(namespace, invalidations.clone()).await {
+            Ok(state) => Some(state),
+            Err(error) => {
+                tracing::error!(%error, %namespace, "Argo CD delivery observer disabled");
+                None
+            }
+        },
+        None => None,
+    };
     // Shared signal: Node/Pod and cache-eligibility changes mark capacity stale.
     let signal = informers::CapacitySignal::new();
 
@@ -248,6 +259,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
                     .map(|components| components.0)
                     .unwrap_or_default(),
             ),
+            argo,
         },
     );
     server::serve(&config, state).await

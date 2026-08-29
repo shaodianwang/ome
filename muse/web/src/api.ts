@@ -164,7 +164,32 @@ export interface ComponentItem {
   /** Ready Instances on `updateRevision` — the true rollout progress while
    *  old-revision pods still count toward `readyReplicas`. */
   updatedReadyReplicas?: number;
+  latestReadyRevision?: string;
+  latestRolledoutRevision?: string;
+  previousRolledoutRevision?: string;
+  traffic?: {
+    revisionName: string;
+    percent: number;
+    latestRevision?: boolean;
+    tag?: string;
+  }[];
   url?: string;
+}
+
+export interface DeliveryItem {
+  application: string;
+  syncStatus: string;
+  healthStatus?: string;
+  desiredRevision?: string;
+  operationPhase?: string;
+  operationMessage?: string;
+  operationStartedAt?: string;
+  operationFinishedAt?: string;
+  resourceSyncStatus?: string;
+  resourceHealthStatus?: string;
+  resourceHealthMessage?: string;
+  requiresPruning?: boolean;
+  reconciledAt?: string;
 }
 
 /** The runtime the operator actually resolves for an ISVC: a namespaced
@@ -204,6 +229,7 @@ export interface IsvcItem {
   age?: string;
   /** Accelerator chips currently held by this service's scheduled pods. */
   accelerators?: number;
+  delivery?: DeliveryItem;
 }
 
 /** One container of an InferenceService pod, for the expanded row. */
@@ -311,8 +337,24 @@ export interface CanaryItem {
   failedChecks?: number;
   /** Humanized time in the current step, e.g. "2h". */
   stepAge?: string;
-  /** The failing analysis checks, when reported. */
+  /** The failing analysis checks, projected for compact display; `metricResults`
+   *  carries the full evidence. */
   failingChecks?: CanaryCheck[];
+  canaryRevisionHash?: string;
+  rolledBackRevisionHash?: string;
+  stepEnteredTime?: string;
+  lastEvaluationTime?: string;
+  lastConclusiveEvaluationTime?: string;
+  analysisFailedChecks?: number;
+  metricResults?: {
+    name: string;
+    passed: boolean;
+    value?: string;
+    threshold?: string;
+    operator?: string;
+    message?: string;
+    time?: string;
+  }[];
 }
 
 /** One failing canary analysis check: what was measured against what. */
@@ -323,11 +365,23 @@ export interface CanaryCheck {
   value?: string;
   message?: string;
 }
+export interface RolloutCoordinationItem {
+  name: string;
+  phase?: string;
+  policy?: string;
+  components?: string[];
+  currentComponent?: string;
+  previousComponent?: string;
+  compositePhase?: string;
+  lastTransitionTime?: string;
+  message?: string;
+}
 
 /** Full ISVC detail (drawer): the overview plus conditions and placement. */
 export interface IsvcDetail extends IsvcItem {
   conditions?: ConditionItem[];
   placement?: PlacementItem;
+  rolloutCoordination?: RolloutCoordinationItem[];
 }
 
 export interface ModelItem {
@@ -474,9 +528,19 @@ export interface RolloutItem {
   namespace?: string;
   deploymentMode?: string;
   ready: boolean;
+  /** OME rollout phase, or MUSE-derived `Reconciling` while the controller's
+   *  observed generation trails the desired spec generation. */
+  phase: string;
+  state: "active" | "terminal";
+  strategy?: string;
+  progressPercent?: number;
+  startedAt?: string;
   reason?: string;
   message?: string;
-  age?: string;
+  components?: ComponentItem[];
+  canary?: CanaryItem;
+  rolloutCoordination?: RolloutCoordinationItem[];
+  delivery?: DeliveryItem;
 }
 
 /** One OME control-plane component's health on one cluster (`GET /v1/system`,
@@ -504,6 +568,7 @@ export interface SystemComponentItem {
   objects?: string[];
   conditions?: ConditionItem[];
   pods?: SystemPod[];
+  delivery?: DeliveryItem;
 }
 
 /** Health thresholds where larger values are worse. */

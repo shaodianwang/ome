@@ -11,6 +11,7 @@ import type { StreamConnectionState } from "../live";
 import {
   canaryNote,
   componentReplicas,
+  componentRolloutMismatch,
   componentTone,
   componentTransition,
   conditionRank,
@@ -63,7 +64,7 @@ export function DeploymentDetail({
   const [tab, setTab] = useState<TabId>("overview");
   const [metricsRangeId, setMetricsRangeId] = useState("");
   const detail = useLive<IsvcDetail>(() => api.inferenceService(sel), {
-    kinds: ["InferenceService"],
+    kinds: ["InferenceService", "ArgoApplication"],
     throttleMs: 4_000,
   });
   const cfg = useLive(api.config, { kinds: [] });
@@ -345,6 +346,7 @@ function OverviewPane({
                   const pct = des > 0 ? Math.round((prog / des) * 100) : prog > 0 ? 100 : 0;
                   const tone = componentTone(c);
                   const barTone = tone === "ok" ? "green" : tone === "warn" ? "amber" : "red";
+                  const rolloutMismatch = componentRolloutMismatch(c);
                   return (
                     <div key={c.name} className={`comp-tile ${tone}`}>
                       <div className="ct-head">
@@ -359,17 +361,46 @@ function OverviewPane({
                           className="ct-rev"
                           title={`${transition.from ?? "(new)"} → ${transition.to}`}
                         >
-                          {transitionLabel(transition)}
+                          updating {transitionLabel(transition)}
                         </div>
-                      ) : c.revision ? (
+                      ) : c.revision && !c.latestReadyRevision && !c.latestRolledoutRevision ? (
                         <div className="ct-rev" title={c.revision}>
-                          {shortRevision(c.revision)}
+                          revision {shortRevision(c.revision)}
                         </div>
                       ) : null}
                       <Track pct={pct} tone={barTone} />
                       <div className="ct-foot">
-                        {[c.rolloutPhase, `${pct}%`].filter(Boolean).join(" · ")}
+                        {[c.rolloutPhase, `${pct}% replicas ready`].filter(Boolean).join(" · ")}
                       </div>
+                      {c.latestReadyRevision ? (
+                        <div className="ct-rev" title={c.latestReadyRevision}>
+                          latest ready {shortRevision(c.latestReadyRevision)}
+                        </div>
+                      ) : null}
+                      {c.latestRolledoutRevision ? (
+                        <div className="ct-rev" title={c.latestRolledoutRevision}>
+                          latest rolled out {shortRevision(c.latestRolledoutRevision)}
+                        </div>
+                      ) : null}
+                      {c.previousRolledoutRevision ? (
+                        <div className="ct-rev" title={c.previousRolledoutRevision}>
+                          previously rolled out {shortRevision(c.previousRolledoutRevision)}
+                        </div>
+                      ) : null}
+                      {c.traffic?.map((traffic) => (
+                        <div
+                          className="ct-rev"
+                          key={traffic.revisionName}
+                          title={traffic.revisionName}
+                        >
+                          traffic {shortRevision(traffic.revisionName)} · {traffic.percent}%
+                        </div>
+                      ))}
+                      {rolloutMismatch ? (
+                        <div className="ct-foot txt-bad" title={rolloutMismatch}>
+                          {rolloutMismatch}
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -420,15 +451,71 @@ function OverviewPane({
                   ? ` ${n(d.canary.failedChecks)} analysis ${d.canary.failedChecks === 1 ? "check is" : "checks are"} failing.`
                   : ""}
               </p>
-              {d.canary.failingChecks?.map((c) => (
-                <div className="detail-load" key={c.name}>
-                  <Dot tone="red" />
-                  <span className="mono">{c.name}</span>
-                  {c.threshold ? <span className="muted">want {c.threshold}</span> : null}
-                  {c.value ? <span className="muted">· got {c.value}</span> : null}
-                  {c.message ? <span> — {c.message}</span> : null}
-                </div>
+              <Facts
+                items={[
+                  ["Candidate", d.canary.canaryRevisionHash],
+                  ["Rolled back", d.canary.rolledBackRevisionHash],
+                  [
+                    "Failed checks",
+                    d.canary.analysisFailedChecks != null
+                      ? String(d.canary.analysisFailedChecks)
+                      : undefined,
+                  ],
+                  ["Step entered", d.canary.stepEnteredTime],
+                  ["Last evaluation", d.canary.lastEvaluationTime],
+                ]}
+              />
+              {d.canary.metricResults?.length ? (
+                <ul className="sys-conditions">
+                  {d.canary.metricResults.map((metric) => (
+                    <li key={metric.name}>
+                      <span className="sys-cond-type">{metric.name}</span>
+                      <span className="sys-cond-status mono">
+                        {metric.passed ? "Passed" : "Failed"}
+                      </span>
+                      {metric.value ? <span>{metric.value}</span> : null}
+                      {metric.message ? (
+                        <span className="sys-cond-msg">{metric.message}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </Card>
+          ) : null}
+          {d.rolloutCoordination?.length ? (
+            <Card title="Rollout coordination">
+              {d.rolloutCoordination.map((group) => (
+                <Facts
+                  key={group.name}
+                  items={[
+                    ["Group", group.name],
+                    ["Policy", group.policy],
+                    ["Phase", group.phase],
+                    ["Current component", group.currentComponent],
+                    ["Previous component", group.previousComponent],
+                    ["Last transition", group.lastTransitionTime],
+                    ["Detail", group.message],
+                  ]}
+                />
               ))}
+            </Card>
+          ) : null}
+          {d.delivery ? (
+            <Card title="Git delivery" sub="Argo CD">
+              <Facts
+                items={[
+                  ["Application", d.delivery.application],
+                  ["Application sync", d.delivery.syncStatus],
+                  ["Resource sync", d.delivery.resourceSyncStatus],
+                  ["Health", d.delivery.resourceHealthStatus ?? d.delivery.healthStatus],
+                  ["Desired revision", d.delivery.desiredRevision],
+                  ["Last operation", d.delivery.operationPhase],
+                  ["Operation detail", d.delivery.operationMessage],
+                  ["Requires pruning", d.delivery.requiresPruning ? "Yes" : ""],
+                  ["Reconciled", d.delivery.reconciledAt],
+                ]}
+              />
             </Card>
           ) : null}
 

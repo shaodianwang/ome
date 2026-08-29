@@ -55,6 +55,8 @@ describe("scopeFleet", () => {
     namespace: "team-a",
     name,
     ready: false,
+    phase: "Pending",
+    state: "active",
   });
   const group = (name: string, kind: string): AccelGroup => ({
     name,

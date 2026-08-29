@@ -652,7 +652,10 @@ export function Fleet({
 
       <h2 className="sec">Rollouts &amp; activity</h2>
       <div className="grid g2">
-        <Card title={`Active rollouts · ${n(rolloutCards.length)}`} sub="progress · phase">
+        <Card
+          title={`OME rollouts & outcomes · ${n(rolloutCards.length)}`}
+          sub="phase · Argo CD sync"
+        >
           {rolloutCards.length ? (
             <div className="urows">
               {rolloutCards.map((r) => (
@@ -668,6 +671,7 @@ export function Fleet({
                     pct={r.barPct ?? 0}
                     tone={r.barTone || "amber"}
                     value={r.note}
+                    showPct={r.barPct != null}
                   />
                   {r.components?.length || r.canary ? (
                     <span className="comp-cells rollout-comps">
@@ -702,7 +706,7 @@ export function Fleet({
                 stale: "Rollout refresh failed; no active rollouts in the last snapshot.",
                 unavailable: "Rollout status is unavailable.",
                 loading: "Loading…",
-                empty: "Nothing rolling out.",
+                empty: "No active or failed OME rollouts.",
               })}
             </div>
           )}

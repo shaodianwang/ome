@@ -119,6 +119,10 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.config.argo.enabled }}
+            - name: MUSE_ARGO_NAMESPACE
+              value: {{ required "config.argo.namespace is required when Argo observation is enabled" .Values.config.argo.namespace | quote }}
+            {{- end }}
             - name: MUSE_METRICS_REFRESH_SECS
               value: {{ .Values.config.metrics.refreshSecs | quote }}
             {{- if .Values.config.metrics.enabled }}

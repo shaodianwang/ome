@@ -664,6 +664,16 @@ pub struct Config {
     )]
     pub system_components: Option<SystemComponents>,
 
+    /// Namespace containing Argo CD Application resources. When unset, delivery
+    /// observation is disabled; when set, a separate ambient-cluster informer is
+    /// started and failures do not affect workload-cluster readiness.
+    #[arg(
+        long = "argo-namespace",
+        env = "MUSE_ARGO_NAMESPACE",
+        value_parser = parse_non_empty
+    )]
+    pub argo_namespace: Option<String>,
+
     /// Node label(s) naming the accelerator's outer topology domain — the RDMA
     /// island / network fabric for GPUs, or the physical block for TPUs — used to
     /// group capacity. Comma-separated; the first label present on a node wins, so

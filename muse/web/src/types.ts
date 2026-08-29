@@ -28,13 +28,13 @@ export interface Rollout {
   name: string;
   namespace?: string;
   barTone: BarTone;
-  /** Real progress: ready/total replicas across the components mid-rollout. */
-  barPct: number;
+  /** Observed canary traffic or ready/total replica progress, when available. */
+  barPct?: number;
   barStriped?: boolean;
   note: string;
   gate: Pill;
   cluster: string;
-  started: string;
+  started?: string;
   /** Per-component rollout state (phase + revision), for the expanded card. */
   components?: ComponentCell[];
   /** In-flight canary (step, observed traffic weight, failing checks). */

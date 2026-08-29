@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::ConditionView;
+use super::{ConditionView, DeliveryView};
 
 /// Which apps/v1 kind a system-component descriptor targets. The variant names
 /// are the wire values (`"Deployment"` / `"DaemonSet"`), matching the Kubernetes
@@ -137,4 +137,6 @@ pub struct SystemComponentRow {
     pub conditions: Vec<ConditionView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pods: Vec<SystemPodView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryView>,
 }

@@ -10,8 +10,8 @@ use crate::{
     protocol::{tagged, ListParams, Listing, RolloutView},
 };
 
-/// `GET /v1/rollouts` — InferenceServices currently mid-rollout (not yet Ready,
-/// or spec generation unobserved), across all clusters or one via `?cluster=`.
+/// `GET /v1/rollouts` — InferenceServices with an explicit active or terminal
+/// OME rollout phase, across all clusters or one via `?cluster=`.
 pub async fn list(
     Query(params): Query<ListParams>,
     State(st): State<AppState>,
@@ -20,7 +20,10 @@ pub async fn list(
     let mut items: Vec<Value> = Vec::new();
     for c in selected {
         for isvc in c.inference_services.list() {
-            if let Some(view) = RolloutView::progressing(isvc.as_ref()) {
+            if let Some(mut view) = RolloutView::noteworthy(isvc.as_ref()) {
+                view.delivery = st.argo().and_then(|argo| {
+                    argo.delivery_for(isvc.as_ref(), "ome.io", "InferenceService")
+                });
                 items.push(tagged(view, &c.name));
             }
         }

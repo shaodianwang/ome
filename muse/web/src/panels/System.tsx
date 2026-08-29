@@ -26,6 +26,12 @@ function countLabel(row: SystemComponentItem): string {
 
 /** One cluster's health line inside a component card; opens the detail drawer. */
 function ClusterLine({ row, onOpen }: { row: SystemComponentItem; onOpen: () => void }) {
+  const detail = [
+    row.message,
+    row.delivery ? `Argo ${row.delivery.resourceSyncStatus ?? row.delivery.syncStatus}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <li>
       <button type="button" className="sys-cluster" onClick={onOpen}>
@@ -35,7 +41,7 @@ function ClusterLine({ row, onOpen }: { row: SystemComponentItem; onOpen: () => 
           {cap(row.status)}
         </span>
         <span className="sys-cluster-count mono">{countLabel(row)}</span>
-        {row.message ? <span className="sys-cluster-msg">{row.message}</span> : null}
+        {detail ? <span className="sys-cluster-msg">{detail}</span> : null}
       </button>
     </li>
   );
@@ -102,6 +108,11 @@ function SystemDrawer({ row, onClose }: { row: SystemComponentItem; onClose: () 
             ["Updated", row.updated != null ? String(row.updated) : ""],
             ["Cluster", row.cluster],
             ["Detail", row.message ?? ""],
+            ["Argo application", row.delivery?.application],
+            ["Argo CD sync", row.delivery?.resourceSyncStatus ?? row.delivery?.syncStatus],
+            ["Git revision", row.delivery?.desiredRevision],
+            ["Last sync", row.delivery?.operationPhase],
+            ["Requires pruning", row.delivery?.requiresPruning ? "Yes" : ""],
           ]}
         />
       </Section>
@@ -138,7 +149,7 @@ function SystemDrawer({ row, onClose }: { row: SystemComponentItem; onClose: () 
 
 export function System() {
   const live = useLive(api.system, {
-    kinds: ["Deployment", "DaemonSet"],
+    kinds: ["Deployment", "DaemonSet", "ArgoApplication"],
     intervalMs: 30_000,
   });
   const [selected, setSelected] = useState<SystemComponentItem | null>(null);

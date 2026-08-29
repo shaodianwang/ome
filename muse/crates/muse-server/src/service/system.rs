@@ -56,7 +56,7 @@ pub async fn list(
             if !component.applies_to(&c.name) {
                 continue;
             }
-            items.push(tagged(evaluate(component, c), &c.name));
+            items.push(tagged(evaluate(component, c, &st), &c.name));
         }
     }
     Ok(Json(Listing::of_kind("SystemComponent", items)))
@@ -91,39 +91,63 @@ fn resolve<K>(
     health: impl Fn(&K) -> Health,
     conditions: impl Fn(&K) -> Vec<ConditionView>,
     selector: impl Fn(&K) -> BTreeMap<String, String>,
-) -> Matched
+) -> (Matched, Option<Arc<K>>)
 where
     K: Resource<DynamicType = ()> + Clone + 'static,
 {
     let objs = match_objects(lister, component);
-    Matched {
-        healths: objs.iter().map(|o| health(o)).collect(),
-        objects: object_names(&objs),
-        conditions: objs.iter().flat_map(|o| conditions(o)).collect(),
-        selectors: objs.iter().map(|o| selector(o)).collect(),
-    }
+    let first = objs.first().cloned();
+    (
+        Matched {
+            healths: objs.iter().map(|o| health(o)).collect(),
+            objects: object_names(&objs),
+            conditions: objs.iter().flat_map(|o| conditions(o)).collect(),
+            selectors: objs.iter().map(|o| selector(o)).collect(),
+        },
+        first,
+    )
 }
 
-fn evaluate(component: &SystemComponent, cluster: &ClusterState) -> SystemComponentRow {
-    let matched = match component.kind {
-        SystemComponentKind::Deployment => resolve(
-            &cluster.deployments,
-            component,
-            deployment_health,
-            |d: &Deployment| {
-                workload_conditions(d.status.as_ref().and_then(|s| s.conditions.as_deref()))
-            },
-            |d: &Deployment| pod_selector(d.spec.as_ref().map(|s| &s.selector)),
-        ),
-        SystemComponentKind::DaemonSet => resolve(
-            &cluster.daemon_sets,
-            component,
-            daemonset_health,
-            |d: &DaemonSet| {
-                workload_conditions(d.status.as_ref().and_then(|s| s.conditions.as_deref()))
-            },
-            |d: &DaemonSet| pod_selector(d.spec.as_ref().map(|s| &s.selector)),
-        ),
+fn evaluate(
+    component: &SystemComponent,
+    cluster: &ClusterState,
+    state: &AppState,
+) -> SystemComponentRow {
+    let (matched, delivery) = match component.kind {
+        SystemComponentKind::Deployment => {
+            let (matched, object) = resolve(
+                &cluster.deployments,
+                component,
+                deployment_health,
+                |d: &Deployment| {
+                    workload_conditions(d.status.as_ref().and_then(|s| s.conditions.as_deref()))
+                },
+                |d: &Deployment| pod_selector(d.spec.as_ref().map(|s| &s.selector)),
+            );
+            let delivery = object.and_then(|object| {
+                state
+                    .argo()
+                    .and_then(|argo| argo.delivery_for(object.as_ref(), "apps", "Deployment"))
+            });
+            (matched, delivery)
+        }
+        SystemComponentKind::DaemonSet => {
+            let (matched, object) = resolve(
+                &cluster.daemon_sets,
+                component,
+                daemonset_health,
+                |d: &DaemonSet| {
+                    workload_conditions(d.status.as_ref().and_then(|s| s.conditions.as_deref()))
+                },
+                |d: &DaemonSet| pod_selector(d.spec.as_ref().map(|s| &s.selector)),
+            );
+            let delivery = object.and_then(|object| {
+                state
+                    .argo()
+                    .and_then(|argo| argo.delivery_for(object.as_ref(), "apps", "DaemonSet"))
+            });
+            (matched, delivery)
+        }
     };
     let Matched {
         healths,
@@ -152,6 +176,7 @@ fn evaluate(component: &SystemComponent, cluster: &ClusterState) -> SystemCompon
         objects,
         conditions,
         pods,
+        delivery,
     }
 }
 

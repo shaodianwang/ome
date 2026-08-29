@@ -4,6 +4,7 @@ import type { ComponentItem, EventItem, IsvcItem, RolloutItem } from "./api";
 import {
   canaryNote,
   componentCells,
+  componentRolloutMismatch,
   componentTone,
   componentTransition,
   conditionRank,
@@ -33,6 +34,9 @@ describe("toRollouts", () => {
         namespace: "team-a",
         deploymentMode: "OMENative",
         ready: false,
+        phase: "Canarying",
+        state: "active",
+        progressPercent: 20,
         reason: "EngineNotReady",
       },
     ];
@@ -55,9 +59,9 @@ describe("toRollouts", () => {
     ];
     const [r] = toRollouts(items, isvcs);
     expect(r.gate.tone).toBe("amber");
-    expect(r.note).toBe("EngineNotReady");
+    expect(r.note).toBe("OME Canarying · Serving NotReady");
+    expect(r.barPct).toBe(20);
     expect(r.namespace).toBe("team-a");
-    expect(r.barPct).toBe(80); // 4/5 replicas ready — real progress, not a constant
     expect(r.sel).toEqual({
       cluster: "cw",
       kind: "InferenceService",
@@ -67,15 +71,18 @@ describe("toRollouts", () => {
     expect(r.components?.map((c) => c.label)).toEqual(["engine 3/4", "router 1/1"]);
   });
 
-  it("degrades to zero progress when the deployment row is missing", () => {
-    const [r] = toRollouts([{ cluster: "cw", name: "gone", ready: false }], []);
-    expect(r.barPct).toBe(0);
+  it("omits progress when no canary or replica progress is available", () => {
+    const [r] = toRollouts(
+      [{ cluster: "cw", name: "gone", ready: false, phase: "Pending", state: "active" }],
+      [],
+    );
+    expect(r.barPct).toBeUndefined();
     expect(r.components).toEqual([]);
   });
 
   it("carries the in-flight canary through the fusion", () => {
     const [r] = toRollouts(
-      [{ cluster: "cw", name: "c1", ready: false }],
+      [{ cluster: "cw", name: "c1", ready: false, phase: "Canarying", state: "active" }],
       [{ cluster: "cw", name: "c1", canary: { currentStep: 2, trafficWeight: 25 } }],
     );
     expect(r.canary).toEqual({ currentStep: 2, trafficWeight: 25 });
@@ -105,6 +112,35 @@ describe("rollout fusion helpers", () => {
     expect(isRolling([{ name: "e", rolloutPhase: "Stable" }])).toBe(false);
     expect(isRolling([{ name: "e", rolloutPhase: "Progressing" }])).toBe(true);
     expect(isRolling([{ name: "e" }])).toBe(false);
+  });
+
+  it("detects disagreement between latest traffic and rolled-out revision", () => {
+    expect(
+      componentRolloutMismatch({
+        name: "engine",
+        latestRolledoutRevision: "model-engine-rev-a822f5c4",
+        traffic: [
+          {
+            revisionName: "model-engine-rev-75ca5677",
+            percent: 100,
+            latestRevision: true,
+          },
+        ],
+      }),
+    ).toBe("status mismatch: traffic marks rev-75ca5677 latest, rollout reports rev-a822f5c4");
+    expect(
+      componentRolloutMismatch({
+        name: "engine",
+        latestRolledoutRevision: "model-engine-rev-75ca5677",
+        traffic: [
+          {
+            revisionName: "model-engine-rev-75ca5677",
+            percent: 100,
+            latestRevision: true,
+          },
+        ],
+      }),
+    ).toBeUndefined();
   });
 
   it("counts only target-revision Instances while a component converges", () => {
@@ -169,6 +205,33 @@ describe("rollout fusion helpers", () => {
       },
     ]);
     expect(cell.transition).toEqual({ from: "w-engine-old1", to: "w-engine-new2" });
+  });
+
+  it("does not fabricate progress for a terminal rollback", () => {
+    const [r] = toRollouts(
+      [
+        {
+          cluster: "cw",
+          name: "r1",
+          ready: true,
+          phase: "RolledBack",
+          state: "terminal",
+          delivery: { application: "isvc-cw", syncStatus: "OutOfSync" },
+        },
+      ],
+      [],
+    );
+    expect(r.gate).toEqual({ label: "RolledBack", tone: "red" });
+    expect(r.barPct).toBeUndefined();
+    expect(r.note).toBe("OME RolledBack · Serving Ready · Argo OutOfSync");
+  });
+
+  it("labels generation lag as controller reconciliation, not an OME phase", () => {
+    const [r] = toRollouts(
+      [{ cluster: "cw", name: "r1", ready: false, phase: "Reconciling", state: "active" }],
+      [],
+    );
+    expect(r.note).toBe("Controller Reconciling · Serving NotReady");
   });
 });
 

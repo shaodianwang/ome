@@ -15,6 +15,7 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    argo::ArgoState,
     chat_proxy::ChatProxy,
     informers::{CapacitySignal, ClusterState, Feed, Invalidations},
     protocol::{to_val, DashboardPolicy, MetricsTimeRanges, SystemComponent, Topology},
@@ -57,6 +58,7 @@ pub struct AppState {
     /// OME control-plane components the System panel reports on. Empty ⇒ the panel
     /// is empty (no baked-in set; see [`SystemComponent`]).
     system_components: Arc<Vec<SystemComponent>>,
+    argo: Option<ArgoState>,
 }
 
 /// Pre-computed capacity responses (already serialized to JSON).
@@ -78,6 +80,7 @@ pub struct AppStateConfig {
     pub dashboard_policy: Option<DashboardPolicy>,
     pub metrics_time_ranges: Option<MetricsTimeRanges>,
     pub system_components: Arc<Vec<SystemComponent>>,
+    pub argo: Option<ArgoState>,
 }
 
 impl AppState {
@@ -111,6 +114,7 @@ impl AppState {
             dashboard_policy: config.dashboard_policy,
             metrics_time_ranges: config.metrics_time_ranges,
             system_components: config.system_components,
+            argo: config.argo,
         };
         // Warm the cache once so the first request is served, not computed.
         state.refresh_capacity();
@@ -326,6 +330,10 @@ impl AppState {
     /// when unconfigured — the endpoint then returns an empty listing.
     pub fn system_components(&self) -> &[SystemComponent] {
         &self.system_components
+    }
+
+    pub fn argo(&self) -> Option<&ArgoState> {
+        self.argo.as_ref()
     }
 }
 

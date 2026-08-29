@@ -93,7 +93,7 @@ pub async fn list_kind(
     for c in selected {
         let rows = match kind.as_str() {
             "nodes" => node_rows(c, &st.topology),
-            "inferenceservices" => isvc_rows(c),
+            "inferenceservices" => isvc_rows(c, &st),
             _ => list_for(&kind, c)
                 .ok_or_else(|| ApiError::NotFound(format!("unknown kind: {kind}")))?,
         };
@@ -115,7 +115,7 @@ pub async fn get_kind(
     for c in selected {
         let found = match kind.as_str() {
             "nodes" => node_detail(c, &name, raw, &st.topology),
-            "inferenceservices" => isvc_detail(c, &name, params.namespace.as_deref(), raw),
+            "inferenceservices" => isvc_detail(c, &name, params.namespace.as_deref(), raw, &st),
             _ => detail_for(&kind, &name, params.namespace.as_deref(), raw, c)
                 .ok_or_else(|| ApiError::NotFound(format!("unknown kind: {kind}")))?,
         };
@@ -148,7 +148,7 @@ where
 /// (one pod-cache scan for the whole listing). Runtime identity resolves from the
 /// spec only — the pod-label fallback would cost a pod scan per row, so it is
 /// reserved for the single-object detail view.
-fn isvc_rows(c: &ClusterState) -> Vec<Value> {
+fn isvc_rows(c: &ClusterState, state: &AppState) -> Vec<Value> {
     let held = accel_held_by_isvc(&c.pods.list());
     c.inference_services
         .list()
@@ -163,6 +163,9 @@ fn isvc_rows(c: &ClusterState) -> Vec<Value> {
                     view.name.clone(),
                 ))
                 .copied();
+            view.delivery = state
+                .argo()
+                .and_then(|argo| argo.delivery_for(isvc.as_ref(), "ome.io", "InferenceService"));
             tagged(view, &c.name)
         })
         .collect()
@@ -203,7 +206,13 @@ fn accel_held_by_isvc(pods: &[Arc<Pod>]) -> BTreeMap<(String, String), i64> {
 /// Detail for one named InferenceService (or the raw object when `raw`), with its
 /// runtime identity resolved from the spec or — for auto-selected runtimes — from
 /// the labels of the service's cached pods.
-fn isvc_detail(c: &ClusterState, name: &str, namespace: Option<&str>, raw: bool) -> Option<Value> {
+fn isvc_detail(
+    c: &ClusterState,
+    name: &str,
+    namespace: Option<&str>,
+    raw: bool,
+    state: &AppState,
+) -> Option<Value> {
     lookup_resource(&c.inference_services, name, namespace).map(|isvc| {
         if raw {
             return tagged(&*isvc, &c.name);
@@ -220,6 +229,9 @@ fn isvc_detail(c: &ClusterState, name: &str, namespace: Option<&str>, raw: bool)
                 .get(&(ns.to_owned(), detail.view.name.clone()))
                 .copied();
         }
+        detail.view.delivery = state
+            .argo()
+            .and_then(|argo| argo.delivery_for(isvc.as_ref(), "ome.io", "InferenceService"));
         tagged(detail, &c.name)
     })
 }

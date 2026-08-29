@@ -53,6 +53,7 @@ from the placement planner rather than collapsed into a fabricated domain.
 | `GET /v1/clusters` | registered clusters + per-cluster summary |
 | `GET /v1/capacity[?cluster=]` | fleet GPU allocatable/allocated/free, grouped by cluster / RDMA island / NVLink domain / instance type |
 | `GET /v1/system[?cluster=]` | OME control-plane component health (controller / scheduler / webhook / model-agent), from the config-driven component set; empty when unconfigured |
+| `GET /v1/rollouts[?cluster=]` | Active and terminal-attention OME rollout states, plus a `Reconciling` fallback for stale observed generations and Argo CD delivery state when configured |
 | `GET /v1/metrics?cluster=&namespace=&inferenceservice=[&range=]` | cached Query Gateway metrics for one exact deployment; fleet scope is available only when the configured catalog declares safe fleet queries |
 | `GET /v1/{kind}[?cluster=]` | list a kind across clusters; each row tagged with `cluster` |
 | `GET /v1/{kind}/{name}[?raw=true][?cluster=][?namespace=]` | get one by full identity (projected view, or full object with `raw=true`); `namespace` disambiguates namespaced kinds |
@@ -60,6 +61,12 @@ from the placement planner rather than collapsed into a fabricated domain.
 `{kind}` ∈ `inferenceservices`, `basemodels`, `servingruntimes`,
 `inferencereplicas`, `clusterbasemodels`, `clusterservingruntimes`,
 `finetunedweights`, `workloadclusters`, `nodes`.
+
+Set `MUSE_ARGO_NAMESPACE` (Helm: `config.argo.enabled` plus
+`config.argo.namespace`) to watch Argo CD `Application` resources in the local
+management cluster. The chart grants only `get/list/watch` on Applications in
+that namespace. Delivery fields are joined to workload objects through Argo's
+tracking annotation and remain independent from OME rollout and serving health.
 
 ## Why aggregate server-side?
 

@@ -104,6 +104,13 @@ config:
   #    kind: DaemonSet
   #    namespace: ome
   #    resourceName: ome-model-agent-daemonset
+  # Optional delivery-state observer. It watches Argo CD Applications through
+  # the ambient management-cluster ServiceAccount and joins them to resources by
+  # Argo's tracking annotation. Workload-cluster health remains available if the
+  # Argo watch is unavailable.
+  argo:
+    enabled: false
+    namespace: argocd
   chat: # in-console inference test proxy (POST /v1/.../chat)
     enabled: false # off by default (forwards to a model endpoint)
     timeoutSecs: 60

@@ -37,7 +37,9 @@ use std::{
 use kube::Resource;
 use ome_client::{
     inferenceservices::{
-        InferenceServiceStatus, InferenceServiceStatusCanary, InferenceServiceStatusPlacement,
+        InferenceServiceStatus, InferenceServiceStatusCanary,
+        InferenceServiceStatusComponentsRolloutPhase, InferenceServiceStatusPlacement,
+        InferenceServiceStatusRolloutCoordinationGroupsPhase,
     },
     k8s_openapi::{
         api::core::v1::Node,
@@ -702,8 +704,36 @@ pub struct ComponentView {
         rename = "updatedReadyReplicas"
     )]
     pub updated_ready_replicas: Option<i32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "latestReadyRevision"
+    )]
+    pub latest_ready_revision: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "latestRolledoutRevision"
+    )]
+    pub latest_rolledout_revision: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "previousRolledoutRevision"
+    )]
+    pub previous_rolledout_revision: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub traffic: Vec<ComponentTrafficView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentTrafficView {
+    pub revision_name: String,
+    pub percent: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_revision: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// Readiness for one Component, read from its `<Comp>Ready` status condition.
@@ -758,6 +788,27 @@ fn components_of(status: &InferenceServiceStatus) -> Vec<ComponentView> {
                     .filter(|s| !s.is_empty()),
                 updated_replicas: lifecycle.and_then(|l| l.updated_replicas),
                 updated_ready_replicas: lifecycle.and_then(|l| l.updated_ready_replicas),
+                latest_ready_revision: c.latest_ready_revision.clone().filter(|s| !s.is_empty()),
+                latest_rolledout_revision: c
+                    .latest_rolledout_revision
+                    .clone()
+                    .filter(|s| !s.is_empty()),
+                previous_rolledout_revision: c
+                    .previous_rolledout_revision
+                    .clone()
+                    .filter(|s| !s.is_empty()),
+                traffic: c
+                    .traffic
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|t| ComponentTrafficView {
+                        revision_name: t.revision_name.clone(),
+                        percent: t.percent,
+                        latest_revision: t.latest_revision,
+                        tag: t.tag.clone().filter(|s| !s.is_empty()),
+                    })
+                    .collect(),
                 url: c.url.clone().filter(|s| !s.is_empty()),
             }
         })
@@ -841,6 +892,8 @@ pub struct InferenceServiceView {
     /// spec declaration verbatim.
     #[serde(skip_serializing_if = "Option::is_none", rename = "resolvedRuntimeRef")]
     pub resolved_runtime_ref: Option<ResolvedRuntimeRefView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryView>,
 }
 
 impl InferenceServiceView {
@@ -887,6 +940,7 @@ impl InferenceServiceView {
             age: age(meta),
             accelerators: None,
             resolved_runtime_ref: None,
+            delivery: None,
         }
     }
 }
@@ -974,23 +1028,39 @@ fn placement_of(p: &InferenceServiceStatusPlacement) -> PlacementView {
     }
 }
 
-/// A canary rollout in flight: which step, the observed traffic weight, how
-/// long it has sat in that step, and which analysis checks are failing.
+/// Canary rollout state: which step and for how long, the observed traffic
+/// weight, the candidate/stable identity, and the analysis evidence needed to
+/// explain promotion or rollback decisions.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CanaryView {
-    #[serde(rename = "currentStep")]
     pub current_step: i32,
-    #[serde(rename = "trafficWeight")]
     pub traffic_weight: i32,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "failedChecks")]
+    /// Analysis checks currently failing; absent when none are.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_checks: Option<i32>,
     /// Humanized time in the current step (from `stepEnteredTime`).
-    #[serde(skip_serializing_if = "Option::is_none", rename = "stepAge")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub step_age: Option<String>,
-    /// The analysis checks currently failing, most recent status first as
-    /// reported. Empty (omitted) when everything passes.
-    #[serde(skip_serializing_if = "Vec::is_empty", rename = "failingChecks")]
+    /// The analysis checks currently failing, projected for compact display
+    /// (Fleet chips, attention detail). Empty (omitted) when everything
+    /// passes; `metric_results` below carries the full evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failing_checks: Vec<CanaryCheckView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary_revision_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolled_back_revision_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_entered_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_evaluation_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_conclusive_evaluation_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis_failed_checks: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub metric_results: Vec<CanaryMetricView>,
 }
 
 /// One failing canary analysis check: what was measured against what.
@@ -1006,6 +1076,65 @@ pub struct CanaryCheckView {
     pub message: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct CanaryMetricView {
+    pub name: String,
+    pub passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolloutCoordinationView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub components: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composite_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_transition_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn coordination_of(status: &InferenceServiceStatus) -> Vec<RolloutCoordinationView> {
+    status
+        .rollout_coordination
+        .as_ref()
+        .and_then(|r| r.groups.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .map(|g| RolloutCoordinationView {
+            name: g.name.clone(),
+            phase: g.phase.as_ref().and_then(enum_str),
+            policy: g.policy.as_ref().and_then(enum_str),
+            components: g.components.clone().unwrap_or_default(),
+            current_component: g.current_component.clone().filter(|s| !s.is_empty()),
+            previous_component: g.previous_component.clone().filter(|s| !s.is_empty()),
+            composite_phase: g.composite_phase.clone().filter(|s| !s.is_empty()),
+            last_transition_time: g.last_transition_time.clone().filter(|s| !s.is_empty()),
+            message: g.message.clone().filter(|s| !s.is_empty()),
+        })
+        .collect()
+}
+
 impl CanaryView {
     pub(crate) fn of(c: &InferenceServiceStatusCanary) -> Self {
         Self {
@@ -1014,6 +1143,33 @@ impl CanaryView {
             failed_checks: c.analysis_failed_checks.filter(|&n| n > 0),
             step_age: c.step_entered_time.as_deref().and_then(since_status_time),
             failing_checks: failing_checks(c),
+            canary_revision_hash: c.canary_revision_hash.clone().filter(|s| !s.is_empty()),
+            rolled_back_revision_hash: c
+                .rolled_back_revision_hash
+                .clone()
+                .filter(|s| !s.is_empty()),
+            step_entered_time: c.step_entered_time.clone().filter(|s| !s.is_empty()),
+            last_evaluation_time: c.last_evaluation_time.clone().filter(|s| !s.is_empty()),
+            last_conclusive_evaluation_time: c
+                .last_conclusive_evaluation_time
+                .clone()
+                .filter(|s| !s.is_empty()),
+            analysis_failed_checks: c.analysis_failed_checks,
+            metric_results: c
+                .metric_results
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|m| CanaryMetricView {
+                    name: m.name.clone(),
+                    passed: m.passed,
+                    value: m.value.clone().filter(|s| !s.is_empty()),
+                    threshold: m.threshold.clone().filter(|s| !s.is_empty()),
+                    operator: m.operator.clone().filter(|s| !s.is_empty()),
+                    message: m.message.clone().filter(|s| !s.is_empty()),
+                    time: m.time.clone().filter(|s| !s.is_empty()),
+                })
+                .collect(),
         }
     }
 }
@@ -1049,6 +1205,8 @@ pub struct InferenceServiceDetail {
     pub conditions: Vec<ConditionView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placement: Option<PlacementView>,
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "rolloutCoordination")]
+    pub rollout_coordination: Vec<RolloutCoordinationView>,
 }
 
 impl InferenceServiceDetail {
@@ -1058,13 +1216,13 @@ impl InferenceServiceDetail {
             view: InferenceServiceView::of(isvc),
             conditions: conditions_of(status.and_then(|s| s.conditions.as_deref())),
             placement: status.and_then(|s| s.placement.as_ref()).map(placement_of),
+            rollout_coordination: status.map(coordination_of).unwrap_or_default(),
         }
     }
 }
 
-/// A rollout in progress: an InferenceService whose latest spec hasn't finished
-/// rolling out (not `Ready`, or its generation isn't observed yet). Steady-state
-/// services are omitted by [`RolloutView::progressing`].
+/// An active or terminal-attention OME rollout, or a spec whose generation the
+/// controller has not observed yet. Serving readiness is carried separately.
 #[derive(Serialize)]
 pub struct RolloutView {
     pub name: String,
@@ -1073,41 +1231,227 @@ pub struct RolloutView {
     #[serde(skip_serializing_if = "Option::is_none", rename = "deploymentMode")]
     pub deployment_mode: Option<String>,
     pub ready: bool,
+    /// An OME rollout phase, or MUSE's `Reconciling` fallback while
+    /// `status.observedGeneration` trails `metadata.generation`.
+    pub phase: String,
+    pub state: RolloutState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "progressPercent")]
+    pub progress_percent: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "startedAt")]
+    pub started_at: Option<String>,
     /// `Ready` condition reason (e.g. `RevisionMissing`, `EngineNotReady`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub components: Vec<ComponentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub age: Option<String>,
+    pub canary: Option<CanaryView>,
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "rolloutCoordination")]
+    pub rollout_coordination: Vec<RolloutCoordinationView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryView>,
 }
 
 impl RolloutView {
-    /// `Some` when the service is mid-rollout, `None` when it's steady (Ready and
-    /// its spec generation observed).
-    pub fn progressing(isvc: &InferenceService) -> Option<Self> {
+    /// `Some` for an explicit OME rollout phase or stale observed generation. A
+    /// service that is merely NotReady is health-only and does not appear here.
+    pub fn noteworthy(isvc: &InferenceService) -> Option<Self> {
         let meta = isvc.meta();
-        let status = isvc.status.as_ref();
-        let ready_cond = status.and_then(ready_condition);
+        let status = isvc.status.as_ref()?;
+        let ready_cond = ready_condition(status);
         let ready = ready_cond.map(|c| c.status == "True").unwrap_or(false);
-        // Spec changed but not yet observed by the controller → still rolling out.
-        let spec_pending = matches!(
-            (status.and_then(|s| s.observed_generation), meta.generation),
-            (Some(observed), Some(generation)) if observed < generation
-        );
-        if ready && !spec_pending {
-            return None;
-        }
+        let coordination = coordination_of(status);
+        let attention = rollout_attention(status).or_else(|| reconciliation_attention(isvc))?;
+        let canary = status.canary.as_ref().map(CanaryView::of);
+        let started_at = canary
+            .as_ref()
+            .and_then(|c| c.step_entered_time.clone())
+            .or_else(|| {
+                coordination
+                    .iter()
+                    .filter_map(|g| g.last_transition_time.clone())
+                    .max()
+            });
         Some(Self {
             name: meta.name.clone().unwrap_or_default(),
             namespace: meta.namespace.clone(),
             deployment_mode: isvc.spec.deployment_mode.as_ref().and_then(enum_str),
             ready,
+            phase: attention.phase,
+            state: attention.state,
+            strategy: rollout_strategy(isvc),
+            progress_percent: canary.as_ref().map(|c| c.traffic_weight),
+            started_at,
             reason: ready_cond.and_then(|c| some_nonempty(&c.reason)),
             message: ready_cond.and_then(|c| some_nonempty(&c.message)),
-            age: age(meta),
+            components: components_of(status),
+            canary,
+            rollout_coordination: coordination,
+            delivery: None,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RolloutState {
+    Active,
+    Terminal,
+}
+
+struct RolloutAttention {
+    phase: String,
+    state: RolloutState,
+    priority: u8,
+}
+
+fn component_rollout_attention(
+    phase: &InferenceServiceStatusComponentsRolloutPhase,
+) -> Option<RolloutAttention> {
+    use InferenceServiceStatusComponentsRolloutPhase as Phase;
+
+    let (state, priority) = match phase {
+        Phase::Stable => return None,
+        Phase::Failed => (RolloutState::Terminal, 100),
+        Phase::RolledBack => (RolloutState::Terminal, 90),
+        Phase::RollingBack => (RolloutState::Active, 80),
+        Phase::Promoting => (RolloutState::Active, 70),
+        Phase::Paused => (RolloutState::Active, 60),
+        Phase::Canarying => (RolloutState::Active, 50),
+        Phase::BlueGreenStandby => (RolloutState::Active, 40),
+        Phase::Pending => (RolloutState::Active, 30),
+    };
+    Some(RolloutAttention {
+        phase: state_string(phase),
+        state,
+        priority,
+    })
+}
+
+fn coordination_rollout_attention(
+    phase: &InferenceServiceStatusRolloutCoordinationGroupsPhase,
+) -> Option<RolloutAttention> {
+    use InferenceServiceStatusRolloutCoordinationGroupsPhase as Phase;
+
+    let (state, priority) = match phase {
+        Phase::Idle => return None,
+        Phase::Failed => (RolloutState::Terminal, 100),
+        Phase::RollingBack => (RolloutState::Active, 80),
+        Phase::Paused => (RolloutState::Active, 60),
+        Phase::Draining => (RolloutState::Active, 55),
+        Phase::Shifting => (RolloutState::Active, 50),
+        Phase::Waiting => (RolloutState::Active, 45),
+        Phase::Surging => (RolloutState::Active, 40),
+        Phase::ScalingDown => (RolloutState::Active, 35),
+    };
+    Some(RolloutAttention {
+        phase: state_string(phase),
+        state,
+        priority,
+    })
+}
+
+fn rollout_attention(status: &InferenceServiceStatus) -> Option<RolloutAttention> {
+    let components = status
+        .components
+        .as_ref()
+        .into_iter()
+        .flat_map(|components| components.values())
+        .filter_map(|component| {
+            component
+                .rollout_phase
+                .as_ref()
+                .and_then(component_rollout_attention)
+        });
+    let coordination = status
+        .rollout_coordination
+        .as_ref()
+        .and_then(|rollout| rollout.groups.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|group| {
+            group
+                .phase
+                .as_ref()
+                .and_then(coordination_rollout_attention)
+        });
+    components
+        .chain(coordination)
+        .max_by_key(|attention| attention.priority)
+}
+
+/// Fall back to the Kubernetes spec/status handshake before OME has declared a
+/// rollout phase. This catches a controller that has not observed the latest
+/// spec without treating every NotReady service as a rollout.
+fn reconciliation_attention(isvc: &InferenceService) -> Option<RolloutAttention> {
+    let generation = isvc.meta().generation?;
+    let observed = isvc
+        .status
+        .as_ref()
+        .and_then(|status| status.observed_generation)?;
+    if observed >= generation {
+        return None;
+    }
+    Some(RolloutAttention {
+        phase: "Reconciling".to_owned(),
+        state: RolloutState::Active,
+        priority: 0,
+    })
+}
+
+fn rollout_strategy(isvc: &InferenceService) -> Option<String> {
+    let groups = isvc.spec.rollout.as_ref()?.groups.as_deref()?;
+    let mut strategies = BTreeMap::<&'static str, ()>::new();
+    for group in groups {
+        if group.canary.is_some() {
+            strategies.insert("Canary", ());
+        }
+        if group.blue_green.is_some() {
+            strategies.insert("BlueGreen", ());
+        }
+        if group.rolling_update.is_some() {
+            strategies.insert("RollingUpdate", ());
+        }
+    }
+    match strategies.len() {
+        0 => None,
+        1 => strategies.into_keys().next().map(str::to_owned),
+        _ => Some("Mixed".to_owned()),
+    }
+}
+
+/// Argo CD delivery state for the Application and exact tracked resource.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryView {
+    pub application: String,
+    pub sync_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_sync_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_health_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_health_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_pruning: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciled_at: Option<String>,
 }
 
 /// Node overview shaped for capacity views: schedulability, instance/island, GPU
@@ -1881,5 +2225,114 @@ mod tests {
         assert_eq!(check.get("threshold"), Some(&Value::from("<= 0.5")));
         assert_eq!(check.get("value"), Some(&Value::from("2.1")));
         assert_eq!(check.get("message"), Some(&Value::from("over budget")));
+    }
+
+    #[test]
+    fn rollout_attention_uses_typed_ome_phases() {
+        use InferenceServiceStatusComponentsRolloutPhase as ComponentPhase;
+        use InferenceServiceStatusRolloutCoordinationGroupsPhase as CoordinationPhase;
+
+        let canary =
+            component_rollout_attention(&ComponentPhase::Canarying).expect("Canarying is active");
+        assert_eq!(canary.state, RolloutState::Active);
+        assert_eq!(canary.phase, "Canarying");
+
+        let rolled_back = component_rollout_attention(&ComponentPhase::RolledBack)
+            .expect("RolledBack is terminal");
+        assert_eq!(rolled_back.state, RolloutState::Terminal);
+        assert_eq!(rolled_back.phase, "RolledBack");
+
+        assert!(component_rollout_attention(&ComponentPhase::Stable).is_none());
+        assert!(coordination_rollout_attention(&CoordinationPhase::Idle).is_none());
+    }
+
+    #[test]
+    fn ready_rolled_back_service_is_not_hidden() {
+        let isvc: InferenceService = serde_json::from_value(serde_json::json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "chat", "namespace": "team-a" },
+            "spec": { "rollout": { "groups": [{
+                "components": ["engine"],
+                "canary": { "steps": [{ "capacity": "25%", "traffic": 25 }] }
+            }] } },
+            "status": {
+                "conditions": [{
+                    "type": "Ready", "status": "True", "reason": "Ready", "message": "",
+                    "lastTransitionTime": "2026-08-27T21:00:00Z"
+                }],
+                "components": { "engine": { "rolloutPhase": "RolledBack" } },
+                "canary": {
+                    "currentStep": 0,
+                    "observedTrafficWeight": 0,
+                    "canaryRevisionHash": "candidate",
+                    "rolledBackRevisionHash": "candidate",
+                    "analysisFailedChecks": 2,
+                    "metricResults": [{ "name": "success-rate", "passed": false }]
+                }
+            }
+        }))
+        .expect("InferenceService JSON is valid");
+        let rollout = RolloutView::noteworthy(&isvc).expect("rollback is noteworthy");
+        assert!(rollout.ready);
+        assert_eq!(rollout.phase, "RolledBack");
+        assert_eq!(rollout.state, RolloutState::Terminal);
+        assert_eq!(rollout.strategy.as_deref(), Some("Canary"));
+        assert_eq!(
+            rollout.canary.map(|c| c.analysis_failed_checks),
+            Some(Some(2))
+        );
+    }
+
+    #[test]
+    fn not_ready_without_rollout_phase_is_health_only() {
+        let isvc: InferenceService = serde_json::from_value(serde_json::json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "chat", "namespace": "team-a" },
+            "spec": {},
+            "status": { "conditions": [{
+                "type": "Ready", "status": "False",
+                "reason": "InsufficientAvailable", "message": "waiting for capacity",
+                "lastTransitionTime": "2026-08-27T21:00:00Z"
+            }] }
+        }))
+        .expect("InferenceService JSON is valid");
+        assert!(RolloutView::noteworthy(&isvc).is_none());
+    }
+
+    #[test]
+    fn stale_generation_is_reconciling_without_an_ome_rollout_phase() {
+        let stale: InferenceService = serde_json::from_value(serde_json::json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "chat", "namespace": "team-a", "generation": 4 },
+            "spec": {},
+            "status": { "observedGeneration": 3 }
+        }))
+        .expect("InferenceService JSON is valid");
+        let rollout = RolloutView::noteworthy(&stale).expect("stale generation is noteworthy");
+        assert_eq!(rollout.phase, "Reconciling");
+        assert_eq!(rollout.state, RolloutState::Active);
+
+        let current: InferenceService = serde_json::from_value(serde_json::json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "chat", "namespace": "team-a", "generation": 4 },
+            "spec": {},
+            "status": { "observedGeneration": 4 }
+        }))
+        .expect("InferenceService JSON is valid");
+        assert!(RolloutView::noteworthy(&current).is_none());
+
+        let unreported: InferenceService = serde_json::from_value(serde_json::json!({
+            "apiVersion": "ome.io/v1beta1",
+            "kind": "InferenceService",
+            "metadata": { "name": "chat", "namespace": "team-a", "generation": 4 },
+            "spec": {},
+            "status": {}
+        }))
+        .expect("InferenceService JSON is valid");
+        assert!(RolloutView::noteworthy(&unreported).is_none());
     }
 }

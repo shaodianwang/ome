@@ -52,4 +52,34 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "muse.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.config.argo.enabled }}
+---
+# Argo CD delivery state is read only from its Application CRs. Access to Argo's
+# cluster credential Secrets is deliberately excluded.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "muse.fullname" . }}-argocd-reader
+  namespace: {{ required "config.argo.namespace is required when Argo observation is enabled" .Values.config.argo.namespace }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "muse.fullname" . }}-argocd-reader
+  namespace: {{ required "config.argo.namespace is required when Argo observation is enabled" .Values.config.argo.namespace }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "muse.fullname" . }}-argocd-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "muse.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

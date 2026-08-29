@@ -121,7 +121,7 @@ export const ATTENTION_LIVE_OPTIONS: LiveOptions = {
 /** Options for the InferenceService list on the panels that render it directly
  *  (Fleet, Deployments). */
 export const ISVC_LIVE_OPTIONS: LiveOptions = {
-  kinds: ["InferenceService"],
+  kinds: ["InferenceService", "ArgoApplication"],
   throttleMs: 5_000,
   intervalMs: 30_000,
 };
