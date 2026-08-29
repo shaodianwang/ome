@@ -1,6 +1,6 @@
 module github.com/ome-projects/ome
 
-go 1.25.0
+go 1.25.5
 
 require (
 	github.com/evanphx/json-patch/v5 v5.9.11
@@ -9,7 +9,7 @@ require (
 	github.com/go-playground/validator/v10 v10.30.1
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
-	github.com/kedacore/keda/v2 v2.18.0
+	github.com/kedacore/keda/v2 v2.18.3
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 	github.com/open-policy-agent/cert-controller v0.15.0
