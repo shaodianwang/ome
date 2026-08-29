@@ -1,0 +1,640 @@
+package acceleratorquota
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	toolscache "k8s.io/client-go/tools/cache"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
+)
+
+const (
+	hubOrigin   = "hub-1"
+	projManager = "ome-quota-projector"
+)
+
+// fakeFleet hands out a fake client per member.
+type fakeFleet struct {
+	members map[string]workloadcluster.SelectivelyCachingClient
+	// missing names a cluster Connected() reports but ClientFor does not have,
+	// which is what a drop between the two calls looks like.
+	missing string
+}
+
+func (f *fakeFleet) Connected() []string {
+	out := make([]string, 0, len(f.members))
+	for name := range f.members {
+		out = append(out, name)
+	}
+	if f.missing != "" {
+		out = append(out, f.missing)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (f *fakeFleet) ClientFor(name string) (workloadcluster.SelectivelyCachingClient, bool) {
+	c, ok := f.members[name]
+	return c, ok
+}
+
+// cachingClient satisfies the transport's client interface over a fake client.
+type cachingClient struct {
+	client.WithWatch
+}
+
+func (cachingClient) AddCacheEventHandler(context.Context, client.Object,
+	toolscache.ResourceEventHandler,
+) (toolscache.ResourceEventHandlerRegistration, error) {
+	return nil, nil
+}
+
+func member(t *testing.T, objs ...client.Object) workloadcluster.SelectivelyCachingClient {
+	t.Helper()
+	return cachingClient{fake.NewClientBuilder().
+		WithScheme(capacityScheme(t)).
+		WithObjects(objs...).
+		WithStatusSubresource(&v1beta1.AcceleratorQuota{}).
+		Build()}
+}
+
+// memberRoot is the root a member's own controller creates, carrying the
+// capacity it derived from its own hardware.
+func memberRoot(chips string) *v1beta1.AcceleratorQuota {
+	return &v1beta1.AcceleratorQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: rootName},
+		Spec:       v1beta1.AcceleratorQuotaSpec{Role: v1beta1.AcceleratorQuotaRoleCohort},
+		Status: v1beta1.AcceleratorQuotaStatus{
+			Capacity: []v1beta1.AcceleratorCapacityStatus{{
+				ResourceName:   "google.com/tpu",
+				ResourceFlavor: "tpu7x",
+				Allocatable:    resource.MustParse(chips),
+			}},
+		},
+	}
+}
+
+func projectingReconciler(t *testing.T, fleet ClusterClients, objs ...client.Object) (*Reconciler, client.Client) {
+	t.Helper()
+	r, c := newReconciler(t, objs...)
+	r.Project = ProjectOptions{
+		Clusters:      fleet,
+		Origin:        hubOrigin,
+		FieldManager:  projManager,
+		DefaultPolicy: v1beta1.AcceleratorQuotaDistributionProportional,
+	}
+	return r, c
+}
+
+// projectedOn lists what landed on one member.
+func projectedOn(t *testing.T, c workloadcluster.SelectivelyCachingClient) map[string]string {
+	t.Helper()
+	var list v1beta1.AcceleratorQuotaList
+	if err := c.List(context.Background(), &list); err != nil {
+		t.Fatalf("list on member: %v", err)
+	}
+	out := map[string]string{}
+	for _, q := range list.Items {
+		if q.Name == rootName {
+			continue
+		}
+		nominal := ""
+		if len(q.Spec.Budgets) > 0 {
+			nominal = q.Spec.Budgets[0].Nominal.String()
+		}
+		out[q.Name] = nominal
+	}
+	return out
+}
+
+// The whole point of the management plane: one fleet total becomes a number on
+// each member, sized to what that member actually has.
+func TestProjectSplitsAcrossMembers(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a, "member-b": b,
+	}}
+
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	// 3:1 capacity, so 90 and 30 — and 120 in total, never more.
+	if diff := cmp.Diff(map[string]string{"team": "90"}, projectedOn(t, a)); diff != "" {
+		t.Errorf("member-a mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]string{"team": "30"}, projectedOn(t, b)); diff != "" {
+		t.Errorf("member-b mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Copies come back to the plane that wrote them when a hub is also a member.
+// Re-splitting an already-split number compounds it every pass, so a projection
+// must never be read as a source.
+func TestProjectIgnoresItsOwnCopies(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	// A copy of an earlier pass, sitting on the hub alongside the sources.
+	echo := leaf("team", rootName, budget("40"))
+	echo.Labels = map[string]string{v1beta1.AcceleratorQuotaOriginLabel: hubOrigin}
+	echo.Name = "echoed-team"
+
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+		echo,
+	)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	got := projectedOn(t, a)
+	if _, echoed := got["echoed-team"]; echoed {
+		t.Error("a projection was read back as a source and re-projected")
+	}
+	if diff := cmp.Diff(map[string]string{"team": "100"}, got); diff != "" {
+		t.Errorf("projection mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A copy carries the marks that make it recognisable as one: without them a
+// member cannot tell it from a node an admin typed, so nothing could ever sweep
+// it and the member's webhook would admit edits to it.
+func TestProjectMarksItsCopies(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	var got v1beta1.AcceleratorQuota
+	if err := a.Get(context.Background(), client.ObjectKey{Name: "team"}, &got); err != nil {
+		t.Fatalf("get projection: %v", err)
+	}
+	if got.Labels[v1beta1.AcceleratorQuotaOriginLabel] != hubOrigin {
+		t.Errorf("origin label = %q, want %q", got.Labels[v1beta1.AcceleratorQuotaOriginLabel], hubOrigin)
+	}
+	if got.Annotations[v1beta1.AcceleratorQuotaClusterAnnotation] != "member-a" {
+		t.Errorf("cluster annotation = %q, want member-a", got.Annotations[v1beta1.AcceleratorQuotaClusterAnnotation])
+	}
+}
+
+// One member being unreachable, or refusing the write, must cost the fleet that
+// member and nothing else. Failing the pass would hold every other member's
+// quota at whatever it last received.
+func TestProjectIsolatesAFailedMember(t *testing.T) {
+	good := member(t, memberRoot("1"))
+	broken := cachingClient{fake.NewClientBuilder().
+		WithScheme(capacityScheme(t)).
+		WithObjects(memberRoot("1")).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object,
+				client.Patch, ...client.PatchOption) error {
+				return errors.New("apiserver refused the write")
+			},
+		}).Build()}
+
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-good": good, "member-broken": broken,
+	}}
+
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+
+	// The pass reports the failure...
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err == nil {
+		t.Fatal("Reconcile() = nil, want the refused write surfaced")
+	}
+	// ...and the healthy member still got its share.
+	if len(projectedOn(t, good)) == 0 {
+		t.Error("a healthy member was left unprojected because another one failed")
+	}
+}
+
+// A member that has not created its root yet is starting up. Treating that as a
+// capacity of zero would apportion it nothing and, worse, would look identical
+// to a member that genuinely has no hardware.
+func TestProjectWaitsForAMemberThatHasNotReported(t *testing.T) {
+	silent := member(t) // no root at all
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": silent}}
+
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	if got := projectedOn(t, silent); len(got) != 0 {
+		t.Errorf("a member that reported no capacity was still apportioned: %v", got)
+	}
+}
+
+// Nothing connected is not a fleet-wide fault. A hub outlives its members'
+// restarts, and reporting every node broken while the fleet comes up would bury
+// a real failure when one happens.
+func TestProjectWithNoMembersConnected(t *testing.T) {
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{}}
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Errorf("Reconcile() = %v, want an empty fleet tolerated", err)
+	}
+}
+
+// A cluster Connected() names but ClientFor no longer has was dropped between
+// the two calls. The next pass sees the newer state; this one must not fail.
+func TestProjectToleratesAClusterDroppedMidPass(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	fleet := &fakeFleet{
+		members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a},
+		missing: "member-vanished",
+	}
+	r, _ := projectingReconciler(t, fleet,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Errorf("Reconcile() = %v, want a mid-pass drop tolerated", err)
+	}
+	if len(projectedOn(t, a)) == 0 {
+		t.Error("the surviving member was not projected")
+	}
+}
+
+// registered is a member the admin has told the hub about, whatever its
+// current reachability.
+func registered(name string) *v1beta1.WorkloadCluster {
+	return &v1beta1.WorkloadCluster{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+// A member that has dropped out does not merely lose its turn: under a
+// proportional split its capacity leaves the basis, so every surviving member's
+// share grows to fill the gap -- while the absent member still holds the
+// projection it last received. The fleet would then have granted more than the
+// admin authorized, and the excess would only surface when the member returned.
+func TestProjectHoldsWhenAMemberIsUnreachable(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	// member-b is registered but the transport has no client for it.
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	// Nothing at all, rather than the 120 member-a would take if the basis
+	// silently shrank to the one cluster still answering.
+	if got := projectedOn(t, a); len(got) != 0 {
+		t.Errorf("projected %v while part of the fleet was unreachable; "+
+			"re-splitting without member-b over-grants the fleet", got)
+	}
+}
+
+// The hold lifts on its own once the fleet is whole again -- it is a wait, not
+// a state an operator has to clear.
+func TestProjectResumesWhenTheFleetIsWholeAgain(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("first Reconcile() = %v", err)
+	}
+	if len(projectedOn(t, a)) != 0 {
+		t.Fatal("the hold did not take")
+	}
+
+	fleet.members["member-b"] = b
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("second Reconcile() = %v", err)
+	}
+
+	if diff := cmp.Diff(map[string]string{"team": "90"}, projectedOn(t, a)); diff != "" {
+		t.Errorf("member-a mismatch after the fleet recovered (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]string{"team": "30"}, projectedOn(t, b)); diff != "" {
+		t.Errorf("member-b mismatch after the fleet recovered (-want +got):\n%s", diff)
+	}
+}
+
+// A member being deregistered is already gone as far as a split is concerned.
+// Holding the fleet for one would mean holding until its finalizers ran.
+func TestProjectDoesNotHoldForADepartingMember(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	departing := registered("member-b")
+	now := metav1.Now()
+	departing.DeletionTimestamp = &now
+	departing.Finalizers = []string{"ome.io/test-hold"}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		departing,
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	if len(projectedOn(t, a)) == 0 {
+		t.Error("the fleet was held for a member that is being deregistered")
+	}
+}
+
+// projectionOn builds a copy this plane is meant to own, as an earlier pass
+// would have left it.
+func projectionOn(name, nominal string) *v1beta1.AcceleratorQuota {
+	q := leaf(name, rootName, budget(nominal))
+	q.Labels = map[string]string{v1beta1.AcceleratorQuotaOriginLabel: hubOrigin}
+	return q
+}
+
+// A tenant the tree no longer describes must stop granting quota. Without the
+// sweep its queue outlives the budget that justified it, which is a grant
+// nobody authorized and nobody can see from the hub.
+func TestProjectSweepsWhatTheTreeNoLongerDescribes(t *testing.T) {
+	// member-a already carries a copy of a tenant that is not in the tree.
+	a := member(t, memberRoot("1"), projectionOn("departed", "40"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	if diff := cmp.Diff(map[string]string{"team": "100"}, projectedOn(t, a)); diff != "" {
+		t.Errorf("member-a mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The sweep may only remove what this plane wrote. A node an admin authored on
+// the member carries no origin, and another plane's copies carry a different
+// one -- reaping either would be one plane deleting another's work.
+func TestProjectSweepLeavesWhatItDoesNotOwn(t *testing.T) {
+	local := leaf("locally-authored", rootName, budget("10"))
+	foreign := projectionOn("other-hubs-copy", "20")
+	foreign.Labels[v1beta1.AcceleratorQuotaOriginLabel] = "some-other-hub"
+
+	a := member(t, memberRoot("1"), local, foreign)
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	got := projectedOn(t, a)
+	for _, name := range []string{"locally-authored", "other-hubs-copy"} {
+		if _, kept := got[name]; !kept {
+			t.Errorf("the sweep removed %s, which this plane does not own", name)
+		}
+	}
+}
+
+// The subtle one. A frozen node's allowances are withheld, so it is absent from
+// what this pass wrote -- and a sweep reading absence as "no longer belongs"
+// would delete exactly the copy the freeze exists to preserve, turning a held
+// tenant into a deleted one.
+func TestProjectSweepKeepsFrozenCopies(t *testing.T) {
+	a := member(t, memberRoot("1"), projectionOn("team", "100"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	// A budget above the root's own total freezes the leaf on containment.
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("50")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	if _, kept := projectedOn(t, a)["team"]; !kept {
+		t.Error("a frozen tenant's projection was swept; freezing must hold it, not delete it")
+	}
+}
+
+// Deleting the node is the one way to take a tenant's quota away on purpose.
+// The finalizer is what makes it reach the members at all -- without the claim
+// the CR vanishes and its budgets outlive it on every cluster.
+func TestProjectReapsOnDeletion(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("first Reconcile() = %v", err)
+	}
+	if _, projected := projectedOn(t, a)["team"]; !projected {
+		t.Fatal("nothing was projected to delete")
+	}
+
+	// The claim is what lets deletion reach the members.
+	var live v1beta1.AcceleratorQuota
+	if err := c.Get(ctx, client.ObjectKey{Name: "team"}, &live); err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if len(live.Finalizers) == 0 {
+		t.Fatal("the source was not claimed, so a delete would strand its projections")
+	}
+
+	if err := c.Delete(ctx, &live); err != nil {
+		t.Fatalf("delete source: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("second Reconcile() = %v", err)
+	}
+
+	if _, stillThere := projectedOn(t, a)["team"]; stillThere {
+		t.Error("the tenant was deleted on the hub but its budget is still live on the member")
+	}
+}
+
+// What the finalizer uniquely provides, which the sweep cannot: an ordering
+// guarantee. The sweep removes a copy once its source leaves the tree, so on
+// the happy path deletion would work without any claim at all -- but only
+// eventually, and only if this plane keeps running. The finalizer is what stops
+// the hub letting go of a node while a member still holds its budget and cannot
+// be reached to be told otherwise.
+func TestProjectHoldsDeletionWhileAMemberIsUnreachable(t *testing.T) {
+	a := member(t, memberRoot("1"), projectionOn("team", "100"))
+	// member-b is registered and has no client.
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	source := leaf("team", rootName, budget("100"))
+	source.Finalizers = []string{v1beta1.AcceleratorQuotaFinalizer}
+	now := metav1.Now()
+	source.DeletionTimestamp = &now
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		source,
+	)
+
+	// The pass reports that it cannot confirm the budget is gone everywhere.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err == nil {
+		t.Fatal("Reconcile() = nil, want the unconfirmable reap surfaced")
+	}
+
+	var live v1beta1.AcceleratorQuota
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "team"}, &live); err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if len(live.Finalizers) == 0 {
+		t.Error("the hub released the node while a member it could not reach still held the budget")
+	}
+}
+
+func TestDepthByParentRef(t *testing.T) {
+	item := func(name, parent string) v1beta1.AcceleratorQuota {
+		q := v1beta1.AcceleratorQuota{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		if parent != "" {
+			q.Spec.ParentRef = &v1beta1.AcceleratorQuotaParentRef{Name: parent}
+		}
+		return q
+	}
+
+	tests := []struct {
+		name  string
+		items []v1beta1.AcceleratorQuota
+		want  map[string]int
+	}{
+		{
+			name:  "a chain is measured from the top of the set",
+			items: []v1beta1.AcceleratorQuota{item("a", ""), item("b", "a"), item("c", "b")},
+			want:  map[string]int{"a": 0, "b": 1, "c": 2},
+		},
+		{
+			// The member's own root is never a projection, so a copy naming it
+			// has nothing above it in the swept set.
+			name:  "a parent outside the set counts as the top",
+			items: []v1beta1.AcceleratorQuota{item("b", "root"), item("c", "b")},
+			want:  map[string]int{"b": 0, "c": 1},
+		},
+		{
+			name:  "siblings share a depth",
+			items: []v1beta1.AcceleratorQuota{item("a", ""), item("b", "a"), item("c", "a")},
+			want:  map[string]int{"a": 0, "b": 1, "c": 1},
+		},
+		{
+			// However it got there, a cycle among a member's objects must not
+			// spin the walk. The numbers are meaningless; terminating is not.
+			name:  "a cycle terminates",
+			items: []v1beta1.AcceleratorQuota{item("a", "b"), item("b", "a")},
+			want:  map[string]int{"a": 2, "b": 2},
+		},
+		{
+			name:  "an empty set",
+			items: nil,
+			want:  map[string]int{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, depthByParentRef(tc.items)); diff != "" {
+				t.Errorf("depth mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A node cannot be deleted while it still has children, so a subtree the tree no
+// longer describes has to come off a member deepest-first. Parent-first is
+// refused at every tier but the last, and the subtree then takes as many passes
+// to disappear as it is deep.
+func TestProjectSweepsASubtreeChildrenFirst(t *testing.T) {
+	// Named so the child sorts before the parent, which is what an order taken
+	// from the list rather than from the shape would get wrong.
+	parent := projectionOn("sim-tenants", "40")
+	parent.Spec.Role = v1beta1.AcceleratorQuotaRoleCohort
+	parent.Spec.Budgets = nil
+	child := projectionOn("sim-serving", "40")
+	child.Spec.ParentRef = &v1beta1.AcceleratorQuotaParentRef{Name: "sim-tenants"}
+
+	var deleted []string
+	a := cachingClient{fake.NewClientBuilder().
+		WithScheme(capacityScheme(t)).
+		WithObjects(memberRoot("1"), parent, child).
+		WithStatusSubresource(&v1beta1.AcceleratorQuota{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				deleted = append(deleted, obj.GetName())
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).Build()}
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("100")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"sim-serving", "sim-tenants"}, deleted); diff != "" {
+		t.Errorf("delete order mismatch (-want +got):\n%s", diff)
+	}
+}

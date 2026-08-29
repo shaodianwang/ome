@@ -117,6 +117,15 @@ func (c *cluster) teardown() {
 	_ = c.fwk.Teardown()
 }
 
+const (
+	// quotaOrigin marks every copy this hub writes, and is what its sweep
+	// selects on. A distinct value from the placement control-plane ID: the two
+	// planes mark their own work and must not reap each other's.
+	quotaOrigin = "quota-hub"
+	// quotaFieldManager owns the fields the projector applies on a member.
+	quotaFieldManager = "ome-quota-projector"
+)
+
 var (
 	controlCluster cluster
 	member1Cluster cluster
@@ -230,7 +239,11 @@ func startControlPlaneManager(c *cluster) {
 			return err
 		}
 		quotaCM = qcm
-		return nil
+		// The management half: split an authored fleet tree and write each
+		// member's copy. Resync is long, so a spec that sees a projection
+		// converge proves an event drove it rather than a tick.
+		return components.SetupQuotaProjection(setupCtx, mgr, qcm,
+			quotaOrigin, quotaFieldManager, 10*time.Minute)
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane StartManager")
 	c.clusters = cm

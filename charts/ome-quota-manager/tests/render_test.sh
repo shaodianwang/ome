@@ -261,4 +261,22 @@ for unwanted in ValidatingWebhookConfiguration cert-manager.io ome-quota-manager
   fi
 done
 
+# --- reaching the fleet is a management-mode grant only ---
+
+mgmt="$(render --set quotaManager.mode=management --show-only templates/rbac.yaml)"
+for wanted in '"workloadclusters"' '"secrets"'; do
+  grep -Fq "${wanted}" <<<"${mgmt}" ||
+    fail "management mode cannot reach the fleet: ${wanted} not granted"
+done
+# The registry has one writer, in ome-manager, and its grace state is in memory.
+# A second writer flaps the condition and loses silently.
+if grep -Fq 'workloadclusters/status' <<<"${mgmt}"; then
+  fail "management mode grants WorkloadCluster status, which belongs to the registry"
+fi
+
+work="$(render --set quotaManager.mode=workload --show-only templates/rbac.yaml)"
+if grep -Fq '"workloadclusters"' <<<"${work}"; then
+  fail "workload mode was granted the registry it never reads"
+fi
+
 echo "ome-quota-manager chart contracts OK"

@@ -12,6 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
+	"github.com/ome-projects/ome/pkg/quota/tree"
 )
 
 // ClusterManager is the shared cross-cluster transport. Both the
@@ -112,6 +113,39 @@ func SetupQuotaTransport(_ context.Context, mgr ctrl.Manager) (*ClusterManager, 
 		return nil, fmt.Errorf("SetupQuotaTransport: SetupWithManager: %w", err)
 	}
 	return clusterManager, nil
+}
+
+// SetupQuotaProjection registers the management-mode quota controller: the half
+// that splits an authored fleet tree and writes each member's copy through the
+// transport SetupQuotaTransport built.
+//
+// Capacity derivation and Kueue materialization are both left off, which is
+// what makes this management mode rather than workload mode -- the hub measures
+// no hardware of its own and writes no Kueue object anywhere.
+func SetupQuotaProjection(_ context.Context, mgr ctrl.Manager, clusters *ClusterManager,
+	origin, fieldManager string, resync time.Duration,
+) error {
+	r := &acceleratorquota.Reconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Log:       ctrl.Log.WithName("AcceleratorQuotaProjector"),
+		APIReader: mgr.GetAPIReader(),
+		Options: tree.Options{
+			RootName: v1beta1.AcceleratorQuotaRootName,
+			MaxDepth: 5,
+		},
+		ResyncInterval: resync,
+		Project: acceleratorquota.ProjectOptions{
+			Clusters:      clusters,
+			Origin:        origin,
+			FieldManager:  fieldManager,
+			DefaultPolicy: v1beta1.AcceleratorQuotaDistributionProportional,
+		},
+	}
+	if err := r.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("SetupQuotaProjection: SetupWithManager: %w", err)
+	}
+	return nil
 }
 
 func SetupWorkloadCluster(_ context.Context, mgr ctrl.Manager, opts ...WorkloadClusterOption) (*ClusterManager, error) {

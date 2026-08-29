@@ -84,6 +84,12 @@ func (r *Reconciler) finalize(ctx context.Context, quota *v1beta1.AcceleratorQuo
 		}
 	}
 
+	if r.Project.Enabled() {
+		if err := r.reapProjections(ctx, quota.Name); err != nil {
+			return fmt.Errorf("reaping projections for %s: %w", quota.Name, err)
+		}
+	}
+
 	updated := quota.DeepCopy()
 	controllerutil.RemoveFinalizer(updated, v1beta1.AcceleratorQuotaFinalizer)
 	if err := r.Patch(ctx, updated, client.MergeFrom(quota)); err != nil {

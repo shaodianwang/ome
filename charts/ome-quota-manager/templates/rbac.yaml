@@ -29,6 +29,32 @@ rules:
 - apiGroups: ["ome.io"]
   resources: ["acceleratorquotas/status"]
   verbs: ["get", "update", "patch"]
+{{- if eq (include "ome-quota-manager.mode" .) "management" }}
+# Reaching a member starts with the registry: the connector follows each
+# WorkloadCluster's Ready condition to decide what to connect to and what to
+# drop, and the projector reads the same set to know when part of the fleet is
+# missing -- a split computed without an absent member over-grants the fleet.
+#
+# Read-only, deliberately. WorkloadCluster status has exactly one writer, the
+# registry's own reconciler in ome-manager, whose grace and backoff state is
+# in-memory rather than behind a lease. A second writer would flap the condition
+# between two processes and lose the argument silently, since conflicts on that
+# path requeue unreported.
+- apiGroups: ["ome.io"]
+  resources: ["workloadclusters"]
+  verbs: ["get", "list", "watch"]
+# The kubeconfig behind each member. Cluster-wide because a WorkloadCluster's
+# secretRef carries its own namespace, so the Secret can live anywhere an
+# operator puts it.
+#
+# This is the widest grant the quota plane holds, and it is the price of a
+# second binary reaching the fleet: ome-manager already holds the equivalent for
+# placement. Scope it by moving every kubeconfig Secret into one namespace and
+# narrowing this to a Role there, if your layout allows it.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
 {{- if and (eq (include "ome-quota-manager.mode" .) "workload") (include "ome-quota-manager.acceleratorResources" .) }}
 # Deriving the reserved root's capacity means measuring the cluster's silicon,
 # which is a cluster-wide read of Nodes and of Kueue's ResourceFlavors — the

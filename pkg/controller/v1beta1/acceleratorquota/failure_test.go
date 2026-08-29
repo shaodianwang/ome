@@ -83,7 +83,7 @@ func TestReconcileFailurePaths(t *testing.T) {
 		{
 			name:    "any other status-write failure fails the pass",
 			funcs:   patchFails(apierrors.NewInternalError(errors.New("etcd unavailable"))),
-			wantErr: "writing quota status",
+			wantErr: "writing status for node",
 		},
 	}
 

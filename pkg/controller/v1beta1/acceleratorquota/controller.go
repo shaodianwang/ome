@@ -102,6 +102,12 @@ type Reconciler struct {
 	// authored fleet tree and has no local silicon to measure.
 	Capacity CapacityOptions
 
+	// Project configures fanning the authored tree out across a fleet. Unset is
+	// the workload-mode shape: a member holds no transport, which is the
+	// structural half of the loop guard — a projection has nothing to be
+	// re-projected by.
+	Project ProjectOptions
+
 	// Materialize configures rendering the tree into an enforcement backend.
 	// Unset leaves the tree observed but unenforced, which is both the
 	// management-mode shape and the way a workload cluster runs before an
@@ -121,6 +127,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// keeps this pass from re-rendering the objects the finalizer is about to
 	// reap, which would read as a failed reap.
 	live, deleting := partitionByDeletion(list.Items)
+
+	// A management plane reads only what an admin wrote here. Its own copies can
+	// come back to it — a hub registered against itself, or one cluster running
+	// both halves — and re-splitting an already-split number would compound it
+	// every pass. A member does the opposite: projections ARE its tree, so this
+	// filter must not run there.
+	if r.Project.Enabled() {
+		live = authoredHere(live)
+	}
 
 	built, violations, err := tree.Build(live, r.Options)
 	if err != nil {
@@ -144,12 +159,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	frozen := built.Frozen(violations)
 	var errs []error
 
-	if r.Materialize.Enabled() {
+	// Claimed whenever this plane writes something a delete has to take back:
+	// Kueue objects here, or projections on members. Without the claim the CR
+	// vanishes on delete and whatever it wrote outlives it, unreferenced.
+	if r.Materialize.Enabled() || r.Project.Enabled() {
 		// Claim every live node before writing anything, so a delete that
 		// arrives mid-pass still finds a finalizer to hold it.
 		for i := range live {
 			if err := r.ensureFinalizer(ctx, &live[i]); err != nil {
-				errs = append(errs, fmt.Errorf("node %s: %w", live[i].Name, err))
+				errs = append(errs, fmt.Errorf("claiming node %s: %w", live[i].Name, err))
 			}
 		}
 		// Reap before applying. A departing node and a live one can name the
@@ -161,7 +179,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		for i := range deleting {
 			if err := r.finalize(ctx, &deleting[i], keep); err != nil {
-				errs = append(errs, fmt.Errorf("node %s: %w", deleting[i].Name, err))
+				errs = append(errs, fmt.Errorf("releasing node %s: %w", deleting[i].Name, err))
 			}
 		}
 	}
@@ -171,6 +189,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		outcomes, err = r.materialize(ctx, built, frozen)
 		if err != nil {
 			errs = append(errs, err)
+		}
+	}
+
+	if r.Project.Enabled() {
+		projected, err := r.project(ctx, built, frozen)
+		if err != nil {
+			// Per-cluster failures are already folded in here; this is the
+			// remainder. Collected rather than returned so the status writes
+			// below still happen — an operator needs the tree's verdict most
+			// when a member is refusing it.
+			errs = append(errs, fmt.Errorf("projecting the quota tree: %w", err))
+		}
+		for node, reason := range projected {
+			log.V(1).Info("node not projected this pass", "node", node, "reason", reason)
 		}
 	}
 
@@ -185,13 +217,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	for _, node := range built.Nodes() {
 		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()], reading); err != nil {
-			errs = append(errs, fmt.Errorf("node %s: %w", node.Name(), err))
+			errs = append(errs, fmt.Errorf("writing status for node %s: %w", node.Name(), err))
 		}
 	}
 	if len(errs) > 0 {
-		// One node's conflicted status write must not skip the rest, so failures
-		// are collected and the whole pass retried.
-		return ctrl.Result{}, fmt.Errorf("writing quota status: %w", errors.Join(errs...))
+		// One node's failure must not skip the rest, so they are collected and
+		// the whole pass retried. Each carries the stage it came from: claiming,
+		// releasing and status writing touch different verbs on different
+		// resources, and one prefix over all three sends a reader chasing the
+		// wrong permission.
+		return ctrl.Result{}, fmt.Errorf("reconciling the quota tree: %w", errors.Join(errs...))
 	}
 
 	if len(violations) > 0 {
