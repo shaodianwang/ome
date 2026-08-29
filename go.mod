@@ -28,18 +28,18 @@ require (
 	gomodules.xyz/jsonpatch/v2 v2.5.0
 	google.golang.org/protobuf v1.36.12
 	istio.io/client-go v1.30.4
-	k8s.io/api v0.35.3
-	k8s.io/apiextensions-apiserver v0.35.3
-	k8s.io/apimachinery v0.35.3
-	k8s.io/client-go v0.35.3
+	k8s.io/api v0.35.8
+	k8s.io/apiextensions-apiserver v0.35.8
+	k8s.io/apimachinery v0.35.8
+	k8s.io/client-go v0.35.8
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-openapi v0.0.0-20251125145642-4e65d59e963e
 	k8s.io/utils v0.0.0-20251219084037-98d557b7f1e7
 	knative.dev/pkg v0.0.0-20250326102644-9f3e60a9244c
-	sigs.k8s.io/controller-runtime v0.22.4
-	sigs.k8s.io/gateway-api v1.4.0
+	sigs.k8s.io/controller-runtime v0.22.5
+	sigs.k8s.io/gateway-api v1.4.1
 	sigs.k8s.io/kueue v0.16.9
-	sigs.k8s.io/scheduler-plugins v0.34.1-devel
+	sigs.k8s.io/scheduler-plugins v0.34.7
 	sigs.k8s.io/yaml v1.6.0
 	volcano.sh/apis v1.13.1-0.20251028070205-46d20c0699e7
 )
@@ -136,8 +136,8 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiserver v0.35.3 // indirect
-	k8s.io/component-base v0.35.3 // indirect
+	k8s.io/apiserver v0.35.8 // indirect
+	k8s.io/component-base v0.35.8 // indirect
 	k8s.io/component-helpers v0.35.0 // indirect
 	sigs.k8s.io/jobset v0.10.1 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
