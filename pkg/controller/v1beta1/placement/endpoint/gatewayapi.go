@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"maps"
@@ -13,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -23,8 +25,8 @@ import (
 
 const (
 	// resourceSuffix names the backing resources the Gateway API publisher
-	// creates for an InferenceService. The HTTPRoute is "<isvc>-global"; each
-	// per-home ExternalName Service is "<isvc>-global-<cluster>" — distinct from
+	// creates for an InferenceService. The HTTPRoute is "<base>-global"; each
+	// per-home ExternalName Service is "<base>-global-<cluster>" — distinct from
 	// the per-cluster ingress resources OME's normal ingress reconciler emits
 	// ("<isvc>", "<isvc>-engine", ...) so the two never collide.
 	resourceSuffix = "-global"
@@ -60,15 +62,39 @@ func NewGatewayAPIPublisher(c client.Client, cfg Config) *GatewayAPIPublisher {
 
 func (p *GatewayAPIPublisher) Name() string { return "GatewayAPI" }
 
-// routeName is the HTTPRoute name for an InferenceService ("<isvc>-global").
-func routeName(isvc *v1beta1.InferenceService) string {
-	return isvc.Name + resourceSuffix
+// resourceBaseName is the stable base every published resource name is built
+// from. A shared RouteNamespace co-locates resources from many source
+// namespaces, so the base carries a digest of the fully-qualified source key
+// there. A plain namespace-name join would not keep same-named sources apart:
+// the hyphen is legal inside both, so (a, b-c) and (a-b, c) would collide.
+func (p *GatewayAPIPublisher) resourceBaseName(isvc *v1beta1.InferenceService) string {
+	if p.routeNamespace(isvc) != isvc.Namespace {
+		sum := sha256.Sum256([]byte(isvc.Namespace + "/" + isvc.Name))
+		return fmt.Sprintf("%s-%x", isvc.Name, sum[:4])
+	}
+	return isvc.Name
 }
 
-// serviceName is the per-home ExternalName Service name for a cluster
-// ("<isvc>-global-<cluster>").
-func serviceName(isvc *v1beta1.InferenceService, cluster string) string {
-	return isvc.Name + resourceSuffix + "-" + cluster
+// boundedResourceName renders a published resource name as a valid DNS-1035
+// label: an overflowing name collapses to a deterministic hashed form, and the
+// result always starts with a letter, which Service names require.
+func boundedResourceName(name string) string {
+	bounded := constants.TruncateNameWithMaxLength(name, validation.DNS1035LabelMaxLength)
+	if bounded != "" && (bounded[0] < 'a' || bounded[0] > 'z') {
+		bounded = "a" + bounded
+		bounded = constants.TruncateNameWithMaxLength(bounded, validation.DNS1035LabelMaxLength)
+	}
+	return bounded
+}
+
+// routeName is the HTTPRoute name for an InferenceService.
+func (p *GatewayAPIPublisher) routeName(isvc *v1beta1.InferenceService) string {
+	return boundedResourceName(p.resourceBaseName(isvc) + resourceSuffix)
+}
+
+// serviceName is the per-home ExternalName Service name for a cluster.
+func (p *GatewayAPIPublisher) serviceName(isvc *v1beta1.InferenceService, cluster string) string {
+	return boundedResourceName(p.resourceBaseName(isvc) + resourceSuffix + "-" + cluster)
 }
 
 // routeNamespace resolves the namespace the published resources live in: the
@@ -83,10 +109,14 @@ func (p *GatewayAPIPublisher) routeNamespace(isvc *v1beta1.InferenceService) str
 // Publish reconciles the per-home ExternalName Services and the HTTPRoute so the
 // global host load-balances across exactly target.Homes.
 func (p *GatewayAPIPublisher) Publish(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
-	if err := p.applyServices(ctx, isvc, target); err != nil {
+	desired, err := p.ensureServices(ctx, isvc, target)
+	if err != nil {
 		return err
 	}
-	return p.applyRoute(ctx, isvc, target)
+	if err := p.applyRoute(ctx, isvc, target); err != nil {
+		return err
+	}
+	return p.pruneServices(ctx, isvc, desired)
 }
 
 // Unpublish deletes the HTTPRoute and every per-home Service this publisher owns
@@ -95,9 +125,20 @@ func (p *GatewayAPIPublisher) Publish(ctx context.Context, isvc *v1beta1.Inferen
 func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	ns := p.routeNamespace(isvc)
 	var errs []error
-	route := &gatewayapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: routeName(isvc), Namespace: ns}}
-	if err := p.client.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) {
-		errs = append(errs, fmt.Errorf("delete global HTTPRoute %s/%s: %w", ns, routeName(isvc), err))
+	// Delete the route only if it is ours. A shared RouteNamespace holds routes
+	// for many sources, so a name match alone must not authorize a delete.
+	existing := &gatewayapiv1.HTTPRoute{}
+	switch err := p.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: p.routeName(isvc)}, existing); {
+	case apierrors.IsNotFound(err):
+		// nothing to remove
+	case err != nil:
+		errs = append(errs, fmt.Errorf("read global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
+	case !p.ownsResource(existing, isvc):
+		errs = append(errs, fmt.Errorf("global HTTPRoute %s/%s belongs to another InferenceService", ns, p.routeName(isvc)))
+	default:
+		if err := p.client.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
+		}
 	}
 	owned, err := p.ownedServices(ctx, isvc)
 	if err != nil {
@@ -113,23 +154,28 @@ func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.Infer
 }
 
 // ownedServices lists the per-home backend Services this publisher created for
-// the ISVC (by the managed-by + per-ISVC labels), so teardown and stale-home GC
-// find them all regardless of how many homes there are.
+// the ISVC (by the managed-by + per-ISVC name/namespace labels), so teardown and
+// stale-home GC find them all regardless of how many homes there are, and never
+// reach a same-named ISVC from another namespace.
 func (p *GatewayAPIPublisher) ownedServices(ctx context.Context, isvc *v1beta1.InferenceService) ([]corev1.Service, error) {
 	list := &corev1.ServiceList{}
 	if err := p.client.List(ctx, list, client.InNamespace(p.routeNamespace(isvc)),
-		client.MatchingLabels{ManagedByLabel: ManagedByValue, PlacementEndpointISVCLabel: isvc.Name}); err != nil {
+		client.MatchingLabels{
+			ManagedByLabel:                      ManagedByValue,
+			PlacementEndpointISVCLabel:          isvc.Name,
+			PlacementEndpointISVCNamespaceLabel: isvc.Namespace,
+		}); err != nil {
 		return nil, fmt.Errorf("list global backend Services for %s/%s: %w", isvc.Namespace, isvc.Name, err)
 	}
 	return list.Items, nil
 }
 
-// applyServices ensures exactly one ExternalName Service per home exists, then
-// deletes any owned Service no longer backing a home (a home that left).
-func (p *GatewayAPIPublisher) applyServices(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
+// ensureServices creates or updates one ExternalName Service per home, before
+// the route is changed, and returns the desired names for the prune step.
+func (p *GatewayAPIPublisher) ensureServices(ctx context.Context, isvc *v1beta1.InferenceService, target Target) (map[string]struct{}, error) {
 	desired := make(map[string]Home, len(target.Homes))
 	for _, h := range target.Homes {
-		desired[serviceName(isvc, h.Cluster)] = h
+		desired[p.serviceName(isvc, h.Cluster)] = h
 	}
 	// Apply in a stable order so behavior is deterministic.
 	names := make([]string, 0, len(desired))
@@ -139,10 +185,20 @@ func (p *GatewayAPIPublisher) applyServices(ctx context.Context, isvc *v1beta1.I
 	sort.Strings(names)
 	for _, name := range names {
 		if err := p.applyService(ctx, isvc, name, desired[name]); err != nil {
-			return err
+			return nil, err
 		}
 	}
+	keep := make(map[string]struct{}, len(desired))
+	for name := range desired {
+		keep[name] = struct{}{}
+	}
+	return keep, nil
+}
 
+// pruneServices deletes owned Services no longer backing a home. It runs after
+// the route drops their backendRefs, so the route never points at a Service that
+// is already gone.
+func (p *GatewayAPIPublisher) pruneServices(ctx context.Context, isvc *v1beta1.InferenceService, desired map[string]struct{}) error {
 	owned, err := p.ownedServices(ctx, isvc)
 	if err != nil {
 		return err
@@ -187,6 +243,22 @@ func (p *GatewayAPIPublisher) applyService(ctx context.Context, isvc *v1beta1.In
 	return nil
 }
 
+// ownsResource reports whether a published object carries this source's owner
+// labels. Objects published before those labels existed carry neither, and are
+// treated as ours so an upgrade still adopts and cleans them up.
+func (p *GatewayAPIPublisher) ownsResource(obj metav1.Object, isvc *v1beta1.InferenceService) bool {
+	l := obj.GetLabels()
+	name, hasName := l[PlacementEndpointISVCLabel]
+	ns, hasNS := l[PlacementEndpointISVCNamespaceLabel]
+	if !hasName && !hasNS {
+		return true
+	}
+	if hasName && name != isvc.Name {
+		return false
+	}
+	return !hasNS || ns == isvc.Namespace
+}
+
 func (p *GatewayAPIPublisher) applyRoute(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
 	desired := p.buildHTTPRoute(isvc, target)
 	existing := &gatewayapiv1.HTTPRoute{}
@@ -199,6 +271,9 @@ func (p *GatewayAPIPublisher) applyRoute(ctx context.Context, isvc *v1beta1.Infe
 	}
 	if err != nil {
 		return err
+	}
+	if !p.ownsResource(existing, isvc) {
+		return fmt.Errorf("global HTTPRoute %s/%s belongs to another InferenceService", desired.Namespace, desired.Name)
 	}
 	desired.ResourceVersion = existing.ResourceVersion
 	if equality.Semantic.DeepEqual(desired.Spec, existing.Spec) &&
@@ -265,7 +340,7 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 			BackendRef: gatewayapiv1.BackendRef{
 				BackendObjectReference: gatewayapiv1.BackendObjectReference{
 					Kind:      ptr.To(gatewayapiv1.Kind(constants.ServiceKind)),
-					Name:      gatewayapiv1.ObjectName(serviceName(isvc, h.Cluster)),
+					Name:      gatewayapiv1.ObjectName(p.serviceName(isvc, h.Cluster)),
 					Namespace: (*gatewayapiv1.Namespace)(&backendNS),
 					Port:      &port,
 				},
@@ -276,7 +351,7 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 
 	return &gatewayapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      routeName(isvc),
+			Name:      p.routeName(isvc),
 			Namespace: backendNS,
 			Labels:    p.baseLabels(isvc),
 		},
@@ -304,13 +379,14 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 }
 
 // baseLabels are the ownership markers stamped on every published resource
-// (route + Services): the managed-by marker plus the per-ISVC grouping label,
-// merged over the operator-configured Labels (owned keys win).
+// (route + Services): the managed-by marker plus the per-ISVC name/namespace
+// grouping labels, merged over the operator-configured Labels (owned keys win).
 func (p *GatewayAPIPublisher) baseLabels(isvc *v1beta1.InferenceService) map[string]string {
 	out := map[string]string{}
 	maps.Copy(out, p.config.Labels)
 	out[ManagedByLabel] = ManagedByValue
 	out[PlacementEndpointISVCLabel] = isvc.Name
+	out[PlacementEndpointISVCNamespaceLabel] = isvc.Namespace
 	return out
 }
 

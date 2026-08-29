@@ -23,6 +23,12 @@ const (
 	// single fixed name.
 	PlacementEndpointISVCLabel = "ome.io/placement-endpoint-isvc"
 
+	// PlacementEndpointISVCNamespaceLabel records the source InferenceService's
+	// namespace. Paired with PlacementEndpointISVCLabel it identifies the owner
+	// exactly: the name alone is ambiguous when a shared RouteNamespace holds
+	// resources from several source namespaces.
+	PlacementEndpointISVCNamespaceLabel = "ome.io/placement-endpoint-isvc-namespace"
+
 	// EndpointFinalizer keeps a placed InferenceService around long enough for the
 	// publisher to tear down its global-traffic backend before the object is
 	// removed. Distinct from the placement controller's own finalizer so the two

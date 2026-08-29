@@ -116,7 +116,8 @@ data:
         "statusSafetyRequeue": "{{ .Values.ome.multicluster.config.placement.statusSafetyRequeue | default "" }}",
         "dispatcherMode": "{{ .Values.ome.multicluster.config.placement.dispatcherMode | default "" }}",
         "dispatcherStepSize": {{ .Values.ome.multicluster.config.placement.dispatcherStepSize | default 0 }},
-        "dispatcherRoundTimeout": "{{ .Values.ome.multicluster.config.placement.dispatcherRoundTimeout | default "" }}"
+        "dispatcherRoundTimeout": "{{ .Values.ome.multicluster.config.placement.dispatcherRoundTimeout | default "" }}",
+        "localQueue": "{{ .Values.ome.multicluster.config.placement.localQueue | default "" }}"
       },
       "endpoint": {
         "globalHostTemplate": "{{ .Values.ome.multicluster.config.endpoint.globalHostTemplate | default "" }}",

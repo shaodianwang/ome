@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -236,6 +237,11 @@ var podGroupKind = corev1.SchemeGroupVersion.WithKind("Pod").GroupKind()
 // unfiltered. There is intentionally no in-code default selector — the value is
 // the caller's to supply, per the repo's no-magic-values rule. Caching Pods is
 // rejected outright: the remote cache must never LIST+WATCH cluster-wide Pods.
+//
+// syncTimeout bounds the initial informer LIST/sync: a cache that cannot start
+// or sync fails the construction rather than leaving later reads and handler
+// registration blocked on a cache that never becomes usable. It is the caller's
+// to supply; non-positive bounds the wait by ctx alone.
 func NewSelectivelyCachingClient(
 	ctx context.Context,
 	restConfig *rest.Config,
@@ -244,6 +250,7 @@ func NewSelectivelyCachingClient(
 	cachedKinds sets.Set[schema.GroupKind],
 	indexes []CacheIndexOption,
 	defaultSelector labels.Selector,
+	syncTimeout time.Duration,
 ) (SelectivelyCachingClient, error) {
 	if cachedKinds.Has(podGroupKind) {
 		return nil, fmt.Errorf("refusing to cache kind %s: the remote cache must never hold cluster-wide Pods", podGroupKind.String())
@@ -274,18 +281,38 @@ func NewSelectivelyCachingClient(
 
 	var synced atomic.Bool
 
+	runCtx, cancelRun := context.WithCancel(ctx)
+	startErr := make(chan error, 1)
 	go func() {
-		if err := remoteCache.Start(ctx); err != nil {
-			ctrl.LoggerFrom(ctx).Error(err, "Remote cache execution failed")
-		}
+		defer cancelRun()
+		startErr <- remoteCache.Start(runCtx)
 	}()
-
-	go func() {
-		if remoteCache.WaitForCacheSync(ctx) {
-			synced.Store(true)
-			ctrl.LoggerFrom(ctx).V(2).Info("Remote cache successfully synchronized")
+	syncCtx := runCtx
+	if syncTimeout > 0 {
+		var cancelSync context.CancelFunc
+		syncCtx, cancelSync = context.WithTimeout(runCtx, syncTimeout)
+		defer cancelSync()
+	}
+	syncDone := make(chan bool, 1)
+	go func() { syncDone <- remoteCache.WaitForCacheSync(syncCtx) }()
+	select {
+	case err := <-startErr:
+		if err == nil {
+			err = errors.New("remote cache stopped before initial synchronization")
 		}
-	}()
+		cancelRun()
+		return nil, fmt.Errorf("starting remote cache: %w", err)
+	case ok := <-syncDone:
+		if !ok {
+			cancelRun()
+			if err := syncCtx.Err(); err != nil {
+				return nil, fmt.Errorf("synchronizing remote cache: %w", err)
+			}
+			return nil, errors.New("synchronizing remote cache failed")
+		}
+		synced.Store(true)
+		ctrl.LoggerFrom(ctx).V(2).Info("Remote cache successfully synchronized")
+	}
 
 	cachedClient := &selectivelyCachingClient{
 		WithWatch:    directClient,

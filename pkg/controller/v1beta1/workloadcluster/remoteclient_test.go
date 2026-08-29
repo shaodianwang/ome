@@ -97,6 +97,7 @@ func TestNewSelectivelyCachingClient_RejectsPodKind(t *testing.T) {
 		sets.New(podGK),
 		nil,
 		nil,
+		time.Second,
 	)
 	if err == nil {
 		t.Fatalf("NewSelectivelyCachingClient with Pod in cachedKinds: got nil error, want rejection")

@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -39,6 +40,8 @@ const DefaultHealthInterval = time.Minute
 // default".
 const DefaultConnectionGracePeriod = 2 * time.Minute
 
+const kubeConfigSecretRefIndex = "spec.clusterSource.kubeConfig.secretRef"
+
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -61,11 +64,23 @@ type Reconciler struct {
 	Manager *Manager
 	// ExecPolicy is the exec credential policy applied during validation.
 	ExecPolicy ExecCredentialPolicy
+	// SecretReader reads kubeconfig Secrets WITHOUT caching them. The Secret watch
+	// is metadata-only, so payloads never enter the informer cache; reading the
+	// bytes through the cached client would defeat that by starting a second,
+	// full-payload Secret informer over every namespace. SetupWithManager defaults
+	// it to mgr.GetAPIReader(); nil falls back to the reconciler's own client.
+	SecretReader client.Reader
 	// ConnectionGracePeriod is how long a previously reachable cluster tolerates
 	// transient probe failures before it is flipped to Ready=False and
 	// disconnected; zero defaults to DefaultConnectionGracePeriod. A negative
 	// value disables grace.
 	ConnectionGracePeriod time.Duration
+	// ProbeTimeout bounds the default reachability probe's single request. It is
+	// the same budget as a remote per-call timeout, so the control-plane wiring
+	// feeds it the configured per-call value. Zero falls back to the health
+	// interval, which is always positive: the probe must never outlast the
+	// cadence that schedules the next one, and this controller runs one worker.
+	ProbeTimeout time.Duration
 
 	// mu guards firstFailure. The reconciler runs single-worker per key, but
 	// firstFailure is shared across keys.
@@ -313,12 +328,16 @@ func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (s
 	}
 	secret := &corev1.Secret{}
 	nn := types.NamespacedName{Name: src.KubeConfig.SecretRef.Name, Namespace: src.KubeConfig.SecretRef.Namespace}
-	if err := r.Get(ctx, nn, secret); err != nil {
+	if err := r.secretReader().Get(ctx, nn, secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return metav1.ConditionFalse, "SecretNotFound",
 				fmt.Sprintf("kubeconfig Secret %s/%s not found", nn.Namespace, nn.Name), nil
 		}
-		return metav1.ConditionFalse, "SecretNotFound", err.Error(), nil
+		// Local-apiserver read failures are transient transport failures, not a
+		// missing configuration. Reuse the connection grace path so one timeout
+		// does not discard an otherwise healthy remote client.
+		return metav1.ConditionFalse, "ConnectionFailed",
+			fmt.Sprintf("reading kubeconfig Secret %s/%s: %v", nn.Namespace, nn.Name, err), nil
 	}
 	raw, ok := secret.Data[key]
 	if !ok || len(raw) == 0 {
@@ -348,6 +367,31 @@ func (r *Reconciler) healthInterval() time.Duration {
 	return DefaultHealthInterval
 }
 
+// secretReader returns the uncached reader for kubeconfig Secrets, falling back
+// to the reconciler's client when none was wired (unit tests build it directly).
+func (r *Reconciler) secretReader() client.Reader {
+	if r.SecretReader != nil {
+		return r.SecretReader
+	}
+	return r.Client
+}
+
+// probeTimeout is the client-level bound for one reachability probe. It comes
+// from config (workloadCluster.perCallTimeout); when that is unset the health
+// interval bounds it instead, so an unreachable endpoint can never hold the
+// single reconcile worker past the next scheduled probe.
+func (r *Reconciler) probeTimeout() time.Duration {
+	if r.cfg != nil {
+		if r.cfg.probeTimeout > 0 {
+			return r.cfg.probeTimeout
+		}
+		if r.cfg.healthInterval > 0 {
+			return r.cfg.healthInterval
+		}
+	}
+	return r.ProbeTimeout
+}
+
 // SetupWithManager wires the reconciler: watch WorkloadClusters, and re-enqueue
 // (debounced by the events-batch period) when a referenced kubeconfig Secret
 // changes. Functional Options shrink the timing knobs (health interval,
@@ -355,8 +399,11 @@ func (r *Reconciler) healthInterval() time.Duration {
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
 	if r.Probe == nil {
 		r.Probe = func(ctx context.Context, raw []byte) error {
-			return probeViaServerVersion(ctx, raw, r.ExecPolicy)
+			return probeViaServerVersion(ctx, raw, r.ExecPolicy, r.probeTimeout())
 		}
+	}
+	if r.SecretReader == nil {
+		r.SecretReader = mgr.GetAPIReader()
 	}
 	if r.firstFailure == nil {
 		r.firstFailure = map[string]time.Time{}
@@ -368,10 +415,25 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
 	if r.Manager != nil {
 		r.Manager.SetReconnectBackoff(cfg.reconnect)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1beta1.WorkloadCluster{}, kubeConfigSecretRefIndex, kubeConfigSecretRefValues); err != nil {
+		return fmt.Errorf("index WorkloadClusters by kubeconfig Secret: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.WorkloadCluster{}).
-		Watches(&corev1.Secret{}, r.secretEventHandler(cfg.eventsBatchPeriod)).
+		// Metadata-only: this controller needs Secret CHANGE events, never cached
+		// Secret payloads. A full informer would hold every Secret in the cluster
+		// in memory and widen the blast radius of a compromised manager pod.
+		Watches(&corev1.Secret{}, r.secretEventHandler(cfg.eventsBatchPeriod), builder.OnlyMetadata).
 		Complete(r)
+}
+
+func kubeConfigSecretRefValues(obj client.Object) []string {
+	wc := obj.(*v1beta1.WorkloadCluster)
+	kc := wc.Spec.ClusterSource.KubeConfig
+	if kc == nil || kc.SecretRef.Name == "" || kc.SecretRef.Namespace == "" {
+		return nil
+	}
+	return []string{types.NamespacedName{Namespace: kc.SecretRef.Namespace, Name: kc.SecretRef.Name}.String()}
 }
 
 // secretEventHandler re-enqueues the WorkloadClusters referencing a changed
@@ -405,15 +467,14 @@ func (r *Reconciler) secretEventHandler(batchPeriod time.Duration) handler.Event
 // kubeConfig.secretRef points at it.
 func (r *Reconciler) workloadClustersForSecret(ctx context.Context, obj client.Object) []ctrl.Request {
 	list := &v1beta1.WorkloadClusterList{}
-	if err := r.List(ctx, list); err != nil {
+	key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
+	if err := r.List(ctx, list, client.MatchingFields{kubeConfigSecretRefIndex: key}); err != nil {
+		r.Log.Error(err, "list WorkloadClusters for kubeconfig Secret", "secret", key)
 		return nil
 	}
-	var reqs []ctrl.Request
+	reqs := make([]ctrl.Request, 0, len(list.Items))
 	for i := range list.Items {
-		kc := list.Items[i].Spec.ClusterSource.KubeConfig
-		if kc != nil && kc.SecretRef.Name == obj.GetName() && kc.SecretRef.Namespace == obj.GetNamespace() {
-			reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Name: list.Items[i].Name}})
-		}
+		reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Name: list.Items[i].Name}})
 	}
 	return reqs
 }

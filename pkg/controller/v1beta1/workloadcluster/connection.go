@@ -25,15 +25,27 @@ import (
 type ExecCredentialPolicy struct {
 	// Allowed turns exec credential plugins on. Default false.
 	Allowed bool
-	// AllowedCommands is the set of permitted plugin command basenames
-	// (e.g. "aws", "gke-gcloud-auth-plugin", "kubelogin"). Empty => none allowed.
+	// AllowedCommands is the set of permitted plugin commands, matched exactly
+	// against the command the kubeconfig names. List a bare command (e.g. "aws",
+	// "gke-gcloud-auth-plugin", "kubelogin") to permit PATH resolution, or an
+	// absolute path to pin one binary; a bare entry does NOT permit a path that
+	// merely ends in that name. Empty => none allowed.
 	AllowedCommands []string
 }
 
 func (p ExecCredentialPolicy) commandAllowed(cmd string) bool {
-	base := filepath.Base(cmd)
+	if cmd == "" {
+		return false
+	}
+	// A command carrying a path separator is only ever authorized by an entry
+	// that is that exact absolute path: a bare entry must never let an
+	// attacker-controlled path through because its basename matches, and a
+	// relative path resolves against an unknown working directory.
+	if strings.ContainsAny(cmd, `/\`) && !filepath.IsAbs(cmd) {
+		return false
+	}
 	for _, a := range p.AllowedCommands {
-		if a == base || a == cmd {
+		if a == cmd {
 			return true
 		}
 	}
@@ -62,8 +74,9 @@ func RESTConfigFromKubeConfig(raw []byte, exec ExecCredentialPolicy) (*rest.Conf
 
 // validateKubeConfigBytes inspects the raw kubeconfig at the API-config level
 // (across ALL clusters and users, not just the current context) and rejects:
-// per-user on-disk token files, per-cluster insecure TLS, CA file paths
-// (require inline certificate-authority-data), and a missing server URL.
+// per-user on-disk token and client certificate/key files, per-cluster insecure
+// TLS, CA file paths (require inline certificate-authority-data), and a missing
+// server URL.
 func validateKubeConfigBytes(raw []byte, exec ExecCredentialPolicy) error {
 	cfg, err := clientcmd.Load(raw)
 	if err != nil {
@@ -75,6 +88,9 @@ func validateKubeConfigBytes(raw []byte, exec ExecCredentialPolicy) error {
 		}
 		if authInfo.TokenFile != "" {
 			return fmt.Errorf("kubeconfig user %q references an on-disk token file, which is not allowed", name)
+		}
+		if authInfo.ClientCertificate != "" || authInfo.ClientKey != "" {
+			return fmt.Errorf("kubeconfig user %q references on-disk client certificate/key files; use inline certificate and key data instead", name)
 		}
 	}
 	for name, cluster := range cfg.Clusters {
@@ -92,18 +108,21 @@ func validateKubeConfigBytes(raw []byte, exec ExecCredentialPolicy) error {
 }
 
 // validateRESTConfig rejects unsafe settings on the flattened rest.Config:
-// exec/auth-provider plugins, on-disk token files, basic auth, disabled TLS, a
-// CA file path, or an untrusted server endpoint. BearerToken (service-account
-// token) and inline CA data are allowed.
+// exec/auth-provider plugins, on-disk token or client certificate/key files,
+// basic auth, disabled TLS, a CA file path, or an untrusted server endpoint.
+// BearerToken (service-account token) and inline CA data are allowed. Every
+// check is independent: an accepted exec provider still has to clear the
+// transport and endpoint checks below.
 func validateRESTConfig(cfg *rest.Config, exec ExecCredentialPolicy) error {
-	switch {
-	case cfg.ExecProvider != nil:
+	if cfg.ExecProvider != nil {
 		if !exec.Allowed {
 			return errors.New("kubeconfig uses an exec credential plugin, which is not allowed (enable --allow-exec-credentials)")
 		}
 		if !exec.commandAllowed(cfg.ExecProvider.Command) {
 			return fmt.Errorf("exec credential plugin command %q is not in the allowed list", cfg.ExecProvider.Command)
 		}
+	}
+	switch {
 	case cfg.AuthProvider != nil:
 		return errors.New("kubeconfig uses an auth-provider plugin, which is not allowed")
 	case cfg.BearerTokenFile != "":
@@ -114,6 +133,8 @@ func validateRESTConfig(cfg *rest.Config, exec ExecCredentialPolicy) error {
 		return errors.New("kubeconfig disables TLS verification, which is not allowed")
 	case cfg.TLSClientConfig.CAFile != "":
 		return errors.New("kubeconfig uses a CA file path; use inline CA data instead")
+	case cfg.TLSClientConfig.CertFile != "" || cfg.TLSClientConfig.KeyFile != "":
+		return errors.New("kubeconfig uses client certificate/key file paths; use inline data instead")
 	case !isValidHostname(cfg.Host):
 		return errors.New("kubeconfig server endpoint is not a trusted host")
 	}
@@ -150,17 +171,24 @@ func isValidHostname(server string) bool {
 // probeViaServerVersion is the default reachability probe: build a discovery
 // client and fetch the remote /version. Cheap and needs no extra RBAC. It is
 // assigned to Reconciler.Probe by SetupWithManager and overridden in tests.
-func probeViaServerVersion(_ context.Context, raw []byte, exec ExecCredentialPolicy) error {
+//
+// timeout bounds the request at the client level; a non-positive value leaves
+// the request bounded only by ctx, matching the perCallTimeout convention.
+func probeViaServerVersion(ctx context.Context, raw []byte, exec ExecCredentialPolicy, timeout time.Duration) error {
 	cfg, err := RESTConfigFromKubeConfig(raw, exec)
 	if err != nil {
 		return err
 	}
-	cfg.Timeout = 10 * time.Second
+	if timeout > 0 {
+		cfg.Timeout = timeout
+	}
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("build discovery client: %w", err)
 	}
-	if _, err := dc.ServerVersion(); err != nil {
+	// Go through the REST client rather than ServerVersion() so the probe
+	// observes ctx cancellation instead of running to its own timeout.
+	if err := dc.RESTClient().Get().AbsPath("/version").Do(ctx).Error(); err != nil {
 		return fmt.Errorf("connect to cluster: %w", err)
 	}
 	return nil

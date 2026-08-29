@@ -100,6 +100,9 @@ type controllerConfig struct {
 	eventsBatchPeriod time.Duration
 	// reconnect governs (re)establish/retry backoff for the remote transport.
 	reconnect reconnectBackoff
+	// probeTimeout bounds one reachability probe at the client level.
+	// Non-positive leaves the probe bounded by its context alone.
+	probeTimeout time.Duration
 }
 
 // Option mutates the reconciler's timing configuration at Setup: the
@@ -172,6 +175,7 @@ func (r *Reconciler) resolveConfig(opts ...Option) controllerConfig {
 	c := controllerConfig{
 		healthInterval:        r.HealthInterval,
 		connectionGracePeriod: r.ConnectionGracePeriod,
+		probeTimeout:          r.ProbeTimeout,
 		reconnect:             defaultReconnectBackoff(),
 	}
 	for _, o := range opts {

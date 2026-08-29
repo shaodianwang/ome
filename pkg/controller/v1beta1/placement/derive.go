@@ -18,7 +18,10 @@ import (
 //   - Kueue gating stamped on component pod metadata (the queue-name label).
 //   - Control-plane-only directives removed (placement selectors + rollout verbs)
 //     so the worker reconciler does not (re)act on the control plane's decisions.
-func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.InferenceService {
+//
+// localQueue is the operator-configured LocalQueue used when the source carries
+// no LocalQueueAnnotation; with neither set the queue label is left unstamped.
+func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID, localQueue string) *v1beta1.InferenceService {
 	d := src.DeepCopy()
 
 	// Clear server-side / control-plane state.
@@ -32,10 +35,10 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.I
 	d.ManagedFields = nil
 	d.Status = v1beta1.InferenceServiceStatus{}
 
-	// Resolve queue name: from LocalQueueAnnotation or default.
+	// Resolve queue name: per-ISVC annotation, then the operator-configured queue.
 	queue := src.Annotations[LocalQueueAnnotation]
 	if queue == "" {
-		queue = DefaultLocalQueue
+		queue = localQueue
 	}
 
 	// Add origin markers.
@@ -59,15 +62,19 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.I
 		delete(d.Annotations, k)
 	}
 
-	// Stamp Kueue gating on each component.
-	if d.Spec.Engine != nil {
-		stampQueue(&d.Spec.Engine.ComponentExtensionSpec, queue)
-	}
-	if d.Spec.Decoder != nil {
-		stampQueue(&d.Spec.Decoder.ComponentExtensionSpec, queue)
-	}
-	if d.Spec.Router != nil {
-		stampQueue(&d.Spec.Router.ComponentExtensionSpec, queue)
+	// Stamp Kueue gating on each component. An unresolved queue leaves the label
+	// off — the queue names an operator-provisioned resource, so there is no
+	// in-code default to guess.
+	if queue != "" {
+		if d.Spec.Engine != nil {
+			stampQueue(&d.Spec.Engine.ComponentExtensionSpec, queue)
+		}
+		if d.Spec.Decoder != nil {
+			stampQueue(&d.Spec.Decoder.ComponentExtensionSpec, queue)
+		}
+		if d.Spec.Router != nil {
+			stampQueue(&d.Spec.Router.ComponentExtensionSpec, queue)
+		}
 	}
 
 	return d

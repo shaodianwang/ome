@@ -1,7 +1,9 @@
 package controllerconfig
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -29,6 +31,9 @@ const MultiClusterConfigName = "multicluster"
 // each knob stays single-sourced in the package that owns it — never duplicated
 // as a literal here — and an absent "multicluster" block reproduces the
 // built-in behavior exactly.
+//
+// A knob that is stated but unusable is a startup error, not a silent fallback:
+// Validate gates the loaded config before any controller is wired.
 type MultiClusterConfig struct {
 	WorkloadCluster WorkloadClusterConfig `json:"workloadCluster,omitempty"`
 	Placement       PlacementConfig       `json:"placement,omitempty"`
@@ -108,6 +113,11 @@ type PlacementConfig struct {
 	// DispatcherRoundTimeout is how long an Incremental round waits for a nominated
 	// cluster to win before adding the next batch. Non-positive enforces no dwell.
 	DispatcherRoundTimeout string `json:"dispatcherRoundTimeout,omitempty"`
+	// LocalQueue is the Kueue LocalQueue that a derived workload's pods join on
+	// the target cluster when the InferenceService carries no per-ISVC queue
+	// annotation. It names a resource the operator created, so it has no in-code
+	// default: empty leaves the choice to the placement package.
+	LocalQueue string `json:"localQueue,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -150,6 +160,63 @@ func parseMultiClusterConfig(configMap *v1.ConfigMap) (*MultiClusterConfig, erro
 		return nil, fmt.Errorf("unable to parse multicluster config json: %w", err)
 	}
 	return cfg, nil
+}
+
+// Validate reports knob values that are stated but unusable, for the manager to
+// refuse at startup. Loading stays forgiving on purpose — an unparseable duration
+// reads as zero so the consuming package applies its own default — but that
+// makes a typo like "30" or "1 m" indistinguishable from "not set", silently
+// discarding the operator's intended value for the life of the process. The
+// composition root calls this so the deploy fails loudly instead.
+func (c MultiClusterConfig) Validate() error {
+	durations := map[string]string{
+		"workloadCluster.perCallTimeout":       c.WorkloadCluster.PerCallTimeout,
+		"workloadCluster.healthInterval":       c.WorkloadCluster.HealthInterval,
+		"workloadCluster.connectionGrace":      c.WorkloadCluster.ConnectionGrace,
+		"workloadCluster.eventsBatchPeriod":    c.WorkloadCluster.EventsBatchPeriod,
+		"workloadCluster.establishInitial":     c.WorkloadCluster.EstablishInitial,
+		"workloadCluster.establishMax":         c.WorkloadCluster.EstablishMax,
+		"workloadCluster.reconnectRetryMax":    c.WorkloadCluster.ReconnectRetryMax,
+		"workloadCluster.funnelResyncInterval": c.WorkloadCluster.FunnelResyncInterval,
+		"placement.requeueInterval":            c.Placement.RequeueInterval,
+		"placement.gcInterval":                 c.Placement.GCInterval,
+		"placement.fanoutTimeout":              c.Placement.FanoutTimeout,
+		"placement.winnerLostGrace":            c.Placement.WinnerLostGrace,
+		"placement.statusBatchPeriod":          c.Placement.StatusBatchPeriod,
+		"placement.statusSafetyRequeue":        c.Placement.StatusSafetyRequeue,
+		"placement.dispatcherRoundTimeout":     c.Placement.DispatcherRoundTimeout,
+	}
+	keys := make([]string, 0, len(durations))
+	for k := range durations {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var errs []error
+	for _, k := range keys {
+		raw := durations[k]
+		if raw == "" {
+			continue
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %q is not a duration (use forms like \"30s\", \"5m\")", k, raw))
+			continue
+		}
+		if d <= 0 {
+			errs = append(errs, fmt.Errorf("%s: %q must be positive", k, raw))
+		}
+	}
+	if p := c.Endpoint.BackendPort; p < 0 || p > 65535 {
+		errs = append(errs, fmt.Errorf("endpoint.backendPort: %d is not a valid port", p))
+	}
+	// Naming a gateway states the intent to publish, but the publisher stays off
+	// without a routable backend port. Zero stays valid for the fully-disabled
+	// endpoint config; paired with a gateway it is a half-finished one that would
+	// otherwise publish nothing and report nothing.
+	if c.Endpoint.GlobalGateway != "" && c.Endpoint.BackendPort <= 0 {
+		errs = append(errs, fmt.Errorf("endpoint.backendPort: must be set when endpoint.globalGateway is configured (%q)", c.Endpoint.GlobalGateway))
+	}
+	return errors.Join(errs...)
 }
 
 // PerCallTimeoutDuration returns the parsed PerCallTimeout (0 if absent/unparseable).
@@ -230,7 +297,8 @@ func (c PlacementConfig) DispatcherRoundTimeoutDuration() time.Duration {
 // parseDurationOrZero parses s, returning 0 when it is empty, malformed, or
 // non-positive. Callers hand the zero to a workloadcluster/placement option,
 // which then applies its own in-package default — so the fallback stays
-// single-sourced in the consuming package, not duplicated here.
+// single-sourced in the consuming package, not duplicated here. Only the empty
+// case reaches a running manager; Validate rejects the rest at startup.
 func parseDurationOrZero(s string) time.Duration {
 	if d, err := time.ParseDuration(s); err == nil && d > 0 {
 		return d

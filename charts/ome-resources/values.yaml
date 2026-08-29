@@ -99,6 +99,7 @@ ome:
         dispatcherMode: ""          # "AllAtOnce" (default) or "Incremental"
         dispatcherStepSize: 0       # candidates Incremental adds per round (0 => one)
         dispatcherRoundTimeout: ""  # Incremental round dwell ("" => no dwell)
+        localQueue: "default"       # Kueue LocalQueue for derived workloads ("" => no queue label, so Kueue does not gate them)
       # endpoint: the global endpoint publisher (Gateway API HTTPRoute to the winner).
       endpoint:
         globalHostTemplate: ""  # text/template for the global host ("" => only annotated ISVCs publish)
