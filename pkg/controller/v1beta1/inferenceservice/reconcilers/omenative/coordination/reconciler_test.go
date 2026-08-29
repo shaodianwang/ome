@@ -743,6 +743,73 @@ func TestReconcile_PreviousRolledoutRecordedOnAdvance(t *testing.T) {
 	}
 }
 
+func TestUpdateTrafficStatusRepairsRevisionMetadataWhenTrafficIsCurrent(t *testing.T) {
+	isvc := testOMENativeISVC()
+	traffic := BuildTrafficTargets(isvc.Name, v1beta1.EngineComponent, []RevisionWeight{
+		{RevisionHash: "current", Percent: 100, LatestRevision: true},
+	})
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			Traffic:                   traffic,
+			LatestReadyRevision:       "llama-engine-rev-old-ready",
+			LatestRolledoutRevision:   "llama-engine-rev-old",
+			PreviousRolledoutRevision: "llama-engine-rev-older",
+		},
+	}
+	engineIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: isvc.Name + "-engine", Namespace: isvc.Namespace},
+		Status: v1beta1.InferenceReplicaStatus{
+			UpdateRevision: isvc.Name + "-engine-current",
+		},
+	}
+	c := testClient(engineIR)
+
+	err := updateTrafficStatus(
+		context.Background(),
+		c,
+		isvc,
+		[]v1beta1.ComponentType{v1beta1.EngineComponent},
+		map[v1beta1.ComponentType]map[string]int32{
+			v1beta1.EngineComponent: {"current": 1},
+		},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("update traffic status: %v", err)
+	}
+
+	cs := isvc.Status.Components[v1beta1.EngineComponent]
+	if !reflect.DeepEqual(cs.Traffic, traffic) {
+		t.Errorf("Traffic=%+v want unchanged %+v", cs.Traffic, traffic)
+	}
+	if got, want := cs.LatestReadyRevision, "llama-engine-rev-current"; got != want {
+		t.Errorf("LatestReadyRevision=%q want %q", got, want)
+	}
+	if got, want := cs.LatestRolledoutRevision, "llama-engine-rev-current"; got != want {
+		t.Errorf("LatestRolledoutRevision=%q want %q", got, want)
+	}
+	if got, want := cs.PreviousRolledoutRevision, "llama-engine-rev-old"; got != want {
+		t.Errorf("PreviousRolledoutRevision=%q want %q", got, want)
+	}
+
+	if err := updateTrafficStatus(
+		context.Background(),
+		c,
+		isvc,
+		[]v1beta1.ComponentType{v1beta1.EngineComponent},
+		map[v1beta1.ComponentType]map[string]int32{
+			v1beta1.EngineComponent: {"current": 1},
+		},
+		1,
+	); err != nil {
+		t.Fatalf("repeat update traffic status: %v", err)
+	}
+	cs = isvc.Status.Components[v1beta1.EngineComponent]
+	if got, want := cs.PreviousRolledoutRevision, "llama-engine-rev-old"; got != want {
+		t.Errorf("repeat PreviousRolledoutRevision=%q want %q", got, want)
+	}
+}
+
 // singleEngineGroup returns a minimal RolloutSpec that opts the engine
 // Component into a rollout group. (v1's Independent policy is gone in v2;
 // a lone single-Component blueGreen group is the minimal opt-in that

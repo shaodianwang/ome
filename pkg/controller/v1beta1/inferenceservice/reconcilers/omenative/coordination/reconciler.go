@@ -510,21 +510,23 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		}
 		weights := ComputeWeightsFromPods(hashes, total, latestHash)
 		traffic := BuildTrafficTargets(isvc.Name, c, weights)
-		// Only write when something changed.
 		cs := isvc.Status.Components[c]
-		if !TrafficDiffersMeaningfully(traffic, cs.Traffic) {
-			continue
+		changed := false
+		// The deadband suppresses pod-count jitter without suppressing
+		// revision-set or latest-revision changes.
+		if TrafficDiffersMeaningfully(traffic, cs.Traffic) &&
+			!TrafficWithinDeadband(traffic, cs.Traffic, deadbandPercent) {
+			cs.Traffic = traffic
+			changed = true
 		}
-		// Hysteresis: suppress writes that are within the per-revision
-		// deadband of what's already in status — pod-count jitter from a
-		// pod momentarily Pending between reconciles, not a real ratio
-		// shift. A sustained change exceeds the band and still converges.
-		if TrafficWithinDeadband(traffic, cs.Traffic, deadbandPercent) {
-			continue
-		}
-		cs.Traffic = traffic
-		if latestHash != "" {
-			cs.LatestReadyRevision = PerRevisionServiceName(isvc.Name, c, latestHash)
+		// Revision metadata is reconciled independently from traffic weights so
+		// an already-correct traffic split cannot strand stale companion fields.
+		if latestHash != "" && hashes[latestHash] > 0 {
+			latestReady := PerRevisionServiceName(isvc.Name, c, latestHash)
+			if cs.LatestReadyRevision != latestReady {
+				cs.LatestReadyRevision = latestReady
+				changed = true
+			}
 		}
 		// LatestRolledoutRevision advances to the per-revision Service
 		// name once the rollout is at 100% on a single revision. The
@@ -534,13 +536,18 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		if len(hashes) == 1 {
 			for hash := range hashes {
 				rolledOut := PerRevisionServiceName(isvc.Name, c, hash)
-				if cs.LatestRolledoutRevision != "" && cs.LatestRolledoutRevision != rolledOut {
-					cs.PreviousRolledoutRevision = cs.LatestRolledoutRevision
+				if cs.LatestRolledoutRevision != rolledOut {
+					if cs.LatestRolledoutRevision != "" {
+						cs.PreviousRolledoutRevision = cs.LatestRolledoutRevision
+					}
+					cs.LatestRolledoutRevision = rolledOut
+					changed = true
 				}
-				cs.LatestRolledoutRevision = rolledOut
 			}
 		}
-		isvc.Status.Components[c] = cs
+		if changed {
+			isvc.Status.Components[c] = cs
+		}
 	}
 	return nil
 }
