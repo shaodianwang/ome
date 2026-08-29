@@ -588,7 +588,7 @@ impl FineTunedWeightView {
 
 /// Serialize an enum (or any value) to its plain string form, treating null and
 /// empty string as absent — e.g. a `deploymentMode`/`phase`/`state` enum → "Ready".
-fn enum_str<T: Serialize>(value: &T) -> Option<String> {
+pub(crate) fn enum_str<T: Serialize>(value: &T) -> Option<String> {
     serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
@@ -1426,6 +1426,11 @@ pub struct FeedEvent {
     pub name: String,
     /// `"applied"` (add or update) or `"deleted"`.
     pub action: &'static str,
+    /// What actually changed ("created", "engine scaled 4 → 8", "became
+    /// ready"); absent for deletions. Events with nothing narratable are
+    /// dropped before reaching the feed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Wall-clock seconds since the Unix epoch when muse observed the change.
     pub at: u64,
 }

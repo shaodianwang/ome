@@ -457,6 +457,9 @@ export interface EventItem {
   namespace?: string;
   name: string;
   action: "applied" | "deleted";
+  /** What actually changed ("created", "engine scaled 4 → 8", "became ready");
+   *  absent for deletions. */
+  note?: string;
   at: number;
 }
 

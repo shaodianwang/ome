@@ -218,10 +218,14 @@ const EVENT_BUFFER: usize = 256;
 
 /// A change observed by an informer. The cache (`Store`/`Lister`) is already
 /// updated to reflect this event by the time a subscriber receives it.
-/// `Applied` covers both add and update; `Deleted` is removal.
+/// `Applied` covers both add and update; `Deleted` is removal. `InitApplied`
+/// is an object delivered by the initial LIST or a re-list after a watch
+/// break — current inventory, not necessarily a fresh change — so consumers
+/// that narrate changes can seed state from it without announcing it.
 #[derive(Clone, Debug)]
 pub enum InformerEvent<K> {
     Applied(Arc<K>),
+    InitApplied(Arc<K>),
     Deleted(Arc<K>),
 }
 
@@ -303,8 +307,11 @@ where
                 // The reflector writes the object to the store before yielding,
                 // so subscribers observe a cache already consistent with the
                 // event. Init/InitDone are list bookkeeping, not object changes.
-                Ok(Event::Apply(obj)) | Ok(Event::InitApply(obj)) => {
+                Ok(Event::Apply(obj)) => {
                     let _ = tx.send(InformerEvent::Applied(Arc::new(obj)));
+                }
+                Ok(Event::InitApply(obj)) => {
+                    let _ = tx.send(InformerEvent::InitApplied(Arc::new(obj)));
                 }
                 Ok(Event::Delete(obj)) => {
                     let _ = tx.send(InformerEvent::Deleted(Arc::new(obj)));

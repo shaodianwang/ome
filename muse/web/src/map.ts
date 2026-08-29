@@ -19,6 +19,9 @@ const FEED_ICON: Record<string, FeedItem["icon"]> = {
 };
 function feedTone(event: EventItem): FeedItem["tone"] {
   if (event.action === "deleted") return "amber";
+  // Notes come from our own change narrator, so its failure phrasings are a
+  // stable signal.
+  if (event.note && /no longer ready|not ready|→ Failed|: Failed/.test(event.note)) return "amber";
   if (event.kind === "InferenceService") return "blue";
   if (event.kind.endsWith("Model")) return "violet";
   return "green";
@@ -36,11 +39,19 @@ const HUMAN_KIND: Record<string, string> = {
 };
 
 export function toFeed(events: EventItem[]): FeedItem[] {
+  const noun = (e: EventItem) => HUMAN_KIND[e.kind] ?? "resource";
+  const rest = (e: EventItem) => {
+    if (e.action === "deleted") return ` ${noun(e)} removed`;
+    if (e.note === "created") return ` ${noun(e)} created`;
+    // The narrated change ("engine scaled 4 → 8") carries more than the noun.
+    if (e.note) return ` · ${e.note}`;
+    return ` ${noun(e)} updated`;
+  };
   return events.map((e) => ({
     tone: feedTone(e),
     icon: e.action === "deleted" ? "warning" : (FEED_ICON[e.kind] ?? "lines"),
     strong: e.name,
-    rest: ` ${HUMAN_KIND[e.kind] ?? "resource"} ${e.action === "deleted" ? "removed" : "updated"}`,
+    rest: rest(e),
     meta: e.cluster,
     when: ago(e.at),
     // Every kind with a detail surface links to it; deleted resources have

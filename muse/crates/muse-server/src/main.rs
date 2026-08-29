@@ -20,6 +20,7 @@
 //!     --rdma-island-label network.meta.com/ai-zone \
 //!     --nvlink-domain-label network.meta.com/domain
 
+mod activity;
 mod app_context;
 mod chat_proxy;
 mod config;

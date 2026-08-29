@@ -456,6 +456,40 @@ describe("runtimeReference", () => {
 describe("toFeed", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("narrates the change when the server supplies a note", () => {
+    const at = Math.floor(Date.now() / 1000);
+    const [scaled, created, failed] = toFeed([
+      {
+        cluster: "cw",
+        kind: "InferenceService",
+        name: "a",
+        action: "applied",
+        note: "engine scaled 4 → 8",
+        at,
+      },
+      {
+        cluster: "cw",
+        kind: "InferenceService",
+        name: "b",
+        action: "applied",
+        note: "created",
+        at,
+      },
+      {
+        cluster: "cw",
+        kind: "InferenceService",
+        name: "c",
+        action: "applied",
+        note: "no longer ready — EngineNotReady",
+        at,
+      },
+    ] as EventItem[]);
+    expect(scaled.rest).toBe(" · engine scaled 4 → 8");
+    expect(scaled.tone).toBe("blue");
+    expect(created.rest).toBe(" deployment created");
+    expect(failed.tone).toBe("amber");
+  });
+
   it("links every kind with a detail surface, and nothing that is gone", () => {
     const at = Math.floor(Date.now() / 1000);
     const [isvc, model, runtime, ftw, deleted] = toFeed([

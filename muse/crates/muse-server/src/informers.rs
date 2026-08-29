@@ -36,6 +36,7 @@ use ome_client::{
 use serde::de::DeserializeOwned;
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::activity::{change_note, Activity, ActivityFacts};
 use crate::protocol::{FeedEvent, InvalidationEvent};
 
 // ===========================================================================
@@ -334,6 +335,7 @@ where
         + Send
         + Sync
         + Prune
+        + Activity
         + 'static,
 {
     if !present {
@@ -364,18 +366,21 @@ where
     if let Some(sub) = feed {
         let mut rx = informer.subscribe();
         tokio::spawn(async move {
-            // uid -> last-seen generation. We surface creates, deletes, and spec
-            // changes (generation bumps) only. A repeated Apply whose generation is
-            // unchanged is status churn (heartbeats, conditions, replica counts) —
-            // dropping it keeps the feed and the SSE stream quiet when nothing
-            // meaningful happens, so clients don't refetch on every status write.
-            let mut seen: HashMap<String, Option<i64>> = HashMap::new();
+            // uid -> last-seen activity fingerprint. The feed narrates what
+            // changed: creates, deletes, and tracked transitions (spec edits,
+            // readiness flips, scale/rollout/canary movement). Everything else
+            // is status churn and stays off the feed and the SSE stream, so
+            // clients don't refetch — and operators don't scroll — on every
+            // status write. Initial-list events only seed the fingerprints:
+            // inventory on (re)connect is not activity.
+            let mut seen: HashMap<String, ActivityFacts> = HashMap::new();
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        let (action, obj) = match &event {
-                            InformerEvent::Applied(o) => ("applied", o),
-                            InformerEvent::Deleted(o) => ("deleted", o),
+                        let (action, obj, init) = match &event {
+                            InformerEvent::Applied(o) => ("applied", o, false),
+                            InformerEvent::InitApplied(o) => ("applied", o, true),
+                            InformerEvent::Deleted(o) => ("deleted", o, false),
                         };
                         let meta = obj.meta();
                         let uid = meta.uid.clone().unwrap_or_else(|| {
@@ -385,27 +390,30 @@ where
                                 meta.name.clone().unwrap_or_default()
                             )
                         });
-                        let emit = if action == "deleted" {
+                        let note = if action == "deleted" {
                             seen.remove(&uid);
-                            true
+                            None
                         } else {
-                            match seen.get(&uid) {
-                                Some(prev) if *prev == meta.generation => false,
-                                _ => {
-                                    seen.insert(uid, meta.generation);
-                                    true
-                                }
+                            let facts = obj.facts();
+                            match seen.insert(uid, facts.clone()) {
+                                // First sight from the initial list: inventory.
+                                None if init => continue,
+                                None => Some("created".to_owned()),
+                                // A re-list replays current state for every
+                                // object; only a real difference is news.
+                                Some(prev) => match change_note(&prev, &facts) {
+                                    Some(note) => Some(note),
+                                    None => continue,
+                                },
                             }
                         };
-                        if !emit {
-                            continue;
-                        }
                         sub.feed.push(FeedEvent {
                             cluster: sub.cluster.clone(),
                             kind: sub.kind.to_owned(),
                             namespace: meta.namespace.clone(),
                             name: meta.name.clone().unwrap_or_default(),
                             action,
+                            note,
                             at: now_secs(),
                         });
                     }

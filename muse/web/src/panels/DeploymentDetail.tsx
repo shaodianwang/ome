@@ -575,8 +575,10 @@ function ActivityPane({
         <ul className="mini-feed">
           {activity.slice(0, 50).map((e, i) => (
             <li key={i}>
-              <span className="mono">{e.action === "deleted" ? "removed" : "updated"}</span> ·{" "}
-              {ago(e.at)}
+              <span className="mono">
+                {e.note ?? (e.action === "deleted" ? "removed" : "updated")}
+              </span>{" "}
+              · {ago(e.at)}
             </li>
           ))}
         </ul>
