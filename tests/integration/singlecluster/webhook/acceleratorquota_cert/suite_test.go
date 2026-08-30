@@ -181,10 +181,40 @@ func startSecretProjection() {
 				// Best effort, exactly like a sync loop: a failed write is
 				// retried on the next tick rather than failing the suite from a
 				// goroutine.
-				_ = os.WriteFile(filepath.Join(certDir, name), data, 0o600)
+				_ = projectFile(name, data)
 			}
 		}
 	}()
+}
+
+// projectFile publishes one Secret key into certDir atomically.
+//
+// A reader of the cert directory only ever sees a complete file. That is a
+// property of the thing being modelled — the kubelet swaps a fully written
+// volume into place — and the specs depend on it: they parse tls.crt while this
+// loop is republishing it, and an in-place write would let a read land inside
+// the truncate-then-write window and return a truncated certificate. The
+// temporary file is created in certDir so the rename stays within one
+// filesystem.
+func projectFile(name string, data []byte) error {
+	tmp, err := os.CreateTemp(certDir, name+".*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(certDir, name)); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	return nil
 }
 
 var _ = ginkgo.AfterSuite(func() {
