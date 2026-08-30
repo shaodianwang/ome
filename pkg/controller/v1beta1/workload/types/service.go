@@ -43,8 +43,8 @@ type PerComponentServiceSpec struct {
 
 	// Selector is the pod-label selector scoping which pods are members
 	// of this Service. Adapters set it so the Service only selects pods
-	// the workload owns (not RawDeployment pods that may share the bare
-	// Component label). The ISVC adapter wires
+	// the workload owns (not legacy LWS / RawDeployment pods that may
+	// share the bare Component label). The ISVC adapter wires
 	// `ome.io/inferenceservice + component + managed-by=OMENative`; the
 	// IR adapter wires the IR-side equivalent.
 	Selector map[string]string

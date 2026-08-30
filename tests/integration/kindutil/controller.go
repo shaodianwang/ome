@@ -104,7 +104,7 @@ func stopOnce(fn func()) func() {
 //   - the OME v1beta1 group (InferenceService, BaseModel,
 //     ServingRuntime, etc.)
 //
-// Suites that need extra schemes (KEDA, scheduler-plugins,
+// Suites that need extra schemes (LWS, KEDA, scheduler-plugins,
 // Gateway API, etc.) add them in their ManagerSetup callback before
 // constructing their reconcilers.
 func BaseScheme() *runtime.Scheme {

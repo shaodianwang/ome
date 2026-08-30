@@ -497,6 +497,7 @@ type DeploymentModeType string
 const (
 	RawDeployment     DeploymentModeType = "RawDeployment"
 	PDDisaggregated   DeploymentModeType = "PDDisaggregated"
+	MultiNode         DeploymentModeType = "MultiNode"
 	VirtualDeployment DeploymentModeType = "VirtualDeployment"
 	OMENative         DeploymentModeType = "OMENative"
 )
@@ -504,7 +505,7 @@ const (
 // IsValid checks if the deployment mode is valid
 func (d DeploymentModeType) IsValid() bool {
 	switch d {
-	case RawDeployment, VirtualDeployment, OMENative:
+	case RawDeployment, MultiNode, VirtualDeployment, OMENative:
 		return true
 	default:
 		return false
@@ -529,6 +530,7 @@ const (
 	VolcanoQueueKind     = "Queue"
 	KEDAScaledObjectKind = "ScaledObject"
 	VolcanoJobKind       = "Job"
+	LWSKind              = "LeaderWorkerSet"
 	GatewayKind          = "Gateway"
 	ServiceKind          = "Service"
 	PodMonitorKind       = "PodMonitor"
@@ -683,6 +685,14 @@ func ModelConfigName(isvcName string) string {
 		isvcName = isvcName[len(isvcName)-maxLen:]
 	}
 	return fmt.Sprintf("modelconfig-%s", isvcName)
+}
+
+func LWSName(isvcName string) string {
+	var maxLen = 50
+	if len(isvcName) > maxLen {
+		isvcName = isvcName[len(isvcName)-maxLen:]
+	}
+	return fmt.Sprintf("lws-%s", isvcName)
 }
 
 func InferenceServiceHostName(name string, namespace string, domain string) string {
@@ -997,4 +1007,131 @@ func ParseModelInfoFromConfigMapKey(configMapKey string) (namespace, modelName s
 	}
 
 	return "", "", false, false
+}
+
+// Env keys the agent's model-decryption and artifact-reuse paths consume.
+var (
+	AgentKeyNameEnvVarKey                    = AgentAppName + "_" + "KEY_NAME"
+	AgentSecretNameEnvVarKey                 = AgentAppName + "_" + "SECRET_NAME"
+	AgentVaultIDEnvVarKey                    = AgentAppName + "_" + "VAULT_ID"
+	AgentDisableModelDecryptionEnvVarKey     = AgentAppName + "_" + "DISABLE_MODEL_DECRYPTION"
+	AgentTargetArtifactReuseAllowedEnvVarKey = AgentAppName + "_" + "TARGET_ARTIFACT_REUSE_ALLOWED"
+	AgentTensorRTLLMVersionsEnvVarKey        = AgentAppName + "_" + "TENSORRTLLM_VERSION"
+)
+
+// Model decryption and model-init injection annotation keys.
+var (
+	BaseModelDecryptionKeyName    = OMEAPIGroupName + "/base-model-decryption-key-name"
+	BaseModelDecryptionSecretName = OMEAPIGroupName + "/base-model-decryption-secret-name"
+	DisableModelDecryption        = OMEAPIGroupName + "/disable-model-decryption"
+	ModelInitInjectionKey         = OMEAPIGroupName + "/inject-model-init"
+	ModelInitContainerName        = "model-init"
+)
+
+// OCI-artifact reuse markers: sentinel objects written next to a model's
+// artifacts so concurrent downloaders can detect a complete or in-flight
+// upload.
+const (
+	ArtifactCompleteMarkerFileName = ".ome-artifact-complete"
+	ArtifactCompleteMarkerBody     = "complete\n"
+	ArtifactUploadLockFileName     = ".ome-artifact-upload.lock"
+	ArtifactUploadLockBody         = "uploading\n"
+	HfArtifactConfigMapKeyPrefix   = "artifact.huggingface."
+	// ModelArtifactsDirectory contains node-local artifacts shared by model paths.
+	ModelArtifactsDirectory = "_artifacts"
+)
+
+// IsArtifactCompleteMarkerObjectName reports whether objectName is (or ends
+// with) the artifact-complete sentinel.
+func IsArtifactCompleteMarkerObjectName(objectName string) bool {
+	return objectName == ArtifactCompleteMarkerFileName || strings.HasSuffix(objectName, "/"+ArtifactCompleteMarkerFileName)
+}
+
+// IsArtifactUploadLockObjectName reports whether objectName is (or ends with)
+// the artifact upload-lock sentinel.
+func IsArtifactUploadLockObjectName(objectName string) bool {
+	return objectName == ArtifactUploadLockFileName || strings.HasSuffix(objectName, "/"+ArtifactUploadLockFileName)
+}
+
+// IsInternalArtifactObjectName reports whether objectName is one of the
+// artifact bookkeeping sentinels rather than model content.
+func IsInternalArtifactObjectName(objectName string) bool {
+	return IsArtifactCompleteMarkerObjectName(objectName) || IsArtifactUploadLockObjectName(objectName)
+}
+
+// BenchmarkJob names.
+const (
+	BenchmarjJobName          = "benchmarkjob"
+	BenchmarkJobConfigMapName = "benchmarkjob-config"
+)
+
+// BenchmarkJobValidatorWebhookName is the BenchmarkJob validating-webhook name.
+var BenchmarkJobValidatorWebhookName = OMEName + "-benchmark-job-validator-webhook"
+
+// Alfred caretaker annotations: per-workload operator knobs gating the
+// Alfred optimization policies.
+var (
+	// AlfredAPIGroupName groups the per-workload caretaker annotations an
+	// operator sets on an InferenceService to gate Alfred's policies.
+	AlfredAPIGroupName = "alfred.ome.io"
+	// AlfredMovableAnnotationKey opts a workload out of ("false") or into
+	// ("true") every Alfred policy; wins over the cluster-wide default.
+	AlfredMovableAnnotationKey = AlfredAPIGroupName + "/movable"
+	// AlfredPriorityAnnotationKey is a float in [0, 1]; lower = more
+	// protected when Alfred orders candidates.
+	AlfredPriorityAnnotationKey = AlfredAPIGroupName + "/priority"
+	// AlfredSpotPolicyAnnotationKey overrides the cluster spot policy for
+	// this workload: avoid | migrate | ignore.
+	AlfredSpotPolicyAnnotationKey = AlfredAPIGroupName + "/spot-policy"
+	// AlfredCooldownMinutesAnnotationKey overrides the per-workload
+	// migration cooldown for this workload.
+	AlfredCooldownMinutesAnnotationKey = AlfredAPIGroupName + "/cooldown-minutes"
+	// AlfredTenantGroupAnnotationKey opts same-group workloads across
+	// namespaces into cross-tenant optimization.
+	AlfredTenantGroupAnnotationKey = AlfredAPIGroupName + "/tenant-group"
+	// AlfredOptOutReasonAnnotationKey is a free-text operator note
+	// explaining an opt-out; surfaced in events, never parsed.
+	AlfredOptOutReasonAnnotationKey = AlfredAPIGroupName + "/opt-out-reason"
+	// MigrationRequestAnnotationPrefix prefixes the UUID-suffixed
+	// migration-request annotations (`ome.io/migration-request-v1-<uuid>`)
+	// written onto an InferenceService. The workload audit package carries
+	// the same value for the controller-side consumer.
+	MigrationRequestAnnotationPrefix = OMEAPIGroupName + "/migration-request-v1-"
+)
+
+// Annotation-driven KEDA scaling keys and defaults.
+const (
+	KedaScalingOperator         = "autoscaling.keda.sh/operator"
+	KedaScalingThreshold        = "autoscaling.keda.sh/threshold"
+	KedaPrometheusQuery         = "autoscaling.keda.sh/prometheus.query"
+	KedaPrometheusServerAddress = "autoscaling.keda.sh/prometheus.serverAddress"
+	KedaDefaultMinReplicas      = 1
+)
+
+// Istio and scheduling names.
+const (
+	IstioMeshGateway        = "mesh"
+	IstioVirtualServiceKind = "VirtualService"
+	VolcanoScheduler        = "volcano"
+
+	DedicatedAiClusterPreemptionPriorityClass = "volcano-scheduling-high-priority"
+
+	// RevisionLabel is the pod label used to look up pods for non-raw deployment modes.
+	// The key retains its historical serving.knative.dev prefix.
+	RevisionLabel = "serving.knative.dev/revision"
+)
+
+// TruncateNameWithPrefix truncates name to fit maxLength together with the
+// given prefix, preserving the prefix whole when possible.
+func TruncateNameWithPrefix(name, prefix string, maxLength int) string {
+	if maxLength <= 0 {
+		return ""
+	}
+
+	payloadMaxLength := maxLength - len(prefix)
+	if payloadMaxLength <= 0 {
+		return TruncateNameWithMaxLength(prefix, maxLength)
+	}
+
+	return prefix + TruncateNameWithMaxLength(name, payloadMaxLength)
 }

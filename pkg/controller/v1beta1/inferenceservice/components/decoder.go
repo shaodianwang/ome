@@ -8,6 +8,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -165,6 +166,8 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			return ctrl.Result{}, errors.Wrap(err, "failed to resolve autoscaler for raw decoder")
 		}
 		return d.deploymentReconciler.ReconcileRawDeployment(ctx, isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent, resolvedAS, pdbRequest)
+	case constants.MultiNode:
+		return d.deploymentReconciler.ReconcileMultiNodeDeployment(isvc, objectMeta, podSpec, workerSize, workerPodSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
@@ -235,8 +238,8 @@ func (d *Decoder) updateDecoderStatus(isvc *v1beta1.InferenceService, objectMeta
 // reconcileObjectMeta creates the object metadata for the decoder
 // component. Delegates the annotation / label merge to the shared
 // ReconcileComponentObjectMeta helper in base.go; the per-component
-// name resolution stays here for symmetry with the engine / router
-// object-meta paths.
+// name resolution stays here because decoder gates the Service-
+// existence lookup on non-MultiNode mode (engine / router don't).
 func (d *Decoder) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
 	decoderName, err := d.determineDecoderName(ctx, isvc)
 	if err != nil {
@@ -255,16 +258,26 @@ func (d *Decoder) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.Inferen
 // determineDecoderName determines the name of the decoder service.
 // The suffix is sourced from GetServiceSuffix so the engine / decoder /
 // router suffix lives in exactly one place (ComponentConfig).
-func (d *Decoder) determineDecoderName(_ context.Context, isvc *v1beta1.InferenceService) (string, error) {
-	return isvc.Name + d.GetServiceSuffix(), nil
+func (d *Decoder) determineDecoderName(ctx context.Context, isvc *v1beta1.InferenceService) (string, error) {
+	defaultDecoderName := isvc.Name + d.GetServiceSuffix()
+
+	if d.DeploymentMode != constants.MultiNode {
+		existing := &v1.Service{}
+		if err := d.Client.Get(ctx, types.NamespacedName{Name: defaultDecoderName, Namespace: isvc.Namespace}, existing); err == nil {
+			return defaultDecoderName, nil
+		}
+	}
+
+	// If the default name doesn't exist, use it
+	return defaultDecoderName, nil
 }
 
 // decoderUsesLeaderTemplate reports whether the decoder should source its
-// primary pod template from the Leader block (multi-pod OMENative shape)
-// rather than the top-level decoder spec (single-pod shape). Pure
-// structural check on the spec; it deliberately does NOT consult the
-// deployment mode, so dispatch-mode classification and template selection
-// stay decoupled. Mirrors engineUsesLeaderTemplate.
+// primary pod template from the Leader block (multi-pod shape — MultiNode
+// or multi-pod OMENative) rather than the top-level decoder spec
+// (single-pod shape). Pure structural check on the spec; it deliberately
+// does NOT consult the deployment mode, so dispatch-mode classification and
+// template selection stay decoupled. Mirrors engineUsesLeaderTemplate.
 func decoderUsesLeaderTemplate(spec *v1beta1.DecoderSpec) bool {
 	return spec != nil && spec.Leader != nil
 }
@@ -275,9 +288,11 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 	// the deployment mode. d.DeploymentMode is set authoritatively at
 	// construction time; switching on it here mis-selects the top-level
 	// (empty) template for OMENative-mode decoders that also set
-	// Leader/Worker — the spec would collapse to the empty top-level runner
-	// ("no containers found in pod spec and no runner spec provided").
-	// Mirrors the engine path (engineUsesLeaderTemplate).
+	// Leader/Worker — the dispatch classifies multi-pod OMENative as
+	// OMENative, not MultiNode, so a `case constants.MultiNode` never
+	// matches and the spec collapses to the empty top-level runner ("no
+	// containers found in pod spec and no runner spec provided"). Mirrors
+	// the engine path (engineUsesLeaderTemplate).
 	var basePodSpec v1beta1.PodSpec
 	var runnerSpec *v1beta1.RunnerSpec
 
@@ -286,7 +301,8 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 		runnerSpec = d.decoderSpec.Leader.Runner
 	} else {
 		// Fallback to the top-level decoder spec — covers single-pod
-		// OMENative and RawDeployment.
+		// OMENative, RawDeployment, and the malformed-but-tolerated
+		// MultiNode-without-Leader shape.
 		basePodSpec = d.decoderSpec.PodSpec
 		runnerSpec = d.decoderSpec.Runner
 	}

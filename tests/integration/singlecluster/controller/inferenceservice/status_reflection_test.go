@@ -15,7 +15,7 @@ import (
 
 // InferenceService Status reflection. The reconciler computes
 // Status.URL / Status.Address / Status.Components from the produced
-// child resources (Service hostname for RawDeployment /
+// child resources (Service hostname for RawDeployment / MultiNode /
 // OMENative). Specs here exercise that observation loop end-to-end
 // with the real apiserver feeding child-resource events back into
 // the controller.

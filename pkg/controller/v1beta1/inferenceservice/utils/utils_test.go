@@ -1591,16 +1591,16 @@ func TestDetermineEngineDeploymentMode(t *testing.T) {
 			expectedMode: constants.RawDeployment,
 		},
 		{
-			name: "legacy MultiNode annotation resolves to OMENative (highest precedence)",
+			name: "annotation with MultiNode takes highest precedence",
 			engine: &v1beta1.EngineSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 					Annotations: map[string]string{
-						constants.DeploymentMode: "MultiNode",
+						constants.DeploymentMode: string(constants.MultiNode),
 					},
 					MinReplicas: intPtr(0),
 				},
 			},
-			expectedMode: constants.OMENative,
+			expectedMode: constants.MultiNode,
 		},
 		{
 			name: "invalid annotation is ignored, falls back to leader check",

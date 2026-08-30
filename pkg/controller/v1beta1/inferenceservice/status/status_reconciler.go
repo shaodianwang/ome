@@ -6,6 +6,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/apis"
+	lwsspec "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -35,6 +36,39 @@ func (sr *StatusReconciler) PropagateRawStatus(
 	sr.setCondition(status, readyCondition, condition)
 	status.Components[component] = statusSpec
 	status.ObservedGeneration = deployment.Status.ObservedGeneration
+}
+
+// PropagateMultiNodeStatus propagates status from LeaderWorkerSet
+func (sr *StatusReconciler) PropagateMultiNodeStatus(
+	status *v1beta1.InferenceServiceStatus,
+	component v1beta1.ComponentType,
+	lws *lwsspec.LeaderWorkerSet,
+	url *apis.URL) {
+
+	statusSpec := sr.initializeComponentStatus(status, component)
+
+	lwsCondition := sr.getLWSConditions(lws, lwsspec.LeaderWorkerSetAvailable)
+	if lwsCondition != nil && lwsCondition.Status == v1.ConditionTrue {
+		statusSpec.URL = url
+	}
+
+	readyCondition := sr.getReadyConditionsMap()[component]
+
+	// Create a new condition with the correct component ready condition type
+	// instead of using the LWS condition type directly
+	if lwsCondition != nil {
+		componentCondition := &apis.Condition{
+			Type:               readyCondition,
+			Status:             lwsCondition.Status,
+			Message:            lwsCondition.Message,
+			Reason:             lwsCondition.Reason,
+			LastTransitionTime: lwsCondition.LastTransitionTime,
+		}
+		sr.setCondition(status, readyCondition, componentCondition)
+	}
+
+	status.Components[component] = statusSpec
+	status.ObservedGeneration = lws.Generation
 }
 
 // PropagateModelStatus propagates model status from pod information.

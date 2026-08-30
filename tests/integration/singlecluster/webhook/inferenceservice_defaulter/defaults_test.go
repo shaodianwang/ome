@@ -81,10 +81,10 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 
 	ginkgo.It("Engine.Leader + Worker.Size>0 → DeploymentMode=OMENative", func() {
 		// Defaulter detects the multi-node signal: Leader+Worker
-		// present AND Worker.Size > 0, which resolves to OMENative
-		// (native multi-node). Without Worker.Size > 0 the branch
-		// falls through to the default-deployment-mode path (covered
-		// by the next spec).
+		// present AND Worker.Size > 0 → OMENative (native multi-node
+		// serving). Without Worker.Size > 0 the branch falls through
+		// to the default-deployment-mode path (covered by the next
+		// spec).
 		isvc := v1beta1testing.MakeInferenceService("def-multinode", "isvc-defaulter").
 			Model("any-model").
 			Engine(&v1beta1.EngineSpec{
@@ -104,7 +104,7 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.OMENative)))
 	})
 
-	ginkgo.It("Engine.Leader + Worker.Size=0 → falls through to default mode (NOT multi-node)", func() {
+	ginkgo.It("Engine.Leader + Worker.Size=0 → falls through to default mode (NOT OMENative)", func() {
 		// Worker.Size=0 disables the multi-node branch — the
 		// defaulter must treat it as if the multi-node signal isn't
 		// present and apply the configured default. Catches a

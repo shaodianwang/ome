@@ -5,8 +5,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 func TestRuntimeSupportsModel(t *testing.T) {
@@ -1352,5 +1354,202 @@ func TestGetCompatibilityDetails_DetailedFormatMismatch(t *testing.T) {
 		assert.False(t, report.IsCompatible)
 		assert.NotEmpty(t, report.IncompatibilityReasons)
 		assert.Contains(t, report.IncompatibilityReasons[0], "no supported formats defined")
+	})
+}
+
+func TestGetCompatibilityDetails_DeploymentMode(t *testing.T) {
+	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
+	boolPtr := ptr[bool]
+
+	baseModel := &v1beta1.BaseModelSpec{
+		ModelFormat: v1beta1.ModelFormat{Name: "pytorch"},
+	}
+
+	makeRuntime := func(engine *v1beta1.EngineSpec, decoder *v1beta1.DecoderSpec) *v1beta1.ServingRuntimeSpec {
+		return &v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat: &v1beta1.ModelFormat{
+						Name:   "pytorch",
+						Weight: 10,
+					},
+					AutoSelect: boolPtr(true),
+				},
+			},
+			EngineConfig:  engine,
+			DecoderConfig: decoder,
+		}
+	}
+
+	engineWithDeploymentMode := func(deploymentMode constants.DeploymentModeType) *v1beta1.EngineSpec {
+		return &v1beta1.EngineSpec{
+			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+				Annotations: map[string]string{
+					constants.DeploymentMode: string(deploymentMode),
+				},
+			},
+		}
+	}
+	decoderWithDeploymentMode := func(deploymentMode constants.DeploymentModeType) *v1beta1.DecoderSpec {
+		return &v1beta1.DecoderSpec{
+			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+				Annotations: map[string]string{
+					constants.DeploymentMode: string(deploymentMode),
+				},
+			},
+		}
+	}
+	isvcWithEngineDeploymentMode := func(deploymentMode string) *v1beta1.InferenceService {
+		return &v1beta1.InferenceService{
+			Spec: v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						Annotations: map[string]string{
+							constants.DeploymentMode: deploymentMode,
+						},
+					},
+				},
+			},
+		}
+	}
+	isvcWithDecoderDeploymentMode := func(deploymentMode string) *v1beta1.InferenceService {
+		return &v1beta1.InferenceService{
+			Spec: v1beta1.InferenceServiceSpec{
+				Decoder: &v1beta1.DecoderSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						Annotations: map[string]string{
+							constants.DeploymentMode: deploymentMode,
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("metadata-level isvc deployment mode annotation is ignored", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.RawDeployment), nil)
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					constants.DeploymentMode: string(constants.MultiNode),
+				},
+			},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvc, "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("empty isvc engine deployment mode is not used for filtering", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), nil)
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithEngineDeploymentMode(""), "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("isvc engine deployment mode matches runtime engine annotation", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), nil)
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithEngineDeploymentMode(string(constants.MultiNode)), "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("runtime engine without deployment mode annotation is not used for filtering", func(t *testing.T) {
+		servingRuntime := makeRuntime(&v1beta1.EngineSpec{
+			Leader: &v1beta1.LeaderSpec{},
+			Worker: &v1beta1.WorkerSpec{Size: ptr(1)},
+		}, nil)
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithEngineDeploymentMode(string(constants.MultiNode)), "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("invalid isvc engine deployment mode is not used for filtering", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), nil)
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithEngineDeploymentMode("InvalidMode"), "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("isvc engine deployment mode rejects runtime engine with different deployment mode", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), nil)
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithEngineDeploymentMode(string(constants.RawDeployment)), "rt")
+		assert.NoError(t, err)
+		assert.False(t, report.IsCompatible)
+		assert.Contains(t, report.IncompatibilityReasons[0], "engine deployment mode")
+	})
+
+	t.Run("isvc decoder deployment mode matches runtime decoder annotation", func(t *testing.T) {
+		servingRuntime := makeRuntime(nil, decoderWithDeploymentMode(constants.MultiNode))
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithDecoderDeploymentMode(string(constants.MultiNode)), "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("isvc decoder deployment mode rejects runtime decoder with different deployment mode", func(t *testing.T) {
+		servingRuntime := makeRuntime(nil, decoderWithDeploymentMode(constants.RawDeployment))
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvcWithDecoderDeploymentMode(string(constants.MultiNode)), "rt")
+		assert.NoError(t, err)
+		assert.False(t, report.IsCompatible)
+		assert.Contains(t, report.IncompatibilityReasons[0], "decoder deployment mode")
+	})
+
+	t.Run("runtime is rejected when decoder mismatches even if engine matches", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), decoderWithDeploymentMode(constants.RawDeployment))
+		isvc := &v1beta1.InferenceService{
+			Spec: v1beta1.InferenceServiceSpec{
+				Engine:  engineWithDeploymentMode(constants.MultiNode),
+				Decoder: decoderWithDeploymentMode(constants.MultiNode),
+			},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvc, "rt")
+		assert.NoError(t, err)
+		assert.False(t, report.IsCompatible)
+		assert.Contains(t, report.IncompatibilityReasons[0], "decoder deployment mode")
+	})
+
+	t.Run("typed spec.deploymentMode counts as an explicit engine declaration", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), nil)
+		mode := constants.RawDeployment
+		isvc := &v1beta1.InferenceService{
+			Spec: v1beta1.InferenceServiceSpec{DeploymentMode: &mode},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvc, "rt")
+		assert.NoError(t, err)
+		assert.False(t, report.IsCompatible)
+		assert.Contains(t, report.IncompatibilityReasons[0], "engine deployment mode")
+	})
+
+	t.Run("per-component annotation overrides the typed spec field", func(t *testing.T) {
+		servingRuntime := makeRuntime(engineWithDeploymentMode(constants.MultiNode), nil)
+		mode := constants.RawDeployment
+		isvc := isvcWithEngineDeploymentMode(string(constants.MultiNode))
+		isvc.Spec.DeploymentMode = &mode
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvc, "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+	})
+
+	t.Run("typed spec field does not constrain an undeclared decoder", func(t *testing.T) {
+		servingRuntime := makeRuntime(nil, decoderWithDeploymentMode(constants.MultiNode))
+		mode := constants.RawDeployment
+		isvc := &v1beta1.InferenceService{
+			Spec: v1beta1.InferenceServiceSpec{DeploymentMode: &mode},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(servingRuntime, baseModel, isvc, "rt")
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
 	})
 }

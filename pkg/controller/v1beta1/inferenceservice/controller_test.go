@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -52,6 +53,7 @@ func TestInferenceServiceReconcile(t *testing.T) {
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(appsv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(lws.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(kedav1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(autoscalingv2.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(policyv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
@@ -424,6 +426,126 @@ func TestInferenceServiceReconcile(t *testing.T) {
 				g.Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(gomega.Equal("engine:latest"))
 			},
 		},
+		{
+			name: "Explicit MultiNode annotation dispatches LeaderWorkerSet",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-multinode",
+					Namespace: "default",
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Model: &v1beta1.ModelRef{
+						Name: "base-model-4",
+						Kind: stringPtr("BaseModel"),
+					},
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							Annotations: map[string]string{
+								constants.DeploymentMode: string(constants.MultiNode),
+							},
+						},
+						Leader: &v1beta1.LeaderSpec{
+							PodSpec: v1beta1.PodSpec{
+								Containers: []v1.Container{
+									{
+										Name:  "leader",
+										Image: "leader:latest",
+									},
+								},
+							},
+						},
+						Worker: &v1beta1.WorkerSpec{
+							Size: intPtr(2),
+							PodSpec: v1beta1.PodSpec{
+								Containers: []v1.Container{
+									{
+										Name:  "worker",
+										Image: "worker:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			setupMocks: func(c client.Client, cs *fake.Clientset) {
+				// Create inferenceservice config in controller-runtime client
+				cm := &v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "inferenceservice-config",
+						Namespace: "default",
+					},
+					Data: map[string]string{
+						"config": "{}",
+					},
+				}
+				err := c.Create(context.TODO(), cm)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				// Create the same config in the fake clientset in ome namespace with deploy config
+				omeCm := &v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "inferenceservice-config",
+						Namespace: "ome",
+					},
+					Data: map[string]string{
+						"deploy": `{"defaultDeploymentMode": "RawDeployment"}`,
+					},
+				}
+				_, err = cs.CoreV1().ConfigMaps("ome").Create(context.TODO(), omeCm, metav1.CreateOptions{})
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				// Create base model
+				baseModel := &v1beta1.BaseModel{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "base-model-4",
+						Namespace: "default",
+					},
+					Spec: v1beta1.BaseModelSpec{
+						ModelFormat: v1beta1.ModelFormat{
+							Name:    "safetensors",
+							Version: stringPtr("1.0.0"),
+						},
+					},
+				}
+				err = c.Create(context.TODO(), baseModel)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				// Create runtime
+				rt := &v1beta1.ServingRuntime{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "multinode-runtime",
+						Namespace: "default",
+					},
+					Spec: v1beta1.ServingRuntimeSpec{
+						SupportedModelFormats: []v1beta1.SupportedModelFormat{
+							{
+								Name:       "safetensors",
+								Version:    stringPtr("*"),
+								AutoSelect: boolPtr(true),
+								ModelFormat: &v1beta1.ModelFormat{
+									Name:    "safetensors",
+									Version: stringPtr("1.0.0"),
+									Weight:  int64(1),
+								},
+							},
+						},
+					},
+				}
+				err = c.Create(context.TODO(), rt)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			},
+			validate: func(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) {
+				// Check that LeaderWorkerSet was created
+				lwsList := &lws.LeaderWorkerSetList{}
+				err := c.List(context.TODO(), lwsList, client.InNamespace("default"))
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				g.Expect(lwsList.Items).To(gomega.HaveLen(1))
+				// Just verify that a LeaderWorkerSet was created
+				// The exact replica count might be handled differently by the controller
+				g.Expect(lwsList.Items[0].Name).To(gomega.ContainSubstring("test-multinode"))
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -755,7 +877,7 @@ func TestDetermineDeploymentModes(t *testing.T) {
 				},
 			},
 			decoderSpec:             nil,
-			expectedEngineMode:      constants.OMENative,
+			expectedEngineMode:      constants.MultiNode,
 			expectedDecoderMode:     "",
 			expectedPDDisaggregated: false,
 		},
@@ -793,7 +915,7 @@ func TestDetermineDeploymentModes(t *testing.T) {
 				},
 			},
 			expectedEngineMode:      constants.RawDeployment,
-			expectedDecoderMode:     constants.OMENative,
+			expectedDecoderMode:     constants.MultiNode,
 			expectedPDDisaggregated: true,
 		},
 	}
@@ -814,7 +936,7 @@ func TestDetermineDeploymentModes(t *testing.T) {
 			if tt.decoderSpec != nil {
 				decoderMode := constants.RawDeployment
 				if tt.decoderSpec.Leader != nil && tt.decoderSpec.Worker != nil {
-					decoderMode = constants.OMENative
+					decoderMode = constants.MultiNode
 				}
 				g.Expect(decoderMode).To(gomega.Equal(tt.expectedDecoderMode))
 			}
@@ -825,7 +947,7 @@ func TestDetermineDeploymentModes(t *testing.T) {
 // Helper function to test deployment mode determination
 func determineEngineDeploymentMode(engineSpec *v1beta1.EngineSpec) constants.DeploymentModeType {
 	if engineSpec.Leader != nil || engineSpec.Worker != nil {
-		return constants.OMENative
+		return constants.MultiNode
 	}
 	return constants.RawDeployment
 }

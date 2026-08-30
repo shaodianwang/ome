@@ -176,15 +176,14 @@ func TestDeploymentModeDetection(t *testing.T) {
 			expectedMode: string(constants.RawDeployment),
 		},
 		{
-			// A pre-existing annotation is preserved verbatim — even a
-			// legacy "MultiNode" value the defaulter itself never stamps.
-			// This pins the upgrade-safety contract: admission does not
-			// rewrite or reject persisted annotations.
+			// A pre-existing annotation is preserved verbatim. This pins
+			// the contract: admission does not rewrite or reject persisted
+			// deployment-mode annotations.
 			name: "existing deployment mode should not be overridden",
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						constants.DeploymentMode: "MultiNode",
+						constants.DeploymentMode: string(constants.MultiNode),
 					},
 				},
 				Spec: v1beta1.InferenceServiceSpec{
@@ -193,7 +192,7 @@ func TestDeploymentModeDetection(t *testing.T) {
 				},
 			},
 			deployConfig: nil,
-			expectedMode: "MultiNode",
+			expectedMode: string(constants.MultiNode),
 		},
 	}
 
@@ -547,7 +546,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 
 	t.Run("not OMENative — omenative block untouched", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: map[string]string{constants.DeploymentMode: string(constants.RawDeployment)},
+			Annotations: map[string]string{constants.DeploymentMode: string(constants.MultiNode)},
 		}
 		defaultOMENativeComponent(ext, podShapeMulti, nil)
 		assert.Nil(t, ext.Lifecycle)

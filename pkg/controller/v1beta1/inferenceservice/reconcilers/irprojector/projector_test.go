@@ -108,12 +108,13 @@ func TestIsIRManagedComponent_OMENativeMode_True(t *testing.T) {
 
 // TestIsIRManagedComponent_NonOMENativeMode_False pins the routing
 // boundary: only OMENative-mode Components flow through the
-// IR-managed path. RawDeployment, PDDisaggregated, VirtualDeployment
-// all fall through to their own dispatch branches.
+// IR-managed path. RawDeployment, MultiNode, PDDisaggregated,
+// VirtualDeployment all fall through to their own dispatch branches.
 func TestIsIRManagedComponent_NonOMENativeMode_False(t *testing.T) {
 	g := gomega.NewWithT(t)
 	for _, mode := range []constants.DeploymentModeType{
 		constants.RawDeployment,
+		constants.MultiNode,
 		constants.PDDisaggregated,
 		constants.VirtualDeployment,
 		constants.DeploymentModeType(""), // unresolved / unknown

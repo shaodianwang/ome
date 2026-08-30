@@ -252,13 +252,11 @@ func TestGetDeploymentModeFromAnnotations(t *testing.T) {
 			expectedFound: true,
 		},
 		{
-			// Upgrade safety: a persisted legacy "MultiNode" annotation
-			// resolves to OMENative (native multi-node), not rejected.
-			name: "legacy MultiNode annotation resolves to OMENative",
+			name: "valid MultiNode mode",
 			annotations: map[string]string{
-				constants.DeploymentMode: "MultiNode",
+				constants.DeploymentMode: string(constants.MultiNode),
 			},
-			expectedMode:  constants.OMENative,
+			expectedMode:  constants.MultiNode,
 			expectedFound: true,
 		},
 		{
@@ -325,7 +323,7 @@ func TestGetDeploymentMode(t *testing.T) {
 				constants.DeploymentMode: string(constants.RawDeployment),
 			},
 			deployConfig: &controllerconfig.DeployConfig{
-				DefaultDeploymentMode: string(constants.OMENative),
+				DefaultDeploymentMode: string(constants.MultiNode),
 			},
 			expectedMode: constants.RawDeployment,
 		},
@@ -333,9 +331,9 @@ func TestGetDeploymentMode(t *testing.T) {
 			name:        "no annotation uses config default",
 			annotations: map[string]string{},
 			deployConfig: &controllerconfig.DeployConfig{
-				DefaultDeploymentMode: string(constants.OMENative),
+				DefaultDeploymentMode: string(constants.MultiNode),
 			},
-			expectedMode: constants.OMENative,
+			expectedMode: constants.MultiNode,
 		},
 		{
 			name:        "nil annotations uses config default",
@@ -351,9 +349,9 @@ func TestGetDeploymentMode(t *testing.T) {
 				constants.DeploymentMode: "InvalidMode",
 			},
 			deployConfig: &controllerconfig.DeployConfig{
-				DefaultDeploymentMode: string(constants.OMENative),
+				DefaultDeploymentMode: string(constants.MultiNode),
 			},
-			expectedMode: constants.OMENative,
+			expectedMode: constants.MultiNode,
 		},
 		{
 			name:        "empty config default returns empty string",

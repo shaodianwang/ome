@@ -350,10 +350,9 @@ func declaredComponents(spec *v1beta1.InferenceServiceSpec) map[v1beta1.Componen
 // omenativeDeploymentModeMap returns Component → effective
 // deploymentMode value for each Component on the spec. Effective value
 // follows the resolution chain: per-Component annotation >
-// spec.deploymentMode > "" (empty when neither is set). Shape-derived
-// behavior (Leader/Worker → OMENative; PDDisaggregated) is intentionally
-// NOT considered — coordination only cares about the dispatch backend,
-// not the shape.
+// spec.deploymentMode > "" (empty when neither is set). The shape-derived
+// modes (MultiNode, PDDisaggregated) are intentionally NOT considered
+// — coordination only cares about the dispatch backend, not the shape.
 func omenativeDeploymentModeMap(spec *v1beta1.InferenceServiceSpec) map[v1beta1.ComponentType]string {
 	out := map[v1beta1.ComponentType]string{}
 	if spec == nil {

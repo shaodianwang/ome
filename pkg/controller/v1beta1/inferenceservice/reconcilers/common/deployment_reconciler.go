@@ -15,6 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/multinode"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/raw"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
@@ -77,6 +78,36 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 	return ctrl.Result{}, nil
 }
 
+// ReconcileMultiNodeDeployment handles multi-node deployment using LeaderWorkerSet
+func (r *DeploymentReconciler) ReconcileMultiNodeDeployment(
+	isvc *v1beta1.InferenceService,
+	objectMeta metav1.ObjectMeta,
+	leaderPodSpec *v1.PodSpec,
+	workerSize int,
+	workerPodSpec *v1.PodSpec,
+	componentSpec *v1beta1.ComponentExtensionSpec,
+	componentType v1beta1.ComponentType,
+) (ctrl.Result, error) {
+	r.Log.Info("Reconciling multi-node deployment", "component", componentType, "inferenceService", isvc.Name)
+
+	reconciler, err := multinode.NewMultiNodeReconciler(r.Client, r.Clientset, r.Scheme, objectMeta, componentSpec, leaderPodSpec, workerSize, workerPodSpec)
+	if err != nil {
+		return ctrl.Result{}, errors.Wrapf(err, "failed to create MultiNodeReconciler for %s", componentType)
+	}
+
+	if err := r.setMultiNodeReferences(isvc, reconciler); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	lws, err := reconciler.Reconcile()
+	if err != nil {
+		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile %s", componentType)
+	}
+
+	r.StatusManager.PropagateMultiNodeStatus(&isvc.Status, componentType, lws, reconciler.URL)
+	return ctrl.Result{}, nil
+}
+
 // setRawReferences sets the necessary references for raw deployment
 func (r *DeploymentReconciler) setRawReferences(isvc *v1beta1.InferenceService, reconciler *raw.RawKubeReconciler) error {
 	if err := controllerutil.SetControllerReference(isvc, reconciler.Deployment.Deployment, r.Scheme); err != nil {
@@ -86,6 +117,21 @@ func (r *DeploymentReconciler) setRawReferences(isvc *v1beta1.InferenceService, 
 		return errors.Wrapf(err, "failed to set service owner reference")
 	}
 	if err := controllerutil.SetControllerReference(isvc, reconciler.PodMonitor.PodMonitor, r.Scheme); err != nil {
+		return errors.Wrapf(err, "failed to set podmonitor owner reference")
+	}
+	return nil
+}
+
+// setMultiNodeReferences sets the necessary references for multi-node deployment
+func (r *DeploymentReconciler) setMultiNodeReferences(isvc *v1beta1.InferenceService, mnr *multinode.MultiNodeReconciler) error {
+	err := controllerutil.SetControllerReference(isvc, mnr.LWS.LWS, r.Scheme)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set lws owner reference")
+	}
+	if err := controllerutil.SetControllerReference(isvc, mnr.Service.Service, r.Scheme); err != nil {
+		return errors.Wrapf(err, "failed to set service owner reference")
+	}
+	if err := controllerutil.SetControllerReference(isvc, mnr.PodMonitor.PodMonitor, r.Scheme); err != nil {
 		return errors.Wrapf(err, "failed to set podmonitor owner reference")
 	}
 	return nil

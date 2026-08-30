@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
@@ -97,6 +98,9 @@ import (
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.x-k8s.io,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;list;watch;create;update;patch;delete
@@ -824,7 +828,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// and copy it onto ISVC.Status.Components[<component>].Lifecycle.
 	// The IR controller is the sole writer of IR.Status. Components on
 	// non-OMENative paths are not touched here; their status was already
-	// written by the RawDeployment reconciler during the per-Component
+	// written by the Raw / MultiNode reconciler during the per-Component
 	// dispatcher pass above.
 	//
 	// Errors propagate so a transient apiserver read failure triggers
@@ -1195,6 +1199,14 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
+	// LeaderWorkerSet is an optional CRD: probe and only watch it when
+	// present, so clusters without LWS keep working (MultiNode dispatch
+	// then fails loudly on its own reconcile).
+	lwsFound, err := utils.IsCrdAvailable(r.ClientConfig, lws.SchemeGroupVersion.String(), constants.LWSKind)
+	if err != nil {
+		return err
+	}
+
 	// Build the canary analysis sampler once. Its concurrency cap and cache TTL are
 	// fixed for the controller's lifetime (the per-sample source + query timeout are
 	// resolved per reconcile from the same config). A missing/unreadable config
@@ -1265,6 +1277,12 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		ctrlBuilder = ctrlBuilder.Owns(&monitoringv1.PodMonitor{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch monitoring.coreos.com/v1/PodMonitor resources because the CRD is not available.")
+	}
+
+	if lwsFound {
+		ctrlBuilder = ctrlBuilder.Owns(&lws.LeaderWorkerSet{})
+	} else {
+		r.Log.Info("The InferenceService controller won't watch leaderworkerset.x-k8s.io/v1/LeaderWorkerSet resources because the CRD is not available.")
 	}
 
 	if podGroupFound {

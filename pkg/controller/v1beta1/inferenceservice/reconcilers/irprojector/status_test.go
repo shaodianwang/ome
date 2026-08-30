@@ -26,7 +26,7 @@ var engineOMENativeModes = map[v1beta1.ComponentType]constants.DeploymentModeTyp
 }
 
 // engineDirectModes is the per-Component mode map for tests whose
-// engine flows through the legacy direct path (RawDeployment /
+// engine flows through the legacy direct path (Raw / MultiNode /
 // missing). Drives the "skip aggregation" branch.
 var engineDirectModes = map[v1beta1.ComponentType]constants.DeploymentModeType{
 	v1beta1.EngineComponent: constants.RawDeployment,
@@ -169,7 +169,7 @@ func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 
 // TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents pins
 // the per-Component isolation: when engine resolves to OMENative but
-// decoder resolves to RawDeployment, the aggregator must NOT touch
+// decoder resolves to Raw/MultiNode, the aggregator must NOT touch
 // the decoder OMENative subtree (the omenative direct path is the
 // sole writer for non-OMENative-mode Components — defensive
 // preservation in case downstream code re-uses the OMENative subtree

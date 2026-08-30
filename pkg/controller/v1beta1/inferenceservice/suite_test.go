@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -49,6 +50,7 @@ var _ = BeforeSuite(func() {
 	Expect(appsv1.AddToScheme(testScheme)).To(Succeed())
 	Expect(v1.AddToScheme(testScheme)).To(Succeed())
 	Expect(kedav1.AddToScheme(testScheme)).To(Succeed())
+	Expect(lws.AddToScheme(testScheme)).To(Succeed())
 	Expect(autoscalingv2.AddToScheme(testScheme)).To(Succeed())
 	Expect(monitoringv1.AddToScheme(testScheme)).To(Succeed())
 

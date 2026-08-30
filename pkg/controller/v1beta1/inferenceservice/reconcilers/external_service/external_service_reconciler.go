@@ -215,3 +215,16 @@ func (r *ExternalServiceReconciler) serviceSpecsEqual(spec1, spec2 *corev1.Servi
 		reflect.DeepEqual(spec1.Ports, spec2.Ports) &&
 		spec1.Type == spec2.Type
 }
+
+// getDeploymentMode determines the deployment mode of the InferenceService
+func (r *ExternalServiceReconciler) getDeploymentMode(isvc *v1beta1.InferenceService) constants.DeploymentModeType {
+	// Check if this is a MultiNode deployment by looking for Leader/Worker specs
+	if isvc.Spec.Engine != nil {
+		if isvc.Spec.Engine.Leader != nil || isvc.Spec.Engine.Worker != nil {
+			return constants.MultiNode
+		}
+	}
+
+	// All other cases are RawDeployment
+	return constants.RawDeployment
+}

@@ -37,7 +37,7 @@ type SuiteOpts struct {
 
 	// Scheme is the runtime.Scheme the in-process manager registers.
 	// nil == BaseScheme() (core k8s + OME v1beta1). Suites that need
-	// extra schemes (KEDA, scheduler-plugins, Gateway API, etc.)
+	// extra schemes (LWS, KEDA, scheduler-plugins, Gateway API, etc.)
 	// build their own via BaseScheme() then AddToScheme(s).
 	Scheme *runtime.Scheme
 

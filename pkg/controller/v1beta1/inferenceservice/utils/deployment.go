@@ -31,7 +31,9 @@ func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec, specMode *constan
 	}
 
 	// Multi-node (leader/worker) resolves to OMENative, which handles
-	// multi-node serving natively.
+	// multi-node serving natively. LeaderWorkerSet-backed MultiNode is
+	// selected only by an explicit deployment-mode annotation or config
+	// default, never by shape inference.
 	if engine.Leader != nil || engine.Worker != nil {
 		return constants.OMENative
 	}

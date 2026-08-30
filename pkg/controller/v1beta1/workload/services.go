@@ -32,7 +32,8 @@ import (
 //     before all pods are Ready, so workers can discover each other while
 //     the controller-owned ome.io/serving gate is still False.
 //   - Selector scoped by the adapter so the Service does not pick up
-//     RawDeployment pods that share the bare component label.
+//     legacy LWS-managed or RawDeployment pods that share the bare
+//     component label.
 //   - OwnerReferences pointing back to the owner CR; deletion of the
 //     owner cascades to this Service.
 //

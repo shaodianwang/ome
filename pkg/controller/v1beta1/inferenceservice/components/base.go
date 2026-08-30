@@ -59,7 +59,7 @@ type BaseComponentFields struct {
 	// the scheduler-plugins `scheduling.x-k8s.io/v1alpha1/PodGroup` CRD
 	// installed. Currently unread on the ISVC side — the projected IR
 	// carries the flag and the IR controller consults it. Other
-	// deployment modes (Raw / PD) ignore this field.
+	// deployment modes (Raw / MultiNode / PD) ignore this field.
 	GangSchedulingAvailable           bool
 	Scheme                            *runtime.Scheme
 	InferenceServiceConfig            *controllerconfig.InferenceServicesConfig
@@ -713,13 +713,14 @@ func ProcessBaseLabels(b *BaseComponentFields, isvc *v1beta1.InferenceService, c
 }
 
 // UpdateComponentStatus updates component status based on deployment mode.
-// All surviving deployment modes (RawDeployment, OMENative) emit pods
-// carrying the raw-deployment app label — the engine / decoder / router
-// previously routed the same constant pair through a per-component
+// All surviving deployment modes (RawDeployment, MultiNode, OMENative)
+// emit pods carrying the raw-deployment app label — the engine / decoder
+// / router previously routed the same constant pair through a per-component
 // getPodLabelInfo callback; that indirection was dead and is inlined here.
 func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceService, componentType v1beta1.ComponentType, objectMeta metav1.ObjectMeta) error {
 	// Always initialize the component ready condition to ensure it's visible from the start
 	// The deployment reconciler will update the condition based on the actual deployment status:
+	// - MultiNode: Updates when LWS becomes available
 	// - RawDeployment: Updates when Deployment becomes available
 	b.StatusManager.InitializeComponentCondition(&isvc.Status, componentType)
 
@@ -892,7 +893,7 @@ func canonicalScaleTargetRef(mode constants.DeploymentModeType, isvcName, compon
 //
 // Inlined PodMonitor build (rather than via the shared podmonitor
 // reconciler) because the shared reconciler hardcodes the
-// `app=<name>` selector that matches RawDeployment pods but NOT
+// `app=<name>` selector that matches Raw / MultiNode pods but NOT
 // OMENative pods. CreateOrUpdate is idempotent + drift-correcting on
 // the three labelSelector / NamespaceSelector / PodMetricsEndpoints
 // shape fields.
@@ -929,8 +930,8 @@ func ReconcileOMENativeSubresources(
 		*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 	}
 
-	// Stable Service via the SAME top-level reconciler RawDeployment
-	// uses; only the selector + owner refs are OMENative-shaped.
+	// Stable Service via the SAME top-level reconciler RawDeployment and
+	// MultiNode use; only the selector + owner refs are OMENative-shaped.
 	sr := service.NewServiceReconciler(b.Client, b.Scheme, *componentMeta, componentExt, podSpec, stableSelector)
 	if _, err := sr.Reconcile(); err != nil {
 		return errors.Wrap(err, "stable service")
@@ -1002,8 +1003,10 @@ func ReconcileOMENativeSubresources(
 
 // ReconcileComponentObjectMeta builds the common ObjectMeta block
 // (Name, Namespace, Annotations, Labels) shared by engine / decoder /
-// router. The per-Component name is resolved upstream. The annotation /
-// label maps are the per-Component merge
+// router. The per-Component name is resolved upstream because the
+// fallback logic (Service-existence lookup, MultiNode gating) still
+// differs across components (see section 4 of the components-dispatch
+// review). The annotation / label maps are the per-Component merge
 // (ISVC + componentExt.Annotations / componentExt.Labels) already
 // performed by the caller.
 //

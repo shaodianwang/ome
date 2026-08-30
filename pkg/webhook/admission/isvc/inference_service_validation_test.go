@@ -655,7 +655,7 @@ func TestInferenceService_OMENativeEngineDecoderCoupling(t *testing.T) {
 			errMsg:  "InvalidDeploymentModeCombination",
 		},
 		{
-			name: "engine OMENative, decoder RawDeployment - rejected",
+			name: "engine OMENative, decoder MultiNode - rejected",
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1beta1.InferenceServiceSpec{
@@ -664,7 +664,7 @@ func TestInferenceService_OMENativeEngineDecoderCoupling(t *testing.T) {
 						Runner:                 withRunner,
 					},
 					Decoder: &v1beta1.DecoderSpec{
-						ComponentExtensionSpec: annot(string(constants.RawDeployment)),
+						ComponentExtensionSpec: annot(string(constants.MultiNode)),
 					},
 				},
 			},
