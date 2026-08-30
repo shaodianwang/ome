@@ -1,0 +1,45 @@
+# Pinned to one home, and what happens when that home goes away.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/65-placement-pinned.yaml
+#
+# clusterSelector is an operator-imposed routing overlay AND-ed onto
+# requirements, so this matches member B alone. Both labels come from
+# --with-placement, which stamps accelerator=tpu7x on each member and zone=a /
+# zone=b to tell them apart.
+#
+# Expect a derived copy on member B only; member A untouched.
+#
+# It is also the starting point for the re-placement paths. With the ISVC
+# running, make its only home stop matching:
+#
+#   kubectl --context kind-ome-quota-hub label workloadcluster member-b zone=a --overwrite
+#
+# and the placer has no candidate left — status.placement reports why rather
+# than moving the workload somewhere its operator excluded. Put the label back
+# and it recovers. Cutting the member off instead (delete the WorkloadCluster,
+# or corrupt its kubeconfig Secret) exercises the other half: unreachable is not
+# the same as unwanted, and the two have different contracts.
+#
+# Needs a tree applied first (any of the 5*-fleet-*.yaml).
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: place-pinned
+  namespace: kwok-sim
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: Single
+    requirements: accelerator=tpu7x
+    clusterSelector: zone=b
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 15

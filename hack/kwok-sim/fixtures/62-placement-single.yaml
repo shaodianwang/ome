@@ -1,0 +1,41 @@
+# One winner, and the loser swept.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/62-placement-single.yaml
+#
+# Single mode fans the derived copy out to every candidate, lets them race, and
+# keeps whichever is admitted first — status.placement.cluster names it. The
+# other member's derived and its pods are then deleted.
+#
+# Which member wins is NOT fixed, and no fixture can make it so: the race is
+# decided by whichever member's Kueue admits first. Read the winner rather than
+# assuming one.
+#
+#   kubectl --context kind-ome-quota-hub -n kwok-sim get isvc place-single \
+#     -o jsonpath='{.status.placement.phase} {.status.placement.cluster}{"\n"}'
+#
+# Watch the sweep on the loser:
+#
+#   kubectl --context kind-ome-quota-b -n kwok-sim get isvc,pods -w
+#
+# Needs a tree applied first (any of the 5*-fleet-*.yaml).
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: place-single
+  namespace: kwok-sim
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: Single
+    requirements: accelerator=tpu7x
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 15

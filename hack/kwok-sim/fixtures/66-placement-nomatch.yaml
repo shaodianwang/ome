@@ -1,0 +1,40 @@
+# The negative control: a placement that matches nothing.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/66-placement-nomatch.yaml
+#
+# No WorkloadCluster carries this label, so candidate matching returns nothing
+# and the ISVC is never fanned out. Worth applying once, because "no derived
+# anywhere" is also what a broken transport looks like, and the two are only
+# distinguishable by the reason the control plane records:
+#
+#   kubectl --context kind-ome-quota-hub -n kwok-sim get isvc place-nomatch -o yaml \
+#     | sed -n '/^  placement:/,/^  [a-z]/p'
+#
+# The same shape is a live source the orphan GC must never touch, so leaving it
+# applied while exercising the others costs nothing and keeps a survivor in the
+# sweep's view.
+#
+# Note the distinction it does NOT show: an ISVC with no spec.placement at all
+# is not a fleet object and is never considered. Declaring a requirement that
+# matches no cluster is a different state, and this is that one.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: place-nomatch
+  namespace: kwok-sim
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: Single
+    requirements: accelerator=does-not-exist
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 15

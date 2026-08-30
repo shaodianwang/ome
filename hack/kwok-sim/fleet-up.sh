@@ -26,6 +26,7 @@
 #
 # Usage:
 #   hack/kwok-sim/fleet-up.sh [--skip-build] [--component NAME]... [--with-kueue]
+#                             [--with-placement] [--topology MODE]
 #
 #   --component NAME
 #                   which OME components to deploy on each WORKLOAD MEMBER;
@@ -35,12 +36,25 @@
 #   --with-kueue    install Kueue itself on each member, not just its CRDs, so a
 #                   rendered ClusterQueue is judged by the thing that judges it
 #                   in production. Adds an image pull and a load per member.
+#   --with-placement
+#                   also exercise OEP-0018 fan-out, not only the quota plane.
+#                   Adds `manager` and `scheduler` to the member component set,
+#                   widens the members' grant so the hub may write derived
+#                   InferenceServices there, and labels each WorkloadCluster so
+#                   an ISVC's placement requirements have something to match.
+#                   Pair it with --with-kueue: a derived workload carries Kueue's
+#                   queue-name label, so without an admitting Kueue and a tree
+#                   its pods gate and never run. See fixtures/6*-placement-*.
+#   --topology M    podgroup (default) | plugin | strict, forwarded to each
+#                   member. Needs --with-placement, which is what puts a
+#                   scheduler there for the mode to mean anything.
 #   --skip-build    reuse the images already in the host docker daemon.
 #
-# Both flags reach the members only. The hub runs the quota manager in
-# management mode, which never reads or writes a Kueue object — capacity
-# derivation and the Kueue backend are both workload-mode-only — so there is
-# nothing there for Kueue to do.
+# Every flag above reaches the members only; the hub's component set is fixed.
+# It runs the quota manager in management mode, which never reads or writes a
+# Kueue object — capacity derivation and the Kueue backend are both
+# workload-mode-only — so there is nothing there for Kueue to do. It schedules
+# nothing either, so a scheduler and simulated silicon would be dead weight.
 #
 # The hub also runs ome-manager in the control-plane role, and must: the
 # WorkloadCluster registry reconciler lives there and is the single writer of
@@ -76,6 +90,10 @@ SKIP_BUILD=0
 # still macOS's default.
 COMPONENTS=""
 WITH_KUEUE=0
+WITH_PLACEMENT=0
+# Empty means up.sh's own default. Only forwarded under --with-placement, which
+# is what puts a manager and a scheduler on the members for it to mean anything.
+TOPOLOGY=""
 # The same node image up.sh pins. Without it kind picks its own built-in
 # default, which tracks the CLI rather than this repo — so the fleet would run a
 # different Kubernetes from every other simulator and every test lane, which is
@@ -87,12 +105,14 @@ while [ $# -gt 0 ]; do
   # reports as "$2: unbound variable" — a bash internal, from a line number, for
   # what is an ordinary usage mistake.
   case "$1" in
-    --component)
+    --component|--topology)
       [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;;
   esac
   case "$1" in
     --component) COMPONENTS="${COMPONENTS} $2"; shift 2 ;;
     --with-kueue) WITH_KUEUE=1; shift ;;
+    --with-placement) WITH_PLACEMENT=1; shift ;;
+    --topology) TOPOLOGY="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     # Named rather than left to the catch-all: each is a flag up.sh really does
     # take, so "unknown flag" would be a lie, and the reason it is refused is
@@ -103,10 +123,13 @@ while [ $# -gt 0 ]; do
     --ip-prefix)
       echo "$1 is detected from the docker bridge; an off-link value wedges kindnetd" >&2
       exit 2 ;;
-    --with-isvcs|--topology|--no-scheduler)
-      echo "$1 needs the manager or scheduler component, which the fleet does not deploy" >&2
+    --with-isvcs)
+      echo "$1 is not forwarded: a fleet member's workloads arrive from the hub" >&2
       exit 2 ;;
-    -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
+    --no-scheduler)
+      echo "$1 would subtract the component --with-placement adds; omit --with-placement instead" >&2
+      exit 2 ;;
+    -h|--help) sed -n '2,71p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -119,6 +142,21 @@ COMPONENTS="${COMPONENTS:-quota-manager}"
 # The membership idiom up.sh uses, for the reason it gives: bash 3.2 is still
 # macOS's default and errors on expanding an empty array under `set -u`.
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# Placement needs both on every member: the manager to reconcile a derived ISVC
+# into pods, and the scheduler because the runtimes render with
+# schedulerName: ome-scheduler under the default topology mode, so without it
+# every gang sits Pending. Added rather than required so --with-placement is the
+# only thing anyone has to remember.
+if [ "$WITH_PLACEMENT" -eq 1 ]; then
+  for c in manager scheduler; do
+    in_list "$c" "$COMPONENTS" || COMPONENTS="${COMPONENTS} ${c}"
+  done
+fi
+
+[ -z "$TOPOLOGY" ] || [ "$WITH_PLACEMENT" -eq 1 ] || {
+  echo "--topology needs --with-placement, which is what puts a scheduler on the members" >&2
+  exit 2; }
 
 for c in $COMPONENTS; do
   in_list "$c" "manager scheduler quota-manager" || {
@@ -213,6 +251,7 @@ rm -f "$KWOK_TAR"
 UP_FLAGS=""
 for c in $COMPONENTS; do UP_FLAGS="${UP_FLAGS} --component ${c}"; done
 [ "$WITH_KUEUE" -eq 1 ] && UP_FLAGS="${UP_FLAGS} --with-kueue"
+[ -n "$TOPOLOGY" ] && UP_FLAGS="${UP_FLAGS} --topology ${TOPOLOGY}"
 
 echo "==> member A: 2 cubes"
 OME_KWOK_CLUSTER="$MEMBER_A" hack/kwok-sim/up.sh \
@@ -249,6 +288,26 @@ for ctx in "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do
     --set quotaManager.remoteAccess.serviceAccount.staticToken=true \
   | kubectl --context "$ctx" apply --server-side --force-conflicts -f - >/dev/null
 done
+
+# One WorkloadCluster carries one credential, and the placer shares it with the
+# projector — so placing as well as budgeting means widening the identity the
+# members already issued rather than minting a second one.
+#
+# The ClusterRole is the chart's own, rendered the same way the quota grant
+# above is, so the fleet exercises the grant a real control plane is given
+# instead of a copy of it. Its ServiceAccount and token come along and go
+# unused; only the rules matter here. The binding onto ome-quota-access is the
+# fixture, because the chart has no reason to know about this fleet's identity.
+if [ "$WITH_PLACEMENT" -eq 1 ]; then
+  echo "==> the placement grant on each member"
+  for ctx in "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do
+    helm template ome charts/ome-resources/ \
+      --namespace "$OME_NS" --show-only templates/ome-controller/rbac/multicluster_access.yaml \
+      --set ome.multiclusterAccess.enabled=true \
+    | kubectl --context "$ctx" apply --server-side --force-conflicts -f - >/dev/null
+    kubectl --context "$ctx" apply -f hack/kwok-sim/fixtures/60-placement-rbac.yaml >/dev/null
+  done
+fi
 
 # Same script the members run, with the silicon left out and the manager put in
 # the control-plane role. Reused rather than reimplemented: standing up
@@ -291,8 +350,11 @@ helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
 
 echo "==> registering the members with the hub"
 # The hub authenticates as ome-quota-access, NOT as an admin. That is the point:
-# a projector reaching beyond acceleratorquotas is refused here.
-register() { # $1 = member cluster, $2 = kubectl fn, $3 = WorkloadCluster name
+# a projector reaching past what the members granted is refused here. Without
+# --with-placement that grant is acceleratorquotas and nothing else; with it,
+# the placement ClusterRole above is bound onto the same identity, and the
+# refusal still holds for everything neither of them names.
+register() { # $1 = member cluster, $2 = kubectl fn, $3 = WorkloadCluster name, $4 = zone
   local server token ca secret="$3-kubeconfig"
   server="https://${1}-control-plane:6443"
   # The token controller populates the secret after it is created, so the
@@ -328,11 +390,19 @@ current-context: member
 YAML
 )" >/dev/null
 
+  # The labels are the placer's whole candidate-selection input: an ISVC's
+  # spec.placement.requirements is matched against them and nothing else, and an
+  # ISVC declaring no requirement matches no cluster. accelerator is what every
+  # placement fixture requires; zone tells the two members apart so one can be
+  # singled out. Harmless to the quota plane, which never reads them.
   hubctl apply -f - >/dev/null <<YAML
 apiVersion: ome.io/v1beta1
 kind: WorkloadCluster
 metadata:
   name: ${3}
+  labels:
+    accelerator: tpu7x
+    zone: ${4}
 spec:
   clusterSource:
     kubeConfig:
@@ -340,8 +410,8 @@ spec:
 YAML
 }
 
-register "$MEMBER_A" actl member-a
-register "$MEMBER_B" bctl member-b
+register "$MEMBER_A" actl member-a a
+register "$MEMBER_B" bctl member-b b
 
 # The hub and the members are separate kind clusters on one docker bridge, so
 # the members' apiservers are reachable by container name — which is what the
@@ -373,3 +443,23 @@ chips. Nothing is budgeted yet. Author a tree on the hub to project one:
   hack/kwok-sim/fleet-status.sh      # what landed where
   hack/kwok-sim/fleet-down.sh        # tear the fleet down
 DONE
+
+if [ "$WITH_PLACEMENT" -eq 1 ]; then
+  cat <<'DONE'
+Placement is wired: both members are labelled accelerator=tpu7x (zone=a, zone=b)
+and the hub may write derived InferenceServices there. Apply a tree FIRST — a
+derived workload carries Kueue's queue-name label, so with no LocalQueue in
+kwok-sim its pods gate and never run — then one of:
+
+  kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/<one of>
+
+  61-placement-all.yaml           every member serves        -> 16 pods each
+  62-placement-single.yaml        race, then sweep the loser -> one winner
+  63-placement-split-spread.yaml  3 replicas, 192 chips      -> 2 on a, 1 on b
+  64-placement-split-capped.yaml  a per-cluster ceiling      -> 1 each
+  65-placement-pinned.yaml        clusterSelector zone=b     -> member-b only
+  66-placement-nomatch.yaml       matches nothing            -> never placed
+
+They all charge the same leaf, so run one at a time.
+DONE
+fi

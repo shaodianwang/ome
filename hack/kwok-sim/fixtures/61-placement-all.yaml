@@ -1,0 +1,36 @@
+# Every matching member serves. The simplest thing the placer does.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/61-placement-all.yaml
+#
+# Expect a derived InferenceService on BOTH members, 16 running pods on each,
+# and status.placement.cluster EMPTY — All mode has no single winner, so the
+# per-home endpoints in status.placement.candidates are the whole answer.
+#
+# One replica is one whole cube: the tpu7x-4x4x4 runtime is 1 leader + 15
+# workers = 16 pods = 16 nodes = 64 chips. Member A holds two cubes, member B
+# one, so this leaves A with a spare cube and fills B.
+#
+# Needs a tree applied first (any of the 5*-fleet-*.yaml): the derived pods
+# carry Kueue's queue-name label, so with no LocalQueue in kwok-sim they gate
+# and never admit.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: place-all
+  namespace: kwok-sim
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: All
+    requirements: accelerator=tpu7x
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 15

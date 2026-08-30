@@ -88,7 +88,7 @@ the `AcceleratorQuota` CRD (`quotaManager.crd.install`) and two charts claiming
 one cluster-scoped object fails whichever release claims it second — which one
 that is would otherwise depend on the order of past runs.
 
-## The fleet
+## Node shapes
 
 The unit is a **cube**: one tpu7x sub-block, 64 chips, 16 nodes of
 `tpu7x-standard-4t` at 4 chips each. rc-1 carves each cube into node pools by
@@ -441,6 +441,120 @@ That distinction is easy to get backwards, and this simulator is a good place to
 see it: cordon the whole fleet and the mark holds at 128 while `allocatable`
 goes to 0; delete the nodes and the mark follows them down.
 
+## Three clusters: `fleet-up.sh`
+
+`up.sh` is one cluster. `fleet-up.sh` is a **hub and two workload members**,
+wired the way a real deployment is — which is the only way to exercise the
+transport, a member-issued credential, and a split taken against capacity the
+members derived from their own hardware rather than numbers a fixture wrote.
+
+```sh
+hack/kwok-sim/fleet-up.sh                                   # quota plane only
+hack/kwok-sim/fleet-up.sh --with-kueue --with-placement     # everything
+hack/kwok-sim/fleet-status.sh                               # what landed where
+hack/kwok-sim/fleet-down.sh
+```
+
+The two members are deliberately unequal — two cubes against one, 128 chips
+against 64 — so a proportional split has to produce different numbers on each,
+and a bug that handed both the fleet total is visible rather than plausible.
+
+### What goes where
+
+Every flag reaches the members only; the hub's component set is fixed, because
+a management plane holds no silicon and schedules nothing.
+
+| | hub `ome-quota-hub` | member `ome-quota-a` | member `ome-quota-b` |
+|---|---|---|---|
+| kind cluster, OME CRDs | ✅ | ✅ | ✅ |
+| kwok + fake TPU nodes | — `--no-nodes` | ✅ 2 cubes / 128 chips | ✅ 1 cube / 64 chips |
+| cert-manager | ✅ | ✅ | ✅ |
+| `ome-manager` | ✅ `control-plane` role | ✅ | ✅ |
+| `PodGroup` CRD | ✅ | ✅ | ✅ |
+| model + runtimes, ns `kwok-sim` | ✅ (inert) | ✅ | ✅ |
+| `ome-scheduler` | — | 🅿️ | 🅿️ |
+| `ome-quota-manager` | ✅ **management** mode | ✅ **workload** mode | ✅ **workload** mode |
+| Kueue CRDs + `ResourceFlavor` | — | ✅ | ✅ |
+| Kueue controller | — | 🇰 | 🇰 |
+| `ome-quota-access` SA + token | — | ✅ | ✅ |
+| placement grant on the SA | — | 🅿️ | 🅿️ |
+| `WorkloadCluster` CRs | ✅ `member-a`, `member-b` | — | — |
+
+🅿️ `--with-placement`  🇰 `--with-kueue`
+
+Three asymmetries are worth internalising:
+
+- **The hub runs `ome-manager`, and must.** The `WorkloadCluster` registry
+  reconciler lives there and is the single writer of the `Ready` condition every
+  remote client waits on. The `control-plane` role simultaneously switches *off*
+  the local InferenceService, BaseModel and ServingRuntime controllers, which is
+  why the model and runtime objects it installs sit inert.
+- **The quota manager runs in a different mode on each side.** Members derive
+  capacity from local hardware and materialize Kueue objects; the hub only
+  projects shares, never touching a Kueue object — which is why it gets no Kueue
+  and no `ResourceFlavor`.
+- **The hub carries no silicon and no scheduler.** Nothing to schedule, so kwok,
+  the fake nodes and `ome-scheduler` would all be dead weight.
+
+### `--with-placement`
+
+The quota plane is only half of what a fleet does. `--with-placement` adds the
+other half — OEP-0018 fan-out — by doing three things the flag exists to make
+unforgettable:
+
+1. Adds `manager` and `scheduler` to the member component set. The manager
+   reconciles a derived ISVC into pods; the scheduler is needed because the
+   runtimes render with `schedulerName: ome-scheduler` under the default
+   topology mode, so without it every gang sits Pending.
+2. Widens the members' grant. One `WorkloadCluster` carries one credential and
+   the placer shares it with the projector, so placing as well as budgeting
+   means binding the `ome-resources` chart's own `ome-multicluster-access`
+   ClusterRole onto the `ome-quota-access` ServiceAccount the members already
+   issued. The rules are the chart's, not a copy — the fleet exercises the grant
+   a real control plane is given.
+3. Labels each `WorkloadCluster` `accelerator=tpu7x` and `zone=a` / `zone=b`.
+   That label set is the placer's entire candidate-selection input: an ISVC's
+   `spec.placement.requirements` is matched against it and nothing else, and an
+   ISVC declaring **no** requirement matches **no** cluster.
+
+`--topology` becomes forwardable under this flag, since it is what puts a
+scheduler on the members for the mode to mean anything.
+
+**Apply a quota tree first.** A derived workload carries Kueue's `queue-name`
+label, so with no `LocalQueue` in `kwok-sim` its pods gate and never run. Every
+`5*-fleet-*.yaml` binds that namespace, and each leaf materializes a `LocalQueue`
+named `default` — the name Kueue itself defaults to, and the one the placer
+stamps.
+
+```sh
+hack/kwok-sim/fleet-up.sh --with-kueue --with-placement
+kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/50-fleet-proportional.yaml
+kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/63-placement-split-spread.yaml
+```
+
+| fixture | what it shows | expect |
+|---|---|---|
+| `61-placement-all.yaml` | every member serves | 16 pods each, no winner |
+| `62-placement-single.yaml` | race, then sweep the loser | one winner, read it |
+| `63-placement-split-spread.yaml` | 3 replicas = 192 chips = the whole fleet | 2 on a, 1 on b |
+| `64-placement-split-capped.yaml` | a per-cluster ceiling overriding Packed | 1 each |
+| `65-placement-pinned.yaml` | `clusterSelector: zone=b` | member-b only |
+| `66-placement-nomatch.yaml` | a requirement nothing carries | never placed |
+
+One replica is one whole cube — the `tpu7x-4x4x4` runtime is 1 leader + 15
+workers = 16 pods = 16 nodes = 64 chips — so `50-fleet-proportional`'s 128/64
+split is exactly two replicas and one. They all charge the same leaf, so run one
+at a time.
+
+Which member wins `62` is not fixed and no fixture can make it so: the race is
+decided by whichever member's Kueue admits first. Read the winner rather than
+assuming one.
+
+```sh
+kubectl --context kind-ome-quota-hub -n kwok-sim get isvc \
+  -o custom-columns=NAME:.metadata.name,PHASE:.status.placement.phase,WINNER:.status.placement.cluster
+```
+
 ## What it is good for
 
 Saturation and packing behave correctly, which is the main reason to have this.
@@ -525,6 +639,8 @@ it here.
 | path | what |
 |---|---|
 | `up.sh` | one-shot: kind → kwok → nodes → dependency CRDs → cert-manager → OME CRDs → the selected components → fixtures |
+| `fleet-up.sh` | three clusters: a hub plus two unequal members, registered and wired |
+| `fleet-status.sh` / `fleet-down.sh` | what landed where across the fleet; tear it down |
 | `render-runtimes.sh` | prints the runtimes adjusted for one `--topology` mode |
 | `gen-tpu-nodes.sh` | emits the node manifest; no cluster contact |
 | `apply-tpu-nodes.sh` | creates them (`--delete` to remove) |
@@ -535,6 +651,9 @@ it here.
 | `fixtures/30-resourceflavor.yaml` | the Kueue `ResourceFlavor` the fleet's chips attribute to |
 | `fixtures/31-acceleratorquota.yaml` | a four-node quota tree over one cube; not applied by `up.sh` |
 | `fixtures/40-job-batch.yaml` | a kwok Job charging the `sim-batch` leaf, so the tree reports usage |
+| `fixtures/5*-fleet-*.yaml` | fleet quota trees for `fleet-up.sh`; not applied by it |
+| `fixtures/60-placement-rbac.yaml` | binds the chart's placement ClusterRole onto the members' quota SA |
+| `fixtures/6[1-6]-placement-*.yaml` | one OEP-0018 placement scenario each; needs `--with-placement` |
 
 ## Install notes
 

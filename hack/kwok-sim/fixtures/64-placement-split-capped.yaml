@@ -1,0 +1,44 @@
+# A per-cluster ceiling forcing a spread that quota alone would not.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/64-placement-split-capped.yaml
+#
+# Member A holds two cubes and, under 50-fleet-proportional, the budget for
+# both — so Packed would put both replicas there and leave member B empty.
+# maxReplicasPerCluster is the lever that overrides that: it caps what one home
+# may hold regardless of what it could afford, so the fill has to move on.
+#
+# Expect exactly 16 running pods on each member, with spread left false — the
+# ceiling is doing the work, not the apportionment policy.
+#
+# The cap also lands on the derived copy as engine.maxReplicas, so a home cannot
+# autoscale past it locally either:
+#
+#   kubectl --context kind-ome-quota-a -n kwok-sim get isvc place-split-capped \
+#     -o jsonpath='{.spec.engine.minReplicas}/{.spec.engine.maxReplicas}{"\n"}'
+#
+# Needs a tree applied first (any of the 5*-fleet-*.yaml).
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: place-split-capped
+  namespace: kwok-sim
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: Split
+    requirements: accelerator=tpu7x
+    split:
+      replicas: 2
+      spread: false
+      maxReplicasPerCluster: 1
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    leader: {}
+    worker:
+      size: 15

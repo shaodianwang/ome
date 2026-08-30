@@ -1,0 +1,30 @@
+# Widen the hub's member-side grant so it can place, not only budget.
+#
+# fleet-up.sh registers each member with the ome-quota-access ServiceAccount,
+# whose ClusterRole allows acceleratorquotas and deliberately nothing else —
+# that narrowness is the point of the quota fleet. One WorkloadCluster carries
+# one credential, and the placement controller shares it with the projector, so
+# placement needs the same identity to hold both grants.
+#
+# The rules themselves are NOT restated here. This binds the ClusterRole the
+# ome-resources chart already ships for exactly this purpose
+# (templates/ome-controller/rbac/multicluster_access.yaml, applied to each
+# member by --with-placement), so the fleet exercises the grant a real control
+# plane is given rather than a copy that can drift from it.
+#
+# Applied by `fleet-up.sh --with-placement`; here so it is reviewable and so a
+# fleet already up can be widened without a rebuild.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ome-quota-access-placement
+  labels:
+    kwok-sim/managed: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ome-multicluster-access
+subjects:
+- kind: ServiceAccount
+  name: ome-quota-access
+  namespace: ome
