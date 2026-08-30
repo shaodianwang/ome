@@ -27,10 +27,12 @@ const defaultTestLogLevel = zapcore.ErrorLevel
 
 // setupObservedLogger wires the controller-runtime logger exactly once
 // per test binary and returns the in-memory observer that captures
-// every entry at or above the configured level. ctrl.SetLogger panics
-// if called twice with a real logger, and Ginkgo runs every suite in
-// its own process but may construct multiple Frameworks within it — so
-// the OnceValue guard makes repeated framework.Init() calls safe.
+// every entry at or above the configured level. Only the first
+// ctrl.SetLogger call takes effect — controller-runtime fulfils the
+// root sink's promise once and drops later calls — so a second
+// observer installed this way would silently receive nothing. The
+// OnceValue makes repeated framework.Init() calls hand back the one
+// live observer.
 //
 // The returned core is teed: entries still flow to GinkgoWriter (so
 // -ginkgo.v failure reports show them) AND into the observer (so

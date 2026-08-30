@@ -8,6 +8,7 @@ import (
 	"github.com/onsi/gomega"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Write-conflict detection markers.
@@ -29,6 +30,67 @@ const (
 	conflictMessagePrefix     = "Operation cannot be fulfilled on"
 	optimisticLockErrorSuffix = "the object has been modified; please apply your changes to the latest version and try again"
 )
+
+// gvkContextKey is the log context field a controller attaches the
+// object's GroupVersionKind under; cert-controller's rotator does,
+// controller-runtime's own reconcile logger uses controllerKind
+// instead. WriteConflictExemption.GVK is compared against it.
+const gvkContextKey = "gvk"
+
+// WriteConflictExemption names one write conflict a suite tolerates.
+//
+// The gate reads an error-level optimistic-lock rejection as "a
+// reconciler lost a race it should have retried". That holds for OME's
+// own reconcilers. It does not hold for a vendored controller that
+// retries correctly but logs the rejection before requeueing: the suite
+// converges anyway, and failing it reports a defect that is not there.
+// An exemption names such a conflict precisely, so the gate stays armed
+// for everything else in the suite — which is what distinguishes it
+// from Framework.SkipWriteConflictCheck, an all-or-nothing switch.
+//
+// Every field that is set must match; a field left zero is not
+// compared. An exemption with no field set matches nothing, so a zero
+// value cannot silently disarm the gate.
+//
+// Matching on a dependency's log message couples the exemption to a
+// string that dependency may reword. That direction of failure is the
+// safe one: a reworded message stops matching, the gate re-arms, and
+// the suite goes red rather than quietly tolerating a new conflict.
+type WriteConflictExemption struct {
+	// Logger is the entry's logger name — what the controller passed to
+	// logr's WithName.
+	Logger string
+	// Message is the entry's log message, compared in full.
+	Message string
+	// GVK is the GroupVersionKind the entry carries under its "gvk"
+	// context field. An entry with no such field never matches a
+	// non-zero GVK.
+	GVK schema.GroupVersionKind
+}
+
+// matches reports whether le is the conflict this exemption names.
+func (e WriteConflictExemption) matches(le observer.LoggedEntry) bool {
+	if e.Logger == "" && e.Message == "" && e.GVK.Empty() {
+		return false
+	}
+	if e.Logger != "" && le.LoggerName != e.Logger {
+		return false
+	}
+	if e.Message != "" && le.Message != e.Message {
+		return false
+	}
+	if !e.GVK.Empty() {
+		// GroupVersionKind is a fmt.Stringer, so zap stores the field as
+		// StringerType and ContextMap renders it via String(). Comparing
+		// against GVK.String() uses that same rendering; a gvk logged
+		// any other way is not a string here and does not match.
+		gvk, ok := le.ContextMap()[gvkContextKey].(string)
+		if !ok || gvk != e.GVK.String() {
+			return false
+		}
+	}
+	return true
+}
 
 // IsWriteConflictMessage reports whether a rendered log/error string
 // describes an apiserver optimistic-lock (write-conflict / concurrent
@@ -61,32 +123,61 @@ func isWriteConflictEntry(le observer.LoggedEntry) bool {
 	return false
 }
 
-// WriteConflictLogs returns every observed >=Error entry that looks
-// like an apiserver write conflict. Empty slice means the run was
-// clean. Exposed (rather than only asserted in Teardown) so suites or
-// the self-test can inspect the offending entries directly.
-func WriteConflictLogs(observed *observer.ObservedLogs) []observer.LoggedEntry {
+// isExempt reports whether any exemption names this entry.
+func isExempt(le observer.LoggedEntry, exemptions []WriteConflictExemption) bool {
+	for _, e := range exemptions {
+		if e.matches(le) {
+			return true
+		}
+	}
+	return false
+}
+
+// WriteConflictLogs returns the observed >=Error entries that describe
+// an apiserver write conflict, starting at from and with the declared
+// exemptions removed. Empty slice means the run was clean. Exposed
+// (rather than only asserted in Teardown) so suites or the self-test
+// can inspect the offending entries directly.
+//
+// from is an index into the observer's history, taken when the
+// Framework started. The observer is process-global and is never
+// drained, so without that bound a Framework's Teardown would assert
+// over every entry an earlier Framework in the same binary produced.
+func WriteConflictLogs(observed *observer.ObservedLogs, from int, exemptions []WriteConflictExemption) []observer.LoggedEntry {
 	if observed == nil {
 		return nil
 	}
-	return observed.Filter(isWriteConflictEntry).All()
+	all := observed.All()
+	if from < 0 {
+		from = 0
+	}
+	if from > len(all) {
+		from = len(all)
+	}
+	var conflicts []observer.LoggedEntry
+	for _, le := range all[from:] {
+		if isWriteConflictEntry(le) && !isExempt(le, exemptions) {
+			conflicts = append(conflicts, le)
+		}
+	}
+	return conflicts
 }
 
-// VerifyNoWriteConflicts fails the suite (via Gomega) if any observed
-// log entry at or above ErrorLevel describes an apiserver write
-// conflict. A reconciler that loses an optimistic-lock race and logs
-// the rejection at error level signals a missing retry/conflict-aware
-// update path — a real bug, not test flake — so the gate turns it into
-// a hard failure rather than letting it hide in passing-suite noise.
+// VerifyNoWriteConflicts fails the suite (via Gomega) if any entry
+// logged from from onwards describes an unexempted apiserver write
+// conflict.
 //
 // Called from Teardown after the manager has been stopped, so the
 // observer holds the complete log history for the suite. Nil observer
 // (logger never wired) is a no-op.
-func VerifyNoWriteConflicts(observed *observer.ObservedLogs) {
+func VerifyNoWriteConflicts(observed *observer.ObservedLogs, from int, exemptions []WriteConflictExemption) {
 	ginkgo.GinkgoHelper()
-	conflicts := WriteConflictLogs(observed)
+	conflicts := WriteConflictLogs(observed, from, exemptions)
 	gomega.Expect(conflicts).To(gomega.BeEmpty(),
-		"controller logged %d write-conflict (optimistic-lock) error(s); a reconciler is missing conflict-aware retry. First: %s",
+		"%d error-level write-conflict (optimistic-lock) rejection(s) logged during this suite. "+
+			"From an OME reconciler this means a missing conflict-aware retry path; from a "+
+			"dependency's controller that retries and converges, name it in "+
+			"Framework.AllowedWriteConflicts. First: %s",
 		len(conflicts), firstConflictDetail(conflicts))
 }
 
@@ -97,5 +188,5 @@ func firstConflictDetail(conflicts []observer.LoggedEntry) string {
 		return "<none>"
 	}
 	c := conflicts[0]
-	return fmt.Sprintf("%q ctx=%v", c.Message, c.ContextMap())
+	return fmt.Sprintf("logger=%q %q ctx=%v", c.LoggerName, c.Message, c.ContextMap())
 }

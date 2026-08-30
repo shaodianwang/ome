@@ -91,7 +91,18 @@ type Framework struct {
 	// logs an apiserver optimistic-lock rejection at error level (a
 	// missing conflict-retry path). Leave false for normal suites; set
 	// true only for suites that deliberately provoke conflicts.
+	//
+	// Prefer AllowedWriteConflicts when only some conflicts are
+	// tolerable — this switch gives up the gate for the whole suite.
 	SkipWriteConflictCheck bool
+
+	// AllowedWriteConflicts names conflicts the Teardown gate must not
+	// fail on, leaving it armed for every other reconciler in the
+	// suite. Use it for a dependency's controller that retries a
+	// conflict and converges but logs the rejection at error level
+	// first — the gate cannot tell that apart from an OME reconciler
+	// that loses the race and gives up.
+	AllowedWriteConflicts []WriteConflictExemption
 
 	// scheme is the *client-side* runtime.Scheme assembled in
 	// SetupClient. Distinct from f.testEnv.Scheme (apiserver-side); the
@@ -103,6 +114,13 @@ type Framework struct {
 	// Teardown write-conflict gate. Set by Init (via the OnceValue
 	// logger), read by Teardown. Nil if Init was never called.
 	observedLogs *observer.ObservedLogs
+
+	// observedFrom is the observer's length when this Framework
+	// started. The observer is shared by every Framework in the test
+	// binary and is never drained, so Teardown asserts from this index
+	// rather than over the binary's whole history. Frameworks whose
+	// lifetimes overlap still share the tail.
+	observedFrom int
 
 	// unexported state — set by Init/StartManager, consumed by Teardown.
 	testEnv        *envtest.Environment
@@ -139,6 +157,7 @@ func (f *Framework) Init() (*rest.Config, error) {
 	// for the Teardown write-conflict gate. Idempotent across multiple
 	// Frameworks in one test binary (sync.OnceValue).
 	f.observedLogs = setupObservedLogger()
+	f.observedFrom = f.observedLogs.Len()
 
 	if f.ProjectRoot == "" {
 		root, err := findProjectRoot()
@@ -259,15 +278,17 @@ func (f *Framework) ObservedLogs() *observer.ObservedLogs {
 // The gate (VerifyNoWriteConflicts) runs after envtest is stopped so
 // the observer holds the suite's complete log history. It fails the
 // suite via Gomega if any controller logged an apiserver optimistic-
-// lock rejection at error level. Disable per-Framework with
-// SkipWriteConflictCheck for suites that provoke conflicts on purpose.
+// lock rejection at error level, over the entries logged after this
+// Framework started, minus the conflicts AllowedWriteConflicts names.
+// Disable it entirely with SkipWriteConflictCheck for suites that
+// provoke conflicts on purpose.
 func (f *Framework) Teardown() error {
 	if f.testEnv == nil {
 		return nil
 	}
 	stopErr := f.testEnv.Stop()
 	if !f.SkipWriteConflictCheck {
-		VerifyNoWriteConflicts(f.observedLogs)
+		VerifyNoWriteConflicts(f.observedLogs, f.observedFrom, f.AllowedWriteConflicts)
 	}
 	return stopErr
 }

@@ -73,13 +73,28 @@ var (
 var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
-	// The write-conflict gate stays on. It would fire if the rotator ever
-	// refreshed the Secret from two paths at once — its own startup runnable and
-	// the injector reacting to the Secret watch — which is what holding the
-	// injection until the cert is readable exists to prevent. A regression there
-	// fails this suite rather than showing up as an error-level optimistic-lock
-	// rejection in a running cluster.
-	s, err := framework.NewSuite(&framework.Framework{})
+	// The write-conflict gate stays on, minus one conflict the rotator produces
+	// by construction. It reads the webhook configuration from its own informer
+	// cache and writes it live, so a reconcile that runs before that cache has
+	// caught up with the previous write sends a superseded resourceVersion and
+	// loses the optimistic lock. The library requeues and converges, so the
+	// rejection is noise here rather than the missing-retry bug the gate looks
+	// for; it is also a third-party write path, not one this repo can fix.
+	//
+	// Scoped to that one message and object rather than switched off, because
+	// the conflict worth catching in this suite shares the rotator's logger: if
+	// the Secret were ever refreshed from two paths at once — the generator's
+	// startup runnable and the injector reacting to the Secret watch, which
+	// holding injection until the cert is readable exists to prevent — it would
+	// surface under a different message with no gvk, and still fail the suite.
+	s, err := framework.NewSuite(&framework.Framework{
+		AllowedWriteConflicts: []framework.WriteConflictExemption{{
+			Logger:  "cert-rotation",
+			Message: "Error updating webhook with certificate",
+			GVK: admissionregistrationv1.SchemeGroupVersion.
+				WithKind("ValidatingWebhookConfiguration"),
+		}},
+	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	suiteFwk = s.Fwk
