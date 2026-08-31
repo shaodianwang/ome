@@ -1553,3 +1553,409 @@ func TestGetCompatibilityDetails_DeploymentMode(t *testing.T) {
 		assert.True(t, report.IsCompatible)
 	})
 }
+
+func TestCompareModelFormatVersions(t *testing.T) {
+	ptrToString := func(s string) *string { return &s }
+	ptrToRuntimeOp := func(s string) *v1beta1.RuntimeSelectorOperator {
+		op := v1beta1.RuntimeSelectorOperator(s)
+		return &op
+	}
+
+	matcher := NewDefaultRuntimeMatcher(NewConfig(nil)).(*DefaultRuntimeMatcher)
+
+	tests := []struct {
+		name            string
+		supportedFormat *v1beta1.ModelFormat
+		modelFormat     *v1beta1.ModelFormat
+		expected        bool
+	}{
+		{
+			name: "Equal versions with Equal operator",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.0.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpEqual)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.0.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "Equal versions with GreaterThan operator",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.0.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.0.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "GreaterThan - supported version is greater",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.8.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.7.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "GreaterThan - supported version is not greater",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.7.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.8.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "GreaterThanOrEqual - equal versions",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.8.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThanOrEqual)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.8.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "GreaterThanOrEqual - supported version is greater",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.9.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThanOrEqual)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.8.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "GreaterThanOrEqual - supported version is less",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.7.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThanOrEqual)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.8.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "Unofficial version forces equality check",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.8.0-dev"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.8.0-dev"),
+			},
+			expected: true,
+		},
+		{
+			name: "Unofficial version not equal",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.8.0-dev"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.8.0-alpha"),
+			},
+			expected: false,
+		},
+		{
+			name: "Equal versions with precision 1 and Equal operator",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1"),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1"),
+			},
+			expected: true,
+		},
+		{
+			name: "Precision mismatch",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("1.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.0.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "Major prefix mismatch",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("v1.0.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("1.0.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "Nil operator defaults to Equal",
+			supportedFormat: &v1beta1.ModelFormat{
+				Name:     "pytorch",
+				Version:  ptrToString("v2.0.0"),
+				Operator: nil,
+			},
+			modelFormat: &v1beta1.ModelFormat{
+				Name:    "pytorch",
+				Version: ptrToString("v2.0.0"),
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matcher.compareModelFormatVersions(tt.supportedFormat, tt.modelFormat)
+			assert.Equal(t, tt.expected, result, "Test case: %s", tt.name)
+		})
+	}
+}
+
+func TestCompareModelFrameworkVersions(t *testing.T) {
+	ptrToString := func(s string) *string { return &s }
+	ptrToRuntimeOp := func(s string) *v1beta1.RuntimeSelectorOperator {
+		op := v1beta1.RuntimeSelectorOperator(s)
+		return &op
+	}
+
+	matcher := NewDefaultRuntimeMatcher(NewConfig(nil)).(*DefaultRuntimeMatcher)
+
+	tests := []struct {
+		name               string
+		supportedFramework *v1beta1.ModelFrameworkSpec
+		modelFramework     *v1beta1.ModelFrameworkSpec
+		expected           bool
+	}{
+		{
+			name: "Equal versions with Equal operator",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpEqual)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "Equal versions with GreaterThan operator",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "GreaterThan - supported version is greater",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.15.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "GreaterThan - supported version is not greater",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.15.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "GreaterThanOrEqual - equal versions",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThanOrEqual)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "GreaterThanOrEqual - supported version is greater",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.15.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThanOrEqual)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: true,
+		},
+		{
+			name: "GreaterThanOrEqual - supported version is less",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThanOrEqual)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.15.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "Unofficial version forces equality check",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0-dev"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0-dev"),
+			},
+			expected: true,
+		},
+		{
+			name: "Unofficial version not equal",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10.0-dev"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0-alpha"),
+			},
+			expected: false,
+		},
+		{
+			name: "Precision mismatch",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("1.10"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "Major prefix mismatch",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("v1.10.0"),
+				Operator: ptrToRuntimeOp(string(v1beta1.RuntimeSelectorOpGreaterThan)),
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "transformers",
+				Version: ptrToString("1.10.0"),
+			},
+			expected: false,
+		},
+		{
+			name: "Nil operator defaults to Equal",
+			supportedFramework: &v1beta1.ModelFrameworkSpec{
+				Name:     "transformers",
+				Version:  ptrToString("v1.10.0"),
+				Operator: nil,
+			},
+			modelFramework: &v1beta1.ModelFrameworkSpec{
+				Name:    "onnxruntime",
+				Version: ptrToString("v1.10.0"),
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matcher.compareModelFrameworkVersions(tt.supportedFramework, tt.modelFramework)
+			assert.Equal(t, tt.expected, result, "Test case: %s", tt.name)
+		})
+	}
+}
+
+func TestIsCompatible_DisabledRuntime(t *testing.T) {
+	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
+
+	baseModel := &v1beta1.BaseModelSpec{ModelFormat: v1beta1.ModelFormat{Name: "pytorch"}}
+	isvc := &v1beta1.InferenceService{}
+
+	rt := &v1beta1.ServingRuntimeSpec{Disabled: ptr(true)}
+	ok, err := matcher.IsCompatible(rt, baseModel, isvc, "rt")
+	assert.False(t, ok)
+	assert.Error(t, err)
+	assert.True(t, IsRuntimeDisabledError(err))
+}
+
+func TestIsCompatible_SizeMismatchNoError(t *testing.T) {
+	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
+
+	isvc := &v1beta1.InferenceService{}
+	rt := &v1beta1.ServingRuntimeSpec{
+		SupportedModelFormats: []v1beta1.SupportedModelFormat{{ModelFormat: &v1beta1.ModelFormat{Name: "pytorch"}}},
+		ModelSizeRange:        &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("2B")},
+	}
+	model := &v1beta1.BaseModelSpec{ModelFormat: v1beta1.ModelFormat{Name: "pytorch"}, ModelParameterSize: ptr("70B")}
+	ok, err := matcher.IsCompatible(rt, model, isvc, "rt")
+	assert.False(t, ok)
+	assert.NoError(t, err)
+}
+
+// TestCompareVersionsWithOperator drives the shared compareVersionsWithOperator
+// helper that backs both compareModelFormatVersions and
+// compareModelFrameworkVersions. Each table row is exercised through both
+// call sites (and the raw helper) to lock in identical semantics.
