@@ -38,13 +38,20 @@ var _ = ginkgo.Describe("A workload-mode quota plane against a real Kueue", func
 				"the root must report the accelerator the fake node carries")
 		}, timeout, interval).Should(gomega.Succeed())
 
-		ginkgo.By("authoring a grouping tier and a leaf beneath the root")
-		gomega.Expect(k8sClient.Create(suiteCtx,
-			quota(tenantsName, v1beta1.AcceleratorQuotaRootName,
-				v1beta1.AcceleratorQuotaRoleCohort, nil))).To(gomega.Succeed())
+		ginkgo.By("authoring a grouping tier and two leaves beneath the root")
+		tier := quota(tenantsName, v1beta1.AcceleratorQuotaRootName,
+			v1beta1.AcceleratorQuotaRoleCohort, nil)
+		tier.Spec.Budgets[0].Nominal = *resource.NewQuantity(tierNominal, resource.DecimalSI)
+		gomega.Expect(k8sClient.Create(suiteCtx, tier)).To(gomega.Succeed())
 		gomega.Expect(k8sClient.Create(suiteCtx,
 			quota(leafName, tenantsName,
 				v1beta1.AcceleratorQuotaRoleClusterQueue, []string{tenantNS}))).To(gomega.Succeed())
+		// The idle sibling. Its namespace stays empty, so its whole share is
+		// available for the cohort to lend and nothing of its own ever competes
+		// for it.
+		gomega.Expect(k8sClient.Create(suiteCtx,
+			quota(idleName, tenantsName,
+				v1beta1.AcceleratorQuotaRoleClusterQueue, []string{idleNS}))).To(gomega.Succeed())
 
 		ginkgo.By("materializing a ClusterQueue that Kueue accepts")
 		gomega.Eventually(func(g gomega.Gomega) {
@@ -85,9 +92,12 @@ var _ = ginkgo.Describe("A workload-mode quota plane against a real Kueue", func
 		expectAdmitted(leafName, 2*perPod)
 		expectAdmitted(tenantsName, 2*perPod)
 
-		ginkgo.By("leaving a workload Kueue has not admitted uncharged")
-		// The budget is exhausted, so Kueue holds this one. Consumption must
-		// stay put rather than counting work that is only waiting.
+		ginkgo.By("refusing work past the budget, with an idle sibling in the cohort")
+		// The real test of a ceiling. The budget is exhausted and the sibling is
+		// holding its whole share idle, so a queue allowed to borrow would admit
+		// this and report more than the tree authorized. Nominal has to mean
+		// nominal: consumption stays put rather than counting work that is only
+		// waiting, and the queue never reaches past its own share to run it.
 		gomega.Expect(k8sClient.Create(suiteCtx, workload("w3"))).To(gomega.Succeed())
 		gomega.Consistently(func(g gomega.Gomega) {
 			g.Expect(admittedOn(g, leafName)).To(gomega.Equal(int64(2 * perPod)))

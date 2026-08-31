@@ -56,8 +56,17 @@ const (
 	// show a rollup. The rollup is asserted here instead.
 	tenantsName = "e2e-tenants"
 	leafName    = "e2e-tenant"
-	tenantNS    = "quota-e2e"
-	flavorName  = "e2e-flavor"
+	// A sibling that funds a budget and never uses it. Its only job is to give
+	// the cohort idle capacity: with one leaf there is nothing to borrow FROM,
+	// so a queue that borrowed without limit would look identical to one that
+	// could not borrow at all.
+	idleName = "e2e-idle"
+	tenantNS = "quota-e2e"
+	// The idle sibling's namespace. Nothing is ever submitted here; a leaf has
+	// to bind one to materialize at all, because Kueue rejects a ClusterQueue
+	// whose namespaceSelector matches In against an empty value list.
+	idleNS     = "quota-e2e-idle"
+	flavorName = "e2e-flavor"
 	// fieldManager is both the apply owner and the value of the managed-by
 	// label, so it is also what the usage reader and the watch predicate
 	// select on.
@@ -71,6 +80,9 @@ const (
 	// admission moves a figure the first already set and a third has to wait.
 	nominal = 4
 	perPod  = 2
+	// The tier funds both leaves, so containment holds: a parent below the sum
+	// of its children freezes the node for a violation this suite is not about.
+	tierNominal = 8
 	// Above the 8 chips the fake node reports, so a budget raised to it is
 	// affordable nowhere on this cluster.
 	unaffordable = 16
@@ -175,9 +187,11 @@ var _ = ginkgo.BeforeSuite(func() {
 	// this suite testing consumption rather than that check.
 	createReadyNode("e2e-node", installed)
 
-	gomega.Expect(k8sClient.Create(suiteCtx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: tenantNS},
-	})).To(gomega.Succeed())
+	for _, ns := range []string{tenantNS, idleNS} {
+		gomega.Expect(k8sClient.Create(suiteCtx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: ns},
+		})).To(gomega.Succeed())
+	}
 })
 
 var _ = ginkgo.AfterSuite(func() {

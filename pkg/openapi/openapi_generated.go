@@ -203,7 +203,7 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorBudget(ref common.ReferenceCallback)
 					},
 					"borrowingLimit": {
 						SchemaProps: spec.SchemaProps{
-							Description: "BorrowingLimit is how far above its share this leaf may burst by borrowing idle sibling capacity, passed through to Kueue. Borrowing is cluster-local, so enabling it turns nominal from a fleet ceiling into a guaranteed floor plus reclaimable overage; the relaxed ceiling is reported in status. Leaves only.",
+							Description: "BorrowingLimit is how far above its share this leaf may burst by borrowing idle sibling capacity, passed through to Kueue. Unset, this leaf does not borrow: nominal is its ceiling, and the materialized queue carries an explicit limit of zero to say so, because the enforcement backend reads an absent limit as unbounded.\n\nBorrowing is cluster-local, so setting it turns nominal from a ceiling into a floor plus overage, and the relaxed ceiling is reported in status.\n\nWARNING: overage is not currently reclaimable. This plane sets no preemption policy, so a borrower holds what it took until its own work finishes -- a leaf that bursts can leave a sibling waiting for the share that sibling was guaranteed. Leaves only.",
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},
