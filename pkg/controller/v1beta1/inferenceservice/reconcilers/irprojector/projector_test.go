@@ -1128,7 +1128,7 @@ func TestEnsureInferenceReplica_AutoscalerProjection_DeepCopies(t *testing.T) {
 		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
 
 	// Mutate the input AFTER projection. If the projector aliased the
-	// pointer, the live IR would show the mutation through Get's
+	// pointer, the live IR would show the mutation through Gets
 	// fake-client round-trip (fake client stores by reference for in-memory).
 	p.ResolvedAutoscaler.Class = v1beta1.AutoscalerNone
 	p.ResolvedAutoscaler.Keda.Triggers[0].Type = "mutated"

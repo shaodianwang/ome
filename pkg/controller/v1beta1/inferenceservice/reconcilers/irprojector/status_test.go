@@ -64,7 +64,7 @@ func liveIR(parentName, namespace string, replicas int32) *v1beta1.InferenceRepl
 				{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, AvailablePodCount: 1, ActiveOrdinal: 0},
 			},
 			Conditions: []metav1.Condition{
-				{Type: "Available", Status: metav1.ConditionTrue, Reason: "AllReady"},
+				{Type: "Available", Status: metav1.ConditionTrue, Reason: "AllInstancesReady"},
 			},
 		},
 	}
@@ -172,7 +172,7 @@ func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 // decoder resolves to Raw/MultiNode, the aggregator must NOT touch
 // the decoder OMENative subtree (the omenative direct path is the
 // sole writer for non-OMENative-mode Components — defensive
-// preservation in case downstream code re-uses the OMENative subtree
+// preservation in case downstream code reuses the OMENative subtree
 // shape).
 func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T) {
 	g := gomega.NewWithT(t)

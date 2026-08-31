@@ -40,7 +40,7 @@ import (
 )
 
 // BudgetNoLimit is returned by Per* budget helpers when the source
-// RollingUpdate field is nil or unparseable — signals "no within-
+// RollingUpdate field is nil or unparsable — signals "no within-
 // Component cap from this field" so the dispatcher's min(group, per-
 // Component) composition collapses to the group-level cap.
 const BudgetNoLimit = int32(-1)

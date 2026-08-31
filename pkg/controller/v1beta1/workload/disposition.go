@@ -41,7 +41,7 @@ import (
 //	                           every node resolves it the same way.
 //	InvalidImageName           the image reference fails validation
 //	                           before any pull is attempted. No node
-//	                           can parse an unparseable reference.
+//	                           can parse an unparsable reference.
 //	CreateContainerConfigError the container's config (missing
 //	                           ConfigMap/Secret key, invalid env
 //	                           projection) was rejected at container

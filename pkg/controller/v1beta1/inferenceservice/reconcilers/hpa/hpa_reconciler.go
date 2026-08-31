@@ -209,11 +209,11 @@ func utilizationFromAnnotation(metadata metav1.ObjectMeta) (int32, bool) {
 	if !ok {
 		return 0, false
 	}
-	utilization, err := strconv.Atoi(value)
+	utilization, err := strconv.ParseInt(value, 10, 32)
 	if err != nil {
 		return 0, false
 	}
-	return int32(utilization), true // #nosec G109
+	return int32(utilization), true
 }
 
 func (r *HPAReconciler) checkHPAExist() (constants.CheckResultType, *autoscalingv2.HorizontalPodAutoscaler, error) {

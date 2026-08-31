@@ -239,7 +239,7 @@ func InstanceIdxFromLabels(pod *corev1.Pod) (int32, bool) {
 	if !ok {
 		return 0, false
 	}
-	n, err := strconv.Atoi(raw)
+	n, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil {
 		return 0, false
 	}
@@ -276,7 +276,7 @@ func PodOrdinalFromLabels(pod *corev1.Pod) (int32, bool) {
 	if !ok {
 		return 0, true
 	}
-	n, err := strconv.Atoi(raw)
+	n, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil {
 		return 0, false
 	}
