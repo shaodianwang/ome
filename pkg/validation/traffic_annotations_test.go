@@ -439,7 +439,7 @@ func TestLevenshtein(t *testing.T) {
 		{"abc", "abc", 0},
 		{"abc", "", 3},
 		{"", "abc", 3},
-		{"abc", "abd", 1},  // substitution
+		{"abc", "abx", 1},  // substitution
 		{"abc", "ab", 1},   // deletion
 		{"abc", "abcd", 1}, // insertion
 		{"kitten", "sitting", 3},

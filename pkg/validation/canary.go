@@ -48,7 +48,7 @@ const ReasonAnalysisInvalid = "AnalysisInvalid"
 //   - Final step Traffic == 100 — otherwise the rollout never fully cuts over.
 //   - Final step Capacity == 100% — otherwise it completes on a partial fleet.
 //   - Every step Capacity parses strictly (integer >= 0, or "<N>%" with N in
-//     [0,100]) — the runtime resolver maps unparseable values to zero, so a
+//     [0,100]) — the runtime resolver maps unparsable values to zero, so a
 //     malformed capacity would silently stage no new pods.
 //   - Traffic in [0,100], non-decreasing, and Traffic>0 requires Capacity>0.
 //   - Each analysis step's config is complete and well-formed (delegated to

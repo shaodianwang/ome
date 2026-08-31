@@ -83,7 +83,7 @@ func TestValidateCanary_TrafficToZeroPercentCapacity(t *testing.T) {
 }
 
 // TestParseCanaryCapacity covers the strict parser: the runtime int/percent
-// resolver maps anything unparseable to zero, so the parser must reject every
+// resolver maps anything unparsable to zero, so the parser must reject every
 // form the resolver would drop and accept exactly the forms it resolves.
 func TestParseCanaryCapacity(t *testing.T) {
 	cases := []struct {
@@ -160,7 +160,7 @@ func TestValidateCanary_CapacityStrictlyParsed(t *testing.T) {
 
 // TestValidateCanary_MalformedFinalCapacityRejected: a malformed final-step
 // capacity slipping through would let the done sentinel run on a plan whose
-// last declared capacity is unparseable.
+// last declared capacity is unparsable.
 func TestValidateCanary_MalformedFinalCapacityRejected(t *testing.T) {
 	spec := canarySpec(
 		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("10%"), Traffic: 10},
