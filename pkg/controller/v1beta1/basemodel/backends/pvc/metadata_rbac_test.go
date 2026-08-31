@@ -137,7 +137,7 @@ func TestEnsureMetadataJobRBAC_IdempotentWhenObjectsAlreadyExist(t *testing.T) {
 func TestEnsureMetadataJobRBAC_NoOpWhenSANameEmpty(t *testing.T) {
 	// The Image-must-be-configured guard in buildMetadataJob fires later
 	// and surfaces a clear PVCConfigMissing status. This function should
-	// not pre-empt that with a confusing nameless SA create error.
+	// not preempt that with a confusing nameless SA create error.
 	scheme := newRBACTestScheme(t)
 	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 

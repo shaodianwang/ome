@@ -26,7 +26,7 @@ const MultiClusterConfigName = "multicluster"
 //
 // Every field degrades gracefully when omitted. Durations are stored as strings
 // and parsed by the *Duration() accessors, which yield 0 on an empty or
-// unparseable value; a zero handed to the workloadcluster/placement options
+// unparsable value; a zero handed to the workloadcluster/placement options
 // makes those packages apply their OWN in-package default. So the default for
 // each knob stays single-sourced in the package that owns it — never duplicated
 // as a literal here — and an absent "multicluster" block reproduces the
@@ -163,7 +163,7 @@ func parseMultiClusterConfig(configMap *v1.ConfigMap) (*MultiClusterConfig, erro
 }
 
 // Validate reports knob values that are stated but unusable, for the manager to
-// refuse at startup. Loading stays forgiving on purpose — an unparseable duration
+// refuse at startup. Loading stays forgiving on purpose — an unparsable duration
 // reads as zero so the consuming package applies its own default — but that
 // makes a typo like "30" or "1 m" indistinguishable from "not set", silently
 // discarding the operator's intended value for the life of the process. The
@@ -219,77 +219,77 @@ func (c MultiClusterConfig) Validate() error {
 	return errors.Join(errs...)
 }
 
-// PerCallTimeoutDuration returns the parsed PerCallTimeout (0 if absent/unparseable).
+// PerCallTimeoutDuration returns the parsed PerCallTimeout (0 if absent/unparsable).
 func (c WorkloadClusterConfig) PerCallTimeoutDuration() time.Duration {
 	return parseDurationOrZero(c.PerCallTimeout)
 }
 
-// HealthIntervalDuration returns the parsed HealthInterval (0 if absent/unparseable).
+// HealthIntervalDuration returns the parsed HealthInterval (0 if absent/unparsable).
 func (c WorkloadClusterConfig) HealthIntervalDuration() time.Duration {
 	return parseDurationOrZero(c.HealthInterval)
 }
 
-// ConnectionGraceDuration returns the parsed ConnectionGrace (0 if absent/unparseable).
+// ConnectionGraceDuration returns the parsed ConnectionGrace (0 if absent/unparsable).
 func (c WorkloadClusterConfig) ConnectionGraceDuration() time.Duration {
 	return parseDurationOrZero(c.ConnectionGrace)
 }
 
-// EventsBatchPeriodDuration returns the parsed EventsBatchPeriod (0 if absent/unparseable).
+// EventsBatchPeriodDuration returns the parsed EventsBatchPeriod (0 if absent/unparsable).
 func (c WorkloadClusterConfig) EventsBatchPeriodDuration() time.Duration {
 	return parseDurationOrZero(c.EventsBatchPeriod)
 }
 
-// EstablishInitialDuration returns the parsed EstablishInitial (0 if absent/unparseable).
+// EstablishInitialDuration returns the parsed EstablishInitial (0 if absent/unparsable).
 func (c WorkloadClusterConfig) EstablishInitialDuration() time.Duration {
 	return parseDurationOrZero(c.EstablishInitial)
 }
 
-// EstablishMaxDuration returns the parsed EstablishMax (0 if absent/unparseable).
+// EstablishMaxDuration returns the parsed EstablishMax (0 if absent/unparsable).
 func (c WorkloadClusterConfig) EstablishMaxDuration() time.Duration {
 	return parseDurationOrZero(c.EstablishMax)
 }
 
-// ReconnectRetryMaxDuration returns the parsed ReconnectRetryMax (0 if absent/unparseable).
+// ReconnectRetryMaxDuration returns the parsed ReconnectRetryMax (0 if absent/unparsable).
 func (c WorkloadClusterConfig) ReconnectRetryMaxDuration() time.Duration {
 	return parseDurationOrZero(c.ReconnectRetryMax)
 }
 
-// FunnelResyncIntervalDuration returns the parsed FunnelResyncInterval (0 if absent/unparseable).
+// FunnelResyncIntervalDuration returns the parsed FunnelResyncInterval (0 if absent/unparsable).
 func (c WorkloadClusterConfig) FunnelResyncIntervalDuration() time.Duration {
 	return parseDurationOrZero(c.FunnelResyncInterval)
 }
 
-// RequeueIntervalDuration returns the parsed RequeueInterval (0 if absent/unparseable).
+// RequeueIntervalDuration returns the parsed RequeueInterval (0 if absent/unparsable).
 func (c PlacementConfig) RequeueIntervalDuration() time.Duration {
 	return parseDurationOrZero(c.RequeueInterval)
 }
 
-// GCIntervalDuration returns the parsed GCInterval (0 if absent/unparseable).
+// GCIntervalDuration returns the parsed GCInterval (0 if absent/unparsable).
 func (c PlacementConfig) GCIntervalDuration() time.Duration {
 	return parseDurationOrZero(c.GCInterval)
 }
 
-// FanoutTimeoutDuration returns the parsed FanoutTimeout (0 if absent/unparseable).
+// FanoutTimeoutDuration returns the parsed FanoutTimeout (0 if absent/unparsable).
 func (c PlacementConfig) FanoutTimeoutDuration() time.Duration {
 	return parseDurationOrZero(c.FanoutTimeout)
 }
 
-// WinnerLostGraceDuration returns the parsed WinnerLostGrace (0 if absent/unparseable).
+// WinnerLostGraceDuration returns the parsed WinnerLostGrace (0 if absent/unparsable).
 func (c PlacementConfig) WinnerLostGraceDuration() time.Duration {
 	return parseDurationOrZero(c.WinnerLostGrace)
 }
 
-// StatusBatchPeriodDuration returns the parsed StatusBatchPeriod (0 if absent/unparseable).
+// StatusBatchPeriodDuration returns the parsed StatusBatchPeriod (0 if absent/unparsable).
 func (c PlacementConfig) StatusBatchPeriodDuration() time.Duration {
 	return parseDurationOrZero(c.StatusBatchPeriod)
 }
 
-// StatusSafetyRequeueDuration returns the parsed StatusSafetyRequeue (0 if absent/unparseable).
+// StatusSafetyRequeueDuration returns the parsed StatusSafetyRequeue (0 if absent/unparsable).
 func (c PlacementConfig) StatusSafetyRequeueDuration() time.Duration {
 	return parseDurationOrZero(c.StatusSafetyRequeue)
 }
 
-// DispatcherRoundTimeoutDuration returns the parsed DispatcherRoundTimeout (0 if absent/unparseable).
+// DispatcherRoundTimeoutDuration returns the parsed DispatcherRoundTimeout (0 if absent/unparsable).
 func (c PlacementConfig) DispatcherRoundTimeoutDuration() time.Duration {
 	return parseDurationOrZero(c.DispatcherRoundTimeout)
 }

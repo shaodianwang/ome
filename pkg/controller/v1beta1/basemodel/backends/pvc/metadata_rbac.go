@@ -101,7 +101,7 @@ func ensureMetadataJobServiceAccount(ctx context.Context, c client.Client, log l
 // of the cross-ns RoleBinding the controller maintains in the OME
 // namespace for a given source `jobNamespace`. The pattern keeps a
 // 1:1 mapping per source ns so concurrent BaseModels in the same
-// jobNamespace re-use the same RoleBinding (idempotent), and BMs in
+// jobNamespace reuse the same RoleBinding (idempotent), and BMs in
 // different namespaces get distinct RoleBindings (no subject churn).
 func metadataJobOMENamespaceRoleBindingName(saName, jobNamespace string) string {
 	return saName + "-" + jobNamespace

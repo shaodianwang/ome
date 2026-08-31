@@ -94,7 +94,7 @@ const metadataJobShortHashLen = 8
 
 // metadataJobName returns a deterministic, ≤63-char Job name derived from
 // the model name and PVC URI. URI hashing means a spec edit that changes
-// the URI yields a fresh Job rather than re-using a stale one.
+// the URI yields a fresh Job rather than reusing a stale one.
 func metadataJobName(modelName, storageURI string) string {
 	sum := sha256.Sum256([]byte(storageURI))
 	hash := hex.EncodeToString(sum[:])[:metadataJobShortHashLen]

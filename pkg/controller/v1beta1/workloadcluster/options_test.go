@@ -358,3 +358,19 @@ func TestReconcile_RetryBackoffSpacesRequeue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 4*time.Second, res3.RequeueAfter, "third failure -> doubled again")
 }
+
+// TestProbeTimeout_ConfiguredValueWins: the probe budget is config-driven — the
+// configured per-call value reaches the reachability probe, and only an unset
+// knob falls back to the in-package default.
+func TestProbeTimeout_ConfiguredValueWins(t *testing.T) {
+	r := &Reconciler{ProbeTimeout: 250 * time.Millisecond}
+	assert.Equal(t, 250*time.Millisecond, r.probeTimeout(), "struct field must apply before Setup")
+
+	c := r.resolveConfig()
+	assert.Equal(t, 250*time.Millisecond, c.probeTimeout, "struct field must seed the resolved config")
+	r.cfg = &c
+	assert.Equal(t, 250*time.Millisecond, r.probeTimeout(), "resolved config must win after Setup")
+}
+
+// TestResolveConfig_NegativeGraceDisables: a negative ConnectionGracePeriod is a
+// deliberate "disable grace" and must be preserved (not replaced by the default).
