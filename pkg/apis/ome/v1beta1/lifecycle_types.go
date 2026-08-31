@@ -167,6 +167,12 @@ type OMENativeInstanceStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// ReadySince is when the Instance last entered Ready. Anchors
+	// post-Ready failure detection: container restarts that finished
+	// before this time belong to boot and never trigger a recreate.
+	// +optional
+	ReadySince *metav1.Time `json:"readySince,omitempty"`
+
 	// Operation is the durable record of an in-flight destructive action
 	// against this Instance. Set before the action starts, cleared after
 	// it completes. Lets a crashed controller resume work without diffing

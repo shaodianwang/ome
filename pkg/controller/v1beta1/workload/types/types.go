@@ -213,6 +213,11 @@ type InstanceStatus struct {
 
 	Conditions []metav1.Condition
 
+	// ReadySince is when the Instance last entered Ready. It anchors
+	// post-Ready failure detection: container restarts that finished
+	// before this time belong to boot and are never restart triggers.
+	ReadySince *metav1.Time
+
 	// Operation is the durable record of an in-flight destructive
 	// action against this Instance. Set before the action starts,
 	// cleared after it completes.

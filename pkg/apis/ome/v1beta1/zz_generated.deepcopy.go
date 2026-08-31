@@ -3230,6 +3230,10 @@ func (in *OMENativeInstanceStatus) DeepCopyInto(out *OMENativeInstanceStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.ReadySince != nil {
+		in, out := &in.ReadySince, &out.ReadySince
+		*out = (*in).DeepCopy()
+	}
 	if in.Operation != nil {
 		in, out := &in.Operation, &out.Operation
 		*out = new(InstanceOperation)

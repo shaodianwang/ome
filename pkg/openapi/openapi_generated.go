@@ -8218,6 +8218,12 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							},
 						},
 					},
+					"readySince": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadySince is when the Instance last entered Ready. Anchors post-Ready failure detection: container restarts that finished before this time belong to boot and never trigger a recreate.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
 					"operation": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Operation is the durable record of an in-flight destructive action against this Instance. Set before the action starts, cleared after it completes. Lets a crashed controller resume work without diffing pod state.",
@@ -8242,7 +8248,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

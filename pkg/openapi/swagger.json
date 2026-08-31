@@ -4618,6 +4618,10 @@
           "type": "integer",
           "format": "int32"
         },
+        "readySince": {
+          "description": "ReadySince is when the Instance last entered Ready. Anchors post-Ready failure detection: container restarts that finished before this time belong to boot and never trigger a recreate.",
+          "$ref": "#/definitions/v1.Time"
+        },
         "runningRevision": {
           "description": "RunningRevision is the ControllerRevision the live pods are running.",
           "type": "string"

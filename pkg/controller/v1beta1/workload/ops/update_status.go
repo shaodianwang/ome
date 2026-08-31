@@ -272,7 +272,7 @@ func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input wo
 			s.ActiveOrdinal == newOrdinal {
 			return false
 		}
-		s.Phase = workload.InstancePhaseReady
+		markReadyTransition(s, input.Now())
 		s.RunningRevision = rev
 		s.TargetRevision = ""
 		s.Operation = nil

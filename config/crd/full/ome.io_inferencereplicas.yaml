@@ -4229,6 +4229,9 @@ spec:
                       readyPodCount:
                         format: int32
                         type: integer
+                      readySince:
+                        format: date-time
+                        type: string
                       runningRevision:
                         type: string
                       scheduledPodCount:
