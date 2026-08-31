@@ -127,12 +127,13 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		cs.CurrentStep = 0
 	}
 
-	// Global pause (ome.io/rollout-paused=true): the operator froze the rollout.
+	// Global pause (ome.io/rollout-paused): the operator held the rollout.
 	// Observe only — no step advance, no traffic or phase write, no annotation
 	// consumption, no rollback arm/clear, and no state-machine (re)initialization.
 	// Step timers are left untouched, so clearing the pause resumes the current
-	// step with its clocks intact.
-	if in.ISVC.Annotations[constants.PausedRolloutAnnotation] == "true" {
+	// step with its clocks intact. Both pause depths hold the canary equally;
+	// the depth only changes whether Instance repair keeps running underneath.
+	if paused, _ := constants.RolloutPauseState(in.ISVC.Annotations); paused {
 		return pausedResult(cs, plan, in.DesiredReplicas), nil
 	}
 	// Stable and canary identities must remain distinct. The controller supplies

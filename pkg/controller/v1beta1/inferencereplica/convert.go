@@ -122,7 +122,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	// removal must resume it without waiting for a successful projection pass.
 	// When the parent is unavailable, fall back to the last projected IR value.
 	if parent != nil {
-		desired.Paused = parent.Annotations[constants.PausedRolloutAnnotation] == "true"
+		desired.Paused, desired.PauseFreeze = constants.RolloutPauseState(parent.Annotations)
 	}
 	// Thread the controller's cached gang-availability into DesiredSpec —
 	// EnsurePodGroups gates per-Instance PodGroup creation on this flag.
@@ -332,6 +332,7 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 		MinReadySeconds: ir.Spec.MinReadySeconds,
 		Runners:         runnersFromIR(ir),
 		Paused:          ir.Spec.Paused,
+		PauseFreeze:     ir.Spec.Paused && ir.Spec.PauseMode == v1beta1.PauseModeFreeze,
 	}
 	if ir.Spec.TopologyKey != nil {
 		desired.TopologyKey = *ir.Spec.TopologyKey

@@ -382,7 +382,12 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.Replicas = desiredReplicas(ir, p)
 	ir.Spec.Runners = runnersFromParams(p)
 	ir.Spec.Lifecycle = lifecycleFromComponentExt(p.ComponentExt)
-	ir.Spec.Paused = p.ISVC.Annotations[constants.PausedRolloutAnnotation] == "true"
+	paused, freeze := constants.RolloutPauseState(p.ISVC.Annotations)
+	ir.Spec.Paused = paused
+	ir.Spec.PauseMode = ""
+	if freeze {
+		ir.Spec.PauseMode = v1beta1.PauseModeFreeze
+	}
 	ir.Spec.RevisionHistoryLimit = revisionHistoryLimitFromISVC(p.ISVC)
 	// Project the resolved gang co-location key verbatim. The IR
 	// controller reads it to auto-generate the worker→leader podAffinity

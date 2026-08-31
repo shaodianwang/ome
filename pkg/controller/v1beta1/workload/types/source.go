@@ -71,10 +71,15 @@ type WorkloadDesiredSpec struct {
 	// means "no pacing constraint" (treated as allowed).
 	Pacing *WorkloadPacing
 
-	// Paused, when true, stops the reconciler from starting any fresh
-	// Update / Restart / Create operations. In-flight operations
-	// resume on unpause.
+	// Paused, when true, stops the reconciler from starting or advancing
+	// Update, Create, and Migration operations. The RestartPolicy keeps
+	// repairing existing Instances unless PauseFreeze is also set.
 	Paused bool
+
+	// PauseFreeze deepens Paused to a full stop: the restart pass is
+	// suspended too, so no Instance repair runs. Meaningless unless
+	// Paused is true.
+	PauseFreeze bool
 
 	// GangSchedulingAvailable is true when the scheduler-plugins
 	// PodGroup CRD was discovered at controller startup. Drives

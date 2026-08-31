@@ -5301,8 +5301,15 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 					},
 					"paused": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Paused, when true, stops the InferenceReplica controller from initiating any new Update / Restart / Create operations. In-flight operations resume on unpause.",
+							Description: "Paused, when true, stops the InferenceReplica controller from initiating fleet changes: Update, Create, and Migration operations are neither started nor advanced. The component's RestartPolicy keeps repairing existing Instances at their current revision unless PauseMode is Freeze. In-flight operations resume on unpause.",
 							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"pauseMode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PauseMode selects how much of the lifecycle Paused suspends. Only meaningful while Paused is true.\n  - \"Recover\" (default when empty): fleet changes are suspended;\n    the RestartPolicy continues to repair existing Instances at\n    the revision they already run.\n  - \"Freeze\": every lifecycle operation is suspended, including\n    Instance repair. Only kubelet-level container restarts and\n    deliberate replica reduction (scale-down) remain active.",
+							Type:        []string{"string"},
 							Format:      "",
 						},
 					},

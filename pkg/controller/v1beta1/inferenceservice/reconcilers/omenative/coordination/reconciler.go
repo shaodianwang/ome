@@ -605,7 +605,7 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 		}
 		obs.Components[c] = buildComponentObservation(summary, c, perRevisionPods[c], partition)
 	}
-	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
+	if paused, _ := constants.RolloutPauseState(isvc.Annotations); paused {
 		obs.PausedGlobal = true
 	}
 	return obs, nil

@@ -1061,35 +1061,91 @@ func TestPlan_LiveSurgeUntouchedByCleanup(t *testing.T) {
 	}
 }
 
-// TestPlan_Paused_TruncatesAfterScaleDown asserts a paused plan keeps
-// the scale-down selection (a deliberate replica reduction still
-// releases capacity) and plans nothing else.
-func TestPlan_Paused_TruncatesAfterScaleDown(t *testing.T) {
-	in := minimalInput(t)
-	forbidMutations(t, &in)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},
-		{Index: 1, Phase: workload.InstancePhaseReady}, // extra
+// TestPlan_Paused_RepairRunsFleetChangesDoNot pins the pause matrix.
+// A standard pause keeps the scale-down selection AND the restart pass
+// (repair of existing Instances at their current revision) while
+// planning no MigrateExpiry / Migrate / Update / Create work and
+// suspending escalation. A frozen pause (PauseFreeze) truncates after
+// scale-down — repair is suspended too. RestartPolicy None plans no
+// repair under either depth.
+func TestPlan_Paused_RepairRunsFleetChangesDoNot(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	// The all-passes fixture: pod-lost + prior-revision Instance
+	// (restart + update triggers), an extra index (scale-down), an
+	// expired and a drivable Manual migration record.
+	build := func(t *testing.T) (workload.ReconcileInput, workload.ComponentPlan) {
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.Clock = clocktesting.NewFakeClock(now)
+		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+			{Index: 9, Incarnation: 1, Phase: workload.InstancePhaseReady}, // extra
+		}
+		in.ObservedState.Migrations = []workload.MigrationRecord{
+			{RequestUUID: "u-expired", Trigger: workload.MigrationTriggerManual,
+				Phase: workload.MigrationPhaseAccepted, SourceInstance: 0,
+				Deadline: metav1.NewTime(now.Add(-time.Minute))},
+			{RequestUUID: "u-drive", Trigger: workload.MigrationTriggerManual,
+				Phase: workload.MigrationPhaseAccepted, SourceInstance: 0,
+				StartedAt: metav1.NewTime(now.Add(-time.Hour))},
+		}
+		plan := minimalPlan()
+		plan.Paused = true
+		plan.RestartPolicy = workload.RestartPolicyRecreateInstance
+		plan.MigrationMode = workload.MigrationModeAuto
+		return in, plan
 	}
-	plan := minimalPlan()
-	plan.Paused = true
-	// A live restart trigger (index 0's pod is gone) must NOT be
-	// planned while paused.
-	plan.RestartPolicy = workload.RestartPolicyRecreateInstance
 
-	d := planOrFail(t, in, plan, planSnapshot(in, nil))
-	if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionScaleDown}) {
-		t.Errorf("paused decision = %v, want [ScaleDown] only", actionKinds(d))
-	}
-	if d.Escalate {
-		t.Errorf("paused decision must suspend escalation")
-	}
+	t.Run("standard pause plans scale-down and repair only", func(t *testing.T) {
+		in, plan := build(t)
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		want := []workload.ActionKind{workload.ActionScaleDown, workload.ActionRestart}
+		if !kindsEqual(actionKinds(d), want) {
+			t.Errorf("paused decision = %v, want %v", actionKinds(d), want)
+		}
+		ra := findAction(d, workload.ActionRestart)
+		if len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 0 {
+			t.Errorf("restart selection = %+v, want index 0 only", ra.Restarts)
+		}
+		if d.Escalate {
+			t.Errorf("paused decision must suspend escalation")
+		}
+	})
 
-	plan.Paused = false
-	d = planOrFail(t, in, plan, planSnapshot(in, nil))
-	if !d.Escalate {
-		t.Errorf("non-paused decision must enable escalation")
-	}
+	t.Run("frozen pause truncates after scale-down", func(t *testing.T) {
+		in, plan := build(t)
+		plan.PauseFreeze = true
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionScaleDown}) {
+			t.Errorf("frozen decision = %v, want [ScaleDown] only", actionKinds(d))
+		}
+		if d.Escalate {
+			t.Errorf("frozen decision must suspend escalation")
+		}
+	})
+
+	t.Run("standard pause with RestartPolicy None plans no repair", func(t *testing.T) {
+		in, plan := build(t)
+		plan.RestartPolicy = ""
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionScaleDown}) {
+			t.Errorf("paused None-policy decision = %v, want [ScaleDown] only", actionKinds(d))
+		}
+	})
+
+	t.Run("unpause restores escalation and the full pipeline", func(t *testing.T) {
+		in, plan := build(t)
+		plan.Paused = false
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		if !d.Escalate {
+			t.Errorf("non-paused decision must enable escalation")
+		}
+		for _, k := range []workload.ActionKind{workload.ActionMigrateExpiry, workload.ActionMigrate, workload.ActionUpdate, workload.ActionCreate} {
+			if findAction(d, k) == nil {
+				t.Errorf("non-paused decision missing %s, got %v", k, actionKinds(d))
+			}
+		}
+	})
 }
 
 // maximalPlanInput builds the all-passes-triggerable fixture: an extra

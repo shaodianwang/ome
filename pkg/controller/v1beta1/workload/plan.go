@@ -62,6 +62,7 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 		InstanceReadyTimeout: InstanceReadyTimeoutOrDefault(lifecycle.InstanceReadyTimeout),
 		MigrationMode:        MigrationModeOrDefault(lifecycle.MigrationPolicy),
 		Paused:               desired.Paused,
+		PauseFreeze:          desired.PauseFreeze,
 		TopologyKey:          desired.TopologyKey,
 	}, nil
 }

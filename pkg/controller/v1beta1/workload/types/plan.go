@@ -41,10 +41,16 @@ type ComponentPlan struct {
 	// never).
 	MigrationMode MigrationMode
 
-	// Paused stops the dispatcher before it starts or advances Restart,
-	// Migration, Update, or Create operations. Scale-down remains active so a
-	// reduced desired replica count can still release capacity while paused.
+	// Paused stops the dispatcher from starting or advancing Migration,
+	// Update, or Create operations. Scale-down remains active so a reduced
+	// desired replica count can still release capacity, and the restart pass
+	// keeps repairing existing Instances at their current revision unless
+	// PauseFreeze is also set.
 	Paused bool
+
+	// PauseFreeze deepens Paused to a full stop: the restart pass is
+	// suspended too. Meaningless unless Paused is true.
+	PauseFreeze bool
 
 	// TopologyKey is the resolved gang co-location node-label key for
 	// this Component (e.g. an NVLink/RDMA fabric-domain label). Empty for

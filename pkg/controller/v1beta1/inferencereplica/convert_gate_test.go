@@ -419,10 +419,12 @@ func TestBuildReconcileInput_ThreadsGangSchedulingAvailable(t *testing.T) {
 
 func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) {
 	tests := []struct {
-		name       string
-		irPaused   bool
-		parent     *v1beta1.InferenceService
-		wantPaused bool
+		name        string
+		irPaused    bool
+		irPauseMode v1beta1.PauseMode
+		parent      *v1beta1.InferenceService
+		wantPaused  bool
+		wantFreeze  bool
 	}{
 		{
 			name:       "readable parent pause overrides stale false IR projection",
@@ -440,6 +442,33 @@ func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) 
 			irPaused:   true,
 			wantPaused: true,
 		},
+		{
+			name:       "readable parent freeze value sets both pause depths",
+			parent:     &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{constants.PausedRolloutAnnotation: constants.PausedRolloutFreezeValue}}},
+			wantPaused: true,
+			wantFreeze: true,
+		},
+		{
+			name:        "readable parent plain pause overrides stale freeze IR projection",
+			irPaused:    true,
+			irPauseMode: v1beta1.PauseModeFreeze,
+			parent:      &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{constants.PausedRolloutAnnotation: "true"}}},
+			wantPaused:  true,
+			wantFreeze:  false,
+		},
+		{
+			name:        "unreadable parent falls back to projected freeze",
+			irPaused:    true,
+			irPauseMode: v1beta1.PauseModeFreeze,
+			wantPaused:  true,
+			wantFreeze:  true,
+		},
+		{
+			name:       "unknown parent annotation value is not paused",
+			irPaused:   true,
+			parent:     &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{constants.PausedRolloutAnnotation: "True"}}},
+			wantPaused: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -447,9 +476,13 @@ func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) 
 			r, _ := newReconciler(t)
 			engineIR := baselineIR("llama-engine", "default", 1)
 			engineIR.Spec.Paused = tc.irPaused
-			got := r.buildReconcileInput(context.Background(), engineIR, tc.parent, nil, nil, 0, 0, coordination.GroupDefaults{}).DesiredSpec.Paused
-			if got != tc.wantPaused {
-				t.Fatalf("DesiredSpec.Paused: got %v want %v", got, tc.wantPaused)
+			engineIR.Spec.PauseMode = tc.irPauseMode
+			desired := r.buildReconcileInput(context.Background(), engineIR, tc.parent, nil, nil, 0, 0, coordination.GroupDefaults{}).DesiredSpec
+			if desired.Paused != tc.wantPaused {
+				t.Fatalf("DesiredSpec.Paused: got %v want %v", desired.Paused, tc.wantPaused)
+			}
+			if desired.PauseFreeze != tc.wantFreeze {
+				t.Fatalf("DesiredSpec.PauseFreeze: got %v want %v", desired.PauseFreeze, tc.wantFreeze)
 			}
 		})
 	}

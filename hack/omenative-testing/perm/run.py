@@ -150,6 +150,11 @@ INIT_BASE_S, INIT_PER_POD_S = int(120 * TIMEOUT_MULT), int(25 * TIMEOUT_MULT)
 # but timed out at 410s before "stable"). 60s/pod gives comfortable margin.
 ROTATE_BASE_S, ROTATE_PER_POD_S = int(180 * TIMEOUT_MULT), int(100 * TIMEOUT_MULT)
 MAX_BUDGET_S = int(1800 * TIMEOUT_MULT)
+# kill-mode pause handling: settle after annotating (annotation → IR
+# projection → workload input), and the no-recovery hold window a paused
+# case must survive before the lift step.
+PAUSE_PROJECT_S = int(15 * TIMEOUT_MULT)
+KILL_PAUSE_HOLD_S = int(60 * TIMEOUT_MULT)
 # Post-Completed source-drain grace. A source can't drain until its surge
 # replacement is Ready (~one pod-init cycle), and multi-instance migrations
 # SERIALIZE on a surge budget of 1 (reusing freed indices), so the drain is
@@ -1353,6 +1358,7 @@ HDR_VALIDATORS = {
     "mig": lambda v: v in {"Auto", "Surge", "Never"},
     "restart": lambda v: v in {"None", "RecreateInstance"},
     "kill": lambda v: v in {"leader", "worker"},
+    "pause": lambda v: v in {"true", "freeze"},
     "inst": _int_list,
     "canary": lambda v: str(v).lower() in {"auto", "manual"},
     "rollback": lambda v: v in (0, 1),
@@ -3449,20 +3455,48 @@ def _compremove(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _pause_annotation(case_id, value):
+    """Set or clear (value "") the rollout-paused annotation on the case ISVC
+    and let it project onto the IR before the next trigger."""
+    if value:
+        kubectl("-n", NS, "annotate", "isvc", case_id,
+                f"ome.io/rollout-paused={value}", "--overwrite")
+    else:
+        kubectl("-n", NS, "annotate", "isvc", case_id, "ome.io/rollout-paused-")
+    time.sleep(PAUSE_PROJECT_S)
+
+
+def _isvc_pause_value(case_id):
+    r = kubectl("-n", NS, "get", "isvc", case_id, "-o",
+                r'jsonpath={.metadata.annotations.ome\.io/rollout-paused}')
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
 def _kill(case_id, yaml_file, desc, hdr):
     """Delete a live pod and assert the RestartPolicy outcome by which pods get
     new UIDs (recreated):
       None             -> only the deleted pod is recreated (1 pod)
       RecreateInstance -> the whole Instance (leader+workers) recreates
-    `kill=leader|worker` (gangs) selects which pod dies."""
+    `kill=leader|worker` (gangs) selects which pod dies.
+
+    `pause=` layers the rollout-paused circuit breaker over the kill:
+      pause=true   -> RecreateInstance must repair WHILE paused (the pause
+                      suspends fleet changes, not the RestartPolicy); policy
+                      None must hold degraded until the annotation is removed.
+      pause=freeze -> no repair while frozen; downgrading the annotation to
+                      "true" must repair without ever unpausing."""
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
     N, configured = ctx["N"], ctx["configured"]
     ppi = ctx["pods_per_inst"]
     policy = hdr.get("restart", "RecreateInstance")
+    pmode = str(hdr.get("pause", ""))  # "" | true | freeze
     kcomp = "engine" if "engine" in configured else sorted(configured)[0]
     ktgt = str(hdr.get("kill", ""))   # leader | worker | ""
+    if pmode:
+        print(f"  Phase 1b: pause rollout (ome.io/rollout-paused={pmode})")
+        _pause_annotation(case_id, pmode)
     cands = [(n, p) for n, p in ctx["pod_state"].items()
              if p and p["alive"] and p["comp"] == kcomp]
     if ktgt:
@@ -3472,17 +3506,44 @@ def _kill(case_id, yaml_file, desc, hdr):
     kill_name, kill_pod = cands[0]
     killed_inst = kill_pod["inst"]
     pre_uids = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
-    print(f"  Phase 2: delete pod {kill_name} (comp={kcomp} inst={killed_inst} runner={kill_pod['runner']}) restartPolicy={policy}")
+    print(f"  Phase 2: delete pod {kill_name} (comp={kcomp} inst={killed_inst} runner={kill_pod['runner']}) restartPolicy={policy} pause={pmode or 'off'}")
     kubectl("-n", NS, "delete", "pod", kill_name, "--wait=false")
     ctx["trigger_ts"] = time.time()
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
-    print(f"  Phase 3: watching recovery (≤{budget}s)")
     exp = {"None": 1, "RecreateInstance": ppi[kcomp]}.get(policy, 1)
 
     def recreated_now():
         return [p for p in ctx["pod_state"].values()
                 if p and p["alive"] and p.get("uid") and p["uid"] not in pre_uids]
 
+    verdict, notes, checks = "PASS", [], []
+
+    # A pause that must hold: freeze holds every policy; plain pause holds
+    # policy None (its recovery path is the Create pass, which pause parks).
+    held = pmode == "freeze" or (pmode == "true" and policy == "None")
+    if held:
+        print(f"  Phase 3a: paused hold — expecting NO recreation for {KILL_PAUSE_HOLD_S}s")
+        hold_end = time.time() + KILL_PAUSE_HOLD_S
+        early = 0
+        while time.time() < hold_end and not ctx["closed"]:
+            _read_one(ctx)
+            if recreated_now():
+                early = len(recreated_now())
+                break
+        if early:
+            verdict = "FAIL"
+            notes.append(f"pause={pmode}: {early} pod(s) recreated during the hold")
+            checks.append(f"  ✗ pause={pmode}: repair ran during the paused hold ({early} recreated)")
+        else:
+            checks.append(f"  ✓ pause={pmode}: no recreation across the {KILL_PAUSE_HOLD_S}s hold")
+        # Lift: freeze downgrades to a plain pause (repair must run while
+        # still paused); plain pause + None unpauses (Create recovers).
+        lift = "true" if pmode == "freeze" else ""
+        print(f"  Phase 3b: lift — set rollout-paused={lift or '(removed)'}")
+        _pause_annotation(case_id, lift)
+        ctx["trigger_ts"] = time.time()
+
+    print(f"  Phase 3: watching recovery (≤{budget}s)")
     state, stable, dipped = "RECOVERING", None, False
     while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         agg = _read_one(ctx)
@@ -3506,7 +3567,6 @@ def _kill(case_id, yaml_file, desc, hdr):
     rc = len(recreated)
     elsewhere = [p for p in recreated if not (p["comp"] == kcomp and p["inst"] == killed_inst)]
 
-    verdict, notes, checks = "PASS", [], []
     if state != "RECOVERED":
         verdict = "FAIL"; notes.append(f"did not recover (state={state}, recreated={rc})")
         checks.append(f"  ✗ never recovered to N ready (state={state}; {rc} pod(s) recreated so far)")
@@ -3523,6 +3583,17 @@ def _kill(case_id, yaml_file, desc, hdr):
         checks.append(f"  ✗ {policy}: {rc} pod(s) recreated, expected {exp} ({'pod-only' if policy == 'None' else 'whole instance'})")
     elif not elsewhere:
         checks.append(f"  ✓ {policy}: exactly {rc} pod(s) recreated, scoped to killed instance {kcomp}/{killed_inst}")
+    # Repair-under-pause contract: recovery must have completed with the pause
+    # annotation still in force (repair may never require unpausing).
+    if pmode and not (held and pmode == "true"):
+        want = "true"
+        got = _isvc_pause_value(case_id)
+        if got != want:
+            verdict = "FAIL"
+            notes.append(f"pause annotation drifted during recovery (got {got!r}, want {want!r})")
+            checks.append(f"  ✗ pause: annotation was {got!r} after recovery, expected {want!r} — repair must not require unpausing")
+        else:
+            checks.append(f"  ✓ pause: recovery completed with rollout-paused={want} still set")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 

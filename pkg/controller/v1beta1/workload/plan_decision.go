@@ -152,9 +152,11 @@ type PlannedAction struct {
 type Decision struct {
 	// Actions are the selected pass-level actions,
 	// first-precedence-first. A paused plan truncates the list after
-	// scale-down: a deliberate replica reduction still releases
-	// capacity, but no lifecycle operation that can create, replace,
-	// or migrate pods is started or advanced.
+	// the restart pass: a deliberate replica reduction still releases
+	// capacity and the RestartPolicy keeps repairing existing
+	// Instances, but no Migration, Update, or Create operation is
+	// started or advanced. A frozen pause (PauseFreeze) truncates
+	// after scale-down — repair is suspended too.
 	Actions []PlannedAction
 
 	// RequeueAfter is the earliest not-yet-due Backoff RetryBlock
@@ -196,13 +198,19 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	}
 
 	// Paused is an operator circuit breaker: scale-down above still
-	// releases capacity, but nothing after it is planned. Pod and spec
-	// watches enqueue the workload again after unpause; no periodic
-	// requeue is needed while the desired state is intentionally held.
-	if plan.Paused {
+	// releases capacity, and the restart pass below keeps repairing
+	// existing Instances at their current revision (RunningRevision —
+	// repair can never advance a rollout), but no Migration, Update, or
+	// Create work is planned. PauseFreeze suspends the restart pass
+	// too. Pod and spec watches enqueue the workload again after
+	// unpause; no periodic requeue is needed while the desired state is
+	// intentionally held.
+	if plan.Paused && plan.PauseFreeze {
 		return d, nil
 	}
-	d.Escalate = true
+	if !plan.Paused {
+		d.Escalate = true
+	}
 
 	// Restart selection: per-Instance pod-loss / pod-Failed triggers,
 	// evaluated against the LIVE pod read — restart is destructive and
@@ -222,6 +230,11 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 		if len(restarts) > 0 {
 			d.Actions = append(d.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
 		}
+	}
+
+	// A standard pause plans nothing beyond repair.
+	if plan.Paused {
+		return d, nil
 	}
 
 	// Migration expiry selection — the deadline consumer. Planned

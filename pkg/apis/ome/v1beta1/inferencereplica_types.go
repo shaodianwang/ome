@@ -133,10 +133,25 @@ type InferenceReplicaSpec struct {
 	Autoscaler *ComponentAutoscaler `json:"autoscaler,omitempty"`
 
 	// Paused, when true, stops the InferenceReplica controller from
-	// initiating any new Update / Restart / Create operations.
-	// In-flight operations resume on unpause.
+	// initiating fleet changes: Update, Create, and Migration
+	// operations are neither started nor advanced. The component's
+	// RestartPolicy keeps repairing existing Instances at their current
+	// revision unless PauseMode is Freeze. In-flight operations resume
+	// on unpause.
 	// +optional
 	Paused bool `json:"paused,omitempty"`
+
+	// PauseMode selects how much of the lifecycle Paused suspends.
+	// Only meaningful while Paused is true.
+	//   - "Recover" (default when empty): fleet changes are suspended;
+	//     the RestartPolicy continues to repair existing Instances at
+	//     the revision they already run.
+	//   - "Freeze": every lifecycle operation is suspended, including
+	//     Instance repair. Only kubelet-level container restarts and
+	//     deliberate replica reduction (scale-down) remain active.
+	// +optional
+	// +kubebuilder:validation:Enum=Recover;Freeze
+	PauseMode PauseMode `json:"pauseMode,omitempty"`
 
 	// RevisionHistoryLimit caps how many non-live ControllerRevisions
 	// the InferenceReplica controller retains for this replica,
@@ -160,6 +175,18 @@ type ParentReference struct {
 	// Name is the name of the parent InferenceService.
 	Name string `json:"name"`
 }
+
+// PauseMode is the enum of pause depths for InferenceReplicaSpec.Paused.
+type PauseMode string
+
+const (
+	// PauseModeRecover suspends fleet changes while the RestartPolicy
+	// keeps repairing existing Instances at their current revision.
+	PauseModeRecover PauseMode = "Recover"
+	// PauseModeFreeze suspends every lifecycle operation, including
+	// Instance repair.
+	PauseModeFreeze PauseMode = "Freeze"
+)
 
 // RunnerName is the enum of recognized Runner roles within an
 // Instance. Matches the established Runner vocabulary so existing

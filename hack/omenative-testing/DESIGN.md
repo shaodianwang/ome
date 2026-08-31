@@ -53,7 +53,11 @@ at any depth (flat layout still works).
     *different* node + source drain + ledger reaches `Completed` (+
     ProgressDeadline timeout / MaxAutoRetries paths).
   - **kill** — delete a pod → assert RestartPolicy behavior (None = no recreate;
-    RecreateInstance = gang/instance recreated).
+    RecreateInstance = gang/instance recreated). `pause=true|freeze` layers the
+    rollout-paused circuit breaker over the kill: `true` must repair
+    RecreateInstance instances while still paused (and hold policy None until
+    unpause); `freeze` must hold everything, then repair after a downgrade to
+    `true` without ever unpausing. Cases p148–p153.
   - **partition** — set `RollingUpdate.Partition` → assert canary count holds,
     rest stay on old revision.
   - **scaledown** / **rebump** — shrink replicas; bump revision twice (X-2)

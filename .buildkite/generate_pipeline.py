@@ -173,7 +173,7 @@ KIND_SPEC_GROUPS = (
         "migration_gang",
     )),
     ("pause-cancel-interleavings", "Pause, cancel, and interleavings", (
-        "pause", "pause_midrollout", "inference_replica_pause",
+        "pause", "pause_midrollout", "pause_recovery", "inference_replica_pause",
         "cancel_midrollout", "interleave",
     )),
     ("scale-transitions", "Scale transitions", (

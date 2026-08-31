@@ -647,6 +647,11 @@ spec:
                   required:
                     - name
                   type: object
+                pauseMode:
+                  enum:
+                    - Recover
+                    - Freeze
+                  type: string
                 paused:
                   type: boolean
                 replicas:
