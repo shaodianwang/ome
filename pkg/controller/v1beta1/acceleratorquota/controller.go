@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -301,6 +302,10 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 	// management plane published about the same node name.
 	if r.Project.Enabled() {
 		updated.Status.Clusters = clusterStatuses(onClusters, current.Status.Clusters)
+		// The management plane's own budget figures, which no backend can give
+		// it: it runs no Kueue and materializes nothing, so its numbers are the
+		// fleet's members added up.
+		updated.Status.Budgets = fleetBudgets(node.Quota.Spec.Budgets, onClusters)
 	}
 
 	violation, isFrozen := frozen[node.Name()]
@@ -443,6 +448,76 @@ func clusterStatuses(observed map[string]clusterState,
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Cluster < out[j].Cluster })
 	return out
+}
+
+// fleetBudgets is the hub's view of one node's budgets: what the admin
+// authorized, and what the fleet is doing with it.
+//
+// Nominal is the authored total rather than the sum of the shares. They agree
+// when every member reported, and when one did not the split is held -- so
+// summing would quietly report a smaller fleet total for as long as a member
+// was missing, which is the same silent shrinkage that caused the over-grant.
+// The authored number is what the admin wrote and stays what the hub reports.
+//
+// The consumption figures ARE sums, because consumption is a fact about the
+// fleet: work admitted on one member is work the fleet is running. Borrowed
+// sums too, and means the same thing one tier up -- how much of what is running
+// sits above the share that authorized it.
+func fleetBudgets(authored []v1beta1.AcceleratorBudget,
+	onClusters map[string]clusterState,
+) []v1beta1.AcceleratorBudgetStatus {
+	if len(authored) == 0 {
+		return nil
+	}
+	out := make([]v1beta1.AcceleratorBudgetStatus, 0, len(authored))
+	for _, b := range authored {
+		key := budgetKey(b.ResourceName, b.ResourceFlavor)
+		row := v1beta1.AcceleratorBudgetStatus{
+			ResourceName:   b.ResourceName,
+			ResourceFlavor: b.ResourceFlavor,
+			Nominal:        b.Nominal.DeepCopy(),
+		}
+		var admitted, reserved, borrowed resource.Quantity
+		for cluster, st := range onClusters {
+			cb, ok := st.budgets[key]
+			if !ok {
+				continue
+			}
+			row.PerCluster = append(row.PerCluster, v1beta1.AcceleratorClusterBudgetStatus{
+				Cluster:  cluster,
+				Nominal:  cb.nominal.DeepCopy(),
+				Admitted: cb.admitted.DeepCopy(),
+				Reserved: cb.reserved.DeepCopy(),
+				Borrowed: cb.borrowed.DeepCopy(),
+			})
+			admitted.Add(cb.admitted)
+			reserved.Add(cb.reserved)
+			borrowed.Add(cb.borrowed)
+		}
+		sort.Slice(row.PerCluster, func(i, j int) bool {
+			return row.PerCluster[i].Cluster < row.PerCluster[j].Cluster
+		})
+		row.Admitted, row.Reserved, row.Borrowed = admitted, reserved, borrowed
+		out = append(out, row)
+	}
+	return out
+}
+
+// equalPerCluster compares one budget's member rows.
+func equalPerCluster(a, b []v1beta1.AcceleratorClusterBudgetStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Cluster != b[i].Cluster ||
+			a[i].Nominal.Cmp(b[i].Nominal) != 0 ||
+			a[i].Admitted.Cmp(b[i].Admitted) != 0 ||
+			a[i].Reserved.Cmp(b[i].Reserved) != 0 ||
+			a[i].Borrowed.Cmp(b[i].Borrowed) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // equalClusters compares the per-member rows, excluding AppliedTime. Including

@@ -853,3 +853,160 @@ func refusingMember(t *testing.T, objs ...client.Object) workloadcluster.Selecti
 			},
 		}).Build()}
 }
+
+// The hub's account of what the fleet is consuming, per member and in total.
+//
+// The numbers come from each member's own copy: only the member can see its
+// Kueue, and it has already rolled its queues onto the node they belong to, so
+// the hub reads its own arithmetic back beside the consumption that arithmetic
+// authorized.
+func TestProjectReportsWhatEachMemberIsHolding(t *testing.T) {
+	// The members' controllers are not running here, so their copies are seeded
+	// with the status a workload-mode manager would have written.
+	a := member(t, memberRoot("3"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	// Each member now reports consumption against the share it was given.
+	reportUsage(t, a, "team", "30", "40", "0")
+	reportUsage(t, b, "team", "10", "10", "5")
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	var got v1beta1.AcceleratorQuota
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if len(got.Status.Budgets) != 1 {
+		t.Fatalf("hub reported %d budgets, want 1", len(got.Status.Budgets))
+	}
+	b0 := got.Status.Budgets[0]
+
+	// Nominal is the authored fleet total, not the sum of the shares. They
+	// agree when every member reported; when one has not, the split is held,
+	// and summing would quietly report a smaller fleet than the admin wrote.
+	if b0.Nominal.String() != "120" {
+		t.Errorf("fleet nominal = %s, want the authored 120", b0.Nominal.String())
+	}
+	// Consumption is a fact about the fleet, so it does sum.
+	if b0.Admitted.String() != "40" {
+		t.Errorf("fleet admitted = %s, want 30+10", b0.Admitted.String())
+	}
+	if b0.Reserved.String() != "50" {
+		t.Errorf("fleet reserved = %s, want 40+10", b0.Reserved.String())
+	}
+	if b0.Borrowed.String() != "5" {
+		t.Errorf("fleet borrowed = %s, want 0+5", b0.Borrowed.String())
+	}
+
+	perCluster := map[string]v1beta1.AcceleratorClusterBudgetStatus{}
+	for _, pc := range b0.PerCluster {
+		perCluster[pc.Cluster] = pc
+	}
+	if len(perCluster) != 2 {
+		t.Fatalf("per-cluster rows = %d, want 2", len(perCluster))
+	}
+	// The share each member was assigned, read back beside what it is holding:
+	// 3:1 reported capacity over a 120 total.
+	rowA, rowB := perCluster["member-a"], perCluster["member-b"]
+	if got := rowA.Nominal.String(); got != "90" {
+		t.Errorf("member-a nominal = %s, want 90", got)
+	}
+	if got := rowB.Nominal.String(); got != "30" {
+		t.Errorf("member-b nominal = %s, want 30", got)
+	}
+	if got := rowA.Admitted.String(); got != "30" {
+		t.Errorf("member-a admitted = %s, want 30", got)
+	}
+	if got := rowB.Borrowed.String(); got != "5" {
+		t.Errorf("member-b borrowed = %s, want 5", got)
+	}
+}
+
+// The breakdown moves independently of the totals it sums to: two members can
+// trade admitted work and leave the fleet figure unchanged. A comparator that
+// only looked at the totals would freeze the breakdown after the first write.
+func TestPerClusterBudgetsKeepMoving(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	ctx := context.Background()
+	// The projections have to exist before a member can report against them.
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	reportUsage(t, a, "team", "20", "20", "0")
+	reportUsage(t, b, "team", "20", "20", "0")
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	// The same fleet total, moved between members.
+	reportUsage(t, a, "team", "35", "35", "0")
+	reportUsage(t, b, "team", "5", "5", "0")
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	var got v1beta1.AcceleratorQuota
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	for _, pc := range got.Status.Budgets[0].PerCluster {
+		if pc.Cluster == "member-a" && pc.Admitted.String() != "35" {
+			t.Errorf("member-a admitted = %s after the work moved, want 35 -- the breakdown froze",
+				pc.Admitted.String())
+		}
+	}
+	if total := got.Status.Budgets[0].Admitted.String(); total != "40" {
+		t.Errorf("fleet admitted = %s, want an unchanged 40", total)
+	}
+}
+
+// reportUsage writes onto a member's projection what its own workload-mode
+// manager would have written after reading its Kueue.
+func reportUsage(t *testing.T, m workloadcluster.SelectivelyCachingClient,
+	node, admitted, reserved, borrowed string,
+) {
+	t.Helper()
+	ctx := context.Background()
+	var q v1beta1.AcceleratorQuota
+	if err := m.Get(ctx, types.NamespacedName{Name: node}, &q); err != nil {
+		t.Fatalf("reading %s on the member: %v", node, err)
+	}
+	q.Status.Budgets = []v1beta1.AcceleratorBudgetStatus{{
+		ResourceName:   "google.com/tpu",
+		ResourceFlavor: "tpu7x",
+		Admitted:       resource.MustParse(admitted),
+		Reserved:       resource.MustParse(reserved),
+		Borrowed:       resource.MustParse(borrowed),
+	}}
+	if err := m.Status().Update(ctx, &q); err != nil {
+		t.Fatalf("writing usage onto %s: %v", node, err)
+	}
+}
