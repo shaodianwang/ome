@@ -109,9 +109,9 @@ func (g *GangPack) isSchedulableAfterPodCapacityChange(_ klog.Logger, pod *v1.Po
 }
 
 func samePodGroup(a, b *v1.Pod) bool {
-	aNS, aName, aOK := podGroupNameOf(a)
-	bNS, bName, bOK := podGroupNameOf(b)
-	return aOK && bOK && aNS == bNS && aName == bName
+	nsA, aName, aOK := podGroupNameOf(a)
+	nsB, bName, bOK := podGroupNameOf(b)
+	return aOK && bOK && nsA == nsB && aName == bName
 }
 
 func samePodIdentity(a, b *v1.Pod) bool {

@@ -19,8 +19,8 @@ ome:
   # via the pod-annotation scrape path.
   #
   # Set `labels` to opt the generated PodMonitors into an external scrape
-  # pipeline that selects monitors by label — e.g. a KTel / OpenTelemetry target
-  # allocator whose podMonitorSelector requires {ktel.fb.com/scrape-tier: cluster}.
+  # pipeline that selects monitors by label — e.g. an OpenTelemetry target
+  # allocator whose podMonitorSelector requires {monitoring.example.com/scrape-tier: cluster}.
   # These labels land on metadata.labels only (never spec.selector).
   #
   # Set `relabelings` to map Kubernetes SD meta labels onto the stable metric
@@ -29,7 +29,7 @@ ome:
   #
   # podMonitor:
   #   labels:
-  #     ktel.fb.com/scrape-tier: cluster
+  #     monitoring.example.com/scrape-tier: cluster
   #   relabelings:
   #     - sourceLabels: ["__meta_kubernetes_pod_label_ome_io_inferenceservice"]
   #       targetLabel: inferenceservice
@@ -126,7 +126,7 @@ ome:
     # Merged after the chart's default annotations (prometheus.io/scrape, etc.).
     # Typical use: metric-pipeline schema tagging, e.g.
     #   podAnnotations:
-    #     fb_metric_schema: ome_controller
+    #     metrics-schema: ome-controller
     podAnnotations: {}
     deploymentMode: "RawDeployment"
     # Admission-time component replica defaults stamped by the ISVC mutating

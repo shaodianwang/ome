@@ -595,7 +595,7 @@ func TestMaterializedSourceGeneration(t *testing.T) {
 			// The annotation is the projector's to write, so a value that will
 			// not parse was edited by hand. Zero would read as "nothing
 			// materialized yet", which is worse than stale.
-			name:    "an unparseable stamp holds the last number rather than resetting",
+			name:    "an unparsable stamp holds the last number rather than resetting",
 			current: projected("not-a-number", 4),
 			status:  materialized(true),
 			want:    4,

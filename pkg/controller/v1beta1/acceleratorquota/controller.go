@@ -393,7 +393,7 @@ func materializedSourceGeneration(current *v1beta1.AcceleratorQuota,
 	if !apimeta.IsStatusConditionTrue(status.Conditions, v1beta1.AcceleratorQuotaMaterialized) {
 		return current.Status.SourceGeneration
 	}
-	// A projector writes this annotation, so an unparseable value means someone
+	// A projector writes this annotation, so an unparsable value means someone
 	// edited it by hand. Holding the previous number is more honest than
 	// reporting zero, which reads as "materialized nothing yet".
 	n, err := strconv.ParseInt(stamped, 10, 64)
