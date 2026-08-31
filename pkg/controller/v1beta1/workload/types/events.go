@@ -19,8 +19,9 @@ const (
 	EventReasonInPlaceUpdateNotPossible EventReason = "InPlaceUpdateNotPossible"
 
 	// Recreate / surge update (workload/ops/update.go).
-	EventReasonRecreateUpdateStarted   EventReason = "RecreateUpdateStarted"
-	EventReasonRecreateUpdateCompleted EventReason = "RecreateUpdateCompleted"
+	EventReasonRecreateUpdateStarted     EventReason = "RecreateUpdateStarted"
+	EventReasonRecreateUpdateCompleted   EventReason = "RecreateUpdateCompleted"
+	EventReasonFailedSurgeTargetRecycled EventReason = "FailedSurgeTargetRecycled"
 
 	// Restart (workload/ops/restart.go).
 	EventReasonRestartTriggered EventReason = "RestartTriggered"

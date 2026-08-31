@@ -116,6 +116,7 @@ const (
 	InstanceOperationMigrate = types.InstanceOperationMigrate
 	InstanceOperationDelete  = types.InstanceOperationDelete
 
+	UpdateStepSurge                  = types.UpdateStepSurge
 	UpdateStepGangSurgeTarget        = types.UpdateStepGangSurgeTarget
 	UpdateStepGangSurgeTargetCleanup = types.UpdateStepGangSurgeTargetCleanup
 	UpdateStepSurgeDrain             = types.UpdateStepSurgeDrain
@@ -127,6 +128,7 @@ const (
 	EventReasonInPlaceUpdateNotPossible      = types.EventReasonInPlaceUpdateNotPossible
 	EventReasonRecreateUpdateStarted         = types.EventReasonRecreateUpdateStarted
 	EventReasonRecreateUpdateCompleted       = types.EventReasonRecreateUpdateCompleted
+	EventReasonFailedSurgeTargetRecycled     = types.EventReasonFailedSurgeTargetRecycled
 	EventReasonRestartTriggered              = types.EventReasonRestartTriggered
 	EventReasonRestartCompleted              = types.EventReasonRestartCompleted
 	EventReasonFoundOrphan                   = types.EventReasonFoundOrphan

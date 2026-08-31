@@ -112,6 +112,10 @@ const (
 	InstanceOperationDelete  InstanceOperationType = "Delete"
 )
 
+// UpdateStepSurge marks the source Instance while a single-pod or gang
+// SurgeThenDrain replacement is being created.
+const UpdateStepSurge = "Surge"
+
 // UpdateStepGangSurgeTarget is the InstanceOperation.Step marking the
 // surge-target (replacement) Instance of an in-flight multi-pod (gang)
 // SurgeThenDrain update. Lives here in the leaf types package so both the

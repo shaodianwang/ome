@@ -22,7 +22,7 @@ const (
 	// being created at the other ordinal slot. Transitions to
 	// updateStepSurgeDrain once the surge pod is Ready and the old
 	// pod's serving gate is being flipped.
-	updateStepSurge = "Surge"
+	updateStepSurge = workload.UpdateStepSurge
 	// updateStepSurgeDrain is the SurgeThenDrain drain phase. Distinct
 	// from updateStepDrain so surge-budget accounting
 	// (workload.CurrentSurgeInFlight, coordination
