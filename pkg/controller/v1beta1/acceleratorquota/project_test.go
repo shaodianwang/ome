@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -693,6 +694,162 @@ func unreadableMember(t *testing.T, objs ...client.Object) workloadcluster.Selec
 				...client.GetOption,
 			) error {
 				return errors.New("connection refused")
+			},
+		}).Build()}
+}
+
+// The hub's only account of what its members are doing. Without it the tree
+// reports Ready while a member is refusing every write, which is the shape of
+// failure this whole component exists to make visible.
+func TestProjectReportsEachMemberOnStatus(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	var got v1beta1.AcceleratorQuota
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+
+	// A row per registered member, in a stable order.
+	if diff := cmp.Diff([]string{"member-a", "member-b"}, clusterNames(got.Status.Clusters)); diff != "" {
+		t.Errorf("rows mismatch (-want +got):\n%s", diff)
+	}
+	for _, row := range got.Status.Clusters {
+		if row.AppliedGeneration == 0 {
+			t.Errorf("%s reports no applied generation, so the hub cannot tell whether its write landed",
+				row.Cluster)
+		}
+		if row.AppliedTime == nil {
+			t.Errorf("%s reports no applied time", row.Cluster)
+		}
+		if row.Message != "" {
+			t.Errorf("%s reports %q on a clean pass", row.Cluster, row.Message)
+		}
+		// Nothing has materialized yet: these members run no controller of
+		// their own in this test, so the gap between applied and materialized
+		// is the whole point and must not be papered over.
+		if row.MaterializedGeneration != 0 {
+			t.Errorf("%s claims to have materialized generation %d with no controller to do it",
+				row.Cluster, row.MaterializedGeneration)
+		}
+	}
+}
+
+// A member that refused the write is the row an operator needs most, and it
+// must say so rather than simply lacking a generation.
+func TestProjectReportsAMemberThatRefused(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	b := refusingMember(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	// The pass reports the refusal as an error and still writes status.
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{})
+
+	var got v1beta1.AcceleratorQuota
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	rows := map[string]v1beta1.AcceleratorQuotaClusterStatus{}
+	for _, row := range got.Status.Clusters {
+		rows[row.Cluster] = row
+	}
+
+	if rows["member-b"].Message == "" {
+		t.Error("the refusing member reports no message, so its failure is invisible from the hub")
+	}
+	if rows["member-b"].AppliedGeneration != 0 {
+		t.Errorf("the refusing member claims applied generation %d", rows["member-b"].AppliedGeneration)
+	}
+	// One member's refusal must not cost the others their report.
+	if rows["member-a"].AppliedGeneration == 0 {
+		t.Error("the healthy member lost its report because another member refused")
+	}
+}
+
+// Every field written to status needs a matching entry in equalStatus: the
+// no-op short-circuit skips the patch when it believes nothing changed, so a
+// field it does not compare is written once and frozen. This package has been
+// bitten by that twice.
+func TestClusterStatusKeepsMoving(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	var got v1beta1.AcceleratorQuota
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if got.Status.Clusters[0].Message != "" {
+		t.Fatalf("first pass already reports %q", got.Status.Clusters[0].Message)
+	}
+
+	// The member starts refusing. Nothing about the node itself changes, so
+	// this second pass is exactly the one a missing comparator entry skips --
+	// and the hub would go on reporting a member that is now rejecting
+	// every write as healthy.
+	fleet.members["member-a"] = refusingMember(t, memberRoot("3"))
+	_, _ = r.Reconcile(ctx, ctrl.Request{})
+
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &got); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if got.Status.Clusters[0].Message == "" {
+		t.Error("the member began refusing and the hub still reports it clean -- the report froze")
+	}
+}
+
+func clusterNames(rows []v1beta1.AcceleratorQuotaClusterStatus) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Cluster)
+	}
+	return out
+}
+
+// refusingMember accepts reads and rejects the projector's applies, which is
+// what a member whose webhook or RBAC says no looks like.
+func refusingMember(t *testing.T, objs ...client.Object) workloadcluster.SelectivelyCachingClient {
+	t.Helper()
+	return cachingClient{fake.NewClientBuilder().
+		WithScheme(capacityScheme(t)).
+		WithObjects(objs...).
+		WithStatusSubresource(&v1beta1.AcceleratorQuota{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object,
+				client.Patch, ...client.PatchOption,
+			) error {
+				return errors.New("denied by the member")
 			},
 		}).Build()}
 }

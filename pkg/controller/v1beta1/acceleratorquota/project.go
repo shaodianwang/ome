@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +52,46 @@ func (o ProjectOptions) Enabled() bool {
 	return o.Clusters != nil && o.Origin != "" && o.FieldManager != ""
 }
 
+// clusterState is what one member is doing with one node, as far as this pass
+// could tell.
+//
+// The generations are the point of the type, and they are comparable because
+// both count SOURCE revisions: Applied is what the hub wrote, Materialized is
+// what the member echoed back after rendering it. Equal means caught up; lower
+// means the member has the update and has not acted on it yet. A projection's
+// own metadata.generation would answer neither question, being object-local.
+type clusterState struct {
+	appliedGeneration      int64
+	appliedTime            *metav1.Time
+	materializedGeneration int64
+	message                string
+}
+
+// fleetView is every node's state on every registered member.
+//
+// Registered, not connected: the member an operator most needs a row for is the
+// one that is missing, and a view that listed only who answered would drop it
+// silently -- the same shape of mistake as a split taken over whoever answered.
+type fleetView map[string]map[string]clusterState
+
+func (v fleetView) note(node, cluster string, mutate func(*clusterState)) {
+	if v[node] == nil {
+		v[node] = map[string]clusterState{}
+	}
+	st := v[node][cluster]
+	mutate(&st)
+	v[node][cluster] = st
+}
+
+// say records a message for one node across every listed member, for the
+// verdicts that are the hub's own and identical everywhere: a held fleet, an
+// unresolved split, a frozen node.
+func (v fleetView) say(node string, clusters []string, message string) {
+	for _, c := range clusters {
+		v.note(node, c, func(st *clusterState) { st.message = message })
+	}
+}
+
 // project fans the authored tree out across the fleet.
 //
 // One pass: read what each member says it has, split every budget against that,
@@ -63,8 +104,9 @@ func (o ProjectOptions) Enabled() bool {
 // when the pass could not be attempted at all.
 func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 	frozen map[string]tree.Violation,
-) (map[string]string, error) {
+) (fleetView, error) {
 	log := r.Log.WithName("project")
+	view := fleetView{}
 	connected := r.Project.Clusters.Connected()
 	sort.Strings(connected)
 	if len(connected) == 0 {
@@ -72,7 +114,7 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 		// restarts, and reporting every node broken because the fleet is still
 		// coming up would bury a real fault when one happens.
 		log.V(1).Info("no member is connected, so nothing is projected this pass")
-		return nil, nil
+		return view, nil
 	}
 
 	// Every member the admin registered, not merely the ones answering. A
@@ -90,17 +132,17 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 	// meant.
 	registered, err := r.registeredClusters(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reading the cluster registry: %w", err)
+		return view, fmt.Errorf("reading the cluster registry: %w", err)
 	}
 	if absent := missing(registered, connected); len(absent) > 0 {
 		log.Info("holding every projection: part of the fleet is unreachable",
 			"unreachable", absent, "connected", connected)
-		held := map[string]string{}
-		for _, leaf := range built.Leaves() {
-			held[leaf.Name()] = fmt.Sprintf(
-				"projections held: %v unreachable, and re-splitting without them would over-grant the fleet", absent)
+		reason := fmt.Sprintf(
+			"projections held: %v unreachable, and re-splitting without them would over-grant the fleet", absent)
+		for _, node := range built.Nodes() {
+			view.say(node.Name(), registered, reason)
 		}
-		return held, nil
+		return view, nil
 	}
 
 	capacity, reported, unreadable := r.fleetCapacity(ctx, connected)
@@ -120,9 +162,8 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 		DefaultPolicy: r.Project.DefaultPolicy,
 	})
 
-	outcomes := map[string]string{}
 	for node, reason := range resolution.Unresolved {
-		outcomes[node] = reason
+		view.say(node, registered, reason)
 	}
 
 	// A frozen node keeps whatever it last received. Withholding this pass's
@@ -134,7 +175,7 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 		kept := allowances[:0]
 		for _, a := range allowances {
 			if v, held := frozen[a.Node]; held {
-				outcomes[a.Node] = fmt.Sprintf("projection held at its last value: %s", v.Message)
+				view.say(a.Node, registered, fmt.Sprintf("projection held at its last value: %s", v.Message))
 				continue
 			}
 			kept = append(kept, a)
@@ -144,16 +185,16 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 
 	var errs []error
 	for _, cluster := range connected {
-		if err := r.projectOnto(ctx, built, cluster, resolution.ByCluster[cluster], frozen); err != nil {
+		if err := r.projectOnto(ctx, built, cluster, resolution.ByCluster[cluster], frozen, view); err != nil {
 			// Recorded per cluster and carried on. The next member's quota does
 			// not depend on this one's write having landed.
 			errs = append(errs, fmt.Errorf("cluster %s: %w", cluster, err))
 		}
 	}
 	if len(errs) > 0 {
-		return outcomes, errors.Join(errs...)
+		return view, errors.Join(errs...)
 	}
-	return outcomes, nil
+	return view, nil
 }
 
 // registeredClusters is every member an admin has registered, whatever its
@@ -197,6 +238,7 @@ func missing(registered, connected []string) []string {
 // that no longer belong there.
 func (r *Reconciler) projectOnto(ctx context.Context, built *tree.Tree,
 	cluster string, allowances []projection.Allowance, frozen map[string]tree.Violation,
+	view fleetView,
 ) error {
 	remote, ok := r.Project.Clusters.ClientFor(cluster)
 	if !ok {
@@ -224,7 +266,19 @@ func (r *Reconciler) projectOnto(ctx context.Context, built *tree.Tree,
 		if err := remote.Patch(ctx, obj, client.Apply,
 			client.FieldOwner(r.Project.FieldManager), client.ForceOwnership); err != nil {
 			errs = append(errs, fmt.Errorf("applying %s: %w", obj.Name, err))
+			view.note(obj.Name, cluster, func(st *clusterState) { st.message = err.Error() })
+			continue
 		}
+		// Applied, which is not the same as materialized: the member has the
+		// revision, and its own controller renders it on its own schedule. The
+		// gap between these two numbers is exactly that lag.
+		applied := sourceGenerationOf(obj)
+		now := metav1.Now()
+		view.note(obj.Name, cluster, func(st *clusterState) {
+			st.appliedGeneration = applied
+			st.appliedTime = &now
+			st.message = ""
+		})
 	}
 
 	// Applied first, swept second. A node that moved between clusters exists
@@ -265,6 +319,17 @@ func keepOn(written []*v1beta1.AcceleratorQuota, frozen map[string]tree.Violatio
 // This is what makes a tenant deletable at all, and what removes a copy from a
 // cluster a leaf no longer matches — a share that fell to zero leaves a queue
 // behind that would otherwise keep granting quota nobody authorized.
+// sourceGenerationOf reads the generation the renderer stamped on a copy. It is
+// the same annotation the member echoes into status.sourceGeneration once it has
+// materialized, which is what makes the two numbers comparable.
+func sourceGenerationOf(obj *v1beta1.AcceleratorQuota) int64 {
+	n, err := strconv.ParseInt(obj.Annotations[v1beta1.AcceleratorQuotaSourceGenerationAnnotation], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // depthByParentRef measures how far each node sits below the top of the set,
 // following parentRef. A name whose parent is absent counts as depth 0: the
 // parent is either the member's own root or already gone, and either way there

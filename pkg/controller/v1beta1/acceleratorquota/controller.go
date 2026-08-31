@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -192,17 +193,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	var fleet fleetView
 	if r.Project.Enabled() {
-		projected, err := r.project(ctx, built, frozen)
+		var err error
+		fleet, err = r.project(ctx, built, frozen)
 		if err != nil {
 			// Per-cluster failures are already folded in here; this is the
 			// remainder. Collected rather than returned so the status writes
 			// below still happen — an operator needs the tree's verdict most
 			// when a member is refusing it.
 			errs = append(errs, fmt.Errorf("projecting the quota tree: %w", err))
-		}
-		for node, reason := range projected {
-			log.V(1).Info("node not projected this pass", "node", node, "reason", reason)
 		}
 	}
 
@@ -216,7 +216,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	for _, node := range built.Nodes() {
-		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()], reading); err != nil {
+		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()], reading, fleet[node.Name()]); err != nil {
 			errs = append(errs, fmt.Errorf("writing status for node %s: %w", node.Name(), err))
 		}
 	}
@@ -276,7 +276,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // only when something changed, so an idle fleet does not rewrite status on every
 // resync tick and spin the watch.
 func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation,
-	outcome backend.NodeOutcome, reading usageReading) error {
+	outcome backend.NodeOutcome, reading usageReading,
+	onClusters map[string]clusterState,
+) error {
 	current := node.Quota
 	updated := current.DeepCopy()
 
@@ -292,6 +294,13 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 	// only one of them is safe to publish on a failed read.
 	if totals, ok := reading.forNode(node.Name()); ok {
 		updated.Status.Budgets = budgetStatus(node, totals)
+	}
+
+	// Only a projecting plane has members to report, and only it should clear
+	// the field: a workload-mode manager writing nil here would erase what the
+	// management plane published about the same node name.
+	if r.Project.Enabled() {
+		updated.Status.Clusters = clusterStatuses(onClusters, current.Status.Clusters)
 	}
 
 	violation, isFrozen := frozen[node.Name()]
@@ -394,6 +403,67 @@ func materializedSourceGeneration(current *v1beta1.AcceleratorQuota,
 	return n
 }
 
+// clusterStatuses renders one node's per-member rows, sorted so two passes over
+// the same fleet produce the same object.
+//
+// A member that reported nothing this pass keeps the generations it last
+// earned. The alternative -- zeroing them -- would read as "this member has
+// materialized nothing", which is a much stronger claim than "we could not ask
+// it", and the two call for opposite responses from an operator.
+func clusterStatuses(observed map[string]clusterState,
+	previous []v1beta1.AcceleratorQuotaClusterStatus,
+) []v1beta1.AcceleratorQuotaClusterStatus {
+	if len(observed) == 0 {
+		return previous
+	}
+	was := make(map[string]v1beta1.AcceleratorQuotaClusterStatus, len(previous))
+	for _, p := range previous {
+		was[p.Cluster] = p
+	}
+
+	out := make([]v1beta1.AcceleratorQuotaClusterStatus, 0, len(observed))
+	for cluster, st := range observed {
+		row := v1beta1.AcceleratorQuotaClusterStatus{
+			Cluster:                cluster,
+			AppliedGeneration:      st.appliedGeneration,
+			AppliedTime:            st.appliedTime,
+			MaterializedGeneration: st.materializedGeneration,
+			Message:                st.message,
+		}
+		if prev, ok := was[cluster]; ok {
+			if row.AppliedGeneration == 0 {
+				row.AppliedGeneration = prev.AppliedGeneration
+				row.AppliedTime = prev.AppliedTime
+			}
+			if row.MaterializedGeneration == 0 {
+				row.MaterializedGeneration = prev.MaterializedGeneration
+			}
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Cluster < out[j].Cluster })
+	return out
+}
+
+// equalClusters compares the per-member rows, excluding AppliedTime. Including
+// it would make every successful pass a write, since a clean re-apply restamps
+// the time whether or not anything moved -- and this status is watched, so a
+// write per pass is a reconcile per pass forever.
+func equalClusters(a, b []v1beta1.AcceleratorQuotaClusterStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Cluster != b[i].Cluster ||
+			a[i].AppliedGeneration != b[i].AppliedGeneration ||
+			a[i].MaterializedGeneration != b[i].MaterializedGeneration ||
+			a[i].Message != b[i].Message {
+			return false
+		}
+	}
+	return true
+}
+
 func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
 	if a.ObservedGeneration != b.ObservedGeneration || a.Path != b.Path || a.Parent != b.Parent {
 		return false
@@ -406,6 +476,9 @@ func equalStatus(a, b v1beta1.AcceleratorQuotaStatus) bool {
 		return false
 	}
 	if !equalBudgets(a.Budgets, b.Budgets) {
+		return false
+	}
+	if !equalClusters(a.Clusters, b.Clusters) {
 		return false
 	}
 	for _, condType := range []string{
