@@ -475,6 +475,7 @@ var (
 		"networking.gke.io/",         // GKE multi-NIC and RDMA network annotations (networking.gke.io/interfaces, etc.)
 		"rdma.ome.io/",               // OME RDMA injection annotations (RDMAAutoInjectAnnotationKey, RDMAProfileAnnotationKey, etc.)
 		"runtime.ome.io/",            // OME runtime profile annotations (shm/probe/observability profiles + container-name override)
+		ModelInitInjectionKey,        // ome.io/inject-model-init - triggers model init container injection via webhook
 		FineTunedAdapterInjectionKey, // ome.io/inject-fine-tuned-adapter - triggers fine-tuned adapter injection via webhook
 		ServingSidecarInjectionKey,   // ome.io/inject-serving-sidecar - triggers serving sidecar injection via webhook
 	}
@@ -687,12 +688,14 @@ func ModelConfigName(isvcName string) string {
 	return fmt.Sprintf("modelconfig-%s", isvcName)
 }
 
-func LWSName(isvcName string) string {
-	var maxLen = 50
-	if len(isvcName) > maxLen {
-		isvcName = isvcName[len(isvcName)-maxLen:]
-	}
-	return fmt.Sprintf("lws-%s", isvcName)
+func LWSName(componentName string) string {
+	const (
+		lwsNamePrefix = "lws-"
+		// Leave room for downstream prefixes/suffixes when this name is embedded in Pod label values.
+		maxLWSNameLength = 35
+	)
+
+	return TruncateNameWithPrefix(componentName, lwsNamePrefix, maxLWSNameLength)
 }
 
 func InferenceServiceHostName(name string, namespace string, domain string) string {
