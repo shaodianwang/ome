@@ -13,6 +13,7 @@ approvers:
 see-also:
   - "/oeps/0010-model-overlays"
   - "/oeps/0011-inference-traffic-policy"
+  - "/oeps/0013.1-autoscaler-policy"
 
 # The target maturity stage in the current dev cycle.
 stage: alpha

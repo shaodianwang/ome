@@ -1,0 +1,51 @@
+title: Reusable Autoscaler Policies
+oep-number: "0013.1"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-09-01
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0013, which defined the per-Component autoscaler block and
+# its isvc -> runtime -> legacy -> default resolution chain. This OEP inserts
+# one reusable layer (a referenced, template-bearing AutoscalerPolicy CRD)
+# between the isvc and runtime steps. Additive: 0013's verbatim pass-through
+# and whole-block-replace contracts are preserved, not superseded.
+see-also:
+  - "/oeps/0013-autoscaling"
+  - "/oeps/0018.1-multicluster-scaleout"
+  - "/oeps/0018.3-placement-modes"
+  - "/oeps/0015.2-canary-analysis"
+  - "/oeps/0011-inference-traffic-policy"
+
+# Additive to 0013, not a supersession.
+replaces: []
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No runtime feature gate. Gating is chart-level: one Helm value installs the
+# CRD, controller, and webhook together (never install-but-dormant). On a
+# cluster without the feature, an InferenceService that sets any
+# spec.<component>.autoscalerPolicyRef is admission-rejected — a ref can never
+# silently no-op.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_autoscaler_policy_render_total          # labels: namespace, policy, component, outcome (rendered|fail_closed)
+  - ome_autoscaler_policy_ready                 # gauge 0/1; labels: namespace, policy
+  - ome_autoscaler_policy_attached_components   # gauge; labels: namespace, policy
+  - ome_autoscaler_policy_fail_closed_total     # labels: namespace, policy, reason
+  - ome_autoscaler_policy_preflight_total       # control plane; labels: mode (Single|All|Split), outcome (eligible|ineligible|held)
+  # ome_autoscaler_spec_source_total (defined in OEP-0013) gains source="policy".
