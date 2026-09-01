@@ -1059,8 +1059,8 @@ case IDs must match the repository inventory exactly. The ColumnarV2-target run
 records actual representation reads/writes and includes a named subset that
 persists columns, restarts the manager, and reconciles from them. No case may
 produce FAIL, INFRA-FAIL, SKIP, a crash, or a missing result. The parked ledger
-is exact: p64, p76, and p90 are declared `infeasible`; p347 is declared
-`notimpl` for the timing nondeterminism tracked by issue #900. Each parked case
+is exact: three cases are declared `infeasible`, and one is declared
+`notimpl` for a known timing nondeterminism in its scenario. Each parked case
 may PASS or be softened from its expected failure to XFAIL under the existing
 harness rule, but its status assertions must still execute and any XFAIL must
 retain the declared reason. Every other case must PASS in both modes, and no new
