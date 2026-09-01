@@ -1,7 +1,7 @@
 title: "Integration test framework v2: multi-cluster, perf, conflict gate"
 oep-number: "0020"
 authors:
-  - "@simo-lin"
+  - "@slin1237"
 status: provisional
 creation-date: 2026-06-26
 reviewers:

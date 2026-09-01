@@ -350,12 +350,12 @@ timing values).
 **The contract — five concrete cleanups:**
 
 1. **Promote `irmanaged_kind` to CI when Docker lands.** The IR-managed path is the
-   production default (since #320/#400), and it has a KIND suite
+   production default, and it has a KIND suite
    (`tests/integration/singlecluster/controller/irmanaged_kind/`), but CI runs only
-   `omenative_coordination_kind`, soft-fail, because mks-cpu agents expose no Docker
-   daemon (`CLAUDE.md`). When the queue gets Docker, the default path's KIND suite
+   `omenative_coordination_kind`, soft-fail, because the CI agents expose no Docker
+   daemon (`CLAUDE.md`). When the CI agents get Docker, the default path's KIND suite
    must become a gating step. *Integration note for the maintainer:* this is a
-   `.buildkite/` + Makefile wiring change, owned outside this OEP's file scope.
+   CI-pipeline + Makefile wiring change, owned outside this OEP's file scope.
 2. **Prune the 13 dead `PIt` and 8 dead `Skip` stubs.** A `ginkgo.PIt("…", func(){})`
    that asserts nothing (e.g. `bluegreen_kind_test.go:31-37`) inflates the spec count
    without adding coverage; convert each to either a real spec or a removed line. The
