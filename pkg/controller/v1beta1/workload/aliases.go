@@ -56,6 +56,8 @@ type (
 	RetryBlock              = types.RetryBlock
 	RetryBlockState         = types.RetryBlockState
 	RetryBlockDisposition   = types.RetryBlockDisposition
+	RolloutHold             = types.RolloutHold
+	RolloutHoldGate         = types.RolloutHoldGate
 	RetryPolicy             = types.RetryPolicy
 	ForceDeletePolicy       = types.ForceDeletePolicy
 	DispositionDeps         = types.DispositionDeps
@@ -153,6 +155,12 @@ const (
 	RetryBlockBackoff         = types.RetryBlockBackoff
 	RetryBlockHeld            = types.RetryBlockHeld
 	RetryBlockRetryInProgress = types.RetryBlockRetryInProgress
+
+	RolloutHoldGateRatio      = types.RolloutHoldGateRatio
+	RolloutHoldGateSequential = types.RolloutHoldGateSequential
+	RolloutHoldGateBudget     = types.RolloutHoldGateBudget
+	RolloutHoldGateRetryBlock = types.RolloutHoldGateRetryBlock
+	RolloutHoldGateHeld       = types.RolloutHoldGateHeld
 
 	RetryBlockUnchanged = types.RetryBlockUnchanged
 	RetryBlockPersist   = types.RetryBlockPersist

@@ -6,6 +6,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -224,6 +225,16 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 			g.Expect(b.State).To(Equal(v1beta1.RetryBlockBackoff))
 			g.Expect(b.AttemptsStarted).To(BeNumerically(">=", 1))
 			g.Expect(b.NextRetryAt).NotTo(BeNil(), "Backoff must persist its resume time")
+
+			// The rollout-hold surface must name this same denial: no
+			// Update pass runs while every candidate Instance is
+			// Backoff-denied, so the IR status writer's RetryBlock/Held
+			// fallback (not a live gate consult) is what populates it.
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			g.Expect(ir.Status.RolloutHold).NotTo(BeNil(),
+				"status.rolloutHold must surface the active Backoff denial")
+			g.Expect(ir.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGateRetryBlock))
+			g.Expect(ir.Status.RolloutHold.Target).To(Equal(badRev))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// ~2 backoff windows + slack of continuous observation: the source
@@ -233,6 +244,7 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 
 	ginkgo.It("exhausts attempts into Held with a RetryHeld event and no further churn", func() {
 		// The second failed wave exhausts the fast policy (maxAttempts=2).
+		var heldSince metav1.Time
 		Eventually(func(g Gomega) {
 			observe(g)
 			b := findRetryBlock(retryBlocks(g, ns.Name, name, v1beta1.EngineComponent), badRev)
@@ -240,6 +252,16 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 			g.Expect(b.State).To(Equal(v1beta1.RetryBlockHeld))
 			g.Expect(b.AttemptsStarted).To(Equal(fastRetryMaxAttempts))
 			g.Expect(b.NextRetryAt).To(BeNil(), "Held has no time bound")
+
+			// The rollout-hold surface must follow the block into Held —
+			// unbounded, same target revision.
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			g.Expect(ir.Status.RolloutHold).NotTo(BeNil(),
+				"status.rolloutHold must surface the Held denial")
+			g.Expect(ir.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGateHeld))
+			g.Expect(ir.Status.RolloutHold.Target).To(Equal(badRev))
+			heldSince = ir.Status.RolloutHold.Since
+			g.Expect(heldSince.IsZero()).To(BeFalse())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// The operator-facing Warning lands on the parent ISVC at the
@@ -262,6 +284,14 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 				g.Expect(known).To(BeTrue(),
 					"no new bad-revision pod may be created after the block reaches Held (new UID %s)", uid)
 			}
+
+			// Churn-safety over real wall-clock reconciles: the Held
+			// denial is unchanged pass to pass, so status.rolloutHold.since
+			// must not move (no status-update-storm on a steady hold).
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			g.Expect(ir.Status.RolloutHold).NotTo(BeNil())
+			g.Expect(ir.Status.RolloutHold.Since.Equal(&heldSince)).To(BeTrue(),
+				"since must stay stable across reconciles while the same Held denial persists")
 		}).WithTimeout(postHeldWindow).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		// Wave accounting across the whole observation: every authorized
@@ -298,6 +328,12 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 			g.Expect(cur.Status.InstanceStatuses[0].RunningRevision).To(Equal(cur.Status.UpdateRevision))
 			g.Expect(findRetryBlock(cur.Status.RetryBlocks, cur.Status.UpdateRevision)).To(BeNil(),
 				"the corrected revision must carry no RetryBlock")
+
+			// Convergence (CurrentRevision == UpdateRevision) clears the
+			// rollout-hold surface outright, regardless of the bounded
+			// Held history left behind for badRev.
+			g.Expect(cur.Status.RolloutHold).To(BeNil(),
+				"status.rolloutHold must clear once the rollout converges on the corrected revision")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

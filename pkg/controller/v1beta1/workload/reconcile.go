@@ -316,6 +316,11 @@ func scaleDownExtras(d Decision) map[int32]struct{} {
 func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, sel *UpdateSelection, retryBlockWait time.Duration) (res ctrl.Result, stop bool, err error) {
 	anyUpdating := false
 	anyGated := false
+	// hold records the first StartingFresh denial this pass (Budget or
+	// UpdateGate) for RecordRolloutHold — one Component has one hold
+	// slot, so the first denial found (plan order) wins, matching the
+	// gate stack's own first-denial-wins precedence.
+	var hold *RolloutHold
 	// anyUpdateRan tracks whether ANY Update call fired this wake-up
 	// — including ones that returned done=true (e.g., a surge that
 	// just promoted Phase to Ready and stamped RunningRevision). Even
@@ -397,6 +402,13 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 					projected := sel.PriorSurgeInFlight + inFlightSurge + 1
 					if projected > sel.SurgeBudget {
 						anyGated = true
+						if hold == nil {
+							hold = &RolloutHold{
+								Gate:   RolloutHoldGateBudget,
+								Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)", sel.SurgeBudget, projected),
+								Target: target.Name,
+							}
+						}
 						continue
 					}
 				}
@@ -405,6 +417,13 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 					projected := sel.PriorUnavailInFlight + inFlightUnavail + 1
 					if projected > sel.UnavailBudget {
 						anyGated = true
+						if hold == nil {
+							hold = &RolloutHold{
+								Gate:   RolloutHoldGateBudget,
+								Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", sel.UnavailBudget, projected),
+								Target: target.Name,
+							}
+						}
 						continue
 					}
 				}
@@ -418,8 +437,11 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 				// unavailability, so gating their own recreate is a
 				// double count that starves the recovery (see
 				// UpdateItem.CoordGateExempt).
-				if allowed, _ := input.UpdateGate(sel.Strategy, inFlightSurge, gateUnavail); !allowed {
+				if allowed, gate, reason := input.UpdateGate(sel.Strategy, inFlightSurge, gateUnavail); !allowed {
 					anyGated = true
+					if hold == nil {
+						hold = &RolloutHold{Gate: gate, Reason: reason, Target: target.Name}
+					}
 					continue
 				}
 			}
@@ -444,6 +466,17 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 		if !done {
 			anyUpdating = true
 		}
+	}
+	if anyUpdateRan {
+		// Forward progress this pass: whatever was gated for a DIFFERENT
+		// Instance is superseded — the Component is not stuck, it will
+		// re-observe fresh state (including any still-active gate) next
+		// pass. Clearing here is also what lets a resolved hold disappear
+		// promptly instead of lingering until the next denial-free pass.
+		hold = nil
+	}
+	if input.RecordRolloutHold != nil {
+		input.RecordRolloutHold(hold)
 	}
 	if anyUpdating || anyGated || anyUpdateRan {
 		// About to requeue without the full Create pass. Brand-new

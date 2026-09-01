@@ -406,6 +406,14 @@ type InferenceReplicaStatus struct {
 	// child without parsing the ISVC spec.
 	// +optional
 	CoordinationGroupRef string `json:"coordinationGroupRef,omitempty"`
+
+	// RolloutHold records the most recent reason a per-Instance Update was
+	// denied for this Component — cross-Component coordination (Ratio,
+	// Sequential), a surge/unavailability budget, or a same-target retry
+	// hold (RetryBlock, Held). Nil while the Component is progressing or
+	// has no rollout in flight. See RolloutHold for the field semantics.
+	// +optional
+	RolloutHold *RolloutHold `json:"rolloutHold,omitempty"`
 }
 
 // RetryBlockState is the retry authority state for one target revision.

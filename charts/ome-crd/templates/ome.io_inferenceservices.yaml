@@ -31610,6 +31610,28 @@ spec:
                           replicas:
                             format: int32
                             type: integer
+                          rolloutHold:
+                            properties:
+                              gate:
+                                enum:
+                                  - Ratio
+                                  - Sequential
+                                  - Budget
+                                  - RetryBlock
+                                  - Held
+                                type: string
+                              reason:
+                                type: string
+                              since:
+                                format: date-time
+                                type: string
+                              target:
+                                type: string
+                            required:
+                              - gate
+                              - reason
+                              - since
+                            type: object
                           servingReplicas:
                             format: int32
                             type: integer

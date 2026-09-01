@@ -336,6 +336,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
 
+	// Capture the update pass's rollout-hold verdict (if any) for the
+	// deferred status write below. execHoldObserved distinguishes "the
+	// Update pass ran and found nothing to hold" (clear) from "the Update
+	// pass never ran this reconcile" (the status writer falls back to the
+	// persisted RetryBlock/Held state instead).
+	var (
+		execHoldObserved bool
+		execHold         *workload.RolloutHold
+	)
+	input.RecordRolloutHold = func(hold *workload.RolloutHold) {
+		execHoldObserved = true
+		execHold = hold
+	}
+
 	// Relocation-directive memory: prune AutoRecover ledger records for
 	// instances observed Ready (the success-prune mirror of the
 	// RetryBlock prune), then project the per-instance node-exclusion
@@ -474,7 +488,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				log.V(1).Error(perr, "CurrentRevision promotion also failed; primary error preserved")
 			}
 		}
-		serr := r.aggregateAndWriteStatus(ctx, ir, plan, specTarget)
+		serr := r.aggregateAndWriteStatus(ctx, ir, plan, specTarget, execHoldObserved, execHold)
 		if errors.Is(serr, workload.ErrStatusMutationPrecondition) {
 			result, err = ctrl.Result{Requeue: true}, nil
 			return

@@ -3068,6 +3068,10 @@
           ],
           "x-kubernetes-list-type": "map"
         },
+        "rolloutHold": {
+          "description": "RolloutHold records the most recent reason a per-Instance Update was denied for this Component — cross-Component coordination (Ratio, Sequential), a surge/unavailability budget, or a same-target retry hold (RetryBlock, Held). Nil while the Component is progressing or has no rollout in flight. See RolloutHold for the field semantics.",
+          "$ref": "#/definitions/v1beta1.RolloutHold"
+        },
         "servingReplicas": {
           "description": "ServingReplicas is the number of Instances whose every pod is both ContainersReady AND has serving=True on the controller-managed readiness gate (i.e., actually in the load balancer rotation). MaxUnavailable budgets are computed against this count, not ReadyReplicas, so \"missing from traffic\" reflects reality during in-place updates.",
           "type": "integer",
@@ -4044,6 +4048,10 @@
           "description": "Replicas is the total Instance count (any phase).",
           "type": "integer",
           "format": "int32"
+        },
+        "rolloutHold": {
+          "description": "RolloutHold reports the most recent reason this Component's rollout did not advance, mirrored verbatim from the owning InferenceReplica's status. Nil while the Component is progressing or has no rollout in flight.",
+          "$ref": "#/definitions/v1beta1.RolloutHold"
         },
         "servingReplicas": {
           "description": "ServingReplicas is the number of Instances whose every pod is BOTH ContainersReady AND has serving=True on the controller-managed readiness gate — i.e., the pod is actually in the load balancer's rotation. This is the count operators care about for traffic availability, and the count MaxUnavailable budgets gate against.\n\nDiverges from ReadyReplicas during in-place updates and any other scenario where the controller flips the serving gate to False while containers remain technically Ready.",
@@ -5382,6 +5390,35 @@
           "type": "integer",
           "format": "int32",
           "default": 0
+        }
+      }
+    },
+    "v1beta1.RolloutHold": {
+      "description": "RolloutHold records the most recent reason a per-Instance Update was denied for a Component — the detail behind \"why has this rollout not moved\". Overwritten whenever a reconcile observes a fresh denial; cleared once the Component's rollout advances (an Update is admitted) or completes (CurrentRevision == UpdateRevision, or no rollout is in flight). Since is preserved across reconciles that keep reporting the same Gate and Target, so it anchors \"held since\" rather than \"last observed at\".",
+      "type": "object",
+      "required": [
+        "gate",
+        "reason",
+        "since"
+      ],
+      "properties": {
+        "gate": {
+          "description": "Gate names the layer that produced Reason.",
+          "type": "string",
+          "default": ""
+        },
+        "reason": {
+          "description": "Reason is the operator-facing denial string from the gate that produced it (e.g. \"Sequential waiting on decoder\").",
+          "type": "string",
+          "default": ""
+        },
+        "since": {
+          "description": "Since is when this Gate+Target combination was first observed without interruption. A change in Gate or Target restarts the clock; a change in Reason text alone does not (mirrors how apimeta.SetStatusCondition preserves LastTransitionTime while a condition's Status is unchanged).",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "target": {
+          "description": "Target is the ControllerRevision name the held Update was aimed at.",
+          "type": "string"
         }
       }
     },

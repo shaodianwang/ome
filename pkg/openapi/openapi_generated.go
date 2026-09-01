@@ -136,6 +136,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":        schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroup":                     schema_pkg_apis_ome_v1beta1_RolloutGroup(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep":                 schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutHold":                      schema_pkg_apis_ome_v1beta1_RolloutHold(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                     schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                      schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                       schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
@@ -5587,11 +5588,17 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCall
 							Format:      "",
 						},
 					},
+					"rolloutHold": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RolloutHold records the most recent reason a per-Instance Update was denied for this Component — cross-Component coordination (Ratio, Sequential), a surge/unavailability budget, or a same-target retry hold (RetryBlock, Held). Nil while the Component is progressing or has no rollout in flight. See RolloutHold for the field semantics.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutHold"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusColumns", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RetryBlock", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceStatusColumns", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RetryBlock", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutHold", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
@@ -7261,11 +7268,17 @@ func schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref common.ReferenceCallback) c
 							},
 						},
 					},
+					"rolloutHold": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RolloutHold reports the most recent reason this Component's rollout did not advance, mirrored verbatim from the owning InferenceReplica's status. Nil while the Component is progressing or has no rollout in flight.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutHold"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutHold", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
@@ -9579,6 +9592,51 @@ func schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref common.ReferenceCallback) 
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutAnalysis", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutHold(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutHold records the most recent reason a per-Instance Update was denied for a Component — the detail behind \"why has this rollout not moved\". Overwritten whenever a reconcile observes a fresh denial; cleared once the Component's rollout advances (an Update is admitted) or completes (CurrentRevision == UpdateRevision, or no rollout is in flight). Since is preserved across reconciles that keep reporting the same Gate and Target, so it anchors \"held since\" rather than \"last observed at\".",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"gate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Gate names the layer that produced Reason.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is the operator-facing denial string from the gate that produced it (e.g. \"Sequential waiting on decoder\").",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"target": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Target is the ControllerRevision name the held Update was aimed at.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"since": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Since is when this Gate+Target combination was first observed without interruption. A change in Gate or Target restarts the clock; a change in Reason text alone does not (mirrors how apimeta.SetStatusCondition preserves LastTransitionTime while a condition's Status is unchanged).",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+				},
+				Required: []string{"gate", "reason", "since"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

@@ -208,8 +208,9 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// The gate reads peer Component status, which must be live:
 		// cross-Component coordination against a cache-lagged peer would
 		// admit a rollout the peer's real state forbids.
-		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-			return coordination.EvaluateUpdateGate(ctx, r.APIReader, parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
+		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workload.RolloutHoldGate, string) {
+			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.APIReader, parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
+			return allowed, workload.RolloutHoldGate(gate), reason
 		}
 	}
 	// The migration audit ledger (history) lives on the user-facing
