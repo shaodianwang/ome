@@ -29,8 +29,8 @@ The console is "MUSE Console" riding the "MUSE" backend — one name, one produc
 
 ## Motivation
 
-The upstream OME shipped a console; we removed it when we forked. Since then MSL
-has added the features that most need a UI — PD-disaggregated serving, multi-cluster
+The upstream OME shipped a console; we removed it when we forked. Since then this
+fork has added the features that most need a UI — PD-disaggregated serving, multi-cluster
 placement (OEP-0018), canary/blue-green rollout (OEP-0015/0017) — and there is no
 operator surface for any of it. The failure mode today is concrete:
 
@@ -108,7 +108,7 @@ OEP about a *layer*, not a new system.
   one `InferenceService` and I watch placement land it on a cluster with free
   H100s.
 - *As an SRE*, I open Capacity, see that `gcp-tpu-us-east5` has two free `v5e-256`
-  slices and `msl-cw-use2-2` is at 95% H100 allocatable, and I deploy accordingly.
+  slices and `cw-us-east-2` is at 95% H100 allocatable, and I deploy accordingly.
 - *As a model owner*, I onboard a PyTorch checkpoint; MUSE converts it to
   safetensors, generates `config.json`, then transfers it Meta→GCP, and I watch
   each stage with an ETA instead of tailing a script.

@@ -602,7 +602,7 @@
       <button class="icon-btn" title="Notifications">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M6 9a6 6 0 1112 0c0 5 2 6 2 6H4s2-1 2-6z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 21h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       </button>
-      <div class="avatar" title="s.lin@meta.com">SL</div>
+      <div class="avatar" title="operator@example.com">OP</div>
     </header>
 
     <div class="content">
@@ -673,7 +673,7 @@
                 </tr></thead>
                 <tbody>
                   <tr>
-                    <td class="cell-name mono">msl-cw-use2-2</td>
+                    <td class="cell-name mono">cw-us-east-2</td>
                     <td><div class="cloud-cell"><span class="cdot cw"></span>CoreWeave</div></td>
                     <td class="muted">us-east-2</td>
                     <td class="num">512</td>
@@ -718,34 +718,34 @@
                     <td><span class="pill green"><span class="pdot"></span>Ready</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">meta-rdma-pnb-3</td>
+                    <td class="cell-name mono">meta-rdma-east-3</td>
                     <td><div class="cloud-cell"><span class="cdot meta"></span>Meta</div></td>
-                    <td class="muted">pnb / RDMA</td>
+                    <td class="muted">east / RDMA</td>
                     <td class="num">1,024</td>
                     <td><span class="tag">H100·RoCE</span></td>
                     <td><div class="util-cell"><div class="bar"><i style="width:77%"></i></div><span class="pct">77%</span></div></td>
                     <td><span class="pill green"><span class="pdot"></span>Ready</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">meta-rdma-eag-1</td>
+                    <td class="cell-name mono">meta-rdma-west-1</td>
                     <td><div class="cloud-cell"><span class="cdot meta"></span>Meta</div></td>
-                    <td class="muted">eag / RDMA</td>
+                    <td class="muted">west / RDMA</td>
                     <td class="num">2,048</td>
                     <td><span class="tag">H100·RoCE</span></td>
                     <td><div class="util-cell"><div class="bar amber"><i style="width:91%"></i></div><span class="pct">91%</span></div></td>
                     <td><span class="pill amber"><span class="pdot"></span>Pressure</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">meta-rdma-ftw-2</td>
+                    <td class="cell-name mono">meta-rdma-central-2</td>
                     <td><div class="cloud-cell"><span class="cdot meta"></span>Meta</div></td>
-                    <td class="muted">ftw / RDMA</td>
+                    <td class="muted">central / RDMA</td>
                     <td class="num">1,536</td>
                     <td><span class="tag">H100·RoCE</span></td>
                     <td><div class="util-cell"><div class="bar"><i style="width:58%"></i></div><span class="pct">58%</span></div></td>
                     <td><span class="pill green"><span class="pdot"></span>Ready</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">cw-msl-cw-use2-1</td>
+                    <td class="cell-name mono">cw-us-east-1</td>
                     <td><div class="cloud-cell"><span class="cdot cw"></span>CoreWeave</div></td>
                     <td class="muted">us-east-2</td>
                     <td class="num">128</td>
@@ -793,7 +793,7 @@
               <div class="feed-item">
                 <div class="feed-ic amber"><svg viewBox="0 0 24 24" fill="none"><path d="M12 9v4m0 4h.01M10.3 4.3L2.6 18a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 4.3a2 2 0 00-3.4 0z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></div>
                 <div class="feed-body">
-                  <div class="row1"><div class="t"><b>Capacity pressure</b> on meta-rdma-eag-1</div><span class="m when">1h</span></div>
+                  <div class="row1"><div class="t"><b>Capacity pressure</b> on meta-rdma-west-1</div><span class="m when">1h</span></div>
                   <div class="m mono">91% allocatable · 3 pending pods queued in Kueue</div>
                 </div>
               </div>
@@ -808,7 +808,7 @@
                 <div class="feed-ic green"><svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
                 <div class="feed-body">
                   <div class="row1"><div class="t"><b>Blue/Green cutover</b> complete</div><span class="m when">3h</span></div>
-                  <div class="m mono">llama-3.3-70b · meta-rdma-ftw-2 · green live, blue drained</div>
+                  <div class="m mono">llama-3.3-70b · meta-rdma-central-2 · green live, blue drained</div>
                 </div>
               </div>
             </div>
@@ -835,7 +835,7 @@
                   <td><span class="pill blue"><span class="pdot"></span>Canary</span></td>
                   <td style="width:230px"><div class="canary-track"><div class="canary-steps"><span class="cstep cur"></span><span class="cstep"></span><span class="cstep"></span><span class="cstep"></span></div><span class="muted" style="font-size:11px">10% → 25% → 50% → 100% · at <b style="color:var(--fg)">10%</b></span></div></td>
                   <td><span class="pill amber"><span class="pdot"></span>analyzing</span></td>
-                  <td class="mono muted">meta-rdma-pnb-3</td>
+                  <td class="mono muted">meta-rdma-east-3</td>
                   <td class="right muted nowrap">4m ago</td>
                 </tr>
                 <tr>
@@ -859,7 +859,7 @@
                   <td><span class="pill violet"><span class="pdot"></span>Blue/Green</span></td>
                   <td style="width:230px"><div class="canary-track"><div class="bar violet striped"><i style="width:42%"></i></div><span class="muted" style="font-size:11px">green provisioning · 5 / 12 ready</span></div></td>
                   <td><span class="pill slate"><span class="pdot"></span>warming</span></td>
-                  <td class="mono muted">meta-rdma-ftw-2</td>
+                  <td class="mono muted">meta-rdma-central-2</td>
                   <td class="right muted nowrap">3m ago</td>
                 </tr>
               </tbody>
@@ -911,7 +911,7 @@
                   <td class="mono" style="font-size:12px">llama-3.1-405b<div class="sub">fp8 · 405B</div></td>
                   <td class="mono" style="font-size:12px">sglang-h100-pd</td>
                   <td><span class="pill cyan"><span class="pdot"></span>PD-Disagg</span></td>
-                  <td class="mono muted">meta-rdma-pnb-3</td>
+                  <td class="mono muted">meta-rdma-east-3</td>
                   <td class="num">16 / 16</td>
                   <td><span class="pill blue"><span class="pdot"></span>Canary 10%</span></td>
                   <td class="num muted">18d</td>
@@ -929,7 +929,7 @@
                               <dt>replicas</dt><dd>4 / 4 ready</dd>
                               <dt>accelerator</dt><dd>H100 ×8 / pod</dd>
                               <dt>topology</dt><dd>MultiNode (LWS)</dd>
-                              <dt>cluster</dt><dd>meta-rdma-pnb-3</dd>
+                              <dt>cluster</dt><dd>meta-rdma-east-3</dd>
                             </dl>
                           </div>
                           <div class="comp-card">
@@ -938,7 +938,7 @@
                               <dt>replicas</dt><dd>12 / 12 ready</dd>
                               <dt>accelerator</dt><dd>H100 ×8 / pod</dd>
                               <dt>topology</dt><dd>MultiNode (LWS)</dd>
-                              <dt>cluster</dt><dd>meta-rdma-pnb-3</dd>
+                              <dt>cluster</dt><dd>meta-rdma-east-3</dd>
                             </dl>
                           </div>
                         </div>
@@ -946,7 +946,7 @@
                         <table class="tbl" style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
                           <thead><tr><th>Cluster</th><th>Engine</th><th>Decoder</th><th>GPUs</th><th>Status</th></tr></thead>
                           <tbody>
-                            <tr><td class="mono">meta-rdma-pnb-3</td><td class="mono">4</td><td class="mono">12</td><td class="mono">128</td><td><span class="pill green"><span class="pdot"></span>Ready</span></td></tr>
+                            <tr><td class="mono">meta-rdma-east-3</td><td class="mono">4</td><td class="mono">12</td><td class="mono">128</td><td><span class="pill green"><span class="pdot"></span>Ready</span></td></tr>
                           </tbody>
                         </table>
                       </div>
@@ -1044,7 +1044,7 @@
                   <td class="mono" style="font-size:12px">llama-3.3-70b<div class="sub">fp8 · 70B</div></td>
                   <td class="mono" style="font-size:12px">sglang-h100</td>
                   <td><span class="pill blue"><span class="pdot"></span>OMENative</span></td>
-                  <td class="mono muted">meta-rdma-ftw-2</td>
+                  <td class="mono muted">meta-rdma-central-2</td>
                   <td class="num">24 / 24</td>
                   <td><span class="pill slate"><span class="pdot"></span>Stable</span></td>
                   <td class="num muted">62d</td>
@@ -1057,7 +1057,7 @@
                   <td class="mono" style="font-size:12px">mixtral-8x22b<div class="sub">fp8 · 141B MoE</div></td>
                   <td class="mono" style="font-size:12px">vllm-h100</td>
                   <td><span class="pill slate"><span class="pdot"></span>MultiNode</span></td>
-                  <td class="mono muted">meta-rdma-ftw-2</td>
+                  <td class="mono muted">meta-rdma-central-2</td>
                   <td class="num">5 / 12</td>
                   <td><span class="pill violet"><span class="pdot"></span>BlueGreen</span></td>
                   <td class="num muted">12d</td>
@@ -1096,7 +1096,7 @@
                   <td class="mono" style="font-size:12px">llama-3.1-8b<div class="sub">bf16 · 8B</div></td>
                   <td class="mono" style="font-size:12px">sglang-a100</td>
                   <td><span class="pill slate"><span class="pdot"></span>RawDeploy</span></td>
-                  <td class="mono muted">cw-msl-cw-use2-1</td>
+                  <td class="mono muted">cw-us-east-1</td>
                   <td class="num">0 / 6</td>
                   <td><span class="pill slate"><span class="pdot"></span>Stable</span></td>
                   <td class="num muted">2d</td>
@@ -1185,7 +1185,7 @@
               <div class="src-logo src-meta">M</div>
               <div class="mh">
                 <div class="nm">llama-3.1-405b-instruct <span class="pill violet"><span class="pdot"></span>In Transit</span></div>
-                <div class="src">meta://manifold/genai/llama-3.1-405b-instruct</div>
+                <div class="src">meta://models/llama-3.1-405b-instruct</div>
               </div>
             </div>
             <div class="specs">
@@ -1203,7 +1203,7 @@
               </div>
               <div class="xfer" style="margin-top:16px">
                 <div class="xh">
-                  <div class="route"><span class="cdot meta" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>Meta·ftw <span class="arr">→</span> <span class="cdot gcp" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>GCP·us-east5 <span class="muted">(TPU hosting)</span></div>
+                  <div class="route"><span class="cdot meta" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>Meta·central <span class="arr">→</span> <span class="cdot gcp" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>GCP·us-east5 <span class="muted">(TPU hosting)</span></div>
                   <span class="mono" style="color:var(--violet)">71%</span>
                 </div>
                 <div class="bar violet striped"><i style="width:71%"></i></div>
@@ -1238,7 +1238,7 @@
           <div class="mcard">
             <div class="top">
               <div class="src-logo src-meta">M</div>
-              <div class="mh"><div class="nm">llama-3.3-70b-instruct <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">meta://manifold/genai/llama-3.3-70b</div></div>
+              <div class="mh"><div class="nm">llama-3.3-70b-instruct <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">meta://models/llama-3.3-70b</div></div>
             </div>
             <div class="specs"><span class="tag">70B</span><span class="tag">arch: llama</span><span class="tag">safetensors</span><span class="tag">fp8</span><span class="tag">TEXT_GENERATION</span></div>
             <div class="pipeline">
@@ -1259,7 +1259,7 @@
           <div class="mcard">
             <div class="top">
               <div class="src-logo src-s3">S3</div>
-              <div class="mh"><div class="nm">gte-large-en-v1.5 <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">s3://msl-models/embeddings/gte-large-en</div></div>
+              <div class="mh"><div class="nm">gte-large-en-v1.5 <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">s3://models/embeddings/gte-large-en</div></div>
             </div>
             <div class="specs"><span class="tag">434M</span><span class="tag">arch: bert</span><span class="tag">safetensors</span><span class="tag">bf16</span><span class="tag">EMBEDDING</span></div>
             <div class="pipeline">
@@ -1275,7 +1275,7 @@
           <div class="mcard">
             <div class="top">
               <div class="src-logo src-oci">OCI</div>
-              <div class="mh"><div class="nm">qwen2.5-vl-72b-instruct <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">oci://iad.ocir.io/msl/qwen2.5-vl-72b</div></div>
+              <div class="mh"><div class="nm">qwen2.5-vl-72b-instruct <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">oci://iad.ocir.io/example/qwen2.5-vl-72b</div></div>
             </div>
             <div class="specs"><span class="tag">72B</span><span class="tag">arch: qwen2_vl</span><span class="tag">safetensors</span><span class="tag">bf16</span><span class="tag">VISION</span><span class="tag">IMAGE_TEXT_TO_TEXT</span></div>
             <div class="pipeline">
@@ -1489,7 +1489,7 @@
           <div class="island-grid">
             <!-- each island: 8x8 grid of GPU cells -->
             <div class="island">
-              <div class="ih"><span class="nm">eag-isl-01</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
+              <div class="ih"><span class="nm">west-isl-01</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
               <div class="cells">
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span>
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span>
@@ -1500,7 +1500,7 @@
             </div>
 
             <div class="island">
-              <div class="ih"><span class="nm">eag-isl-02</span><span class="pill amber" style="padding:1px 7px"><span class="pdot"></span>pressure</span></div>
+              <div class="ih"><span class="nm">west-isl-02</span><span class="pill amber" style="padding:1px 7px"><span class="pdot"></span>pressure</span></div>
               <div class="cells">
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span>
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span>
@@ -1511,7 +1511,7 @@
             </div>
 
             <div class="island">
-              <div class="ih"><span class="nm">ftw-isl-01</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
+              <div class="ih"><span class="nm">central-isl-01</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
               <div class="cells">
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell free"></span><span class="cell free"></span><span class="cell free"></span>
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell free"></span><span class="cell free"></span><span class="cell free"></span><span class="cell free"></span>
@@ -1522,7 +1522,7 @@
             </div>
 
             <div class="island">
-              <div class="ih"><span class="nm">ftw-isl-02</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
+              <div class="ih"><span class="nm">central-isl-02</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
               <div class="cells">
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell free"></span><span class="cell free"></span>
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell free"></span><span class="cell free"></span><span class="cell free"></span>
@@ -1533,7 +1533,7 @@
             </div>
 
             <div class="island">
-              <div class="ih"><span class="nm">pnb-isl-01</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
+              <div class="ih"><span class="nm">east-isl-01</span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>link ✓</span></div>
               <div class="cells">
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell free"></span>
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell free"></span><span class="cell free"></span>
@@ -1544,7 +1544,7 @@
             </div>
 
             <div class="island">
-              <div class="ih"><span class="nm">pnb-isl-02</span><span class="pill red" style="padding:1px 7px"><span class="pdot"></span>1 node down</span></div>
+              <div class="ih"><span class="nm">east-isl-02</span><span class="pill red" style="padding:1px 7px"><span class="pdot"></span>1 node down</span></div>
               <div class="cells">
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span>
                 <span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span><span class="cell used"></span>
@@ -1606,7 +1606,7 @@
           </div>
           <div class="pool-grid">
             <div class="pool">
-              <div class="ph"><span class="nm"><span class="cdot cw"></span>msl-cw-use2-2 <span class="mono">H100·SXM</span></span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>Ready</span></div>
+              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-us-east-2 <span class="mono">H100·SXM</span></span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>Ready</span></div>
               <div class="nums">
                 <div class="n"><b>4,096</b><span>total GPUs</span></div>
                 <div class="n"><b style="color:var(--accent-2)">3,317</b><span>in use</span></div>
@@ -1636,7 +1636,7 @@
             </div>
 
             <div class="pool">
-              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-msl-cw-use2-1 <span class="mono">A100·80G</span></span><span class="pill red" style="padding:1px 7px"><span class="pdot"></span>Saturated</span></div>
+              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-us-east-1 <span class="mono">A100·80G</span></span><span class="pill red" style="padding:1px 7px"><span class="pdot"></span>Saturated</span></div>
               <div class="nums">
                 <div class="n"><b>1,024</b><span>total GPUs</span></div>
                 <div class="n"><b style="color:var(--accent-2)">983</b><span>in use</span></div>
