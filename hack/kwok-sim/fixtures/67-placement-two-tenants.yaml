@@ -1,0 +1,80 @@
+# Two tenants, two namespaces, two budgets — and neither can spend the other's.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/52-fleet-mixed.yaml
+#   for c in a b; do kubectl --context "kind-ome-quota-$c" create ns kwok-sim-batch; done
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/67-placement-two-tenants.yaml
+#
+# Isolation here is by NAMESPACE, not by queue name. OME materializes exactly one
+# LocalQueue per bound namespace and always calls it "default" — it is Kueue's own
+# default-queue name, so Kueue's webhook stamps workloads there without anyone
+# naming it. Two tenants are therefore two namespaces bound to two leaves, and a
+# workload charges whichever leaf owns the namespace it was created in.
+#
+# Against 52-fleet-mixed each member holds:
+#
+#                sim-serving   sim-batch
+#   member-a          64           16
+#   member-b          32           32
+#
+# Each tenant below asks for one tpu7x-2x2x2 replica: 1 leader + 1 worker = 2 pods
+# = 8 chips, on every matching member. So after both are placed:
+#
+#   sim-serving  admitted 8 on member-a, 8 on member-b
+#   sim-batch    admitted 8 on member-a, 8 on member-b
+#
+#   kubectl --context kind-ome-quota-a get aq -o wide
+#
+# The point is the two lines side by side. Neither leaf's admitted figure counts
+# the other's pods, and sim-batch's 16 on member-a is untouched by a sim-serving
+# tenant that has 64 to play with. A single shared queue would show one leaf
+# carrying 16 and the other 0.
+#
+# Worth trying next: apply this twice under different names in kwok-sim-batch.
+# The second copy needs 8 more of sim-batch's 16 on member-a, which exactly
+# exhausts it; a third gates. That is the ceiling holding per tenant rather than
+# per fleet.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tenant-serving
+  namespace: kwok-sim
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: All
+    requirements: accelerator=tpu7x
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-2x2x2
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 1
+---
+# The same shape in the other tenant's namespace, so the only difference between
+# the two workloads is which leaf owns the namespace they land in.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tenant-batch
+  namespace: kwok-sim-batch
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    mode: All
+    requirements: accelerator=tpu7x
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-2x2x2
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader: {}
+    worker:
+      size: 1
