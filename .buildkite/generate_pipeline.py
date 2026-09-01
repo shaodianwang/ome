@@ -808,6 +808,13 @@ def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str 
     targets that need extra system tooling (e.g. `make manifests` needs
     `jq` for CRD post-processing). Empty (the common case) skips apt.
 
+    Retries on any non-zero exit: every regen target installs its tooling
+    with `go install`, so the step is network-heavy before it checks
+    anything, and a proxy.golang.org blip reads as drift. `_infra_retry`
+    is too narrow — a failed module fetch exits 1 or 2, never 125. Drift
+    itself is deterministic and so survives the retries, which is what
+    makes the broader preset safe on a merge gate here.
+
     The block is indented for direct concatenation onto `ci_steps()`'s
     dedented output (steps at 2-space indent under `steps:`).
     """
@@ -821,6 +828,7 @@ def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str 
         f'  - label: "{label}"\n'
         f'    key: "{key}"\n'
         f"{_gh_status(key, indent=4)}\n"
+        f"{_auto_retry(indent=4)}\n"
         f"    command: |\n"
         f"{apt_block}"
         f"      make {make_target}\n"

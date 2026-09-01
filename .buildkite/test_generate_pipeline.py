@@ -238,6 +238,50 @@ class TestImageBuildEmission(unittest.TestCase):
         )
 
 
+class TestDriftCheckEmission(unittest.TestCase):
+    # A drift check installs its tooling with `go install` before it compares
+    # anything, so a module-proxy blip fails the step and reads as drift. The
+    # retry has to be the any-non-zero preset: a failed fetch exits 1 or 2,
+    # which the infra preset (125 / agent_stop) never matches.
+    RETRY_BLOCK = (
+        '    retry:\n'
+        '      automatic:\n'
+        '        - exit_status: "*"\n'
+        '          limit: 2'
+    )
+
+    def test_every_drift_check_retries_on_any_nonzero_exit(self):
+        for key, label, target in [
+            ("fmt-drift", ":broom: Fmt Drift", "fmt"),
+            ("tidy-drift", ":package: Tidy Drift", "tidy"),
+            ("manifests-drift", ":memo: Manifests Drift", "manifests"),
+            ("generate-drift", ":arrows_counterclockwise: Generate Drift", "generate"),
+            ("dep-crds-drift", ":truck: Dep CRDs Drift", "dep-crds"),
+        ]:
+            with self.subTest(key=key):
+                yaml_text = gp._drift_check_step(key, label, target)
+                self.assertIn(self.RETRY_BLOCK, yaml_text)
+                self.assertIn(f"      make {target}\n", yaml_text)
+                self.assertIn("      git diff --exit-code\n", yaml_text)
+
+    def test_retry_precedes_the_command_it_guards(self):
+        yaml_text = gp._drift_check_step("dep-crds-drift", ":truck: Dep CRDs Drift", "dep-crds")
+        self.assertLess(
+            yaml_text.index("    retry:"),
+            yaml_text.index("    command: |"),
+            "retry must be a step-level key, not swallowed into the command block",
+        )
+
+    def test_apt_packages_still_lead_the_command(self):
+        yaml_text = gp._drift_check_step(
+            "manifests-drift", ":memo: Manifests Drift", "manifests", apt_packages="jq"
+        )
+        self.assertLess(
+            yaml_text.index("apt-get install -y --no-install-recommends jq"),
+            yaml_text.index("      make manifests"),
+        )
+
+
 class TestEvalSubsharding(unittest.TestCase):
     def test_worker_and_pod_limits_each_create_waves(self):
         worker_limited = [f"p{i:02d}" for i in range(1, 10)]
