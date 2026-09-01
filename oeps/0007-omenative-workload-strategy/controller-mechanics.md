@@ -1544,7 +1544,7 @@ Mode impact in v1:
 - `VirtualDeployment`
   - unchanged
 
-`Serverless` (Knative Service) was removed from OME in PR #174 and is
+`Serverless` (Knative Service) has been removed from OME and is
 not enumerated here.
 
 Selection rule:
@@ -1705,7 +1705,7 @@ controller.
 The current generic status helper in
 `pkg/controller/v1beta1/inferenceservice/status/` is Deployment- and
 LWS-oriented (Knative status paths were removed alongside the
-`Serverless` mode in PR #174). It should continue to own top-level
+`Serverless` mode). It should continue to own top-level
 readiness aggregation, but OMENative-specific per-Instance status
 derivation lives in the OMENative package itself.
 
@@ -1737,8 +1737,8 @@ That gives the exact Loop A / Loop B split from this design:
 
 Do **not** keep extending the current
 `reconcilers/common/deployment_reconciler.go` to support OMENative.
-That file is Deployment/LWS shaped (Knative paths were removed in
-PR #174).
+That file is Deployment/LWS shaped (Knative paths were removed
+alongside the `Serverless` mode).
 
 Instead:
 
@@ -1817,8 +1817,8 @@ with:
 - per-Instance status list
 
 That avoids polluting the existing `ComponentStatusSpec` fields
-(historically shaped for the Knative path that was removed in
-PR #174 and now mainly used by `RawDeployment`/`MultiNode`) with
+(historically shaped for the removed Knative path and now mainly
+used by `RawDeployment`/`MultiNode`) with
 unrelated instance-state machinery.
 
 ## 13. Proposed Package / File Layout

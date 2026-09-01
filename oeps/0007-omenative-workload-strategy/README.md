@@ -1492,7 +1492,7 @@ Core scenarios:
 
 - Integration tests 1–22 passing, including chaos.
 - 2+ production users running OMENative-managed workloads ≥ 60 days
-  without Sev1/Sev2 incidents attributed to OMENative.
+  without high-severity incidents attributed to OMENative.
 - Dashboard published.
 - Migration guide published.
 - Decision recorded on whether to promote the annotation contract to
@@ -1553,9 +1553,7 @@ Four alternatives were considered:
 
 - **`InferenceReplica` CRD extraction.** Phase 1 (CRD scaffold +
   scheme + RBAC + webhook stubs) has landed; no behavioral use yet.
-  The design lives in
-  `.claude/specs/2026-05-27-inference-workload-crd/README.md` and is
-  the long-term direction for status ownership: per-Component status
+  This is the long-term direction for status ownership: per-Component status
   currently aggregated by the OMENative reconciler into
   `InferenceService.status.components[<c>].omenative` moves into one
   `InferenceReplica` per `(InferenceService, Component)` tuple,
@@ -1589,8 +1587,8 @@ from the research-level Open Questions below.
    target is sometimes ignored, an extra pod can land, and `Ready`
    may flip True prematurely. Likely the same family as the in-memory
    snapshot drift the status mirror closed for the single-bump case.
-   Tracked internally; a future patch may need to chain a status
-   mirror through the target-revision retarget path as well.
+   A future patch may need to chain a status mirror through the
+   target-revision retarget path as well.
 2. **Multi-pod SurgeThenDrain routes to recreate.** Real surge for
    multi-pod gangs is deferred (see Future Work above); flagged here
    so the gap is discoverable from the body of the OEP.
