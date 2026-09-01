@@ -27,6 +27,32 @@
 # Usage:
 #   hack/kwok-sim/fleet-up.sh [--skip-build] [--component NAME]... [--with-kueue]
 #                             [--with-placement] [--topology MODE]
+#                             [--cubes A-SPEC;B-SPEC]
+#
+#   --cubes A;B     the silicon each member starts with, one spec per member,
+#                   separated by a semicolon. Within a member the syntax is
+#                   up.sh's: comma-separated cubes, each a carve topology.
+#                   Default: 4x4x4,4x4x4;4x4x4 — two cubes on member A and one
+#                   on member B, deliberately unequal so a proportional split
+#                   has to produce different numbers on each and a bug that
+#                   handed both the fleet total would be visible rather than
+#                   plausible.
+#
+#                   Re-runnable, and additive. Node names and addresses derive
+#                   from the cube index, so a later run with more cubes keeps
+#                   every existing node and adds the new ones:
+#
+#                     fleet-up.sh --cubes '4x4x4;2x2x2'
+#                     fleet-up.sh --cubes '4x4x4,4x4x4;2x2x2' --skip-build
+#
+#                   grows member A by a cube in place. Shrinking does NOT
+#                   remove nodes: nothing prunes, so a smaller spec leaves the
+#                   surplus behind. Tear the fleet down for that.
+#
+#                   Changing this changes what a proportional split divides by,
+#                   so a fixture's numbers stop matching the hardware. The
+#                   closing banner prints the chips each member ends up with;
+#                   author a tree against those.
 #
 #   --component NAME
 #                   which OME components to deploy on each WORKLOAD MEMBER;
@@ -91,6 +117,10 @@ SKIP_BUILD=0
 COMPONENTS=""
 WITH_KUEUE=0
 WITH_PLACEMENT=0
+# Per-member silicon, "<member-a cubes>;<member-b cubes>". Deliberately unequal:
+# see --cubes above.
+DEFAULT_CUBES="4x4x4,4x4x4;4x4x4"
+CUBES="$DEFAULT_CUBES"
 # Empty means up.sh's own default. Only forwarded under --with-placement, which
 # is what puts a manager and a scheduler on the members for it to mean anything.
 TOPOLOGY=""
@@ -105,7 +135,7 @@ while [ $# -gt 0 ]; do
   # reports as "$2: unbound variable" — a bash internal, from a line number, for
   # what is an ordinary usage mistake.
   case "$1" in
-    --component|--topology)
+    --component|--topology|--cubes)
       [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;;
   esac
   case "$1" in
@@ -113,11 +143,12 @@ while [ $# -gt 0 ]; do
     --with-kueue) WITH_KUEUE=1; shift ;;
     --with-placement) WITH_PLACEMENT=1; shift ;;
     --topology) TOPOLOGY="$2"; shift 2 ;;
+    --cubes) CUBES="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     # Named rather than left to the catch-all: each is a flag up.sh really does
     # take, so "unknown flag" would be a lie, and the reason it is refused is
     # not guessable from the name.
-    --cluster|--cubes|--block)
+    --cluster|--block)
       echo "$1 is set per member by this script; it cannot be forwarded" >&2
       exit 2 ;;
     --ip-prefix)
@@ -171,6 +202,30 @@ done
 in_list quota-manager "$COMPONENTS" || {
   echo "--component must include quota-manager: it builds the image the hub side-loads" >&2
   exit 2; }
+
+# One spec per member, semicolon-separated. Split before any cluster work: a
+# malformed spec should cost a second, not the several minutes it takes to
+# discover it when the generator is finally reached.
+case "$CUBES" in
+  *\;*\;*) echo "--cubes takes two specs separated by one ';', got: $CUBES" >&2; exit 2 ;;
+  *\;*) ;;
+  *) echo "--cubes needs a spec per member, e.g. '4x4x4;2x2x2', got: $CUBES" >&2; exit 2 ;;
+esac
+CUBES_A="${CUBES%%;*}"
+CUBES_B="${CUBES#*;}"
+for spec in "$CUBES_A" "$CUBES_B"; do
+  [ -n "$spec" ] || { echo "--cubes has an empty member spec: $CUBES" >&2; exit 2; }
+done
+
+# What the generator will actually mint, asked of the generator rather than
+# recomputed here: the carve arithmetic lives there, and a second copy of it
+# would be a second thing to get wrong.
+chips_for() { # $1 = a member's cube spec
+  hack/kwok-sim/gen-tpu-nodes.sh --cubes "$1" --block 1 2>/dev/null | awk '
+    /^kind: Node$/            { nodes++ }
+    /google\.com\/tpu:/ && !per { gsub(/"/, "", $2); per = $2 }
+    END                       { print nodes * per }'
+}
 
 resolve_kind
 
@@ -253,16 +308,16 @@ for c in $COMPONENTS; do UP_FLAGS="${UP_FLAGS} --component ${c}"; done
 [ "$WITH_KUEUE" -eq 1 ] && UP_FLAGS="${UP_FLAGS} --with-kueue"
 [ -n "$TOPOLOGY" ] && UP_FLAGS="${UP_FLAGS} --topology ${TOPOLOGY}"
 
-echo "==> member A: 2 cubes"
+echo "==> member A: ${CUBES_A}"
 OME_KWOK_CLUSTER="$MEMBER_A" hack/kwok-sim/up.sh \
   --cluster "$MEMBER_A" $UP_FLAGS \
-  --cubes 4x4x4,4x4x4 --block 1 \
+  --cubes "$CUBES_A" --block 1 \
   $([ "$SKIP_BUILD" -eq 1 ] && echo --skip-build) >/dev/null
 
-echo "==> member B: 1 cube"
+echo "==> member B: ${CUBES_B}"
 OME_KWOK_CLUSTER="$MEMBER_B" hack/kwok-sim/up.sh \
   --cluster "$MEMBER_B" $UP_FLAGS \
-  --cubes 4x4x4 --block 2 \
+  --cubes "$CUBES_B" --block 2 \
   --skip-build >/dev/null
 
 # Before any tree is authored, the way a real cluster has them before anyone
@@ -428,17 +483,38 @@ hubctl get workloadclusters
 # No tree is applied, for the reason the single-cluster fixtures give: a tree is
 # what an operator is here to write, and the fleet stands up without one. It also
 # keeps the harness from prejudging which split is being exercised.
-cat <<'DONE'
+CHIPS_A="$(chips_for "$CUBES_A")"
+CHIPS_B="$(chips_for "$CUBES_B")"
+cat <<DONE
 
-The fleet is up: a hub holding no silicon, and two members holding 128 and 64
-chips. Nothing is budgeted yet. Author a tree on the hub to project one:
+The fleet is up: a hub holding no silicon, and two members holding ${CHIPS_A} and
+${CHIPS_B} chips. Nothing is budgeted yet. Author a tree on the hub to project one:
 
   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/<one of>
+DONE
+
+if [ "$CUBES" = "$DEFAULT_CUBES" ]; then
+  cat <<'DONE'
 
   50-fleet-proportional.yaml   192 split against capacity      -> 128 / 64
   51-fleet-explicit.yaml        96 split by hand, inverted     ->  32 / 64
   52-fleet-mixed.yaml          two tenants, one policy each    ->  80 / 64
   53-fleet-oversubscribed.yaml a share member-b cannot hold    -> member-b frozen
+DONE
+else
+  # The fixtures carry fixed numbers, so a non-default sizing makes their
+  # arithmetic wrong rather than merely different. Say so instead of printing a
+  # table that no longer describes this fleet.
+  cat <<DONE
+
+  The 5*-fleet-* and 6*-placement-* fixtures assume 192 chips fleet-wide, which
+  is the default sizing and not this one. Author a tree against $((CHIPS_A + CHIPS_B)) instead:
+  a budget above what a member holds freezes it with CapacityExceeded, and one
+  below leaves capacity unbudgeted.
+DONE
+fi
+
+cat <<'DONE'
 
   hack/kwok-sim/fleet-status.sh      # what landed where
   hack/kwok-sim/fleet-down.sh        # tear the fleet down
