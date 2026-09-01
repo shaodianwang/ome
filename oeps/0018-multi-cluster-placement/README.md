@@ -38,7 +38,7 @@ OME owns the control plane (the fan-out controller, the cross-cluster transport,
 
 Placing inference across clusters is manual today. An operator decides, by hand or by editing a gitops repo, which cluster an ISVC lands on. Two failure modes follow:
 
-1. **No global placement → chronic mis-utilization.** Our fleet spans clusters across regions and providers (e.g. CW `us-east-2`, GCP `us-central1`, mks) with uneven GPU availability. With no placer, one cluster queues work it cannot run while another sits idle.
+1. **No global placement → chronic mis-utilization.** A fleet spans clusters across regions and providers with uneven GPU availability. With no placer, one cluster queues work it cannot run while another sits idle.
 2. **No quota concept, even single-cluster.** OME has no `ClusterQueue`-equivalent: nothing caps a team's GPUs, nothing preempts. Two teams oversubscribe a cluster and the loser's pods sit `Pending` with no policy behind it.
 
 The platform owner's constraint is explicit: **OME should own the multi-cluster control plane** — not hand the steering wheel to an external orchestrator — but OME should **not** reinvent GPU quota, which Kueue already does well. Fan-out + race threads that needle: OME owns *where to try* (clone to all candidates) and *what to keep* (first admitted wins); Kueue owns *whether a cluster has room* (admission). This OEP draws that line.
@@ -131,17 +131,17 @@ Fan-out hinges on one property: **OME's own pods must tolerate being held by Kue
 apiVersion: ome.io/v1beta1
 kind: WorkloadCluster              # cluster-scoped, shortName: wlc
 metadata:
-  name: cw-use2-2
+  name: cluster-a
   labels:                          # capability matching: an ISVC's requirements match THESE
-    provider: cw
+    provider: aws
     region: us-east-2
     gpu: gb300
 spec:
   clusterSource:                   # pluggable connection (learned from MultiKueueCluster.ClusterSource); exactly one of:
     kubeConfig:
-      secretRef: {name: cw-use2-2-kubeconfig, namespace: ome-system}
+      secretRef: {name: cluster-a-kubeconfig, namespace: ome-system}
     # -- or --
-    # clusterProfileRef: {name: cw-use2-2}   # reference a SIG-Multicluster ClusterProfile (cluster-inventory-api)
+    # clusterProfileRef: {name: cluster-a}   # reference a SIG-Multicluster ClusterProfile (cluster-inventory-api)
 status:
   conditions:                      # connection HEALTH only -- never capacity, never Kueue
     - {type: Ready, status: "True", reason: Reachable}
@@ -157,7 +157,7 @@ The referenced `Secret` is just the kubeconfig (rotated/RBAC'd independently); t
 ```yaml
 status:
   placement:
-    cluster: cw-use2-2
+    cluster: cluster-a
     endpoint: https://my-svc.global.example
     phase: FanningOut | Admitted | Running | RePlacing
     conditions: [...]              # mirrored readiness from the derived ISVC on the winner
@@ -208,13 +208,13 @@ OME owns the global endpoint (decided in design: not delegated to an external LB
 
 ```
 1. User applies ISVC to the CONTROL-PLANE cluster.
-2. Fan-out controller computes candidates (gb300 + reachable) -> {cw-use2-2, gcp-usc1-1}.
+2. Fan-out controller computes candidates (gb300 + reachable) -> {cluster-a, cluster-b}.
 3. Creates the DERIVED ISVC on BOTH; pods labeled queue-name=<lq>, serving=true.
-4. Each cluster's Kueue gates the pods. gcp-usc1-1 has free GB300 -> its Kueue
-   admits first -> pods run there. cw-use2-2 stays gated.
-5. Controller records winner=gcp-usc1-1, DELETES the derived ISVC on cw-use2-2.
-6. Status mirror writes ISVC.status.placement (cluster=gcp-usc1-1, Running).
-7. Endpoint publisher points the global endpoint at gcp-usc1-1.
+4. Each cluster's Kueue gates the pods. cluster-b has free GB300 -> its Kueue
+   admits first -> pods run there. cluster-a stays gated.
+5. Controller records winner=cluster-b, DELETES the derived ISVC on cluster-a.
+6. Status mirror writes ISVC.status.placement (cluster=cluster-b, Running).
+7. Endpoint publisher points the global endpoint at cluster-b.
 ```
 
 ### Failure modes and re-placement
@@ -262,7 +262,7 @@ Presented as a menu with the cost of each, then the pick.
 3. **OME-native everything (approach B).** OME builds placement *and* its own quota engine (borrowing/preemption/fairness) *and* the transport. **Rejected** as too extreme — reinvents quota, which Kueue already solves.
 4. **Registry as a labeled Secret (no CRD).** *Rejected:* the `WorkloadCluster` concept deserves a queryable kind; the first draft's mistake was capacity-in-status, fixed by keeping capacity out.
 5. **Wrapper CRD `MultiClusterInferenceService`.** A global object embedding an ISVC template. **Rejected:** ~95% duplicates the ISVC spec; "the ISVC is the unit, the control plane fans it out" is cleaner.
-6. **gitops as the transport.** The controller writes clones into an argo-gitops repo per cluster. **Rejected:** couples multi-cluster control to gitops; the owner wants pure OME control.
+6. **gitops as the transport.** The controller writes clones into a per-cluster GitOps repo. **Rejected:** couples multi-cluster control to gitops; the owner wants pure OME control.
 
 ## Open Questions
 

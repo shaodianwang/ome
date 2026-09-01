@@ -1,7 +1,7 @@
 title: "OME Multi-Cluster Support: placement by fan-out + race"
 oep-number: "0018"
 authors:
-  - "@simo-lin"
+  - "@slin1237"
 status: provisional
 creation-date: 2026-06-21
 reviewers:
