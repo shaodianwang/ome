@@ -1680,7 +1680,7 @@ no new CRD vendoring.
   from OEP-0007 v1 (`migration.md`), API reference (`api.md`).
 - At least one production-grade prefill-decode `InferenceService`
   running on OMENative with `policy: BlueGreen` for ≥ 14 days without
-  Sev1/Sev2 incidents.
+  high-severity incidents.
 
 ### Beta
 
