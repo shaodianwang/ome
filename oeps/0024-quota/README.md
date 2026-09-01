@@ -71,7 +71,7 @@ leaf's `LocalQueue` + `WorkloadPriorityClass` labels, replacing today's two
 divergent label stampers. Because a fleet is now many small CRs, OME also ships
 **authoring tooling** (a CLI / kubectl plugin) that renders and validates the
 assembled tree offline before it is committed. Capacity admins view the tree and
-live usage in MUSE, which is read-only — rolled up into `AcceleratorQuota.status`
+live usage in an internal admin console, which is read-only — rolled up into `AcceleratorQuota.status`
 on the management plane, and drillable against `ClusterQueue.status` on a member.
 Budget spec edits flow through GitOps, and status is not synced through GitOps.
 
@@ -122,16 +122,16 @@ Five concrete failure modes, each anchored to current code:
    split or rebalance that number — each cluster's quota is an independent island
    (OEP-0018 Open Question, `README.md:274`).
 
-4. **No admin surface.** MUSE is read-only (`muse/README.md:3`) and does not even
-   watch Kueue (`informers.rs` covers OME kinds, Node/Pod, and apps/v1 workload kinds
+4. **No admin surface.** The internal admin console is read-only and does not even
+   watch Kueue (its informers cover OME kinds, Node/Pod, and apps/v1 workload kinds
    — no Kueue types), so an admin can
    neither see quota-vs-usage nor change a budget.
 
 5. **A budget would have no denominator.** No controller in the OME manager reads
    `Node.status.allocatable`. ome-scheduler's gangpack plugin reads allocatable through the scheduler
    framework's `NodeInfo` snapshot (`scheduler/pkg/plugins/gangpack/nodes.go:36,51`),
-   but only per-node inside a scheduling cycle; the only fleet-level rollup in the tree is MUSE's, in Rust and
-   read-only (`muse/crates/muse-server/src/rollup.rs`). So a fleet total is a number
+   but only per-node inside a scheduling cycle; the only fleet-level rollup in the
+   tree is the internal admin console's, read-only and outside the manager. So a fleet total is a number
    an admin types and nothing checks — over-subscribe by 3× and the tree is
    perfectly valid while the workloads never schedule.
 
@@ -155,9 +155,9 @@ Five concrete failure modes, each anchored to current code:
   materialization path**: workload mode renders a tree identically whether that tree
   was locally authored or projected. Multi-cluster adds a management-mode
   distribution layer on top; it does not fork materialization.
-- **G5.** A capacity-admin view in MUSE: read-only fleet capacity vs quota vs
-  usage vs borrowed, per tenant and per cluster. Budget edits are GitOps, not a
-  MUSE write.
+- **G5.** A capacity-admin view in the internal admin console: read-only fleet
+  capacity vs quota vs usage vs borrowed, per tenant and per cluster. Budget
+  edits are GitOps, not a console write.
 - **G6.** Authoring ergonomics for a many-CR tree: a client-side tool that
   assembles the per-node CRs into the full tree, validates it (the same checks the
   webhook runs) before a GitOps commit, and can scaffold a child under a parent —
@@ -493,14 +493,14 @@ of how many?" No controller in the OME manager reads `Node.status.allocatable`;
 ome-scheduler's gangpack plugin reads it through the scheduler framework's
 `NodeInfo` snapshot (`scheduler/pkg/plugins/gangpack/nodes.go:36,51`), but only
 per-node inside a scheduling cycle, and the only fleet-level rollup in the
-tree is MUSE's, in Rust and read-only. So `root`'s total is a number an admin types
+tree is the internal admin console's, read-only. So `root`'s total is a number an admin types
 and nothing checks: over-subscribe by 3× and the tree is perfectly valid while the
 workloads never schedule.
 
 Each workload cluster's controller therefore maintains its reserved root locally
 and writes `status.capacity` from its own `Node` objects. Availability follows
-MUSE's predicate — `Ready=True && !spec.unschedulable`
-(`muse/crates/muse-server/src/rollup.rs:280-300`) — deliberately **not** the
+the internal admin console's rollup predicate — `Ready=True &&
+!spec.unschedulable` — deliberately **not** the
 scheduler's predicate (`scheduler/pkg/plugins/gangpack/nodes.go:150-158`), which is
 pod-relative: it matches taints against a *specific pod's* tolerations and has no
 meaning for a pod-free capacity sum. Applied with an empty toleration set it would
@@ -582,7 +582,7 @@ the logic is new code, and per the repo's no-magic-values rule its band is a con
 **Freeze propagates down, but only to new output.** Existing descendants keep their
 last-good materialization; no *new* descendant materializes under a frozen
 ancestor; status and usage observation continue while output writes stop. Usage
-must keep flowing or MUSE shows stale numbers for a very much alive tenant.
+must keep flowing or the admin console shows stale numbers for a very much alive tenant.
 
 **A missing ancestor `Cohort` is a silent trap, not an error.** If a leaf's
 `spec.cohortName` names a `Cohort` object that is not there, Kueue does not complain —
@@ -612,9 +612,10 @@ The same rule covers an unreachable member: **freeze the projection, never
 rebalance it away.** Rebalancing a partitioned cluster's share onto its peers
 double-books the fleet the moment the partition heals.
 
-### Muse: the capacity-admin view
+### The capacity-admin view
 
-MUSE is **read-only** in v1, and which plane it runs on decides what it can see.
+The internal admin console is **read-only** in v1, and which plane it runs on
+decides what it can see.
 
 On the **management plane** there are no Kueue objects at all, so the fleet panel
 reads entirely from the source `AcceleratorQuota.status` the hub has already rolled
@@ -622,13 +623,13 @@ up — `capacity[]`, `budgets[].nominal/admitted/borrowed`, and their `perCluste
 breakdowns. That is the "Quota" panel: **capacity vs quota vs used vs borrowed**,
 per tenant and per cluster, with no new accounting and no cross-cluster join.
 
-On a **member**, MUSE may additionally watch Kueue `ClusterQueue`/`Cohort`/
+On a **member**, the console may additionally watch Kueue `ClusterQueue`/`Cohort`/
 `LocalQueue` (gated on CRD presence, like the existing OME informers) and join them
-in `rollup.rs` against the per-namespace usage it already computes, for drill-down
+against the per-namespace usage it already computes, for drill-down
 into one cluster. Usage/borrowing is read directly from
 `ClusterQueue.status.flavorsUsage`.
 
-Editing a budget is **not** a MUSE write: `AcceleratorQuota` is the declarative source
+Editing a budget is **not** a console write: `AcceleratorQuota` is the declarative source
 of truth, so changes flow through GitOps like any other cluster config. The exact
 write mechanism (which repo/path, review flow) is out of scope for this OEP.
 Having `AcceleratorQuota` as the declarative source of truth is what keeps that clean:
@@ -655,7 +656,7 @@ edges:
 
 The tool is pure client-side validation and code-gen: it holds no privilege and is
 not on the admission path — the webhook and the controllers remain the authority. This
-keeps MUSE read-only while still giving admins a way to build and check the whole
+keeps the admin console read-only while still giving admins a way to build and check the whole
 tree without hand-tracking every edge. The exact surface (standalone binary vs.
 `kubectl ome quota …` plugin) is an implementation detail; the requirement is that
 the tree is authorable and checkable as a whole.
@@ -1271,7 +1272,7 @@ here.
   chain; `Explicit` then `Proportional` (snapshot) apportionment with `Σ shares ==
   nominal` exactly, including pinned clusters; the member veto with `Pending` and
   `SharesExhausted` reporting; OwnerReference GC with the label sweep as
-  belt-and-braces; MUSE read panel for capacity vs quota vs usage; DAC-annotation
+  belt-and-braces; the admin-console read panel for capacity vs quota vs usage; DAC-annotation
   migration path documented.
 - **Stable:** the authoring-time containment check and the projection contract
   battle-tested; priority tiers proven; usage rollup in `status` proven against
