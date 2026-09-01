@@ -13,7 +13,7 @@ are welded to rival engines. The design was captured provisionally; the
 shim** (justified below).
 
 **Status:** implementable. The design was captured provisionally after shipping the
-canary executor (OEP-0015.1, PRs #448/#464); the implementation triggers below have
+canary executor (OEP-0015.1); the implementation triggers below have
 since fired, and the spec + engine rewiring is underway.
 
 ---
@@ -36,8 +36,8 @@ reasoning that made the *shape* worth committing to still holds:
   [Evidence](#evidence-the-multi-group-axis-is-unused)), so the break is cheap
   today and only gets costlier as adoption grows.
 
-The cost is real and unchanged: v2 supersedes both `coordination` (default since
-#320/#400/#405) and `canary` (#464), and still needs a unified status, a merged
+The cost is real and unchanged: v2 supersedes both `coordination` (already the
+default) and `canary` (OEP-0015.1), and still needs a unified status, a merged
 reconciler, and a full KIND re-test. It does **not** need a migration shim — the
 legacy fields are removed outright (see [Conversion / migration](#conversion--migration)),
 because near-zero adoption makes a one-release deprecation window more machinery than
@@ -183,11 +183,9 @@ The v2 model makes `groups[]` an **ordered** list (today it is an unordered set 
 independent, parallel groups). That is safe only if nobody relies on
 parallel-independent groups. They do not:
 
-- Every coordination block in-tree declares **exactly one group**, always
-  `[engine, decoder]`: `config/samples/sglang-omenative-rollout/inferenceservice.yaml`,
-  all four how-to examples in `howto-update-and-roll.md`, and the perm-harness
-  generator `coord_for()` (`hack/omenative-testing/perm/gen_cases.py`), which only
-  ever emits a single group.
+- Every coordination block in the sample manifests and rollout how-to examples
+  declares **exactly one group**, always `[engine, decoder]`, and the
+  permutation-test harness's case generator only ever emits a single group.
 - `Independent` policy appears only in CRD enums and one doc example — never as
   live parallel orchestration. It is documented as "documentation only" (const
   `CoordinationPolicyIndependent`).
@@ -446,7 +444,7 @@ ever wanted.
 
 ## Anticipated objections
 
-**Q. Why redesign a feature (canary) that shipped only recently (#464)?**
+**Q. Why redesign a feature (canary) that shipped only recently?**
 A. Because API shape is cheapest to fix at near-zero adoption, and that is now. The
 redesign was captured as a target the moment canary landed — to stop accreting
 features around the bundled `policy`/two-engine shape — and held until canary had
