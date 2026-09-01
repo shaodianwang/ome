@@ -64,7 +64,7 @@ and profiles).
 
 ## Implementation status
 
-Part B shipped via PR #149. Two deviations from the design below
+Part B has shipped. Two deviations from the design below
 landed during implementation; the rest of this document reflects the
 original design intent.
 
@@ -92,7 +92,7 @@ already-engine-populated spec at consumer call sites.
 
 The ServingRuntime CRD exists so that many InferenceServices can share
 one engine configuration. In practice, every new model variant gets its
-own ServingRuntime (`srt-llama4x-nvfp4-pd-cc`, `srt-mistral-7b-instruct`,
+own ServingRuntime (`srt-llama4-nvfp4-pd`, `srt-mistral-7b-instruct`,
 `srt-kimi-k2-pd`, `srt-deepseek-rdma-pd`, …) because **model-specific
 tuning is hardcoded directly into `runner.command`**:
 
@@ -100,7 +100,7 @@ tuning is hardcoded directly into `runner.command`**:
 command:
   - python3
   - -m
-  - sglang_meta.launch_server
+  - sglang.launch_server
   - --tp-size=4               # model-specific
   - --ep-size=4               # model-specific
   - --quantization=modelopt_fp4  # model-specific
@@ -118,7 +118,7 @@ runtime, many ISVCs) is defeated.
 A second source of bloat is **infrastructure boilerplate** that
 repeats across every runtime regardless of model:
 
-- 16 `cw-multus` macvlan annotations
+- 16 multus macvlan annotations
 - `arm64` node selector + `nvidia.com/gpu` toleration
 - `dshm` (940 GiB Memory) + `tmp-storage` volumes + matching mounts
 - ~15 `NCCL_*` / `CUDA_*` env vars
@@ -180,7 +180,7 @@ metadata:
   name: srt-sglang-pd
 spec:
   supportedModelFormats:
-    - {modelArchitecture: Llama4xForCausalLM, ...}
+    - {modelArchitecture: Llama4ForCausalLM, ...}
     - {modelArchitecture: MistralForCausalLM, ...}
     - {modelArchitecture: MixtralForCausalLM, ...}
     - {modelArchitecture: DeepSeekV3ForCausalLM, ...}
@@ -191,7 +191,7 @@ spec:
       command:
         - python3
         - -m
-        - sglang_meta.launch_server
+        - sglang.launch_server
         - --model-path=$(MODEL_PATH)
         - --tp-size=$(TP_SIZE)
         - --ep-size=$(EP_SIZE)
@@ -212,9 +212,9 @@ spec:
 ```yaml
 # Every model variant is a short ISVC
 kind: InferenceService
-metadata: {name: avo-tier5, namespace: playground}
+metadata: {name: llama4-nvfp4, namespace: playground}
 spec:
-  model: {name: avo-tier5}
+  model: {name: llama4-nvfp4}
   runtime: {name: srt-sglang-pd}
   engine:
     runner:
@@ -304,7 +304,7 @@ selected:
 ```yaml
 kind: ClusterServingRuntime
 metadata:
-  name: profile-cw-gb300-rdma-16
+  name: profile-gb300-rdma-16
   annotations:
     ome.io/runtime-profile: "true"
 spec:
@@ -347,19 +347,19 @@ kind: ClusterServingRuntime
 metadata:
   name: srt-sglang-pd
   annotations:
-    ome.io/inherit-from: profile-cw-gb300-rdma-16
+    ome.io/inherit-from: profile-gb300-rdma-16
 spec:
   supportedModelFormats: [...]
   engineConfig:
     runner:
       image: ghcr.io/.../sglang:gb300-stable
-      command: [python3, -m, sglang_meta.launch_server, --tp-size=$(TP_SIZE), ...]
+      command: [python3, -m, sglang.launch_server, --tp-size=$(TP_SIZE), ...]
       # NO env block, NO resources, NO volumeMounts, NO securityContext —
       # inherited from profile
   decoderConfig:
     runner:
       image: ghcr.io/.../sglang:gb300-stable
-      command: [python3, -m, sglang_meta.launch_server, …, --disaggregation-mode=decode]
+      command: [python3, -m, sglang.launch_server, …, --disaggregation-mode=decode]
 ```
 
 At ISVC reconcile time, the controller:
@@ -469,7 +469,7 @@ The last row is the "researcher happy + platform consistent" case:
 metadata:
   annotations:
     ome.io/engine: sglang-pd                       # OME-shipped engine bundle (Part C)
-    ome.io/inherit-from: profile-cw-gb300-rdma-16  # operator infra profile (Part B)
+    ome.io/inherit-from: profile-gb300-rdma-16     # operator infra profile (Part B)
 ```
 
 Ordering: Part C's webhook runs at admission (mutates stored runtime
@@ -512,7 +512,7 @@ PR. After: writes a 50-line ISVC. Zero new runtimes.
 Platform team rolls a new node class (e.g. switches from RDMA-16 to
 RDMA-8). Today: touches every model-specific runtime to update
 resources + multus annotations. After: updates **one** profile
-(`profile-cw-gb300-rdma-16` → `profile-cw-gb300-rdma-8`). Engine
+(`profile-gb300-rdma-16` → `profile-gb300-rdma-8`). Engine
 runtimes and ISVCs unchanged. ISVCs that reference an engine runtime
 inheriting from the profile pick up the new infra on their next
 reconcile (≤30s). New pods spawned after that point have the new
@@ -708,8 +708,8 @@ rejects invalid combinations at CRUD time for fast operator feedback:
    (default 5) to bound resolver work and force sane composition
    patterns.
 
-Multi-level inheritance IS supported — e.g. `srt-sglang-pd-llama4x` ⇒
-`profile-sglang-pd` ⇒ `profile-cw-gb300-rdma-16` ⇒ `profile-cw-base`
+Multi-level inheritance IS supported — e.g. `srt-sglang-pd-llama4` ⇒
+`profile-sglang-pd` ⇒ `profile-gb300-rdma-16` ⇒ `profile-base`
 is a four-level chain that resolves cleanly. The webhook's job is
 just to keep it bounded and acyclic.
 
@@ -796,7 +796,7 @@ get pushed back with a suggested ISVC env block.
   without inheritance have `EffectiveSpec == Spec`, so the read is
   uniform either way).
 - Migrate one cluster's worth of infra boilerplate into a profile
-  (`profile-cw-gb300-rdma-16`). Migrate one runtime
+  (`profile-gb300-rdma-16`). Migrate one runtime
   (`srt-sglang-pd`) to inherit from it. Verify the resulting pod
   spec (after ISVC reconcile) is byte-identical to the pre-migration
   one.
@@ -888,14 +888,15 @@ Add to `tests/integration/singlecluster/webhook/runtimepreset/`
   applied for that field; preset still fills other unset positions.
 - **Composition with Part B**: runtime carries both
   `ome.io/engine: sglang-pd` and `ome.io/inherit-from:
-  profile-cw-gb300-rdma-16` → final `Status.EffectiveSpec` has
+  profile-gb300-rdma-16` → final `Status.EffectiveSpec` has
   engine bits from preset + infra bits from inherited profile.
 
 #### Manual smoke
 
-Migrate `config/samples/avo-tier5-pd/cluster-serving-runtime.yaml` to
-inherit from a profile; verify the resulting Deployment pod spec is
-byte-identical to the pre-migration one. Also create a fresh runtime
+Migrate the end-to-end PD sample's `cluster-serving-runtime.yaml`
+(under `config/samples/`) to inherit from a profile; verify the
+resulting Deployment pod spec is byte-identical to the
+pre-migration one. Also create a fresh runtime
 with `ome.io/engine: sglang-pd` and assert the resulting
 `Deployment` pod spec equals the migrated runtime's.
 
