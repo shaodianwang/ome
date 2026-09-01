@@ -29,41 +29,41 @@ and a single `url` field structurally cannot represent that.
 
 ### The failure mode (what breaks today)
 
-Two distinct, live-verified failures. Both were captured on 2026-07-13 by
-comparing `status.url` against the actual `HTTPRoute` (hostnames + path matches)
+Two distinct, live-verified failures. Both were captured by comparing
+`status.url` against the actual `HTTPRoute` (hostnames + path matches)
 and the `Gateway` listeners on the cluster.
 
 **Failure 1 — shared-host/path clusters: `status.url` is non-routable.**
-On `msl-cw-use2-2` (prod) and `msl-cw-use2-dev-2` (dev), the ingress config is
+On the prod and dev clusters, the ingress config is
 `perISVCSubdomain: false` with `sharedHostPrefix: "llm"`. Routing is
-shared-host + path-prefix. For isvc `prod/avo-t5-metacode-0513-fp4-prod`:
+shared-host + path-prefix. For isvc `prod/my-model`:
 
 | | value |
 |---|---|
-| `status.url` | `https://avo-t5-metacode-0513-fp4-prod.prod.int-gw-https.msl-cw-use2-2.cw.metafb.cloud` |
-| actual `HTTPRoute` host | `llm.int-gw-https.msl-cw-use2-2.cw.metafb.cloud` |
-| actual `HTTPRoute` path | `PathPrefix: /prod/avo-t5-metacode-0513-fp4-prod/` |
-| real reachable URL | `https://llm.int-gw-https.msl-cw-use2-2.cw.metafb.cloud/prod/avo-t5-metacode-0513-fp4-prod/` |
+| `status.url` | `https://my-model.prod.int-gw-https.example.com` |
+| actual `HTTPRoute` host | `llm.int-gw-https.example.com` |
+| actual `HTTPRoute` path | `PathPrefix: /prod/my-model/` |
+| real reachable URL | `https://llm.int-gw-https.example.com/prod/my-model/` |
 | gateway listeners that exist | `llm-int-gw-https`, `llm-ext-gw-https`, `llm-int-gw-tls`, `llm-ext-gw-tls` |
 
-The advertised host `avo-t5-metacode-0513-fp4-prod.prod.int-gw-https…` is a
+The advertised host `my-model.prod.int-gw-https…` is a
 per-ISVC subdomain that **has no gateway listener** and the URL **omits the
 `/prod/<isvc>/` path prefix the route requires**. A caller who copies
 `status.url` gets a URL that does not resolve and would not route even if it did.
 `status.url` is simply wrong on these clusters — for every isvc.
 
 **Failure 2 — multi-gateway clusters: `status.url` hides the endpoint callers
-need.** On `msl-gcp-usc1-1` (TPU), the config is `perISVCSubdomain: true` with a
+need.** On the TPU cluster, the config is `perISVCSubdomain: true` with a
 cluster-default primary (internal) gateway, a cluster-default **additional
 (external)** gateway, and per-namespace int/ext gateway pairs
-(`namespaceIngressGateways` for `inf-prod`, `inf-sandbox`, `inf-staging`,
-`sdg-prod`, `sdg-sandbox`). For isvc `meta-ai/gpt-oss-20b-ome`:
+(`namespaceIngressGateways` for several namespaces). For isvc
+`team-a/gpt-oss-20b`:
 
 | | value |
 |---|---|
-| `status.url` | `https://gpt-oss-20b-ome.meta-ai.int-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud` |
-| actual `HTTPRoute` hostnames | `…int-gw-https…` **and** `gpt-oss-20b-ome.meta-ai.ext-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud` |
-| actual `HTTPRoute` parentRefs | `meta-ai-int-gw-https` **and** `meta-ai-ext-gw-https` |
+| `status.url` | `https://gpt-oss-20b.team-a.int-gw-https.tpu.example.com` |
+| actual `HTTPRoute` hostnames | `…int-gw-https…` **and** `gpt-oss-20b.team-a.ext-gw-https.tpu.example.com` |
+| actual `HTTPRoute` parentRefs | `team-a-int-gw-https` **and** `team-a-ext-gw-https` |
 
 Here `status.url` is *reachable* (the internal host is real) but exposes only the
 **internal** endpoint. The **external** endpoint — the one an off-cluster
@@ -103,7 +103,7 @@ the same URL-construction code; see [Design Details](#design-details)):
   URL (`controller.go setExternalServiceURL`) — all emit `http://` regardless of
   `urlScheme: https`. On every cluster above `urlScheme` is `https`, so these
   fields are wrong whenever they are set. This also violates the repo's
-  "no hardcoded magic values" design constraint (`CLAUDE.md`).
+  "no hardcoded magic values" design constraint.
 - **Raw vs Gateway strategy inconsistencies:** the Kubernetes-Ingress strategy
   appends `:<port>` to `status.url` and uses the bare `<isvc>` service host for
   `status.address`, while the Gateway-API strategy appends no port and uses
@@ -136,7 +136,7 @@ the same URL-construction code; see [Design Details](#design-details)):
   `status` *reports*, plus the shared derivation. No change to `gatewaysForRoute`
   routing semantics.
 - **Adding gateway configuration.** Per-namespace / additional gateways already
-  exist (`namespaceIngressGateways`, `additionalIngressGateways`; PR #716).
+  exist (`namespaceIngressGateways`, `additionalIngressGateways`).
 - **DNS provisioning / TLS issuance.** Whether a hostname resolves or has a cert
   is the platform's job; this OEP reports the URL OME's routes define.
 - **Multi-cluster global endpoint.** OEP-0018's `PlacementStatus.Endpoint`
@@ -152,12 +152,12 @@ the same URL-construction code; see [Design Details](#design-details)):
 Defined before use, with the consequence baked in:
 
 - **Subdomain routing** (`perISVCSubdomain: true`): each isvc gets its own host,
-  `<isvc>.<ns>.<domain>`, path `/`. The host identifies the service. Used on TPU
-  `msl-gcp-usc1-1`.
+  `<isvc>.<ns>.<domain>`, path `/`. The host identifies the service. Used on the
+  TPU cluster.
 - **Shared-host / path routing** (`perISVCSubdomain: false`): all isvcs share one
   host, `<sharedHostPrefix>.<domain>`, and are disambiguated by a path prefix
   `/<ns>/<isvc>/` (an Envoy `urlRewrite` filter strips it before forwarding).
-  Used on prod `msl-cw-use2-2` and dev `msl-cw-use2-dev-2`. **The path is
+  Used on the prod and dev clusters. **The path is
   load-bearing: drop it and the request does not route.**
 - **Primary (internal) gateway** (`omeIngressGateway` + `ingressDomain`): the
   default gateway every route attaches to; by convention the in-datacenter
@@ -165,10 +165,11 @@ Defined before use, with the consequence baked in:
 - **Additional / external gateway** (`additionalIngressGateways[]`, each with its
   own `omeIngressGateway` + `ingressDomain`): extra gateways every route *also*
   attaches to; by convention the externally-exposed ("ext") gateway, e.g.
-  `…ext-gw-https…` (on prod this is an actual internet-facing ELB).
+  `…ext-gw-https…` (on the prod cluster this is an actual internet-facing
+  load balancer).
 - **Per-namespace gateway** (`namespaceIngressGateways[<ns>]`): overrides the
-  primary and additional gateways for isvcs in `<ns>` (e.g. `sdg-prod` routes via
-  `sdg-prod-int-gw-https` / `sdg-prod-ext-gw-https` instead of the cluster
+  primary and additional gateways for isvcs in `<ns>` (e.g. `team-a` routes via
+  `team-a-int-gw-https` / `team-a-ext-gw-https` instead of the cluster
   default). The *host* is unchanged (the namespace is already in the host); the
   *parentRef gateway* differs.
 - **Endpoint** (proposed): one reachable URL for the isvc, tagged with a
@@ -177,16 +178,17 @@ Defined before use, with the consequence baked in:
 
 ## Evidence: what each cluster actually reports
 
-Cross-cluster snapshot (2026-07-13), showing `status.url` against the real route:
+Cross-cluster snapshot, showing `status.url` against the real route:
 
 | Cluster | mode | gateways (OME config) | real reachable URL | `status.url` today | correct? |
 |---|---|---|---|---|---|
-| `msl-gcp-usc1-1` (TPU) | subdomain | int + ext (cluster-default **and** per-ns) | `…int…` **and** `…ext…` host | `…int…` only | reachable, **external missing** |
-| `msl-cw-use2-2` (prod) | shared-host/path | int only (ext ELB exists, unused by OME) | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` (subdomain, no path) | **non-routable** |
-| `msl-cw-use2-dev-2` (dev) | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` | **non-routable** |
+| TPU cluster | subdomain | int + ext (cluster-default **and** per-ns) | `…int…` **and** `…ext…` host | `…int…` only | reachable, **external missing** |
+| prod cluster | shared-host/path | int only (ext load balancer exists, unused by OME) | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` (subdomain, no path) | **non-routable** |
+| dev cluster | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` | **non-routable** |
 
-Note prod exposes `llm-ext-gw-https` (a real internet-facing ELB) at the
-infrastructure layer, but OME's prod config has `additionalIngressGateways:
+Note the prod cluster exposes `llm-ext-gw-https` (a real internet-facing load
+balancer) at the infrastructure layer, but OME's prod config has
+`additionalIngressGateways:
 null` — so prod isvcs are not wired to it *and* status has no external URL. That
 is a config gap (out of scope) but it underscores why status must faithfully
 report whatever gateways a route is attached to, not a fixed assumption.
@@ -240,8 +242,9 @@ so OME never treats any class name as special.
 
 Route the three hardcoded-`http` writers (per-component, VirtualDeployment,
 external-service) through `urlScheme`, so `https` clusters report `https`. Small,
-mechanical, and removes a `CLAUDE.md` design-constraint violation. `status.url`
-carries **no explicit port** for gateway URLs (the port is implied by scheme —
+mechanical, and removes a hardcoded-magic-value design-constraint violation.
+`status.url` carries **no explicit port** for gateway URLs (the port is implied
+by scheme —
 `:443` for `https`); this standardizes the two ingress strategies, which
 currently disagree (the Kubernetes-Ingress strategy appends `:<port>`, Gateway
 API does not).
