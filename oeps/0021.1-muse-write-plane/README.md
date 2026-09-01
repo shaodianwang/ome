@@ -7,7 +7,7 @@
 **Tl;dr:** MUSE's write plane turns a console form into a reviewed pull request.
 Every create or edit of an OME resource — an `InferenceService`, a
 `ServingRuntime`, or a scale/traffic change to an existing one — is rendered to a
-Kubernetes CR and committed to the GitOps repository (`github.com/mslsrc`) as a PR
+Kubernetes CR and committed to the GitOps repository as a PR
 **authored by the requesting user**; Argo CD applies it on merge. MUSE writes to no
 cluster: the write component holds a GitHub credential, not kube write-RBAC.
 
@@ -34,8 +34,8 @@ Define the load-bearing terms up front; the rest of the doc keeps them apart:
 - **Actor** — the authenticated human on whose behalf a write happens, established
   from the gateway identity (below) and attributed on the PR. An *unattributed*
   write is a defect, not a convenience.
-- **silfra `jwt_header`** — the ingress plugin that injects a signed JWT
-  (`X-Silfra-Authorization`, carrying the caller's `fbid`) so the backend knows who
+- **gateway `jwt_header`** — the ingress-gateway plugin that injects a signed JWT
+  (a request header carrying the caller's internal user ID) so the backend knows who
   the user is. It is the *identity* source; it is **not** a GitHub credential.
 - **GitHub App user-access-token** — a token (`ghu_`) that lets `muse-writer` act
   on GitHub *as a specific user*, so the PR is attributed to them. Distinct from an
@@ -62,12 +62,11 @@ intervening feasibility work made concrete:
    its blast radius is "can open a PR," not "can mutate any cluster." That is
    strictly smaller than direct-write, and it keeps the read plane's read-only
    guarantee intact across the whole product.
-3. **The sanctioned MSL pattern is already GitOps.** The OME
+3. **The sanctioned internal pattern is already GitOps.** The OME
    `InferenceService`/`ServingRuntime` deploy path today is a Helm chart committed
-   to `github.com/mslsrc` and reconciled by Argo CD
-   (`fbcode/msl_infra/inference/helm/unified-inference/`, D110935030), and the
-   design of record for programmatic deploys is "convert input → CR → commit to
-   GitHub → Argo applies" (D95166934). PR-per-write *is* that pattern; direct-write
+   to the GitOps repository and reconciled by Argo CD, and the internal design of
+   record for programmatic deploys is "convert input → CR → commit to
+   GitHub → Argo applies". PR-per-write *is* that pattern; direct-write
    would fork it.
 
 The honest cost is stated in Non-Goals and Drawbacks: **day-2 operations become PR
@@ -127,8 +126,8 @@ accepted, because the alternative co-locates secrets with the read plane.
 ### User stories
 
 - *As an ML engineer*, I fill in the Deploy form, click "Open PR," and MUSE opens a
-  pull request in `mslsrc` — authored by me — that adds one `InferenceService`; I
-  review the rendered YAML, merge, and Argo applies it.
+  pull request in the GitOps repository — authored by me — that adds one
+  `InferenceService`; I review the rendered YAML, merge, and Argo applies it.
 - *As an SRE*, I scale a deployment from 4 to 8 replicas; MUSE opens a one-line PR
   editing `spec…replicas`; my teammate approves it and it rolls out through Argo.
 - *As a reviewer*, I see exactly who requested each change and what it does, in the
@@ -136,20 +135,21 @@ accepted, because the alternative co-locates secrets with the read plane.
 
 ### Risks (named so they are reviewable)
 
-- **W1 — Identity spoofing.** The silfra JWT is trivially forgeable if `muse-writer`
+- **W1 — Identity spoofing.** The gateway JWT is trivially forgeable if `muse-writer`
   does not verify its signature, or if `muse-writer` is reachable off-gateway.
   Mitigation in Design Details (verify + NetworkPolicy).
 - **W2 — GitHub token custody.** Per-user OAuth tokens are user-scoped secrets. Held
   wrong, they are an impersonation vector. Mitigation: short-lived, encrypted,
-  server-side only, derived from an authenticated OAuth login — never an
-  employee-supplied GitHub↔identity mapping (the abuse surface T275445110 warns of).
+  server-side only, derived from an authenticated OAuth login — never a
+  user-supplied GitHub↔identity mapping (a self-reported mapping is itself an
+  impersonation surface).
 - **W3 — Bad CR merged (validation gap).** With no cluster apply, MUSE cannot
   server-dry-run, so a semantically-invalid CR could pass the form and only fail at
   Argo-apply. Mitigation, not full fix: pre-PR schema validation + the OME admission
   webhook as post-merge backstop.
 - **W4 — Source-vs-concrete ambiguity.** Whether the PR should carry a single
   placement-driven *source* `InferenceService` (OEP-0018 fans it out) or a
-  *concrete* per-cluster CR depends on how the `mslsrc`/Argo flow is wired — which
+  *concrete* per-cluster CR depends on how the GitOps/Argo flow is wired — which
   is not yet confirmed. Open Question #1.
 
 ## Design Details
@@ -164,37 +164,38 @@ accepted, because the alternative co-locates secrets with the read plane.
 attribution must be unspoofable. Authorization (who *may* write) builds on it, but
 identity comes first.
 
-**The failure mode.** A raw header like `X-Silfra-Authorization: Bearer <anything>`
+**The failure mode.** A raw header like `X-Gateway-Authorization: Bearer <anything>`
 is settable by any client. If `muse-writer` trusts the header's mere presence, or is
 reachable off the gateway, anyone can impersonate anyone. So identity is only as
 good as its verification.
 
-**Terminology.** *silfra `jwt_header`* injects a JWT signed by the `SILFRA_JWT`
-crypto project, carrying the caller's `fbid`; resolve the unixname server-side. It
-authenticates the *user*; it is not a GitHub credential. Do **not** conflate
+**Terminology.** The gateway's *`jwt_header`* plugin injects a JWT signed with the
+gateway's signing key, carrying the caller's internal user ID; resolve the
+username server-side. It authenticates the *user*; it is not a GitHub credential. Do **not** conflate
 identity ("who you are") with GitHub authorization ("act on GitHub as you"), which
 is a separate token obtained separately (below).
 
 **Approach (how).** Options:
 
-  a) **Verify the silfra `jwt_header`.** MUSE is already fronted by silfra. Verify
-     the JWT signature against the `SILFRA_JWT` public key (accepting current+next
-     `kid`, since the key rotates monthly), validate `exp` yourself (the FBCrypto
-     libs verify the signature but *not* claims), and restrict `muse-writer` to the
-     gateway with a CiliumNetworkPolicy so the header cannot be injected off-path.
-     *Tradeoff:* smallest new surface, but the sanctioned verifier ships
-     Go/C++/Hack, not Rust — so `muse-writer` verifies against the exported public
-     key with a Rust JOSE library, a real, bounded cost, and it must get rotation
-     right or identity breaks for a few milliseconds each month.
-  b) **App-run OIDC** (the ArgoCD/Kargo precedent): `muse-writer` runs its own Okta
-     OIDC login (PKCE), reading `email`/`unixname`/`groups`. *Tradeoff:* richer
-     claims (group-based authz for free) and path-independent, but a full OIDC +
-     session flow to build.
+  a) **Verify the gateway `jwt_header`.** MUSE is already fronted by the gateway.
+     Verify the JWT signature against the gateway's published public key (accepting
+     current+next `kid`, since the key rotates monthly), validate `exp` yourself
+     (the sanctioned in-house crypto libraries verify the signature but *not*
+     claims), and restrict `muse-writer` to the gateway with a CiliumNetworkPolicy
+     so the header cannot be injected off-path. *Tradeoff:* smallest new surface,
+     but the sanctioned verifier libraries have no Rust implementation — so
+     `muse-writer` verifies against the exported public key with a Rust JOSE
+     library, a real, bounded cost, and it must get rotation right or identity
+     breaks for a few milliseconds each month.
+  b) **App-run OIDC** (the ArgoCD/Kargo precedent): `muse-writer` runs its own
+     corporate-IdP OIDC login (PKCE), reading `email`/`username`/`groups`.
+     *Tradeoff:* richer claims (group-based authz for free) and path-independent,
+     but a full OIDC + session flow to build.
 
 We choose **(a) for v1, with (b) as the graduation target** once we need
-group-based RBAC — because MUSE is already behind silfra, so (a) reuses the existing
-path and ships identity fastest. This is a lean, flagged for reviewers, not a
-settled fact.
+group-based RBAC — because MUSE is already behind the gateway, so (a) reuses the
+existing path and ships identity fastest. This is a lean, flagged for reviewers,
+not a settled fact.
 
 **Attribution ≠ GitHub authorization.** Verifying who you are does not grant a
 GitHub token. The PR-author credential is obtained separately, in the pipeline
@@ -227,14 +228,13 @@ Two stages, both anchored to sanctioned patterns:
      leaves semantic rules to the webhook; reimplementing OME's semantic validation
      in Rust is explicitly out of scope (drift risk).
 2. **Render + open the PR as the user.** Use a **first-party GitHub App with the
-   OAuth user-access-token flow** — the pattern the `marker` app already ships
-   (`fbcode/nest/apps/marker/`, `getGitHubTokenForWriting()`): the user does a
-   one-time "Login with GitHub," MUSE stores their `ghu_` token (encrypted,
-   server-side, short-lived), and opens the branch/commit/PR *as them*, so the PR is
-   attributed to the user. If a user has not linked GitHub, the fallback is an
-   installation token (`ghs_`, the `github_committer` pattern, D94112356) — but that
-   PR is **bot-attributed**, which loses goal #3, so it is a fallback, not the
-   default.
+   OAuth user-access-token flow** — a pattern an existing internal app already
+   ships in production: the user does a one-time "Login with GitHub," MUSE stores
+   their `ghu_` token (encrypted, server-side, short-lived), and opens the
+   branch/commit/PR *as them*, so the PR is attributed to the user. If a user has
+   not linked GitHub, the fallback is an installation token (`ghs_`, the existing
+   bot-committer pattern) — but that PR is **bot-attributed**, which loses goal #3,
+   so it is a fallback, not the default.
 
 ### What CR do we emit — source vs concrete (proposal + open question)
 
@@ -246,9 +246,9 @@ choice becomes placement fields on that source CR.
 
 I recommend the **source-CR model**, because it keeps the write plane consistent
 with OEP-0018 and avoids MUSE learning per-cluster layout. But it depends on a fact
-I cannot yet confirm: whether the `mslsrc`/Argo flow reconciles into a control-plane
+I cannot yet confirm: whether the GitOps/Argo flow reconciles into a control-plane
 cluster *running OEP-0018 placement*, or applies `InferenceService`/`ServingRuntime`
-directly to workload clusters (as the `unified-inference` chart appears to). If the
+directly to workload clusters (as the existing deploy chart appears to). If the
 latter, MUSE must emit a *concrete* per-cluster CR instead. This is Open Question #1;
 it blocks nothing in slices 0–1 except the exact render target.
 
@@ -260,7 +260,7 @@ values / a CRD-style struct), with **no in-code defaults**:
 
 - the GitOps repo and a path template per (kind, environment) — where the CR YAML
   lands;
-- the silfra JWT header name + the `SILFRA_JWT` verification-key source + the
+- the gateway JWT header name + the verification-key source + the
   issuer/audience to enforce;
 - the GitHub App id and OAuth client config;
 - the authorization allowlist (who may open PRs, to which environments).
@@ -273,35 +273,35 @@ write.
 
 A separate deployment in the management-plane cluster, beside `muse-server`. It
 holds the GitHub App key + per-user OAuth tokens and egresses to
-`github.com`/`api.github.com`. Egress is already available on `msl-mks-cp-lco-0`:
-that cluster's fwdproxy policy imports the shared `MKS_CICD_DOMAINS` list, whose
-`(.*\.)?github\.com` regex covers both hosts — so no allowlist diff is needed there.
-The one requirement is that `muse-writer`'s pod presents the cluster pod-identity
-(`identity.mks.meta.com/default: "true"`); MUSE's chart today mints only the
-chat-proxy mTLS cert, a *separate* credential. Verify allow/deny in the TTLS Scuba
-table; a 403 after opting in is an identity gap, not a missing domain. Do **not**
-set `HTTPS_PROXY` on MKS — egress is transparent via `ttls_proxy`, and pointing at
-fwdproxy breaks it (the OME MKS bring-up hit exactly this).
+`github.com`/`api.github.com`. Egress is already available there: the cluster's
+egress policy imports the platform's shared CI/CD domain list, whose
+`(.*\.)?github\.com` regex covers both hosts — so no allowlist diff is needed.
+The one requirement is that `muse-writer`'s pod opts into the cluster's pod
+identity (a pod annotation); MUSE's chart today mints only the
+chat-proxy mTLS cert, a *separate* credential. Verify allow/deny in the egress
+proxy's audit log; a 403 after opting in is an identity gap, not a missing domain.
+Do **not** set an explicit `HTTPS_PROXY` — egress on this platform is transparent,
+and pointing at a forward proxy breaks it (a prior bring-up hit exactly this).
 
 ### Why this is mostly assembly
 
 Every non-trivial piece has a sanctioned internal precedent, which is why the risk
 is integration, not invention:
 
-- identity verification → silfra `jwt_header` + FBCrypto/`SILFRA_JWT` (Presto's
-  `JsonWebTokenAuthenticator` is a working consumer);
-- PR-as-user → the `marker` app's user-token flow; bot fallback → `github_committer`
-  (D94112356);
-- CR-commit-for-Argo → the design of record D95166934 and the `unified-inference`
-  chart (D110935030);
-- egress → already covered by `MKS_CICD_DOMAINS`.
+- identity verification → the gateway's `jwt_header` plugin + its signing-key
+  infrastructure (an existing production service is a working consumer);
+- PR-as-user → an existing internal app's user-token flow; bot fallback → the
+  existing installation-token bot committer;
+- CR-commit-for-Argo → the internal design of record and the existing deploy
+  chart;
+- egress → already covered by the platform's shared CI/CD domain list.
 
-The one genuinely new piece is the Rust-side silfra verification plus the pipeline
-glue.
+The one genuinely new piece is the Rust-side gateway-JWT verification plus the
+pipeline glue.
 
 ## Test Plan
 
-- **Identity (unit).** Verify a good silfra JWT; reject a forged signature, an
+- **Identity (unit).** Verify a good gateway JWT; reject a forged signature, an
   expired token, and a wrong-issuer token; exercise `kid` rotation (current+next).
   This is the security-critical path — test the rejections, not just the happy path.
 - **Pipeline mapping (unit).** `ChangeRequest` → exact CR YAML, including the create
@@ -322,7 +322,7 @@ glue.
 Sliced so the GitHub-free work ships first and the GitHub-dependent work follows
 once the App + egress land:
 
-- **Slice 0 — Identity.** silfra `jwt_header` verification + `/v1/me` + the authz
+- **Slice 0 — Identity.** Gateway `jwt_header` verification + `/v1/me` + the authz
   gate. No GitHub, no egress. Behind an internal flag.
 - **Slice 1 — Create `InferenceService` → PR.** The full pipeline (validate → render
   → PR-as-user) + the GitHub App + OAuth flow. First real write. Single environment.
@@ -352,30 +352,30 @@ once the App + egress land:
    UX, but MUSE holds cluster write-RBAC and the audit trail is whatever MUSE
    records. Rejected — it is the exact "unaudited button" failure mode this OEP
    exists to avoid.
-2. **Bot-attributed PRs only (`github_committer`).** *Tradeoff:* simplest (no
-   per-user OAuth), but every PR is `[bot]`, losing goal #3. The `marker` team hit
-   this and added the user-token flow specifically to fix it. Rejected as the
-   default; kept as the link-less fallback.
+2. **Bot-attributed PRs only (installation token).** *Tradeoff:* simplest (no
+   per-user OAuth), but every PR is `[bot]`, losing goal #3. The team behind the
+   precedent app hit this and added the user-token flow specifically to fix it.
+   Rejected as the default; kept as the link-less fallback.
 3. **OIDC → github.com token exchange.** *Tradeoff:* would avoid per-user GitHub
-   OAuth entirely, but no such exchange exists today (the `mslsrc` org shares Meta's
-   SAML IdP for interactive login, but there is no OIDC→github-API token exchange),
-   so it is net-new `crypto_primitives` work. Rejected for v1.
+   OAuth entirely, but no such exchange exists today (the GitHub org shares the
+   corporate SAML IdP for interactive login, but there is no OIDC→github-API token
+   exchange), so it is net-new token-exchange (crypto) work. Rejected for v1.
 4. **Fold the write plane into `muse-server`.** *Tradeoff:* one fewer process, but
    the read plane inherits GitHub tokens + egress. Rejected on trust-domain grounds.
 
 ## Open Questions
 
 1. **Source vs concrete CR** (blocks the render target, not the slice 0–1
-   scaffolding). Does the `mslsrc`/Argo flow reconcile into a control-plane cluster
+   scaffolding). Does the GitOps/Argo flow reconcile into a control-plane cluster
    running OEP-0018 placement (→ emit a source CR), or apply directly to workload
    clusters (→ emit a concrete per-cluster CR)? Owner: `TBD` (confirm with the
-   `unified-inference` owners).
-2. **Which repo + path.** `mslsrc/dev` (where `github_committer` commits today) or a
+   deploy-chart owners).
+2. **Which repo + path.** The repo the existing bot committer writes to today, or a
    dedicated config repo? Owner: `TBD`.
-3. **Identity: silfra vs app-run OIDC — final call.** (a) ships v1; (b) is the
+3. **Identity: gateway JWT vs app-run OIDC — final call.** (a) ships v1; (b) is the
    group-RBAC upgrade. When do we actually need groups? Owner: `TBD`.
-4. **GitHub App onboarding owner.** A first-party App (keychain ACLs, Chronos token
-   rotation, `github.com` fwdproxy policy) must be filed via the `open_source`
+4. **GitHub App onboarding owner.** A first-party App (secret-store ACLs, scheduled
+   token rotation, `github.com` egress policy) must be filed with the owning
    oncall. Owner: `TBD`.
 5. **Authz model.** Who may open a PR, to which environments/namespaces? v1 can start
    with an allowlist; the fuller model is `TBD`.
