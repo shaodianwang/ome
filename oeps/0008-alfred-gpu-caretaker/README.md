@@ -116,7 +116,7 @@ The reader's reasonable objection: "These are three unrelated jobs. Why not thre
 2. **One safety layer.** Rate limits, per-workload cooldowns, concurrency caps, and "reject high-uncertainty actions" (*primum non nocere*) are not policy-specific — they bound *actuation*, regardless of which policy proposed it. Centralizing them in the Arbiter means a defrag migration and a health evacuation can't both move the same workload, or together exceed the cluster's churn budget. N independent controllers cannot enforce a shared budget without inventing a coordination protocol between them — i.e., reinventing the Arbiter, badly.
 3. **One narrow actuation contract.** Both moving a fragmented workload and evacuating a workload off a bad node reduce to the *same* primitive: migrate this workload safely via OMENative's annotation, or evict it via the K8s API if it's a single pod. The Dispatcher already encodes "how to move an OME workload without breaking it." A second controller would either duplicate that contract or, worse, take a wider, more dangerous surface.
 
-This is also where the **archived `ome-operator` Alfred** re-enters the design. That component (in the retired `bitbucket.oci.oraclecorp.com/genaicore/ome-operator` repo) carried four pieces, audited as:
+This is also where the **archived `ome-operator` Alfred** re-enters the design. That component (in the retired, pre-open-source `ome-operator` repository) carried four pieces, audited as:
 
 - **Auto-patching** (`pkg/alfred/autopatching/autopatching.go`) — cordons nodes, triggers GPU node image rotation via the OCI Compute API, drains single-replica InferenceServices.
 - **Auto-repair** (`pkg/alfred/autorepair/autorepair.go`) — watches for a `GpuUnhealthy` node condition, then cordons, drains, and triggers a soft reset via the OCI Compute API.
@@ -1923,7 +1923,7 @@ forecasting), and the **OEP-0013 read-only seam**.
 Scope adds **Policy #3 Descheduling**.
 
 - Integration tests 1–27 (Descheduling included) + chaos + simulation passing.
-- 2+ production users running Alfred for ≥ 60 days without Sev1/Sev2 incidents
+- 2+ production users running Alfred for ≥ 60 days without high-severity incidents
   attributed to Alfred — across **at least Defrag and Node-Health enabled
   together**, so arbitration is exercised in production, not just in CI.
 - Dashboard + runbook published, covering per-policy metrics and the Arbiter's
@@ -2084,9 +2084,8 @@ policies.
 ## Open questions
 
 Some of these are the long-standing research-level questions carried from the
-single-policy design (the P3 items from `design-questions.md`); the rest are
-new, surfaced by the multi-policy reframing. None block design completeness;
-they bound what is **not** yet decided.
+single-policy design; the rest are new, surfaced by the multi-policy reframing.
+None block design completeness; they bound what is **not** yet decided.
 
 New, from the Caretaker reframing:
 
