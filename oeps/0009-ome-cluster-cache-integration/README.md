@@ -37,7 +37,7 @@
 
 ## Summary
 
-This OEP adds an optional model-cache-backed distribution path for `BaseModel` / `ClusterBaseModel` in OME. The existing model-agent behavior is unchanged and remains the default. Operators opt in per model via `spec.distribution: Sharded`. When opted in, OME drives source validation, metadata discovery, prewarm, status, and metadata parsing through a generic `modelcache.Client` contract. A concrete provider implements that contract. The initial provider is Meta's cluster_cache, but OME core must not assume cluster_cache is the only possible implementation.
+This OEP adds an optional model-cache-backed distribution path for `BaseModel` / `ClusterBaseModel` in OME. The existing model-agent behavior is unchanged and remains the default. Operators opt in per model via `spec.distribution: Sharded`. When opted in, OME drives source validation, metadata discovery, prewarm, status, and metadata parsing through a generic `modelcache.Client` contract. A concrete provider implements that contract. The initial provider is cluster_cache, but OME core must not assume cluster_cache is the only possible implementation.
 
 For `Sharded` models, the per-node download path is bypassed. Compatible engines consume weights through the selected cache provider's data-plane integration. For the initial cluster-cache provider, engines use the in-process cluster_cache client so high-throughput weight loading can keep its ring fan-out, RDMA, NUMA/HCA affinity, and direct buffer/tensor access. Unsupported engines are rejected until their `ServingRuntime` declares capability for the selected provider.
 
@@ -73,7 +73,7 @@ A second motivation is **HuggingFace source coverage**. The initial cluster-cach
 - **Not adding Sharded consumption to every runtime.** Engines that do not implement a supported model-cache data-plane integration remain unsupported for `Sharded` BaseModels and are rejected by OME validation.
 - **Not requiring every provider to support every source backend.** The initial cluster-cache provider targets S3 and HF. OCI/GCP/Azure can be added by provider implementations later.
 - **Not adding a `ModelCacheBackend` CRD in Alpha.** Alpha uses cluster-level provider configuration for the controller. A CRD can be added later if OME needs multiple cache providers in one cluster or per-model provider selection.
-- **Not Stage 1 contract negotiation** with MSL TBD lab or MSL FAIR. Out of scope; this OEP works with whatever Stage 1 produces today.
+- **Not contract negotiation with upstream model-producing teams.** Out of scope; this OEP works with whatever those teams' pipelines produce today.
 
 ## Proposal
 
@@ -221,7 +221,7 @@ If OME later needs multiple cache providers in one cluster, namespace-specific
 provider selection, or per-model provider selection, a `ModelCacheBackend` CRD
 or `spec.cacheRef` can be introduced as a follow-up.
 
-The initial provider is `cluster_cache`, backed by Meta's cluster_cache
+The initial provider is `cluster_cache`, backed by the cluster_cache
 DaemonSet. Future providers can implement the same control-plane contract using
 different implementations, for example an OSS HTTP cache, a PVC-backed cache, or
 a development no-op cache.
@@ -379,7 +379,7 @@ provider is configured.
 ### Initial cluster-cache provider work
 
 The initial `cluster_cache` provider maps `modelcache.Client` operations to
-Meta's cluster_cache daemon server API. Cluster_cache remains an independent
+the cluster_cache daemon server API. Cluster_cache remains an independent
 component. OME does not import the fat engine client or participate in hot-path
 engine weight loading. The OME cluster-cache provider does contain a small
 control-plane implementation of cluster-cache ring lookup so it can route
@@ -450,7 +450,7 @@ on, forwarding to `/file_metadata/local` to avoid loops.
 A concrete cluster_cache implementation would look like:
 
 1. Keep `/file_metadata` as the source directory manifest API. It lists objects
-   under the source prefix, normalizes `manifold://` roots to `s3://`, returns
+   under the source prefix, normalizes internal source schemes to `s3://`, returns
    concrete object paths plus size/mtime/etag metadata, and caches listing
    results in the daemon LRU.
 2. Use `/fetch` on a small metadata file such as `config.json` to learn the
@@ -487,7 +487,7 @@ GET /file_metadata?path=<remote-root>
 Accepted roots:
 
 - `s3://bucket/prefix`
-- `manifold://bucket/prefix`, normalized by cluster_cache to
+- internal-scheme roots, normalized by cluster_cache to
   `s3://bucket/prefix`
 
 Response:
