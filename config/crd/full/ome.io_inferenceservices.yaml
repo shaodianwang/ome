@@ -8061,6 +8061,11 @@ spec:
                       x-kubernetes-list-type: atomic
                     topologyKey:
                       type: string
+                    topologySpread:
+                      enum:
+                        - Preferred
+                        - Required
+                      type: string
                     topologySpreadConstraints:
                       items:
                         properties:
@@ -8119,6 +8124,8 @@ spec:
                         - topologyKey
                         - whenUnsatisfiable
                       x-kubernetes-list-type: map
+                    topologySpreadKey:
+                      type: string
                     volumes:
                       items:
                         properties:
@@ -21362,6 +21369,11 @@ spec:
                       x-kubernetes-list-type: atomic
                     topologyKey:
                       type: string
+                    topologySpread:
+                      enum:
+                        - Preferred
+                        - Required
+                      type: string
                     topologySpreadConstraints:
                       items:
                         properties:
@@ -21420,6 +21432,8 @@ spec:
                         - topologyKey
                         - whenUnsatisfiable
                       x-kubernetes-list-type: map
+                    topologySpreadKey:
+                      type: string
                     volumes:
                       items:
                         properties:

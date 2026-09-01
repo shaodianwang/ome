@@ -3875,6 +3875,20 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Format:      "",
 						},
 					},
+					"topologySpread": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologySpread spreads this component's instances across fault domains so losing one domain (rack / fabric slice / cube) cannot take out every instance at once. Rendered as a standard topologySpreadConstraint (maxSkew 1) on each instance's anchor pod (the leader, or the sole pod of a single-pod instance); workers follow their leader, so gangs stay whole. Required renders as DoNotSchedule — balanced spreading enforced by any scheduler that keeps PodTopologySpread's Filter, including the OME gang scheduler's packing profile. Preferred renders as ScheduleAnyway — advisory only, and currently without effect under the OME gang scheduler (its profile disables the spreading Score and pre-narrows gang candidates to one domain). Not part of the revision hash: changing it shapes future placements without rolling a healthy fleet. Unset keeps pure bin-packing.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"topologySpreadKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologySpreadKey is the node-label key naming the fault domains TopologySpread spreads across. Defaults to TopologyKey — right for fabrics where the co-location domain IS the failure zone (an NVLink rack). Set it to a coarser label when the failure zone contains many gang domains: e.g. co-locate by the TPU partition label while spreading across cloud.google.com/gce-topology-subblock. Single-pod components have no co-location key, so spreading them requires setting this explicitly. Ignored unless TopologySpread is set.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"acceleratorOverride": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AcceleratorOverride allows overriding the global accelerator selection for this component",
@@ -4630,6 +4644,20 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Format:      "",
 						},
 					},
+					"topologySpread": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologySpread spreads this component's instances across fault domains so losing one domain (rack / fabric slice / cube) cannot take out every instance at once. Rendered as a standard topologySpreadConstraint (maxSkew 1) on each instance's anchor pod (the leader, or the sole pod of a single-pod instance); workers follow their leader, so gangs stay whole. Required renders as DoNotSchedule — balanced spreading enforced by any scheduler that keeps PodTopologySpread's Filter, including the OME gang scheduler's packing profile. Preferred renders as ScheduleAnyway — advisory only, and currently without effect under the OME gang scheduler (its profile disables the spreading Score and pre-narrows gang candidates to one domain). Not part of the revision hash: changing it shapes future placements without rolling a healthy fleet. Unset keeps pure bin-packing.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"topologySpreadKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologySpreadKey is the node-label key naming the fault domains TopologySpread spreads across. Defaults to TopologyKey — right for fabrics where the co-location domain IS the failure zone (an NVLink rack). Set it to a coarser label when the failure zone contains many gang domains: e.g. co-locate by the TPU partition label while spreading across cloud.google.com/gce-topology-subblock. Single-pod components have no co-location key, so spreading them requires setting this explicitly. Ignored unless TopologySpread is set.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"acceleratorOverride": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AcceleratorOverride allows overriding the global accelerator selection for this component",
@@ -5255,6 +5283,20 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 					"topologyKey": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TopologyKey is the resolved gang co-location node-label key for this Component, projected verbatim from the effective ISVC↔runtime component spec (spec.<component>.topologyKey, else the runtime component-config value). When set on a multi-node Component, the InferenceReplica controller auto-generates the per-Instance worker→leader podAffinity that co-locates every worker onto its gang's leader on a node sharing this label value. Nil means no auto-generated gang affinity.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"topologySpread": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologySpread is the resolved spreading policy for this Component, projected verbatim from the effective ISVC↔runtime component spec. The InferenceReplica controller renders it as a topologySpreadConstraint on each Instance's anchor pod; nil keeps pure bin-packing.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"topologySpreadKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologySpreadKey is the resolved fault-domain node-label key TopologySpread spreads across; nil defaults to TopologyKey.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

@@ -130,6 +130,15 @@ type Params struct {
 	// for single-pod Components or when unset on both ISVC and runtime.
 	TopologyKey *string
 
+	// TopologySpread is the resolved gang spreading policy for the
+	// Component, projected verbatim onto ir.Spec.TopologySpread so the IR
+	// controller can advertise it on each Instance's PodGroup.
+	TopologySpread *v1beta1.TopologySpreadPolicy
+
+	// TopologySpreadKey is the resolved fault-domain label key for
+	// TopologySpread; nil defaults to the co-location TopologyKey.
+	TopologySpreadKey *string
+
 	// ResolvedAutoscaler is the authoritative per-Component
 	// ComponentAutoscaler the autoscaler.ResolveComponentAutoscaler
 	// helper picked from the ISVC → runtime → default chain. The
@@ -393,6 +402,8 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// controller reads it to auto-generate the worker→leader podAffinity
 	// for multi-node Components; nil is a no-op there.
 	ir.Spec.TopologyKey = p.TopologyKey
+	ir.Spec.TopologySpread = p.TopologySpread
+	ir.Spec.TopologySpreadKey = p.TopologySpreadKey
 	// Project the resolved Autoscaler onto the IR. Whole-block replace
 	// semantics — operator-side changes to isvc.spec.<comp>.autoscaler
 	// always win over any drifted IR.spec.autoscaler. DeepCopy keeps the

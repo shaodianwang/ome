@@ -91,6 +91,20 @@ type InferenceReplicaSpec struct {
 	// +optional
 	TopologyKey *string `json:"topologyKey,omitempty"`
 
+	// TopologySpread is the resolved spreading policy for this
+	// Component, projected verbatim from the effective ISVC↔runtime
+	// component spec. The InferenceReplica controller renders it as a
+	// topologySpreadConstraint on each Instance's anchor pod; nil keeps
+	// pure bin-packing.
+	// +optional
+	// +kubebuilder:validation:Enum=Preferred;Required
+	TopologySpread *TopologySpreadPolicy `json:"topologySpread,omitempty"`
+
+	// TopologySpreadKey is the resolved fault-domain node-label key
+	// TopologySpread spreads across; nil defaults to TopologyKey.
+	// +optional
+	TopologySpreadKey *string `json:"topologySpreadKey,omitempty"`
+
 	// Runners is the fully-rendered set of pod templates per Instance.
 	// MUST be non-empty. Single-pod Instances have one Runner with
 	// Name="default" and Size=1; multi-node Instances typically have

@@ -107,6 +107,8 @@ type fixtureOptions struct {
 	startupDelaySec   int
 	engineAnnots      map[string]string
 	engineTopologyKey string
+
+	engineTopologySpread v1beta1.TopologySpreadPolicy
 	// engineWorkerSize > 0 promotes the engine to a multi-pod gang
 	// Instance: a Leader + N workers per Instance (total = N+1 pods).
 	// Zero leaves the engine as single-pod (default).
@@ -198,6 +200,12 @@ func WithEngineWorkerSize(n int) FixtureOption {
 // worker affinity and the corresponding PodGroup annotation.
 func WithEngineTopologyKey(key string) FixtureOption {
 	return func(o *fixtureOptions) { o.engineTopologyKey = key }
+}
+
+// WithEngineTopologySpread configures the gang spreading policy advertised
+// on each engine Instance's PodGroup.
+func WithEngineTopologySpread(p v1beta1.TopologySpreadPolicy) FixtureOption {
+	return func(o *fixtureOptions) { o.engineTopologySpread = p }
 }
 
 // WithEngineUpdateStrategy sets Spec.Engine.Lifecycle.UpdateStrategy.Type.
@@ -427,6 +435,10 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	if o.engineTopologyKey != "" {
 		topologyKey := o.engineTopologyKey
 		engine.TopologyKey = &topologyKey
+	}
+	if o.engineTopologySpread != "" {
+		spread := o.engineTopologySpread
+		engine.TopologySpread = &spread
 	}
 	if o.engineMinReplicas != 1 {
 		mr := o.engineMinReplicas

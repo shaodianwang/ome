@@ -1,0 +1,25 @@
+# Balanced over-subscription: three Required instances on a two-cube
+# topology (up.sh --cubes 2x2x2,2x2x2). maxSkew 1 means BALANCED spreading,
+# not exclusive: instance counts per cube may differ by at most one, so all
+# three place as 2/1 — nothing stays Pending on balance alone. A placement
+# only waits when the under-loaded cube cannot fit the gang.
+# Verify: hack/kwok-sim/verify-spread.sh sim-spread-balanced --distinct 2
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sim-spread-balanced
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-2x2x2
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    leader: {}
+    worker:
+      size: 1
+    topologySpread: Required
+    topologySpreadKey: cloud.google.com/gce-topology-subblock

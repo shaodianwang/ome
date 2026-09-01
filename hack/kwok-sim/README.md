@@ -54,6 +54,31 @@ Tear down with `hack/kwok-sim/down.sh`, which reads the same `--cluster` and
 `OME_KWOK_CLUSTER` the bring-up does — so it deletes the cluster you actually
 started, not whichever one the default names.
 
+## Verifying gang spreading
+
+`topologySpread` places replicas of one component in different fault domains,
+rendered as a standard `topologySpreadConstraint` on each instance's leader —
+the scheduler carries no spread configuration. On tpu7x the co-location
+partition is gang-sized, so the fault domain is the cube
+(`cloud.google.com/gce-topology-subblock`), named via `topologySpreadKey`. A
+two-cube 2x2x2 layout demonstrates both shapes:
+
+```sh
+hack/kwok-sim/up.sh --cubes 2x2x2,2x2x2 --skip-build
+kubectl apply -n kwok-sim -f hack/kwok-sim/fixtures/70-spread-required.yaml
+hack/kwok-sim/verify-spread.sh sim-spread --distinct 2
+
+kubectl apply -n kwok-sim -f hack/kwok-sim/fixtures/71-spread-balanced.yaml
+hack/kwok-sim/verify-spread.sh sim-spread-balanced --distinct 2
+```
+
+The first fixture's two instances land in different cubes (packing alone
+would put both in one). The second over-subscribes on purpose: three
+instances, two cubes — maxSkew 1 is BALANCED spreading, so they place 2/1
+and nothing stays Pending on balance alone. `Preferred` renders
+ScheduleAnyway and is advisory only under this packing profile (the
+spreading Score is disabled); use `Required` when spreading must hold.
+
 ## Components
 
 `up.sh` builds and deploys three OME components. `--component` narrows that to

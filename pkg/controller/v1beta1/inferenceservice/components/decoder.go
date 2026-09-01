@@ -190,6 +190,8 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			WorkerSize:         workerSize,
 			MultiPod:           multiPod,
 			TopologyKey:        d.decoderSpec.TopologyKey,
+			TopologySpread:     d.decoderSpec.TopologySpread,
+			TopologySpreadKey:  d.decoderSpec.TopologySpreadKey,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             d.Client,
 			Reader:             d.APIReader,

@@ -1,0 +1,28 @@
+# Spread across cubes, Required. Needs a topology with at least two 2x2x2
+# cubes: up.sh --cubes 2x2x2,2x2x2. Each instance is one 2-node gang filling
+# one partition; the partition label is gang-sized, so fault isolation comes
+# from spreading across the subblock (cube) label via topologySpreadKey.
+# OME renders this as a DoNotSchedule topologySpreadConstraint on each
+# instance's leader; the scheduler needs no spread configuration. (Preferred
+# renders ScheduleAnyway and is advisory only — the packing profile disables
+# the spreading Score, so use Required for guaranteed spreading here.)
+# Verify: hack/kwok-sim/verify-spread.sh sim-spread --distinct 2
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sim-spread
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-2x2x2
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    leader: {}
+    worker:
+      size: 1
+    topologySpread: Required
+    topologySpreadKey: cloud.google.com/gce-topology-subblock

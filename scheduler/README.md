@@ -72,8 +72,13 @@ rather than the scheduler's slow periodic flush. `NodeResourcesFit` supplies
 node-level `MostAllocated` packing. Placement
 decisions, gate outcomes, unwinds, and the count of pinned groups are exported as
 `ome_scheduler_*` metrics on the
-scheduler's `/metrics` endpoint. Still ahead: replica spreading across domains
-for fault isolation, and topology-aware preemption.
+scheduler's `/metrics` endpoint. Replica spreading for fault isolation
+needs no scheduler support: OME renders it as a standard leader-pod
+`topologySpreadConstraint`, whose hard (`DoNotSchedule`) form the retained
+PodTopologySpread Filter enforces — a best-fit pin the constraint vetoes is
+released by PostFilter, remembered, and re-planned into a compatible domain
+(covered by `test/integration/spread_tsc_test.go`). Still ahead:
+topology-aware preemption.
 
 ## Version policy
 

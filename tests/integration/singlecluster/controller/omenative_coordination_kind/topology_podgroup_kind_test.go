@@ -9,6 +9,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -24,6 +25,79 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 	})
 	ginkgo.AfterEach(func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
+	})
+
+	ginkgo.It("renders topologySpread as a leader constraint and spreads instances across nodes", func() {
+		const isvcName = "topology-spread"
+		fix := newCoordFixture(ns.Name,
+			WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(2),
+			WithEngineWorkerSize(1),
+			WithEngineTopologyKey(corev1.LabelHostname),
+			WithEngineTopologySpread(v1beta1.TopologySpreadRequired),
+		)
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("leaders carry the constraint, workers do not, PodGroups stay clean, and leaders land on distinct nodes")
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(ir.Spec.TopologySpread).NotTo(BeNil())
+			g.Expect(*ir.Spec.TopologySpread).To(Equal(v1beta1.TopologySpreadRequired))
+
+			leaderNodes := map[string]bool{}
+			for _, p := range listOMENativePods(g, ns.Name, isvcName) {
+				if p.DeletionTimestamp != nil {
+					continue
+				}
+				switch p.Labels[query.LabelRunner] {
+				case "leader":
+					g.Expect(p.Spec.TopologySpreadConstraints).To(HaveLen(1),
+						"every leader must carry exactly the rendered spread constraint")
+					c := p.Spec.TopologySpreadConstraints[0]
+					g.Expect(c.TopologyKey).To(Equal(corev1.LabelHostname))
+					g.Expect(c.MaxSkew).To(Equal(int32(1)))
+					g.Expect(c.WhenUnsatisfiable).To(Equal(corev1.DoNotSchedule))
+					g.Expect(c.LabelSelector.MatchLabels).To(HaveKeyWithValue(query.LabelRunner, "leader"),
+						"the selector counts anchors only")
+					g.Expect(p.Spec.NodeName).NotTo(BeEmpty())
+					leaderNodes[p.Spec.NodeName] = true
+				case "worker":
+					g.Expect(p.Spec.TopologySpreadConstraints).To(BeEmpty(),
+						"workers follow their leader; they carry no spread constraint")
+				}
+			}
+			g.Expect(leaderNodes).To(HaveLen(2),
+				"two instances must spread their leaders across two distinct nodes")
+
+			for idx := int32(0); idx < 2; idx++ {
+				pg := &schedulingv1alpha1.PodGroup{}
+				name := query.PodGroupName(isvcName, workload.ComponentEngine, idx)
+				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: name}, pg)).To(Succeed())
+				g.Expect(pg.Annotations).To(HaveKeyWithValue(query.AnnotationTopologyKey, corev1.LabelHostname),
+					"the topology contract is unchanged by spreading")
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("clearing the policy never churns running pods (the constraint is not part of the revision)")
+		var uids []string
+		for _, p := range listOMENativePods(Default, ns.Name, isvcName) {
+			uids = append(uids, string(p.UID))
+		}
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.TopologySpread = nil
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		Consistently(func(g Gomega) {
+			var got []string
+			for _, p := range listOMENativePods(g, ns.Name, isvcName) {
+				got = append(got, string(p.UID))
+			}
+			g.Expect(got).To(ConsistOf(uids),
+				"toggling topologySpread must not roll or recreate any pod")
+		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
 	})
 
 	ginkgo.It("uses the configured topology key for initial and surge PodGroups and worker affinity", func() {

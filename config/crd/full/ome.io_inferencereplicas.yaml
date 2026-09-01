@@ -3747,6 +3747,13 @@ spec:
                   x-kubernetes-list-type: map
                 topologyKey:
                   type: string
+                topologySpread:
+                  enum:
+                    - Preferred
+                    - Required
+                  type: string
+                topologySpreadKey:
+                  type: string
               required:
                 - component
                 - parentRef

@@ -66,6 +66,16 @@ type ComponentPlan struct {
 	// that active gang must use the same immutable topology contract; fresh
 	// Instances and surge indices fall back to TopologyKey.
 	InstanceTopologyKeys map[int32]string
+
+	// TopologySpread is the gang spreading policy ("Preferred" / "Required";
+	// empty = pure bin-packing) the PodGroup builder advertises to the
+	// topology-aware gang scheduler. Placement-time preference only — it
+	// never constrains rendered pods.
+	TopologySpread string
+
+	// TopologySpreadKey is the fault-domain node-label key TopologySpread
+	// spreads across; empty defaults to TopologyKey.
+	TopologySpreadKey string
 }
 
 // TopologyKeyForInstance returns the live-safe topology contract for an

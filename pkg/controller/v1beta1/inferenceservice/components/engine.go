@@ -202,6 +202,8 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			WorkerSize:         workerSize,
 			MultiPod:           multiPod,
 			TopologyKey:        e.engineSpec.TopologyKey,
+			TopologySpread:     e.engineSpec.TopologySpread,
+			TopologySpreadKey:  e.engineSpec.TopologySpreadKey,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             e.Client,
 			Reader:             e.APIReader,

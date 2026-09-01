@@ -64,6 +64,8 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 		Paused:               desired.Paused,
 		PauseFreeze:          desired.PauseFreeze,
 		TopologyKey:          desired.TopologyKey,
+		TopologySpread:       desired.TopologySpread,
+		TopologySpreadKey:    desired.TopologySpreadKey,
 	}, nil
 }
 

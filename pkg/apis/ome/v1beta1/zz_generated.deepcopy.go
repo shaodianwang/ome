@@ -1591,6 +1591,16 @@ func (in *DecoderSpec) DeepCopyInto(out *DecoderSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.TopologySpread != nil {
+		in, out := &in.TopologySpread, &out.TopologySpread
+		*out = new(TopologySpreadPolicy)
+		**out = **in
+	}
+	if in.TopologySpreadKey != nil {
+		in, out := &in.TopologySpreadKey, &out.TopologySpreadKey
+		*out = new(string)
+		**out = **in
+	}
 	if in.AcceleratorOverride != nil {
 		in, out := &in.AcceleratorOverride, &out.AcceleratorOverride
 		*out = new(AcceleratorSelector)
@@ -1717,6 +1727,16 @@ func (in *EngineSpec) DeepCopyInto(out *EngineSpec) {
 	}
 	if in.TopologyKey != nil {
 		in, out := &in.TopologyKey, &out.TopologyKey
+		*out = new(string)
+		**out = **in
+	}
+	if in.TopologySpread != nil {
+		in, out := &in.TopologySpread, &out.TopologySpread
+		*out = new(TopologySpreadPolicy)
+		**out = **in
+	}
+	if in.TopologySpreadKey != nil {
+		in, out := &in.TopologySpreadKey, &out.TopologySpreadKey
 		*out = new(string)
 		**out = **in
 	}
@@ -2104,6 +2124,16 @@ func (in *InferenceReplicaSpec) DeepCopyInto(out *InferenceReplicaSpec) {
 	}
 	if in.TopologyKey != nil {
 		in, out := &in.TopologyKey, &out.TopologyKey
+		*out = new(string)
+		**out = **in
+	}
+	if in.TopologySpread != nil {
+		in, out := &in.TopologySpread, &out.TopologySpread
+		*out = new(TopologySpreadPolicy)
+		**out = **in
+	}
+	if in.TopologySpreadKey != nil {
+		in, out := &in.TopologySpreadKey, &out.TopologySpreadKey
 		*out = new(string)
 		**out = **in
 	}

@@ -61,6 +61,16 @@ type WorkloadDesiredSpec struct {
 	// spec at the boundary.
 	TopologyKey string
 
+	// TopologySpread is the gang spreading policy ("Preferred" /
+	// "Required"; empty = pure bin-packing) advertised on each
+	// multi-pod Instance's PodGroup for the topology-aware gang
+	// scheduler. Adapters project it from the owner-CRD component spec.
+	TopologySpread string
+
+	// TopologySpreadKey is the fault-domain node-label key TopologySpread
+	// spreads across; empty defaults to TopologyKey.
+	TopologySpreadKey string
+
 	// Lifecycle holds RestartPolicy / UpdateStrategy / ReadyPolicy /
 	// InstanceReadyTimeout / MigrationPolicy as workload-owned mirror
 	// values; adapters project the CRD-shape lifecycle into this struct
