@@ -49,6 +49,10 @@ type specEnv struct {
 
 	// kueueManaged labels the workload namespace so Kueue gates its pods.
 	kueueManaged bool
+	// sourceQueue overrides the queue a SOURCE is routed to, without touching
+	// the queue grantQuota funds. The two differ only when a spec is about a
+	// workload pointed somewhere its quota is not.
+	sourceQueue string
 
 	// engineCPU is the per-replica CPU request. Empty means none, which is
 	// what most specs want; a spec asserting on admission MUST set it, since
@@ -90,6 +94,13 @@ func withKueueManagedNamespaces() specEnvOption {
 // Kueue can actually run out of. Without a request a pod consumes nothing and
 // is admitted against a zero quota, which silently turns an admission spec into
 // a no-op that passes.
+// withSourceQueue routes created sources to a queue other than the one this
+// spec funds. Quota still lands on the real queue, so a workload that fails to
+// run under this option failed for want of routing rather than of budget.
+func withSourceQueue(name string) specEnvOption {
+	return func(e *specEnv) { e.sourceQueue = name }
+}
+
 func withEngineCPU(quantity string) specEnvOption {
 	return func(e *specEnv) { e.engineCPU = quantity }
 }
@@ -468,5 +479,9 @@ func (e *specEnv) routeToSpecQueue(src *v1beta1.InferenceService) {
 	if src.Annotations == nil {
 		src.Annotations = map[string]string{}
 	}
-	src.Annotations[placement.LocalQueueAnnotation] = e.queueName
+	queue := e.queueName
+	if e.sourceQueue != "" {
+		queue = e.sourceQueue
+	}
+	src.Annotations[placement.LocalQueueAnnotation] = queue
 }

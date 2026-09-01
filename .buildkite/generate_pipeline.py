@@ -91,7 +91,7 @@ MC_KIND_SPEC_GROUPS = (
         "fanout", "lifecycle", "endpoint", "ownership", "reshard", "scale",
     )),
     ("quota", "Multi-cluster Kueue quota", (
-        "admission", "split_quota",
+        "admission", "split_quota", "queue_routing",
     )),
 )
 
