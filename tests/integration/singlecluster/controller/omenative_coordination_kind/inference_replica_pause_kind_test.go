@@ -62,14 +62,23 @@ var _ = ginkgo.Describe("InferenceReplica pause circuit breaker", ginkgo.Ordered
 		zero := int64(0)
 		Expect(k8sClient.Delete(suiteCtx, &pods[0], &client.DeleteOptions{GracePeriodSeconds: &zero})).To(Succeed())
 
-		ginkgo.By("holding the missing-pod state without restart or create churn")
+		ginkgo.By("holding the missing-pod state without restart or create churn, with truthful status")
 		Eventually(func(g Gomega) {
 			g.Expect(listOMENativePods(g, ns.Name, isvcName)).To(BeEmpty())
+			// The truth pass must stop the Instance from claiming Ready
+			// with zero pods while its recovery stays parked by the pause.
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstancePending),
+				"a paused Instance that lost every pod must not report Ready")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		Consistently(func(g Gomega) {
 			g.Expect(listOMENativePods(g, ns.Name, isvcName)).To(BeEmpty())
 			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
 			g.Expect(ir.Spec.Paused).To(BeTrue())
+			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
+			g.Expect(ir.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstancePending),
+				"the demotion must hold for the whole paused window")
 		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
 
 		ginkgo.By("removing the parent InferenceService pause annotation")

@@ -1,5 +1,4 @@
-# p149: kill engine under pause=true, policy None holds degraded until unpause  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=None pause=true inv_off=A co=none topo=engine
-# reason: pause parks the Create pass, which is RestartPolicy None's only recovery path, so the killed instance keeps its last op-owned Phase=Ready while podCount tells the live truth for the whole hold window; status truthfulness under pause is a tracked follow-up, and this case's own verdict still asserts the hold and the post-unpause recovery.
+# p149: kill engine under pause=true, policy None holds degraded until unpause  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=None pause=true co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p149 }

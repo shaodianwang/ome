@@ -59,6 +59,7 @@ type (
 	RolloutHold             = types.RolloutHold
 	RolloutHoldGate         = types.RolloutHoldGate
 	RetryPolicy             = types.RetryPolicy
+	DemotionSelection       = types.DemotionSelection
 	ForceDeletePolicy       = types.ForceDeletePolicy
 	DispositionDeps         = types.DispositionDeps
 )
@@ -140,6 +141,7 @@ const (
 	EventReasonRetryHeld                     = types.EventReasonRetryHeld
 	EventReasonRetryBlockReleased            = types.EventReasonRetryBlockReleased
 	EventReasonRetryBlockReleaseSkipped      = types.EventReasonRetryBlockReleaseSkipped
+	EventReasonInstanceDemoted               = types.EventReasonInstanceDemoted
 	EventReasonPodForceDeleted               = types.EventReasonPodForceDeleted
 	EventReasonPodDeleteBlockedByFinalizer   = types.EventReasonPodDeleteBlockedByFinalizer
 	EventReasonMigrationRequestAccepted      = types.EventReasonMigrationRequestAccepted

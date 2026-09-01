@@ -81,6 +81,11 @@ const (
 	// changed.
 	EventReasonRetryBlockReleaseSkipped EventReason = "RetryBlockReleaseSkipped"
 
+	// EventReasonInstanceDemoted fires when the truth pass demotes a
+	// Ready Instance with no live pods and no in-flight operation to
+	// Pending. Status-only; recovery stays with the ordinary passes.
+	EventReasonInstanceDemoted EventReason = "InstanceDemoted"
+
 	// EventReasonPodForceDeleted fires when scale-down escalation
 	// force-deletes (grace 0, UID-preconditioned) a Terminating pod
 	// overdue past its own deletion deadline on a node that provably

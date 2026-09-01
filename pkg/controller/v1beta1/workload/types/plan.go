@@ -88,6 +88,13 @@ func (p ComponentPlan) TopologyKeyForInstance(index int32) string {
 	return p.TopologyKey
 }
 
+// DemotionSelection is one Instance the truth pass corrects, with the
+// observed evidence that justifies the status-only transition.
+type DemotionSelection struct {
+	Index  int32
+	Reason string
+}
+
 // InstancePlan is the desired state for one Instance — the atomic
 // unit of gang scheduling, restart, and migration.
 type InstancePlan struct {

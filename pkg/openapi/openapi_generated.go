@@ -5351,7 +5351,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 					},
 					"pauseMode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "PauseMode selects how much of the lifecycle Paused suspends. Only meaningful while Paused is true.\n  - \"Recover\" (default when empty): fleet changes are suspended;\n    the RestartPolicy continues to repair existing Instances at\n    the revision they already run.\n  - \"Freeze\": every lifecycle operation is suspended, including\n    Instance repair. Only kubelet-level container restarts and\n    deliberate replica reduction (scale-down) remain active.",
+							Description: "PauseMode selects how much of the lifecycle Paused suspends. Only meaningful while Paused is true.\n  - \"Recover\" (default when empty): fleet changes are suspended;\n    the RestartPolicy continues to repair existing Instances at\n    the revision they already run.\n  - \"Freeze\": every lifecycle operation is suspended, including\n    Instance repair. Only kubelet-level container restarts and\n    deliberate replica reduction (scale-down) remain active.\nStatus stays truthful in every depth: a Ready Instance whose pods are all gone (and whose RestartPolicy will not repair it) is demoted to Pending without running any recovery operation.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

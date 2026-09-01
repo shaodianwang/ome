@@ -1124,12 +1124,19 @@ func TestPlan_Paused_RepairRunsFleetChangesDoNot(t *testing.T) {
 		}
 	})
 
-	t.Run("standard pause with RestartPolicy None plans no repair", func(t *testing.T) {
+	t.Run("standard pause with RestartPolicy None plans truth but no repair", func(t *testing.T) {
 		in, plan := build(t)
 		plan.RestartPolicy = ""
 		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
-		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionScaleDown}) {
-			t.Errorf("paused None-policy decision = %v, want [ScaleDown] only", actionKinds(d))
+		// Index 0 is Ready with no pods and no operation: with no restart
+		// pass to own it, the truth pass demotes it — even while paused.
+		want := []workload.ActionKind{workload.ActionScaleDown, workload.ActionDemote}
+		if !kindsEqual(actionKinds(d), want) {
+			t.Errorf("paused None-policy decision = %v, want %v", actionKinds(d), want)
+		}
+		da := findAction(d, workload.ActionDemote)
+		if len(da.Demotions) != 1 || da.Demotions[0].Index != 0 {
+			t.Errorf("demotions = %+v, want index 0 only (the extra belongs to scale-down)", da.Demotions)
 		}
 	})
 
@@ -1298,4 +1305,103 @@ func TestPlan_MaximalFixture_NoWrites(t *testing.T) {
 	if podLists < 2 {
 		t.Errorf("pod List calls = %d, want >= 2 (live + cached read sources must go through the intercepted client)", podLists)
 	}
+}
+
+// TestPlan_Demote_UnbackedReadyInstances pins the truth pass: a Ready
+// Instance with no live pods and no in-flight Operation is demoted in
+// every pause depth when no op pass will act; the pass never fires for
+// RecreateInstanceOnPodRestart components (their restart pass owns
+// Ready-with-pod-loss), never for Instances with pods or an Operation,
+// and never for scale-down extras.
+func TestPlan_Demote_UnbackedReadyInstances(t *testing.T) {
+	unbacked := func(t *testing.T) workload.ReconcileInput {
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
+		}
+		return in
+	}
+
+	t.Run("frozen pause still tells the truth", func(t *testing.T) {
+		in := unbacked(t)
+		plan := minimalPlan()
+		plan.Paused = true
+		plan.PauseFreeze = true
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionDemote}) {
+			t.Errorf("frozen decision = %v, want [Demote] only", actionKinds(d))
+		}
+	})
+
+	t.Run("plain pause demotes", func(t *testing.T) {
+		in := unbacked(t)
+		plan := minimalPlan()
+		plan.Paused = true
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionDemote}) {
+			t.Errorf("paused decision = %v, want [Demote] only", actionKinds(d))
+		}
+	})
+
+	t.Run("unpaused leaves the correction to Create", func(t *testing.T) {
+		in := unbacked(t)
+		plan := minimalPlan()
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if findAction(d, workload.ActionDemote) != nil {
+			t.Errorf("unpaused reconciles must not demote (Create recovers and re-stamps), got %v", actionKinds(d))
+		}
+		if findAction(d, workload.ActionCreate) == nil {
+			t.Errorf("Create must be planned to re-materialize, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("RecreateInstance components never demote", func(t *testing.T) {
+		in := unbacked(t)
+		plan := minimalPlan()
+		plan.Paused = true
+		plan.RestartPolicy = workload.RestartPolicyRecreateInstance
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if findAction(d, workload.ActionDemote) != nil {
+			t.Errorf("RecreateInstance must leave Ready-with-pod-loss to the restart pass, got %v", actionKinds(d))
+		}
+		if findAction(d, workload.ActionRestart) == nil {
+			t.Errorf("the restart pass must own the recovery, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("live pods veto the demotion", func(t *testing.T) {
+		in := unbacked(t)
+		plan := minimalPlan()
+		plan.Paused = true
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-0-default-0", Namespace: "prod"}}
+		d := planOrFail(t, in, plan, planSnapshot(in, map[int32][]*corev1.Pod{0: {pod}}))
+		if findAction(d, workload.ActionDemote) != nil {
+			t.Errorf("an Instance with live pods must not be demoted, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("an in-flight Operation keeps ownership", func(t *testing.T) {
+		in := unbacked(t)
+		in.ObservedState.InstanceStatuses[0].Operation = &workload.InstanceOperation{
+			ID: "u-1", Type: workload.InstanceOperationUpdate, Step: "Surge",
+		}
+		plan := minimalPlan()
+		plan.Paused = true
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if findAction(d, workload.ActionDemote) != nil {
+			t.Errorf("an Instance with an Operation must not be demoted, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("non-Ready phases are never touched", func(t *testing.T) {
+		in := unbacked(t)
+		in.ObservedState.InstanceStatuses[0].Phase = workload.InstancePhasePending
+		plan := minimalPlan()
+		plan.Paused = true
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if findAction(d, workload.ActionDemote) != nil {
+			t.Errorf("only Ready demotes, got %v", actionKinds(d))
+		}
+	})
 }

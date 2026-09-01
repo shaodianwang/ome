@@ -163,6 +163,9 @@ type InferenceReplicaSpec struct {
 	//   - "Freeze": every lifecycle operation is suspended, including
 	//     Instance repair. Only kubelet-level container restarts and
 	//     deliberate replica reduction (scale-down) remain active.
+	// Status stays truthful in every depth: a Ready Instance whose pods
+	// are all gone (and whose RestartPolicy will not repair it) is
+	// demoted to Pending without running any recovery operation.
 	// +optional
 	// +kubebuilder:validation:Enum=Recover;Freeze
 	PauseMode PauseMode `json:"pauseMode,omitempty"`

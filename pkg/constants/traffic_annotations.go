@@ -83,6 +83,8 @@ var (
 	//              revision.
 	//   "freeze" — full stop: repair is suspended too; only kubelet
 	//              container restarts and deliberate scale-down remain.
+	// Status stays truthful in either depth: an Instance that lost every
+	// pod stops reporting Ready even though its recovery stays parked.
 	// Any other value is treated as not paused.
 	PausedRolloutAnnotation = OMEAPIGroupName + "/rollout-paused"
 
