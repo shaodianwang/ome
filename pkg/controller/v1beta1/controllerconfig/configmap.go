@@ -270,6 +270,16 @@ type DeployConfig struct {
 	// corresponding field as authored, never a silent fallback to baked-in
 	// numbers. Configured values must be > 0 (rejected at config-load).
 	Replicas *ReplicasDefaultsConfig `json:"replicas,omitempty"`
+	// TerminationGracePeriodSeconds is the admission-time pod termination
+	// grace the ISVC defaulter stamps on any component that does not author
+	// one. It bounds how long a component has to finish in-flight work after
+	// SIGTERM, so a serving component whose requests outlive the platform
+	// default loses them on every restart unless this is raised.
+	//
+	// Following Replicas above, there is no in-code default: nil means
+	// unconfigured and the component keeps whatever it authored. A configured
+	// value must be > 0 (rejected at config-load).
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // ReplicasDefaultsConfig is the admission-time replica-defaulting policy
@@ -1269,6 +1279,10 @@ func parseDeployConfig(configMap *v1.ConfigMap) (*DeployConfig, error) {
 			if err := deployConfig.Replicas.validate(); err != nil {
 				return nil, err
 			}
+		}
+
+		if v := deployConfig.TerminationGracePeriodSeconds; v != nil && *v <= 0 {
+			return nil, fmt.Errorf("invalid deploy config, terminationGracePeriodSeconds must be > 0, got %d", *v)
 		}
 	}
 	return deployConfig, nil

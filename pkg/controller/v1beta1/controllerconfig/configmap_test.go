@@ -715,6 +715,50 @@ func TestNewDeployConfig(t *testing.T) {
 			},
 			expectedError: true,
 		},
+		{
+			name: "termination grace default parsed",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"terminationGracePeriodSeconds": 600
+				}`,
+			},
+			expectedError: false,
+			validateConfig: func(t *testing.T, cfg *DeployConfig) {
+				require.NotNil(t, cfg.TerminationGracePeriodSeconds)
+				assert.Equal(t, int64(600), *cfg.TerminationGracePeriodSeconds)
+			},
+		},
+		{
+			name: "omitted termination grace stays unconfigured",
+			configMapData: map[string]string{
+				DeployConfigName: `{"defaultDeploymentMode": "RawDeployment"}`,
+			},
+			expectedError: false,
+			validateConfig: func(t *testing.T, cfg *DeployConfig) {
+				assert.Nil(t, cfg.TerminationGracePeriodSeconds)
+			},
+		},
+		{
+			name: "zero termination grace rejected at config-load",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"terminationGracePeriodSeconds": 0
+				}`,
+			},
+			expectedError: true,
+		},
+		{
+			name: "negative termination grace rejected at config-load",
+			configMapData: map[string]string{
+				DeployConfigName: `{
+					"defaultDeploymentMode": "RawDeployment",
+					"terminationGracePeriodSeconds": -1
+				}`,
+			},
+			expectedError: true,
+		},
 	}
 
 	for _, tt := range tests {

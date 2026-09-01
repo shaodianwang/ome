@@ -141,6 +141,15 @@ ome:
         engine: 3
         decoder: 3
         router: 2
+    # Admission-time pod termination grace stamped by the same webhook on any
+    # component that does not author terminationGracePeriodSeconds. Bounds how
+    # long a component has to finish in-flight requests after SIGTERM; a
+    # serving component whose requests outlive it loses them on every restart.
+    # Same contract as replicas above: the binary has no built-in default, and
+    # an authored component value always wins. Size it above the tier's
+    # longest expected request, and keep any in-process drain the runtime
+    # performs strictly under it so the runtime finishes first.
+    terminationGracePeriodSeconds: 600
     # Max reconciles each controller runs in parallel (distinct objects only —
     # controller-runtime serializes per object key, so independent objects
     # reconcile concurrently). Source of truth for these values (the OME binary

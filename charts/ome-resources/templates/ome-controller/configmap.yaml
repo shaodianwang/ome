@@ -30,7 +30,8 @@ data:
   deploy: |-
     {
       "defaultDeploymentMode": "{{ .Values.ome.controller.deploymentMode }}"{{- with .Values.ome.controller.replicas }},
-      "replicas": {{ toJson . }}{{- end }}
+      "replicas": {{ toJson . }}{{- end }}{{- with .Values.ome.controller.terminationGracePeriodSeconds }},
+      "terminationGracePeriodSeconds": {{ . }}{{- end }}
     }
 {{- with .Values.ome.controller.podDisruptionBudget }}
   podDisruptionBudget: |-
