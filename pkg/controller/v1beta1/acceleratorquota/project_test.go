@@ -1010,3 +1010,113 @@ func reportUsage(t *testing.T, m workloadcluster.SelectivelyCachingClient,
 		t.Fatalf("writing usage onto %s: %v", node, err)
 	}
 }
+
+// The hub's whole reason to exist is the fleet-wide view, and a tier that
+// reports nothing while the leaves under it run the fleet is the one number an
+// operator is most likely to read first.
+//
+// Only leaves carry figures -- a share is apportioned to a leaf, and an
+// ancestor is projected budget-less -- so the tiers above have to be summed to.
+func TestFleetUsageRollsUpToAncestors(t *testing.T) {
+	a := member(t, memberRoot("2"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("120")),
+		cohort("org", rootName, budget("120")),
+		leaf("team", "org", budget("120")),
+	)
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	reportUsage(t, a, "team", "30", "40", "0")
+	reportUsage(t, b, "team", "10", "10", "0")
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	// Every tier reports the same 40, because one tenant's work is the fleet's
+	// work however far up you read.
+	for _, name := range []string{"team", "org", rootName} {
+		var q v1beta1.AcceleratorQuota
+		if err := c.Get(ctx, types.NamespacedName{Name: name}, &q); err != nil {
+			t.Fatalf("Get(%s) = %v", name, err)
+		}
+		if len(q.Status.Budgets) == 0 {
+			t.Errorf("%s reports no budgets at all", name)
+			continue
+		}
+		if got := q.Status.Budgets[0].Admitted.String(); got != "40" {
+			t.Errorf("%s admitted = %s, want 40 -- the leaf's consumption never reached it", name, got)
+		}
+		if got := q.Status.Budgets[0].Reserved.String(); got != "50" {
+			t.Errorf("%s reserved = %s, want 50", name, got)
+		}
+	}
+
+	ginkgoLikeCheck := func(name string, wantRows int) {
+		t.Helper()
+		var q v1beta1.AcceleratorQuota
+		if err := c.Get(ctx, types.NamespacedName{Name: name}, &q); err != nil {
+			t.Fatalf("Get(%s) = %v", name, err)
+		}
+		if got := len(q.Status.Budgets[0].PerCluster); got != wantRows {
+			t.Errorf("%s has %d per-cluster rows, want %d", name, got, wantRows)
+		}
+	}
+	// The breakdown belongs to the node that was actually apportioned a share.
+	// An ancestor with per-cluster rows would have to invent a nominal nobody
+	// assigned it.
+	ginkgoLikeCheck("team", 2)
+	ginkgoLikeCheck("org", 0)
+	ginkgoLikeCheck(rootName, 0)
+}
+
+// Borrowed is the one figure that must not simply add up the tree. A loan
+// between two siblings is internal to the tier that contains them, so summing
+// their figures would report that tier borrowing from outside itself when it is
+// not. Across CLUSTERS it does sum, because a Kueue cohort lives on one member
+// and two members lending to the same tenant are two separate loans.
+func TestFleetBorrowedIsNotSummedUpTheTree(t *testing.T) {
+	a := member(t, memberRoot("2"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	r, c := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("100")),
+		cohort("org", rootName, budget("100")),
+		leaf("team", "org", budget("20")),
+	)
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	// The leaf is over its own 20 by 10, borrowed from elsewhere in its cohort.
+	reportUsage(t, a, "team", "30", "30", "10")
+	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	var leafQ, tier v1beta1.AcceleratorQuota
+	if err := c.Get(ctx, types.NamespacedName{Name: "team"}, &leafQ); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "org"}, &tier); err != nil {
+		t.Fatal(err)
+	}
+	if got := leafQ.Status.Budgets[0].Borrowed.String(); got != "10" {
+		t.Errorf("leaf borrowed = %s, want the backend's own 10", got)
+	}
+	// The tier is funded for 100 and holds 30, so nothing it runs is above its
+	// own allowance -- whatever its child had to borrow to get there.
+	if got := tier.Status.Budgets[0].Borrowed.String(); got != "0" {
+		t.Errorf("tier borrowed = %s, want 0: it is funded for more than it holds", got)
+	}
+}

@@ -79,6 +79,12 @@ type clusterState struct {
 // the hub projected. So the hub reads its own arithmetic back alongside the
 // consumption that arithmetic authorized.
 type clusterBudget struct {
+	// The pair these figures describe, carried rather than parsed back out of
+	// the map key: a resource name is an arbitrary qualified name and splitting
+	// a rendered key would be a guess about what may appear inside one.
+	resourceName   string
+	resourceFlavor string
+
 	nominal  resource.Quantity
 	admitted resource.Quantity
 	reserved resource.Quantity
@@ -282,8 +288,11 @@ func (r *Reconciler) projectOnto(ctx context.Context, built *tree.Tree,
 	// write it" is a different report from "assigned nothing".
 	for _, a := range allowances {
 		nominal := a.Nominal.DeepCopy()
-		view.observe(a.Node, cluster, budgetKey(a.ResourceName, a.ResourceFlavor),
-			func(b *clusterBudget) { b.nominal = nominal })
+		name, flavor := a.ResourceName, a.ResourceFlavor
+		view.observe(a.Node, cluster, budgetKey(name, flavor), func(b *clusterBudget) {
+			b.resourceName, b.resourceFlavor = name, flavor
+			b.nominal = nominal
+		})
 	}
 
 	objects, err := projection.For(built, cluster, allowances, projection.Options{Origin: r.Project.Origin})
@@ -366,10 +375,11 @@ func (r *Reconciler) readBack(cluster string, live []v1beta1.AcceleratorQuota, v
 		})
 		for _, b := range obj.Status.Budgets {
 			admitted, reserved, borrowed := b.Admitted.DeepCopy(), b.Reserved.DeepCopy(), b.Borrowed.DeepCopy()
-			view.observe(obj.Name, cluster, budgetKey(b.ResourceName, b.ResourceFlavor),
-				func(cb *clusterBudget) {
-					cb.admitted, cb.reserved, cb.borrowed = admitted, reserved, borrowed
-				})
+			name, flavor := b.ResourceName, b.ResourceFlavor
+			view.observe(obj.Name, cluster, budgetKey(name, flavor), func(cb *clusterBudget) {
+				cb.resourceName, cb.resourceFlavor = name, flavor
+				cb.admitted, cb.reserved, cb.borrowed = admitted, reserved, borrowed
+			})
 		}
 	}
 }

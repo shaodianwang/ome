@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,6 +40,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/backend"
 	"github.com/ome-projects/ome/pkg/quota/tree"
+	"github.com/ome-projects/ome/pkg/quota/usage"
 )
 
 // Mode selects which half of the quota plane a manager runs. It is a manager
@@ -207,6 +207,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// What the fleet is holding, summed up the tree. Only leaves carry figures
+	// -- a share is apportioned to a leaf and an ancestor travels budget-less --
+	// so without this a grouping tier and the root report nothing while the
+	// leaves beneath them run the whole fleet.
+	//
+	// The same roll the workload plane uses on its own queues, rather than a
+	// second one here: an ancestor's borrowed figure is recomputed rather than
+	// summed, because a loan between two siblings is internal to the subtree
+	// that contains them and adding the children's numbers would report the
+	// subtree borrowing from outside itself.
+	fleetRollup := usage.Roll(built, fleetLeafUsage(fleet))
+
 	// Observational, so a backend that cannot be read costs the fleet its usage
 	// figures for this pass and nothing else. Failing here would stop the
 	// conditions and tree positions below from being written too, which is the
@@ -217,7 +229,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	for _, node := range built.Nodes() {
-		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()], reading, fleet[node.Name()]); err != nil {
+		if err := r.reconcileStatus(ctx, node, frozen, outcomes[node.Name()], reading,
+			fleet[node.Name()], fleetRollup[node.Name()]); err != nil {
 			errs = append(errs, fmt.Errorf("writing status for node %s: %w", node.Name(), err))
 		}
 	}
@@ -278,7 +291,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // resync tick and spin the watch.
 func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, frozen map[string]tree.Violation,
 	outcome backend.NodeOutcome, reading usageReading,
-	onClusters map[string]clusterState,
+	onClusters map[string]clusterState, rolled map[usage.Key]usage.Total,
 ) error {
 	current := node.Quota
 	updated := current.DeepCopy()
@@ -305,7 +318,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 		// The management plane's own budget figures, which no backend can give
 		// it: it runs no Kueue and materializes nothing, so its numbers are the
 		// fleet's members added up.
-		updated.Status.Budgets = fleetBudgets(node.Quota.Spec.Budgets, onClusters)
+		updated.Status.Budgets = fleetBudgets(node.Quota.Spec.Budgets, onClusters, rolled)
 	}
 
 	violation, isFrozen := frozen[node.Name()]
@@ -463,8 +476,41 @@ func clusterStatuses(observed map[string]clusterState,
 // fleet: work admitted on one member is work the fleet is running. Borrowed
 // sums too, and means the same thing one tier up -- how much of what is running
 // sits above the share that authorized it.
+// fleetLeafUsage reshapes the per-cluster view into what the roll expects: one
+// entry per node, summed across the members holding it.
+//
+// Summing across CLUSTERS is not the same as summing across children, which the
+// roll refuses to do for borrowed. Borrowing is cluster-local -- a Kueue cohort
+// lives on one member -- so two members each lending to the same tenant are two
+// separate loans, and the fleet really is running that much above its shares.
+func fleetLeafUsage(fleet fleetView) map[string]map[usage.Key]usage.Observed {
+	if len(fleet) == 0 {
+		return nil
+	}
+	out := map[string]map[usage.Key]usage.Observed{}
+	for node, byCluster := range fleet {
+		for _, st := range byCluster {
+			for _, cb := range st.budgets {
+				if cb.resourceName == "" {
+					continue
+				}
+				if out[node] == nil {
+					out[node] = map[usage.Key]usage.Observed{}
+				}
+				k := usage.Key{ResourceName: cb.resourceName, ResourceFlavor: cb.resourceFlavor}
+				agg := out[node][k]
+				agg.Admitted.Add(cb.admitted)
+				agg.Reserved.Add(cb.reserved)
+				agg.Borrowed.Add(cb.borrowed)
+				out[node][k] = agg
+			}
+		}
+	}
+	return out
+}
+
 func fleetBudgets(authored []v1beta1.AcceleratorBudget,
-	onClusters map[string]clusterState,
+	onClusters map[string]clusterState, rolled map[usage.Key]usage.Total,
 ) []v1beta1.AcceleratorBudgetStatus {
 	if len(authored) == 0 {
 		return nil
@@ -477,7 +523,10 @@ func fleetBudgets(authored []v1beta1.AcceleratorBudget,
 			ResourceFlavor: b.ResourceFlavor,
 			Nominal:        b.Nominal.DeepCopy(),
 		}
-		var admitted, reserved, borrowed resource.Quantity
+		// The breakdown is this node's own, so only a leaf has one: a share is
+		// apportioned to a leaf, and an ancestor is projected budget-less. An
+		// ancestor with per-cluster rows would have to invent a nominal nobody
+		// assigned it.
 		for cluster, st := range onClusters {
 			cb, ok := st.budgets[key]
 			if !ok {
@@ -490,14 +539,18 @@ func fleetBudgets(authored []v1beta1.AcceleratorBudget,
 				Reserved: cb.reserved.DeepCopy(),
 				Borrowed: cb.borrowed.DeepCopy(),
 			})
-			admitted.Add(cb.admitted)
-			reserved.Add(cb.reserved)
-			borrowed.Add(cb.borrowed)
 		}
 		sort.Slice(row.PerCluster, func(i, j int) bool {
 			return row.PerCluster[i].Cluster < row.PerCluster[j].Cluster
 		})
-		row.Admitted, row.Reserved, row.Borrowed = admitted, reserved, borrowed
+
+		// The totals come from the roll, which is what carries a leaf's figures
+		// up to the tiers above it.
+		if t, ok := rolled[usage.Key{ResourceName: b.ResourceName, ResourceFlavor: b.ResourceFlavor}]; ok {
+			row.Admitted = t.Admitted.DeepCopy()
+			row.Reserved = t.Reserved.DeepCopy()
+			row.Borrowed = t.Borrowed.DeepCopy()
+		}
 		out = append(out, row)
 	}
 	return out
