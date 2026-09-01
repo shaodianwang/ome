@@ -293,6 +293,105 @@ func TestInferenceServicesConfigFromConfigMapRejectsInvalidPodDisruptionBudget(t
 	}
 }
 
+func TestInferenceServicesConfigFromConfigMapParsesAcceleratorResources(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     map[string]string
+		wantErr  bool
+		validate func(*testing.T, *InferenceServicesConfig)
+	}{
+		{
+			name: "missing key",
+			data: map[string]string{},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Nil(t, cfg.AcceleratorResources)
+			},
+		},
+		{
+			name: "empty key",
+			data: map[string]string{AcceleratorResourcesConfigName: " \n\t"},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Nil(t, cfg.AcceleratorResources)
+			},
+		},
+		{
+			name: "configured multi-vendor list",
+			data: map[string]string{
+				AcceleratorResourcesConfigName: `["nvidia.com/gpu", "amd.com/gpu", "google.com/tpu"]`,
+			},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Equal(t, []string{"nvidia.com/gpu", "amd.com/gpu", "google.com/tpu"}, cfg.AcceleratorResources)
+			},
+		},
+		{
+			name: "explicit empty list",
+			data: map[string]string{
+				AcceleratorResourcesConfigName: `[]`,
+			},
+			validate: func(t *testing.T, cfg *InferenceServicesConfig) {
+				assert.Empty(t, cfg.AcceleratorResources)
+			},
+		},
+		{
+			name:    "malformed json",
+			data:    map[string]string{AcceleratorResourcesConfigName: `not-json`},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := inferenceServicesConfigFromConfigMap(&v1.ConfigMap{Data: tt.data})
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			tt.validate(t, cfg)
+		})
+	}
+}
+
+func TestAcceleratorResourceNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      *InferenceServicesConfig
+		expected []string
+	}{
+		{
+			name:     "nil receiver falls back to nvidia-only",
+			cfg:      nil,
+			expected: []string{constants.NvidiaGPUResourceType},
+		},
+		{
+			name:     "unset field falls back to nvidia-only",
+			cfg:      &InferenceServicesConfig{},
+			expected: []string{constants.NvidiaGPUResourceType},
+		},
+		{
+			name:     "explicit empty slice falls back to nvidia-only",
+			cfg:      &InferenceServicesConfig{AcceleratorResources: []string{}},
+			expected: []string{constants.NvidiaGPUResourceType},
+		},
+		{
+			name:     "configured list is returned verbatim",
+			cfg:      &InferenceServicesConfig{AcceleratorResources: []string{"nvidia.com/gpu", "amd.com/gpu", "google.com/tpu"}},
+			expected: []string{"nvidia.com/gpu", "amd.com/gpu", "google.com/tpu"},
+		},
+		{
+			name:     "configured list need not include nvidia",
+			cfg:      &InferenceServicesConfig{AcceleratorResources: []string{"amd.com/gpu"}},
+			expected: []string{"amd.com/gpu"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.cfg.AcceleratorResourceNames())
+		})
+	}
+}
+
 func TestNewOmeAgentConfig(t *testing.T) {
 	tests := []struct {
 		name          string

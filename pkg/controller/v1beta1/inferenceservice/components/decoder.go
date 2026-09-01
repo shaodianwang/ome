@@ -375,7 +375,7 @@ func (d *Decoder) setParallelismEnvVarForDecoder(container *v1.Container, worker
 		return
 	}
 
-	numGPUsPerPod := int64(isvcutils.GetGpuCountFromContainer(container))
+	numGPUsPerPod := int64(isvcutils.GetGpuCountFromContainer(container, d.InferenceServiceConfig.AcceleratorResourceNames()))
 	numLeaders := int64(0)
 	numWorkers := int64(workerReplicas)
 

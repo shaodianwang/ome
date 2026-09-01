@@ -166,6 +166,28 @@ ome:
     # window; kept short so ConfigMap edits apply without a restart. Set to "0" to
     # disable caching (read the apiserver on every load).
     configCacheTTL: "30s"
+    # AcceleratorResources lists the extended resource names OME recognizes as
+    # GPU/accelerator capacity when inspecting a container's resources (GPU-enabled
+    # checks, per-pod accelerator counts feeding multi-node PARALLELISM_SIZE
+    # sizing). Exact names, no patterns. The OME binary has NO built-in default
+    # list; omitting this key (or setting an empty list) falls back to
+    # recognizing only "nvidia.com/gpu" — the sole resource name OME recognized
+    # before this field existed — so an unconfigured/upgraded cluster's behavior
+    # is unchanged. The chart default below preserves that same nvidia-only
+    # behavior for every existing install.
+    #
+    # Adding a resource name here is a template-affecting change, not a config
+    # tweak: for any multi-node Engine/Decoder Component whose runner container
+    # requests that resource, recognizing it materializes the PARALLELISM_SIZE
+    # env var onto the pod template where it was previously absent (0 GPUs
+    # detected). That changes the hashed OMENative revision payload, which mints
+    # a new revision and rolls every such Component still running. Schedule
+    # adding a vendor here like any other pod-template change, not like a
+    # config-only edit.
+    acceleratorResources:
+      - nvidia.com/gpu
+      # - amd.com/gpu
+      # - google.com/tpu
     # canaryAnalysis tunes metric-gated canary promotion (spec.rollout.canary).
     canaryAnalysis:
       # Default Prometheus the analysis queries when a canary does not set its own

@@ -383,7 +383,7 @@ func (e *Engine) setParallelismEnvVarForEngine(container *v1.Container, workerRe
 		return
 	}
 
-	numGPUsPerPod := int64(isvcutils.GetGpuCountFromContainer(container))
+	numGPUsPerPod := int64(isvcutils.GetGpuCountFromContainer(container, e.InferenceServiceConfig.AcceleratorResourceNames()))
 	numLeaders := int64(1) // at least one leader/pod
 	numWorkers := int64(workerReplicas)
 

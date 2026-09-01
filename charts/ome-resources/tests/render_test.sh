@@ -358,3 +358,30 @@ multicluster_access="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --show-only templates/ome-controller/rbac/multicluster_access.yaml)"
 grep -Fqx '  - inferencereplicas' <<<"${multicluster_access}" ||
   fail "multicluster-access ClusterRole does not grant inferencereplicas"
+
+# acceleratorResources has no in-code default: the chart default is the only
+# source of any non-nvidia recognition. It stays nvidia-only so upgrading the
+# chart cannot change which pods get a PARALLELISM_SIZE env var — recognizing
+# a resource an existing multi-node Component already requests would change
+# that Component's hashed OMENative revision payload and roll it (see
+# controllerconfig.InferenceServicesConfig.AcceleratorResourceNames).
+grep -Fq '["nvidia.com/gpu"]' <<<"${controller_config}" ||
+  fail "default accelerator resources list was not rendered"
+if grep -Fq -e 'amd.com/gpu' -e 'google.com/tpu' <<<"${controller_config}"; then
+  fail "chart default recognized a non-nvidia accelerator without an explicit override"
+fi
+
+accelerator_resources_overridden="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-json 'ome.controller.acceleratorResources=["nvidia.com/gpu","amd.com/gpu","google.com/tpu"]' \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '["nvidia.com/gpu","amd.com/gpu","google.com/tpu"]' <<<"${accelerator_resources_overridden}" ||
+  fail "accelerator resources override was not rendered"
+
+accelerator_resources_cleared="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-json 'ome.controller.acceleratorResources=[]' \
+  --show-only templates/ome-controller/configmap.yaml)"
+if grep -Fq 'acceleratorResources' <<<"${accelerator_resources_cleared}"; then
+  fail "acceleratorResources key was rendered when the list was cleared"
+fi

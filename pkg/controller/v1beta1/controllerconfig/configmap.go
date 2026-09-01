@@ -26,15 +26,16 @@ import (
 )
 
 const (
-	IngressConfigKeyName          = "ingress"
-	DeployConfigName              = "deploy"
-	OmeAgentConfigName            = "omeAgent"
-	ModelCacheConfigName          = "modelCache"
-	CanaryAnalysisConfigName      = "canaryAnalysis"
-	CoordinationConfigName        = "coordination"
-	PodMonitorConfigName          = "podMonitor"
-	LifecycleConfigName           = "lifecycle"
-	PodDisruptionBudgetConfigName = "podDisruptionBudget"
+	IngressConfigKeyName           = "ingress"
+	DeployConfigName               = "deploy"
+	OmeAgentConfigName             = "omeAgent"
+	ModelCacheConfigName           = "modelCache"
+	CanaryAnalysisConfigName       = "canaryAnalysis"
+	CoordinationConfigName         = "coordination"
+	PodMonitorConfigName           = "podMonitor"
+	LifecycleConfigName            = "lifecycle"
+	PodDisruptionBudgetConfigName  = "podDisruptionBudget"
+	AcceleratorResourcesConfigName = "acceleratorResources"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -70,6 +71,33 @@ type InferenceServicesConfig struct {
 	PodMonitor PodMonitorConfig `json:"podMonitor,omitempty"`
 	// PodDisruptionBudget carries per-deployment-mode disruption budget policy.
 	PodDisruptionBudget PodDisruptionBudgetConfig `json:"podDisruptionBudget,omitempty"`
+	// AcceleratorResources are the extended resource names OME recognizes as
+	// GPU/accelerator capacity when inspecting a container's resources (e.g.
+	// utils.IsGPUEnabled, isvcutils.GetGpuCountFromContainer). Exact names, no
+	// patterns — mirrors quota/capacity.Options.AcceleratorResources, e.g.
+	// "nvidia.com/gpu", "amd.com/gpu", "google.com/tpu".
+	//
+	// There is intentionally NO in-code default list — the value is supplied via
+	// the inferenceservice-config ConfigMap's "acceleratorResources" key (Helm
+	// chart / GitOps). Unlike quota/capacity (where empty disables derivation),
+	// empty/absent here does NOT disable accelerator recognition: these helpers
+	// existed before this field did and always recognized
+	// constants.NvidiaGPUResourceType, so silently switching to "recognize
+	// nothing" on upgrade would break every existing nvidia-only cluster.
+	// AcceleratorResourceNames applies that documented fallback and should be
+	// used instead of reading this field directly.
+	AcceleratorResources []string `json:"acceleratorResources,omitempty"`
+}
+
+// AcceleratorResourceNames returns the accelerator resource names OME
+// recognizes when inspecting a container's resources, applying the
+// unconfigured fallback documented on AcceleratorResources. Safe to call on a
+// nil receiver.
+func (c *InferenceServicesConfig) AcceleratorResourceNames() []string {
+	if c == nil || len(c.AcceleratorResources) == 0 {
+		return []string{constants.NvidiaGPUResourceType}
+	}
+	return c.AcceleratorResources
 }
 
 // PodDisruptionBudgetPolicy configures one deployment mode's availability
@@ -925,6 +953,11 @@ func inferenceServicesConfigFromConfigMap(cm *v1.ConfigMap) (*InferenceServicesC
 	if data, ok := cm.Data[PodMonitorConfigName]; ok && strings.TrimSpace(data) != "" {
 		if err := json.Unmarshal([]byte(data), &cfg.PodMonitor); err != nil {
 			return nil, fmt.Errorf("unable to parse %q config json: %w", PodMonitorConfigName, err)
+		}
+	}
+	if data, ok := cm.Data[AcceleratorResourcesConfigName]; ok && strings.TrimSpace(data) != "" {
+		if err := json.Unmarshal([]byte(data), &cfg.AcceleratorResources); err != nil {
+			return nil, fmt.Errorf("unable to parse %q config json: %w", AcceleratorResourcesConfigName, err)
 		}
 	}
 	if data, ok := cm.Data[PodDisruptionBudgetConfigName]; ok && strings.TrimSpace(data) != "" {

@@ -136,6 +136,10 @@ data:
   podMonitor: |-
     {{- toJson .Values.ome.podMonitor | nindent 4 }}
 {{- end }}
+{{- if .Values.ome.controller.acceleratorResources }}
+  acceleratorResources: |-
+    {{- toJson .Values.ome.controller.acceleratorResources | nindent 4 }}
+{{- end }}
 {{ if .Values.ome.modelCache.provider }}
   modelCache: |-
     {
