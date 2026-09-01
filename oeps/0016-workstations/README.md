@@ -136,7 +136,7 @@ rest*. There are deliberately **no** `engine`/`decoder`/`router` blocks on the
 Workstation — single/multi-node are inline; PD comes from a runtime (rationale in
 [Alternatives](#alternatives)).
 
-Condensed (full draft: `.claude/2026-06-02-workstation-crd/workstation_types.go`):
+Condensed:
 
 ```go
 type WorkstationSpec struct {
@@ -171,7 +171,7 @@ kind: Workstation
 metadata: { name: pd-dev, namespace: dev }
 spec:
   desiredState: Running
-  runtime: { name: srt-llama4x-nvfp4-pd }   # PD topology inherited from the runtime
+  runtime: { name: srt-llama4-nvfp4-pd }   # PD topology inherited from the runtime
   storage: { size: 100Gi, mountPath: /home/dev }
   idleTimeout: 2h
 ```
@@ -319,7 +319,7 @@ Webhook (validating + defaulting):
 - **envtest:** create → Provisioning → Running phase walk; Stop deletes pods and
   retains the PVC; Start resumes onto the same PVC; Delete honors
   `retainStorageOnDelete`; `claimName` PVC is mounted and never deleted.
-- **KIND** (real kubelet — the OMENative suites live here per `CLAUDE.md`): the Stop
+- **KIND** (real kubelet — where the OMENative suites live): the Stop
   hand-off (engine does not recreate the pod after Stop; box reads `Stopped`);
   multi-node leader+worker convergence on the engine (no LWS object created);
   PD three-component bring-up; unschedulable→Failed deadline; in-place image update
@@ -413,5 +413,4 @@ Webhook (validating + defaulting):
 
 - **This OEP (provisional, 2026-06-04)** — proposes the `Workstation` CRD,
   controller-over-workload-engine, shape-from-runtime, model-optional, and
-  create-or-reference storage. Full type draft + samples + the grounding audit live
-  under `.claude/2026-06-02-workstation-crd/`.
+  create-or-reference storage.
