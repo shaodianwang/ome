@@ -109,6 +109,15 @@ func (s *InferenceServiceSpec) GetRolloutGroups() []RolloutGroup {
 	return s.Rollout.Groups
 }
 
+// RolloutPairingProtocol returns spec.rollout.pairingProtocol, or "" when the
+// rollout block or the field is unset. Nil-safe on a nil receiver.
+func (s *InferenceServiceSpec) RolloutPairingProtocol() string {
+	if s == nil || s.Rollout == nil || s.Rollout.PairingProtocol == nil {
+		return ""
+	}
+	return *s.Rollout.PairingProtocol
+}
+
 // GetCanaryGroup returns the first rollout group whose progression is canary, or
 // nil if none. Admission rejects more than one canary group, so there is at most
 // one; a canary group may span multiple Components (primary-driven). Nil-safe.

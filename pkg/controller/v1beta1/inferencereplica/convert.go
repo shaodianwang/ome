@@ -344,6 +344,9 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 	if ir.Spec.TopologySpreadKey != nil {
 		desired.TopologySpreadKey = *ir.Spec.TopologySpreadKey
 	}
+	if ir.Spec.PairingProtocol != nil {
+		desired.PairingProtocol = *ir.Spec.PairingProtocol
+	}
 	if ir.Spec.Pacing != nil {
 		desired.Pacing = &workload.WorkloadPacing{
 			Partition:      ir.Spec.Pacing.Partition,

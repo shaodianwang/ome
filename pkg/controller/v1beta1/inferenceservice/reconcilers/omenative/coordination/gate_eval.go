@@ -22,10 +22,11 @@ import (
 // here — in the coordination package the IR path depends on — means
 // there is exactly one tested implementation.
 //
-// Gate order: ratio -> surge | unavailability -> sequential. First denial
-// wins; later gates short-circuit. The caller reads the allowed bit and
-// may also surface gate + denyReason as a RolloutHold; gate names Ratio,
-// Budget (surge or unavailability), or Sequential accordingly.
+// Gate order: pairing -> ratio -> surge | unavailability -> sequential.
+// First denial wins; later gates short-circuit. The caller reads the
+// allowed bit and may also surface gate + denyReason as a RolloutHold;
+// gate names Pairing, Ratio, Budget (surge or unavailability), or
+// Sequential accordingly.
 //
 // Ratio projection is strategy-aware (see the projDelta computation
 // below): SurgeThenDrain projects +1 (a Ready pod is added before the old
@@ -66,6 +67,14 @@ func EvaluateUpdateGate(
 	// MembershipFor + nil-isvc / no-coord short-circuit) runs once instead of
 	// four times -- see the coordination.GateContext docs.
 	gateCtx := ResolveGateContextWithDefaults(ctx, reads, isvc, component, defaults)
+
+	// Pairing runs first, for EVERY strategy: an in-place update keeps net
+	// capacity flat (which is why CheckRatio bypasses it below) but still
+	// moves the instance across pairing cohorts — the exact transition the
+	// pair floor exists to pace.
+	if ok, reason := gateCtx.CheckPairing(strategy, inFlightSurge, inFlightUnavail); !ok {
+		return false, v1beta1.RolloutHoldGatePairing, reason
+	}
 
 	inPlace := strategy == workloadtypes.UpdateStrategyInPlaceIfPossible ||
 		strategy == workloadtypes.UpdateStrategyInPlaceOnly

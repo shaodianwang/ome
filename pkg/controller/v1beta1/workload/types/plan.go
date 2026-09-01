@@ -76,6 +76,11 @@ type ComponentPlan struct {
 	// TopologySpreadKey is the fault-domain node-label key TopologySpread
 	// spreads across; empty defaults to TopologyKey.
 	TopologySpreadKey string
+
+	// PairingProtocol is the P/D wire-compatibility token of the revision
+	// being rendered; Render stamps it as the ome.io/pairing-protocol label
+	// on every pod. Empty renders no label (pairs with anything).
+	PairingProtocol string
 }
 
 // TopologyKeyForInstance returns the live-safe topology contract for an

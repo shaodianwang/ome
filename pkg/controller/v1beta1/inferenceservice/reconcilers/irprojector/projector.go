@@ -404,6 +404,16 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.TopologyKey = p.TopologyKey
 	ir.Spec.TopologySpread = p.TopologySpread
 	ir.Spec.TopologySpreadKey = p.TopologySpreadKey
+	// Project the P/D pairing protocol onto the Components that pair. The
+	// token rides the engine/decoder revision hash so a protocol change rolls
+	// both; the router does not participate in pairing and must not re-roll
+	// on a protocol change.
+	ir.Spec.PairingProtocol = nil
+	if p.Component == v1beta1.EngineComponent || p.Component == v1beta1.DecoderComponent {
+		if proto := p.ISVC.Spec.RolloutPairingProtocol(); proto != "" {
+			ir.Spec.PairingProtocol = &proto
+		}
+	}
 	// Project the resolved Autoscaler onto the IR. Whole-block replace
 	// semantics — operator-side changes to isvc.spec.<comp>.autoscaler
 	// always win over any drifted IR.spec.autoscaler. DeepCopy keeps the

@@ -114,6 +114,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("pd-topology-isolation", "PD topology and isolation", (
         "pd", "pd_isolation", "pd_three_way", "pd_concurrent", "independent",
+        "pairing_protocol",
     )),
     ("bluegreen-core", "BlueGreen rollouts", (
         "bluegreen", "bluegreen_n3", "bluegreen_inplaceonly_happy",

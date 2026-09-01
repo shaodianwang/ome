@@ -108,6 +108,11 @@ func RenderWithRevision(
 	if revisionHash != "" {
 		lbls[query.LabelRevisionHash] = revisionHash
 	}
+	// Informational cohort marker; routing reads the per-revision Service
+	// label and the traffic targets, not this. Absent = pairs with anything.
+	if plan.PairingProtocol != "" {
+		lbls[query.LabelPairingProtocol] = plan.PairingProtocol
+	}
 	// Multi-pod Instances stamp the scheduler-plugins pod-group label so
 	// the gang-aware scheduler co-schedules every pod in the Instance.
 	// Single-pod Instances skip the label — no PodGroup, no gang. The

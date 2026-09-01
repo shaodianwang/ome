@@ -105,6 +105,17 @@ type InferenceReplicaSpec struct {
 	// +optional
 	TopologySpreadKey *string `json:"topologySpreadKey,omitempty"`
 
+	// PairingProtocol is the engine↔decoder wire-compatibility token projected
+	// from spec.rollout.pairingProtocol on the parent InferenceService. It is
+	// folded into the revision hash (a change mints a new revision) and stamped
+	// as the ome.io/pairing-protocol label on rendered pods. Projected only
+	// onto engine and decoder — the router does not participate in P/D pairing
+	// and must not re-roll on a protocol change. Nil pairs with anything.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	PairingProtocol *string `json:"pairingProtocol,omitempty"`
+
 	// Runners is the fully-rendered set of pod templates per Instance.
 	// MUST be non-empty. Single-pod Instances have one Runner with
 	// Name="default" and Size=1; multi-node Instances typically have

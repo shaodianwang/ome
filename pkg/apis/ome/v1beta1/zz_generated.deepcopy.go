@@ -2137,6 +2137,11 @@ func (in *InferenceReplicaSpec) DeepCopyInto(out *InferenceReplicaSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.PairingProtocol != nil {
+		in, out := &in.PairingProtocol, &out.PairingProtocol
+		*out = new(string)
+		**out = **in
+	}
 	if in.Runners != nil {
 		in, out := &in.Runners, &out.Runners
 		*out = make([]Runner, len(*in))
@@ -3938,6 +3943,11 @@ func (in *RolloutSpec) DeepCopyInto(out *RolloutSpec) {
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.PairingProtocol != nil {
+		in, out := &in.PairingProtocol, &out.PairingProtocol
+		*out = new(string)
+		**out = **in
 	}
 }
 

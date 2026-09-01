@@ -509,6 +509,9 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 			return err
 		}
 		weights := ComputeWeightsFromPods(hashes, total, latestHash)
+		if err := AttachPairingProtocols(ctx, reads, isvc.Namespace, isvc.Name, c, weights); err != nil {
+			return err
+		}
 		traffic := BuildTrafficTargets(isvc.Name, c, weights)
 		cs := isvc.Status.Components[c]
 		changed := false

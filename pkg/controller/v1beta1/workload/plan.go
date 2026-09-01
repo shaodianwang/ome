@@ -66,6 +66,7 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 		TopologyKey:          desired.TopologyKey,
 		TopologySpread:       desired.TopologySpread,
 		TopologySpreadKey:    desired.TopologySpreadKey,
+		PairingProtocol:      desired.PairingProtocol,
 	}, nil
 }
 

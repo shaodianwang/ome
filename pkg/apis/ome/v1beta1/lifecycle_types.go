@@ -90,10 +90,14 @@ type LifecycleStatus struct {
 
 // RolloutHoldGate names the layer that most recently denied a
 // per-Instance Update for a Component.
-// +kubebuilder:validation:Enum=Ratio;Sequential;Budget;RetryBlock;Held
+// +kubebuilder:validation:Enum=Pairing;Ratio;Sequential;Budget;RetryBlock;Held
 type RolloutHoldGate string
 
 const (
+	// RolloutHoldGatePairing: the P/D pair-floor refused the step because it
+	// would leave no pairable serving engine+decoder pair during a
+	// pairing-protocol transition (coordination.CheckPairing).
+	RolloutHoldGatePairing RolloutHoldGate = "Pairing"
 	// RolloutHoldGateRatio: cross-Component RatioBalanced coordination
 	// refused the surge because it would skew the observed ratio past
 	// tolerance (coordination.CheckRatio).

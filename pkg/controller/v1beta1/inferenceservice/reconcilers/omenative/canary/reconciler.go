@@ -43,6 +43,12 @@ type ReconcileInputs struct {
 	// the persisted status identity when one exists, otherwise the observed
 	// non-canary revision (which seeds the persisted identity at canary start).
 	StableRevisionHash string
+	// CanaryPairingProtocol / StablePairingProtocol are the P/D pairing
+	// tokens the two revisions were minted under, published on the traffic
+	// targets so routing consumers pair engine/decoder targets by equal
+	// values. Empty pairs with anything.
+	CanaryPairingProtocol string
+	StablePairingProtocol string
 	// ReadyCanaryInstances is the count of complete PodReady target Instances,
 	// resolved from the IR's runner topology. nil uses PerRevisionPods.
 	ReadyCanaryInstances *int32
@@ -290,7 +296,8 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	}
 
 	// Capacity satisfied: program this step's external traffic weight.
-	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash, step.Traffic)
+	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash,
+		in.CanaryPairingProtocol, in.StablePairingProtocol, step.Traffic)
 
 	// Final step (TrafficWeight 100): drain the stable revision, then complete.
 	if int(cs.CurrentStep) == len(plan.Steps)-1 {
@@ -433,7 +440,15 @@ func stableHashFor(cs *v1beta1.CanaryStatus, pods map[string]int32, rejectedHash
 // target appears).
 func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 	stableHash := stableHashFor(cs, in.PerRevisionPods, cs.RolledBackRevisionHash)
-	applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, 0)
+	// The rejected entry is written at 0% (dropped), so only the stable
+	// target's protocol matters. It is known only when the resolved stable
+	// hash matches the one the dispatcher resolved a protocol for; the
+	// live-pod fallback degrades to "" (pairs with anything).
+	stableProtocol := ""
+	if stableHash == in.StableRevisionHash {
+		stableProtocol = in.StablePairingProtocol
+	}
+	applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, "", stableProtocol, 0)
 	if in.PerRevisionPods[cs.RolledBackRevisionHash] > 0 {
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRollingBack)
 		return &Result{Active: true, RolledBack: true, RequeueAfter: reconcileRequeue}

@@ -71,6 +71,15 @@ type WorkloadDesiredSpec struct {
 	// spreads across; empty defaults to TopologyKey.
 	TopologySpreadKey string
 
+	// PairingProtocol is the P/D wire-compatibility token this Component's
+	// revision is minted under. It participates in the revision hash (a
+	// change mints a new revision) and is stamped as the
+	// ome.io/pairing-protocol label on rendered pods. Empty means the
+	// Component pairs with anything. Adapters project it from the owner-CRD
+	// spec at the boundary; only Components that pair (engine, decoder)
+	// carry it.
+	PairingProtocol string
+
 	// Lifecycle holds RestartPolicy / UpdateStrategy / ReadyPolicy /
 	// InstanceReadyTimeout / MigrationPolicy as workload-owned mirror
 	// values; adapters project the CRD-shape lifecycle into this struct

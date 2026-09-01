@@ -3180,6 +3180,13 @@ func schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref common.ReferenceCall
 							Format:      "",
 						},
 					},
+					"pairingProtocol": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PairingProtocol is the engine↔decoder wire-compatibility token the target's revision was minted under (spec.rollout.pairingProtocol at mint time). Consumers MUST only pair engine and decoder targets whose PairingProtocol values are equal; an empty value pairs with anything.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"revisionName", "percent"},
 			},
@@ -5298,6 +5305,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 					"topologySpreadKey": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TopologySpreadKey is the resolved fault-domain node-label key TopologySpread spreads across; nil defaults to TopologyKey.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"pairingProtocol": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PairingProtocol is the engine↔decoder wire-compatibility token projected from spec.rollout.pairingProtocol on the parent InferenceService. It is folded into the revision hash (a change mints a new revision) and stamped as the ome.io/pairing-protocol label on rendered pods. Projected only onto engine and decoder — the router does not participate in P/D pairing and must not re-roll on a protocol change. Nil pairs with anything.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -9685,6 +9699,13 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 									},
 								},
 							},
+						},
+					},
+					"pairingProtocol": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PairingProtocol declares the engine↔decoder wire-compatibility contract for prefill-decode pairing (e.g. a KV-transfer protocol generation, such as \"nixl-v2\"). It is an opaque, operator-owned token compared only for equality; bump it ONLY when the engine↔decoder wire contract breaks. The value rides each engine and decoder revision: changing it mints new revisions for both Components (a rollout), stamps ome.io/pairing-protocol on their pods and per-revision Services, and is published on each traffic target so routing pairs only engine and decoder revisions whose values are equal. Empty or unset pairs with anything, so setting or clearing the token is upgrade-neutral. Changing it between two non-empty values requires engine and decoder to roll as one blueGreen or canary group.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 				},

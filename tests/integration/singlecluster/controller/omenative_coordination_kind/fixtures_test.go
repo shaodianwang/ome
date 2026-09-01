@@ -131,9 +131,10 @@ type fixtureOptions struct {
 	routerUpdateStrategy v1beta1.UpdateStrategyType
 
 	// Coordination knobs.
-	coordGroups   []v1beta1.RolloutCoordinationGroup
-	pausedGlobal  bool
-	extraISVCAnns map[string]string
+	coordGroups     []v1beta1.RolloutCoordinationGroup
+	pairingProtocol string
+	pausedGlobal    bool
+	extraISVCAnns   map[string]string
 }
 
 // FixtureOption mutates fixtureOptions before the fixture is built.
@@ -333,6 +334,14 @@ func WithSequentialGroup(order ...v1beta1.ComponentType) FixtureOption {
 		Policy:     v1beta1.CoordinationPolicySequential,
 		Order:      order,
 	})
+}
+
+// WithPairingProtocol sets spec.rollout.pairingProtocol — the P/D
+// wire-compatibility token that rides every engine/decoder revision. The
+// Spec.Rollout block is materialized even when no coordination groups
+// translate to v2 (the protocol alone is a valid rollout block).
+func WithPairingProtocol(p string) FixtureOption {
+	return func(o *fixtureOptions) { o.pairingProtocol = p }
 }
 
 // WithRolloutPaused adds the ome.io/rollout-paused=true annotation to
@@ -576,6 +585,13 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 		if len(v2Groups) > 0 {
 			isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: v2Groups}
 		}
+	}
+	if o.pairingProtocol != "" {
+		if isvc.Spec.Rollout == nil {
+			isvc.Spec.Rollout = &v1beta1.RolloutSpec{}
+		}
+		protocol := o.pairingProtocol
+		isvc.Spec.Rollout.PairingProtocol = &protocol
 	}
 
 	return &coordFixture{CBM: cbm, CSR: csr, ISVC: isvc}
