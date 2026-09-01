@@ -216,6 +216,23 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		if strings.Contains(asJSON, `"perCluster": []`) {
 			t.Errorf("a leaf with no split emitted an empty list:\n%s", asJSON)
 		}
+
+		// The same numbers off the same read, anchored the other way. Only
+		// team-nlp has a split, so each cluster carries exactly that leaf's
+		// share and nothing else.
+		byCluster := runAgainst(ctx, t, cfg,
+			Options{Output: OutputTree, Color: ColorNever, Axis: ViewCluster})
+		for cluster, want := range map[string][]string{
+			"member-a": {"member-a", roleWorkloadCluster, "96", "72"},
+			"member-b": {"member-b", roleWorkloadCluster, "32", "24"},
+		} {
+			if diff := cmp.Diff(want, strings.Fields(lineWith(t, byCluster, cluster))); diff != "" {
+				t.Errorf("cluster anchor mismatch (-want +got):\n%s\nin:\n%s", diff, byCluster)
+			}
+		}
+		if strings.Contains(byCluster, "team-vision") {
+			t.Errorf("a leaf with no share on any cluster survived the fleet axis:\n%s", byCluster)
+		}
 	})
 }
 

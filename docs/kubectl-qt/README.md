@@ -24,7 +24,9 @@ root                Cohort        512      288              2d2h
 
 Where the tree is authored, each leaf's fleet-wide budget is divided into a
 share per workload cluster, and those shares hang off the leaf as a tier of
-`WorkloadCluster` rows. See [The per-cluster split](#the-per-cluster-split).
+`WorkloadCluster` rows — see [The per-cluster split](#the-per-cluster-split).
+[`--view cluster`](#reading-it-the-other-way---view-cluster) reads those same
+numbers with the clusters on top instead.
 
 `kubectl get aq` names its columns the same way and in the same order, so a node
 reads alike either way. It carries a subset: no tree, no more than a node's
@@ -188,6 +190,68 @@ node declares one, which means an operator-level default applied: that value
 lives in the manager's configuration, on no object this plugin reads, so naming
 one would report a policy the cluster may not be using.
 
+### Reading it the other way: `--view cluster`
+
+The tree is anchored on the tenant — it answers *"where does this budget live"*.
+`--view cluster` reads the same numbers along the other axis and answers *"what
+is this cluster carrying"*, which is the capacity owner's question:
+
+```console
+$ kubectl qt --view cluster
+nvidia.com/gpu on flavor a100
+
+NAME                ROLE             NOMINAL  ADMITTED  READY  AGE
+member-a            WorkloadCluster  448      248
+├─ org-product      Cohort           256      128              3h
+│  └─ team-serving  ClusterQueue     256      128              3h
+└─ org-research     Cohort           192      120              3h
+   ├─ team-nlp      ClusterQueue     96       72               3h
+   └─ team-vision   ClusterQueue     96       48               3h
+member-b            WorkloadCluster  64       40
+└─ org-research     Cohort           64       40               3h
+   ├─ team-nlp      ClusterQueue     32       24               3h
+   └─ team-vision   ClusterQueue     32       16               3h
+
+Cohort and WorkloadCluster rows total the leaf shares below them; only a ClusterQueue row is a resolved budget
+```
+
+`member-b` has no `org-product` branch at all — `team-serving` is `Explicit` on
+`member-a` alone. On the tenant axis that fact is a row quietly *absent* under
+one leaf several tiers down; here it is a missing subtree, which is the kind of
+thing this axis exists to make obvious.
+
+Read the numbers knowing which are published and which are added up:
+
+| Row | `NOMINAL` |
+|---|---|
+| `ClusterQueue` | The share the management plane assigned that leaf on that cluster. Published in `status.budgets[].perCluster[]`. |
+| `Cohort` | The leaf shares below it, on that cluster, added up. **Derived** — a Cohort is apportioned nothing of its own, so the alternative is a dash at every tier. |
+| `WorkloadCluster` | Every leaf share on that cluster, added up. Also derived. |
+
+Only leaves are ever summed, so a total is never counted twice on its way up,
+and flavors are never added to each other — two flavors are two kinds of
+accelerator and their sum is a quantity of nothing.
+
+Three more things to know:
+
+- **The reserved `root` is not repeated.** It sits under every cluster and says
+  the same thing each time. A tree re-rooted by `--node` *is* kept, because that
+  node is what you asked to see.
+- **Filters apply first.** `kubectl qt --for-namespace serving-prod --view
+  cluster` answers "which clusters is this tenant on", not "every cluster".
+- **Orphans stay where they are.** A node with no position in the tree has none
+  in a cluster's slice of it either, so it keeps its own section on both axes.
+
+`--view cluster` fails on a workload cluster rather than rendering an empty
+table: nothing there resolves a split, and a blank table reads as "this fleet
+holds nothing".
+
+> [!NOTE]
+> The clusters come from the shares, not from the registry. A `WorkloadCluster`
+> that is registered but holds no share of anything appears in no budget, and so
+> appears nowhere here. Reading the registry would need a second resource and a
+> second RBAC rule; it is not done today.
+
 ### A split that does not add up
 
 ```console
@@ -294,6 +358,12 @@ kubectl qt -o wide
 # The tree alone, without each budget's per-cluster split.
 kubectl qt --split=false
 
+# What is each cluster carrying?
+kubectl qt --view cluster
+
+# Which clusters is one tenant on, and how much on each?
+kubectl qt --for-namespace nlp-prod --view cluster
+
 # How one tenant's budget is spread across the fleet.
 kubectl qt --node team-nlp
 
@@ -332,7 +402,8 @@ parent of the leaves that do.
 | Flag | Default | Purpose |
 |---|---|---|
 | `-o, --output` | `tree` | `tree`, `wide`, `json`, or `yaml`. |
-| `--split` | `true` | Draw each budget's per-cluster shares as a tier below the node. `--split=false` for the tree alone. |
+| `--view` | `tenant` | What to anchor on: `tenant`, the quota tree as authored; or `cluster`, one workload cluster per tree carrying its slice. |
+| `--split` | `true` | Draw each budget's per-cluster shares as a tier below the node. `--split=false` for the tree alone. Has no effect under `--view cluster`, which is already the split. |
 | `--node` | | Re-root the render at one node. |
 | `--leaves-only` | `false` | Keep only budget-carrying leaves, with their paths. |
 | `--for-namespace` | | Keep the leaves binding this serving namespace. |
@@ -407,6 +478,27 @@ never `null`, so "no quotas exist" stays distinguishable from a failed request.
 `--split` and `-o wide` were set to: those flags budget terminal width, which a
 machine format does not have. `perCluster` is absent rather than empty on a
 workload cluster, which resolves no split.
+
+`--view cluster` replaces `root` with `clusters`, never both — the two are one
+set of numbers along different axes, and a consumer that found both would have
+to guess which it was reading:
+
+```jsonc
+{
+  "clusters": [
+    { "name": "member-a",
+      "budgets": [ { "resourceName": "nvidia.com/gpu", "resourceFlavor": "a100",
+                     "nominal": "448", "admitted": "248", "borrowed": "0" } ],
+      "nodes": [ /* that cluster's slice of the tree */ ] }
+  ],
+  "violations": [ /* ... */ ]
+}
+```
+
+A `clusters[].budgets` entry and any `Cohort` node inside `nodes` carry totals
+this plugin computed; only a `ClusterQueue` node's numbers were published by the
+controller. `perCluster` is stripped from the nodes on this axis, since the
+cluster is already named by the entry they sit in.
 
 ## RBAC
 

@@ -69,7 +69,7 @@ func Render(w io.Writer, v *View, opts RenderOptions) error {
 	}
 	p := newPalette(opts.Color, w)
 
-	if v == nil || (v.Root == nil && len(v.Orphans) == 0) {
+	if v == nil || (v.Root == nil && len(v.Clusters) == 0 && len(v.Orphans) == 0) {
 		_, err := fmt.Fprintln(w, "No AcceleratorQuota resources found.")
 		return err
 	}
@@ -84,6 +84,9 @@ func Render(w io.Writer, v *View, opts RenderOptions) error {
 	var rows []row
 	if v.Root != nil {
 		rows = append(rows, renderNode(v.Root, nil, layout, opts.Glyphs)...)
+	}
+	for _, c := range v.Clusters {
+		rows = append(rows, renderCluster(c, layout, opts.Glyphs)...)
 	}
 	if len(v.Orphans) > 0 {
 		rows = append(rows, layout.sectionRow("nodes with no position in the tree"))
@@ -170,6 +173,17 @@ func (b branches) tier(last bool) string {
 		return b.stem + b.glyphs.Last
 	}
 	return b.stem + b.glyphs.Tee
+}
+
+// renderCluster emits one workload cluster and the slice of the tree it
+// carries. The cluster is the top of its own tree, so it is drawn from no
+// ancestry at all and its nodes hang off it as an ordinary first tier.
+func renderCluster(c *ClusterView, l layout, g Glyphs) []row {
+	rows := l.clusterRows(c)
+	for i, n := range c.Nodes {
+		rows = append(rows, renderNode(n, []bool{i == len(c.Nodes)-1}, l, g)...)
+	}
+	return rows
 }
 
 // renderNode emits a node and its subtree. ancestorLast[i] reports whether the
@@ -305,6 +319,14 @@ func writeFooter(b *strings.Builder, v *View, p palette) {
 			fromSpec = fromSpec || bg.FromSpec
 		}
 	})
+	// Said once rather than marked per row: on this axis nearly every row above
+	// a leaf is a total, and a mark that lands on most of the table says
+	// nothing. Only a ClusterQueue row is a figure the controller published.
+	if len(v.Clusters) > 0 {
+		fmt.Fprintf(b, "\n%s\n", p.apply(styleDim,
+			"Cohort and WorkloadCluster rows total the leaf shares below them; "+
+				"only a ClusterQueue row is a resolved budget"))
+	}
 	if fromSpec {
 		fmt.Fprintf(b, "\n%s\n", p.apply(styleDim,
 			"* nominal read from spec; status.budgets carries no resolved value for it"))

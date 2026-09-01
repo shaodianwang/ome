@@ -28,6 +28,12 @@ type View struct {
 	// whatever subtree hangs off it. Sorted by name.
 	Orphans []*NodeView `json:"orphans,omitempty"`
 
+	// Clusters is the same tree anchored on the fleet instead, one entry per
+	// workload cluster. Set by ByCluster, which clears Root when it does:
+	// the two are one set of numbers read along different axes, so exactly one
+	// of them is ever populated.
+	Clusters []*ClusterView `json:"clusters,omitempty"`
+
 	// Violations is every invariant the set breaks, in the order
 	// pkg/quota/tree reports them: by node, then by which cause to act on first.
 	Violations []ViolationView `json:"violations,omitempty"`

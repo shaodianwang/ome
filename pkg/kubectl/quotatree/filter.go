@@ -176,6 +176,11 @@ func findNode(v *View, name string) *NodeView {
 }
 
 // eachNode visits every node in the view, parents before children.
+//
+// A cluster-anchored view holds one slice of the tree per cluster, so a node on
+// several clusters is visited once per slice. Every caller either collects into
+// a set or folds, so a repeat costs nothing and dropping it would hide a node
+// from the footer entirely.
 func eachNode(v *View, fn func(*NodeView)) {
 	var walk func(*NodeView)
 	walk = func(n *NodeView) {
@@ -186,6 +191,11 @@ func eachNode(v *View, fn func(*NodeView)) {
 	}
 	if v.Root != nil {
 		walk(v.Root)
+	}
+	for _, c := range v.Clusters {
+		for _, n := range c.Nodes {
+			walk(n)
+		}
 	}
 	for _, o := range v.Orphans {
 		walk(o)

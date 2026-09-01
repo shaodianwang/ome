@@ -42,6 +42,9 @@ type Options struct {
 	// tree alone.
 	Split bool
 
+	// Axis is what the render is anchored on, from --view. Empty is ViewTenant.
+	Axis ViewAxis
+
 	// Timeout bounds Run when set. The cluster path leaves it zero and relies
 	// on --request-timeout, which clientcmd applies to the rest config; it is
 	// here so a caller driving Run with an injected Lister can still bound it.
@@ -66,6 +69,7 @@ func NewCommand(out, errOut io.Writer) *cobra.Command {
 	var (
 		output string
 		color  string
+		axis   string
 	)
 
 	loading := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -90,12 +94,19 @@ Nodes with no position in the tree are reported separately rather than hidden,
 and every invariant the set violates is listed with the node it is attributed
 to. A budget shown with a trailing * was read from spec because status.budgets
 carries no resolved value for it; one with a trailing ! was divided into shares
-that do not add up to it.`,
+that do not add up to it.
+
+--view cluster reads the same numbers along the other axis: one workload
+cluster at the top of each tree, carrying the slice of the tenants it hosts.
+A Cohort's figure there is what its tenants hold on that cluster between them.`,
 		Example: `  # The whole tree, with each budget's per-cluster split.
   kubectl qt
 
   # The tree alone.
   kubectl qt --split=false
+
+  # Anchored on the fleet: what is each cluster carrying?
+  kubectl qt --view cluster
 
   # Every column, including the split policy, capacity, and all conditions.
   kubectl qt -o wide
@@ -118,7 +129,7 @@ that do not add up to it.`,
 		// flag out of the run path entirely.
 		Version: fmt.Sprintf("%s (%s)", version.GitVersion, version.GitCommit),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := o.Complete(output, color, loading, overrides); err != nil {
+			if err := o.Complete(output, color, axis, loading, overrides); err != nil {
 				return err
 			}
 			return o.Run(cmd.Context())
@@ -140,6 +151,9 @@ that do not add up to it.`,
 	flags.BoolVar(&o.Split, "split", true,
 		"Show how each budget was divided across the fleet, as a tier of per-cluster "+
 			"rows below the node. Pass --split=false for the tree alone.")
+	flags.StringVar(&axis, "view", string(ViewTenant),
+		"What to anchor the render on: tenant, the quota tree as authored; or "+
+			"cluster, one workload cluster at the top of each tree carrying its slice of it.")
 
 	flags.StringVar(&o.Filter.Node, "node", "",
 		"Render only this node and its descendants.")
@@ -174,7 +188,7 @@ that do not add up to it.`,
 
 // Complete validates the flags and, unless a Lister was injected, builds one
 // from the kubeconfig.
-func (o *Options) Complete(output, color string, loading clientcmd.ClientConfigLoader, overrides *clientcmd.ConfigOverrides) error {
+func (o *Options) Complete(output, color, axis string, loading clientcmd.ClientConfigLoader, overrides *clientcmd.ConfigOverrides) error {
 	format, err := ParseOutputFormat(output)
 	if err != nil {
 		return err
@@ -186,6 +200,12 @@ func (o *Options) Complete(output, color string, loading clientcmd.ClientConfigL
 		return err
 	}
 	o.Color = mode
+
+	anchor, err := ParseViewAxis(axis)
+	if err != nil {
+		return err
+	}
+	o.Axis = anchor
 
 	if o.MaxDepth < 0 {
 		return fmt.Errorf("invalid --max-depth %d: want a non-negative number of edges", o.MaxDepth)
@@ -235,8 +255,16 @@ func (o *Options) Run(ctx context.Context) error {
 	}
 
 	view := BuildView(t, violations)
+	// Filtered first, so --view sees the set the caller narrowed to: asking for
+	// one tenant and then for the fleet axis should show the clusters that
+	// tenant is on, not every cluster there is.
 	if err := o.Filter.Apply(view); err != nil {
 		return err
+	}
+	if o.Axis == ViewCluster {
+		if err := ByCluster(view); err != nil {
+			return err
+		}
 	}
 
 	glyphs := UnicodeGlyphs

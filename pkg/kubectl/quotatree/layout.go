@@ -151,6 +151,40 @@ func (l layout) memberRow(n *NodeView, b BudgetView, c ClusterBudgetView, prefix
 // a ClusterQueue, which a bare "Cluster" would not.
 const roleWorkloadCluster = "WorkloadCluster"
 
+// clusterRows draws a workload cluster's own row, one per (resource, flavor)
+// pair it carries.
+//
+// The name is bold because on this axis the cluster is the top of its own tree,
+// which is what bold marks. The columns describing a node are empty for the
+// same reason they are on a per-cluster row one axis over: a cluster holds no
+// position in the quota tree, and the policy that produced its shares belongs
+// to the leaves below, not to the total.
+func (l layout) clusterRows(c *ClusterView) []row {
+	budgets := c.Budgets
+	if len(budgets) == 0 {
+		budgets = []BudgetView{{}}
+	}
+
+	rows := make([]row, 0, len(budgets))
+	for i, b := range budgets {
+		first := i == 0
+		cells := []cell{{text: firstOnly(first, c.Name), style: styleBold}}
+		cells = append(cells, dim(firstOnly(first, roleWorkloadCluster)))
+		if l.showPair {
+			cells = append(cells, text(orUnset(b.ResourceName)), text(orUnset(b.ResourceFlavor)))
+		}
+		if l.wide {
+			cells = append(cells, cell{})
+		}
+		cells = append(cells, quantityCell(b.Nominal), quantityCell(b.Admitted))
+		if l.wide {
+			cells = append(cells, quantityCell(b.Borrowed))
+		}
+		rows = append(rows, row{cells: l.pad(cells)})
+	}
+	return rows
+}
+
 func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first bool) row {
 	// Branch art recedes so the names it leads to carry the eye down the tree.
 	cells := []cell{{

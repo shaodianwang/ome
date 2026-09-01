@@ -121,6 +121,37 @@ func TestRunDrawsTheSplitWhenAsked(t *testing.T) {
 	}
 }
 
+func TestRunAnchorsOnTheFleetWhenAsked(t *testing.T) {
+	got, err := runWith(t, &Options{
+		Lister: fakeLister{quotas: fleetSplitAcrossClusters()},
+		Axis:   ViewCluster,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.HasPrefix(strings.SplitN(got, "\n", 4)[3], "member-a") {
+		t.Errorf("a cluster is not the first row:\n%s", got)
+	}
+	// The reserved root is under every cluster and says the same thing each
+	// time, so it is not repeated.
+	if strings.Contains(got, "\nroot ") {
+		t.Errorf("the reserved root was repeated under a cluster:\n%s", got)
+	}
+}
+
+func TestRunReportsAFleetAxisWithNoFleet(t *testing.T) {
+	_, err := runWith(t, &Options{
+		Lister: fakeLister{quotas: healthyFleet()},
+		Axis:   ViewCluster,
+	})
+	if err == nil {
+		t.Fatal("Run succeeded with --view cluster on a plane that resolves no split")
+	}
+	if !strings.Contains(err.Error(), "no fleet to anchor on") {
+		t.Errorf("error = %q, want it to say why there is nothing to show", err)
+	}
+}
+
 func TestRunASCII(t *testing.T) {
 	got, err := runWith(t, &Options{Lister: fakeLister{quotas: healthyFleet()}, ASCII: true})
 	if err != nil {
@@ -140,19 +171,21 @@ func TestCompleteValidatesFlags(t *testing.T) {
 		o       Options
 		output  string
 		color   string
+		axis    string
 		wantErr string
 	}{
-		{"bad output", Options{Lister: fakeLister{}}, "table", "auto", "invalid -o"},
-		{"bad color", Options{Lister: fakeLister{}}, "tree", "sometimes", "invalid --color"},
-		{"negative depth", Options{Lister: fakeLister{}, MaxDepth: -1}, "tree", "auto", "invalid --max-depth"},
+		{"bad output", Options{Lister: fakeLister{}}, "table", "auto", "tenant", "invalid -o"},
+		{"bad color", Options{Lister: fakeLister{}}, "tree", "sometimes", "tenant", "invalid --color"},
+		{"bad view", Options{Lister: fakeLister{}}, "tree", "auto", "fleet", "invalid --view"},
+		{"negative depth", Options{Lister: fakeLister{}, MaxDepth: -1}, "tree", "auto", "tenant", "invalid --max-depth"},
 		{
 			"conflicting selectors",
 			Options{Lister: fakeLister{}, Filter: Filter{Node: "a", Namespace: "b"}},
-			"tree", "auto", "use one",
+			"tree", "auto", "tenant", "use one",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.o.Complete(tc.output, tc.color, loading, overrides)
+			err := tc.o.Complete(tc.output, tc.color, tc.axis, loading, overrides)
 			if err == nil {
 				t.Fatalf("Complete succeeded, want an error containing %q", tc.wantErr)
 			}
@@ -166,10 +199,10 @@ func TestCompleteValidatesFlags(t *testing.T) {
 func TestCompleteKeepsAnInjectedLister(t *testing.T) {
 	// Without this the command would reach for a kubeconfig in a unit test.
 	o := Options{Lister: fakeLister{}}
-	if err := o.Complete("json", "never", clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}); err != nil {
+	if err := o.Complete("json", "never", "cluster", clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if o.Output != OutputJSON || o.Color != ColorNever {
+	if o.Output != OutputJSON || o.Color != ColorNever || o.Axis != ViewCluster {
 		t.Errorf("Complete did not apply the parsed flags: %+v", o)
 	}
 }
@@ -178,7 +211,7 @@ func TestNewCommandRegistersTheExpectedFlags(t *testing.T) {
 	cmd := NewCommand(&bytes.Buffer{}, &bytes.Buffer{})
 
 	for _, name := range []string{
-		"output", "color", "ascii", "split",
+		"output", "color", "ascii", "split", "view",
 		"node", "leaves-only", "for-namespace", "resource", "flavor", "max-depth",
 		"request-timeout",
 		// The standard connection flags, so the plugin behaves like kubectl.

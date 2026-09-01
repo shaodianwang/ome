@@ -202,6 +202,43 @@ func healthyFleet() []v1beta1.AcceleratorQuota {
 	}
 }
 
+// fleetSplitAcrossClusters is a two-org management plane where the split is
+// uneven on purpose: team-serving is Explicit on member-a alone, so member-b
+// hosts no org-product tenant at all. That absence is a row that is simply
+// missing in the tenant view and a whole subtree that is missing in the cluster
+// view, which is the difference the two axes exist to show.
+func fleetSplitAcrossClusters() []v1beta1.AcceleratorQuota {
+	return []v1beta1.AcceleratorQuota{
+		cohort("root", "",
+			withSpec(specBudget(gpu, a100, "512")),
+			withStatus(statusBudget(gpu, a100, "512", "288")), ready()),
+		cohort("org-research", "root",
+			withSpec(specBudget(gpu, a100, "256")),
+			withStatus(statusBudget(gpu, a100, "256", "160")), ready()),
+		leaf("team-nlp", "org-research",
+			withSpec(specBudget(gpu, a100, "128")),
+			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional),
+			withStatus(splitAcross(statusBudget(gpu, a100, "128", "96"),
+				share("member-a", "96", "72"), share("member-b", "32", "24"))),
+			withNamespaces("nlp-prod"), ready()),
+		leaf("team-vision", "org-research",
+			withSpec(specBudget(gpu, a100, "128")),
+			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional),
+			withStatus(splitAcross(statusBudget(gpu, a100, "128", "64"),
+				share("member-a", "96", "48"), share("member-b", "32", "16"))),
+			withNamespaces("vision-prod"), ready()),
+		cohort("org-product", "root",
+			withSpec(specBudget(gpu, a100, "256")),
+			withStatus(statusBudget(gpu, a100, "256", "128")), ready()),
+		leaf("team-serving", "org-product",
+			withSpec(specBudget(gpu, a100, "256")),
+			withPolicy(v1beta1.AcceleratorQuotaDistributionExplicit),
+			withStatus(splitAcross(statusBudget(gpu, a100, "256", "128"),
+				share("member-a", "256", "128"))),
+			withNamespaces("serving-prod"), ready()),
+	}
+}
+
 // splitFleet is a management plane's tree: a fleet total on every tier, and on
 // the one leaf the split into the share each member was assigned. The Cohorts
 // carry none because only leaves are apportioned — a grouping travels to every

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"sigs.k8s.io/yaml"
 )
 
@@ -104,6 +105,37 @@ func TestPrintJSONCarriesTheSplitWhateverTheTreeDrew(t *testing.T) {
 	}
 	if shares[1].Admitted.String() != "8" {
 		t.Errorf("second share admitted = %s, want 8", shares[1].Admitted)
+	}
+}
+
+func TestPrintJSONAnchoredOnTheFleet(t *testing.T) {
+	v := buildView(t, fleetSplitAcrossClusters(), 0)
+	if err := ByCluster(v); err != nil {
+		t.Fatalf("ByCluster: %v", err)
+	}
+	var b strings.Builder
+	if err := Print(&b, v, OutputJSON, RenderOptions{}); err != nil {
+		t.Fatalf("Print: %v", err)
+	}
+
+	var got View
+	if err := json.Unmarshal([]byte(b.String()), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, b.String())
+	}
+	// .root is absent rather than empty, so a consumer cannot read one axis
+	// and silently get the other's shape.
+	if got.Root != nil {
+		t.Errorf(".root = %q, want it absent from a fleet-anchored document", got.Root.Name)
+	}
+	if len(got.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2", len(got.Clusters))
+	}
+	a := got.Clusters[0]
+	if a.Name != "member-a" || a.Budgets[0].Nominal.String() != "448" {
+		t.Errorf("first cluster = %s at %v, want member-a at 448", a.Name, a.Budgets[0].Nominal)
+	}
+	if got := nodeNames(a.Nodes); !cmp.Equal(got, []string{"org-product", "org-research"}) {
+		t.Errorf("member-a nodes = %v, want the root's children", got)
 	}
 }
 
