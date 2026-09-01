@@ -23,8 +23,7 @@ are load-bearing and settled here:
 - **The set of components is entirely config-driven.** Which objects count as "the
   controller" or "the scheduler" — their namespaces, kinds, and label selectors —
   is supplied by config with **no in-code default**, because those identifiers are
-  install- and provider-specific and hardcoding them is a repo-wide hard blocker
-  (see `CLAUDE.md`, "Design Constraints").
+  install- and provider-specific and hardcoding them is a repo-wide hard blocker.
 
 Define the load-bearing terms up front; the rest of the doc keeps them apart:
 
@@ -76,7 +75,7 @@ Three concrete cases the current console cannot show, that this view must:
    *desired* count is the only evidence, and it lives on the Deployment, not on any
    Pod.
 3. **`model-agent` is missing on a member cluster.** The DaemonSet was never
-   installed on `cw-use3`, so models never localize there. Across a 20-cluster
+   installed on that cluster, so models never localize there. Across a 20-cluster
    fleet this is invisible until a deploy to that cluster fails; a per-cluster
    descriptor with an expected cluster scope turns "absent from cache" into an
    explicit **missing** signal.
@@ -422,7 +421,7 @@ it is called out here explicitly per the review discipline.
 
 - **Access control.** The read plane has no authn/authz today, so this "admin" view
   is not enforced as admin-only. Should it be gated (gateway-level identity, à la
-  OEP-0021.1's silfra `jwt_header`), and if so is that a MUSE concern or the
+  OEP-0021.1's ingress-injected `jwt_header`), and if so is that a MUSE concern or the
   gateway's? *Current lean:* defer to the gateway; do not invent an identity layer
   in the read plane for this.
 - **Namespace-scoped informers.** Does the `ome-client-rs`
