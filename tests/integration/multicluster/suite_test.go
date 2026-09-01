@@ -242,8 +242,16 @@ func startControlPlaneManager(c *cluster) {
 		// The management half: split an authored fleet tree and write each
 		// member's copy. Resync is long, so a spec that sees a projection
 		// converge proves an event drove it rather than a tick.
+		// Watching members is what keeps the fleet view current: consumption and
+		// capacity both move without anything on the hub changing, and with a
+		// ten-minute resync a spec that sees either land has been driven by an
+		// event.
+		memberEvents, err := components.SetupQuotaMemberFunnel(setupCtx, mgr, qcm)
+		if err != nil {
+			return err
+		}
 		return components.SetupQuotaProjection(setupCtx, mgr, qcm,
-			quotaOrigin, quotaFieldManager, 10*time.Minute)
+			quotaOrigin, quotaFieldManager, 10*time.Minute, memberEvents)
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane StartManager")
 	c.clusters = cm

@@ -1,6 +1,8 @@
 package multicluster
 
 import (
+	"time"
+
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -276,6 +278,76 @@ var _ = ginkgo.Describe("Management-plane quota projection", ginkgo.Ordered, fun
 		var kept v1beta1.AcceleratorQuota
 		gomega.Expect(member1Cluster.client.Get(member1Cluster.ctx,
 			types.NamespacedName{Name: org}, &kept)).To(gomega.Succeed())
+	})
+
+	// Consumption moves without anything in the tree changing. The hub is woken
+	// by edits to its own nodes and by a resync tick, and neither fires when a
+	// tenant's work starts or finishes on a member -- so without watching the
+	// members its account of the fleet is stale for up to a whole interval,
+	// which for this suite is ten minutes.
+	//
+	// That long interval is what makes this spec mean something: if the hub
+	// picks the figure up inside the timeout below, an event carried it.
+	ginkgo.It("follows a member's consumption without waiting for a resync", func() {
+		authorTree("120")
+		gomega.Eventually(func() (string, error) { return nominalOn(member1Cluster, team) },
+			eventuallyTimeout, eventuallyPoll).Should(gomega.Equal("90"))
+
+		// Wait for the hub to go quiet first. Authoring a tree sets off several
+		// passes -- each status write is an event on the hub's own nodes -- and
+		// one of those landing after the member update would read the figure back
+		// for reasons that have nothing to do with watching members. Settling
+		// first is what makes the assertion below attributable.
+		ginkgo.By("letting the hub settle, so the next pass has only one cause")
+		var quiet string
+		gomega.Eventually(func(g gomega.Gomega) {
+			var src v1beta1.AcceleratorQuota
+			g.Expect(controlCluster.client.Get(controlCluster.ctx,
+				types.NamespacedName{Name: team}, &src)).To(gomega.Succeed())
+			// Recorded BEFORE the assertion: a failing g.Expect aborts this
+			// function, so asserting first would leave the previous value never
+			// updated and the comparison could never succeed.
+			seen := src.ResourceVersion
+			previous := quiet
+			quiet = seen
+			g.Expect(seen).To(gomega.Equal(previous), "the hub is still writing status")
+		}).WithPolling(2 * time.Second).WithTimeout(eventuallyTimeout).Should(gomega.Succeed())
+
+		// The member reports what its own Kueue is holding, which is the only
+		// place these numbers can come from: the hub runs no Kueue and holds no
+		// credential to read one.
+		ginkgo.By("reporting consumption on the member's own copy")
+		gomega.Eventually(func(g gomega.Gomega) {
+			var copyOnMember v1beta1.AcceleratorQuota
+			g.Expect(member1Cluster.client.Get(member1Cluster.ctx,
+				types.NamespacedName{Name: team}, &copyOnMember)).To(gomega.Succeed())
+			copyOnMember.Status.Budgets = []v1beta1.AcceleratorBudgetStatus{{
+				ResourceName:   tpu,
+				ResourceFlavor: flavor,
+				Admitted:       resource.MustParse("42"),
+			}}
+			g.Expect(member1Cluster.client.Status().Update(
+				member1Cluster.ctx, &copyOnMember)).To(gomega.Succeed())
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+
+		ginkgo.By("seeing it on the hub, long before the resync would have")
+		gomega.Eventually(func() (string, error) {
+			var src v1beta1.AcceleratorQuota
+			if err := controlCluster.client.Get(controlCluster.ctx,
+				types.NamespacedName{Name: team}, &src); err != nil {
+				return "", err
+			}
+			for _, b := range src.Status.Budgets {
+				for _, pc := range b.PerCluster {
+					if pc.Cluster == wcA {
+						return pc.Admitted.String(), nil
+					}
+				}
+			}
+			return "", nil
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Equal("42"),
+			"the hub never picked up the member's consumption, so the fleet view "+
+				"only moves on the resync tick")
 	})
 
 	ginkgo.It("follows the fleet total when an admin changes it", func() {

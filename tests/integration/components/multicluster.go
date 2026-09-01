@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorquota"
@@ -101,6 +104,14 @@ func WithDerivedISVCCache(controlPlaneID string) WorkloadClusterOption {
 // silently. The connector only reads.
 func SetupQuotaTransport(_ context.Context, mgr ctrl.Manager) (*ClusterManager, error) {
 	clusterManager := workloadcluster.NewManager(mgr.GetScheme())
+	// Cached, and before the Connector: SetCacheOptions only reaches clients
+	// built after it, so a member connected first would keep a never-caching
+	// one and never deliver an event. Unfiltered because the hub reads two
+	// disjoint sets off a member -- its own origin-labelled projections, and
+	// the member's unlabelled root -- and one selector covers every cached kind.
+	clusterManager.SetCacheOptions(workloadcluster.CacheOptions{
+		CachedKinds: sets.New(v1beta1.SchemeGroupVersion.WithKind("AcceleratorQuota").GroupKind()),
+	})
 	if err := mgr.Add(clusterManager); err != nil {
 		return nil, fmt.Errorf("SetupQuotaTransport: add cluster manager runnable: %w", err)
 	}
@@ -115,6 +126,26 @@ func SetupQuotaTransport(_ context.Context, mgr ctrl.Manager) (*ClusterManager, 
 	return clusterManager, nil
 }
 
+// SetupQuotaMemberFunnel watches AcceleratorQuota on every connected member and
+// returns the channel its changes arrive on. Wire it into SetupQuotaProjection
+// so the hub's fleet view follows the members rather than a clock.
+func SetupQuotaMemberFunnel(_ context.Context, mgr ctrl.Manager, clusters *ClusterManager,
+) (<-chan event.GenericEvent, error) {
+	funnel := workloadcluster.NewStatusFunnel(clusters, workloadcluster.FunnelConfig{
+		NewList:   func() client.ObjectList { return &v1beta1.AcceleratorQuotaList{} },
+		NewObject: func() client.Object { return &v1beta1.AcceleratorQuota{} },
+		// Every change resolves to the root: the pass rebuilds the whole tree
+		// whatever woke it, so one key lets a burst collapse into one request.
+		Resolve: func(client.Object) (types.NamespacedName, bool) {
+			return types.NamespacedName{Name: v1beta1.AcceleratorQuotaRootName}, true
+		},
+	})
+	if err := mgr.Add(funnel); err != nil {
+		return nil, fmt.Errorf("SetupQuotaMemberFunnel: add funnel runnable: %w", err)
+	}
+	return funnel.Events(), nil
+}
+
 // SetupQuotaProjection registers the management-mode quota controller: the half
 // that splits an authored fleet tree and writes each member's copy through the
 // transport SetupQuotaTransport built.
@@ -123,7 +154,7 @@ func SetupQuotaTransport(_ context.Context, mgr ctrl.Manager) (*ClusterManager, 
 // what makes this management mode rather than workload mode -- the hub measures
 // no hardware of its own and writes no Kueue object anywhere.
 func SetupQuotaProjection(_ context.Context, mgr ctrl.Manager, clusters *ClusterManager,
-	origin, fieldManager string, resync time.Duration,
+	origin, fieldManager string, resync time.Duration, memberEvents <-chan event.GenericEvent,
 ) error {
 	r := &acceleratorquota.Reconciler{
 		Client:    mgr.GetClient(),
@@ -142,7 +173,11 @@ func SetupQuotaProjection(_ context.Context, mgr ctrl.Manager, clusters *Cluster
 			DefaultPolicy: v1beta1.AcceleratorQuotaDistributionProportional,
 		},
 	}
-	if err := r.SetupWithManager(mgr); err != nil {
+	var opts []acceleratorquota.Option
+	if memberEvents != nil {
+		opts = append(opts, acceleratorquota.WithMemberEvents(memberEvents))
+	}
+	if err := r.SetupWithManager(mgr, opts...); err != nil {
 		return fmt.Errorf("SetupQuotaProjection: SetupWithManager: %w", err)
 	}
 	return nil

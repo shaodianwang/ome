@@ -592,11 +592,30 @@ func WithTransportEvents(ch <-chan event.GenericEvent) Option {
 	return func(o *options) { o.transportEvents = ch }
 }
 
+// WithMemberEvents wires the channel a status funnel fills when an
+// AcceleratorQuota changes on any member, so the hub's account of the fleet
+// follows the fleet instead of a clock.
+//
+// Consumption moves without anything in the tree changing, and none of this
+// controller's own triggers notice: it is woken by edits to the hub's own
+// nodes and by its resync tick, neither of which fires when a tenant's work
+// starts or finishes on a member. The workload plane has the same problem one
+// layer down and solves it the same way, by watching the objects that carry the
+// figures rather than re-reading them on a timer.
+//
+// This does not feed back on itself. The hub's own applies to a member are
+// server-side applies, and one that changes nothing does not bump
+// resourceVersion, so it raises no event to wake the pass that made it.
+func WithMemberEvents(ch <-chan event.GenericEvent) Option {
+	return func(o *options) { o.memberEvents = ch }
+}
+
 // Option configures SetupWithManager.
 type Option func(*options)
 
 type options struct {
 	transportEvents <-chan event.GenericEvent
+	memberEvents    <-chan event.GenericEvent
 }
 
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
@@ -675,14 +694,21 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
 			builder.WithPredicates(usageChanged),
 		)
 	}
+	// One handler for both, because the pass they trigger is the same one: it
+	// rebuilds the whole tree from the root, so a burst of member events and a
+	// reconnection collapse into a single queued request rather than one each.
+	wake := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, obj client.Object) []reconcile.Request {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName()}}}
+		})
+	if cfg.memberEvents != nil {
+		b = b.WatchesRawSource(source.Channel(cfg.memberEvents, wake))
+	}
 	if cfg.transportEvents != nil {
 		// Every event names the root and the pass rebuilds the whole tree, so a
 		// burst of reconnections collapses into one queued pass rather than one
 		// per member.
-		b = b.WatchesRawSource(source.Channel(cfg.transportEvents,
-			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
-				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName()}}}
-			})))
+		b = b.WatchesRawSource(source.Channel(cfg.transportEvents, wake))
 	}
 	return b.Complete(r)
 }
