@@ -12,7 +12,7 @@ GO_CMD ?= go
 # Use go.mod go version as source
 GOLANGCI_LINT_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' github.com/golangci/golangci-lint)
 CONTROLLER_GEN_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' sigs.k8s.io/controller-tools)
-KUSTOMIZE_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' sigs.k8s.io/kustomize/kustomize/v4)
+KUSTOMIZE_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' sigs.k8s.io/kustomize/kustomize/v5)
 ENVTEST_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' sigs.k8s.io/controller-runtime/tools/setup-envtest)
 KIND_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' sigs.k8s.io/kind)
 YQ_VERSION ?= $(shell cd $(TOOLS_DIR) && GO111MODULE=on $(GO_CMD) list -m -f '{{.Version}}' github.com/mikefarah/yq/v4)
@@ -59,7 +59,7 @@ KUSTOMIZE = $(PROJECT_DIR)/bin/kustomize
 .PHONY: kustomize
 kustomize: fix-tools-gomod ## 🔧 Download kustomize locally if necessary
 	@echo "🔧 Installing kustomize..."
-	cd $(TOOLS_DIR) && GOBIN=$(PROJECT_DIR)/bin GO111MODULE=on $(GO_CMD) install sigs.k8s.io/kustomize/kustomize/v4@$(KUSTOMIZE_VERSION)
+	cd $(TOOLS_DIR) && GOBIN=$(PROJECT_DIR)/bin GO111MODULE=on $(GO_CMD) install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
 	@echo "✅ Installation complete"
 
 ENVTEST = $(PROJECT_DIR)/bin/setup-envtest
