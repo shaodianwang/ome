@@ -88,7 +88,7 @@ resolution and fan-out, and branches on `mode` only here:
 **2. Endpoint publication** — `Single` = one URL; `All` = one backend per home,
 equal weight; `Split` = one backend per home, weighted by ready replicas.
 
-The sticky-winner / re-home-on-lost-admission (PR #863) / terminal-fail logic is
+The sticky-winner / re-home-on-lost-admission / terminal-fail logic is
 **`Single`-only** — it protects the *one-home* invariant. `All`/`Split` are
 per-home independent: a home that loses admission is just not-currently-serving;
 the others are unaffected and the endpoint set shrinks. `All` is best-effort —
