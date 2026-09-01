@@ -83,7 +83,7 @@ precedent: **no Kubernetes feature gate**. Opt-in is per-ISVC by setting any
 Everything past request timeout — LB algorithm, hash-based session affinity,
 circuit breakers, retries, connection timeouts, backend TLS, rate limiting — is
 hand-authored as a sibling gateway-implementation-specific resource. A real
-example on a production cluster: an `avocado-tier5-chat` ISVC carried a separate
+example on a production cluster: a chat-serving ISVC carried a separate
 `BackendTrafficPolicy` with `loadBalancer: LeastRequest` plus a circuit breaker
 and connection timeouts, all maintained outside the ISVC's lifecycle.
 
@@ -617,7 +617,7 @@ separate. It did not vanish — it was relocated and reshaped:
    revisions over time* — a different axis with no executor yet. The field is
    shape-only precisely so the rollout surface is not forked again later.
 
-3. **`canaryTrafficPercent` was removed** (#424,
+3. **`canaryTrafficPercent` was removed** (from
    `pkg/apis/ome/v1beta1` — grep returns zero hits today). The first draft built
    all three rollout strategies on three semantic points of that one field; the
    field is gone, and with it the strategy-via-magic-value scheme.
@@ -694,7 +694,7 @@ The scenarios the suite must hold:
   depend on them).
 - Coexistence at phase 2 (admission warning on same-name conflict).
 - 2+ production users running ISVCs with OME-managed backend policies ≥ 60 days
-  without a Sev1/Sev2 attributable to the traffic reconciler.
+  without a high-severity incident attributable to the traffic reconciler.
 - Annotation surface frozen except for additive keys.
 - Istio translator either matches the Envoy field coverage or remains a
   documented partial with the gaps in the matrix above.
@@ -711,12 +711,12 @@ The scenarios the suite must hold:
 - 2026-05-16: Hybrid typed-core + annotation API; ISVC-level scope; merged a
   canary/rollout half into the doc (later removed — see below).
 - 2026-05-18: API merged — `TrafficSpec` / `TrafficStatus` + annotation
-  constants (#136).
+  constants.
 - 2026-05-19: Reconciler merged — backend-policy translator + reconciler +
-  Envoy Gateway / Istio / noop + integration tests (#143). Part 1 alpha.
-- 2026-06-03: `canaryTrafficPercent` removed from the API (#424).
+  Envoy Gateway / Istio / noop + integration tests. Part 1 alpha.
+- 2026-06-03: `canaryTrafficPercent` removed from the API.
 - 2026-06-04: OEP-0015 unified the rollout surface under `spec.rollout`,
-  deleting `spec.traffic.rollout` and reserving `spec.rollout.canary` (#426).
+  deleting `spec.traffic.rollout` and reserving `spec.rollout.canary`.
 - 2026-06-04: This OEP scoped down to backend traffic policy (Part 1); the
   rollout half marked
   [superseded](#superseded-progressive-rollout-moved-to-specrollout) and

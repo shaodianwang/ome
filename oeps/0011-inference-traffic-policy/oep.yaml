@@ -24,9 +24,9 @@ stage: alpha
 latest-milestone: "alpha"
 
 milestone:
-  # API (TrafficSpec/TrafficStatus + annotation constants) merged in #136
-  # on 2026-05-18; the translator + reconciler + EG/Istio + integration
-  # merged in #143 on 2026-05-19. The later date is the alpha mark.
+  # API (TrafficSpec/TrafficStatus + annotation constants) merged on
+  # 2026-05-18; the translator + reconciler + EG/Istio + integration
+  # merged on 2026-05-19. The later date is the alpha mark.
   alpha: "2026-05-19"
   beta: "TBD"
   stable: "TBD"
