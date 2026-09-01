@@ -109,7 +109,7 @@ capacity engine.
   replicas — the exact data a global load balancer needs to split traffic across
   homes in proportion to ready capacity (not round-robin, not single-home-resolve).
   Actually balancing traffic from that contract is done by a global-traffic
-  *consumer* — most likely the **existing front-tier** (the api_proxy / SGL-router
+  *consumer* — most likely the **existing front-tier** (an API-proxy / router
   fleet) pointed at `homes[]`, or client-side LB. OME natively programming a
   GSLB/Gateway/mesh is an **optional** follow-up OEP, not something this OEP builds
   or blocks on. This OEP owns the contract + a pluggable publisher seam (default
@@ -255,10 +255,10 @@ NVLink/NVSwitch within a node, ICI within a TPU slice, InfiniBand/RoCE within a
 cluster's rail-optimized network. Those collectives assume single-digit-µs RTT
 and a shared fabric. A cross-cluster (cross-region, cross-provider) link is
 WAN-class: milliseconds of RTT, no shared fabric, no RDMA. Place two ranks of one
-gang on two clusters and the collective doesn't just slow down — `START_SESSION`
-/ the NCCL/ICI bring-up fails outright, exactly the multi-host-slice split
-failure mode OME already hit and fixed for TPU gangs (per-gang slice affinity,
-PR #497). So the boundary is physical: **the replica is the smallest unit we may
+gang on two clusters and the collective doesn't just slow down — the NCCL/ICI
+bring-up fails outright, exactly the multi-host-slice split failure mode OME
+already hit and fixed for TPU gangs (per-gang slice affinity). So the boundary
+is physical: **the replica is the smallest unit we may
 relocate; the gang is indivisible.**
 
 Consequence for apportionment: the unit of all replica math is **whole gangs**.
@@ -352,25 +352,25 @@ status:
     phase: FanningOut | Admitted | Running | Degraded | ReSharding
     endpoint: https://my-svc.global.example   # the single global, load-balanced endpoint
     homes:
-      - cluster: cw-use2-2
+      - cluster: cluster-a
         apportionedReplicas: 50
         admittedReplicas: 50
         readyReplicas: 50
         weight: 50               # share of endpoint traffic; tracks readyReplicas
-        endpoint: https://my-svc.cw-use2-2.ingress   # per-home backend (LB target)
+        endpoint: https://my-svc.cluster-a.ingress   # per-home backend (LB target)
         conditions: [...]        # mirrored from the derived ISVC on this home
-      - cluster: gcp-usc1-1
+      - cluster: cluster-b
         apportionedReplicas: 50
         admittedReplicas: 40     # this cluster only had room for 40
         readyReplicas: 38
         weight: 38
-        endpoint: https://my-svc.gcp-usc1-1.ingress
-      - cluster: mks-eu-1
+        endpoint: https://my-svc.cluster-b.ingress
+      - cluster: cluster-c
         apportionedReplicas: 25
         admittedReplicas: 20
         readyReplicas: 20
         weight: 20
-        endpoint: https://my-svc.mks-eu-1.ingress
+        endpoint: https://my-svc.cluster-c.ingress
 ```
 
 Note the example sums to 110 admitted against 125 desired: the controller is
@@ -545,7 +545,7 @@ weighed against invariants 1–4.
 
 **Who consumes the contract — and why it's not a blocker.** `homes[]` is data; some
 global-traffic layer reads it and balances. That consumer is **most likely the
-front-tier we already run** (the api_proxy / forked SGL-router fleet) — point its
+front-tier we already run** (an API-proxy / router fleet) — point its
 backend pool at the per-home ingresses with the published weights. Client-side LB
 (clients read `homes[]`) is an alternative. Neither is a new OEP — they're
 integrations against the contract. So **this OEP does not block on building
@@ -557,8 +557,8 @@ backend (a multi-cluster Gateway / GSLB / mesh) instead of leaning on the
 front-tier, that's a separate, **optional** OEP — worth doing eventually (it also
 gives single-active 0018 a stable cluster-independent name), but not required for
 0018.1 to function. The backend choice is gated on what the fleet's global-traffic
-system exposes across GKE + CoreWeave + MKS (there's no Gateway API object spanning
-them), which is why it's its own proposal rather than a subsection here.
+system exposes across its heterogeneous providers (there's no Gateway API object
+spanning them), which is why it's its own proposal rather than a subsection here.
 
 **Consequence, stated plainly.** 0018.1 is fully functional with the existing
 front-tier consuming `homes[]`. The native-LB OEP is an enhancement, not a gate.
@@ -610,22 +610,22 @@ under-scoped GC — and both are fixed (see [Current state](#current-state)).
 1. User applies ISVC (replicas: 125, placement.scaleOut.enabled: true) to the
    CONTROL-PLANE cluster.
 2. Fan-out controller computes candidates by accelerator match (gb300 + reachable)
-   -> {cw-use2-2, gcp-usc1-1, mks-eu-1}. Apportions ceil(125/3)=42 each (Balanced),
+   -> {cluster-a, cluster-b, cluster-c}. Apportions ceil(125/3)=42 each (Balanced),
    clamped to maxPerCluster=50.
 3. Creates the DERIVED ISVC on all three with replicas=42; pods labeled
    queue-name=<lq>. Each cluster's Kueue admits as many WHOLE 8-pod gangs as fit.
-4. cw-use2-2 admits 42; gcp-usc1-1 admits 42; mks-eu-1 has room for only 20 (gates
+4. cluster-a admits 42; cluster-b admits 42; cluster-c has room for only 20 (gates
    22). placed = 104, deficit = 21.
-5. Re-apportion the deficit: cw-use2-2 and gcp-usc1-1 still under maxPerCluster=50,
+5. Re-apportion the deficit: cluster-a and cluster-b still under maxPerCluster=50,
    bump each toward 50 (+8 each = 16) and look for headroom; suppose both reach 50
-   admitted. placed = 120, deficit = 5; mks-eu-1's 22 gated remainder admits 1 more
+   admitted. placed = 120, deficit = 5; cluster-c's 22 gated remainder admits 1 more
    as a gang frees -> placed = 121... loop until 125 or all gated -> Degraded@121.
 6. Status mirror writes status.placement.homes (3 entries, admitted/ready/weight).
 7. The control plane publishes the weighted-home contract (3 backends + ready
    weights); the global endpoint load-balances across all three home ingresses —
    the concrete backend programming is the global weighted endpoint OEP's job.
-8. Later: gcp-usc1-1 preempted, admitted drops 50->30. After graceWindow, re-shard:
-   bump the deficit onto cw-use2-2 (headroom) / a 4th candidate; endpoint keeps
+8. Later: cluster-b preempted, admitted drops 50->30. After graceWindow, re-shard:
+   bump the deficit onto cluster-a (headroom) / a 4th candidate; endpoint keeps
    serving on the survivors the whole time; weights rebalance.
 ```
 
@@ -641,7 +641,7 @@ under-scoped GC — and both are fixed (see [Current state](#current-state)).
 | A home is preempted (admitted drops) | Partial capacity loss, NOT total | Re-shard the lost replicas; the base re-checks admission and re-races after a grace window (Single mode) |
 | Brief unreachable blip < graceWindow | Risk of needless re-home + weight flap | Grace window suppresses re-shard; hysteresis on endpoint reweight |
 | Endpoint weights chase transient readiness | Traffic flaps to warming/cold replicas | Weight by **ready** only, with hysteresis; never weight by apportioned/admitted |
-| Gang would be split across clusters | Physically broken collectives (START_SESSION fails) | **Invariant**: split only at replica boundary; Kueue per-gang admission enforces indivisibility |
+| Gang would be split across clusters | Physically broken collectives (gang bring-up fails) | **Invariant**: split only at replica boundary; Kueue per-gang admission enforces indivisibility |
 | Two control-plane controllers (HA) double-fan-out | Conflicting deriveds across many homes | Leader election; deterministic derived names; the GC is control-plane-scoped, so one control plane never reaps another's deriveds |
 
 ### Dependencies
@@ -653,7 +653,7 @@ under-scoped GC — and both are fixed (see [Current state](#current-state)).
 - **A global-traffic consumer for `homes[]`** — NOT a hard dependency on new OME
   code. This OEP produces the weighted-home contract; something must consume it to
   balance traffic. The expected consumer is the **existing front-tier**
-  (api_proxy / SGL-router) programmed from `homes[]`, or client-side LB — an
+  (an API-proxy / router fleet) programmed from `homes[]`, or client-side LB — an
   integration, not a new subsystem. OME natively programming a GSLB/Gateway/mesh is
   an **optional** future OEP (also benefits single-active 0018's stable naming), not
   a gate on 0018.1.
@@ -672,7 +672,7 @@ under-scoped GC — and both are fixed (see [Current state](#current-state)).
 ## Current state
 
 **The base (OEP-0018) is fixed and validated, and fractional placement itself
-has shipped.** A bug-hunt over the base implementation (2026-06-26) found 38
+has shipped.** A bug-hunt over the base implementation found 38
 defects, eight of which this OEP called blockers. All eight are resolved, as are
 the notable mediums; the base now has both an envtest and a real-Kueue
 end-to-end suite. Fractional placement landed as `spec.placement.mode: Split`
@@ -688,43 +688,42 @@ reads it.
 
 | # | Blocker | Resolution |
 |---|---|---|
-| 1 | `deleteLosers` deleted by identity alone (cross-tenant data loss) | `deleteDerivedOn` reads first, checks the origin label/UID, and deletes under a UID precondition; `applyDerived` carries the same guard so a foreign object is never overwritten either (#579, #608) |
-| 2 | Candidate matching ignored accelerator requirements | `MatchCandidates` ANDs the requirements selector with the optional cluster-selector; an ISVC declaring no requirement matches NO cluster instead of fanning out fleet-wide (#576), extended to the typed `spec.placement` selectors (#891) |
-| 3 | Partial admission misread as full placement | `AllComponentsAdmitted` requires every declared component to have an admitted instance; `AnyInstanceAdmitted` is retained only as a low-level predicate (#579) |
-| 4 | GC deleted live deriveds on a transient/partial List | A list error aborts the sweep, and an empty live-UID set is treated as suspect and skipped rather than reaping everything (#577) |
-| 5 | GC had no control-plane identity scoping | `GCReconciler.ControlPlaneID` filters both the remote List and the orphan classification, so one control plane never reaps another's deriveds (#577) |
-| 6 | Sticky winner never re-checked admission | The sticky path re-reads per-component IR status and, on lost admission, rides a grace window then re-races off the healthy candidates (#863) |
-| 7 | Endpoint publisher was a stub | `placement/endpoint` programs a Gateway API HTTPRoute over per-home ExternalName Services, weighted by ready replicas; the nil-flap is gone (sticky last-known URL) (#589, #894, #911, #896) |
-| 8 | Cross-cluster RBAC was wrong and over-broad | The token ClusterRole now grants read-only `pods` and `scheduling.x-k8s.io/podgroups`, and ClusterServingRuntime access was narrowed to get/list/watch (#575) |
+| 1 | `deleteLosers` deleted by identity alone (cross-tenant data loss) | `deleteDerivedOn` reads first, checks the origin label/UID, and deletes under a UID precondition; `applyDerived` carries the same guard so a foreign object is never overwritten either |
+| 2 | Candidate matching ignored accelerator requirements | `MatchCandidates` ANDs the requirements selector with the optional cluster-selector; an ISVC declaring no requirement matches NO cluster instead of fanning out fleet-wide, extended to the typed `spec.placement` selectors |
+| 3 | Partial admission misread as full placement | `AllComponentsAdmitted` requires every declared component to have an admitted instance; `AnyInstanceAdmitted` is retained only as a low-level predicate |
+| 4 | GC deleted live deriveds on a transient/partial List | A list error aborts the sweep, and an empty live-UID set is treated as suspect and skipped rather than reaping everything |
+| 5 | GC had no control-plane identity scoping | `GCReconciler.ControlPlaneID` filters both the remote List and the orphan classification, so one control plane never reaps another's deriveds |
+| 6 | Sticky winner never re-checked admission | The sticky path re-reads per-component IR status and, on lost admission, rides a grace window then re-races off the healthy candidates |
+| 7 | Endpoint publisher was a stub | `placement/endpoint` programs a Gateway API HTTPRoute over per-home ExternalName Services, weighted by ready replicas; the nil-flap is gone (sticky last-known URL) |
+| 8 | Cross-cluster RBAC was wrong and over-broad | The token ClusterRole now grants read-only `pods` and `scheduling.x-k8s.io/podgroups`, and ClusterServingRuntime access was narrowed to get/list/watch |
 
 ### Resolved mediums
 
 - Reconnect/backoff: a previously-reachable cluster tolerates transient probe
   failures for a grace period instead of disconnecting on one failed `/version`,
-  and reconnects on a two-backoff schedule (#578, #589).
+  and reconnects on a two-backoff schedule.
 - `placeOn` no longer clobbers worker-side metadata — control-plane-owned keys
-  are merged over what the worker added (#579), with conflict-aware writes
-  (#606) and the foreign-object guard (#608).
+  are merged over what the worker added, with conflict-aware writes and the
+  foreign-object guard.
 - `deleteLosers` tolerates per-cluster failures instead of aborting on the
   first, and `reconcileDelete` holds the finalizer when a *connected* cluster
-  still has the derived (#579).
+  still has the derived.
 - Candidate set vs `Manager.Connected()` divergence no longer flaps placement:
   fan-out snapshots connectivity and skips unreachable candidates rather than
-  treating them as lost (#589).
+  treating them as lost.
 - `KueueServingAnnotation` (never a real Kueue key) is gone; only the
-  queue-name label, which is what actually gates, remains (#576).
+  queue-name label, which is what actually gates, remains.
 
 ### Validation
 
 - `tests/integration/multicluster/` — 1 control plane + 2 member envtest
   apiservers in one process, covering the produce→project→read path the base
   originally lacked, plus the winner-lost grace window, lost-admission re-race,
-  terminal failure, origin guard, GC scoping, and the Split apportionment modes
-  (#589, #602).
+  terminal failure, origin guard, GC scoping, and the Split apportionment modes.
 - The same suite under `OME_MC_REALKUEUE=1` runs full member managers with
   Kueue's real admission stack — S1–S7 cover the happy race, PD all-components
-  admission, gated-deadline, no-quota-anywhere, re-placement, and GC scoping
-  (#612). **Not wired into CI**; it is opt-in and local-only today.
+  admission, gated-deadline, no-quota-anywhere, re-placement, and GC scoping.
+  **Not wired into CI**; it is opt-in and local-only today.
 
 ### What is still open
 
@@ -869,9 +868,9 @@ Presented as a menu with each option's cost, then the pick.
 ## Open Questions
 
 - **Weighted-endpoint consumer — integration, not a blocker.** v1 expects the
-  existing front-tier (api_proxy / SGL-router) to consume `homes[]` and balance;
-  this OEP owns only the contract, invariants 1–4, and the pluggable publisher seam
-  (default no-op). Whether to *also* have OME natively program a global backend
+  existing front-tier (an API-proxy / router fleet) to consume `homes[]` and
+  balance; this OEP owns only the contract, invariants 1–4, and the pluggable
+  publisher seam (default no-op). Whether to *also* have OME natively program a global backend
   (Gateway weighted routes vs GSLB vs mesh) — and its reweight latency — is an
   **optional** follow-up OEP, not a gate on 0018.1. Owner of any follow-up: TBD.
 - **Automatic global autoscaling — deferred (now a Non-Goal), not an open question
