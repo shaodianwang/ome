@@ -271,11 +271,12 @@ The strongest observed evidence is the OEP-0007.3 measurement:
 | 1,000 | approximately 505 KiB |
 | 2,000 | approximately 1 MiB |
 
-PR #1056 added real-type fixtures for steady singletons and gangs, Create,
-in-place and surge updates, Delete, Kueue admission, realistic and large
-failures, and migration-heavy status. The checked-in golden attributes each
-field family's bytes and includes the full normalized status-update request;
-the envtest suite also captures API-server managed-fields behavior.
+The measurement suite provides real-type fixtures for steady singletons and
+gangs, Create, in-place and surge updates, Delete, Kueue admission, realistic
+and large failures, and migration-heavy status. The checked-in golden
+attributes each field family's bytes and includes the full normalized
+status-update request; the envtest suite also captures API-server
+managed-fields behavior.
 
 Removing only the three fields and adding no per-object metadata gives these
 steady-state numbers:
@@ -866,12 +867,13 @@ existing check.
 ### Upgrade boundary
 
 The minimum supported forward-upgrade predecessor contains the observation seam
-from PR #1061 and the consumer migration from PR #1066. Its lifecycle consumers
-derive the three observations from the workload observation, except that its
-empty gang-surge-slot guard still contains redundant cache checks dominated by
-`podCount` on controller-produced rows. An older leader therefore makes the same
-decisions on supported state even though it may temporarily repopulate the
-fields. The next compact write removes them again.
+and the consumer migration steps of the implementation sequence below. Its
+lifecycle consumers derive the three observations from the workload
+observation, except that its empty gang-surge-slot guard still contains
+redundant cache checks dominated by `podCount` on controller-produced rows. An
+older leader therefore makes the same decisions on supported state even though
+it may temporarily repopulate the fields. The next compact write removes them
+again.
 
 That mixed-writer window is logically safe but not storage-safe for an IR whose
 legacy shape already exceeds the configured request limit. At that scale, an
@@ -944,15 +946,15 @@ watch behavior would be false.
 
 The work is split so each PR has one reviewable responsibility:
 
-1. **Measurement and fixtures (landed in PR #1056).** Add named, reproducible
+1. **Measurement and fixtures (landed).** Add named, reproducible
    size attribution for steady singletons, gangs, creates, updates, deletes,
    failures, and migrations using real API types and complete status-update
    request bodies. Compare legacy and compact dense rows.
-2. **Observation seam (landed in PR #1061).** Make the durable-plus-live inputs
+2. **Observation seam (landed).** Make the durable-plus-live inputs
    explicit while preserving separate decision/publication epochs and each
    path's source and owner-filtering scope. Differential-test old and new
    decisions.
-3. **Consumer migration (landed in PR #1066).** Move decision consumers to the
+3. **Consumer migration (landed).** Move decision consumers to the
    correct epoch-scoped view. Its empty-slot predicate retains redundant cache
    checks that are decision-equivalent on controller-produced rows. Retained
    prior-snapshot and admission fields and placement behavior stay unchanged.
