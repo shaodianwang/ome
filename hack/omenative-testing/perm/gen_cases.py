@@ -253,9 +253,9 @@ COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "e
 # sweep preserves them and C() must never mint their ids. (p188/p189 are the
 # former scale/p97+p98, renamed out from under rollout/p97+p98's shadow.)
 HAND_WRITTEN = {"scale": {"p188", "p189"}}
-# isvcs/fault/ (p600+) and isvcs/scenario/ (p700+) are entirely hand-written
-# and NOT in COUNTERS — the regen sweep never touches them; keep the feature
-# counters below 600.
+# isvcs/fault/ (p600+), isvcs/scenario/ (p700+) and isvcs/pairing/ (p800+) are
+# entirely hand-written and NOT in COUNTERS — the regen sweep never touches
+# them; keep the feature counters below 600.
 
 
 def C(folder, desc, comps, coord=None, runtime=None, meta_ann=None, **kv):

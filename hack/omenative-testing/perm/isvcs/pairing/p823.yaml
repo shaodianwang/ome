@@ -1,0 +1,22 @@
+# p823: pairing swap v1→v2 ST maxSurge=2 at N=4 — parallel surge under the pair floor  mode=pairing proto=nixl-v2 Ne=4 Nd=4 Nr=0 ceil_e=6 ceil_d=6 ceil_r=0 co=bluegreen topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p823 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  rollout:
+    pairingProtocol: nixl-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

@@ -27,7 +27,24 @@ const (
 	// filtered out of the revision-hash computation as a system annotation.
 	RolloutTriggerAnnotation = "perm.test/rev"
 	RolloutTriggerValue      = "v2"
+	// RolloutPairingProtocolLabel is the P/D pairing cohort label
+	// (query.LabelPairingProtocol): stamped on pods at render and restamped
+	// in place on an in-place update; carried on per-revision routing
+	// Services in METADATA only, never the selector. Absent = pairs with
+	// anything.
+	RolloutPairingProtocolLabel = "ome.io/pairing-protocol"
+	// PodServingConditionType is the controller-managed pod readiness gate
+	// (query.ServingConditionType) marking a pod as in the serving rotation.
+	PodServingConditionType = "ome.io/serving"
 )
+
+// PairAliveSustainWindow is how long an unpaired engine/decoder state must
+// persist (seconds) before it counts as a pair-alive violation. A REAL pair
+// break lasts at least one pod-startup cycle (the new cohort must come Ready
+// before a pair can re-form); a sub-window blip is a watch-interleave
+// transient between a label restamp and a serving flip. Callers assert
+// PairAliveWorst() < this.
+const PairAliveSustainWindow = 5.0
 
 // ratioSustainWindow is how long a serving-ratio excursion must persist before
 // RatioWorst counts it as a band violation. Shorter excursions are
@@ -89,13 +106,30 @@ type RolloutObserver struct {
 	ratioSamples   []ratioSample
 	ratioInstDev   float64
 	ratioInstAB    [2]int
+
+	// Pair-alive tracking (optional; EnablePairAlive arms it for a
+	// non-empty→non-empty pairing-protocol transition). Whenever both engine
+	// and decoder have >=1 alive+ready+serving pod, some engine/decoder pod
+	// pair must be pairable — equal protocols, or either empty. The gate's
+	// two liveness escapes are exempt: once no pair exists (a side at zero or
+	// externally destroyed) the tracker DISARMS until a pairable sample
+	// reappears, and the 1×1 mutual wall (both sides <=1 serving) is the
+	// bounded first-mover window the gate deliberately allows.
+	pairTrack       bool
+	pairArmed       bool
+	pairBadSince    float64 // seconds post-baseline the open unpaired span began; <0 = none
+	pairOpenDetail  string  // the open span's violating snapshot
+	pairWorst       float64 // longest armed unpaired span observed (seconds)
+	pairWorstDetail string
 }
 
 type obsPod struct {
 	comp    string
 	alive   bool
 	ready   bool
+	serving bool
 	hash    string
+	pairing string
 	uid     string
 	newAnno bool
 }
@@ -179,6 +213,17 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// podServing reports the controller-managed serving readiness-gate condition.
+func podServing(pod *corev1.Pod) bool {
+	for i := range pod.Status.Conditions {
+		c := &pod.Status.Conditions[i]
+		if string(c.Type) == PodServingConditionType {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 func (o *RolloutObserver) handle(evType string, pod *corev1.Pod) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -191,7 +236,9 @@ func (o *RolloutObserver) handle(evType string, pod *corev1.Pod) {
 			comp:    pod.Labels[constants.OMEComponentLabel],
 			alive:   pod.DeletionTimestamp == nil,
 			ready:   podReady(pod),
+			serving: podServing(pod),
 			hash:    pod.Labels[RolloutRevisionHashLabel],
+			pairing: pod.Labels[RolloutPairingProtocolLabel],
 			uid:     string(pod.UID),
 			newAnno: pod.Annotations[RolloutTriggerAnnotation] == RolloutTriggerValue,
 		}
@@ -238,6 +285,93 @@ func (o *RolloutObserver) handle(evType string, pod *corev1.Pod) {
 			}
 		}
 	}
+	if o.pairTrack {
+		o.samplePairAliveLocked(now)
+	}
+}
+
+// samplePairAliveLocked folds one pair-alive observation at t seconds
+// post-baseline. A violation span opens on an armed unpaired sample and its
+// detail records that violating snapshot; the span keeps growing until a
+// sample that is pairable, walled, or one-sided arrives. Caller holds mu.
+func (o *RolloutObserver) samplePairAliveLocked(now float64) {
+	var eng, dec []string // serving pods' pairing protocols per Component
+	for _, p := range o.pods {
+		if p == nil || !p.alive || !p.ready || !p.serving {
+			continue
+		}
+		switch p.comp {
+		case "engine":
+			eng = append(eng, p.pairing)
+		case "decoder":
+			dec = append(dec, p.pairing)
+		}
+	}
+	closeSpan := func() {
+		if o.pairBadSince >= 0 {
+			if span := now - o.pairBadSince; span > o.pairWorst {
+				o.pairWorst = span
+				o.pairWorstDetail = o.pairOpenDetail
+			}
+			o.pairBadSince = -1
+		}
+	}
+	if len(eng) == 0 || len(dec) == 0 {
+		// A side has nothing serving — no pair left to protect: disarm until
+		// a pairable sample reappears (the gate's no-pair escape).
+		o.pairArmed = false
+		closeSpan()
+		return
+	}
+	pairable := false
+	for _, pe := range eng {
+		for _, pd := range dec {
+			if pe == "" || pd == "" || pe == pd {
+				pairable = true
+			}
+		}
+	}
+	if pairable {
+		o.pairArmed = true
+		closeSpan()
+		return
+	}
+	if len(eng) <= 1 && len(dec) <= 1 {
+		// 1×1 mutual wall: the bounded first-mover window the gate allows.
+		closeSpan()
+		return
+	}
+	if !o.pairArmed {
+		return
+	}
+	if o.pairBadSince < 0 {
+		o.pairBadSince = now
+		o.pairOpenDetail = fmt.Sprintf("engine=%v decoder=%v", eng, dec)
+	}
+	if span := now - o.pairBadSince; span > o.pairWorst {
+		o.pairWorst = span
+		o.pairWorstDetail = o.pairOpenDetail
+	}
+}
+
+// EnablePairAlive arms pair-alive tracking. Call it for a non-empty→
+// non-empty pairing-protocol transition, together with MarkBaseline.
+func (o *RolloutObserver) EnablePairAlive() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.pairTrack = true
+	o.pairArmed = false
+	o.pairBadSince = -1
+}
+
+// PairAliveWorst returns the longest ARMED unpaired engine/decoder span
+// observed (seconds) and a snapshot of the serving protocols at its worst.
+// Spans shorter than PairAliveSustainWindow are watch-interleave transients;
+// the caller asserts worst < PairAliveSustainWindow.
+func (o *RolloutObserver) PairAliveWorst() (float64, string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.pairWorst, o.pairWorstDetail
 }
 
 // aggregateLocked returns component → [alive, ready, updated]. Caller holds mu.

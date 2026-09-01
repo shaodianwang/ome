@@ -234,6 +234,44 @@ Two real-cluster perf harnesses for the async sampler:
 
 Both assume OME (+ bundled prometheus) in ns `ome` (see `perf/prom-delay-proxy.yaml`).
 
+### Pairing protocol (`mode=pairing`)
+
+`isvcs/pairing/` (p800+, hand-written — outside both generators' sweep) covers
+`spec.rollout.pairingProtocol`: the trigger is a **patch of the protocol
+field** (not an annotation bump) — the token rides every engine+decoder
+revision, so the patch alone re-mints and rolls both pairing Components
+(never the router; isolation is asserted). Header knobs:
+
+- `proto=<token|clear>` — the transition target; the starting value is
+  whatever the case YAML declares (`""→X` adoption, `X→""` clear, `X→Y`
+  coordinated swap). `proto2=` re-patches mid-roll (converge on the FINAL
+  cohort, no Instance stranded on the intermediate — the X-2 shape).
+- `hold=1` — assert a `status…rolloutHold` with `gate=Pairing` is observed
+  mid-transition (only on shapes where a denial window is guaranteed, e.g.
+  RecreatePod `maxUnavailable=100%`); otherwise holds are reported ⓘ.
+- `pkill=1` — delete the LAST old-cohort decoder pod mid-transition and
+  assert full recovery + convergence. Such cases carry `inv_off=C` (the
+  harness, not the product, destroyed the pair) and `order_soft=1`.
+- `scale_e=` / `scale_d=` — re-target a Component's replicas mid-transition.
+- `expect=reject` + `mode=pairing` — an **update-time** admission negative:
+  the CREATE is admitted and the Phase-2 protocol patch itself must be denied
+  (`reason=` substring asserted). Plain `expect=reject` (apply-time) cannot
+  express this — the webhook rule compares old vs new spec.
+
+Verdicts on top of the usual rollout checks: every engine/decoder pod carries
+`ome.io/pairing-protocol=<target>`, every live traffic target publishes
+`pairingProtocol=<target>`, every routing Service named by live traffic
+carries the label in metadata and NO Service ever carries it in
+`spec.selector`. Continuous **invariant C (pair-alive)** arms for every
+non-empty→non-empty transition: whenever both engine and decoder serve, a
+pairable pair (equal or either-empty protocols) must exist — with the gate's
+two liveness escapes (no pair left to protect; the 1×1 mutual wall) exempted.
+Waive with `inv_off=C` + a line-2 `# reason:` comment.
+
+A `canary=auto` case with a canary group in the YAML drives the same protocol
+patch through the staged canary (steps advance on their own `pause.duration`
+timers; `canary=manual` is not supported in this mode).
+
 ### Negative cases (`expect=reject`)
 
 `isvcs/reject/` (p320+) are **admission-rejection** cases: the ISVC spec is
@@ -329,7 +367,8 @@ preserve them and the generators refuse to mint their ids.
 `isvcs/fault/` (`p600`+ — fault-injection cases: `fault=` header, plus the
 `blocked=1` / `expect=fail` / `lift=1` contract knobs) is entirely
 hand-written and outside both generators' sweep; the `p600`+ id block is
-reserved for it.
+reserved for it. `isvcs/pairing/` (`p800`+ — the `mode=pairing` protocol
+cases) is likewise hand-written, with the `p800`+ block reserved.
 
 Coordination is emitted under `spec.rollout.groups[]` (OEP-0017 v2: BlueGreen ->
 one `blueGreen` group; RollingUpdate -> a `rollingUpdate` group, +`maintainRatio`

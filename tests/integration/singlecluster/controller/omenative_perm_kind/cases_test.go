@@ -100,6 +100,20 @@ type permCase struct {
 	ratioTol     *int32
 	groupSurge   *intstr.IntOrString
 	groupUnavail *intstr.IntOrString
+
+	// P/D pairing-protocol transition (the pairing trigger). pairTrigger
+	// switches the rollout trigger from the annotation bump to a patch of
+	// spec.rollout.pairingProtocol pairFrom→pairTo (the token rides every
+	// engine+decoder revision, so the patch alone rolls both — never the
+	// router). "" on either side means unset. pairExpectHold asserts a
+	// rolloutHold with gate=Pairing is observed mid-transition. pairScale
+	// re-targets a Component's replicas once the transition has visibly
+	// started (scale-during-transition).
+	pairTrigger    bool
+	pairFrom       string
+	pairTo         string
+	pairExpectHold bool
+	pairScale      map[v1beta1.ComponentType]int32
 }
 
 func (pc permCase) cfg(c v1beta1.ComponentType) *lc {
@@ -323,6 +337,27 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 			isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: groups}
 		}
 	}
+	// Initial pairing protocol: the value every engine/decoder revision is
+	// minted under before the pairing trigger patches it.
+	if pc.pairFrom != "" {
+		if isvc.Spec.Rollout == nil {
+			isvc.Spec.Rollout = &v1beta1.RolloutSpec{}
+		}
+		isvc.Spec.Rollout.PairingProtocol = ptr(pc.pairFrom)
+	}
+	// A mid-transition scale-up needs autoscale headroom on the target.
+	for c, t := range pc.pairScale {
+		l := pc.cfg(c)
+		if l == nil || int(t) <= l.n {
+			continue
+		}
+		switch c {
+		case v1beta1.EngineComponent:
+			isvc.Spec.Engine.MaxReplicas = int(t)
+		case v1beta1.DecoderComponent:
+			isvc.Spec.Decoder.MaxReplicas = int(t)
+		}
+	}
 	return isvc
 }
 
@@ -376,6 +411,66 @@ func buildPermCases() []permCase {
 			dec: stD(4), rtr: stD(2), ceilE: 4, ceilD: 5, ceilR: 3,
 			members: egDec, policy: v1beta1.CoordinationPolicyRollingUpdate,
 			pacingType: v1beta1.CoordinationPacingRatioBalanced, ratioTol: ptr(int32(25)), groupUnavail: pi(3)},
+
+		// --- P/D pairing protocol (ids mirror the playground isvcs/pairing/
+		// corpus; the trigger is a spec.rollout.pairingProtocol patch) ---
+		{id: "p800", desc: "pairing adopt: unset→v2 rolls e+d with no gating, router untouched",
+			eng: st(2, pi(1), pi(0)), dec: st(2, pi(1), pi(0)), rtr: st(2, pi(1), pi(0)),
+			ceilE: 3, ceilD: 3, ceilR: 2,
+			pairTrigger: true, pairTo: "nixl-v2"},
+		{id: "p801", desc: "pairing clear: v1→unset rolls e+d ungrouped, labels drop",
+			eng: st(2, pi(1), pi(0)), dec: st(2, pi(1), pi(0)), rtr: st(2, pi(1), pi(0)),
+			ceilE: 3, ceilD: 3, ceilR: 2,
+			pairTrigger: true, pairFrom: "nixl-v1"},
+		{id: "p802", desc: "pairing swap v1→v2 blueGreen ST — pair floor + all label surfaces flip",
+			eng: st(2, pi(1), pi(0)), dec: st(2, pi(1), pi(0)), rtr: st(2, pi(1), pi(0)),
+			ceilE: 3, ceilD: 3, ceilR: 2,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
+		{id: "p803", desc: "pairing swap v1→v2 RecreatePod unavail=100% — credit-0 pacing, Pairing hold guaranteed",
+			eng:   &lc{n: 2, strat: v1beta1.UpdateStrategyRecreatePod, surge: pi(0), unavail: ps("100%")},
+			dec:   &lc{n: 2, strat: v1beta1.UpdateStrategyRecreatePod, surge: pi(0), unavail: ps("100%")},
+			ceilE: 2, ceilD: 2,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2", pairExpectHold: true},
+		{id: "p804", desc: "pairing swap v1→v2 RecreatePod unavail=1 — drain-first ping-pong under the pair floor",
+			eng:   &lc{n: 2, strat: v1beta1.UpdateStrategyRecreatePod, surge: pi(0), unavail: pi(1)},
+			dec:   &lc{n: 2, strat: v1beta1.UpdateStrategyRecreatePod, surge: pi(0), unavail: pi(1)},
+			ceilE: 2, ceilD: 2,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
+		{id: "p805", desc: "pairing swap v1→v2 InPlaceIfPossible — labels restamp on live pods, UIDs stable",
+			eng:   &lc{n: 2, strat: v1beta1.UpdateStrategyInPlaceIfPossible, surge: pi(1), unavail: pi(1)},
+			dec:   &lc{n: 2, strat: v1beta1.UpdateStrategyInPlaceIfPossible, surge: pi(1), unavail: pi(1)},
+			ceilE: 2, ceilD: 2,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
+		{id: "p806", desc: "pairing swap v1→v2 InPlaceOnly — gate active despite flat capacity",
+			eng:   &lc{n: 2, strat: v1beta1.UpdateStrategyInPlaceOnly, surge: pi(0), unavail: pi(1)},
+			dec:   &lc{n: 2, strat: v1beta1.UpdateStrategyInPlaceOnly, surge: pi(0), unavail: pi(1)},
+			ceilE: 2, ceilD: 2,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
+		{id: "p809", desc: "pairing 1x1 wall RecreatePod — mutual-wall escape completes in a bounded window",
+			eng:   &lc{n: 1, strat: v1beta1.UpdateStrategyRecreatePod, surge: pi(0), unavail: ps("100%")},
+			dec:   &lc{n: 1, strat: v1beta1.UpdateStrategyRecreatePod, surge: pi(0), unavail: ps("100%")},
+			ceilE: 1, ceilD: 1,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
+		{id: "p810", desc: "pairing 1x1 ST — surge keeps the old pair serving through the flip",
+			eng: st(1, pi(1), pi(0)), dec: st(1, pi(1), pi(0)),
+			ceilE: 2, ceilD: 2,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
+		{id: "p814", desc: "pairing swap v1→v2 with engine scaled 2→4 mid-transition",
+			eng: st(2, pi(1), pi(0)), dec: st(2, pi(1), pi(0)),
+			ceilE: 5, ceilD: 3,
+			members: egDec, policy: v1beta1.CoordinationPolicyBlueGreen,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2",
+			pairScale: map[v1beta1.ComponentType]int32{v1beta1.EngineComponent: 4}},
+		{id: "p816", desc: "pairing swap v1→v2 engine-only — no pair to keep, gate inactive, labels flip",
+			eng: st(2, pi(1), pi(0)), ceilE: 3,
+			pairTrigger: true, pairFrom: "nixl-v1", pairTo: "nixl-v2"},
 	}
 }
 

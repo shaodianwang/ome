@@ -7,10 +7,12 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -53,16 +55,35 @@ func runPerm(ns string, pc permCase) {
 			modes[string(c)] = "surge"
 		}
 	}
-	// Bumped = every coordination-group member; engine-only when no group.
-	// Mirrors run.py: bumped = members ∩ configured, else {engine}.
-	bumped := map[string]bool{}
-	for _, c := range pc.members {
-		if pc.replicas(c) > 0 {
-			bumped[string(c)] = true
+	// A pairing trigger detects updated pods by revision hash for EVERY
+	// strategy: an in-place op restamps the revision-hash (and pairing)
+	// label on the LIVE pod, so hash-vs-baseline works uniformly. The
+	// in-place contract is still asserted through UID stability below.
+	if pc.pairTrigger {
+		for c := range modes {
+			modes[c] = "surge"
 		}
 	}
-	if len(bumped) == 0 {
-		bumped[string(v1beta1.EngineComponent)] = true
+	// Bumped = every coordination-group member; engine-only when no group.
+	// Mirrors run.py: bumped = members ∩ configured, else {engine}.
+	// A pairing trigger overrides both: the protocol rides every
+	// engine+decoder revision, so the patch rolls exactly those Components.
+	bumped := map[string]bool{}
+	if pc.pairTrigger {
+		for _, c := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
+			if pc.replicas(c) > 0 {
+				bumped[string(c)] = true
+			}
+		}
+	} else {
+		for _, c := range pc.members {
+			if pc.replicas(c) > 0 {
+				bumped[string(c)] = true
+			}
+		}
+		if len(bumped) == 0 {
+			bumped[string(v1beta1.EngineComponent)] = true
+		}
 	}
 	controls := map[string]bool{}
 	for _, c := range configured {
@@ -84,6 +105,12 @@ func runPerm(ns string, pc permCase) {
 	}
 	initBudget := time.Duration(120+25*sumN) * time.Second
 	rotateBudget := time.Duration(120+60*sumBumped+soakS) * time.Second
+	// A mid-transition scale-up grows the fleet the rotation must cover.
+	for c, t := range pc.pairScale {
+		if extra := int(t) - pc.replicas(c); extra > 0 {
+			rotateBudget += time.Duration(60*extra) * time.Second
+		}
+	}
 
 	// Phase 1: initial Ready.
 	ginkgo.By("waiting for initial Ready")
@@ -97,27 +124,88 @@ func runPerm(ns string, pc permCase) {
 		return true
 	}).WithTimeout(initBudget).WithPolling(time.Second).Should(gomega.BeTrue(), "initial Ready")
 
-	// Phase 2: baseline + trigger (bump every member).
+	// Phase 2: baseline + trigger (bump every member / patch the protocol).
 	obs.MarkBaseline(want, bumped, modes)
 	ne, nd := pc.replicas(v1beta1.EngineComponent), pc.replicas(v1beta1.DecoderComponent)
 	if pc.pacingType == v1beta1.CoordinationPacingRatioBalanced && ne > 0 && nd > 0 {
 		obs.SetRatioPair(string(v1beta1.EngineComponent), string(v1beta1.DecoderComponent),
 			float64(ne)/float64(nd))
 	}
-	ginkgo.By("bumping trigger on all members")
+	// Pair-alive arms exactly when the gate does: a non-empty→non-empty
+	// transition with both pairing Components configured.
+	pairAlive := pc.pairTrigger && pc.pairFrom != "" && pc.pairTo != "" &&
+		bumped[string(v1beta1.EngineComponent)] && bumped[string(v1beta1.DecoderComponent)]
+	if pairAlive {
+		obs.EnablePairAlive()
+	}
+	if pc.pairTrigger {
+		ginkgo.By(fmt.Sprintf("patching pairingProtocol %q -> %q", pc.pairFrom, pc.pairTo))
+	} else {
+		ginkgo.By("bumping trigger on all members")
+	}
 	gomega.Eventually(func(g gomega.Gomega) {
 		cur := &v1beta1.InferenceService{}
 		g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(isvc), cur)).To(gomega.Succeed())
-		for c := range bumped {
-			setTrigger(cur, v1beta1.ComponentType(c))
+		if pc.pairTrigger {
+			setPairingProtocol(cur, pc.pairTo)
+		} else {
+			for c := range bumped {
+				setTrigger(cur, v1beta1.ComponentType(c))
+			}
 		}
 		g.Expect(k8sClient.Update(suiteCtx, cur)).To(gomega.Succeed())
 	}).WithTimeout(2*time.Minute).WithPolling(time.Second).Should(gomega.Succeed(), "bump trigger")
 
-	// Phase 3: converge — every configured at N alive+ready, every bumped fully rotated.
+	// Phase 3: converge — every configured at N alive+ready, every bumped fully
+	// rotated. Pairing cases piggyback two side channels on the poll: record
+	// every rolloutHold gate reported mid-transition, and fire the one-shot
+	// mid-transition scale once the roll has visibly started.
 	ginkgo.By("watching rotation to convergence")
+	holdGates := map[string]bool{}
+	scaled := len(pc.pairScale) == 0
 	gomega.Eventually(func() bool {
 		cnt := obs.Counts()
+		if pc.pairTrigger {
+			cur := &v1beta1.InferenceService{}
+			if err := k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(isvc), cur); err == nil {
+				for c := range bumped {
+					lf := cur.Status.Components[v1beta1.ComponentType(c)].Lifecycle
+					if lf != nil && lf.RolloutHold != nil {
+						holdGates[string(lf.RolloutHold.Gate)] = true
+					}
+				}
+				if !scaled {
+					started := false
+					for c := range bumped {
+						if cnt[c][2] > 0 {
+							started = true
+						}
+					}
+					if started {
+						for c, t := range pc.pairScale {
+							n := int(t)
+							switch c {
+							case v1beta1.EngineComponent:
+								cur.Spec.Engine.MinReplicas = &n
+								cur.Spec.Engine.MaxReplicas = n
+							case v1beta1.DecoderComponent:
+								cur.Spec.Decoder.MinReplicas = &n
+								cur.Spec.Decoder.MaxReplicas = n
+							}
+						}
+						if k8sClient.Update(suiteCtx, cur) == nil {
+							for c, t := range pc.pairScale {
+								want[string(c)] = int(t)
+							}
+							scaled = true
+						}
+					}
+				}
+			}
+		}
+		if !scaled {
+			return false // the mid-transition scale must fire before convergence can latch
+		}
 		for _, c := range configured {
 			v := cnt[string(c)]
 			if v[0] != want[string(c)] || v[1] != want[string(c)] {
@@ -181,9 +269,13 @@ func runPerm(ns string, pc permCase) {
 			"ISOLATION: %s (not bumped) rotated %d pods [%s]", c, final[c][2], pc.desc)
 	}
 
-	// 3. In-place strategies must update in place — no UID rotation.
+	// 3. In-place strategies must update in place — no UID rotation. Keyed on
+	// the case's declared strategy, not the observer mode: a pairing trigger
+	// runs the observer hash-based ("surge") for every strategy, but the
+	// in-place contract still holds.
 	for c := range bumped {
-		if modes[c] != "inplace" {
+		l := pc.cfg(v1beta1.ComponentType(c))
+		if l == nil || !inPlace(l.strat) {
 			continue
 		}
 		base := obs.BaselineUIDs(c)
@@ -216,6 +308,97 @@ func runPerm(ns string, pc permCase) {
 		gomega.Expect(dev).To(gomega.BeNumerically("<=", tol),
 			"RATIO: serving %d:%d dev %.0f%% exceeded tol %d%% [%s]", ra, rb, dev*100, *pc.ratioTol, pc.desc)
 	}
+
+	// 6. Pairing-protocol verdicts.
+	if pc.pairTrigger {
+		// 6a. Pair-alive: no armed unpaired engine/decoder window past the
+		// sustain threshold (the gate's no-pair and 1×1-wall escapes are
+		// already exempted inside the tracker).
+		if pairAlive {
+			worst, detail := obs.PairAliveWorst()
+			gomega.Expect(worst).To(gomega.BeNumerically("<", util.PairAliveSustainWindow),
+				"PAIR-ALIVE: unpaired serving window of %.1fs (%s) during %q→%q [%s]",
+				worst, detail, pc.pairFrom, pc.pairTo, pc.desc)
+		}
+		// 6b. The pair floor visibly held a step where the shape guarantees a
+		// denial window.
+		if pc.pairExpectHold {
+			gomega.Expect(holdGates).To(gomega.HaveKey("Pairing"),
+				"HOLD: no rolloutHold gate=Pairing observed mid-transition (gates seen: %v) [%s]", holdGates, pc.desc)
+		}
+		// 6c. Surface convergence: pod labels, traffic protocols, Service
+		// metadata labels (never selectors) all on the target cohort.
+		assertPairingSurfaces(ns, pc, bumped)
+	}
+}
+
+// setPairingProtocol sets (or, for "", removes) spec.rollout.pairingProtocol —
+// the pairing-transition rollout trigger.
+func setPairingProtocol(isvc *v1beta1.InferenceService, to string) {
+	if isvc.Spec.Rollout == nil {
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{}
+	}
+	if to == "" {
+		isvc.Spec.Rollout.PairingProtocol = nil
+		return
+	}
+	isvc.Spec.Rollout.PairingProtocol = &to
+}
+
+// assertPairingSurfaces checks the three protocol surfaces converged on the
+// case's target cohort: every engine/decoder pod label, every live traffic
+// target on the bumped Components, and every routing Service named by live
+// traffic (metadata label only — the selector must NEVER carry it). Status
+// lags pod convergence, so the whole block polls.
+func assertPairingSurfaces(ns string, pc permCase, bumped map[string]bool) {
+	target := pc.pairTo
+	gomega.Eventually(func(g gomega.Gomega) {
+		pods := &corev1.PodList{}
+		g.Expect(k8sClient.List(suiteCtx, pods, client.InNamespace(ns),
+			client.MatchingLabels{constants.InferenceServicePodLabelKey: pc.id})).To(gomega.Succeed())
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			comp := pod.Labels[constants.OMEComponentLabel]
+			if pod.DeletionTimestamp != nil ||
+				(comp != string(v1beta1.EngineComponent) && comp != string(v1beta1.DecoderComponent)) {
+				continue
+			}
+			g.Expect(pod.Labels[util.RolloutPairingProtocolLabel]).To(gomega.Equal(target),
+				"pod %s must carry its revision cohort", pod.Name)
+		}
+
+		svcs := &corev1.ServiceList{}
+		g.Expect(k8sClient.List(suiteCtx, svcs, client.InNamespace(ns),
+			client.MatchingLabels{constants.InferenceServicePodLabelKey: pc.id})).To(gomega.Succeed())
+		byName := map[string]*corev1.Service{}
+		for i := range svcs.Items {
+			s := &svcs.Items[i]
+			byName[s.Name] = s
+			g.Expect(s.Spec.Selector).NotTo(gomega.HaveKey(util.RolloutPairingProtocolLabel),
+				"the pairing protocol must never enter Service %s's selector", s.Name)
+		}
+
+		cur := &v1beta1.InferenceService{}
+		g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns, Name: pc.id}, cur)).To(gomega.Succeed())
+		for c := range bumped {
+			targets := cur.Status.Components[v1beta1.ComponentType(c)].Traffic
+			g.Expect(targets).NotTo(gomega.BeEmpty(), "%s must publish traffic targets", c)
+			for _, t := range targets {
+				if t.Percent <= 0 {
+					continue
+				}
+				g.Expect(t.PairingProtocol).To(gomega.Equal(target),
+					"%s target %s protocol", c, t.RevisionName)
+				svc := byName[t.RevisionName]
+				g.Expect(svc).NotTo(gomega.BeNil(), "routing Service %s named by live traffic", t.RevisionName)
+				if svc != nil {
+					g.Expect(svc.Labels[util.RolloutPairingProtocolLabel]).To(gomega.Equal(target),
+						"routing Service %s metadata cohort label", t.RevisionName)
+				}
+			}
+		}
+	}).WithTimeout(2*time.Minute).WithPolling(time.Second).Should(gomega.Succeed(),
+		"pairing surfaces must converge on %q [%s]", target, pc.desc)
 }
 
 // setTrigger stamps the trigger annotation on a Component's ComponentExtensionSpec.

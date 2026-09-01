@@ -1,0 +1,22 @@
+# p806: pairing swap v1→v2 InPlaceOnly — flat capacity yet the restamp still crosses cohorts, so the gate stays active  mode=pairing proto=nixl-v2 Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 co=bluegreen topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p806 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  rollout:
+    pairingProtocol: nixl-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

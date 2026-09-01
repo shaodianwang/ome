@@ -28,7 +28,9 @@ Architecture:
      (A) status-truth: no IR Instance claims Failed while all its pods serve, or
      Ready with no pods; (B) endpoints-membership: every serving pod is a Ready
      endpoint of its per-revision routed Service and no endpoint references a
-     deleted pod. Sustained violations FAIL the verdict (see INV_* constants).
+     deleted pod; (C) pair-alive (armed only by mode=pairing for a non-empty→
+     non-empty protocol transition): whenever both engine and decoder serve, a
+     pairable pair exists. Sustained violations FAIL the verdict (INV_*).
   6. Optional fault injection (header fault=<kind>:<param>): quota:<n> (derived
      ResourceQuota admitting exactly +n case-shaped pods), podkill:<phase>,
      ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source.
@@ -77,6 +79,9 @@ RUN_TS = os.environ.get("OME_RUN_TS") or time.strftime("%Y%m%d-%H%M%S")
 NS = os.environ.get("OME_TEST_NS", "sandbox")
 HERE = Path(__file__).parent.resolve()
 REV_LABEL = "ome.io/revision-hash"   # OMENative per-revision pod label (query.LabelRevisionHash)
+PAIRING_LABEL = "ome.io/pairing-protocol"  # P/D pairing cohort label (query.LabelPairingProtocol):
+                                           # on pods (render + in-place restamp) and per-revision
+                                           # routing Services (metadata only — never the selector)
 TRIGGER_ANNO = "perm.test/rev"       # annotation we bump to trigger a rollout
 TRIGGER_VAL = "v2"
 PROMOTE_ANNO = "ome.io/rollout-promote"    # canary manual-promote verb (value = canary revision hash)
@@ -124,6 +129,11 @@ INV_TICK_S = 5.0
 INV_SUSTAIN_A = 2
 INV_SUSTAIN_B_MISSING = 3
 INV_SUSTAIN_B_STALE = 2
+# C pair-alive: 2 observations (>= 1 full tick interval), same arithmetic as A.
+# A REAL pair break lasts at least one pod-startup cycle (the new cohort must
+# come Ready before a pair can re-form), so it always spans 2+ ticks; a
+# single-sample race between a label restamp and a serving flip cannot.
+INV_SUSTAIN_C = 2
 # IR Instance phases exempt from ALL status-truth checks: transitional by
 # definition. A Migrating source keeps serving while its replacement surges;
 # Updating/Restarting/Creating/Deleting all legitimately hold pods in states
@@ -258,7 +268,7 @@ def get_spec_info(case_id):
     """
     info = {"policy": None, "members": [], "order": [], "soak": 0, "strat": {},
             "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {},
-            "canary": None}
+            "canary": None, "pairing": ""}
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
         return info
@@ -295,6 +305,9 @@ def get_spec_info(case_id):
     #   - .canary group                          -> info["canary"] (not a coordination policy)
     #   - MULTIPLE single-Component blueGreen     -> policy "Sequential" (members/order = the chain)
     #     groups, one per component, in list order  (the v2 spelling for Sequential)
+    # P/D pairing protocol (opaque cohort token; rides every engine/decoder
+    # revision). "" = unset = pairs with anything.
+    info["pairing"] = str(spec.get("rollout", {}).get("pairingProtocol") or "")
     groups = spec.get("rollout", {}).get("groups", []) or []
     # Canary group first (canary lives on a group; it's not a coordination policy).
     cg = next((g for g in groups if isinstance(g, dict) and isinstance(g.get("canary"), dict)), None)
@@ -671,14 +684,19 @@ def teardown_check(case_id, total_pods, verdict, notes, checks):
 
 
 # ── Continuous invariants ────────────────────────────────────────────────────
-# Two invariants the pod-observed verdicts are blind to, polled every
-# INV_TICK_S for the whole case:
+# Invariants the pod-observed verdicts are blind to, polled every INV_TICK_S
+# for the whole case:
 #   A status-truth      — an IR Instance must not claim Phase=Failed while its
 #                         full pod set is Ready+serving, nor Phase=Ready with
 #                         zero pods for its index.
 #   B endpoints-membership — every Ready+serving pod that revision-matches a
 #                         per-revision routed Service must be a Ready endpoint
 #                         of it, and no endpoint may reference a deleted pod.
+#   C pair-alive        — during a non-empty→non-empty pairing-protocol
+#                         transition (armed only by mode=pairing), whenever
+#                         both engine and decoder serve, a pairable pair must
+#                         exist; the gate's no-pair and 1×1-wall escapes are
+#                         exempt.
 # A violation must hold for its sustain count of CONSECUTIVE ticks to fire
 # (see the INV_* constants for the carve-out arithmetic); fired violations
 # dedup per (invariant, kind, subject) with first/last timestamps and an
@@ -694,20 +712,30 @@ def _pod_serving(obj):
 
 
 def _inv_new(case_id, hdr):
-    """Fresh invariant-poller state. Header `inv_off=A|B|all` (which requires an
-    adjacent '# reason:' comment — enforced by validate-only) disables checks."""
+    """Fresh invariant-poller state. Header `inv_off=A|B|C|all` (which requires
+    an adjacent '# reason:' comment — enforced by validate-only) disables checks.
+    Invariant C (pair-alive) additionally requires arming: a pairing-mode
+    handler sets inv["pairing"] at trigger time for a non-empty→non-empty
+    protocol transition; without that it never evaluates."""
     off = str(hdr.get("inv_off", "") or "")
     return {
         "case_id": case_id,
         "off": off,
         "a_on": off not in ("A", "all"),
         "b_on": off not in ("B", "all"),
+        "c_on": off not in ("C", "all"),
         "last": 0.0,        # last tick timestamp (self-rate-limited)
         "streaks": {},      # streak_key → consecutive-tick observation count
         "viol": {},         # viol_key → {first, last, n, detail}
         "ir_seen": False,   # instanceStatuses observed at least once (version tolerance)
         "b_seen": False,    # invariant B evaluated ≥1 Ready+serving pod against a routed Service
         "dead_uids": set(), # pod UIDs whose DELETED watch event was observed
+        # Set by the pairing handler for a non-empty→non-empty transition:
+        # {"frm": F, "to": T, "armed": bool, "seen": bool}. armed flips True on
+        # every pairable sample and gates the violation — once the pair is gone
+        # (for any reason) the unpaired samples that follow are the product
+        # legitimately progressing back toward a pair, not the gate breaking one.
+        "pairing": None,
     }
 
 
@@ -845,12 +873,65 @@ def _inv_check_endpoints(inv, pod_state, hits, now):
                      f"svc {name}: endpoint still references deleted pod UID {u[:13]}…")
 
 
+def _pairing_serving_split(pod_state):
+    """(engine_insts, decoder_insts): serving Instances per pairing Component,
+    each a list of the instance's serving pods' pairing-protocol labels. An
+    Instance is serving when >=1 of its pods is alive+Ready+serving (mirrors
+    the gate's ServingPodCount>0)."""
+    by = {"engine": defaultdict(list), "decoder": defaultdict(list)}
+    for p in pod_state.values():
+        if p and p["alive"] and p["ready"] and p.get("serving") and p["comp"] in by:
+            by[p["comp"]][p.get("inst", "0")].append(p.get("pairing", ""))
+    return list(by["engine"].values()), list(by["decoder"].values())
+
+
+def _inv_check_pair_alive(inv, pod_state, hits, now):
+    """Invariant C, one tick: during a non-empty→non-empty pairing-protocol
+    transition, whenever both engine and decoder have >=1 serving Instance a
+    pairable pair must exist — some serving engine pod and serving decoder pod
+    with equal protocols, or either empty (empty pairs with anything).
+
+    The gate's two documented liveness escapes are exempt:
+      - no pair to protect: once no pairable pair exists (a side at zero, or
+        externally destroyed), the check DISARMS — the unpaired samples that
+        follow are the product progressing back toward a pair, exactly what the
+        no-pair-pre-existing escape allows. It re-arms on the next pairable
+        sample.
+      - the 1×1 mutual wall: both Components down to <=1 serving Instance is
+        the bounded first-mover window the gate deliberately allows.
+    """
+    st = inv.get("pairing")
+    if not st:
+        return
+    eng, dec = _pairing_serving_split(pod_state)
+    if not eng or not dec:
+        st["armed"] = False   # a side has nothing serving — no pair to protect
+        return
+    st["seen"] = True
+    pairable = any(pe == "" or pd == "" or pe == pd
+                   for insts_e in eng for pe in insts_e
+                   for insts_d in dec for pd in insts_d)
+    if pairable:
+        st["armed"] = True
+        return
+    if len(eng) <= 1 and len(dec) <= 1:
+        return   # 1×1 mutual wall: bounded by-design window; stays armed
+    if not st["armed"]:
+        return
+    key = ("C", "pair-alive")
+    eng_p = sorted({pe for insts in eng for pe in insts})
+    dec_p = sorted({pd for insts in dec for pd in insts})
+    _inv_hit(inv, hits, key, key, INV_SUSTAIN_C, now,
+             f"no pairable serving engine+decoder pair during {st['frm']!r}→{st['to']!r} "
+             f"(engine serves {eng_p}, decoder serves {dec_p})")
+
+
 def _inv_tick(inv, pod_state, pods_per_inst):
     """One invariant observation, self-rate-limited to INV_TICK_S. Called from
-    every watch loop each iteration; a no-op between ticks and when both
-    invariants are opted out. Streaks reset for keys not observed this tick
+    every watch loop each iteration; a no-op between ticks and when every
+    invariant is opted out. Streaks reset for keys not observed this tick
     (the CONSECUTIVE-tick sustain rule)."""
-    if not inv or (not inv["a_on"] and not inv["b_on"]):
+    if not inv or (not inv["a_on"] and not inv["b_on"] and not inv["c_on"]):
         return
     now = time.time()
     if now - inv["last"] < INV_TICK_S:
@@ -861,6 +942,8 @@ def _inv_tick(inv, pod_state, pods_per_inst):
         _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now)
     if inv["b_on"]:
         _inv_check_endpoints(inv, pod_state, hits, now)
+    if inv["c_on"]:
+        _inv_check_pair_alive(inv, pod_state, hits, now)
     for k in [k for k in inv["streaks"] if k not in hits]:
         del inv["streaks"][k]
 
@@ -877,10 +960,15 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant A (status-truth) skipped — IR instanceStatuses unavailable on this build")
     if inv["b_on"] and not inv["b_seen"]:
         checks.append("  ⓘ invariant B (endpoints-membership) evaluated zero Ready+serving pods against a routed Service — vacuous (no assertion made)")
+    pairing = inv.get("pairing")
+    if inv["c_on"] and pairing and not pairing.get("seen"):
+        checks.append("  ⓘ invariant C (pair-alive) never saw both engine and decoder serving at a tick — vacuous (no assertion made)")
     if not inv["viol"]:
-        active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]), ("B", inv["b_on"] and inv["b_seen"])) if on]
+        active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]),
+                                  ("B", inv["b_on"] and inv["b_seen"]),
+                                  ("C", inv["c_on"] and bool(pairing) and pairing.get("seen", False))) if on]
         if active:
-            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership violation")
+            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership / pair-alive violation")
         return verdict
     for key, v in sorted(inv["viol"].items()):
         verdict = "FAIL"
@@ -1298,7 +1386,7 @@ def case_category(case_id):
 # trigger and the verdict. Implemented: scaledown. Planned: migrate, kill,
 # partition, rebump (each becomes a branch here on the same scaffolding).
 MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev",
-                 "recreate", "compremove"}   # modes with a real impl
+                 "recreate", "compremove", "pairing"}   # modes with a real impl
 TO_KEYS = {"engine": "to_e", "decoder": "to_d", "router": "to_r"}  # scaledown target replicas
 
 
@@ -1346,6 +1434,16 @@ def _numlike(v):
         return False
 
 
+# CRD pattern for spec.rollout.pairingProtocol (opaque cohort token).
+_PAIRING_TOKEN_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+
+
+def _pairing_token(v):
+    """`clear` (remove the field) or a CRD-valid opaque token, <= 63 chars."""
+    s = str(v)
+    return s == "clear" or (len(s) <= 63 and bool(_PAIRING_TOKEN_RE.match(s)))
+
+
 # Header schema = exactly what the runner consumes (parse_header + the hdr.get
 # dispatches above). Enums lowered where run.py lowers; exact where it compares
 # exact. Values arrive int-coerced when possible (parse_header semantics).
@@ -1383,6 +1481,18 @@ HDR_VALIDATORS = {
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
     "hint": lambda v: v == 1,     # migrate: carry hint_target_nodes (soft placement assert)
     "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen"},
+    # Pairing-mode knobs (mode=pairing). The trigger is a patch of
+    # spec.rollout.pairingProtocol: proto= is the target of the transition
+    # (`clear` removes the field); proto2= re-patches mid-roll (the X-2 shape);
+    # hold=1 asserts a rolloutHold gate=Pairing observation mid-transition;
+    # pkill=1 deletes the last old-cohort decoder pod mid-transition;
+    # scale_e=/scale_d= re-target a Component's replicas mid-transition.
+    "proto": _pairing_token,
+    "proto2": _pairing_token,
+    "hold": lambda v: v == 1,
+    "pkill": lambda v: v == 1,
+    "scale_e": lambda v: isinstance(v, int) and v >= 1,
+    "scale_d": lambda v: isinstance(v, int) and v >= 1,
     "topo": lambda v: v in {"engine", "pd", "engine-mn", "pd-mn"},
     "infeasible": lambda v: v == 1,
     "notimpl": lambda v: v == 1,
@@ -1396,9 +1506,9 @@ HDR_VALIDATORS = {
     #                                   podkill:rotating, deletes a pod → drain with no
     #                                   preceding surge; informational, not a FAIL)
     # Opt out of the continuous invariants (A=status-truth, B=endpoints-
-    # membership). REQUIRES an adjacent '# reason: <why>' comment on line 2
-    # of the case file — validate-only rejects an inv_off without one.
-    "inv_off": lambda v: v in {"A", "B", "all"},
+    # membership, C=pair-alive). REQUIRES an adjacent '# reason: <why>' comment
+    # on line 2 of the case file — validate-only rejects an inv_off without one.
+    "inv_off": lambda v: v in {"A", "B", "C", "all"},
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES), cordon:<target ∈ FAULT_TARGETS>.
     "fault": _fault_ok,
@@ -1486,6 +1596,20 @@ def validate_case_file(path):
         errs.append(f"{path}:1: dup=/hint= are migrate-mode knobs")
     if fields.get("blocked") and "fault" not in fields:
         errs.append(f"{path}:1: blocked=1 requires a fault= header")
+    if mode == "pairing" and "proto" not in fields:
+        errs.append(f"{path}:1: mode=pairing needs proto=<token|clear> (the transition target)")
+    for k in ("proto", "proto2", "hold", "pkill", "scale_e", "scale_d"):
+        if k in fields and mode != "pairing":
+            errs.append(f"{path}:1: {k}= is a pairing-mode knob (mode=pairing)")
+    if mode == "pairing":
+        if "proto2" in fields and fields["proto2"] == fields.get("proto"):
+            errs.append(f"{path}:1: proto2= must differ from proto= (a mid-roll re-target)")
+        if fields.get("pkill") and fields.get("Nd", 0) == 0:
+            errs.append(f"{path}:1: pkill=1 kills the last old-cohort decoder — needs Nd>0")
+        if str(fields.get("canary", "")).lower() == "manual":
+            errs.append(f"{path}:1: mode=pairing drives canary groups auto-only (canary=manual needs the promote pump)")
+        if fields.get("expect") == "reject" and any(k in fields for k in ("proto2", "pkill", "scale_e", "scale_d", "pause", "hold")):
+            errs.append(f"{path}:1: expect=reject with mode=pairing asserts the protocol PATCH is denied — no rotation-phase knobs apply")
     if fields.get("expect") == "fail" and (mode != "migrate" or "fault" not in fields):
         errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
     if fields.get("lift") and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
@@ -1640,6 +1764,7 @@ def _apply_event(ctx, ev):
             "ord": labels.get("ome.io/pod-ordinal", "0"),
             "alive": deletion is None,
             "ready": ready, "hash": rev,
+            "pairing": labels.get(PAIRING_LABEL, ""),
             "serving": _pod_serving(obj),
             "uid": meta.get("uid", ""),
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
@@ -3597,6 +3722,427 @@ def _kill(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _pairing_patch(case_id, target):
+    """Patch spec.rollout.pairingProtocol to `target` ("" removes the field —
+    JSON merge patch null deletes the key). Returns (ok, last stderr line)."""
+    patch = {"spec": {"rollout": {"pairingProtocol": (target or None)}}}
+    r = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(patch))
+    msg = (r.stderr.strip().splitlines() or [""])[-1]
+    return r.returncode == 0, msg
+
+
+def _sample_rollout_holds(case_id, bumped, holds):
+    """One rolloutHold observation: for each bumped Component record the gate
+    (status.components.<c>.lifecycle.rolloutHold.gate) currently reported."""
+    st = fetch_status(case_id)
+    comps = st.get("components") or {}
+    for c in bumped:
+        rh = ((comps.get(c) or {}).get("lifecycle") or {}).get("rolloutHold")
+        if isinstance(rh, dict) and rh.get("gate"):
+            holds.setdefault(c, {})[rh["gate"]] = rh.get("reason", "")[:160]
+
+
+def pairing_surface_checks(case_id, ctx, target, bumped, verdict, notes, checks):
+    """Post-convergence pairing surface verdicts. `target` is the protocol every
+    engine/decoder revision must have converged onto ("" = cleared):
+      1. every alive engine/decoder pod carries ome.io/pairing-protocol=target
+         (label absent when target is "");
+      2. every live (percent>0) traffic target on the bumped Components
+         publishes pairingProtocol=target, and the traffic list is non-empty;
+      3. every routing Service named by a live traffic target carries the
+         label in METADATA only — and NO Service of the case ever carries it
+         in spec.selector (pod selection stays revision-hash based)."""
+    # 1. Pod labels (from the watcher's live pod state).
+    bad_pods = [f"{n}={p.get('pairing', '')!r}" for n, p in sorted(ctx["pod_state"].items())
+                if p and p["alive"] and p["comp"] in ("engine", "decoder")
+                and p.get("pairing", "") != target]
+    if bad_pods:
+        verdict = "FAIL"
+        notes.append(f"pod pairing labels != {target!r}: {len(bad_pods)} pod(s)")
+        checks.append(f"  ✗ pairing: {len(bad_pods)} engine/decoder pod(s) do not carry {PAIRING_LABEL}={target!r}: "
+                      + ", ".join(bad_pods[:4]) + ("…" if len(bad_pods) > 4 else ""))
+    else:
+        checks.append(f"  ✓ pairing: every engine/decoder pod carries {PAIRING_LABEL}={target!r}" +
+                      (" (label absent)" if target == "" else ""))
+
+    # 2. Traffic targets.
+    status = fetch_status(case_id)
+    comps_status = status.get("components") or {}
+    live_rev_names = set()
+    for c in sorted(bumped):
+        traffic = (comps_status.get(c) or {}).get("traffic") or []
+        live = [t for t in traffic if t.get("percent", 0) > 0]
+        if not live:
+            verdict = "FAIL"
+            notes.append(f"{c} publishes no live traffic target")
+            checks.append(f"  ✗ pairing: {c} publishes no live (percent>0) traffic target at convergence")
+            continue
+        bad = [t for t in live if str(t.get("pairingProtocol", "") or "") != target]
+        live_rev_names.update(t.get("revisionName", "") for t in live)
+        if bad:
+            verdict = "FAIL"
+            notes.append(f"{c} traffic pairingProtocol != {target!r}")
+            checks.append(f"  ✗ pairing: {c} live traffic target(s) publish the wrong protocol: "
+                          + ", ".join(f"{t.get('revisionName', '?')}={t.get('pairingProtocol', '')!r}" for t in bad[:3]))
+        else:
+            checks.append(f"  ✓ pairing: {c} live traffic targets all publish pairingProtocol={target!r}")
+
+    # 3. Services: metadata label on routed per-revision Services; NEVER the selector.
+    r = kubectl("-n", NS, "get", "svc", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    svcs = []
+    if r.returncode == 0:
+        try:
+            svcs = json.loads(r.stdout).get("items", [])
+        except Exception:
+            svcs = []
+    by_name = {}
+    sel_viol = []
+    for s in svcs:
+        name = ((s.get("metadata") or {}).get("name")) or "?"
+        by_name[name] = s
+        if PAIRING_LABEL in ((s.get("spec") or {}).get("selector") or {}):
+            sel_viol.append(name)
+    if sel_viol:
+        verdict = "FAIL"
+        notes.append(f"pairing label in Service selector: {sel_viol}")
+        checks.append(f"  ✗ pairing: {PAIRING_LABEL} appeared in spec.selector of {sel_viol} — the protocol must never select pods")
+    else:
+        checks.append(f"  ✓ pairing: no Service selector carries {PAIRING_LABEL} (metadata-only contract held)")
+    svc_bad = []
+    for name in sorted(n for n in live_rev_names if n):
+        s = by_name.get(name)
+        if s is None:
+            svc_bad.append(f"{name}=MISSING")
+            continue
+        got = (((s.get("metadata") or {}).get("labels")) or {}).get(PAIRING_LABEL, "")
+        if got != target:
+            svc_bad.append(f"{name}={got!r}")
+    if svc_bad:
+        verdict = "FAIL"
+        notes.append(f"routing Service pairing labels != {target!r}: {svc_bad}")
+        checks.append(f"  ✗ pairing: routing Service(s) named by live traffic lack metadata {PAIRING_LABEL}={target!r}: "
+                      + ", ".join(svc_bad[:4]))
+    elif live_rev_names:
+        checks.append(f"  ✓ pairing: every live routing Service carries metadata {PAIRING_LABEL}={target!r}" +
+                      (" (label absent)" if target == "" else ""))
+    return verdict
+
+
+def _pairing(case_id, yaml_file, desc, hdr):
+    """mode=pairing: the rollout trigger is a spec.rollout.pairingProtocol
+    transition (set / bump / clear) instead of an annotation bump. The token
+    rides every engine+decoder revision, so the patch alone re-mints and rolls
+    BOTH pairing Components (never the router — isolation is asserted).
+
+    Updated-pod detection is revision-hash based for EVERY strategy: an
+    in-place op restamps the revision-hash label (and the pairing label) on the
+    live pod, so hash-vs-old works uniformly; UID stability is asserted
+    separately for in-place strategies.
+
+    Optional mid-transition verbs (one-shot, after first observed progress):
+    pause=true|freeze (hold, assert parked, lift, converge), pkill=1 (delete
+    the last old-cohort decoder pod; recovery must still converge — pair-alive
+    is waived via inv_off=C on such cases since the harness, not the product,
+    destroys the pair), scale_e=/scale_d= (re-target replicas mid-roll),
+    proto2= (re-patch the protocol mid-roll; converge on the FINAL cohort with
+    no Instance stranded on the intermediate one).
+
+    expect=reject inverts the case into an update-time admission negative: the
+    Phase-2 patch itself must be DENIED (reason= substring asserted), because
+    an uncoordinated non-empty→non-empty change is rejected by the webhook."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N, configured = ctx["N"], ctx["configured"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    info = ctx["info"]
+    ppi = ctx["pods_per_inst"]
+    from_proto = info.get("pairing") or ""
+    target = "" if str(hdr.get("proto")) == "clear" else str(hdr.get("proto"))
+    final_target = target
+    proto2 = hdr.get("proto2")
+    if proto2 is not None:
+        final_target = "" if str(proto2) == "clear" else str(proto2)
+    # Hash-based updated detection for every strategy (see docstring); the
+    # in-place contract is asserted through UID stability below instead.
+    ctx["modes"] = {c: "surge" for c in configured}
+    bumped = {"engine", "decoder"} & configured
+    controls = configured - bumped
+    pmode = str(hdr.get("pause", "") or "")
+
+    # Update-time admission negative: the patch itself must be denied.
+    if hdr.get("expect") == "reject":
+        want = hdr.get("reason")
+        print(f"\n  Phase 2: patch pairingProtocol {from_proto!r}→{target!r} — expecting admission DENIAL")
+        ok, msg = _pairing_patch(case_id, target)
+        verdict, notes, checks = "PASS", [], []
+        if ok:
+            verdict = "FAIL"
+            notes.append("protocol patch ACCEPTED but admission rejection was expected")
+            checks.append("  ✗ pairing: uncoordinated protocol change was ACCEPTED — ValidatePairingProtocolUpdate did not fire")
+        elif want and want not in msg:
+            verdict = "FAIL"
+            notes.append(f"rejected but message lacks reason '{want}'")
+            checks.append(f"  ✗ pairing: patch rejected for the WRONG reason (want ~{want}): {msg[:160]}")
+        else:
+            checks.append(f"  ✓ pairing: protocol change denied as expected ({want or 'any reason'}): {msg[:160]}")
+        return _finish(case_id, desc, hdr, ctx, "REJECTED", verdict, notes, checks)
+
+    print(f"\n  Phase 2: patch pairingProtocol {from_proto!r}→{target!r} on the ISVC (rolls {sorted(bumped)}; "
+          f"controls {sorted(controls) or '[]'})")
+    ok, msg = _pairing_patch(case_id, target)
+    if not ok:
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"protocol patch denied: {msg[:160]}")
+    ctx["trigger_ts"] = time.time()
+    ctx["track_comps"] = sorted(configured)
+    # Arm the pair-alive invariant for a non-empty→non-empty transition with
+    # both pairing Components configured (its activation condition mirrors the
+    # gate's). Cases that destroy the pair themselves (pkill) waive it via
+    # inv_off=C in their header.
+    if from_proto and target and bumped == {"engine", "decoder"}:
+        ctx["inv"]["pairing"] = {"frm": from_proto, "to": target, "armed": False, "seen": False}
+
+    # Budget: rotate base + per bumped pod, plus canary step pauses when the
+    # case ships a canary group (the step machine advances on its own timers).
+    extra = 0
+    if info.get("canary"):
+        extra += sum(parse_duration((s.get("pause") or {}).get("duration"))
+                     for s in info["canary"].get("steps", []) if isinstance(s, dict))
+    scale_to = {"engine": hdr.get("scale_e"), "decoder": hdr.get("scale_d")}
+    scale_to = {c: int(v) for c, v in scale_to.items() if isinstance(v, int) and N.get(c, 0) > 0}
+    extra += ROTATE_PER_POD_S * sum(max(0, t - N[c]) * ppi.get(c, 1) for c, t in scale_to.items())
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in bumped) + extra)
+
+    # want = the convergence replica target (scale verbs move it mid-roll);
+    # ctx["N"] becomes the floor basis min(start, target) once a scale fires.
+    want = dict(N)
+    holds = {}
+    hold_last = 0.0
+    pk_fired = False
+    sc_fired = False
+    p2_fired = False
+    pre_final = None       # hash universe before the proto2 re-patch (X-2 check)
+    pause_done = pmode == ""
+    verdict, notes, checks = "PASS", [], []
+
+    def progressed_now():
+        return any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+                   for p in ctx["pod_state"].values())
+
+    def new_pod_split():
+        """(ready, inflight) alive new-rev pod counts across bumped comps."""
+        rd = inflight = 0
+        for p in ctx["pod_state"].values():
+            if p and p["alive"] and p["comp"] in bumped and p.get("hash") and p["hash"] not in ctx["old_hashes"]:
+                if p["ready"]:
+                    rd += 1
+                else:
+                    inflight += 1
+        return rd, inflight
+
+    def bumped_rotated():
+        """Every bumped Component fully on the FINAL cohort at want[c]."""
+        for c in bumped:
+            a, rd, up = ctx["agg"].get(c, (0, 0, 0))
+            if a != want[c] or rd != want[c]:
+                return False
+            if pre_final is not None:
+                live = [p for p in ctx["pod_state"].values() if p and p["alive"] and p["comp"] == c]
+                if not live or any(not p.get("hash") or p["hash"] in pre_final for p in live):
+                    return False
+            elif up != want[c]:
+                return False
+        return True
+
+    print(f"\n  Phase 3: watching the protocol transition (≤{budget}s; peak ≤ {ceil['engine']}/{ceil['decoder']}/{ceil['router']})")
+    state, stable = "ROTATING", None
+    progressed = False
+    while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        agg = _read_one(ctx)
+        now = time.time()
+        progressed = progressed or progressed_now()
+        if now - hold_last >= INV_TICK_S:
+            hold_last = now
+            _sample_rollout_holds(case_id, bumped, holds)
+
+        # Mid-transition verbs, one-shot each, gated on observed progress.
+        if progressed and not pause_done:
+            pause_done = True
+            print(f"  Phase 3a: pause mid-transition (ome.io/rollout-paused={pmode})")
+            _pause_annotation(case_id, pmode)   # sleeps PAUSE_PROJECT_S (settle)
+            _read_one(ctx)
+            names_at_settle = {n for n, p in ctx["pod_state"].items() if p and p["alive"]}
+            rd0, inflight0 = new_pod_split()
+            print(f"  Phase 3b: paused hold {KILL_PAUSE_HOLD_S}s (rotated {rd0} ready, {inflight0} in flight at settle)")
+            hold_end = time.time() + KILL_PAUSE_HOLD_S
+            while time.time() < hold_end and not ctx["closed"]:
+                _read_one(ctx)
+                if time.time() - hold_last >= INV_TICK_S:
+                    hold_last = time.time()
+                    _sample_rollout_holds(case_id, bumped, holds)
+            new_names = {n for n, p in ctx["pod_state"].items()
+                         if p and p["alive"] and p["comp"] in bumped and n not in names_at_settle}
+            rd1, _ = new_pod_split()
+            if new_names:
+                verdict = "FAIL"
+                notes.append(f"pause={pmode}: {len(new_names)} new pod(s) created during the hold")
+                checks.append(f"  ✗ pause={pmode}: rollout kept creating pods during the hold ({sorted(new_names)[:3]}…) — pause not honored")
+            elif rd1 > rd0 + inflight0:
+                verdict = "FAIL"
+                notes.append(f"pause={pmode}: rotation advanced during the hold ({rd0}+{inflight0} in-flight → {rd1})")
+                checks.append(f"  ✗ pause={pmode}: rotated pod count grew {rd0}→{rd1} beyond the {inflight0} in-flight at pause — pause not honored")
+            else:
+                checks.append(f"  ✓ pause={pmode}: transition parked across the {KILL_PAUSE_HOLD_S}s hold (no new pods; rotation {rd0}→{rd1} ≤ in-flight {inflight0})")
+            print("  Phase 3c: lift the pause and resume the transition")
+            _pause_annotation(case_id, "")
+            continue
+
+        if progressed and hdr.get("pkill") and not pk_fired:
+            _new, old = _inst_rev_split(ctx, "decoder")
+            if old == 1:
+                victims = [(n, p) for n, p in sorted(ctx["pod_state"].items())
+                           if p and p["alive"] and p["comp"] == "decoder"
+                           and p.get("hash") in ctx["old_hashes"] and p.get("serving")]
+                leaders = [x for x in victims if x[1].get("runner") == "leader"]
+                pick = (leaders or victims)
+                if pick:
+                    pk_fired = True
+                    vname = pick[0][0]
+                    print(f"    ⚡ pkill: deleting the LAST old-cohort decoder pod {vname}")
+                    kubectl("-n", NS, "delete", "pod", vname, "--wait=false")
+                    checks.append(f"  ⓘ pkill fired: deleted last old-cohort decoder pod {vname} mid-transition")
+
+        if progressed and scale_to and not sc_fired:
+            sc_fired = True
+            patch = {"spec": {c: {"minReplicas": t, "maxReplicas": t} for c, t in scale_to.items()}}
+            print(f"  Phase 3a: scale mid-transition {json.dumps(patch['spec'])}")
+            rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(patch))
+            if rr.returncode != 0:
+                verdict = "FAIL"
+                notes.append(f"mid-roll scale patch failed: {rr.stderr[:120]}")
+                checks.append(f"  ✗ scale: mid-transition replica patch failed: {rr.stderr[:120]}")
+            else:
+                for c, t in scale_to.items():
+                    want[c] = t
+                    ctx["N"][c] = min(N[c], t)   # floor basis: never below min(start, target)
+                checks.append("  ⓘ scale fired mid-transition: " + " ".join(f"{c}→{t}" for c, t in sorted(scale_to.items())))
+
+        if progressed and proto2 is not None and not p2_fired:
+            p2_fired = True
+            pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
+            print(f"  Phase 3a: re-patch pairingProtocol {target!r}→{final_target!r} mid-transition")
+            ok2, msg2 = _pairing_patch(case_id, final_target)
+            if not ok2:
+                verdict = "FAIL"
+                notes.append(f"proto2 re-patch denied: {msg2[:120]}")
+                checks.append(f"  ✗ proto2: mid-transition protocol re-patch denied: {msg2[:120]}")
+            # Re-arm pair-alive onto the final transition (still non-empty→non-empty?).
+            if ctx["inv"].get("pairing") and final_target:
+                ctx["inv"]["pairing"]["to"] = final_target
+            elif ctx["inv"].get("pairing") and not final_target:
+                ctx["inv"]["pairing"] = None   # →empty pairs with anything: gate + invariant inactive
+
+        # Convergence: every configured Component at want alive+ready, every
+        # bumped one fully on the final cohort, sustained STABILITY_S.
+        ok_all = progressed and bumped_rotated() and all(
+            ctx["agg"].get(c, (0, 0, 0))[0] == want[c] and ctx["agg"].get(c, (0, 0, 0))[1] == want[c]
+            for c in configured)
+        # A pending one-shot verb must fire before convergence can latch.
+        pending = (not pause_done) or (hdr.get("pkill") and not pk_fired) \
+            or (scale_to and not sc_fired) or (proto2 is not None and not p2_fired)
+        if ok_all and not pending:
+            if stable is None:
+                stable = time.time()
+            elif time.time() - stable >= STABILITY_S:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                print(f"\n  ✓ CONVERGED at {ctx['converged_at']:.1f}s post-trigger")
+                break
+        else:
+            stable = None
+    if state != "CONVERGED":
+        state = "ROTATE_TIMEOUT" if progressed else "NO_ROLLOUT"
+        print(f"  ✗ {'ROTATE TIMEOUT' if progressed else 'NO ROLLOUT'} after {budget}s")
+
+    # ── Checks ──
+    for c in COMPS:
+        if want.get(c, N[c]) == 0 and N[c] == 0:
+            continue
+        if ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} exceeded ceiling {ceil[c]} (surge budget violated)")
+        else:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    if state != "CONVERGED":
+        verdict = "FAIL"
+        rot = " ".join(f"{c}={ctx['agg'].get(c, (0, 0, 0))[2]}/{want[c]}" for c in sorted(bumped))
+        notes.append(f"did not converge (state={state}, rotated {rot})")
+        checks.append(f"  ✗ protocol transition never converged (state={state}, rotated {rot})")
+    else:
+        checks.append(f"  ✓ converged at {ctx['converged_at']:.1f}s: every bumped Component fully on the "
+                      f"{final_target!r} cohort at target capacity")
+        if pre_final is not None:
+            checks.append("  ✓ proto2: no Instance stranded on the intermediate cohort (all pods past the pre-re-patch hash universe)")
+    # Isolation: the router never participates in pairing — a protocol change
+    # must not surge or rotate it.
+    for c in sorted(controls):
+        up = ctx["agg"].get(c, (0, 0, 0))[2]
+        if ctx["peaks"][c] > N[c] or up > 0:
+            verdict = "FAIL"
+            notes.append(f"{c} (no pairing) changed: peak={ctx['peaks'][c]} updated={up}")
+            checks.append(f"  ✗ {c} does not participate in pairing but it surged/rotated (peak={ctx['peaks'][c]}>{N[c]} or updated={up}) — isolation violated")
+        else:
+            checks.append(f"  ✓ {c} (no pairing) stayed put (peak={ctx['peaks'][c]}=N, 0 rotated) — protocol change did not touch it")
+    # In-place strategies must have restamped the LIVE pods (no UID rotation).
+    for c in sorted(bumped):
+        if info["strat"].get(c) not in IN_PLACE_TYPES:
+            continue
+        if ppi.get(c, 1) > 1:
+            checks.append(f"  ⓘ {c} in-place on a multi-node gang → whole-gang recreate expected (in-place compares the leader spec only)")
+            continue
+        cur = {p["uid"] for p in ctx["pod_state"].values()
+               if p and p["alive"] and p["comp"] == c and p.get("uid")}
+        rotated = cur - ctx["old_uids"].get(c, set())
+        if rotated:
+            verdict = "FAIL"
+            notes.append(f"{c} in-place but {len(rotated)} pod(s) recreated")
+            checks.append(f"  ✗ {c} strategy is in-place but {len(rotated)} pod UID(s) rotated — the protocol restamp recreated instead of patching")
+        elif state == "CONVERGED":
+            checks.append(f"  ✓ {c} protocol restamped in place (labels flipped, UIDs stable)")
+    verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(configured), verdict, notes, checks)
+    if state == "CONVERGED":
+        verdict = pairing_surface_checks(case_id, ctx, final_target, bumped, verdict, notes, checks)
+    # rolloutHold observations. hold=1 asserts the pair floor visibly held a
+    # step (gate=Pairing) at some point mid-transition; otherwise informational.
+    seen_gates = sorted({g for by in holds.values() for g in by})
+    pairing_held = any("Pairing" in by for by in holds.values())
+    if hdr.get("hold"):
+        if pairing_held:
+            rs = next(by["Pairing"] for by in holds.values() if "Pairing" in by)
+            checks.append(f"  ✓ rolloutHold gate=Pairing observed mid-transition ({rs[:110]})")
+        else:
+            verdict = "FAIL"
+            notes.append(f"no rolloutHold gate=Pairing observed (saw {seen_gates or 'none'})")
+            checks.append(f"  ✗ hold=1: no rolloutHold gate=Pairing was ever observed mid-transition (gates seen: {seen_gates or 'none'})")
+    elif seen_gates:
+        checks.append(f"  ⓘ rolloutHold gates observed mid-transition: {seen_gates}" +
+                      (" (incl. Pairing)" if pairing_held else ""))
+    if state == "CONVERGED":
+        # A Pairing hold lingering after convergence would be stale status —
+        # reported, not failed, until the clear-on-progress contract is pinned.
+        st = fetch_status(case_id)
+        lingering = [c for c in sorted(bumped)
+                     if ((((st.get("components") or {}).get(c) or {}).get("lifecycle") or {}).get("rolloutHold") or {}).get("gate") == "Pairing"]
+        if lingering:
+            checks.append(f"  ⚠ rolloutHold gate=Pairing still reported on {lingering} after convergence — stale hold (informational)")
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _canary_primary(ctx):
     """The externally-routed component the canary step machine drives + reports on:
     router > engine > decoder (mirrors canary.primaryComponent). The harness reads
@@ -3985,6 +4531,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _recreate(case_id, yaml_file, desc, hdr)
     if mode == "compremove":
         return _compremove(case_id, yaml_file, desc, hdr)
+    if mode == "pairing":
+        return _pairing(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
     # Survivor set: instances with index < min(start,target) must be left UNTOUCHED
@@ -4126,6 +4674,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                                    "ord": labels.get("ome.io/pod-ordinal", "0"),
                                    "alive": meta.get("deletionTimestamp") is None,
                                    "ready": ready, "hash": labels.get(REV_LABEL, ""),
+                                   "pairing": labels.get(PAIRING_LABEL, ""),
                                    "uid": meta.get("uid", ""), "newanno": False,
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", "")}
@@ -4375,7 +4924,10 @@ def run_case(case_id):
     desc, hdr = parse_header(yaml_file)
     # Negative cases (header `expect=reject`) assert the webhook denies the apply —
     # handled before mode dispatch, since rejection happens at apply for any mode.
-    if hdr.get("expect") == "reject":
+    # EXCEPT mode=pairing: an uncoordinated protocol change is an UPDATE-time
+    # rule (old and new protocol both non-empty), so the CREATE is admitted and
+    # the pairing handler asserts the Phase-2 patch is denied instead.
+    if hdr.get("expect") == "reject" and hdr.get("mode") != "pairing":
         return run_reject_case(case_id, yaml_file, desc, hdr)
     mode = hdr.get("mode", "rollout")
     if mode != "rollout":
@@ -4628,6 +5180,7 @@ def run_case(case_id):
                                    "ord": labels.get("ome.io/pod-ordinal", "0"),
                                    "alive": deletion is None,
                                    "ready": ready, "hash": rev, "uid": uid, "newanno": newanno,
+                                   "pairing": labels.get(PAIRING_LABEL, ""),
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", "")}
 

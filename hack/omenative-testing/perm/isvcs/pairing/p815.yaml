@@ -1,0 +1,22 @@
+# p815: pairing swap v1→v2 with decoder scaled 2→4 mid-transition — the grown side arrives entirely on the new cohort  mode=pairing proto=nixl-v2 scale_d=4 Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=5 ceil_r=0 co=bluegreen topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p815 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    pairingProtocol: nixl-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

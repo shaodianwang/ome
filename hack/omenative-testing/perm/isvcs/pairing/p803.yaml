@@ -1,0 +1,22 @@
+# p803: pairing swap v1→v2 RecreatePod unavail=100% — credit-0 pacing serializes the drain-all and a Pairing hold is guaranteed  mode=pairing proto=nixl-v2 hold=1 Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 co=bluegreen topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p803 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: "100%" } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: "100%" } } }
+  rollout:
+    pairingProtocol: nixl-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

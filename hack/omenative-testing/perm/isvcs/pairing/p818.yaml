@@ -1,0 +1,26 @@
+# p818: pairing swap v1→v2 through a 3-step auto canary 25/50/100 at N=4 — the step machine paces the cohort flip  mode=pairing proto=nixl-v2 canary=auto Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 co=none topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p818 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 5
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 5
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    pairingProtocol: nixl-v1
+    groups:
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "25%", traffic: 25, pause: { duration: "20s" } }
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
