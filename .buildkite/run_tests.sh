@@ -136,6 +136,8 @@ package_kind_bundle omenative-kind-test.tgz omenative_coordination_kind.test \
   ./tests/integration/singlecluster/controller/omenative_coordination_kind
 package_kind_bundle multicluster-kind-test.tgz scaleout_kind.test \
   ./tests/integration/multicluster/scaleout_kind
+package_kind_bundle omenative-upgrade-kind-test.tgz omenative_upgrade_kind.test \
+  ./tests/integration/singlecluster/e2e/omenative_upgrade_kind
 
 # The kind binary rides along as an artifact for the same reason the suite
 # binaries do: it is built here, where the Go toolchain and the module proxy

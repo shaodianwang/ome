@@ -22,7 +22,7 @@ fi
 target="${repo}/kind-ci:test-${short_sha}-${build_number}"
 # One bundle per KIND suite; every one is baked into the same runner image and
 # selected at run time by OME_KIND_TEST_BUNDLE.
-artifact_bundles="omenative-kind-test.tgz multicluster-kind-test.tgz"
+artifact_bundles="omenative-kind-test.tgz multicluster-kind-test.tgz omenative-upgrade-kind-test.tgz"
 
 command -v buildkite-agent >/dev/null 2>&1 || {
   echo "buildkite-agent is required to download the test bundle" >&2
@@ -72,6 +72,46 @@ kueue_image="${KUEUE_IMAGE_REPO:-registry.k8s.io/kueue/kueue}:${kueue_version}"
 echo "--- pull ${kueue_image}"
 crane pull --platform linux/amd64 "$kueue_image" "$stage/images/kueue.tar"
 crane validate --tarball "$stage/images/kueue.tar"
+
+# The operator-upgrade identity gate (omenative-upgrade-kind-test.tgz) needs a
+# previously published ome-manager + ome-agent pair to install before
+# upgrading to this commit's own build. Resolved here, at package time,
+# because this step already has git history, crane, and prod ECR
+# credentials — the restricted runtime container that runs the gate has
+# none of those and cannot pull anything live. On main, the previous
+# version is this commit's first parent, tagged the same way
+# _build_image_step already pushes (short SHA); resolving it against prod
+# ECR (where main images are mirrored) also confirms the parent commit's
+# own build succeeded and published, not just that it exists in git.
+#
+# A parent that was never built or never mirrored — a broken prior main
+# run, or simply the branch's first commit — is not a defect in THIS
+# commit, so its absence degrades to a loud, non-failing skip at run time
+# (see run_omenative_upgrade_gke.sh) rather than failing this packaging
+# step: a transient or historical gap upstream of this change should not
+# block shipping it.
+if [ "${BUILDKITE_BRANCH:-}" = main ] && git rev-parse --verify --quiet HEAD^ >/dev/null; then
+  upgrade_from_sha="$(git rev-parse --short HEAD^)"
+  upgrade_from_manager="${repo}/ome-manager:${upgrade_from_sha}"
+  upgrade_from_agent="${repo}/ome-agent:${upgrade_from_sha}"
+  if crane manifest "$upgrade_from_manager" >/dev/null 2>&1 \
+    && crane manifest "$upgrade_from_agent" >/dev/null 2>&1; then
+    echo "--- pull previous-version images for the upgrade-identity gate ---"
+    echo "    manager: ${upgrade_from_manager}"
+    echo "    agent:   ${upgrade_from_agent}"
+    crane pull --platform linux/amd64 "$upgrade_from_manager" "$stage/images/upgrade-from-manager.tar"
+    crane validate --tarball "$stage/images/upgrade-from-manager.tar"
+    crane pull --platform linux/amd64 "$upgrade_from_agent" "$stage/images/upgrade-from-agent.tar"
+    crane validate --tarball "$stage/images/upgrade-from-agent.tar"
+    printf '%s\n' "$upgrade_from_manager" >"$stage/images/upgrade-from-image"
+    printf '%s\n' "$upgrade_from_agent" >"$stage/images/upgrade-from-agent-image"
+  else
+    echo "previous main image not found at ${upgrade_from_manager} or ${upgrade_from_agent};" \
+      "upgrade-identity gate will skip at run time"
+  fi
+else
+  echo "not a main build, or HEAD has no parent; upgrade-identity gate will skip at run time"
+fi
 
 # The kind binary and node image ship in this layer for the same reason Kueue
 # does, and it is load-bearing for them specifically: a bump to either is only

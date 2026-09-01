@@ -947,6 +947,26 @@ test-kind-eval: dep-crds ## 🧪 Run migrated OMENative eval cases against a cha
 		-count=1 -v -timeout 60m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ Deployed OME eval tests passed"
 
+.PHONY: test-kind-upgrade
+test-kind-upgrade: dep-crds ## 🧪 Run the operator-upgrade identity gate against a chart-installed OME (needs OME_UPGRADE_FROM_IMAGE)
+	@echo "🧪 Running operator-upgrade identity tests..."
+	@[ -n "$$OME_UPGRADE_FROM_IMAGE" ] || { \
+		echo "❌ OME_UPGRADE_FROM_IMAGE is required: a pullable ome-manager image ref for the previous version to upgrade from."; \
+		exit 1; \
+	}
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ docker is not reachable. Operator-upgrade identity tests need a running Docker daemon."; \
+		exit 1; \
+	}
+	@KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
+		go test ./tests/integration/singlecluster/e2e/omenative_upgrade_kind/... \
+		-count=1 -v -timeout 60m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
+	@echo "✅ Operator-upgrade identity tests passed"
+
 .PHONY: test-kind-irmanaged
 test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND IR-managed OMENative tests..."

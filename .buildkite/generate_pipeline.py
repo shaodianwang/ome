@@ -101,7 +101,7 @@ MC_KIND_SPEC_GROUPS = (
 KIND_SPEC_GROUPS = (
     ("foundation-lifecycle", "Foundation and lifecycle", (
         "baseline_no_coord", "diagnostic", "lifecycle_basic", "lifecycle",
-        "single_replica", "regression", "watches",
+        "single_replica", "regression", "watches", "manager_restart_identity",
     )),
     ("status-events-services", "Status, events, and services", (
         "events", "status", "status_surface", "producer_services",
@@ -203,6 +203,10 @@ def _truthy(val: str) -> bool:
 # See .buildkite/README-gke-kind.md.
 GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", "1"))
 GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
+# Kill switch for the deployed-mode operator-upgrade identity gate (see
+# _gke_upgrade_identity_step). The step resolves its own previous-image
+# reference at run time, so this only needs to gate whether the step exists.
+GKE_UPGRADE_ENABLED = _truthy(os.environ.get("GKE_UPGRADE_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
@@ -553,6 +557,34 @@ def _gke_kind_group() -> str:
     return _yaml_block([group], 2)
 
 
+def _gke_upgrade_identity_step() -> str:
+    """The operator-upgrade identity gate: one deployed-mode KIND job.
+
+    Only meaningful on main, where package_kind_test_image.sh resolves and
+    bakes the previous commit's manager+agent images (see the comment
+    there). run_omenative_upgrade_gke.sh skips loudly, without failing the
+    step, whenever that pair was not baked — so this step existing on a
+    build does not by itself mean an upgrade was actually exercised.
+    """
+    plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
+    step = {
+        "label": ":test_tube: Operator-upgrade identity (deployed KIND)",
+        "key": "kind-gke-upgrade-identity",
+        "depends_on": "package-kind-test-image",
+        "env": {"OME_KIND_TEST_BUNDLE": "/kind-test/omenative-upgrade-kind-test.tgz"},
+        "agents": {"queue": GKE_QUEUE},
+        "command": "sh .buildkite/run_omenative_upgrade_gke.sh",
+        "plugins": plugins,
+    }
+    group = {
+        "group": ":test_tube: Operator-Upgrade Identity (KIND on GKE)",
+        "key": "integration-test-kind-upgrade",
+        "notify": [{"github_commit_status": {"context": "integration-test-kind-upgrade"}}],
+        "steps": [step],
+    }
+    return _yaml_block([group], 2)
+
+
 def _package_kind_test_image_step() -> str:
     """Put the exact Go test bundle in a commit-tagged runner image for GKE."""
     dependencies = '    depends_on: "test"\n'
@@ -842,6 +874,7 @@ def ci_steps() -> str:
             artifact_paths:
               - ".buildkite/artifacts/omenative-kind-test.tgz"
               - ".buildkite/artifacts/multicluster-kind-test.tgz"
+              - ".buildkite/artifacts/omenative-upgrade-kind-test.tgz"
               - ".buildkite/artifacts/kind"
             agents:
               queue: "{DEFAULT_QUEUE}"
@@ -1144,6 +1177,10 @@ def generate_pipeline() -> str:
     pipeline += "\n" + cd_steps()
     if BRANCH == "main" and GKE_EVAL_ENABLED:
         pipeline += "\n" + _gke_eval_group()
+    # GKE_KIND_ENABLED too: this step depends on package-kind-test-image,
+    # which only exists in the pipeline when that switch is on.
+    if BRANCH == "main" and GKE_UPGRADE_ENABLED and GKE_KIND_ENABLED:
+        pipeline += "\n" + _gke_upgrade_identity_step()
     return pipeline
 
 
