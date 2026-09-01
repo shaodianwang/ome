@@ -155,6 +155,57 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
+	ginkgo.It("asymmetric transition with a single-replica drain-first decoder converges", func() {
+		// Config: 2 engines + 1 RecreatePod decoder in one blueGreen group,
+		// protocol v1. Action: bump the protocol (both Components re-roll).
+		// Invariant: the transition converges. The walk requires the gate's
+		// asymmetric ordering: the engine's last old instance is held until
+		// the decoder flips, and the single-replica decoder's drain-first hop
+		// is admitted once the engine stages target capacity — its recreate
+		// gap is the same one it has without pairing.
+		fix := newCoordFixture(ns.Name, WithISVCName("pairing-asym"),
+			WithEngineReplicas(2),
+			WithDecoderReplicas(1),
+			WithDecoderUpdateStrategy(v1beta1.UpdateStrategyRecreatePod),
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent),
+			WithPairingProtocol("nixl-v1"),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "pairing-asym")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(1)))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			assertPairingSurface(g, ns.Name, "pairing-asym", "nixl-v1")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "pairing-asym")
+			cur.Spec.Rollout.PairingProtocol = ptr.To("nixl-v2")
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Convergence IS the assertion: without the final-hop admission the
+		// walk wedges permanently with the decoder still on the old cohort.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "pairing-asym")
+			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(1)))
+			assertPairingSurface(g, ns.Name, "pairing-asym", "nixl-v2")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
 	// The admission rule denying uncoordinated protocol changes is covered by
 	// the envtest webhook suite — the KIND environment runs no webhook server.
 })

@@ -93,7 +93,7 @@ var pairingComponents = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1
 // which is exactly what this gate paces. In-flight starts from the same
 // wake-up are charged pessimistically against the cohort under simulation.
 //
-// Two liveness escapes keep the gate deadlock-free:
+// Three liveness escapes keep the gate deadlock-free:
 //   - When no pairable pair exists BEFORE the step, there is nothing left to
 //     protect and progress toward the target cohort is the only way back to
 //     one — allow.
@@ -102,6 +102,14 @@ var pairingComponents = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1
 //     first movers would deadlock the rollout permanently, so the step is
 //     allowed; for surge strategies the resulting unpaired window is bounded
 //     by the peer's concurrently-approved surge.
+//   - When the acting Component is down to its last serving instance and the
+//     peer already serves the target cohort (the last-hop shape), the step is
+//     the acting side's final unavoidable hop and no other step can create
+//     the pairing a denial would wait for — allow. The transient unpaired
+//     window equals what a single-replica update costs WITHOUT pairing (the
+//     gate must not be stricter than non-pairing behavior for the last
+//     mover), and the incoming instance pairs with the peer's target
+//     capacity the moment it serves.
 //
 // Fails closed (deny, retryable reason) when IR status or a serving
 // instance's ControllerRevision cannot be read — approving a cohort-draining
@@ -217,6 +225,10 @@ func (ctx GateContext) CheckPairing(strategy workloadtypes.UpdateStrategyType, i
 			return true, fmt.Sprintf("both %s and %s are down to their last serving instance with no cohort %q capacity; allowing the step rather than deadlocking the transition",
 				component, peer, target)
 		}
+		if lastHopEscape(serving, component, peer, target) {
+			return true, fmt.Sprintf("%s is down to its last serving instance and %s already serves cohort %q; allowing the final hop (the unpaired window equals a single-replica update without pairing)",
+				component, peer, target)
+		}
 		return false, fmt.Sprintf("pairing protocol transition to %q: updating a serving %s of cohort %q would leave no pairable serving engine+decoder pair; holding until cohort %q serves on both Components",
 			target, component, proto, target)
 	}
@@ -251,6 +263,19 @@ func mutualPairingWall(serving map[v1beta1.ComponentType]map[string]int32, compo
 		return false
 	}
 	return totalServing(serving[component]) <= 1 && totalServing(serving[peer]) <= 1
+}
+
+// lastHopEscape reports the asymmetric deadlock shape: the acting Component
+// is down to at most one serving instance while the peer already serves the
+// target cohort. The step is the acting side's final unavoidable hop — every
+// path to convergence moves that instance, and no other step can create the
+// pairing a denial would wait for (the peer's remaining old instances are
+// themselves held by the ordinary simulation until the acting side flips).
+// A Component with two or more serving instances never satisfies this: its
+// old cohort keeps being paced instance-by-instance. Disjoint from the
+// mutual wall, which covers the peer-has-no-target-capacity shape.
+func lastHopEscape(serving map[v1beta1.ComponentType]map[string]int32, component, peer v1beta1.ComponentType, target string) bool {
+	return totalServing(serving[component]) <= 1 && serving[peer][target] > 0
 }
 
 func totalServing(byProto map[string]int32) int32 {

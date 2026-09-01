@@ -192,11 +192,14 @@ func TestCheckPairing_DeniesLastOldEngineUntilTargetDecoderServes(t *testing.T) 
 }
 
 // TestCheckPairing_CreditDistinguishesSurgeFromRecreate pins the replacement
-// credit: with the old cohort down to its last engine and the target decoder
-// already serving, a surge step is allowed (its replacement serves before the
-// drain) while a drain-first recreate of the same instance is denied (the gap
-// would leave no serving engine at all pairable with the proto-a decoder...
-// no engine cohort at all).
+// credit and the last-hop escape on the engine-side asymmetric shape: with
+// the old cohort down to its last engine and the target decoder already
+// serving, a surge step passes the ordinary simulation (its replacement
+// serves before the drain — no escape involved), while a drain-first
+// recreate of the same instance fails the simulation and is admitted only by
+// the last-hop escape: the hop is unavoidable, its gap equals a
+// single-replica recreate without pairing, and the incoming instance pairs
+// with the decoder's target capacity the moment it serves.
 func TestCheckPairing_CreditDistinguishesSurgeFromRecreate(t *testing.T) {
 	isvc := pairingISVC("proto-b")
 	objs := []client.Object{
@@ -207,11 +210,19 @@ func TestCheckPairing_CreditDistinguishesSurgeFromRecreate(t *testing.T) {
 		pairingCR("prod", "llama", v1beta1.DecoderComponent, "db", "proto-b"),
 	}
 	gate := pairingGate(t, isvc, v1beta1.EngineComponent, objs...)
-	if ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !ok {
+	ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
+	if !ok {
 		t.Errorf("surge swaps the last engine to proto-b, pairable with db: %s", reason)
 	}
-	if ok, _ := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0); ok {
-		t.Errorf("recreate of the only serving engine mid-transition must be denied (no credit for a drain-first gap)")
+	if reason != "" {
+		t.Errorf("surge must pass the ordinary simulation, not an escape: %s", reason)
+	}
+	ok, reason = gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0)
+	if !ok {
+		t.Errorf("recreate of the engine's last instance is its final hop; must be allowed: %s", reason)
+	}
+	if !strings.Contains(reason, "last serving instance") {
+		t.Errorf("recreate must be admitted by the last-hop escape, not the simulation: %s", reason)
 	}
 }
 
@@ -441,5 +452,114 @@ func TestEnsurePerRevisionServices_PairingLabel(t *testing.T) {
 	}
 	if _, has := routing2.Labels[query.LabelPairingProtocol]; has {
 		t.Errorf("protocol-free revision must not be labeled: %+v", routing2.Labels)
+	}
+}
+
+// TestCheckPairing_LastHopEscape_AsymmetricDecoder is the asymmetric wedge
+// shape: engine already staged the target cohort while the single-replica
+// drain-first decoder still runs the old one. The decoder's step empties its
+// side in simulation, but it is the decoder's final unavoidable hop and the
+// engine's target capacity re-pairs the incoming instance — allowed via the
+// last-hop escape (the reason pins the escape, not an accidental pass).
+func TestCheckPairing_LastHopEscape_AsymmetricDecoder(t *testing.T) {
+	isvc := pairingISVC("proto-b")
+	objs := []client.Object{
+		pairingIR("prod", "llama", v1beta1.EngineComponent, servingInstances("llama", v1beta1.EngineComponent, "ea", "eb")),
+		pairingCR("prod", "llama", v1beta1.EngineComponent, "ea", "proto-a"),
+		pairingCR("prod", "llama", v1beta1.EngineComponent, "eb", "proto-b"),
+		pairingIR("prod", "llama", v1beta1.DecoderComponent, servingInstances("llama", v1beta1.DecoderComponent, "da")),
+		pairingCR("prod", "llama", v1beta1.DecoderComponent, "da", "proto-a"),
+	}
+	gate := pairingGate(t, isvc, v1beta1.DecoderComponent, objs...)
+	ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0)
+	if !ok {
+		t.Fatalf("last decoder hop with engine target capacity must be allowed: %s", reason)
+	}
+	if !strings.Contains(reason, "last serving instance") {
+		t.Errorf("allow must come from the last-hop escape: %s", reason)
+	}
+}
+
+// TestCheckPairing_LastHopEscape_RequiresPeerTargetCapacity: the escape never
+// fires before the peer stages target capacity — the single-replica decoder
+// is held until then (its later hop is covered by the escape once the peer
+// flips), and a multi-serving acting Component is held regardless. This is
+// the boundary that keeps the escape from draining a cohort early.
+func TestCheckPairing_LastHopEscape_RequiresPeerTargetCapacity(t *testing.T) {
+	isvc := pairingISVC("proto-b")
+	objs := []client.Object{
+		pairingIR("prod", "llama", v1beta1.EngineComponent, servingInstances("llama", v1beta1.EngineComponent, "ea", "ea2")),
+		pairingCR("prod", "llama", v1beta1.EngineComponent, "ea", "proto-a"),
+		pairingCR("prod", "llama", v1beta1.EngineComponent, "ea2", "proto-a"),
+		pairingIR("prod", "llama", v1beta1.DecoderComponent, servingInstances("llama", v1beta1.DecoderComponent, "da")),
+		pairingCR("prod", "llama", v1beta1.DecoderComponent, "da", "proto-a"),
+	}
+	gate := pairingGate(t, isvc, v1beta1.DecoderComponent, objs...)
+	ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0)
+	if ok {
+		t.Fatalf("single-replica decoder must be held until the engine stages target capacity")
+	}
+	if !strings.Contains(reason, `"proto-a"`) {
+		t.Errorf("denial must name the dying cohort: %s", reason)
+	}
+}
+
+// TestCheckPairing_AsymmetricTransitionReachability walks every state of the
+// engine{old:2} x decoder{old:1} drain-first transition and asserts each step
+// the convergence path needs is admitted — and that the one hold that orders
+// the walk (the engine's last old instance before the decoder flips) stays a
+// hold. Every step uses RecreatePod, the strategy with no replacement credit.
+func TestCheckPairing_AsymmetricTransitionReachability(t *testing.T) {
+	isvc := pairingISVC("proto-b")
+	transitionCRs := func() []client.Object {
+		return []client.Object{
+			pairingCR("prod", "llama", v1beta1.EngineComponent, "ea", "proto-a"),
+			pairingCR("prod", "llama", v1beta1.EngineComponent, "ea2", "proto-a"),
+			pairingCR("prod", "llama", v1beta1.EngineComponent, "eb", "proto-b"),
+			pairingCR("prod", "llama", v1beta1.DecoderComponent, "da", "proto-a"),
+			pairingCR("prod", "llama", v1beta1.DecoderComponent, "db", "proto-b"),
+		}
+	}
+
+	// State 1 — engine{a,a} decoder{a}: the engine's first step keeps an
+	// old pair serving.
+	objs := append(transitionCRs(),
+		pairingIR("prod", "llama", v1beta1.EngineComponent, servingInstances("llama", v1beta1.EngineComponent, "ea", "ea2")),
+		pairingIR("prod", "llama", v1beta1.DecoderComponent, servingInstances("llama", v1beta1.DecoderComponent, "da")),
+	)
+	gate := pairingGate(t, isvc, v1beta1.EngineComponent, objs...)
+	if ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0); !ok {
+		t.Fatalf("state 1: engine's first old step must be allowed: %s", reason)
+	}
+
+	// State 2 — engine{a,b} decoder{a}: the engine's remaining old step is
+	// HELD (no decoder target yet; this hold is what orders the walk) while
+	// the decoder's step goes through the last-hop escape.
+	objs = append(transitionCRs(),
+		pairingIR("prod", "llama", v1beta1.EngineComponent, servingInstances("llama", v1beta1.EngineComponent, "ea", "eb")),
+		pairingIR("prod", "llama", v1beta1.DecoderComponent, servingInstances("llama", v1beta1.DecoderComponent, "da")),
+	)
+	gate = pairingGate(t, isvc, v1beta1.EngineComponent, objs...)
+	if ok, _ := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0); ok {
+		t.Fatalf("state 2: engine's last old step must be held until the decoder flips")
+	}
+	gate = pairingGate(t, isvc, v1beta1.DecoderComponent, objs...)
+	ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0)
+	if !ok {
+		t.Fatalf("state 2: decoder's last hop must be allowed: %s", reason)
+	}
+	if !strings.Contains(reason, "last serving instance") {
+		t.Errorf("state 2: decoder allow must come from the last-hop escape: %s", reason)
+	}
+
+	// State 3 — engine{a,b} decoder{b}: the engine's last old step now has a
+	// target pair to land on; the ordinary simulation admits it.
+	objs = append(transitionCRs(),
+		pairingIR("prod", "llama", v1beta1.EngineComponent, servingInstances("llama", v1beta1.EngineComponent, "ea", "eb")),
+		pairingIR("prod", "llama", v1beta1.DecoderComponent, servingInstances("llama", v1beta1.DecoderComponent, "db")),
+	)
+	gate = pairingGate(t, isvc, v1beta1.EngineComponent, objs...)
+	if ok, reason := gate.CheckPairing(workloadtypes.UpdateStrategyRecreatePod, 0, 0); !ok {
+		t.Fatalf("state 3: engine's final old step must be allowed: %s", reason)
 	}
 }
