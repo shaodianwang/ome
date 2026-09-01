@@ -3,10 +3,11 @@
 # GKE-backed KIND runner.
 #
 # Mirrors run_kind_tests_gke.sh's shape (exact-commit test bundle, dind
-# preflight, baked-image loads, no live pulls) with one addition: the
-# previous-main manager+agent image pair package_kind_test_image.sh resolved
-# and baked at package time (see the comment there). Their presence under
-# OME_KIND_IMAGES_DIR is the run/skip signal — no image pair baked there
+# preflight, baked-image loads, no live pulls) with two additions
+# package_kind_test_image.sh resolves and bakes at package time (see the
+# comments there): the previous-main manager+agent image pair, and this
+# commit's own canary-metrics image. The manager+agent pair's presence
+# under OME_KIND_IMAGES_DIR is the run/skip signal — no pair baked there
 # means either this is not a main build or the parent commit's images were
 # never published, and the gate skips loudly without failing the step.
 set -eu
@@ -94,11 +95,14 @@ done
 docker version --format 'client {{.Client.Version}} / server {{.Server.Version}}'
 
 # kindest-node backs `kind create cluster`; busybox backs the inotify step
-# below. Every other image deploy-ome-kind.sh's offline path needs (the
-# golang:1.25 compile base, cert-manager, eval-nginx) is loaded by that
-# script itself from the same OME_KIND_IMAGES_DIR — it already knows how to
-# fall back to the baked tarball, so duplicating that here would only be
-# two places to keep in sync.
+# below. The generic offline dependencies deploy-ome-kind.sh's offline path
+# needs (the golang:1.25 compile base, cert-manager, eval-nginx,
+# eval-prometheus) are loaded by that script itself from the same
+# OME_KIND_IMAGES_DIR — it already knows how to fall back to the baked
+# tarball for those, so duplicating that here would only be two places to
+# keep in sync. Per-commit build artifacts (ome-manager, ome-agent,
+# canary-metrics) are different: deploy-ome-kind.sh only ever builds those
+# from source or expects them preloaded, so this runner provides them below.
 echo "--- load baked images into dind (no registry pulls) ---"
 for tar in "$IMAGES_DIR"/kindest-node.tar "$IMAGES_DIR"/busybox.tar; do
   [ -f "$tar" ] || { echo "FATAL: baked image tarball missing: $tar" >&2; exit 1; }
@@ -112,6 +116,21 @@ docker load -i "${IMAGES_DIR}/upgrade-from-manager.tar"
 docker load -i "${IMAGES_DIR}/upgrade-from-agent.tar"
 docker image inspect "$upgrade_from_manager" >/dev/null
 docker image inspect "$upgrade_from_agent" >/dev/null
+
+# canary-metrics is this commit's own image, not part of the upgrade-from
+# pair: deploy-ome-kind.sh's --skip-build path expects canary-metrics:kind-local
+# to already exist (it builds it from source only when SKIP_BUILD=0), the
+# same way it expects ome-manager/ome-agent under that flag. Both the
+# "before" and "after" deploy-ome-kind.sh passes reference the same tag, so
+# one image serves both.
+short_sha=$(printf '%.8s' "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}")
+repo="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra"
+canary_metrics_image="${repo}/canary-metrics:${short_sha}"
+echo "--- load canary-metrics image for the upgrade-identity gate ---"
+echo "    canary-metrics: ${canary_metrics_image}"
+docker load -i "${IMAGES_DIR}/canary-metrics.tar"
+docker image inspect "$canary_metrics_image" >/dev/null
+docker tag "$canary_metrics_image" canary-metrics:kind-local
 
 echo "--- raise inotify limits on the docker daemon ---"
 docker run --rm --privileged busybox sh -c '

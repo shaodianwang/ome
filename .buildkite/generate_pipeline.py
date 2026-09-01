@@ -562,17 +562,24 @@ def _gke_upgrade_identity_step() -> str:
     """The operator-upgrade identity gate: one deployed-mode KIND job.
 
     Only meaningful on main, where package_kind_test_image.sh resolves and
-    bakes the previous commit's manager+agent images (see the comment
-    there). run_omenative_upgrade_gke.sh skips loudly, without failing the
-    step, whenever that pair was not baked — so this step existing on a
-    build does not by itself mean an upgrade was actually exercised.
+    bakes the previous commit's manager+agent images plus this commit's own
+    canary-metrics image (see the comments there). run_omenative_upgrade_gke.sh
+    skips loudly, without failing the step, whenever the manager+agent pair
+    was not baked — so this step existing on a build does not by itself mean
+    an upgrade was actually exercised.
     """
     plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
     step = {
         "label": ":test_tube: Operator-upgrade identity (deployed KIND)",
         "key": "kind-gke-upgrade-identity",
         "depends_on": "package-kind-test-image",
-        "env": {"OME_KIND_TEST_BUNDLE": "/kind-test/omenative-upgrade-kind-test.tgz"},
+        "env": {
+            "OME_KIND_TEST_BUNDLE": "/kind-test/omenative-upgrade-kind-test.tgz",
+            # Lets the runner derive this commit's canary-metrics ref
+            # (${PROD_ECR_REGISTRY}/msl_infra/canary-metrics:<short-sha>)
+            # the same way package_kind_test_image.sh resolved it.
+            "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
+        },
         "agents": {"queue": GKE_QUEUE},
         "command": "sh .buildkite/run_omenative_upgrade_gke.sh",
         "plugins": plugins,
@@ -594,6 +601,7 @@ def _package_kind_test_image_step() -> str:
             "    depends_on:\n"
             '      - "test"\n'
             '      - "mirror-kind-ci"\n'
+            '      - "mirror-canary-metrics"\n'
         )
     return (
         '  - label: ":package: Package exact Go KIND runner"\n'

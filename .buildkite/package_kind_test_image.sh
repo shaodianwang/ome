@@ -73,6 +73,25 @@ echo "--- pull ${kueue_image}"
 crane pull --platform linux/amd64 "$kueue_image" "$stage/images/kueue.tar"
 crane validate --tarball "$stage/images/kueue.tar"
 
+# The operator-upgrade identity gate's first pass installs OME with
+# --skip-build (see deploy-ome-kind-from-image.sh). Under that flag,
+# deploy-ome-kind.sh treats canary-metrics exactly like ome-manager /
+# ome-agent: it only ever builds the image (offline, from source) or fatals
+# when the image is missing — unlike cert-manager / eval-nginx /
+# eval-prometheus / the golang:1.25 compile base, it never falls back to a
+# baked tarball itself, because it is a per-commit build artifact, not a
+# generic offline dependency. Pulled here, at package time, using this
+# commit's own already-mirrored image — generate_pipeline.py lists
+# mirror-canary-metrics as a dependency of this step, so this never races
+# the mirror. Main-only: PR builds never push this commit's images, and the
+# upgrade-identity gate itself never runs off main.
+if [ "${BUILDKITE_BRANCH:-}" = main ]; then
+  canary_metrics_image="${repo}/canary-metrics:${short_sha}"
+  echo "--- pull ${canary_metrics_image} ---"
+  crane pull --platform linux/amd64 "$canary_metrics_image" "$stage/images/canary-metrics.tar"
+  crane validate --tarball "$stage/images/canary-metrics.tar"
+fi
+
 # The operator-upgrade identity gate (omenative-upgrade-kind-test.tgz) needs a
 # previously published ome-manager + ome-agent pair to install before
 # upgrading to this commit's own build. Resolved here, at package time,
