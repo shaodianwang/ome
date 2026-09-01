@@ -636,6 +636,9 @@ h2.sec {
   border-collapse: collapse;
   font-size: var(--t-sm);
 }
+.place-tbl.pending-tbl {
+  min-width: 780px;
+}
 .place-tbl th {
   text-align: left;
   font-weight: 500;

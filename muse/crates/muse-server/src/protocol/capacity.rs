@@ -134,6 +134,10 @@ pub struct CapacityReport {
     /// non-OME workloads — appear only in the namespace list above.
     #[serde(rename = "consumersByDeployment")]
     pub consumers_by_deployment: Vec<DeploymentConsumer>,
+    /// InferenceServices with unscheduled accelerator pods, ranked by missing
+    /// accelerators. Requested is the sum of scheduled and missing demand.
+    #[serde(rename = "pendingByDeployment")]
+    pub pending_by_deployment: Vec<PendingDeployment>,
 }
 
 /// One carve-able domain (a TPU subblock or a GPU NVLink rack) for the heatmap:
@@ -168,6 +172,27 @@ pub struct DeploymentConsumer {
     pub kind: String,
     pub accelerators: i64,
     pub pods: i64,
+}
+
+/// Accelerator demand for one InferenceService that has Pending, unbound pods.
+#[derive(Serialize)]
+pub struct PendingDeployment {
+    pub cluster: String,
+    pub namespace: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(rename = "requestedAccelerators")]
+    pub requested_accelerators: i64,
+    #[serde(rename = "requestedPods")]
+    pub requested_pods: i64,
+    #[serde(rename = "allocatedAccelerators")]
+    pub allocated_accelerators: i64,
+    #[serde(rename = "allocatedPods")]
+    pub allocated_pods: i64,
+    #[serde(rename = "missingAccelerators")]
+    pub missing_accelerators: i64,
+    #[serde(rename = "missingPods")]
+    pub missing_pods: i64,
 }
 
 /// The occupancy breakdown of the carve-able units at one size — a TPU slice shape,

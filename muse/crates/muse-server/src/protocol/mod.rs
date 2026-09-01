@@ -16,8 +16,8 @@ mod system;
 
 pub use capacity::{
     first_label, node_accel, sum_accel, Accel, AccelDemand, AccelLost, CapacityReport, Consumer,
-    DeploymentConsumer, Fragment, GpuView, GroupCapacity, NodeCounts, PlacementUnits, Topology,
-    UnitBox,
+    DeploymentConsumer, Fragment, GpuView, GroupCapacity, NodeCounts, PendingDeployment,
+    PlacementUnits, Topology, UnitBox,
 };
 pub(crate) use pods::{
     isvc_owner, owned_by, pod_accelerators, pod_component, pod_problem_reason,

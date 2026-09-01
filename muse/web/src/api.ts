@@ -61,6 +61,9 @@ export interface CapacityResp {
    *  Pods without the ownership label (non-OME workloads) appear only in
    *  `consumers`. */
   consumersByDeployment?: DeploymentConsumer[];
+  /** InferenceServices with Pending, unbound accelerator pods, ranked by missing
+   *  accelerators. */
+  pendingByDeployment?: PendingDeployment[];
 }
 
 /** A top accelerator consumer attributed to one InferenceService. */
@@ -71,6 +74,20 @@ export interface DeploymentConsumer {
   kind: string;
   accelerators: number;
   pods: number;
+}
+
+/** Scheduled and missing accelerator demand for one pending InferenceService. */
+export interface PendingDeployment {
+  cluster: string;
+  namespace: string;
+  name: string;
+  kind: string;
+  requestedAccelerators: number;
+  requestedPods: number;
+  allocatedAccelerators: number;
+  allocatedPods: number;
+  missingAccelerators: number;
+  missingPods: number;
 }
 
 /** One carve-able domain (a TPU subblock or GPU NVLink rack) for the heatmap: id,

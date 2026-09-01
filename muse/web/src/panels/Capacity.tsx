@@ -197,6 +197,7 @@ export function Capacity({
         .flatMap(({ name, cap }) => (cap.consumers ?? []).map((c) => ({ ...c, cluster: name })))
         .sort((a, b) => b.accelerators - a.accelerators)
         .slice(0, 10);
+  const pendingDeployments = tab ? (caps[0]?.cap.pendingByDeployment ?? []) : [];
 
   // Demand (Pending pods waiting on capacity) + lost capacity (accelerators on
   // NotReady/cordoned nodes), summed across clusters.
@@ -532,6 +533,58 @@ export function Capacity({
           </p>
         )}
       </Card>
+
+      {tab ? (
+        <Card
+          title="Top pending deployments"
+          sub="accelerator pod requests · allocated means bound to a node"
+        >
+          {!caps.length ? (
+            <p className="panel-note">Pending deployment data is unavailable for this cluster.</p>
+          ) : pendingDeployments.length ? (
+            <table className="place-tbl pending-tbl">
+              <thead>
+                <tr>
+                  <th>Deployment</th>
+                  <th>Kind</th>
+                  <th className="tnum">Asked pods</th>
+                  <th className="tnum">Asked accels</th>
+                  <th className="tnum">Allocated pods</th>
+                  <th className="tnum">Allocated accels</th>
+                  <th className="tnum">Missing pods</th>
+                  <th className="tnum">Missing accels</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingDeployments.map((deployment) => (
+                  <tr
+                    key={`${deployment.cluster}/${deployment.namespace}/${deployment.name}/${deployment.kind}`}
+                    className="link"
+                    onClick={() =>
+                      openDeployment(
+                        isvcSelected(deployment.cluster, deployment.name, deployment.namespace),
+                      )
+                    }
+                  >
+                    <td className="mono">
+                      {deployment.name} <span className="muted">{deployment.namespace}</span>
+                    </td>
+                    <td>{deployment.kind.toUpperCase()}</td>
+                    <td className="tnum">{n(deployment.requestedPods)}</td>
+                    <td className="tnum">{n(deployment.requestedAccelerators)}</td>
+                    <td className="tnum">{n(deployment.allocatedPods)}</td>
+                    <td className="tnum">{n(deployment.allocatedAccelerators)}</td>
+                    <td className="tnum txt-bad">{n(deployment.missingPods)}</td>
+                    <td className="tnum txt-bad">{n(deployment.missingAccelerators)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="panel-note">No deployment-attributed accelerator pods are pending.</p>
+          )}
+        </Card>
+      ) : null}
 
       <PlacementTiers caps={caps} onOpenUnit={openNode} />
 

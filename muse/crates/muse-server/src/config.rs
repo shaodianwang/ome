@@ -591,7 +591,7 @@ pub struct Config {
     )]
     pub capacity_max_fragments: usize,
 
-    /// Maximum top consumers returned in each capacity report.
+    /// Maximum rows returned in each ranked capacity list.
     #[arg(
         long = "capacity-max-consumers",
         env = "MUSE_CAPACITY_MAX_CONSUMERS",

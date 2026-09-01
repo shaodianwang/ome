@@ -19,8 +19,8 @@ use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
 
 use crate::protocol::{
     first_label, node_accel, sum_accel, AccelDemand, AccelLost, CapacityReport, Consumer,
-    DeploymentConsumer, Fragment, GpuView, GroupCapacity, NodeCounts, PlacementUnits, Topology,
-    UnitBox, INFERENCE_SERVICE_POD_LABEL,
+    DeploymentConsumer, Fragment, GpuView, GroupCapacity, NodeCounts, PendingDeployment,
+    PlacementUnits, Topology, UnitBox, INFERENCE_SERVICE_POD_LABEL,
 };
 
 /// Accelerator kinds tracked separately (a pod/node never mixes them in practice).
@@ -42,6 +42,7 @@ pub struct ClusterData {
 #[derive(Clone, Copy, Debug)]
 pub struct CapacityLimits {
     pub max_fragments: usize,
+    /// Maximum rows in each consumer or pending-deployment ranking.
     pub max_consumers: usize,
 }
 
@@ -95,6 +96,7 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
     // for pods carrying the ownership label — per (namespace, InferenceService, kind).
     let mut consumers: BTreeMap<(String, &'static str), (i64, i64)> = BTreeMap::new();
     let mut deployment_consumers: BTreeMap<DeploymentKey, (i64, i64)> = BTreeMap::new();
+    let mut deployment_demand: BTreeMap<DeploymentKey, DeploymentDemand> = BTreeMap::new();
 
     for cluster in clusters {
         let allocated = accel_allocated_by_node(&cluster.pods);
@@ -105,6 +107,7 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
             &mut consumers,
             &mut deployment_consumers,
         );
+        accumulate_deployment_demand(&cluster.name, &cluster.pods, &mut deployment_demand);
 
         for node in &cluster.nodes {
             let name = node.meta().name.clone().unwrap_or_default();
@@ -228,6 +231,7 @@ pub fn build(clusters: &[ClusterData], topo: &Topology, limits: CapacityLimits) 
             deployment_consumers,
             limits.max_consumers,
         ),
+        pending_by_deployment: top_pending_deployments(deployment_demand, limits.max_consumers),
     }
 }
 
@@ -466,6 +470,69 @@ fn accumulate_pending(pods: &[Arc<Pod>], out: &mut BTreeMap<&'static str, (i64, 
 /// Full identity of one deployment's consumption: (cluster, namespace, service, kind).
 type DeploymentKey = (String, String, String, &'static str);
 
+#[derive(Default)]
+struct DeploymentDemand {
+    allocated_accelerators: i64,
+    allocated_pods: i64,
+    missing_accelerators: i64,
+    missing_pods: i64,
+}
+
+/// Sum scheduled and unscheduled accelerator requests for labelled pods. A pod
+/// is allocated once it is bound to a node; an unbound Pending pod is missing.
+fn accumulate_deployment_demand(
+    cluster: &str,
+    pods: &[Arc<Pod>],
+    out: &mut BTreeMap<DeploymentKey, DeploymentDemand>,
+) {
+    for pod in pods {
+        let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+        if matches!(phase, Some("Succeeded" | "Failed")) {
+            continue;
+        }
+        let Some(spec) = pod.spec.as_ref() else {
+            continue;
+        };
+        let allocated = spec.node_name.is_some();
+        let missing = !allocated && phase == Some("Pending");
+        if !allocated && !missing {
+            continue;
+        }
+        let Some(owner) = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(INFERENCE_SERVICE_POD_LABEL))
+            .filter(|owner| !owner.is_empty())
+        else {
+            continue;
+        };
+        let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+        for kind in KINDS {
+            let requested: i64 = spec
+                .containers
+                .iter()
+                .filter_map(|container| container.resources.as_ref())
+                .filter_map(|resources| resources.requests.as_ref())
+                .map(|resources| sum_accel(resources, kind))
+                .sum();
+            if requested <= 0 {
+                continue;
+            }
+            let demand = out
+                .entry((cluster.to_owned(), namespace.clone(), owner.clone(), kind))
+                .or_default();
+            if allocated {
+                demand.allocated_accelerators += requested;
+                demand.allocated_pods += 1;
+            } else {
+                demand.missing_accelerators += requested;
+                demand.missing_pods += 1;
+            }
+        }
+    }
+}
+
 /// Sum accelerator chips held by *scheduled* pods — who is actually occupying the
 /// cluster's accelerators — per (namespace, kind), and per owning InferenceService
 /// for pods that carry the operator's ownership label. A Pending/unscheduled pod
@@ -564,6 +631,41 @@ fn top_deployment_consumers(
             .cmp(&a.accelerators)
             .then(a.namespace.cmp(&b.namespace))
             .then(a.name.cmp(&b.name))
+    });
+    out.truncate(max_consumers);
+    out
+}
+
+/// Flatten deployment demand into the top-N services still missing capacity.
+fn top_pending_deployments(
+    map: BTreeMap<DeploymentKey, DeploymentDemand>,
+    max_consumers: usize,
+) -> Vec<PendingDeployment> {
+    let mut out: Vec<PendingDeployment> = map
+        .into_iter()
+        .filter(|(_, demand)| demand.missing_pods > 0)
+        .map(
+            |((cluster, namespace, name, kind), demand)| PendingDeployment {
+                cluster,
+                namespace,
+                name,
+                kind: kind.to_owned(),
+                requested_accelerators: demand.allocated_accelerators + demand.missing_accelerators,
+                requested_pods: demand.allocated_pods + demand.missing_pods,
+                allocated_accelerators: demand.allocated_accelerators,
+                allocated_pods: demand.allocated_pods,
+                missing_accelerators: demand.missing_accelerators,
+                missing_pods: demand.missing_pods,
+            },
+        )
+        .collect();
+    out.sort_by(|a, b| {
+        b.missing_accelerators
+            .cmp(&a.missing_accelerators)
+            .then(b.missing_pods.cmp(&a.missing_pods))
+            .then(a.namespace.cmp(&b.namespace))
+            .then(a.name.cmp(&b.name))
+            .then(a.kind.cmp(&b.kind))
     });
     out.truncate(max_consumers);
     out
@@ -889,7 +991,7 @@ mod tests {
                 )
             })
             .collect();
-        let pods = (0..4)
+        let mut pods: Vec<_> = (0..4)
             .map(|index| {
                 pod_in_namespace(
                     &format!("work-{index}"),
@@ -900,6 +1002,15 @@ mod tests {
                 )
             })
             .collect();
+        pods.extend((0..4).map(|index| {
+            pending_owned_pod(
+                &format!("pending-{index}"),
+                "gpu",
+                index + 1,
+                "pending",
+                &format!("service-{index}"),
+            )
+        }));
         let report = build(
             &[cluster(nodes, pods)],
             &topology(),
@@ -915,6 +1026,9 @@ mod tests {
         assert_eq!(report.consumers.len(), 2);
         assert_eq!(report.consumers[0].namespace, "tenant-3");
         assert_eq!(report.consumers[1].namespace, "tenant-2");
+        assert_eq!(report.pending_by_deployment.len(), 2);
+        assert_eq!(report.pending_by_deployment[0].name, "service-3");
+        assert_eq!(report.pending_by_deployment[1].name, "service-2");
     }
 
     /// A pod stamped with the operator's ownership label, as the InferenceService
@@ -932,6 +1046,19 @@ mod tests {
             INFERENCE_SERVICE_POD_LABEL.to_owned(),
             isvc.to_owned(),
         )]));
+        Arc::new(pod)
+    }
+
+    fn pending_owned_pod(
+        name: &str,
+        kind: &str,
+        chips: i64,
+        namespace: &str,
+        isvc: &str,
+    ) -> Arc<Pod> {
+        let mut pod = (*owned_pod(name, "", kind, chips, namespace, isvc)).clone();
+        pod.spec.as_mut().expect("pod spec").node_name = None;
+        pod.status.as_mut().expect("pod status").phase = Some("Pending".to_owned());
         Arc::new(pod)
     }
 
@@ -971,6 +1098,59 @@ mod tests {
         assert_eq!(by_deployment.kind, "gpu");
         assert_eq!(by_deployment.accelerators, 6);
         assert_eq!(by_deployment.pods, 2);
+    }
+
+    #[test]
+    fn pending_deployments_report_requested_allocated_and_missing_demand() {
+        let pods = vec![
+            owned_pod("large-engine-0", "gpu-0", "gpu", 4, "sandbox", "large"),
+            owned_pod("large-engine-1", "gpu-1", "gpu", 2, "sandbox", "large"),
+            pending_owned_pod("large-engine-2", "gpu", 8, "sandbox", "large"),
+            pending_owned_pod("large-engine-3", "gpu", 4, "sandbox", "large"),
+            owned_pod("small-engine-0", "gpu-2", "gpu", 1, "sandbox", "small"),
+            pending_owned_pod("small-engine-1", "gpu", 2, "sandbox", "small"),
+            // Pending accelerator demand without the ownership label remains in
+            // the cluster total, but cannot be attributed to an InferenceService.
+            {
+                let mut pod = (*pod_in_namespace("batch", "", "gpu", 8, "sandbox")).clone();
+                pod.spec.as_mut().expect("pod spec").node_name = None;
+                pod.status.as_mut().expect("pod status").phase = Some("Pending".to_owned());
+                Arc::new(pod)
+            },
+        ];
+        let report = build(&[cluster(vec![], pods)], &topology(), limits());
+
+        assert_eq!(report.pending.len(), 1);
+        assert_eq!(report.pending[0].kind, "gpu");
+        assert_eq!(report.pending[0].pods, 4);
+        assert_eq!(report.pending[0].accelerators, 22);
+
+        assert_eq!(report.pending_by_deployment.len(), 2);
+        let large = &report.pending_by_deployment[0];
+        assert_eq!(large.cluster, "cluster-a");
+        assert_eq!(large.namespace, "sandbox");
+        assert_eq!(large.name, "large");
+        assert_eq!(large.kind, "gpu");
+        assert_eq!(large.requested_pods, 4);
+        assert_eq!(large.requested_accelerators, 18);
+        assert_eq!(large.allocated_pods, 2);
+        assert_eq!(large.allocated_accelerators, 6);
+        assert_eq!(large.missing_pods, 2);
+        assert_eq!(large.missing_accelerators, 12);
+
+        let wire = serde_json::to_value(&report).expect("capacity report should serialize");
+        assert_eq!(wire["pendingByDeployment"][0]["requestedPods"], 4);
+        assert_eq!(wire["pendingByDeployment"][0]["allocatedAccelerators"], 6);
+        assert_eq!(wire["pendingByDeployment"][0]["missingAccelerators"], 12);
+
+        let small = &report.pending_by_deployment[1];
+        assert_eq!(small.name, "small");
+        assert_eq!(small.requested_pods, 2);
+        assert_eq!(small.requested_accelerators, 3);
+        assert_eq!(small.allocated_pods, 1);
+        assert_eq!(small.allocated_accelerators, 1);
+        assert_eq!(small.missing_pods, 1);
+        assert_eq!(small.missing_accelerators, 2);
     }
 
     #[test]
