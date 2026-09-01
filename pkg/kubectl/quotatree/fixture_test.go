@@ -47,6 +47,30 @@ func statusBudget(resourceName, flavor, nominal, admitted string) v1beta1.Accele
 	}
 }
 
+// share is one member's slice of a status budget, as a management plane
+// reports it: the nominal it assigned, and what that member holds against it.
+func share(cluster, nominal, admitted string) v1beta1.AcceleratorClusterBudgetStatus {
+	return v1beta1.AcceleratorClusterBudgetStatus{
+		Cluster:  cluster,
+		Nominal:  qty(nominal),
+		Admitted: qty(admitted),
+	}
+}
+
+// splitAcross attaches a per-cluster breakdown to a status budget.
+func splitAcross(b v1beta1.AcceleratorBudgetStatus,
+	shares ...v1beta1.AcceleratorClusterBudgetStatus,
+) v1beta1.AcceleratorBudgetStatus {
+	b.PerCluster = append(b.PerCluster, shares...)
+	return b
+}
+
+func withPolicy(policy v1beta1.AcceleratorQuotaDistributionPolicy) nodeOpt {
+	return func(q *v1beta1.AcceleratorQuota) {
+		q.Spec.Distribution = &v1beta1.AcceleratorQuotaDistribution{Policy: policy}
+	}
+}
+
 // node builds one CR. Options mutate it so a test states only what it cares
 // about, keeping the shape of an eight-node fixture readable.
 type nodeOpt func(*v1beta1.AcceleratorQuota)
@@ -175,5 +199,27 @@ func healthyFleet() []v1beta1.AcceleratorQuota {
 			withNamespaces("serving-prod"),
 			withPath("/root/org-product/team-serving"),
 			withCondition(v1beta1.AcceleratorQuotaReady, "False")),
+	}
+}
+
+// splitFleet is a management plane's tree: a fleet total on every tier, and on
+// the one leaf the split into the share each member was assigned. The Cohorts
+// carry none because only leaves are apportioned — a grouping travels to every
+// member as pure topology.
+func splitFleet() []v1beta1.AcceleratorQuota {
+	return []v1beta1.AcceleratorQuota{
+		cohort("root", "",
+			withSpec(specBudget(tpu, tpu7x, "192")),
+			withStatus(statusBudget(tpu, tpu7x, "192", "0")), ready()),
+		cohort("tenants", "root",
+			withSpec(specBudget(tpu, tpu7x, "192")),
+			withStatus(statusBudget(tpu, tpu7x, "192", "0")), ready()),
+		leaf("serving", "tenants",
+			withSpec(specBudget(tpu, tpu7x, "192")),
+			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional),
+			withStatus(splitAcross(statusBudget(tpu, tpu7x, "192", "24"),
+				share("member-a", "128", "16"),
+				share("member-b", "64", "8"))),
+			withNamespaces("serving-prod"), ready()),
 	}
 }

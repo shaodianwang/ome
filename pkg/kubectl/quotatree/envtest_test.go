@@ -13,6 +13,7 @@ import (
 	"testing"
 	"text/tabwriter"
 
+	"github.com/google/go-cmp/cmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -169,6 +170,67 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 			t.Errorf("JSON missing the computed path:\n%s", got)
 		}
 	})
+
+	// Last, because it writes a split onto a node the subtests above read.
+	//
+	// status.budgets[].perCluster is a list-map keyed on cluster, which only a
+	// real apiserver enforces: a fixture can hold two rows for one cluster and
+	// a unit test would never know. The shares are made to sum, so the tree
+	// this leaves behind is still the healthy one.
+	t.Run("split survives the round trip", func(t *testing.T) {
+		api := client.OmeV1beta1().AcceleratorQuotas()
+		nlp, err := api.Get(ctx, "team-nlp", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get team-nlp: %v", err)
+		}
+		nlp.Status.Budgets = []v1beta1.AcceleratorBudgetStatus{
+			splitAcross(statusBudget(gpu, a100, "128", "96"),
+				share("member-a", "96", "72"),
+				share("member-b", "32", "24")),
+		}
+		if _, err := api.UpdateStatus(ctx, nlp, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("write the split: %v", err)
+		}
+
+		// The leading │ is load-bearing: team-vision follows this leaf, so the
+		// tier must not close its parent's line on the way past.
+		got := runAgainst(ctx, t, cfg, Options{Output: OutputTree, Color: ColorNever, Split: true})
+		for cluster, want := range map[string][]string{
+			"member-a": {"│", "├─", "member-a", "WorkloadCluster", "96", "72"},
+			"member-b": {"│", "└─", "member-b", "WorkloadCluster", "32", "24"},
+		} {
+			if diff := cmp.Diff(want, strings.Fields(lineWith(t, got, cluster))); diff != "" {
+				t.Errorf("per-cluster row mismatch (-want +got):\n%s\nin:\n%s", diff, got)
+			}
+		}
+		if strings.Contains(got, "128!") {
+			t.Errorf("a split that adds up was marked short:\n%s", got)
+		}
+
+		// Absent, not empty: the leaves beside it resolve no split, and a
+		// consumer must be able to tell that from a split of nothing.
+		asJSON := runAgainst(ctx, t, cfg, Options{Output: OutputJSON, Color: ColorNever})
+		if !strings.Contains(asJSON, `"cluster": "member-a"`) {
+			t.Errorf("the split is missing from JSON:\n%s", asJSON)
+		}
+		if strings.Contains(asJSON, `"perCluster": []`) {
+			t.Errorf("a leaf with no split emitted an empty list:\n%s", asJSON)
+		}
+	})
+}
+
+// lineWith is the one rendered line containing want. Column padding depends on
+// the widest name in the whole table, so an assertion that spelled a row out
+// verbatim would break whenever an unrelated node was renamed.
+func lineWith(t *testing.T, out, want string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	t.Fatalf("no line containing %q in:\n%s", want, out)
+	return ""
 }
 
 // runAgainst drives the real cluster path, including the generated clientset.

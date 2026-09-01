@@ -37,6 +37,11 @@ type Options struct {
 	Color  ColorMode
 	ASCII  bool
 
+	// Split draws each budget's per-cluster shares below the node. NewCommand
+	// turns it on; the zero value leaves a caller driving Run directly with the
+	// tree alone.
+	Split bool
+
 	// Timeout bounds Run when set. The cluster path leaves it zero and relies
 	// on --request-timeout, which clientcmd applies to the rest config; it is
 	// here so a caller driving Run with an injected Lister can still bound it.
@@ -76,14 +81,23 @@ nodes, a ClusterQueue is a leaf that binds serving namespaces and carries the
 accelerator budget. The edges live in spec.parentRef on each node, so the shape
 is only visible once the whole set is assembled — which is what this does.
 
+Where the tree is authored the fleet total is divided into a share per workload
+cluster, and those shares are drawn as a tier of WorkloadCluster rows below the node
+that carries the budget. A projected copy holds one already-resolved share and
+no split, so on a workload cluster there is nothing extra to draw.
+
 Nodes with no position in the tree are reported separately rather than hidden,
 and every invariant the set violates is listed with the node it is attributed
 to. A budget shown with a trailing * was read from spec because status.budgets
-carries no resolved value for it.`,
-		Example: `  # The whole tree.
+carries no resolved value for it; one with a trailing ! was divided into shares
+that do not add up to it.`,
+		Example: `  # The whole tree, with each budget's per-cluster split.
   kubectl qt
 
-  # Every column, including capacity, namespaces, and all conditions.
+  # The tree alone.
+  kubectl qt --split=false
+
+  # Every column, including the split policy, capacity, and all conditions.
   kubectl qt -o wide
 
   # One subtree.
@@ -123,6 +137,9 @@ carries no resolved value for it.`,
 			"to a terminal, and is overridden by the NO_COLOR environment variable.")
 	flags.BoolVar(&o.ASCII, "ascii", false,
 		"Draw branches with ASCII instead of box-drawing characters.")
+	flags.BoolVar(&o.Split, "split", true,
+		"Show how each budget was divided across the fleet, as a tier of per-cluster "+
+			"rows below the node. Pass --split=false for the tree alone.")
 
 	flags.StringVar(&o.Filter.Node, "node", "",
 		"Render only this node and its descendants.")
@@ -226,7 +243,7 @@ func (o *Options) Run(ctx context.Context) error {
 	if o.ASCII {
 		glyphs = ASCIIGlyphs
 	}
-	return Print(o.Out, view, o.Output, RenderOptions{Glyphs: glyphs, Color: o.Color})
+	return Print(o.Out, view, o.Output, RenderOptions{Glyphs: glyphs, Color: o.Color, Split: o.Split})
 }
 
 // clusterLister reads the nodes from an apiserver.

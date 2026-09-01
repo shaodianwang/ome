@@ -44,6 +44,144 @@ func TestRenderDrawsTheTreeWithAlignedColumns(t *testing.T) {
 	}
 }
 
+func TestRenderDrawsTheSplitAsATierBelowTheNode(t *testing.T) {
+	got := render(t, buildView(t, splitFleet(), 0), RenderOptions{Split: true})
+
+	want := strings.Join([]string{
+		"google.com/tpu on flavor tpu7x",
+		"",
+		"NAME               ROLE             NOMINAL  ADMITTED  READY  AGE",
+		"root               Cohort           192      0                3h",
+		"└─ tenants         Cohort           192      0                3h",
+		"   └─ serving      ClusterQueue     192      24               3h",
+		"      ├─ member-a  WorkloadCluster  128      16",
+		"      └─ member-b  WorkloadCluster  64       8",
+		"",
+	}, "\n")
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("rendered split mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRenderWithoutTheSplitIsTheTreeAlone(t *testing.T) {
+	got := render(t, buildView(t, splitFleet(), 0), RenderOptions{})
+
+	if strings.Contains(got, "member-a") {
+		t.Errorf("per-cluster rows drawn with Split unset:\n%s", got)
+	}
+	if !strings.Contains(got, "serving  ClusterQueue  192      24") {
+		t.Errorf("the node's own budget row did not survive:\n%s", got)
+	}
+}
+
+func TestRenderDrawsNoSplitTierForACohort(t *testing.T) {
+	// Only leaves are apportioned; a grouping travels to every member as pure
+	// topology. Rows of dashes under every Cohort would triple the tree for
+	// nothing.
+	got := render(t, buildView(t, splitFleet(), 0), RenderOptions{Split: true})
+
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "WorkloadCluster") && !strings.Contains(line, "member-") {
+			t.Errorf("unexpected per-cluster row: %q", line)
+		}
+	}
+	tenants := strings.Index(got, "tenants")
+	serving := strings.Index(got, "serving")
+	if strings.Contains(got[tenants:serving], "WorkloadCluster") {
+		t.Errorf("a Cohort grew a per-cluster tier:\n%s", got)
+	}
+}
+
+func TestRenderKeepsTheTierOpenAcrossFlavorsAndChildren(t *testing.T) {
+	// Every budget's shares are one sibling list below the node, so the line
+	// closes on the last of them across all budgets — and not even there when
+	// a child follows at the same indent.
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", "",
+			withSpec(specBudget(gpu, a100, "64"), specBudget(gpu, h100, "32")),
+			withStatus(
+				splitAcross(statusBudget(gpu, a100, "64", "0"), share("member-a", "64", "0")),
+				splitAcross(statusBudget(gpu, h100, "32", "0"), share("member-a", "32", "0"))),
+			ready()),
+		leaf("team", "root", withSpec(specBudget(gpu, a100, "8")), ready()),
+	}
+	got := render(t, buildView(t, quotas, 0), RenderOptions{Split: true})
+
+	lines := strings.Split(got, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "└─") && strings.Contains(l, "WorkloadCluster") {
+			t.Errorf("line %d closes the tier while a child still follows: %q", i, l)
+		}
+	}
+	// The continuation row for the second flavor sits inside the tier, so it
+	// keeps the line open rather than blanking it.
+	for _, l := range lines {
+		if strings.Contains(l, "h100") && strings.Contains(l, "Cohort") {
+			if !strings.HasPrefix(l, "│") {
+				t.Errorf("the second flavor's row broke the tier's line: %q", l)
+			}
+		}
+	}
+	if !strings.Contains(got, "└─ team") {
+		t.Errorf("the child did not close the level:\n%s", got)
+	}
+}
+
+func TestRenderMarksAndExplainsASplitThatIsShort(t *testing.T) {
+	// A member the hub recorded no share for leaves the fleet holding less than
+	// the admin authorized. The node still reports the authored total, so
+	// nothing else in the view says so.
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", "", withSpec(specBudget(gpu, a100, "120"))),
+		leaf("team", "root",
+			withSpec(specBudget(gpu, a100, "120")),
+			withStatus(splitAcross(statusBudget(gpu, a100, "120", "30"),
+				share("member-a", "90", "30"))), ready()),
+	}
+	got := render(t, buildView(t, quotas, 0), RenderOptions{Split: true})
+
+	if !strings.Contains(got, "120!") {
+		t.Errorf("short split not marked on the nominal:\n%s", got)
+	}
+	if !strings.Contains(got, "1 budget split does not add up:") {
+		t.Errorf("no footer heading for the short split:\n%s", got)
+	}
+	if !strings.Contains(got, "team: nvidia.com/gpu on a100 is 120 but its per-cluster shares total 90") {
+		t.Errorf("the footer does not name the gap:\n%s", got)
+	}
+}
+
+func TestRenderReportsAShortSplitEvenWithTheTierCollapsed(t *testing.T) {
+	// The gap is there whether or not the breakdown is on screen, so hiding it
+	// with --split=false would be the view concealing a fault.
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", "", withSpec(specBudget(gpu, a100, "120"))),
+		leaf("team", "root",
+			withSpec(specBudget(gpu, a100, "120")),
+			withStatus(splitAcross(statusBudget(gpu, a100, "120", "30"),
+				share("member-a", "90", "30"))), ready()),
+	}
+	got := render(t, buildView(t, quotas, 0), RenderOptions{})
+
+	if strings.Contains(got, "member-a") {
+		t.Fatalf("the tier was drawn despite Split being unset:\n%s", got)
+	}
+	if !strings.Contains(got, "120!") || !strings.Contains(got, "budget split does not add up") {
+		t.Errorf("the short split went unreported:\n%s", got)
+	}
+}
+
+func TestRenderSaysNothingAboutASplitThatAddsUp(t *testing.T) {
+	got := render(t, buildView(t, splitFleet(), 0), RenderOptions{Split: true})
+
+	if strings.Contains(got, "!") {
+		t.Errorf("a split that adds up was marked:\n%s", got)
+	}
+	if strings.Contains(got, "budget split does not add up") {
+		t.Errorf("footer for a mark that did not appear:\n%s", got)
+	}
+}
+
 func TestRenderHidesReadyWhenHealthy(t *testing.T) {
 	// The table exists to surface problems: a fleet that is entirely Ready
 	// should render an empty column, not a wall of True.

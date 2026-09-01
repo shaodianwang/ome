@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Glyphs are the branch characters the tree is drawn with. Unicode by default;
@@ -34,6 +36,11 @@ type RenderOptions struct {
 
 	// Glyphs draws the branches.
 	Glyphs Glyphs
+
+	// Split draws each budget's per-cluster breakdown as a tier of rows below
+	// the node. Only the plane that authors a tree resolves a split, so on a
+	// workload cluster there is none to draw and this changes nothing.
+	Split bool
 
 	// Color selects when to emit ANSI escapes.
 	Color ColorMode
@@ -72,7 +79,7 @@ func Render(w io.Writer, v *View, opts RenderOptions) error {
 	// more than one pair. With a single pair they say the same thing on every
 	// row, so they move to a caption above the table.
 	single := len(pairs) == 1
-	layout := newLayout(opts.Wide, single, opts.Now)
+	layout := newLayout(opts.Wide, single, opts.Split, opts.Now)
 
 	var rows []row
 	if v.Root != nil {
@@ -129,6 +136,42 @@ func budgetPairs(v *View) []pair {
 	return out
 }
 
+// branches is the tree drawing for one node: the art joining it to its parent,
+// and the art for the rows that sit at the tier below it — its budget
+// continuation rows and its per-cluster rows.
+type branches struct {
+	// node joins this node to its parent.
+	node string
+
+	// stem is the ancestors' open lines, the indent every row at the tier
+	// below this node starts from.
+	stem   string
+	glyphs Glyphs
+
+	// children reports that the node has children of its own, which follow its
+	// per-cluster rows at the same indent and so keep that line open past them.
+	children bool
+}
+
+// cont draws a budget continuation row, which sits at the tier below the node
+// and so keeps that line open whenever anything is still to come there.
+func (b branches) cont(more bool) string {
+	if more || b.children {
+		return b.stem + b.glyphs.Vertical
+	}
+	return b.stem + b.glyphs.Blank
+}
+
+// tier draws a per-cluster row. Every budget's shares belong to one sibling
+// list below the node, so the line closes on the last of them across all
+// budgets, and only when no child follows.
+func (b branches) tier(last bool) string {
+	if last && !b.children {
+		return b.stem + b.glyphs.Last
+	}
+	return b.stem + b.glyphs.Tee
+}
+
 // renderNode emits a node and its subtree. ancestorLast[i] reports whether the
 // ancestor at depth i was the last of its siblings, which is what decides
 // between a continuing line and a blank at that indent level.
@@ -137,7 +180,12 @@ func budgetPairs(v *View) []pair {
 // child slice is copied before recursing: sharing the backing array would let
 // one branch overwrite the ancestry another branch is still drawing from.
 func renderNode(n *NodeView, ancestorLast []bool, l layout, g Glyphs) []row {
-	rows := l.nodeRows(n, treePrefix(ancestorLast, g), contPrefix(ancestorLast, len(n.Children) > 0, g))
+	rows := l.nodeRows(n, branches{
+		node:     treePrefix(ancestorLast, g),
+		stem:     stem(ancestorLast, g),
+		glyphs:   g,
+		children: len(n.Children) > 0,
+	})
 	for i, c := range n.Children {
 		childAncestry := make([]bool, len(ancestorLast), len(ancestorLast)+1)
 		copy(childAncestry, ancestorLast)
@@ -159,20 +207,6 @@ func treePrefix(ancestorLast []bool, g Glyphs) string {
 		b.WriteString(g.Last)
 	} else {
 		b.WriteString(g.Tee)
-	}
-	return b.String()
-}
-
-// contPrefix draws the art for a node's budget continuation rows. They sit
-// between the node and its children, so every ancestor line that is still open
-// stays open, and the node's own line does too when it has children below.
-func contPrefix(ancestorLast []bool, hasChildren bool, g Glyphs) string {
-	var b strings.Builder
-	b.WriteString(stem(ancestorLast, g))
-	if hasChildren {
-		b.WriteString(g.Vertical)
-	} else {
-		b.WriteString(g.Blank)
 	}
 	return b.String()
 }
@@ -275,6 +309,7 @@ func writeFooter(b *strings.Builder, v *View, p palette) {
 		fmt.Fprintf(b, "\n%s\n", p.apply(styleDim,
 			"* nominal read from spec; status.budgets carries no resolved value for it"))
 	}
+	writeShortSplits(b, v, p)
 
 	if len(v.Violations) == 0 {
 		return
@@ -316,6 +351,47 @@ func writeFooter(b *strings.Builder, v *View, p palette) {
 		fmt.Fprintf(b, "%s\n", p.apply(styleYellow, fmt.Sprintf(
 			"%s violated outside this view; re-run without filters to see them",
 			plural(elsewhere, "further invariant"))))
+	}
+}
+
+// writeShortSplits reports the budgets whose per-cluster shares do not add up
+// to the allowance they divide.
+//
+// No invariant covers this, so nothing else in the view says it: a node reports
+// the total an admin authored whether or not the fleet was handed all of it,
+// and the difference is capacity no cluster can admit against. Reported even
+// when the tier itself is collapsed, because the gap is there either way.
+func writeShortSplits(b *strings.Builder, v *View, p palette) {
+	type short struct {
+		node   string
+		budget BudgetView
+		total  resource.Quantity
+	}
+	var found []short
+	eachNode(v, func(n *NodeView) {
+		for _, bg := range n.Budgets {
+			if total, whole := splitTotal(bg); !whole {
+				found = append(found, short{node: n.Name, budget: bg, total: total})
+			}
+		}
+	})
+	if len(found) == 0 {
+		return
+	}
+
+	// Neither "short" nor "over": the arithmetic can miss in both directions,
+	// and the per-node lines below say which way each one went.
+	heading := "1 budget split does not add up:"
+	if len(found) > 1 {
+		heading = fmt.Sprintf("%d budget splits do not add up:", len(found))
+	}
+	fmt.Fprintf(b, "\n%s\n", p.apply(styleRed, heading))
+	for _, s := range found {
+		fmt.Fprintf(b, "  %s %s %s on %s is %s but its per-cluster shares total %s\n",
+			p.apply(styleRed, "!"),
+			p.apply(styleBold, s.node+":"),
+			s.budget.ResourceName, s.budget.ResourceFlavor,
+			s.budget.Nominal.String(), s.total.String())
 	}
 }
 

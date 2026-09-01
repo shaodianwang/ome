@@ -89,6 +89,13 @@ type BudgetView struct {
 	ResourceName   string `json:"resourceName"`
 	ResourceFlavor string `json:"resourceFlavor"`
 
+	// Policy is the distribution policy declared for this pair: the budget's
+	// own, else the node's default. Empty where neither declares one, which
+	// leaves an operator-level default to apply — a value configured inside the
+	// cluster and on no object this plugin can read, so it is left unstated
+	// rather than guessed at.
+	Policy string `json:"policy,omitempty"`
+
 	// Nominal is the allowance. Prefer the controller-resolved value in status;
 	// fall back to spec when no status entry exists for this pair.
 	Nominal *resource.Quantity `json:"nominal,omitempty"`
@@ -105,6 +112,22 @@ type BudgetView struct {
 	// state, not a pending one.
 	FromSpec bool `json:"fromSpec,omitempty"`
 
+	Admitted *resource.Quantity `json:"admitted,omitempty"`
+	Borrowed *resource.Quantity `json:"borrowed,omitempty"`
+
+	// PerCluster is how Nominal was divided across the fleet. Only the plane
+	// that authors a tree resolves a split, so this is empty on a workload
+	// cluster: the copy projected there carries one already-resolved share and
+	// no trace of the arithmetic that produced it.
+	PerCluster []ClusterBudgetView `json:"perCluster,omitempty"`
+}
+
+// ClusterBudgetView is one workload cluster's slice of a budget: the share the
+// management plane assigned it, and what that cluster reports holding against
+// it. The numbers mirror BudgetView's, one tier down.
+type ClusterBudgetView struct {
+	Cluster  string             `json:"cluster"`
+	Nominal  *resource.Quantity `json:"nominal,omitempty"`
 	Admitted *resource.Quantity `json:"admitted,omitempty"`
 	Borrowed *resource.Quantity `json:"borrowed,omitempty"`
 }
@@ -241,6 +264,7 @@ func budgetViews(q *v1beta1.AcceleratorQuota) []BudgetView {
 		bv := at(key{b.ResourceName, b.ResourceFlavor})
 		bv.Nominal = quantityPtr(b.Nominal)
 		bv.FromSpec = true
+		bv.Policy = declaredPolicy(q, b)
 	}
 	for i := range q.Status.Budgets {
 		b := &q.Status.Budgets[i]
@@ -249,6 +273,7 @@ func budgetViews(q *v1beta1.AcceleratorQuota) []BudgetView {
 		bv.FromSpec = false
 		bv.Admitted = quantityPtr(b.Admitted)
 		bv.Borrowed = quantityPtr(b.Borrowed)
+		bv.PerCluster = clusterBudgetViews(b.PerCluster)
 	}
 
 	sort.Slice(order, func(i, j int) bool {
@@ -262,6 +287,64 @@ func budgetViews(q *v1beta1.AcceleratorQuota) []BudgetView {
 		out = append(out, *views[k])
 	}
 	return out
+}
+
+// declaredPolicy is the distribution policy written on the CR for one budget:
+// the budget's own override, else the node's default.
+//
+// The chain stops there. A budget declaring neither falls back to a default
+// held in the manager's configuration, which is not on any object the plugin
+// reads — so it reports nothing rather than naming a policy the cluster may
+// not be using, the same reason --max-depth defaults to off.
+func declaredPolicy(q *v1beta1.AcceleratorQuota, b *v1beta1.AcceleratorBudget) string {
+	if b.Policy != "" {
+		return string(b.Policy)
+	}
+	if q.Spec.Distribution != nil {
+		return string(q.Spec.Distribution.Policy)
+	}
+	return ""
+}
+
+// clusterBudgetViews renders one budget's split, sorted by cluster so two runs
+// against one tree agree on the order.
+func clusterBudgetViews(shares []v1beta1.AcceleratorClusterBudgetStatus) []ClusterBudgetView {
+	if len(shares) == 0 {
+		return nil
+	}
+	out := make([]ClusterBudgetView, 0, len(shares))
+	for i := range shares {
+		s := &shares[i]
+		out = append(out, ClusterBudgetView{
+			Cluster:  s.Cluster,
+			Nominal:  quantityPtr(s.Nominal),
+			Admitted: quantityPtr(s.Admitted),
+			Borrowed: quantityPtr(s.Borrowed),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Cluster < out[j].Cluster })
+	return out
+}
+
+// splitTotal adds up a budget's per-cluster shares and reports whether they
+// account for the whole allowance.
+//
+// A budget nobody split is whole by definition: there is no gap where there
+// was no division. Where there was one, a total under the allowance is capacity
+// the fleet was authorized and never handed, and a total over it is capacity it
+// was never authorized at all. Nothing else in the view says either: the node
+// keeps reporting the number the admin wrote.
+func splitTotal(b BudgetView) (resource.Quantity, bool) {
+	var total resource.Quantity
+	if len(b.PerCluster) == 0 || b.Nominal == nil {
+		return total, true
+	}
+	for _, c := range b.PerCluster {
+		if c.Nominal != nil {
+			total.Add(*c.Nominal)
+		}
+	}
+	return total, total.Cmp(*b.Nominal) == 0
 }
 
 func capacityViews(q *v1beta1.AcceleratorQuota) []CapacityView {

@@ -21,19 +21,28 @@ type layout struct {
 	// tree uses one pair, which the caption states instead.
 	showPair bool
 
+	// split draws each budget's per-cluster shares as a tier below the node.
+	split bool
+
 	// now is what AGE is measured against, fixed for the whole render so two
 	// rows of one table cannot disagree about the current time.
 	now time.Time
 }
 
-func newLayout(wide, singlePair bool, now time.Time) layout {
-	return layout{wide: wide, showPair: !singlePair, now: now}
+func newLayout(wide, singlePair, split bool, now time.Time) layout {
+	return layout{wide: wide, showPair: !singlePair, split: split, now: now}
 }
 
-func (l layout) header() row {
+// columnNames is the single description of the column set. The header and the
+// padding of a row that stops early both read it, so a row can never be one
+// cell out of step with the heading above it.
+func (l layout) columnNames() []string {
 	names := []string{"NAME", "ROLE"}
 	if l.showPair {
 		names = append(names, "RESOURCE", "FLAVOR")
+	}
+	if l.wide {
+		names = append(names, "POLICY")
 	}
 	names = append(names, "NOMINAL", "ADMITTED")
 	if l.wide {
@@ -45,13 +54,26 @@ func (l layout) header() row {
 	} else {
 		names = append(names, "READY")
 	}
-	names = append(names, "AGE")
+	return append(names, "AGE")
+}
 
+func (l layout) header() row {
+	names := l.columnNames()
 	cells := make([]cell, 0, len(names))
 	for _, n := range names {
 		cells = append(cells, cell{text: n})
 	}
 	return row{cells: cells, style: styleBold}
+}
+
+// pad fills a row out to the full column set with empty cells, so a row that
+// says nothing past a certain column still aligns with the rest of the table.
+func (l layout) pad(cells []cell) []cell {
+	n := len(l.columnNames())
+	for len(cells) < n {
+		cells = append(cells, cell{})
+	}
+	return cells
 }
 
 func (l layout) sectionRow(text string) row {
@@ -63,10 +85,11 @@ func (l layout) sectionRow(text string) row {
 // the branch art: the alternative is summing across flavors, which would add up
 // two different kinds of accelerator.
 //
-// prefix is the branch art for the node's own row; cont is the art for its
-// continuation rows, which sit between the node and its children and so must
-// keep both the ancestors' lines and the node's own line open.
-func (l layout) nodeRows(n *NodeView, prefix, cont string) []row {
+// Under each budget row come that budget's per-cluster shares. Every budget's
+// shares belong to one sibling list below the node, so the tier's line is kept
+// open until the last of them and the count of what is left to draw decides
+// where it closes.
+func (l layout) nodeRows(n *NodeView, art branches) []row {
 	budgets := n.Budgets
 	if len(budgets) == 0 {
 		// A Cohort may carry no budget at all, and a filter can leave a node
@@ -75,16 +98,58 @@ func (l layout) nodeRows(n *NodeView, prefix, cont string) []row {
 		budgets = []BudgetView{{}}
 	}
 
-	rows := make([]row, 0, len(budgets))
+	remaining := 0
+	if l.split {
+		for _, b := range budgets {
+			remaining += len(b.PerCluster)
+		}
+	}
+
+	rows := make([]row, 0, len(budgets)+remaining)
 	for i, b := range budgets {
 		if i == 0 {
-			rows = append(rows, l.budgetRow(n, b, prefix, n.Name, true))
+			rows = append(rows, l.budgetRow(n, b, art.node, n.Name, true))
+		} else {
+			rows = append(rows, l.budgetRow(n, b, art.cont(remaining > 0), "", false))
+		}
+		if !l.split {
 			continue
 		}
-		rows = append(rows, l.budgetRow(n, b, cont, "", false))
+		for _, c := range b.PerCluster {
+			remaining--
+			rows = append(rows, l.memberRow(n, b, c, art.tier(remaining == 0)))
+		}
 	}
 	return rows
 }
+
+// memberRow draws one workload cluster's share of a budget.
+//
+// The columns describing the node rather than the share are left empty: a
+// cluster holds no position in the quota tree, binds no namespaces, and has no
+// conditions or age of its own. The policy is left to the budget row above,
+// because one policy produced the whole split rather than any single share.
+func (l layout) memberRow(n *NodeView, b BudgetView, c ClusterBudgetView, prefix string) row {
+	cells := []cell{{prefix: prefix, prefixStyle: styleDim, text: c.Cluster}}
+	cells = append(cells, dim(roleWorkloadCluster))
+	if l.showPair {
+		cells = append(cells, dim(orUnset(b.ResourceName)), dim(orUnset(b.ResourceFlavor)))
+	}
+	if l.wide {
+		cells = append(cells, cell{})
+	}
+	cells = append(cells, quantityCell(c.Nominal), quantityCell(c.Admitted))
+	if l.wide {
+		cells = append(cells, quantityCell(c.Borrowed))
+	}
+	return row{cells: l.pad(cells), dim: n.contextDim()}
+}
+
+// roleWorkloadCluster is what a per-cluster row puts in the ROLE column. Not a
+// role the API defines: the column says what a row is, and this row is one
+// WorkloadCluster's share. Naming the kind is what keeps it from being read as
+// a ClusterQueue, which a bare "Cluster" would not.
+const roleWorkloadCluster = "WorkloadCluster"
 
 func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first bool) row {
 	// Branch art recedes so the names it leads to carry the eye down the tree.
@@ -97,6 +162,12 @@ func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first 
 	cells = append(cells, dim(firstOnly(first, n.Role)))
 	if l.showPair {
 		cells = append(cells, text(orUnset(b.ResourceName)), text(orUnset(b.ResourceFlavor)))
+	}
+	if l.wide {
+		// Per budget rather than per node, so it repeats down a node's flavors:
+		// a leaf can be Explicit on a reserved flavor and Proportional on a
+		// fungible one.
+		cells = append(cells, text(orUnset(b.Policy)))
 	}
 	cells = append(cells, nominalCell(b), quantityCell(b.Admitted))
 
@@ -198,15 +269,21 @@ func dim(s string) cell { return cell{text: s, style: styleDim} }
 
 func quantityCell(q *resource.Quantity) cell { return text(quantity(q)) }
 
-// nominalCell renders the allowance. A value with no resolved counterpart in
-// status is drawn in the provisional color as well as marked, so it reads as
-// unsettled at a glance and still survives a copy-paste into a plain terminal.
+// nominalCell renders the allowance, marked where the number needs qualifying.
+// Both marks are drawn in color as well, so they read at a glance and still
+// survive a copy-paste into a plain terminal.
+//
+// The two cannot collide: a split is only ever resolved alongside the status
+// nominal it divides, so a value read from spec has none.
 func nominalCell(b BudgetView) cell {
 	if b.Nominal == nil {
 		return text(unset)
 	}
 	if b.FromSpec {
 		return cell{text: b.Nominal.String() + "*", style: styleYellow}
+	}
+	if _, whole := splitTotal(b); !whole {
+		return cell{text: b.Nominal.String() + "!", style: styleRed}
 	}
 	return cell{text: b.Nominal.String()}
 }

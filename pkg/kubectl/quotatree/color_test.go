@@ -116,6 +116,38 @@ func TestColorMarksUnresolvedBudgetsAsProvisional(t *testing.T) {
 	}
 }
 
+func TestColorMarksASplitThatDoesNotAddUp(t *testing.T) {
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", "", withSpec(specBudget(gpu, a100, "120"))),
+		leaf("team", "root",
+			withSpec(specBudget(gpu, a100, "120")),
+			withStatus(splitAcross(statusBudget(gpu, a100, "120", "30"),
+				share("member-a", "90", "30")))),
+	}
+	out := colored(t, buildView(t, quotas, 0), RenderOptions{Split: true})
+
+	if got, want := styleOf(styledLine(t, out, "120!"), "120!"), string(styleRed); got != want {
+		t.Errorf("short-split nominal style = %q, want %q", got, want)
+	}
+}
+
+func TestColorSetsAPerClusterRowApartFromTheNodes(t *testing.T) {
+	// A cluster holds no position in the quota tree, so it must not carry the
+	// bold a live node does — otherwise an eye scanning the column for tenants
+	// finds members among them.
+	out := colored(t, buildView(t, splitFleet(), 0), RenderOptions{Split: true})
+
+	if got := styleOf(styledLine(t, out, "member-a"), "member-a"); got == string(styleBold) {
+		t.Error("a per-cluster row is bolded like a node in the tree")
+	}
+	if got, want := styleOf(styledLine(t, out, "member-a"), roleWorkloadCluster), string(styleDim); got != want {
+		t.Errorf("WorkloadCluster role style = %q, want dim %q", got, want)
+	}
+	if got, want := styleOf(styledLine(t, out, "serving"), "serving"), string(styleBold); got != want {
+		t.Errorf("the node above it lost its bold: %q, want %q", got, want)
+	}
+}
+
 func TestColorSeparatesFilterMatchesFromTheirPath(t *testing.T) {
 	// --for-namespace keeps the ancestors so you can see where the leaf sits.
 	// They are the path to the answer, not the answer, and have to read that

@@ -73,6 +73,40 @@ func TestPrintJSONNestsTheTree(t *testing.T) {
 	}
 }
 
+func TestPrintJSONCarriesTheSplitWhateverTheTreeDrew(t *testing.T) {
+	// The machine formats are not width-constrained, so they carry the split
+	// the same way they already carry capacity and namespaces the default tree
+	// keeps behind -o wide.
+	var b strings.Builder
+	if err := Print(&b, buildView(t, splitFleet(), 0), OutputJSON, RenderOptions{}); err != nil {
+		t.Fatalf("Print: %v", err)
+	}
+
+	var got View
+	if err := json.Unmarshal([]byte(b.String()), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, b.String())
+	}
+	serving := got.Root.Children[0].Children[0]
+	if serving.Name != "serving" {
+		t.Fatalf("leaf = %q, want serving", serving.Name)
+	}
+	if want := "Proportional"; serving.Budgets[0].Policy != want {
+		t.Errorf("policy = %q, want %q", serving.Budgets[0].Policy, want)
+	}
+
+	shares := serving.Budgets[0].PerCluster
+	if len(shares) != 2 {
+		t.Fatalf("per-cluster shares = %d, want 2", len(shares))
+	}
+	// Quantities marshal as strings, the same way they appear on the CR.
+	if shares[0].Cluster != "member-a" || shares[0].Nominal.String() != "128" {
+		t.Errorf("first share = %+v, want member-a at 128", shares[0])
+	}
+	if shares[1].Admitted.String() != "8" {
+		t.Errorf("second share admitted = %s, want 8", shares[1].Admitted)
+	}
+}
+
 func TestPrintJSONKeepsOrphansAndViolations(t *testing.T) {
 	// A consumer reading only .root must not be able to conclude a broken tree
 	// is healthy, so both have to survive serialization.

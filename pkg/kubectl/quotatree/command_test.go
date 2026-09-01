@@ -109,6 +109,18 @@ func TestRunReportsDepthOnlyWhenAsked(t *testing.T) {
 	}
 }
 
+func TestRunDrawsTheSplitWhenAsked(t *testing.T) {
+	got, err := runWith(t, &Options{Lister: fakeLister{quotas: splitFleet()}, Split: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, want := range []string{"member-a", "member-b", "WorkloadCluster", "128", "64"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRunASCII(t *testing.T) {
 	got, err := runWith(t, &Options{Lister: fakeLister{quotas: healthyFleet()}, ASCII: true})
 	if err != nil {
@@ -166,7 +178,7 @@ func TestNewCommandRegistersTheExpectedFlags(t *testing.T) {
 	cmd := NewCommand(&bytes.Buffer{}, &bytes.Buffer{})
 
 	for _, name := range []string{
-		"output", "color", "ascii",
+		"output", "color", "ascii", "split",
 		"node", "leaves-only", "for-namespace", "resource", "flavor", "max-depth",
 		"request-timeout",
 		// The standard connection flags, so the plugin behaves like kubectl.
@@ -175,6 +187,13 @@ func TestNewCommandRegistersTheExpectedFlags(t *testing.T) {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s is not registered", name)
 		}
+	}
+
+	// The split is the whole of what a management plane adds over a flat list,
+	// so it is on unless an operator says otherwise. A workload cluster
+	// resolves none, so the default costs nothing there.
+	if got := cmd.Flags().Lookup("split").DefValue; got != "true" {
+		t.Errorf("--split default = %q, want %q", got, "true")
 	}
 	for _, short := range []string{"o", "c"} {
 		if cmd.Flags().ShorthandLookup(short) == nil {

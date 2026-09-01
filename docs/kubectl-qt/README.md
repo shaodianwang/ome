@@ -22,6 +22,10 @@ root                Cohort        512      288              2d2h
    └─ team-vision   ClusterQueue  128      64               3h
 ```
 
+Where the tree is authored, each leaf's fleet-wide budget is divided into a
+share per workload cluster, and those shares hang off the leaf as a tier of
+`WorkloadCluster` rows. See [The per-cluster split](#the-per-cluster-split).
+
 `kubectl get aq` names its columns the same way and in the same order, so a node
 reads alike either way. It carries a subset: no tree, no more than a node's
 first `(resource, flavor)` pair, no reason for a broken edge, and no observed
@@ -76,14 +80,14 @@ asks kubectl to exec it for you.
 
 | Column | Meaning |
 |---|---|
-| `NAME` | The node's `metadata.name`, indented by its position in the tree. |
-| `ROLE` | `Cohort` (groups other nodes) or `ClusterQueue` (a leaf carrying the budget). |
+| `NAME` | The node's `metadata.name`, indented by its position in the tree — or, on a `WorkloadCluster` row, the cluster's name. |
+| `ROLE` | `Cohort` (groups other nodes), `ClusterQueue` (a leaf carrying the budget), or `WorkloadCluster` (one cluster's share of the row above). |
 | `NOMINAL` | The allowance for this (resource, flavor) pair. |
 | `ADMITTED` | What is currently admitted against the materialized queues, including anything borrowed. |
 | `READY` | Blank when the node is Ready. A value here means it is not. |
 | `AGE` | How long the node has existed, measured once per render so no two rows disagree. |
 
-Three conventions are worth knowing:
+Four conventions are worth knowing:
 
 - **`READY` is blank when healthy.** The table exists to surface problems, so a
   healthy fleet renders an empty column and an unhealthy node is the only thing
@@ -94,6 +98,9 @@ Three conventions are worth knowing:
   resolved for that plane, so the two legitimately differ — the mark keeps a
   fleet number from being read as this plane's resolved share. See
   [below](#why-is-every-budget-marked-) for what an all-`*` tree means.
+- **A trailing `!` on `NOMINAL` means the split does not add up**: the
+  per-cluster shares total something other than the allowance they divide. See
+  [below](#a-split-that-does-not-add-up).
 - **`-` means no value**, distinct from a blank. A Cohort carrying no budget and
   a leaf budgeted zero are different states.
 
@@ -135,6 +142,80 @@ shows as `ALLOCATABLE` and `PEAK`.
 So read an all-`*` tree as *"this is the shape and the requested budget"*, and
 `ADMITTED` as unavailable rather than zero.
 
+## The per-cluster split
+
+A management plane authors one fleet-wide number per leaf and divides it into a
+share per workload cluster. The tree alone shows the same total on every tier,
+which is the least interesting thing a management plane knows — so each leaf's
+shares are drawn as a tier of `WorkloadCluster` rows below it:
+
+```console
+$ kubectl qt
+google.com/tpu on flavor tpu7x
+
+NAME               ROLE             NOMINAL  ADMITTED  READY  AGE
+root               Cohort           192      0                3h
+└─ tenants         Cohort           192      0                3h
+   └─ serving      ClusterQueue     192      24               3h
+      ├─ member-a  WorkloadCluster  128      16
+      └─ member-b  WorkloadCluster  64       8
+```
+
+A `WorkloadCluster` row's `NOMINAL` is the share the management plane assigned
+that cluster, and its `ADMITTED` is what the cluster reports holding against it,
+read back off the projection. The columns that describe a node rather than a
+share — `READY`, `AGE`, `TIER`, `NAMESPACES`, `PATH` — are blank, because a
+cluster holds no position in the quota tree.
+
+Three things follow from where the numbers come from:
+
+- **Only leaves fan out.** A Cohort is apportioned nothing: it travels to every
+  member as pure topology, and a fleet total on a grouping tier is a number no
+  single cluster could hold. So a Cohort grows no tier.
+- **A workload cluster shows none of this.** The copy projected there carries
+  one already-resolved share and no trace of the split that produced it, so
+  `status.budgets[].perCluster` is empty and the output is the tree alone.
+- **The tier grows rows, not columns.** A fleet of twenty members makes the
+  output twenty rows longer rather than pushing the table off the screen.
+
+`--split=false` collapses the tier back to the plain tree. The `!` mark and its
+footer survive that, because the gap it reports is there either way.
+
+`-o wide` adds a `POLICY` column naming how the split was derived — `Explicit`
+if an admin wrote the shares, `Proportional` if they were computed against what
+each cluster reported holding. It shows `-` where neither the budget nor the
+node declares one, which means an operator-level default applied: that value
+lives in the manager's configuration, on no object this plugin reads, so naming
+one would report a policy the cluster may not be using.
+
+### A split that does not add up
+
+```console
+$ kubectl qt
+nvidia.com/gpu on flavor a100
+
+NAME            ROLE             NOMINAL  ADMITTED  READY  AGE
+root            Cohort           120      30               3h
+└─ team         ClusterQueue     120!     30               3h
+   └─ member-a  WorkloadCluster  90       30
+
+1 budget split does not add up:
+  ! team: nvidia.com/gpu on a100 is 120 but its per-cluster shares total 90
+```
+
+The 30 accelerators between 120 and 90 are authorized and handed to nobody: a
+member the management plane could not place a share on this pass. It is not an
+invariant violation and nothing else in the view reports it — the node keeps
+reporting the total the admin wrote, which is correct and, on its own,
+misleading. A total *above* the allowance is marked the same way, and means the
+opposite: capacity handed out that nobody authorized.
+
+Usually transient. The management plane holds the whole split rather than
+re-dividing it when a member drops out, so the ordinary failure mode is the tier
+vanishing entirely, not shrinking; a *partial* split means one member fell out
+between the read and the write. If it persists, `status.clusters[].message` on
+the node says which member and why.
+
 ### Color
 
 Color is on by default in a terminal (`--color=auto`) and off when the output is
@@ -148,10 +229,11 @@ Every mark also survives without color — nothing is encoded in color alone:
 |---|---|
 | **bold** name | A live node. |
 | <code>red</code> name | This node broke an invariant. It is the cause. |
-| plain name | Frozen by an ancestor's violation — a consequence, not a cause. |
+| plain name | Frozen by an ancestor's violation — a consequence, not a cause. Also a `WorkloadCluster` row, which is a cluster rather than a node. |
 | dim row | Kept only as the path to a filter match, not a match itself. |
 | dim branch art, dim `-` | Structure and absent values, receding behind the numbers. |
 | <code>yellow</code> `512*` | Read from `spec`; not yet resolved by the controller. |
+| <code>red</code> `120!` | Divided into per-cluster shares that do not add up to it. |
 | green / red condition | Judged by meaning, not literal value — `Degraded=True` is red where `Ready=True` is green. |
 
 The one rule worth stating: **a violation on the root freezes every node beneath
@@ -205,8 +287,15 @@ rather than spelled out:
 ## Common tasks
 
 ```sh
-# Every column: capacity, borrowed, ceiling, namespaces, tier, path, all conditions.
+# Every column: split policy, capacity, borrowed, ceiling, namespaces, tier,
+# path, all conditions.
 kubectl qt -o wide
+
+# The tree alone, without each budget's per-cluster split.
+kubectl qt --split=false
+
+# How one tenant's budget is spread across the fleet.
+kubectl qt --node team-nlp
 
 # One subtree, re-rooted. Works on an orphan too.
 kubectl qt --node org-research
@@ -243,6 +332,7 @@ parent of the leaves that do.
 | Flag | Default | Purpose |
 |---|---|---|
 | `-o, --output` | `tree` | `tree`, `wide`, `json`, or `yaml`. |
+| `--split` | `true` | Draw each budget's per-cluster shares as a tier below the node. `--split=false` for the tree alone. |
 | `--node` | | Re-root the render at one node. |
 | `--leaves-only` | `false` | Keep only budget-carrying leaves, with their paths. |
 | `--for-namespace` | | Keep the leaves binding this serving namespace. |
@@ -289,7 +379,19 @@ flattened, so a script and an operator read one structure:
         "allocatable": "520", "highWaterMark": "544" }
     ],
     "conditions": { "Ready": "True" },
-    "children": [ /* ... */ ]
+    "children": [
+      { "name": "team-nlp",
+        "role": "ClusterQueue",
+        "budgets": [
+          { "resourceName": "nvidia.com/gpu", "resourceFlavor": "a100",
+            "policy": "Proportional",
+            "nominal": "128", "admitted": "96", "borrowed": "0",
+            "perCluster": [
+              { "cluster": "member-a", "nominal": "96", "admitted": "72", "borrowed": "0" },
+              { "cluster": "member-b", "nominal": "32", "admitted": "24", "borrowed": "0" }
+            ] }
+        ] }
+    ]
   },
   "orphans":    [ /* nodes with no position in the tree */ ],
   "violations": [ { "node": "...", "reason": "...", "message": "..." } ]
@@ -300,6 +402,11 @@ Quantities marshal as strings, the same way they appear on the CR. `orphans` and
 `violations` are always present when non-empty — a consumer reading only `.root`
 would otherwise conclude a broken tree was healthy. An empty cluster emits `{}`,
 never `null`, so "no quotas exist" stays distinguishable from a failed request.
+
+`policy` and `perCluster` appear on leaves only, and are emitted whatever
+`--split` and `-o wide` were set to: those flags budget terminal width, which a
+machine format does not have. `perCluster` is absent rather than empty on a
+workload cluster, which resolves no split.
 
 ## RBAC
 

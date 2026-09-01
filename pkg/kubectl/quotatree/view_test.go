@@ -125,6 +125,117 @@ func TestBuildViewMergesBudgetsAcrossFlavorsInOrder(t *testing.T) {
 	}
 }
 
+func TestBuildViewCarriesTheSplitSortedByCluster(t *testing.T) {
+	// Status is controller-owned and already sorted, but the view sorts anyway:
+	// the order a member appears in is part of what a reader compares between
+	// two runs, and it must not depend on how the list was assembled.
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", "", withSpec(specBudget(gpu, a100, "120"))),
+		leaf("team", "root",
+			withSpec(specBudget(gpu, a100, "120")),
+			withStatus(splitAcross(statusBudget(gpu, a100, "120", "40"),
+				share("member-b", "30", "10"),
+				share("member-a", "90", "30")))),
+	}
+	v := buildView(t, quotas, 0)
+
+	b := childNamed(v.Root, "team").Budgets[0]
+	var got []string
+	for _, c := range b.PerCluster {
+		got = append(got, c.Cluster+"="+c.Nominal.String()+"/"+c.Admitted.String())
+	}
+	want := []string{"member-a=90/30", "member-b=30/10"}
+	if !cmp.Equal(got, want) {
+		t.Errorf("split = %v, want %v", got, want)
+	}
+}
+
+func TestBuildViewLeavesTheSplitEmptyOnAWorkloadCluster(t *testing.T) {
+	// A projected copy carries one already-resolved share and no trace of the
+	// arithmetic behind it, so there is nothing to break down.
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", ""),
+		leaf("team", "root",
+			withSpec(specBudget(gpu, a100, "90")),
+			withStatus(statusBudget(gpu, a100, "90", "30"))),
+	}
+	v := buildView(t, quotas, 0)
+
+	if got := childNamed(v.Root, "team").Budgets[0].PerCluster; len(got) != 0 {
+		t.Errorf("split = %v, want none", got)
+	}
+}
+
+func TestBuildViewReportsOnlyADeclaredPolicy(t *testing.T) {
+	// The remaining fallback is an operator-level default held in the manager's
+	// configuration, which is on no object the plugin reads. Naming one would
+	// report a policy the cluster may not be using.
+	quotas := []v1beta1.AcceleratorQuota{
+		cohort("root", "", withSpec(specBudget(gpu, a100, "300"))),
+		leaf("on-budget", "root", withSpec(v1beta1.AcceleratorBudget{
+			ResourceName:   gpu,
+			ResourceFlavor: a100,
+			Nominal:        qty("100"),
+			Policy:         v1beta1.AcceleratorQuotaDistributionExplicit,
+		})),
+		leaf("on-node", "root",
+			withSpec(specBudget(gpu, a100, "100")),
+			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional)),
+		leaf("inherited", "root", withSpec(specBudget(gpu, a100, "100"))),
+	}
+	v := buildView(t, quotas, 0)
+
+	for _, tc := range []struct{ node, want string }{
+		{"on-budget", "Explicit"},
+		{"on-node", "Proportional"},
+		{"inherited", ""},
+	} {
+		if got := childNamed(v.Root, tc.node).Budgets[0].Policy; got != tc.want {
+			t.Errorf("%s policy = %q, want %q", tc.node, got, tc.want)
+		}
+	}
+}
+
+func TestSplitTotal(t *testing.T) {
+	nominal := qty("120")
+	for _, tc := range []struct {
+		name      string
+		budget    BudgetView
+		wantTotal string
+		wantWhole bool
+	}{
+		{
+			"adds up",
+			BudgetView{Nominal: &nominal, PerCluster: []ClusterBudgetView{
+				{Cluster: "a", Nominal: quantityPtr(qty("90"))},
+				{Cluster: "b", Nominal: quantityPtr(qty("30"))},
+			}},
+			"120", true,
+		},
+		{
+			"short by a member the hub could not place",
+			BudgetView{Nominal: &nominal, PerCluster: []ClusterBudgetView{
+				{Cluster: "a", Nominal: quantityPtr(qty("90"))},
+			}},
+			"90", false,
+		},
+		// A budget nobody split is whole by definition: there is no gap where
+		// there was no division.
+		{"never split", BudgetView{Nominal: &nominal}, "0", true},
+		{"no allowance to divide", BudgetView{PerCluster: []ClusterBudgetView{{Cluster: "a"}}}, "0", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			total, whole := splitTotal(tc.budget)
+			if got := total.String(); got != tc.wantTotal {
+				t.Errorf("total = %s, want %s", got, tc.wantTotal)
+			}
+			if whole != tc.wantWhole {
+				t.Errorf("whole = %v, want %v", whole, tc.wantWhole)
+			}
+		})
+	}
+}
+
 func TestBuildViewSurfacesOrphansRatherThanDroppingThem(t *testing.T) {
 	// A node whose parent was deleted is exactly the node an operator is
 	// hunting for, so it must not disappear with the edge.
