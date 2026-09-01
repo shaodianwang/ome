@@ -48,10 +48,10 @@ This is feasible now because coordination, while shipped, has **no external
 users yet** — so the relocation needs no long deprecation window, only a
 one-release in-cluster conversion (below).
 
-**Prerequisite:** this OEP depends on **#424 (remove `canaryTrafficPercent`)
+**Prerequisite:** this OEP depends on **the removal of `canaryTrafficPercent`
 landing first** — that field, `ValidateCanaryPercent`, and the
-`MixedRolloutForms` mutual-exclusion rule are still on `main` until #424 merges
-(#424 is rebased onto main and `MERGEABLE`, not yet merged).
+`MixedRolloutForms` mutual-exclusion rule are still on `main` until that
+removal merges (the change is drafted and ready to merge, not yet merged).
 
 ## Motivation
 
@@ -111,7 +111,7 @@ landing first** — that field, `ValidateCanaryPercent`, and the
 
 ### API shape
 
-Full draft: `.claude/rollout_consolidated_draft.go` (model A). Condensed:
+Condensed shape:
 
 ```go
 type InferenceServiceSpec struct {
@@ -164,7 +164,7 @@ An earlier draft split coordination into a service-level `type`
 So `ordering` is not an independent axis — most `(type, ordering)` cells are
 contradictory (e.g. `BlueGreen + Sequential` = gang-parallel vs one-at-a-time),
 and the split would need both new admission rules to forbid them and a new
-`status.policy` derivation. Model A keeps the existing four-value
+`status.policy` derivation. This proposal keeps the existing four-value
 `CoordinationPolicy` enum, which faithfully captures the four distinct
 implemented machines, and pays none of that cost.
 
@@ -246,8 +246,8 @@ RatioBalanced rule to **both** layers, per the existing pattern.
 ## Migration
 
 No external users today, but persisted in-cluster ISVCs (the live
-`config/samples/inferenceservice.yaml`, `avo-tier5-pd/`, ~40 test fixtures)
-**do** carry `spec.rolloutCoordination`. A hard rename would make their
+`config/samples/inferenceservice.yaml`, the PD-disaggregated sample, ~40 test
+fixtures) **do** carry `spec.rolloutCoordination`. A hard rename would make their
 coordination silently stop being read. So a **one-release conversion is
 recommended, not optional**: have the defaulter accept `spec.rolloutCoordination`
 and copy it into `spec.rollout.coordination` (emit a deprecation warning), for
@@ -278,10 +278,11 @@ Blast radius (from the migration sweep):
   drift check is the gate. This also drives the **spec-gen → Python SDK + API
   reference** regeneration chain.
 
-Sequencing: **#424 merges first** → free the `RolloutSpec` name + delete
-`traffic.rollout` → relocate coordination with the conversion defaulter. Status
-output unchanged throughout; run envtest + the KIND coordination suite locally
-before merge (CI runs `make test-kind` soft-fail).
+Sequencing: **the `canaryTrafficPercent` removal merges first** → free the
+`RolloutSpec` name + delete `traffic.rollout` → relocate coordination with the
+conversion defaulter. Status output unchanged throughout; run envtest + the
+KIND coordination suite locally before merge (CI runs `make test-kind`
+soft-fail).
 
 ## Test Plan
 
@@ -332,8 +333,8 @@ before merge (CI runs `make test-kind` soft-fail).
 
 ## Implementation History
 
-- **#424 (pending merge)** — remove `spec.engine.canaryTrafficPercent`. A
-  prerequisite for this OEP (it also removes `ValidateCanaryPercent` and the
-  `MixedRolloutForms` rule). Rebased onto `main`, `MERGEABLE`, not yet merged.
+- **Prerequisite change (pending merge)** — remove
+  `spec.engine.canaryTrafficPercent` (this also removes `ValidateCanaryPercent`
+  and the `MixedRolloutForms` rule). Ready to merge, not yet merged.
 - **This OEP** — relocate coordination, delete `traffic.rollout` (keep its status
   reserved), reserve `canary`.
