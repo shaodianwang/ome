@@ -129,7 +129,7 @@ For each declared overlay, on every reconcile the ISVC controller:
 3. **Computes the effective path** per the overlay's distribution:
    - `PVC` → `/opt/ml/model-overlays/<name>`, mounted from the PVC into
      every runner container (read-only).
-   - `Sharded` → the raw `storage.storageUri` (e.g. `manifold://…`).
+   - `Sharded` → the raw `storage.storageUri` (e.g. `s3://…`).
      No mount; the runner is expected to fetch through the cluster_cache
      client envs that are already wired in.
    - `PerNode` (HostPath) → `spec.storage.path` value, mounted as
@@ -149,25 +149,25 @@ in OME.
 
 #### Story 1: Sharded primary, PVC overlay as runtime safety net
 
-Operator runs `avo-tier5` via Sharded + cluster_cache for performance.
+Operator runs `foo` via Sharded + cluster_cache for performance.
 Wants the same checkpoint mounted from a PVC as a last-resort path the
 engine can fall back to internally if cluster_cache misbehaves.
 
 ```yaml
 spec:
   model:
-    name: avo-tier5
+    name: foo
     overlays:
-      - name: avo-tier5-pvc
+      - name: foo-pvc
 ```
 
-Pod gets `MODEL_PATH=manifold://…` (primary, cluster_cache) and
-`OVERLAY_AVO_TIER5_PVC_MODEL_PATH=/opt/ml/model-overlays/avo-tier5-pvc`
+Pod gets `MODEL_PATH=s3://…` (primary, cluster_cache) and
+`OVERLAY_FOO_PVC_MODEL_PATH=/opt/ml/model-overlays/foo-pvc`
 (overlay, PVC mount). Engine wrapper script:
 
 ```sh
-exec python -m sglang_meta.launch_server \
-    --model-path "${MODEL_PATH:-${OVERLAY_AVO_TIER5_PVC_MODEL_PATH}}" \
+exec python -m sglang.launch_server \
+    --model-path "${MODEL_PATH:-${OVERLAY_FOO_PVC_MODEL_PATH}}" \
     ...
 ```
 
@@ -175,10 +175,10 @@ If cluster_cache health degrades, operator can flip via annotation
 without changing the spec:
 
 ```sh
-kubectl annotate isvc avo-tier5 ome.io/active-model=avo-tier5-pvc
+kubectl annotate isvc foo ome.io/active-model=foo-pvc
 ```
 
-Controller picks this up, sets `MODEL_PATH=/opt/ml/model-overlays/avo-tier5-pvc`
+Controller picks this up, sets `MODEL_PATH=/opt/ml/model-overlays/foo-pvc`
 on the next reconcile, rolls pods. Files already on disk → ~30s pod
 boot vs ~5min from a fresh PVC mount + load. Removing the annotation
 restores the primary.
@@ -451,10 +451,10 @@ Add to `tests/integration/singlecluster/controller/inferenceservice/`:
 
 - **Single PVC overlay, Sharded primary**: pod spec contains
   cluster_cache envs + PVC volume + `OVERLAY_<name>_MODEL_PATH` env;
-  primary `MODEL_PATH` is the manifold URI.
+  primary `MODEL_PATH` is the raw storage URI.
 - **Single Sharded overlay, PVC primary**: pod spec contains PVC
   mount + cluster_cache envs (because of overlay) + `OVERLAY_<name>_MODEL_PATH`
-  = manifold URI.
+  = the raw storage URI.
 - **Two overlays, mixed types**: both env vars present, only PVC
   contributes a volume.
 - **Disabled overlay**: omitted from pod spec;
