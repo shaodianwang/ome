@@ -4,7 +4,9 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import generate_cases
 import run
 
 HERE = Path(__file__).parent.resolve()
@@ -156,6 +158,33 @@ class GeneratedCorpusTest(unittest.TestCase):
         # decision, not a bigger PR.
         n = sum(1 for _ in (HERE / "isvcs").glob("**/*.yaml"))
         self.assertLessEqual(n, 3000)
+
+    def test_parked_cell_emits_xfail_header_and_reason(self):
+        """A PARKED entry must turn its cell into notimpl=1 issue=N with the
+        parked reason as the line-2 rationale — the only quiet path for a
+        generated case (build_outputs is pure; nothing is written here).
+        The fixture cell is one that is NOT parked for real, so the test
+        stays independent of the live parking table."""
+        cell = ("kill", "engine", 0, "RecreatePod", "None", "", None)
+        self.assertNotIn(cell, generate_cases.PARKED)
+        with mock.patch.dict(generate_cases.PARKED,
+                             {cell: (999999, "parked on a tracked bug (fixture)")}):
+            outputs, rows = generate_cases.build_outputs()
+        parked = [(f, n) for f, n, _kv, m in rows if m.get("parked") == 999999]
+        self.assertEqual(len(parked), 1, "exactly the parked cell is marked")
+        folder, name = parked[0]
+        text = outputs[f"{folder}/{name}.yaml"]
+        header = text.splitlines()[0]
+        self.assertIn("notimpl=1", header)
+        self.assertIn("issue=999999", header)
+        self.assertEqual(text.splitlines()[1],
+                         "# reason: parked on a tracked bug (fixture)")
+
+    def test_stale_parked_key_fails_the_regen(self):
+        cell = ("kill", "no-such-topo", 0, "SurgeThenDrain", "None", "", None)
+        with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "stale")}):
+            with self.assertRaises(SystemExit):
+                generate_cases.build_outputs()
 
 
 if __name__ == "__main__":

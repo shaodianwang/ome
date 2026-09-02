@@ -1,11 +1,14 @@
-# p416: runtime-rev engine corrective-rollout-deadlocks-behind-stuck-surge (KNOWN BUG: deadlocks today) mode=runtimerev rt=ome-coordtest-rt-p416 expect=recover break=stuck Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+# p416: runtime-rev engine corrective-rollout-deadlocks-behind-stuck-surge (KNOWN BUG: deadlocks today) mode=runtimerev rt=ome-coordtest-rt-p416 expect=recover break=stuck Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine notimpl=1 issue=1355
 # Surge-budget deadlock guard (prod incident, t4-9b-mm-smg-shadow). maxSurge=1:
 # a prior rollout's ONE surge pod runs but never becomes Ready (readinessProbe
 # forced to fail; container stays up via startup/liveness → no crash, no
 # ImagePullBackOff → the fast stuck-pod breaker never fires). That stuck surge
 # holds the entire maxSurge budget, so a later CORRECTIVE rollout can start zero
 # new-revision pods and deadlocks at 0/N until instanceReadyTimeout. MUST roll
-# the corrective revision forward; today it does not.
+# the corrective revision forward; the deadlock is the tracked bug the header
+# issue parks this case on. The other half of a red run — the never-Ready
+# surge pod surviving teardown by holding its full termination grace — is
+# fixed separately by the fixture command's stop-signal trap.
 apiVersion: ome.io/v1beta1
 kind: ClusterServingRuntime
 metadata:

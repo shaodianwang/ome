@@ -112,6 +112,30 @@ HAND_PINNED_KILL = {
     ("pd-mn", 1, "SurgeThenDrain", "RecreateInstance", "freeze", "leader"): "p153",
 }
 
+# Cells parked on tracked product bugs: cell key -> (issue number, reason).
+# A parked cell emits notimpl=1 issue=N and carries the reason as its line-2
+# rationale, so the runners record XFAIL (known bug: #N) instead of red and
+# the PARKED DEBT table keeps the debt visible. This is the ONLY way a
+# generated case goes quiet: entries require a filed issue number, and a key
+# that matches no emitted cell fails the regen (stale parking is invisible
+# debt). Cell keys are the per-family tuples the emitters build:
+#   ("rollout", topo, w, strat, surge, unavail)
+#   ("podkill", phase, topo, w, size, strat, surge, unavail, rp)
+#   ("kill", topo, w, strat, rp, pause, target)
+_FREEZE_TOTAL_LOSS = (
+    "under freeze, RecreateInstance total pod loss is neither repaired "
+    "(frozen, correct) nor demoted (truth-pass carve-out), so Phase=Ready "
+    "persists over podCount=0 until the fix couples truthful demotion with "
+    "a repair-eligibility path")
+# The single-pod freeze x RecreateInstance cells: every strategy (dormant
+# under a kill) on both single-pod topologies shows the same stale-Ready
+# window; gang shapes keep podCount > 0, so only these cells can observe it.
+PARKED = {
+    ("kill", topo, 0, strat, "RecreateInstance", "freeze", None): (1354, _FREEZE_TOTAL_LOSS)
+    for topo in ("engine", "pd")
+    for strat in ("SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly")
+}
+
 # Runner verbs/hooks this corpus needs but the runners do not implement yet.
 # Kept in the manifest so the follow-up surface stays visible next to the
 # corpus it would grow.
@@ -220,7 +244,8 @@ def emit_rollout(add):
                 if is_pd(topo):
                     reason += "; decoder/router are negative controls (co=none)"
                 life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
-                add("gen-rollout", desc, kv, comps(topo, n, w, life), reason, meta)
+                add("gen-rollout", desc, kv, comps(topo, n, w, life), reason, meta,
+                    cell=("rollout", topo, w, strat, surge, unavail))
 
 
 # ── gen-fault: podkill during a rollout ─────────────────────────────────────
@@ -305,7 +330,9 @@ def emit_fault(add):
                                       if is_pd(topo) else None)
                             add("gen-fault", desc, kv,
                                 comps(topo, size, w, life, d_life=d_life),
-                                reason, meta)
+                                reason, meta,
+                                cell=("podkill", phase, topo, w, size, strat,
+                                      surge, unavail, rp))
 
 
 # ── gen-restart: steady-state kill x pause x strategy ───────────────────────
@@ -363,7 +390,8 @@ def emit_restart(add):
                         d_life = (lib.lifecycle(restart=RP_FULL[rp])
                                   if is_pd(topo) else None)
                         add("gen-restart", desc, kv,
-                            comps(topo, n, w, life, d_life=d_life), reason, meta)
+                            comps(topo, n, w, life, d_life=d_life), reason, meta,
+                            cell=("kill", topo, w, strat, rp, pause, target))
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
@@ -372,20 +400,31 @@ def build_outputs():
     outputs = {}
     counters = {f: lo for f, (lo, _hi) in GEN_BLOCKS.items()}
     rows = []   # (folder, case id, kv, meta) for the manifest
+    parked_used = set()
 
-    def add(folder, desc, kv, case_comps, reason, meta):
+    def add(folder, desc, kv, case_comps, reason, meta, cell):
         lo, hi = GEN_BLOCKS[folder]
         cid = counters[folder]
         if cid >= hi:
             sys.exit(f"{folder}: id block exhausted at p{cid} (block ends before p{hi})")
         counters[folder] += 1
         name = f"p{cid}"
+        if cell in PARKED:
+            parked_used.add(cell)
+            issue, parked_reason = PARKED[cell]
+            kv = dict(kv, notimpl=1, issue=issue)
+            reason = parked_reason
+            meta = dict(meta, parked=issue)
         outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, case_comps, reason)
         rows.append((folder, name, dict(kv), dict(meta)))
 
     emit_rollout(add)
     emit_fault(add)
     emit_restart(add)
+    stale = set(PARKED) - parked_used
+    if stale:
+        sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
+                 + "; ".join(repr(k) for k in sorted(stale)))
     outputs[MANIFEST_REL] = manifest(rows)
     return outputs, rows
 
@@ -438,6 +477,12 @@ def manifest(rows):
     lines += table("By failure verb / phase", tally(lambda kv, m: m["verb"]))
     lines += table("By restartPolicy", tally(lambda kv, m: m.get("rp", "(unset — baseline)")))
     lines += table("By pause", tally(lambda kv, m: m.get("pause", "off")))
+    parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
+    if parked_rows:
+        lines += ["### Parked cells (XFAIL on a tracked issue)", "",
+                  "| case | folder | issue |", "|---|---|---|"]
+        lines += [f"| {n} | {f} | #{i} |" for f, n, i in parked_rows]
+        lines += [""]
     lines += [
         "## Constraint ledger (tuples excluded during construction)",
         "",
