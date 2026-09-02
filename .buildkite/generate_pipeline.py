@@ -567,8 +567,17 @@ def _gke_upgrade_identity_step() -> str:
     skips loudly, without failing the step, whenever the manager+agent pair
     was not baked — so this step existing on a build does not by itself mean
     an upgrade was actually exercised.
+
+    shared_model=True gives the runner and dind containers the same
+    /ome-eval-model emptyDir the eval lane uses. The model fixture's
+    hostPath PV is bind-mounted into the KIND node from dind's filesystem,
+    not the runner's, so the suite's pre-cluster chmod of that path (see
+    suite_test.go) only reaches the directory dind and KIND actually use
+    when this volume is shared between the two containers.
     """
-    plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
+    plugins = _gke_kind_plugins(
+        _kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"), shared_model=True
+    )
     step = {
         "label": ":test_tube: Operator-upgrade identity (deployed KIND)",
         "key": "kind-gke-upgrade-identity",

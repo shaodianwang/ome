@@ -38,9 +38,11 @@ spec:
             - sh
             - -c
             - |
+              set -e
               cat > /m/config.json <<'JSON'
               {"architectures":["TestArchitecture"],"model_type":"test","hidden_size":1,"num_attention_heads":1,"num_hidden_layers":1,"vocab_size":1,"torch_dtype":"float32"}
               JSON
+              [ -s /m/config.json ]
               echo "seed written"
           volumeMounts:
             - { name: m, mountPath: /m }
