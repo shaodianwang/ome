@@ -369,6 +369,26 @@ for webhook in true false; do
   done
 done
 
+# --- runAsNonRoot binds the container, not the pod ---
+#
+# A pod-level runAsNonRoot also binds every container the platform injects, and
+# an injected initContainer carries no securityContext of its own. One that runs
+# as root then fails with "container has runAsNonRoot and image will run as
+# root" and takes the pod with it -- which is how an exec-credential install
+# breaks. The workload's own guarantee is unchanged either way.
+ctx="$(render --set quotaManager.mode=management --show-only templates/deployment.yaml)"
+python3 - "$ctx" <<'PY' || fail "runAsNonRoot is not scoped to the container"
+import sys, re
+doc = sys.argv[1]
+spec = doc.split('    spec:', 1)[1]
+pod_ctx = spec.split('      containers:', 1)[0]
+if 'runAsNonRoot' in pod_ctx:
+    raise SystemExit("pod-level securityContext still sets runAsNonRoot")
+ctr = spec.split('      containers:', 1)[1]
+if 'runAsNonRoot: true' not in ctr:
+    raise SystemExit("container securityContext lost runAsNonRoot")
+PY
+
 # And absent, they add nothing: an empty env/volumes block is invalid, not inert.
 bare="$(render --set quotaManager.mode=management \
   --set quotaManager.webhook.enabled=false --show-only templates/deployment.yaml)"

@@ -205,13 +205,19 @@ quotaManager:
   affinity: {}
 
   podAnnotations: {}
-  # Extra env/volumes for the container. Needed when projection authenticates
-  # to members through an exec plugin: the plugin's trust store and cert paths
-  # are not part of the identity injection.
-  extraEnv: []
-  extraVolumes: []
-  extraVolumeMounts: []
   podLabels: {}
+
+  # Pod-level securityContext, which containers that set none inherit. Empty by
+  # default, and the workload's own guarantee is asserted on its container
+  # instead — see securityContext below.
+  #
+  # The distinction matters when the platform injects a container. An injected
+  # initContainer carries no securityContext of its own, so a pod-level
+  # runAsNonRoot applies to it: an image that runs as root then fails to start
+  # with "container has runAsNonRoot and image will run as root", taking the pod
+  # with it. Constraining the pod constrains whatever the platform adds, which
+  # is not the thing this chart is trying to constrain.
+  podSecurityContext: {}
 
   # Escape hatches for what the platform, rather than this chart, has to supply.
   # The case they exist for is an exec-credential kubeconfig: the plugin binary
