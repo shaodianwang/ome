@@ -51,15 +51,32 @@ func envEnabled(key string) bool {
 // give it 3min to absorb cold image pulls on first-ever runs.
 const clusterCreateTimeout = 3 * time.Minute
 
+// KindExtraMount mirrors one entry of a KIND node's extraMounts: a host
+// directory bind-mounted into a node container at the same (or a
+// caller-chosen) path, applied identically to every node in the cluster.
+// Needed by any fixture that assumes a real, node-independent filesystem —
+// a static hostPath PersistentVolume, for instance — since without it
+// kubelet's own DirectoryOrCreate handling only ever sees the individual
+// node container's own throwaway filesystem.
+type KindExtraMount struct {
+	HostPath      string
+	ContainerPath string
+}
+
 // EnsureCluster brings the named cluster into a Ready state. If the
 // cluster already exists, it's reused (modulo KIND_RECREATE=1). The
 // returned restConfig points at the cluster's apiserver.
+//
+// extraMounts, if given, is applied to every node (control-plane and
+// workers alike) so a bind-mounted host path is available regardless of
+// which node a pod lands on. Ignored when reusing an existing cluster —
+// only cluster creation can set extraMounts.
 //
 // Failure modes are explicit:
 //   - `kind` binary missing on $PATH → ErrKindMissing
 //   - docker / container-runtime backend not responding → ErrDockerMissing
 //   - `kind create cluster` non-zero exit → wrapped error with stderr
-func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config, error) {
+func EnsureCluster(ctx context.Context, name string, workers int, extraMounts ...KindExtraMount) (*rest.Config, error) {
 	if _, err := exec.LookPath("kind"); err != nil {
 		return nil, fmt.Errorf("%w: install kind via "+
 			"`curl -Lo ~/.local/bin/kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-darwin-arm64 && chmod +x ~/.local/bin/kind`",
@@ -87,7 +104,7 @@ func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config,
 		exists = false
 	}
 	if !exists {
-		if err := createCluster(ctx, name, workers); err != nil {
+		if err := createCluster(ctx, name, workers, extraMounts); err != nil {
 			return nil, err
 		}
 	}
@@ -145,19 +162,20 @@ func clusterExists(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
 
-// createCluster runs `kind create cluster --wait` for the named
-// cluster with the requested worker count. Single-node clusters
-// (workers=0) skip the multi-node config-file dance for fastest
-// spinup.
-func createCluster(ctx context.Context, name string, workers int) error {
+// createCluster runs `kind create cluster --wait` for the named cluster
+// with the requested worker count and extraMounts. A single-node cluster
+// with no extraMounts skips the config-file dance entirely for fastest
+// spinup; either a worker count or extraMounts forces a config file since
+// both require settings `kind create cluster`'s flags cannot express.
+func createCluster(ctx context.Context, name string, workers int, extraMounts []KindExtraMount) error {
 	args := []string{"create", "cluster", "--name", name, "--wait", "60s"}
 	if img := strings.TrimSpace(os.Getenv(envNodeImage)); img != "" {
 		args = append(args, "--image", img)
 	}
-	if workers > 0 {
-		cfg, cleanup, err := writeMultiNodeConfig(workers)
+	if workers > 0 || len(extraMounts) > 0 {
+		cfg, cleanup, err := writeClusterConfig(workers, extraMounts)
 		if err != nil {
-			return fmt.Errorf("createCluster: write multi-node config: %w", err)
+			return fmt.Errorf("createCluster: write cluster config: %w", err)
 		}
 		defer cleanup()
 		args = append(args, "--config", cfg)
@@ -175,16 +193,30 @@ func createCluster(ctx context.Context, name string, workers int) error {
 	return nil
 }
 
-// writeMultiNodeConfig emits a temp KIND config-file with N worker
-// nodes and returns its path. cleanup deletes the temp file.
-func writeMultiNodeConfig(workers int) (string, func(), error) {
+// writeClusterConfig emits a temp KIND config-file with N worker nodes and
+// returns its path. extraMounts, when non-empty, is repeated identically
+// on every node (control-plane and workers) — a static hostPath
+// PersistentVolume needs the same content regardless of which node a pod
+// mounting it lands on. cleanup deletes the temp file.
+func writeClusterConfig(workers int, extraMounts []KindExtraMount) (string, func(), error) {
 	var b bytes.Buffer
 	b.WriteString("kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n")
-	b.WriteString("- role: control-plane\n")
-	for i := 0; i < workers; i++ {
-		b.WriteString("- role: worker\n")
+	writeNode := func(role string) {
+		b.WriteString("- role: " + role + "\n")
+		if len(extraMounts) == 0 {
+			return
+		}
+		b.WriteString("  extraMounts:\n")
+		for _, m := range extraMounts {
+			b.WriteString("  - hostPath: " + m.HostPath + "\n")
+			b.WriteString("    containerPath: " + m.ContainerPath + "\n")
+		}
 	}
-	f, err := os.CreateTemp("", "kind-multinode-*.yaml")
+	writeNode("control-plane")
+	for i := 0; i < workers; i++ {
+		writeNode("worker")
+	}
+	f, err := os.CreateTemp("", "kind-cluster-config-*.yaml")
 	if err != nil {
 		return "", func() {}, err
 	}

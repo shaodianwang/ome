@@ -41,6 +41,18 @@ const upgradeNamespace = "ome-upgrade-identity"
 // Deployment — deploy-ome-kind.sh's OME_NAMESPACE default.
 const omeNamespace = "ome"
 
+// modelFixtureHostPath backs the static hostPath PersistentVolume the model
+// fixture's pv-kind.yaml declares (its own OME_EVAL_PV_HOST_PATH default,
+// which nothing in this suite overrides). pv-kind.yaml's own comment
+// documents the contract: KIND nodes are expected to share this path
+// through an extraMount in the cluster config, the way
+// run_omenative_eval_gke.sh's hand-built cluster already does for the eval
+// lane. Passed as an ExtraMount below (on every node, so scheduling can't
+// route the seed Job and the metadata-extraction Job to two different
+// views of it) to satisfy that same contract for a kindutil-created
+// cluster.
+const modelFixtureHostPath = "/ome-eval-model"
+
 // Per-spec timeouts — local aliases of the shared kindfix KIND tier.
 const (
 	kindMediumTimeout    = kindfix.MediumTimeout
@@ -67,9 +79,25 @@ func TestOMENativeUpgradeIdentity(t *testing.T) {
 		t.Fatalf("OMENative upgrade-identity gate requires one Ginkgo process per KIND cluster; got %d", suiteConfig.ParallelTotal)
 	}
 
+	// The extraMount below only lets a node see this path — something still
+	// has to create it first. DirectoryOrCreate would do that itself once a
+	// pod mounts the resulting PV, but seeding 0777 up front means the seed
+	// Job's container (an arbitrary, non-root image UID) can write to it
+	// regardless of which UID a bare mkdir would have picked.
+	if err := os.MkdirAll(modelFixtureHostPath, 0o777); err != nil {
+		t.Fatalf("create %s for the model fixture's hostPath PV: %v (needs write access to create a top-level directory; run with sudo or pre-create it)",
+			modelFixtureHostPath, err)
+	}
+	if err := os.Chmod(modelFixtureHostPath, 0o777); err != nil {
+		t.Fatalf("chmod %s for the model fixture's hostPath PV: %v", modelFixtureHostPath, err)
+	}
+
 	state := kindutil.RunKindSuite(t, kindutil.SuiteOpts{
 		ClusterName: "ome-upgrade-kind",
 		Scheme:      kindfix.OMEScheme(),
+		ExtraMounts: []kindutil.KindExtraMount{
+			{HostPath: modelFixtureHostPath, ContainerPath: modelFixtureHostPath},
+		},
 		// Dependencies only; the chart owns the OME CRDs.
 		CRDPaths: []string{
 			"tests/integration/dep-crds/prometheus-operator",

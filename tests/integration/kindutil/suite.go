@@ -24,6 +24,14 @@ type SuiteOpts struct {
 	// recommended value for tests that need scheduling pressure.
 	Workers int
 
+	// ExtraMounts, if given, bind-mounts each host path into every node
+	// (control-plane and workers alike) at cluster-creation time. Only
+	// takes effect when the cluster doesn't already exist — see
+	// EnsureCluster. A fixture relying on a static hostPath
+	// PersistentVolume needs this so the same directory backs the volume
+	// regardless of which node a consuming pod lands on.
+	ExtraMounts []KindExtraMount
+
 	// BuildImages declares Docker images to build + kind-load before
 	// the manager starts. The build step is content-hashed so re-runs
 	// skip the work when the source files haven't changed.
@@ -141,7 +149,7 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cfg, err := EnsureCluster(ctx, opts.ClusterName, opts.Workers)
+	cfg, err := EnsureCluster(ctx, opts.ClusterName, opts.Workers, opts.ExtraMounts...)
 	if err != nil {
 		t.Fatalf("RunKindSuite: EnsureCluster(%s): %v", opts.ClusterName, err)
 	}
