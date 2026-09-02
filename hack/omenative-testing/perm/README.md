@@ -61,13 +61,17 @@ perm/
 Read `runtime/csr.yaml`. The critical line:
 
 ```yaml
-command: ["sh", "-c", "sleep ${TEST_STARTUP_DELAY:-15} && … && exec nginx …"]   # TEST_STARTUP_DELAY=15
+command: ["sh", "-c", "trap 'exit 0' TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && … && exec nginx …"]   # TEST_STARTUP_DELAY=15
 ```
 
 Plain nginx goes Ready in ~150 ms, so a pod sampler misses every transition. The
 ~15 s `sleep` stretches each pod's Ready transition so a rotation spans long
 enough for the watcher to catch the **peak** concurrent pods per Component — which
-is what proves a strategy respected its surge/unavailable budget.
+is what proves a strategy respected its surge/unavailable budget. The `trap`
+matters just as much: until the `exec`, `sh` is PID 1, and an untrapped SIGTERM
+during the startup sleep would leave a deleted pod Terminating for its full
+termination grace (the admission-defaulted grace is far longer than any teardown
+budget here) instead of exiting immediately.
 `csr-multinode.yaml` applies the same startup delay to the gang runtime (leader +
 workers), so multi-node cases catch their peaks too.
 

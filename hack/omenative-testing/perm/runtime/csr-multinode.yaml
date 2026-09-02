@@ -25,13 +25,16 @@ spec:
       runner: &mnRunner
         name:  ome-container
         image: ${OME_EVAL_NGINX_IMAGE}
+        # The trap keeps sh (PID 1 until the exec) SIGTERM-responsive: untrapped,
+        # a delete landing in the startup window would leave the pod Terminating
+        # for its full termination grace instead of exiting at once.
         # Cap nginx workers (NOT 'auto'): 'auto' = one worker per NODE core,
         # ignoring the CPU cgroup quota — on a 144-core gang node that's ~144
         # workers → OOM at 128Mi (and thrash at 200m CPU). The image conf already
         # sets worker_processes (so -g would be a duplicate directive); instead
         # sed a copy into /tmp (the conf is read-only) and nginx -c it, which
         # preserves the image's writable pid path + its 8080 server.
-        command: ["sh", "-c", "sleep ${TEST_STARTUP_DELAY:-15} && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
+        command: ["sh", "-c", "trap 'exit 0' TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
         env:
           - { name: TEST_REV,            value: "v1" }
           - { name: TEST_STARTUP_DELAY,  value: "15" }

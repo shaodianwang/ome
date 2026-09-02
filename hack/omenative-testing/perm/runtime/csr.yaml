@@ -25,11 +25,14 @@ spec:
       # The critical line: sleep before starting nginx so pod startup
       # takes ~15s. Without this, peak/drain transitions complete in
       # ~2s and the sampler misses them.
+      # The trap keeps sh (PID 1 until the exec) SIGTERM-responsive: untrapped,
+      # a delete landing in the startup window would leave the pod Terminating
+      # for its full termination grace instead of exiting at once.
       # Cap nginx workers (NOT 'auto', which = one worker per NODE core and
       # ignores the CPU cgroup quota → OOM on a big node). The image conf already
       # sets worker_processes, so sed a copy into /tmp (conf is read-only) and
       # nginx -c it — preserving the image's writable pid path + 8080 server.
-      command: ["sh", "-c", "sleep ${TEST_STARTUP_DELAY:-15} && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
+      command: ["sh", "-c", "trap 'exit 0' TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
       env:
         - { name: TEST_REV,            value: "v1" }
         - { name: TEST_STARTUP_DELAY,  value: "15" }
