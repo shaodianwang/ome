@@ -41,7 +41,7 @@ make xet-build            # Build the Rust xet native library (required before o
 ### Test
 ```bash
 make test                 # Run all unit tests (builds xet first)
-make test-no-xet          # Run tests excluding ome-agent (no Rust dependency needed)
+make test-no-xet          # Run tests excluding xet-linked ome-agent packages (no Rust dependency needed)
 make integration-test     # Run Ginkgo integration tests from tests/ directory (envtest)
 make test-kind            # Run KIND-backed integration tests (real kubelet — needs docker + kind locally)
 make test-kind-clean      # Delete leftover KIND clusters from prior test-kind runs
@@ -50,9 +50,8 @@ make coverage             # Show coverage summary (48% threshold enforced)
 
 `make test-kind` runs only the coordination suite under
 `tests/integration/singlecluster/controller/omenative_coordination_kind/`. It
-needs Docker on the host and a `kind` binary on PATH (install with
-`make kind`, which pins the version from `hack/internal/tools/go.mod`
-and installs to `bin/kind`). `KIND_KEEP_CLUSTER=true` is
+needs Docker on the host and a `kind` binary on PATH or at `bin/kind` (install
+the pinned version with `make kind`). `KIND_KEEP_CLUSTER=true` is
 on by default so re-runs are fast; set `KIND_RECREATE=true` to force
 a fresh cluster. Narrow with `GINKGO_FOCUS='regex'`.
 
@@ -120,7 +119,7 @@ make test-kind-clean                                 # delete leftover KIND clus
 
 Requirements:
 - Docker daemon running on the host (KIND brings up the cluster as a Docker container).
-- `kind` binary on PATH: `make kind` (version pinned in `hack/internal/tools/go.mod`, installed to `bin/kind`).
+- `kind` binary on `PATH` or at `bin/kind`; run `make kind` to install the pinned version.
 
 `KIND_KEEP_CLUSTER=true` is on by default in `make test-kind` — the cluster persists between runs for fast iteration. Set `KIND_RECREATE=true` to force a fresh cluster (use after suspected dirty state).
 
@@ -128,6 +127,7 @@ Direct `go test` (when you need extra flags):
 
 ```sh
 KIND_KEEP_CLUSTER=true \
+  PATH="$(pwd)/bin:$PATH" \
   go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
   -v -timeout 30m -ginkgo.v -ginkgo.focus 'rollout converges'
 ```

@@ -583,9 +583,10 @@ EXCLUDE_PATTERNS := "pkg/testing/|pkg/testutils/|_generated\.go|zz_generated|pkg
 # Define test packages
 TEST_PACKAGES     := $(shell go list ./... | grep -v -E '(pkg/apis|pkg/testing|pkg/openapi|pkg/client)')
 CMD_PACKAGES      := $(shell go list ./cmd/...)
-CMD_PACKAGES_NO_XET := $(shell go list ./cmd/... | grep -v './cmd/ome-agent')
+CMD_PACKAGES_NO_XET := $(filter-out github.com/ome-projects/ome/cmd/ome-agent,$(CMD_PACKAGES))
 PKG_PACKAGES      := $(shell go list ./pkg/... | grep -v -E '(pkg/testing|pkg/openapi|pkg/client|pkg/xet)')
 INTERNAL_PACKAGES := $(shell go list ./internal/...)
+INTERNAL_PACKAGES_NO_XET := $(filter-out github.com/ome-projects/ome/internal/ome-agent/replica%,$(INTERNAL_PACKAGES))
 
 # Centralized Environment
 TEST_ENV = \
@@ -623,12 +624,20 @@ test: fmt vet manifests envtest xet-build ## 🧪 Run all tests with coverage
 	@echo "\n🎉 All tests completed successfully!"
 
 .PHONY: test-no-xet
-test-no-xet: fmt vet manifests envtest ## 🧪 Run tests excluding ome-agent
-	@echo "\n🧪 Running test suite (excluding ome-agent, Toolchain: $(GOTOOLCHAIN))..."
+test-no-xet: fmt vet manifests envtest test-no-xet-deps ## 🧪 Run tests excluding XET-linked ome-agent packages
+	@echo "\n🧪 Running test suite (excluding XET-linked ome-agent packages, Toolchain: $(GOTOOLCHAIN))..."
 	$(call run_go_test,$(CMD_PACKAGES_NO_XET),cmd,-no-xet)
 	$(call run_go_test,$(PKG_PACKAGES),pkg,-no-xet)
-	$(call run_go_test,$(INTERNAL_PACKAGES),internal,-no-xet)
-	@echo "\n🎉 All tests completed successfully (excluding ome-agent)!"
+	$(call run_go_test,$(INTERNAL_PACKAGES_NO_XET),internal,-no-xet)
+	@echo "\n🎉 All tests completed successfully (excluding XET-linked ome-agent packages)!"
+
+.PHONY: test-no-xet-deps
+test-no-xet-deps: ## 🧪 Verify the no-xet package set does not link XET
+	@deps="$$( $(GO_CMD) list -deps $(CMD_PACKAGES_NO_XET) $(PKG_PACKAGES) $(INTERNAL_PACKAGES_NO_XET) )" || exit $$?; \
+	if printf '%s\n' "$$deps" | grep -qx 'github.com/ome-projects/ome/pkg/xet'; then \
+		echo "❌ test-no-xet package set depends on pkg/xet"; \
+		exit 1; \
+	fi
 
 .PHONY: coverage
 coverage: ## Show coverage summary and enforce threshold
@@ -908,7 +917,7 @@ mc-realkueue: envtest dep-crds ## 🧪 Run the OEP-0018 real-Kueue multi-cluster
 .PHONY: test-kind
 test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND-backed integration tests..."
-	@command -v kind >/dev/null 2>&1 || { \
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
@@ -922,7 +931,8 @@ test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real ku
 	@# 90m timeout: 94 specs in the suite with per-spec timeouts up to
 	@# kindLongTimeout=5m. Headroom for the long tail without masking a
 	@# genuine deadlock.
-	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
+	@PATH="$(LOCALBIN):$$PATH" \
+		LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
 		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
 		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
 		go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
@@ -933,7 +943,7 @@ test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real ku
 OME_EVAL_NAMESPACE ?= sandbox
 test-kind-eval: dep-crds ## 🧪 Run migrated OMENative eval cases against a chart-installed OME
 	@echo "🧪 Running deployed OME eval tests..."
-	@command -v kind >/dev/null 2>&1 || { \
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
@@ -941,7 +951,8 @@ test-kind-eval: dep-crds ## 🧪 Run migrated OMENative eval cases against a cha
 		echo "❌ docker is not reachable. Deployed OME eval tests need a running Docker daemon."; \
 		exit 1; \
 	}
-	@OME_TEST_NS=$${OME_TEST_NS:-$(OME_EVAL_NAMESPACE)} \
+	@PATH="$(LOCALBIN):$$PATH" \
+		OME_TEST_NS=$${OME_TEST_NS:-$(OME_EVAL_NAMESPACE)} \
 		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
 		go test ./tests/integration/singlecluster/e2e/omenative_eval_kind/... \
 		-count=1 -v -timeout 60m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
@@ -970,7 +981,7 @@ test-kind-upgrade: dep-crds ## 🧪 Run the operator-upgrade identity gate again
 .PHONY: test-kind-irmanaged
 test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND IR-managed OMENative tests..."
-	@command -v kind >/dev/null 2>&1 || { \
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
@@ -984,7 +995,8 @@ test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENa
 	@# controller registered + IR-managed enabled. On a resource-constrained
 	@# host (e.g. an 8GB Colima VM) run `make test-kind-clean` first so this
 	@# cluster doesn't contend with the coordination cluster.
-	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
+	@PATH="$(LOCALBIN):$$PATH" \
+		LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
 		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
 		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
 		go test ./tests/integration/singlecluster/controller/irmanaged_kind/... \
@@ -994,7 +1006,7 @@ test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENa
 .PHONY: test-kind-raw
 test-kind-raw: xet-build dep-crds ## 🧪 Run KIND-backed RawDeployment tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND RawDeployment tests..."
-	@command -v kind >/dev/null 2>&1 || { \
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
@@ -1005,7 +1017,8 @@ test-kind-raw: xet-build dep-crds ## 🧪 Run KIND-backed RawDeployment tests (r
 	@# RawDeployment end-to-end on a real kubelet (its own cluster ome-raw-kind):
 	@# the Deployment must actually schedule pods that report Ready, which the
 	@# envtest controller/inferenceservice suite cannot observe.
-	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
+	@PATH="$(LOCALBIN):$$PATH" \
+		LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
 		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
 		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
 		go test ./tests/integration/singlecluster/controller/rawdeployment_kind/... \
@@ -1017,7 +1030,7 @@ PERM_PROCS ?= 2
 
 .PHONY: test-kind-perm-up
 test-kind-perm-up: dep-crds ## 🧪 Bring up the perm KIND cluster + CRDs + fake-serving images (no specs); then run the external manager
-	@command -v kind >/dev/null 2>&1 || { \
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
@@ -1030,10 +1043,11 @@ test-kind-perm-up: dep-crds ## 🧪 Bring up the perm KIND cluster + CRDs + fake
 	@# -count=1 defeats the go-test result cache (otherwise a second `-up` is a
 	@# no-op and never re-runs RunKindSuite).
 	@echo "🧪 Bringing up perm KIND cluster (ome-coord-kind) — cluster + CRDs + images, no specs..."
-	@KIND_KEEP_CLUSTER=true PERM_SETUP_ONLY=1 \
+	@PATH="$(LOCALBIN):$$PATH" \
+		KIND_KEEP_CLUSTER=true PERM_SETUP_ONLY=1 \
 		go test -count=1 -v -timeout 20m -run TestOMENativePerm \
 		./tests/integration/singlecluster/controller/omenative_perm_kind/
-	@kind get kubeconfig --name ome-coord-kind > "$(PERM_KUBECONFIG)"
+	@PATH="$(LOCALBIN):$$PATH" kind get kubeconfig --name ome-coord-kind > "$(PERM_KUBECONFIG)"
 	@echo ""
 	@echo "✅ Cluster up. Kubeconfig written to $(PERM_KUBECONFIG)"
 	@echo ""
@@ -1046,11 +1060,11 @@ test-kind-perm-up: dep-crds ## 🧪 Bring up the perm KIND cluster + CRDs + fake
 
 .PHONY: test-kind-perm
 test-kind-perm: dep-crds ## 🧪 Run the watch-driven OMENative rollout specs in parallel (needs test-kind-perm-up + an external manager)
-	@command -v kind >/dev/null 2>&1 || { \
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
 		exit 1; \
 	}
-	@kind get clusters 2>/dev/null | grep -qx ome-coord-kind || { \
+	@PATH="$(LOCALBIN):$$PATH" kind get clusters 2>/dev/null | grep -qx ome-coord-kind || { \
 		echo "❌ KIND cluster 'ome-coord-kind' not found. Run 'make test-kind-perm-up' first."; \
 		exit 1; \
 	}
@@ -1062,7 +1076,7 @@ test-kind-perm: dep-crds ## 🧪 Run the watch-driven OMENative rollout specs in
 	@# cluster — each PD spec brings up a ~10-pod fleet. KIND_KEEP_CLUSTER keeps
 	@# the shared cluster alive across the parallel processes.
 	@echo "🧪 Driving OMENative rollout specs ($(PERM_PROCS) parallel procs)..."
-	@KIND_KEEP_CLUSTER=true \
+	@PATH="$(LOCALBIN):$$PATH" KIND_KEEP_CLUSTER=true \
 		go run github.com/onsi/ginkgo/v2/ginkgo \
 		-procs=$(PERM_PROCS) --timeout=40m -v \
 		$(if $(GINKGO_FOCUS),--focus '$(GINKGO_FOCUS)') \
@@ -1071,9 +1085,9 @@ test-kind-perm: dep-crds ## 🧪 Run the watch-driven OMENative rollout specs in
 
 .PHONY: test-kind-clean
 test-kind-clean: ## 🧹 Delete leftover KIND clusters from prior test-kind runs
-	@kind get clusters 2>/dev/null | while read -r c; do \
+	@PATH="$(LOCALBIN):$$PATH" kind get clusters 2>/dev/null | while read -r c; do \
 		echo "🧹 Deleting kind cluster: $$c"; \
-		kind delete cluster --name "$$c"; \
+		PATH="$(LOCALBIN):$$PATH" kind delete cluster --name "$$c"; \
 	done
 
 
