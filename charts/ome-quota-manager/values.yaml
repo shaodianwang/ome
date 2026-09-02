@@ -233,6 +233,11 @@ quotaManager:
   extraVolumes: []
   extraVolumeMounts: []
 
+  # runAsNonRoot: true by default. The auth-tools injector adds a root init
+  # container, so a plane using execCredentials must relax this.
+  podSecurityContext:
+    runAsNonRoot: true
+
   # A single-replica install cannot satisfy a PDB, so it is off by default and
   # only meaningful alongside replicaCount > 1.
   podDisruptionBudget:
