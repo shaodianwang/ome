@@ -121,6 +121,9 @@ ome:
     #   operation_retention: completed prewarm status retention, e.g. 10m
     options: {}
   controller:
+    extraEnv: []
+    extraVolumes: []
+    extraVolumeMounts: []
     replicaCount: 3
     # Additional annotations applied to the controller pod template.
     # Merged after the chart's default annotations (prometheus.io/scrape, etc.).
