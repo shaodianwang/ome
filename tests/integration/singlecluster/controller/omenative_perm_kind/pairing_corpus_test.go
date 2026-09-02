@@ -173,6 +173,16 @@ func TestPairingCorpus(t *testing.T) {
 		if _, ok := pc.fields["infeasible"]; ok && !pc.reason {
 			t.Errorf("%s: infeasible=1 requires an adjacent '# reason:' comment on line 2", pc.id)
 		}
+		if pc.fields["notimpl"] == "1" {
+			// Parked debt must link its tracking issue and say in place why
+			// it is parked, so un-parking is a one-line header change.
+			if n, err := strconv.Atoi(pc.fields["issue"]); err != nil || n <= 0 {
+				t.Errorf("%s: notimpl=1 requires issue=<tracking issue number>, got %q", pc.id, pc.fields["issue"])
+			}
+			if !pc.reason {
+				t.Errorf("%s: notimpl=1 should carry an adjacent '# reason:' comment on line 2 naming why it is parked", pc.id)
+			}
+		}
 		if c, ok := pc.fields["canary"]; ok && c != "auto" {
 			t.Errorf("%s: mode=pairing drives canary groups auto-only (canary=%s)", pc.id, c)
 		}

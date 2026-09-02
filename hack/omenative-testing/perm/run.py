@@ -891,12 +891,13 @@ def _inv_check_pair_alive(inv, pod_state, hits, now):
     pairable pair must exist — some serving engine pod and serving decoder pod
     with equal protocols, or either empty (empty pairs with anything).
 
-    The gate's two documented liveness escapes are exempt:
+    The gate's liveness escapes are exempt:
       - no pair to protect: once no pairable pair exists (a side at zero, or
         externally destroyed), the check DISARMS — the unpaired samples that
         follow are the product progressing back toward a pair, exactly what the
         no-pair-pre-existing escape allows. It re-arms on the next pairable
-        sample.
+        sample. The last-hop escape's window is covered by the same rule: the
+        acting side's final hop passes through zero serving, which disarms.
       - the 1×1 mutual wall: both Components down to <=1 serving Instance is
         the bounded first-mover window the gate deliberately allows.
     """
@@ -3842,10 +3843,11 @@ def _pairing(case_id, yaml_file, desc, hdr):
     Optional mid-transition verbs (one-shot, after first observed progress):
     pause=true|freeze (hold, assert parked, lift, converge), pkill=1 (delete
     the last old-cohort decoder pod; recovery must still converge — pair-alive
-    is waived via inv_off=C on such cases since the harness, not the product,
-    destroys the pair), scale_e=/scale_d= (re-target replicas mid-roll),
-    proto2= (re-patch the protocol mid-roll; converge on the FINAL cohort with
-    no Instance stranded on the intermediate one).
+    and the decoder's capacity floor are exempt on such cases since the
+    harness, not the product, destroys the pair), scale_e=/scale_d= (re-target
+    replicas mid-roll), proto2= (re-patch the protocol once >=1 new-cohort pod
+    is READY — a re-target over a partially-landed intermediate; converge on
+    the FINAL cohort with no Instance stranded on the intermediate one).
 
     expect=reject inverts the case into an update-time admission negative: the
     Phase-2 patch itself must be DENIED (reason= substring asserted), because
@@ -4028,7 +4030,11 @@ def _pairing(case_id, yaml_file, desc, hdr):
                     ctx["N"][c] = min(N[c], t)   # floor basis: never below min(start, target)
                 checks.append("  ⓘ scale fired mid-transition: " + " ".join(f"{c}→{t}" for c, t in sorted(scale_to.items())))
 
-        if progressed and proto2 is not None and not p2_fired:
+        # The re-target fires MID-transition: at least one new-cohort pod must
+        # be Ready+counted before the second patch, so the case exercises a
+        # re-target over a partially-landed intermediate, not a patch race
+        # measured in seconds.
+        if proto2 is not None and not p2_fired and new_pod_split()[0] > 0:
             p2_fired = True
             pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
             print(f"  Phase 3a: re-patch pairingProtocol {target!r}→{final_target!r} mid-transition")
@@ -4114,7 +4120,14 @@ def _pairing(case_id, yaml_file, desc, hdr):
     verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
     verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
     verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
-    verdict = min_ready_checks(ctx, sorted(configured), verdict, notes, checks)
+    # pkill kills a serving decoder pod itself, so the decoder's ready count
+    # legitimately dips below its floor for the repair+startup window; assert
+    # the floor only on the untouched Components and report the decoder's dip.
+    floor_comps = sorted(configured - ({"decoder"} if pk_fired else set()))
+    verdict = min_ready_checks(ctx, floor_comps, verdict, notes, checks)
+    if pk_fired:
+        dmin = (ctx.get("min_ready") or {}).get("decoder", N["decoder"])
+        checks.append(f"  ⓘ decoder capacity floor exempt (pkill deleted its serving pod): min ready {dmin} during the induced repair window")
     if state == "CONVERGED":
         verdict = pairing_surface_checks(case_id, ctx, final_target, bumped, verdict, notes, checks)
     # rolloutHold observations. hold=1 asserts the pair floor visibly held a

@@ -250,14 +250,20 @@ revision, so the patch alone re-mints and rolls both pairing Components
 
 - `proto=<token|clear>` — the transition target; the starting value is
   whatever the case YAML declares (`""→X` adoption, `X→""` clear, `X→Y`
-  coordinated swap). `proto2=` re-patches mid-roll (converge on the FINAL
+  coordinated swap). `proto2=` re-patches once ≥1 new-cohort pod is READY —
+  a re-target over a partially-landed intermediate (converge on the FINAL
   cohort, no Instance stranded on the intermediate — the X-2 shape).
 - `hold=1` — assert a `status…rolloutHold` with `gate=Pairing` is observed
-  mid-transition (only on shapes where a denial window is guaranteed, e.g.
-  RecreatePod `maxUnavailable=100%`); otherwise holds are reported ⓘ.
+  mid-transition. Only shapes where the denial spans a startup cycle can
+  assert this: the acting Component must keep ≥2 serving instances through
+  the denied window (that blocks all three gate escapes — no-pair, the 1×1
+  wall, and last-hop), e.g. an in-place engine racing ahead of a surging
+  decoder. Drain-first shapes shed to ≤1 serving and get admitted by the
+  escapes in under a sampling tick — holds there are reported ⓘ only.
 - `pkill=1` — delete the LAST old-cohort decoder pod mid-transition and
-  assert full recovery + convergence. Such cases carry `inv_off=C` (the
-  harness, not the product, destroyed the pair) and `order_soft=1`.
+  assert full recovery + convergence. Such cases carry `inv_off=C` and
+  `order_soft=1`, and the decoder's capacity floor is exempt in-handler (the
+  harness, not the product, destroyed the pod); the engine floor stays hard.
 - `scale_e=` / `scale_d=` — re-target a Component's replicas mid-transition.
 - `expect=reject` + `mode=pairing` — an **update-time** admission negative:
   the CREATE is admitted and the Phase-2 protocol patch itself must be denied
@@ -270,8 +276,10 @@ Verdicts on top of the usual rollout checks: every engine/decoder pod carries
 carries the label in metadata and NO Service ever carries it in
 `spec.selector`. Continuous **invariant C (pair-alive)** arms for every
 non-empty→non-empty transition: whenever both engine and decoder serve, a
-pairable pair (equal or either-empty protocols) must exist — with the gate's
-two liveness escapes (no pair left to protect; the 1×1 mutual wall) exempted.
+pairable pair (equal or either-empty protocols) must exist. The gate's
+liveness escapes are exempt: the 1×1 mutual wall explicitly, and the no-pair
+and last-hop windows through the disarm rule (a side at zero serving drops
+`both-present`, and the tracker re-arms only on the next pairable sample).
 Waive with `inv_off=C` + a line-2 `# reason:` comment.
 
 A `canary=auto` case with a canary group in the YAML drives the same protocol

@@ -1,4 +1,4 @@
-# p803: pairing swap v1→v2 RecreatePod unavail=100% — credit-0 pacing serializes the drain-all and a Pairing hold is guaranteed  mode=pairing proto=nixl-v2 hold=1 Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 co=bluegreen topo=pd
+# p803: pairing swap v1→v2 RecreatePod unavail=100% — credit-0 pacing serializes the drain-all; once both sides drain to one the wall and last-hop escapes admit the tail, so any Pairing hold is sub-sampling (informational only)  mode=pairing proto=nixl-v2 Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 co=bluegreen topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p803 }

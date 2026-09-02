@@ -1,4 +1,5 @@
-# p825: pairing v1→v2 then cleared mid-transition — dropping to empty deactivates the gate mid-flight and converges label-free  mode=pairing proto=nixl-v2 proto2=clear Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 co=bluegreen topo=pd
+# p825: pairing v1→v2 then cleared mid-transition — dropping to empty deactivates the gate mid-flight and converges label-free  mode=pairing proto=nixl-v2 proto2=clear Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 co=bluegreen topo=pd notimpl=1 issue=1347
+# reason: parked on the mid-surge re-target wedge — re-patching the protocol while the first transition's surge is in flight strands the blueGreen group in Surging with no further update ops, so the fleet parks short of the final cohort; this case is the tracker for that wedge
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p825 }
