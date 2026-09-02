@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 import copy
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 import run
+
+HERE = Path(__file__).parent.resolve()
 
 
 def pod(component, index, runner="default", ready=True, serving=True):
@@ -134,6 +139,23 @@ class CanaryCommandStateTest(unittest.TestCase):
         got = run._canary_command_state(
             {"canaryRevisionHash": "new"}, "new", {"stable"}, 0)
         self.assertEqual(("new", 0, True, True, False), got)
+
+
+class GeneratedCorpusTest(unittest.TestCase):
+    def test_regeneration_is_byte_stable(self):
+        """The gen-* corpus is a pure function of generate_cases.py: a hand
+        edit to a generated file (or a generator edit without a regen) must
+        fail here, not surface as review noise."""
+        r = subprocess.run([sys.executable, str(HERE / "generate_cases.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=(r.stdout + r.stderr))
+
+    def test_corpus_stays_under_lane_cap(self):
+        # 3000 committed case files is the agreed ceiling for running the
+        # whole corpus in one eval lane; growth past it needs a lane split
+        # decision, not a bigger PR.
+        n = sum(1 for _ in (HERE / "isvcs").glob("**/*.yaml"))
+        self.assertLessEqual(n, 3000)
 
 
 if __name__ == "__main__":

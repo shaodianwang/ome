@@ -1,0 +1,27 @@
+# p1753: [gen] kill pd-mn W2 N=2 SurgeThenDrain rp RecreateInstance target leader pause true  mode=kill Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 restart=RecreateInstance kill=leader pause=true co=none topo=pd-mn
+# reason: pause suspends fleet changes, not the RestartPolicy: the whole instance (leader+workers) recreates from a dead leader while rollout-paused stays set
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1753 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

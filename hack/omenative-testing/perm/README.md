@@ -39,6 +39,7 @@ perm/
 ├── batch.py               — parallel fan-out over many cases (--conc, ranges)
 ├── gen_cases.py           — generator: feature cases (migration/restart/partition/scale/edge)
 ├── gen_mn.py              — generator: multi-node (gang) rollout cases → isvcs/rollout/
+├── generate_cases.py      — generator: hot-core permutation corpus → isvcs/gen-*/ (byte-stable; --check)
 ├── runtime_fixtures.py    — renders runtime/ for a target cluster (ns, storage, arch, images)
 ├── runtime/               — fixture TEMPLATES (see runtime_fixtures.py; not directly appliable)
 │   ├── csr.yaml            — single-pod ClusterServingRuntime (nginx + a startup sleep)
@@ -48,7 +49,8 @@ perm/
 │   └── pvc-and-seed.yaml   — 1Mi PVC + seed Job (writes config.json so the CBM validates)
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
-│   └── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
+│   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
+│   └── gen-rollout/ gen-fault/ gen-restart/  — generated hot core (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -354,12 +356,19 @@ surviving pod's UID never rotated (skipped for gangs, where pods are recreated).
 
 ## Regenerating cases
 
-Two generators (re-run after editing; both write into `isvcs/`):
+Three generators (re-run after editing; all write into `isvcs/`):
 - `gen_cases.py` — the feature matrix (migration/restart/partition/scale/edge),
   permuting topology × lifecycle × coordination.
 - `gen_mn.py` — the multi-node (gang) rollout cases (`p66`–`p99`, `p500`+) →
   `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
   `gen_cases.py`'s feature counters).
+- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p1999`) →
+  `isvcs/gen-rollout/`, `isvcs/gen-fault/`, `isvcs/gen-restart/`, plus
+  `isvcs/MANIFEST.md` (per-dimension counts, constraint ledger, missing-hook
+  catalog). The gen-* folders are generator-owned WHOLESALE: regeneration is
+  byte-stable and `generate_cases.py --check` (run by `run_test.py` in CI)
+  rejects any hand edit — promote a bug-finding case into a hand-owned folder
+  under a fresh id instead of editing it in place.
 
 Every generator finishes with `run.py --validate-only`, so a regeneration that
 would reintroduce a duplicate (shadowed) case id or a malformed header fails

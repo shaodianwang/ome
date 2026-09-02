@@ -1,0 +1,15 @@
+# p1694: [gen] kill engine-mn W2 N=2 InPlaceIfPossible rp RecreateInstance target leader pause true (InPlaceIfPossible dormant)  mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=RecreateInstance kill=leader pause=true co=none topo=engine-mn
+# reason: pause suspends fleet changes, not the RestartPolicy: the whole instance (leader+workers) recreates from a dead leader while rollout-paused stays set
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1694 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

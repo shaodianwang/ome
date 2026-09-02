@@ -1,0 +1,13 @@
+# p1607: [gen] kill engine N=4 InPlaceIfPossible rp RecreateInstance (InPlaceIfPossible dormant)  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance co=none topo=engine
+# reason: steady-state kill: the instance (one pod) recreates, scoped to the killed instance, fleet returns to N
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1607 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

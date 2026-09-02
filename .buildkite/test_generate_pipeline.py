@@ -425,7 +425,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(set(assignments), committed)
         self.assertEqual(shard_counts[("canary", "engine")], 7)
         self.assertEqual(shard_counts[("canary", "pd")], 6)
-        self.assertEqual(job_count, 67)
+        self.assertEqual(job_count, 108)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(

@@ -49,6 +49,14 @@ export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
 make xet-build
 make envtest
 
+# Perm-corpus contract: every committed case YAML (hand-written and
+# generated) must parse with the Go loader — header fields, strict
+# InferenceService decode, gang worker sizes for pod-weight derivation.
+# Pure file parsing: no cluster, no suite bootstrap.
+echo "--- perm corpus parse (Go) ---"
+go test -count=1 -run 'TestGeneratedCorpusParses' \
+  ./tests/integration/singlecluster/controller/omenative_perm_kind/
+
 # The mks-cpu pod's external interface is IPv6. kube-apiserver
 # auto-detects it as the external host, then refuses to start because
 # the IPv6 host doesn't match the IPv4 service-cluster IP range envtest

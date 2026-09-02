@@ -1,0 +1,15 @@
+# p1039: [gen] rollout engine-mn W2 N=2 RecreatePod u1  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 co=none topo=engine-mn
+# reason: plain bump: drain-first roll bounded by the unavailable budget, no surge above N
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1039 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

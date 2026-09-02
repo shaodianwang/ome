@@ -1,0 +1,13 @@
+# p1210: [gen] podkill rotating engine N=4 SurgeThenDrain s25pct rp None  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=podkill:rotating co=none topo=engine
+# reason: kill the newest new-revision pod: the controller replaces it and the roll still converges; settled capacity is untouched
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1210 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: "25%", maxUnavailable: 0 } } }

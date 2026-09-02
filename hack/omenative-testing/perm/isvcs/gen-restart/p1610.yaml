@@ -1,0 +1,13 @@
+# p1610: [gen] kill engine N=4 InPlaceIfPossible rp RecreateInstance pause freeze (InPlaceIfPossible dormant)  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance pause=freeze co=none topo=engine
+# reason: freeze holds every repair; downgrading to a plain pause must repair without ever unpausing
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1610 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
