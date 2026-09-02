@@ -1,0 +1,24 @@
+# A standard consumer: one ref line per backend component; maxReplicas stays
+# the only place the ceiling is authored — the policy renders the query
+# multiplier and fallback count from it.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llm-a
+  namespace: llm-serving
+spec:
+  model:
+    name: example-model
+  engine:
+    minReplicas: 1
+    maxReplicas: 8
+    autoscalerPolicyRef:
+      name: request-activity-v1
+  decoder:
+    minReplicas: 1
+    maxReplicas: 4
+    autoscalerPolicyRef:
+      name: request-activity-v1
+  router:
+    minReplicas: 1
+    maxReplicas: 1

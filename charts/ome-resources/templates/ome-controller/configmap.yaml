@@ -127,6 +127,17 @@ data:
         "backendPort": {{ .Values.ome.multicluster.config.endpoint.backendPort | default 0 }}
       }
     }
+{{- if .Values.ome.autoscalerPolicy.enabled }}
+
+  autoscalerPolicy: |-
+    {
+      "metricProviders": {{ .Values.ome.autoscalerPolicy.metricProviders | default dict | toJson }},
+      "preflight": {
+        "memberGetTimeoutSeconds": {{ .Values.ome.autoscalerPolicy.preflight.memberGetTimeoutSeconds | default 0 }},
+        "skewDeadlineSeconds": {{ .Values.ome.autoscalerPolicy.preflight.skewDeadlineSeconds | default 0 }}
+      }
+    }
+{{- end }}
 
   metricsAggregator: |-
     {

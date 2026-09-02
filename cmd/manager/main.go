@@ -46,6 +46,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	v1beta1acceleratorclasscontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorclass"
+	autoscalerpolicycontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/autoscalerpolicy"
 	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
@@ -59,6 +60,7 @@ import (
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
+	autoscalerpolicywebhook "github.com/ome-projects/ome/pkg/webhook/admission/autoscalerpolicy"
 	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
 	inferencereplicawebhook "github.com/ome-projects/ome/pkg/webhook/admission/inferencereplica"
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
@@ -470,6 +472,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// AutoscalerPolicy is chart-gated together with its controller and
+	// webhook: the CRD probe is the single source of truth for whether the
+	// feature exists on this cluster.
+	autoscalerPolicyFound, err := utils.IsCrdAvailable(cfg, v1beta1.SchemeGroupVersion.String(), constants.AutoscalerPolicyKind)
+	if err != nil {
+		setupLog.Error(err, "Failed to probe for the AutoscalerPolicy CRD")
+		os.Exit(1)
+	}
+
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
 	if isControlPlane {
@@ -489,6 +500,14 @@ func main() {
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceService controller")
 			os.Exit(1)
+		}
+
+		if autoscalerPolicyFound {
+			setupLog.Info("Setting up AutoscalerPolicy status controller")
+			if err := autoscalerpolicycontroller.SetupWithManager(mgr, clientSet, controllerconfig.NewConfigCache(options.configCacheTTL)); err != nil {
+				setupLog.Error(err, "Failed to create AutoscalerPolicy status controller")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -656,6 +675,14 @@ func main() {
 			Handler: &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
+		// The AutoscalerPolicy ValidatingWebhookConfiguration is chart-gated
+		// alongside the CRD; registering the handler unconditionally is
+		// inert until that configuration exists.
+		setupLog.Info("Registering AutoscalerPolicy validator webhook to the webhook server")
+		hookServer.Register("/validate-ome-io-v1beta1-autoscalerpolicy", &webhook.Admission{
+			Handler: &autoscalerpolicywebhook.Validator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+
 		// The InferenceService defaulter/validator runtime-selects
 		// against the LOCAL cluster's runtime/model catalog. On the control
 		// plane that catalog is empty (runtimes/models live on the workload
@@ -679,6 +706,10 @@ func main() {
 				WithValidator(&isvc.InferenceServiceValidator{
 					Client:          mgr.GetClient(),
 					RuntimeSelector: runtimeSelector,
+					// Rejects any spec.<component>.autoscalerPolicyRef when
+					// the AutoscalerPolicy CRD is absent, so a ref can never
+					// silently no-op on a non-feature cluster.
+					AutoscalerPolicyEnabled: autoscalerPolicyFound,
 					// Reject ome.io/btp.* (Envoy Gateway) when the active
 					// translator is Istio or Noop, and vice versa, at
 					// admission. Sourced from the same translator the

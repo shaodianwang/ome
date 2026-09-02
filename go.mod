@@ -19,6 +19,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.70.1
+	github.com/prometheus/prometheus v0.304.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.11.1
@@ -46,7 +47,10 @@ require (
 )
 
 require (
+	github.com/dennwc/varint v1.0.0 // indirect
 	github.com/expr-lang/expr v1.17.7 // indirect
+	github.com/go-kit/log v0.2.1 // indirect
+	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-openapi/swag/cmdutils v0.25.4 // indirect
 	github.com/go-openapi/swag/conv v0.25.4 // indirect
 	github.com/go-openapi/swag/fileutils v0.25.4 // indirect
@@ -59,6 +63,7 @@ require (
 	github.com/go-openapi/swag/typeutils v0.25.4 // indirect
 	github.com/go-openapi/swag/yamlutils v0.25.4 // indirect
 	github.com/google/btree v1.1.3 // indirect
+	github.com/grafana/regexp v0.0.0-20240518133315-a468a5bfb3bc // indirect
 	github.com/kubeflow/trainer/v2 v2.1.0 // indirect
 	github.com/project-codeflare/appwrapper v1.1.2 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
@@ -151,4 +156,6 @@ replace sigs.k8s.io/ome v1.0.0 => github.com/ome-projects/ome v1.2.3-0.202608220
 // keda/v2 requires a placeholder version of prometheus/prometheus that it
 // resolves with its own replace directive. Dependency replaces are ignored, so
 // the main module must repeat it or the module graph fails to resolve.
+// The replace also pins the promql/parser used by AutoscalerPolicy admission
+// and the ome-policy CLI: rendered queries are validated by the 2.54 parser.
 replace github.com/prometheus/prometheus => github.com/prometheus/prometheus v0.54.0

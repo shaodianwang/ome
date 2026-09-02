@@ -1,0 +1,23 @@
+apiVersion: ome.io/v1beta1
+kind: AutoscalerPolicy
+metadata:
+  name: request-activity-v1
+  namespace: llm-serving
+spec:
+  class: KEDA
+  keda:
+    triggers:
+    - type: prometheus
+      providerRef:
+        name: cluster-prometheus
+      metricType: AverageValue
+      queryReturnsDesiredReplicas: true
+      metadata:
+        threshold: "1"
+        ignoreNullValues: "false"
+        query: |
+          ((sum({inferenceservice="{{ .ISVCName }}",namespace="{{ .Namespace }}"}) > bool 0) * {{ .MaxReplicas }})
+    fallback:
+      failureThreshold: 3
+      replicas:
+        fromComponent: MaxReplicas

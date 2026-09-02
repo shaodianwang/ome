@@ -385,3 +385,55 @@ accelerator_resources_cleared="$("${helm_bin}" template ome-resources "${chart_d
 if grep -Fq 'acceleratorResources' <<<"${accelerator_resources_cleared}"; then
   fail "acceleratorResources key was rendered when the list was cleared"
 fi
+
+# ome.autoscalerPolicy.enabled gates the policy validating webhook and the
+# config block. Manager RBAC stays ungated in the generated role (the
+# optional-CRD precedent: grants on absent CRDs are inert), so the gate-off
+# render checks the webhook, not RBAC rule names.
+if grep -Fq 'path: /validate-ome-io-v1beta1-autoscalerpolicy' <<<"${rendered}"; then
+  fail "AutoscalerPolicy webhook was rendered with the feature gate off"
+fi
+if grep -Fq 'autoscalerPolicy:' <<<"${controller_config}"; then
+  fail "autoscalerPolicy config block was rendered with the feature gate off"
+fi
+
+autoscaler_enabled="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.autoscalerPolicy.enabled=true)"
+# The autoscalerpolicies / triggerauthentications RBAC lives ungated in the
+# generated manager role (the optional-CRD precedent: grants on absent CRDs
+# are inert), so it must render regardless of the feature gate.
+grep -Fq -- '- triggerauthentications' <<<"${autoscaler_enabled}" ||
+  fail "KEDA TriggerAuthentication RBAC was not rendered"
+grep -Fq -- '- autoscalerpolicies/status' <<<"${autoscaler_enabled}" ||
+  fail "AutoscalerPolicy status RBAC was not rendered"
+grep -Fq 'name: autoscalerpolicy.ome.io' <<<"${autoscaler_enabled}" ||
+  fail "AutoscalerPolicy validating webhook was not rendered with the gate on"
+grep -Fq 'path: /validate-ome-io-v1beta1-autoscalerpolicy' <<<"${autoscaler_enabled}" ||
+  fail "AutoscalerPolicy webhook path was not rendered with the gate on"
+# In-use deletion denial happens at admission, so the webhook must both
+# register the DELETE operation and pass DELETE through its skip-deletion
+# matchCondition (a DELETE review has no `object` to guard on).
+grep -Fq -- '- DELETE' <<<"${autoscaler_enabled}" ||
+  fail "AutoscalerPolicy webhook does not register the DELETE operation"
+grep -Fq "request.operation == 'DELETE'" <<<"${autoscaler_enabled}" ||
+  fail "AutoscalerPolicy skip-deletion matchCondition does not pass DELETE through"
+
+autoscaler_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.autoscalerPolicy.enabled=true \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '"metricProviders": {}' <<<"${autoscaler_config}" ||
+  fail "empty autoscalerPolicy provider map was not rendered with the gate on"
+grep -Fq '"memberGetTimeoutSeconds": 0' <<<"${autoscaler_config}" ||
+  fail "autoscalerPolicy preflight member GET timeout default was not rendered"
+grep -Fq '"skewDeadlineSeconds": 0' <<<"${autoscaler_config}" ||
+  fail "autoscalerPolicy preflight skew deadline default was not rendered"
+
+autoscaler_provider_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.autoscalerPolicy.enabled=true \
+  --set-string 'ome.autoscalerPolicy.metricProviders.cluster-prometheus.serverAddress=http://ome-prometheus.ome.svc:9090' \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '"cluster-prometheus":{"serverAddress":"http://ome-prometheus.ome.svc:9090"}' <<<"${autoscaler_provider_config}" ||
+  fail "autoscalerPolicy metric provider binding was not rendered"

@@ -10,6 +10,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
@@ -50,4 +51,11 @@ type ComponentInputs struct {
 	AcceleratorClass     *v1beta1.AcceleratorClassSpec
 	AcceleratorClassName string
 	Overlays             []isvcutils.ResolvedOverlay
+
+	// PolicyResolver renders per-component autoscalerPolicyRef attachments.
+	// Built per reconcile from the cached operator config so provider-binding
+	// edits apply within one config TTL. Never nil in the controller path; a
+	// disabled feature is expressed via the resolver's Enabled=false, which
+	// fails refs closed instead of silently ignoring them.
+	PolicyResolver *autoscaler.PolicyResolver
 }

@@ -12,6 +12,8 @@ type Interface interface {
 	AcceleratorClasses() AcceleratorClassInformer
 	// AcceleratorQuotas returns a AcceleratorQuotaInformer.
 	AcceleratorQuotas() AcceleratorQuotaInformer
+	// AutoscalerPolicies returns a AutoscalerPolicyInformer.
+	AutoscalerPolicies() AutoscalerPolicyInformer
 	// BaseModels returns a BaseModelInformer.
 	BaseModels() BaseModelInformer
 	// ClusterBaseModels returns a ClusterBaseModelInformer.
@@ -49,6 +51,11 @@ func (v *version) AcceleratorClasses() AcceleratorClassInformer {
 // AcceleratorQuotas returns a AcceleratorQuotaInformer.
 func (v *version) AcceleratorQuotas() AcceleratorQuotaInformer {
 	return &acceleratorQuotaInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// AutoscalerPolicies returns a AutoscalerPolicyInformer.
+func (v *version) AutoscalerPolicies() AutoscalerPolicyInformer {
+	return &autoscalerPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // BaseModels returns a BaseModelInformer.

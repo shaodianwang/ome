@@ -1,0 +1,85 @@
+# Suite-local fixture: the AutoscalerPolicy validator plus the ISVC
+# validator (for the policy-ref rejection specs). The full
+# config/webhook/manifests.yaml would install every OME webhook and require
+# each corresponding handler to be registered in this suite's manager.
+#
+# envtest rewrites caBundle and swaps clientConfig.service for a
+# clientConfig.url pointing at the in-process server, so those values are
+# scaffolding — except the rules and matchConditions, which decide what
+# actually reaches the handlers and are therefore a copy of what the chart
+# installs. The matchConditions CEL is load-bearing: a DELETE review
+# carries no `object`, so the operation check must short-circuit before
+# the deletionTimestamp guard or every delete would be rejected.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: autoscalerpolicy.ome.io
+webhooks:
+  - name: autoscalerpolicy.ome-webhook-server.validator
+    clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-server-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-autoscalerpolicy
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    matchConditions:
+      - name: skip-deletion
+        expression: "request.operation == 'DELETE' || !has(object.metadata.deletionTimestamp)"
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["autoscalerpolicies"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: inferenceservice.ome.io
+webhooks:
+  - name: inferenceservice.ome-webhook-server.validator
+    clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-server-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-inferenceservice
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]
+---
+# Suite-local fixture (no chart equivalent): a second ISVC validator
+# instance registered with the AutoscalerPolicy feature DISABLED. The
+# namespaceSelector scopes it to the suite's labeled disabled namespace so
+# the feature-disabled ref rejection is exercised end-to-end while every
+# other namespace keeps hitting only the feature-enabled validator above.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: inferenceservice-policy-disabled.ome.io
+webhooks:
+  - name: inferenceservice-policy-disabled.ome-webhook-server.validator
+    clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-server-service
+        namespace: ome
+        path: /validate-inferenceservice-policy-disabled
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    namespaceSelector:
+      matchLabels:
+        ome-test-autoscaler-policy: disabled
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]

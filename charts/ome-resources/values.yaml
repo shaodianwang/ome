@@ -106,6 +106,44 @@ ome:
         globalGateway: ""       # "namespace/name" of the global Gateway ("" => publisher is a no-op)
         routeNamespace: ""      # namespace for the published HTTPRoute + Service ("" => the ISVC's namespace)
         backendPort: 0          # port on the winner's ingress the global host forwards to
+  # autoscalerPolicy is the single gate for the reusable AutoscalerPolicy
+  # feature: the manager's policy RBAC, the policy validating webhook, and the
+  # autoscalerPolicy config block all install together on this one value —
+  # never install-but-dormant. Alpha; default off. Deliberately the same
+  # values path as the ome-crd chart's ome.autoscalerPolicy.enabled: set both
+  # charts from one value so the CRD and its controller + webhook always ship
+  # as a unit.
+  autoscalerPolicy:
+    enabled: false
+    # metricProviders binds the logical provider names policies reference
+    # (providerRef on endpoint triggers) to this cluster's metric endpoints.
+    # Cluster-admin owned and the ONLY source of endpoints: a policy can only
+    # NAME a provider, an unbound name is a render error (fail closed), and
+    # the OME binary has NO built-in addresses — this map is the source of
+    # truth. Per provider: serverAddress (required) is injected as the
+    # rendered trigger's serverAddress; authSecretRef ({name, key}, optional)
+    # points at a Secret key in each consumer namespace holding a bearer
+    # token, materialized as a KEDA TriggerAuthentication and never rendered
+    # into policies, status, or digests.
+    # Example, pointing at the bundled Prometheus this chart deploys (same
+    # address canaryAnalysis defaults to):
+    # metricProviders:
+    #   cluster-prometheus:
+    #     serverAddress: "http://ome-prometheus.ome.svc:9090"
+    #     # authSecretRef:
+    #     #   name: prometheus-bearer
+    #     #   key: token
+    metricProviders: {}
+    # preflight tunes the control-plane placement preflight for
+    # policy-referencing InferenceServices. 0 => the manager's built-in
+    # default (memberGetTimeoutSeconds 5, skewDeadlineSeconds 900).
+    preflight:
+      # Deadline for each per-candidate live policy GET; a timed-out member
+      # is ineligible for that placement.
+      memberGetTimeoutSeconds: 0
+      # How long a home may hold a derived policy-referencing ISVC without
+      # reporting a resolved digest before the control plane flags it.
+      skewDeadlineSeconds: 0
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.

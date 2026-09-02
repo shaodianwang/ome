@@ -20,3 +20,16 @@ grep -Fq 'chart-version: "0.1.0"' <<<"${rendered}" ||
   fail "release marker chart version was not rendered"
 grep -Fq 'app-version: "1.16.0"' <<<"${rendered}" ||
   fail "release marker app version was not rendered"
+
+# The AutoscalerPolicy CRD installs only with the feature gate, so a cluster
+# never carries the CRD without the controller + webhook the ome-resources
+# chart gates on the same value.
+if grep -Fq 'name: autoscalerpolicies.ome.io' <<<"${rendered}"; then
+  fail "AutoscalerPolicy CRD was rendered with the feature gate off"
+fi
+
+autoscaler_enabled="$("${helm_bin}" template ome-crd "${chart_dir}" \
+  --namespace ome \
+  --set ome.autoscalerPolicy.enabled=true)"
+grep -Fq 'name: autoscalerpolicies.ome.io' <<<"${autoscaler_enabled}" ||
+  fail "AutoscalerPolicy CRD was not rendered with the feature gate on"
