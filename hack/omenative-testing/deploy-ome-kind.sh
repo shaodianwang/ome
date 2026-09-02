@@ -459,7 +459,26 @@ if [ "${state:-}" != "Ready" ]; then
   echo "FATAL: ClusterBaseModel stuck in state '${state:-<none>}'" >&2
   kubectl --context "$KCTX" get clusterbasemodel ome-coordtest-noop \
     -o jsonpath='{.status.conditions[*].message}{"\n"}' >&2 || true
-  kubectl --context "$KCTX" -n "$NS" get pods >&2 || true
+  # Full diagnostic dump: which node(s) exist, where the PV/PVC actually
+  # bound, and what the seed and metadata-extraction pods each saw. All of
+  # this is CI-log-only (stderr, no artifact upload) so it costs nothing on
+  # the success path and never runs there.
+  echo "--- diagnostics: nodes ---" >&2
+  kubectl --context "$KCTX" get nodes -o wide >&2 || true
+  echo "--- diagnostics: PersistentVolume ---" >&2
+  kubectl --context "$KCTX" get pv -o wide >&2 || true
+  kubectl --context "$KCTX" get pv ome-coordtest-noop-pv -o yaml >&2 || true
+  echo "--- diagnostics: PersistentVolumeClaim ---" >&2
+  kubectl --context "$KCTX" -n "$NS" get pvc -o wide >&2 || true
+  kubectl --context "$KCTX" -n "$NS" get pvc ome-coordtest-noop-pvc -o yaml >&2 || true
+  echo "--- diagnostics: pods ---" >&2
+  kubectl --context "$KCTX" -n "$NS" get pods -o wide >&2 || true
+  for pod in $(kubectl --context "$KCTX" -n "$NS" get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    echo "--- diagnostics: describe $pod ---" >&2
+    kubectl --context "$KCTX" -n "$NS" describe pod "$pod" >&2 || true
+    echo "--- diagnostics: logs $pod ---" >&2
+    kubectl --context "$KCTX" -n "$NS" logs "$pod" --all-containers --tail=200 >&2 || true
+  done
   exit 1
 fi
 echo "ClusterBaseModel Ready"

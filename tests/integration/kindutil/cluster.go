@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -173,19 +174,24 @@ func createCluster(ctx context.Context, name string, workers int, extraMounts []
 		args = append(args, "--image", img)
 	}
 	if workers > 0 || len(extraMounts) > 0 {
-		cfg, cleanup, err := writeClusterConfig(workers, extraMounts)
+		cfg, content, cleanup, err := writeClusterConfig(workers, extraMounts)
 		if err != nil {
 			return fmt.Errorf("createCluster: write cluster config: %w", err)
 		}
 		defer cleanup()
 		args = append(args, "--config", cfg)
+		// Printed unconditionally (not just on error): whether a --config
+		// was even passed, and what it contained, is exactly what the
+		// caller cannot otherwise see once `kind create cluster` succeeds.
+		fmt.Printf("createCluster: %s --config %s:\n%s", strings.Join(args, " "), cfg, content)
 	}
 	createCtx, cancel := context.WithTimeout(ctx, clusterCreateTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(createCtx, "kind", args...)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("createCluster: kind create cluster --name %s: %w (stderr: %s)",
 			name, err, stderr.String())
@@ -194,11 +200,11 @@ func createCluster(ctx context.Context, name string, workers int, extraMounts []
 }
 
 // writeClusterConfig emits a temp KIND config-file with N worker nodes and
-// returns its path. extraMounts, when non-empty, is repeated identically
-// on every node (control-plane and workers) — a static hostPath
-// PersistentVolume needs the same content regardless of which node a pod
-// mounting it lands on. cleanup deletes the temp file.
-func writeClusterConfig(workers int, extraMounts []KindExtraMount) (string, func(), error) {
+// returns its path and content. extraMounts, when non-empty, is repeated
+// identically on every node (control-plane and workers) — a static
+// hostPath PersistentVolume needs the same content regardless of which
+// node a pod mounting it lands on. cleanup deletes the temp file.
+func writeClusterConfig(workers int, extraMounts []KindExtraMount) (string, string, func(), error) {
 	var b bytes.Buffer
 	b.WriteString("kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n")
 	writeNode := func(role string) {
@@ -216,21 +222,22 @@ func writeClusterConfig(workers int, extraMounts []KindExtraMount) (string, func
 	for i := 0; i < workers; i++ {
 		writeNode("worker")
 	}
+	content := b.String()
 	f, err := os.CreateTemp("", "kind-cluster-config-*.yaml")
 	if err != nil {
-		return "", func() {}, err
+		return "", "", func() {}, err
 	}
 	if _, err := f.Write(b.Bytes()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return "", func() {}, err
+		return "", "", func() {}, err
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(f.Name())
-		return "", func() {}, err
+		return "", "", func() {}, err
 	}
 	cleanup := func() { _ = os.Remove(f.Name()) }
-	return f.Name(), cleanup, nil
+	return f.Name(), content, cleanup, nil
 }
 
 // kubeconfigForCluster runs `kind get kubeconfig --name <cluster>`
