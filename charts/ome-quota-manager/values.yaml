@@ -205,6 +205,12 @@ quotaManager:
   affinity: {}
 
   podAnnotations: {}
+  # Extra env/volumes for the container. Needed when projection authenticates
+  # to members through an exec plugin: the plugin's trust store and cert paths
+  # are not part of the identity injection.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
   podLabels: {}
 
   # Escape hatches for what the platform, rather than this chart, has to supply.
