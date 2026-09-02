@@ -123,7 +123,13 @@ description, replica counts (`Ne/Nd/Nr`), peak ceilings (`ceil_e/ceil_d/ceil_r`)
 `topo=`, and the optional parked-debt flags (see verdicts): `infeasible=1`
 (requires a `# reason: <why unsatisfiable>` comment on line 2) and `notimpl=1`
 (requires `issue=<github issue number>` — an XFAIL with no tracked issue is
-invisible debt; validate-only rejects both omissions).
+invisible debt; validate-only rejects both omissions). A notimpl case whose
+tracked bug is itself a continuous-invariant violation adds
+`inv_xfail=A|B|C|all` (requires the line-2 `# reason:` too): exactly that
+invariant's violations record as the case's `XFAIL (known bug: #N)` instead of
+hardening the verdict — the invariant is still evaluated and printed (nothing
+is blinded, unlike `inv_off`), and any other invariant still fails hard, so
+unrelated regressions cannot hide behind the parking.
 
 ## How a case runs (`run.py`)
 

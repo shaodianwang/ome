@@ -724,6 +724,10 @@ def _inv_new(case_id, hdr):
         "a_on": off not in ("A", "all"),
         "b_on": off not in ("B", "all"),
         "c_on": off not in ("C", "all"),
+        # inv_xfail scope: a violation of this invariant class is the case's
+        # tracked bug (notimpl issue) and records as the XFAIL, never a FAIL.
+        "xfail": str(hdr.get("inv_xfail", "") or ""),
+        "xfail_issue": hdr.get("issue"),
         "last": 0.0,        # last tick timestamp (self-rate-limited)
         "streaks": {},      # streak_key → consecutive-tick observation count
         "viol": {},         # viol_key → {first, last, n, detail}
@@ -952,7 +956,11 @@ def _inv_tick(inv, pod_state, pods_per_inst):
 def invariant_checks(inv, verdict, notes, checks):
     """Verdict gate for the continuous invariants: every violation that fired
     (sustained past its carve-out) FAILs the case, with first/last-seen
-    timestamps and the tick occurrence count."""
+    timestamps and the tick occurrence count. The one exception is a parked
+    case whose header scopes its tracked bug to an invariant class
+    (inv_xfail): violations of exactly that class record as the case's
+    known-bug XFAIL — still evaluated, still printed — while any other class
+    fails hard, so unrelated regressions can never hide behind the parking."""
     if not inv:
         return verdict
     if inv["off"]:
@@ -971,13 +979,24 @@ def invariant_checks(inv, verdict, notes, checks):
         if active:
             checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership / pair-alive violation")
         return verdict
+    scope = inv.get("xfail") or ""
+    ref = f"#{inv['xfail_issue']}" if inv.get("xfail_issue") else "UNLINKED"
+    expected_hits = 0
     for key, v in sorted(inv["viol"].items()):
-        verdict = "FAIL"
         first = time.strftime("%H:%M:%S", time.localtime(v["first"]))
         last = time.strftime("%H:%M:%S", time.localtime(v["last"]))
-        notes.append(f"invariant {key[0]} {key[1]}: {v['detail']}")
-        checks.append(f"  ✗ invariant {key[0]} violated ({key[1]}): {v['detail']} "
-                      f"[first {first}, last {last}, {v['n']} tick(s)]")
+        span = f"[first {first}, last {last}, {v['n']} tick(s)]"
+        if scope == "all" or key[0] == scope:
+            expected_hits += 1
+            notes.append(f"invariant {key[0]} {key[1]} (known bug: {ref}): {v['detail']}")
+            checks.append(f"  ⓘ invariant {key[0]} violated ({key[1]}) — the tracked bug "
+                          f"this case is parked on ({ref}): {v['detail']} {span}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"invariant {key[0]} {key[1]}: {v['detail']}")
+            checks.append(f"  ✗ invariant {key[0]} violated ({key[1]}): {v['detail']} {span}")
+    if expected_hits and verdict == "PASS":
+        verdict = f"XFAIL (known bug: {ref})"
     return verdict
 
 
@@ -1510,6 +1529,13 @@ HDR_VALIDATORS = {
     # membership, C=pair-alive). REQUIRES an adjacent '# reason: <why>' comment
     # on line 2 of the case file — validate-only rejects an inv_off without one.
     "inv_off": lambda v: v in {"A", "B", "C", "all"},
+    # Scope a notimpl parking to a continuous invariant: a sustained violation
+    # of the NAMED invariant is the tracked bug itself, so it records as the
+    # case's XFAIL instead of hardening the verdict to FAIL. The invariant is
+    # still evaluated and printed (unlike inv_off, nothing is blinded), and a
+    # violation of any OTHER invariant fails hard as always. Requires
+    # notimpl=1 (whose issue= names the bug) + the line-2 '# reason:' comment.
+    "inv_xfail": lambda v: v in {"A", "B", "C", "all"},
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES), cordon:<target ∈ FAULT_TARGETS>.
     "fault": _fault_ok,
@@ -1571,6 +1597,15 @@ def validate_case_file(path):
         # A notimpl XFAIL is parked debt on a KNOWN BUG — it must link the
         # tracking issue or the debt is invisible until it fires in prod (#899).
         errs.append(f"{path}:1: notimpl=1 requires issue=<github issue number> — an XFAIL without a tracked issue is invisible debt")
+    if "inv_xfail" in fields:
+        # An expected invariant violation is parking, and parking needs the
+        # tracked issue; the rationale must travel with the case like every
+        # other invariant-scope change.
+        if not fields.get("notimpl"):
+            errs.append(f"{path}:1: inv_xfail={fields['inv_xfail']} requires notimpl=1 issue=<n> — an expected invariant violation is parked debt")
+        second = text.splitlines()[1] if len(text.splitlines()) > 1 else ""
+        if not re.match(r"^\s*#\s*reason:\s*\S", second):
+            errs.append(f"{path}:2: inv_xfail={fields['inv_xfail']} requires an adjacent '# reason: <why>' comment on line 2")
     if fields.get("infeasible"):
         # Infeasible-by-design must name WHY the config is unsatisfiable, on
         # the line adjacent to the header, so the rationale travels with the

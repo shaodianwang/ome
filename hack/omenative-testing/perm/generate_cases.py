@@ -112,13 +112,17 @@ HAND_PINNED_KILL = {
     ("pd-mn", 1, "SurgeThenDrain", "RecreateInstance", "freeze", "leader"): "p153",
 }
 
-# Cells parked on tracked product bugs: cell key -> (issue number, reason).
-# A parked cell emits notimpl=1 issue=N and carries the reason as its line-2
-# rationale, so the runners record XFAIL (known bug: #N) instead of red and
-# the PARKED DEBT table keeps the debt visible. This is the ONLY way a
-# generated case goes quiet: entries require a filed issue number, and a key
-# that matches no emitted cell fails the regen (stale parking is invisible
-# debt). Cell keys are the per-family tuples the emitters build:
+# Cells parked on tracked product bugs: cell key -> (issue number, reason,
+# invariant scope). A parked cell emits notimpl=1 issue=N and carries the
+# reason as its line-2 rationale, so the runners record XFAIL (known bug: #N)
+# instead of red and the PARKED DEBT table keeps the debt visible. The scope
+# ("A"|"B"|"C"|"all", or "" when the bug fails an ordinary check) additionally
+# emits inv_xfail=<scope>: it names the continuous invariant whose violation
+# IS the tracked bug, which would otherwise fail the verdict after the
+# notimpl softening. This is the ONLY way a generated case goes quiet:
+# entries require a filed issue number, and a key that matches no emitted
+# cell fails the regen (stale parking is invisible debt). Cell keys are the
+# per-family tuples the emitters build:
 #   ("rollout", topo, w, strat, surge, unavail)
 #   ("podkill", phase, topo, w, size, strat, surge, unavail, rp)
 #   ("kill", topo, w, strat, rp, pause, target)
@@ -131,7 +135,7 @@ _FREEZE_TOTAL_LOSS = (
 # under a kill) on both single-pod topologies shows the same stale-Ready
 # window; gang shapes keep podCount > 0, so only these cells can observe it.
 PARKED = {
-    ("kill", topo, 0, strat, "RecreateInstance", "freeze", None): (1354, _FREEZE_TOTAL_LOSS)
+    ("kill", topo, 0, strat, "RecreateInstance", "freeze", None): (1354, _FREEZE_TOTAL_LOSS, "A")
     for topo in ("engine", "pd")
     for strat in ("SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly")
 }
@@ -411,8 +415,10 @@ def build_outputs():
         name = f"p{cid}"
         if cell in PARKED:
             parked_used.add(cell)
-            issue, parked_reason = PARKED[cell]
+            issue, parked_reason, inv_scope = PARKED[cell]
             kv = dict(kv, notimpl=1, issue=issue)
+            if inv_scope:
+                kv["inv_xfail"] = inv_scope
             reason = parked_reason
             meta = dict(meta, parked=issue)
         outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, case_comps, reason)

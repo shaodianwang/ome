@@ -2,10 +2,12 @@
 import copy
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import batch
 import generate_cases
 import run
 
@@ -168,7 +170,7 @@ class GeneratedCorpusTest(unittest.TestCase):
         cell = ("kill", "engine", 0, "RecreatePod", "None", "", None)
         self.assertNotIn(cell, generate_cases.PARKED)
         with mock.patch.dict(generate_cases.PARKED,
-                             {cell: (999999, "parked on a tracked bug (fixture)")}):
+                             {cell: (999999, "parked on a tracked bug (fixture)", "A")}):
             outputs, rows = generate_cases.build_outputs()
         parked = [(f, n) for f, n, _kv, m in rows if m.get("parked") == 999999]
         self.assertEqual(len(parked), 1, "exactly the parked cell is marked")
@@ -177,14 +179,65 @@ class GeneratedCorpusTest(unittest.TestCase):
         header = text.splitlines()[0]
         self.assertIn("notimpl=1", header)
         self.assertIn("issue=999999", header)
+        self.assertIn("inv_xfail=A", header)
         self.assertEqual(text.splitlines()[1],
                          "# reason: parked on a tracked bug (fixture)")
 
     def test_stale_parked_key_fails_the_regen(self):
         cell = ("kill", "no-such-topo", 0, "SurgeThenDrain", "None", "", None)
-        with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "stale")}):
+        with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "stale", "")}):
             with self.assertRaises(SystemExit):
                 generate_cases.build_outputs()
+
+
+class ParkedInvariantVerdictTest(unittest.TestCase):
+    """The job-exit path for a case parked on an invariant-class bug, run
+    through the REAL pipeline pieces in _finish's order: parse the committed
+    header, soften, then gate on the invariants, then batch's green check."""
+
+    def _violation(self, invariant, kind, subject, detail):
+        now = time.time()
+        return {(invariant, kind, subject): {"first": now - 47, "last": now,
+                                             "n": 10, "detail": detail}}
+
+    def _verdict(self, hdr, viol):
+        inv = run._inv_new("p1632", hdr)
+        inv["ir_seen"] = True
+        inv["viol"].update(viol)
+        checks, notes = [], []
+        verdict = run.soften_expected_fail(hdr, "PASS", checks)
+        return run.invariant_checks(inv, verdict, notes, checks), checks
+
+    def test_in_scope_invariant_violation_records_as_known_bug_xfail(self):
+        _first, hdr = run.parse_header(run.find_isvc("p1632"))
+        self.assertEqual(hdr.get("notimpl"), 1)
+        self.assertEqual(hdr.get("inv_xfail"), "A")
+        verdict, checks = self._verdict(hdr, self._violation(
+            "A", "ready-without-pods", "engine/0",
+            "engine/0 Phase=Ready while the IR's own podCount is 0"))
+        self.assertEqual(verdict, f"XFAIL (known bug: #{hdr['issue']})")
+        self.assertTrue(batch.is_green(verdict))
+        self.assertTrue(any("tracked bug this case is parked on" in c for c in checks))
+
+    def test_out_of_scope_invariant_violation_still_fails(self):
+        _first, hdr = run.parse_header(run.find_isvc("p1632"))
+        verdict, _checks = self._verdict(hdr, self._violation(
+            "B", "missing-endpoint", "engine/0",
+            "Ready+serving pod is not an endpoint of its Service"))
+        self.assertEqual(verdict, "FAIL")
+        self.assertFalse(batch.is_green(verdict))
+
+    def test_unscoped_parked_case_still_hardens_on_invariants(self):
+        """A notimpl case without inv_xfail keeps today's contract: an
+        invariant violation fails it even though ordinary checks are parked."""
+        _first, hdr = run.parse_header(run.find_isvc("p416"))
+        self.assertEqual(hdr.get("notimpl"), 1)
+        self.assertNotIn("inv_xfail", hdr)
+        verdict, _checks = self._verdict(hdr, self._violation(
+            "A", "ready-without-pods", "engine/0",
+            "engine/0 Phase=Ready while the IR's own podCount is 0"))
+        self.assertEqual(verdict, "FAIL")
+        self.assertFalse(batch.is_green(verdict))
 
 
 if __name__ == "__main__":
