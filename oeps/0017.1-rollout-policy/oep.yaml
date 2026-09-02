@@ -1,0 +1,58 @@
+title: Reusable Rollout Policies
+oep-number: "0017.1"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-09-02
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0017, which defined spec.rollout.groups[] with the one-of
+# canary|blueGreen|rollingUpdate progression and its reject-at-admission
+# honesty contract. This OEP adds (1) a referenced, reusable RolloutPolicy CRD
+# carrying exactly one progression body, consumed per group, and (2) a
+# first-class rollout run that pins the effective plan for the duration of a
+# roll — for policy-sourced and inline rollouts alike. Additive: 0017's
+# admission rules and group grammar are preserved, not superseded.
+see-also:
+  - "/oeps/0017-unified-rollout-v2"
+  - "/oeps/0015.1-canary-executor"
+  - "/oeps/0015.2-canary-analysis"
+  - "/oeps/0013.1-autoscaler-policy"
+  - "/oeps/0018-multi-cluster-placement"
+  - "/oeps/0018.1-multicluster-scaleout"
+  - "/oeps/0018.2-multi-cluster-performance"
+
+# Additive to 0017, not a supersession.
+replaces: []
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No runtime feature gate for the policy surface. Gating is chart-level: one
+# Helm value installs the CRD, policy-status controller, and webhook together
+# (never install-but-dormant). On a cluster without the feature, an
+# InferenceService that sets any groups[].policyRef is admission-rejected — a
+# ref can never silently no-op. Run pinning is NOT behind the gate: it ships
+# with the controller unconditionally, because the live-read behaviors it
+# replaces are defect classes, not contracts.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_rollout_run_opened_total      # labels: namespace, source (inline|policy), progression
+  - ome_rollout_run_closed_total      # labels: namespace, outcome (completed|rolledback|superseded)
+  - ome_rollout_run_parked_total      # labels: namespace, reason
+  - ome_rollout_plan_drift            # gauge 0/1; labels: namespace, isvc
+  - ome_rollout_repin_total           # labels: namespace, outcome (applied|rejected)
+  - ome_rollout_policy_ready          # gauge 0/1; labels: namespace, policy
+  - ome_rollout_policy_attached_groups # gauge; labels: namespace, policy

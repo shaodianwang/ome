@@ -14,6 +14,7 @@ see-also:
   - "/oeps/0015-unified-rollout"                  # spec.rollout home; coordination relocation
   - "/oeps/0015.1-canary-executor"               # the canary executor v2 would absorb
   - "/oeps/0007.1-omenative-coordinated-rollout" # coordination groups origin
+  - "/oeps/0017.1-rollout-policy"                # follow-up: reusable RolloutPolicy + run pinning
 
 stage: alpha
 
