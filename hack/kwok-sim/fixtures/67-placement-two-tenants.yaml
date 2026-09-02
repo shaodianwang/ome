@@ -1,8 +1,11 @@
 # Two tenants, two namespaces, two budgets — and neither can spend the other's.
 #
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/52-fleet-mixed.yaml
-#   for c in a b; do kubectl --context "kind-ome-quota-$c" create ns kwok-sim-batch; done
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/67-placement-two-tenants.yaml
+#
+# kwok-sim-batch has to exist on the hub, which is where these are applied, and
+# on both members, which is where the leaf binds it. fleet-up.sh creates every
+# namespace the fixtures bind on all three, so neither apply needs a step first.
 #
 # Isolation here is by NAMESPACE, not by queue name. OME materializes exactly one
 # LocalQueue per bound namespace and always calls it "default" — it is Kueue's own

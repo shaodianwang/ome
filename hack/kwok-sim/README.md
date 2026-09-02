@@ -497,15 +497,16 @@ a management plane holds no silicon and schedules nothing.
 | `ome-manager` | ✅ `control-plane` role | ✅ | ✅ |
 | `PodGroup` CRD | ✅ | ✅ | ✅ |
 | model + runtimes, ns `kwok-sim` | ✅ (inert) | ✅ | ✅ |
+| the tenant namespaces the fixtures bind | ✅ | ✅ | ✅ |
 | `ome-scheduler` | — | 🅿️ | 🅿️ |
 | `ome-quota-manager` | ✅ **management** mode | ✅ **workload** mode | ✅ **workload** mode |
 | Kueue CRDs + `ResourceFlavor` | — | ✅ | ✅ |
-| Kueue controller | — | 🇰 | 🇰 |
+| Kueue controller | — | 🚦 | 🚦 |
 | `ome-quota-access` SA + token | — | ✅ | ✅ |
 | placement grant on the SA | — | 🅿️ | 🅿️ |
 | `WorkloadCluster` CRs | ✅ `member-a`, `member-b` | — | — |
 
-🅿️ `--with-placement`  🇰 `--with-kueue`
+🅿️ `--with-placement`  🚦 `--with-kueue`
 
 Three asymmetries are worth internalising:
 

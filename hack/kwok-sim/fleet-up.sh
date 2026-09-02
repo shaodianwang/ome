@@ -321,12 +321,21 @@ OME_KWOK_CLUSTER="$MEMBER_B" hack/kwok-sim/up.sh \
   --skip-build >/dev/null
 
 # Before any tree is authored, the way a real cluster has them before anyone
-# budgets against one. Both members get every namespace the fleet fixtures bind,
+# budgets against one. All three clusters get every namespace the fixtures bind,
 # not just the one the fixture in hand uses, so switching between fixtures needs
 # no second step.
-echo "==> the namespaces the fleet fixtures bind"
-for ctx in "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do
-  ensure_namespaces "$ctx" hack/kwok-sim/fixtures/5*-fleet-*.yaml
+#
+# The hub included, and it is the one that is easy to forget: a member needs the
+# namespace because a leaf binding one that does not exist materializes no
+# LocalQueue, but the hub needs it because the hub is where the tree and the
+# placement ISVCs are applied, and an apply into a missing namespace is refused
+# outright. Same set on all three, so the three are interchangeable to a
+# fixture.
+echo "==> the namespaces the fixtures bind"
+for ctx in "kind-${HUB}" "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do
+  ensure_namespaces "$ctx" \
+    hack/kwok-sim/fixtures/3*-acceleratorquota*.yaml \
+    hack/kwok-sim/fixtures/5*-fleet-*.yaml
 done
 
 echo "==> the member-issued grant on each member"
