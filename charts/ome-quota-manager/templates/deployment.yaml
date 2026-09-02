@@ -115,14 +115,24 @@ spec:
             drop: ["ALL"]
         resources:
           {{- toYaml .Values.quotaManager.resources | nindent 10 }}
-        {{- if .Values.quotaManager.webhook.enabled }}
+        {{- with .Values.quotaManager.extraEnv }}
+        env:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- if or .Values.quotaManager.webhook.enabled .Values.quotaManager.extraVolumeMounts }}
         volumeMounts:
+        {{- if .Values.quotaManager.webhook.enabled }}
         - name: webhook-cert
           mountPath: {{ include "ome-quota-manager.certDir" . }}
           readOnly: true
         {{- end }}
-      {{- if .Values.quotaManager.webhook.enabled }}
+        {{- with .Values.quotaManager.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- end }}
+      {{- if or .Values.quotaManager.webhook.enabled .Values.quotaManager.extraVolumes }}
       volumes:
+      {{- if .Values.quotaManager.webhook.enabled }}
       # Read-only in both cert modes. With internal management the component
       # never writes this path: it writes the Secret, and the kubelet projects
       # the Secret back down here — which is also why a fresh pod stays unready
@@ -131,6 +141,10 @@ spec:
         secret:
           defaultMode: 420
           secretName: {{ .Values.quotaManager.name }}-webhook-cert
+      {{- end }}
+      {{- with .Values.quotaManager.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.quotaManager.nodeSelector }}
       nodeSelector:
