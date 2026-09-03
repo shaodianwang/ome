@@ -263,15 +263,19 @@ func resolveContextDir(rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return rel, nil
 	}
-	root, err := repoRoot()
+	root, err := RepoRoot()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(root, rel), nil
 }
 
-// repoRoot walks up from CWD until it finds the OME go.mod.
-func repoRoot() (string, error) {
+// RepoRoot walks up from the process's working directory until it finds the
+// OME go.mod. Callers that need the repo root must resolve it this way
+// rather than from a compile-time source path (e.g. runtime.Caller): a KIND
+// suite here runs as a precompiled test binary on a runner whose checkout
+// does not live at the path the binary was built under.
+func RepoRoot() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err

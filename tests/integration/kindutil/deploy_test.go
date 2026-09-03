@@ -58,9 +58,9 @@ printf 'deployment stderr\n' >&2
 
 	assertFileContents(t, output+".args", "--cluster\ntest-cluster\n--flag\ntwo words\n")
 	assertFileContents(t, output+".env", "expected-value\n")
-	root, err := repoRoot()
+	root, err := RepoRoot()
 	if err != nil {
-		t.Fatalf("repoRoot() error = %v", err)
+		t.Fatalf("RepoRoot() error = %v", err)
 	}
 	assertFileContents(t, output+".pwd", root+"\n")
 }

@@ -2,10 +2,11 @@ package omenative_upgrade_kind
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
+	"testing"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -194,18 +195,6 @@ func snapshotManagerPods(g gomega.Gomega) map[string]types.UID {
 	return out
 }
 
-// repoRootDir resolves the repository root from this file's own path, so
-// the upgrade step can locate deploy-ome-kind.sh regardless of the test
-// binary's working directory.
-func repoRootDir() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		panic("omenative_upgrade_kind: runtime.Caller failed")
-	}
-	// This file lives at <repo>/tests/integration/singlecluster/e2e/omenative_upgrade_kind/<file>.go.
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "..", ".."))
-}
-
 // upgradeToCurrentBuild re-runs deploy-ome-kind.sh in its normal
 // (build-from-worktree) mode against the suite's already-running cluster: a
 // second `helm upgrade --install` against the same release, landing the
@@ -214,7 +203,10 @@ func repoRootDir() string {
 // waits for `kubectl rollout status` and the webhook endpoints internally,
 // so a manager that never comes back healthy fails here, not later.
 func upgradeToCurrentBuild() error {
-	root := repoRootDir()
+	root, err := kindutil.RepoRoot()
+	if err != nil {
+		return fmt.Errorf("upgradeToCurrentBuild: %w", err)
+	}
 	script := filepath.Join(root, "hack", "omenative-testing", "deploy-ome-kind.sh")
 	ctx, cancel := context.WithTimeout(suiteCtx, upgradeDeployTimeout)
 	defer cancel()
@@ -228,4 +220,21 @@ func upgradeToCurrentBuild() error {
 	cmd.Stdout = ginkgo.GinkgoWriter
 	cmd.Stderr = ginkgo.GinkgoWriter
 	return cmd.Run()
+}
+
+// TestUpgradeScriptResolvesFromRepoRoot guards the path resolution
+// upgradeToCurrentBuild depends on. It needs no cluster and runs
+// unconditionally (unlike TestOMENativeUpgradeIdentity, which Skips without
+// a previous-image env var), so a regression here surfaces on its own in
+// under a second instead of only after a full KIND cluster and chart
+// install have already completed.
+func TestUpgradeScriptResolvesFromRepoRoot(t *testing.T) {
+	root, err := kindutil.RepoRoot()
+	if err != nil {
+		t.Fatalf("kindutil.RepoRoot(): %v", err)
+	}
+	script := filepath.Join(root, "hack", "omenative-testing", "deploy-ome-kind.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("resolved repo root %s does not contain deploy-ome-kind.sh: %v", root, err)
+	}
 }

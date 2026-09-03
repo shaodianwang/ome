@@ -48,7 +48,7 @@ func deployOME(ctx context.Context, clusterName string, d *DeployedOME) error {
 	if _, err := os.Stat(script); err != nil {
 		return fmt.Errorf("deployOME: %w", err)
 	}
-	root, err := repoRoot()
+	root, err := RepoRoot()
 	if err != nil {
 		return fmt.Errorf("deployOME: repo root: %w", err)
 	}
