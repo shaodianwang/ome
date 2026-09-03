@@ -527,9 +527,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Rollout run layer: resolve and pin the effective plan BEFORE the
 	// partition stamp and the dispatch engines, so every consumer in this
-	// pass indexes the same frozen plan. Pinning is not chart-gated (the
-	// live-read behaviors it replaces were defect classes); only ref
-	// resolution depends on the policy feature. The pin and the executors'
+	// pass indexes the same frozen plan. Pinning is not chart-gated; only
+	// ref resolution depends on the policy feature. The pin and the executors'
 	// step state ride the same status flush, which is what makes them
 	// atomic.
 	var rolloutRunRequeue time.Duration

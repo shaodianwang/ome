@@ -33,8 +33,7 @@ func ComposeGroup(g *v1beta1.RolloutGroup, policy *v1beta1.RolloutPolicySpec) (v
 	}
 	if g.PolicyRef == nil {
 		// No inline arm and no ref: the group defaults to blueGreen at
-		// resolution (OEP-0017 semantics, unchanged). Pin it explicitly so the
-		// frozen plan is self-describing.
+		// resolution. Pin it explicitly so the frozen plan is self-describing.
 		out.BlueGreen = &v1beta1.GroupBlueGreen{}
 		return out, nil
 	}

@@ -15,15 +15,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
-// mkSequentialParent returns an ISVC named "llama" (the parent every
-// baselineIR points at) declaring a Sequential rollout over [decoder,
-// engine] in that order. In the v2 rollout API Sequential is spelled as a run
-// of single-Component blueGreen groups, in list order; the controller's
-// collapseSequential folds them back into one Sequential group whose Order
-// is the list order (decoder→engine). Generation is 2; callers stamp
-// each IR's parent-generation annotation and status to model in-flight
-// vs converged (stamp ≠ 2 ⇒ projection lag, the moment-of-bump signal
-// observeSequentialComponentsForGate keys on).
 // pinRun pins the ISVC's current spec.rollout as its active run: the update
 // gates fail closed for grouped Components without one, so every gate fixture
 // models the production state where the run layer has already pinned.
@@ -46,6 +37,15 @@ func pinRun(isvc *v1beta1.InferenceService) *v1beta1.InferenceService {
 	return isvc
 }
 
+// mkSequentialParent returns an ISVC named "llama" (the parent every
+// baselineIR points at) declaring a Sequential rollout over [decoder,
+// engine] in that order. In the v2 rollout API Sequential is spelled as a run
+// of single-Component blueGreen groups, in list order; the controller's
+// collapseSequential folds them back into one Sequential group whose Order
+// is the list order (decoder→engine). Generation is 2; callers stamp
+// each IR's parent-generation annotation and status to model in-flight
+// vs converged (stamp ≠ 2 ⇒ projection lag, the moment-of-bump signal
+// observeSequentialComponentsForGate keys on).
 func mkSequentialParent() *v1beta1.InferenceService {
 	return pinRun(&v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 2},

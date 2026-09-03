@@ -1,7 +1,7 @@
 // Package rolloutpolicy is the pure, K8s-client-free core of the RolloutPolicy
-// feature: portable digests and ref→group composition. The webhook, the run
-// opener, the placement inflater, and CI tooling all link this package, so no
-// two of them can disagree about a digest or a composed group.
+// feature: portable digests and ref→group composition. The run opener, the
+// placement inflater, and the RolloutPolicy status controller all link this
+// package, so no two of them can disagree about a digest or a composed group.
 package rolloutpolicy
 
 import (

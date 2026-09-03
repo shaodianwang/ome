@@ -46,10 +46,6 @@ func newReconciler(t *testing.T, bindings ProviderBindings, objs ...client.Objec
 	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
-	// The API package's SchemeBuilder does not carry RolloutPolicy; register
-	// the kind directly so the fake client can serve it.
-	scheme.AddKnownTypes(v1beta1.SchemeGroupVersion,
-		&v1beta1.RolloutPolicy{}, &v1beta1.RolloutPolicyList{})
 	c := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.RolloutPolicy{}).

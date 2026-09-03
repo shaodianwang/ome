@@ -103,8 +103,8 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 	active := activeRun(isvc)
 
 	// Every group deleted mid-run: the pinned plan continues (an inert edit,
-	// like any other) — the implicit "delete the group to abort" workflow is
-	// gone, so point at the verbs that do abort.
+	// like any other); deleting a group never aborts a run, so point at the
+	// verbs that do.
 	if specGroups == 0 {
 		if active != nil {
 			if setPlanDrift(isvc, true, v1beta1.RolloutPlanDriftReasonSpecNewerThanRun,
@@ -460,8 +460,8 @@ func primaryPhase(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup) v1bet
 
 // updateDrift compares each spec group's live render digest against the
 // pinned one and stamps RolloutPlanDrift. A canary group disappearing from
-// the spec gets a pointed event: the implicit delete-to-abort workflow no
-// longer works mid-run.
+// the spec gets a pointed event: only the rollback and repin verbs abort a
+// pinned run.
 func updateDrift(ctx context.Context, in Inputs, active *v1beta1.RolloutRun, now metav1.Time) error {
 	isvc := in.ISVC
 	specGroups := isvc.Spec.Rollout.Groups
@@ -476,7 +476,7 @@ func updateDrift(ctx context.Context, in Inputs, active *v1beta1.RolloutRun, now
 		recordDrift(isvc, true)
 		if setPlanDrift(isvc, true, v1beta1.RolloutPlanDriftReasonSpecNewerThanRun, msg, now) && canaryGone {
 			emit(in.Recorder, isvc, corev1.EventTypeWarning, EventGroupRemoved,
-				"canary group removed while run %s is pinned; deleting the group no longer aborts a run — use ome.io/rollout-rollback or ome.io/rollout-repin", active.RunID)
+				"canary group removed while run %s is pinned; deleting the group does not abort a pinned run — use ome.io/rollout-rollback or ome.io/rollout-repin", active.RunID)
 		}
 		return nil
 	}
