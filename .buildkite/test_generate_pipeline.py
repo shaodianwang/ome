@@ -216,6 +216,38 @@ class TestGkeKindGroupEmission(PipelineTestCase):
             self.assertIsNone(regex.search("/repo/tests/alpha_kind_test.go.bak"))
 
 
+class TestChartImageOrdering(unittest.TestCase):
+    """A chart that stamps an image ref must not publish before that image."""
+
+    def _stamping_charts_per_push_script(self):
+        # push_chart.sh decides which charts stamp, one `[ "${CHART}" = "x" ]`
+        # block each. Reading it is the point: the two files drifting is the bug
+        # this guards, so asserting against a second hardcoded list would prove
+        # nothing.
+        script = (Path(gp.__file__).resolve().parent / "push_chart.sh").read_text()
+        return set(re.findall(r'\[ "\$\{CHART\}" = "([a-z0-9-]+)" \]', script))
+
+    def test_every_chart_that_stamps_an_image_waits_for_it(self):
+        stamping = self._stamping_charts_per_push_script()
+        self.assertTrue(stamping, "found no stamping blocks — did push_chart.sh change shape?")
+        missing = stamping - set(gp.IMAGE_STAMPING_CHARTS)
+        self.assertEqual(
+            missing, set(),
+            f"{sorted(missing)} stamp an image ref in push_chart.sh but are not in "
+            "IMAGE_STAMPING_CHARTS, so their chart publishes before the image exists",
+        )
+        extra = set(gp.IMAGE_STAMPING_CHARTS) - stamping
+        self.assertEqual(
+            extra, set(),
+            f"{sorted(extra)} wait on the image build but stamp nothing, delaying "
+            "their publish for no reason",
+        )
+
+    def test_stamping_charts_are_real_charts(self):
+        unknown = set(gp.IMAGE_STAMPING_CHARTS) - set(gp.CHARTS)
+        self.assertEqual(unknown, set(), f"{sorted(unknown)} are not in CHARTS")
+
+
 class TestImageBuildEmission(unittest.TestCase):
     def test_wrapper_and_generated_build_job_have_automatic_retries(self):
         yaml_text = gp._build_image_step(

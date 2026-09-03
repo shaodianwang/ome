@@ -240,6 +240,12 @@ IMAGES = [
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager"]
 
+# Charts whose published values carry an image ref, so their publish step has to
+# wait for that image to exist in the prod registry. Mirrors the per-chart
+# stamping blocks in push_chart.sh; a chart that stamps but is missing here
+# publishes ahead of its own image and installs as ErrImagePull.
+IMAGE_STAMPING_CHARTS = ("ome-resources", "ome-scheduler", "ome-quota-manager", "muse")
+
 
 # ---------------------------------------------------------------------------
 # Step helpers
@@ -1166,11 +1172,13 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
 
 def cd_steps() -> str:
     parts: list[str] = []
-    # The ome-resources / ome-scheduler / muse charts stamp an image ref (prod-ECR
-    # hub + tag) into their values at publish time, so they must wait for both the
-    # build (dev push) AND the mirror (prod push) to finish — otherwise a consumer
-    # installing the freshly published chart could hit ImagePullBackOff until the
-    # mirror catches up.
+    # A chart that stamps an image ref (prod-ECR hub + tag) into its values at
+    # publish time must wait for both the build (dev push) AND the mirror (prod
+    # push) — otherwise a consumer installing the freshly published chart pulls a
+    # tag that does not exist yet and sits in ErrImagePull until the mirror
+    # catches up. Which charts stamp is decided by push_chart.sh, and
+    # IMAGE_STAMPING_CHARTS has to agree with it; test_generate_pipeline.py reads
+    # that script and fails if the two drift.
     image_keys = []
     for label, ecr_name, dockerfile in IMAGES:
         parts.append(_build_image_step(label, ecr_name, dockerfile))
@@ -1185,7 +1193,7 @@ def cd_steps() -> str:
     if BRANCH == "main" and GKE_EVAL_ENABLED:
         parts.append(_package_kind_eval_image_step())
     for chart in CHARTS:
-        if chart in ("ome-resources", "ome-scheduler", "muse"):
+        if chart in IMAGE_STAMPING_CHARTS:
             # These charts stamp an image ref, so wait for the image build + mirror.
             parts.append(_push_chart_step(chart, depends_on=image_keys))
         else:
