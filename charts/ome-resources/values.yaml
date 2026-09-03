@@ -318,10 +318,12 @@ ome:
       # bound.
       defaultRatioTolerancePercent: 5
     # podDisruptionBudget configures pod-level availability policies by mode.
-    # Omitting rawDeployment keeps the chart default; set rawDeployment: null
-    # to disable it.
+    # Explicit per-Component policies take precedence over these defaults. Set
+    # either mode to null to disable its default.
     podDisruptionBudget:
       rawDeployment:
+        maxUnavailable: 1
+      omeNative:
         maxUnavailable: 1
     # lifecycle tunes the OMENative per-Instance lifecycle state machine.
     lifecycle:
