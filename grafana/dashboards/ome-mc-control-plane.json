@@ -1,0 +1,948 @@
+{
+  "uid": "ome-mc-control-plane",
+  "title": "OME \u00b7 Multi-cluster control plane",
+  "description": "Health of the multi-cluster control plane: are the OME deployments up on the management cluster, is the placer reconciling, and what OME objects exist. Generic signals only \u2014 see the coverage-limits panel for what is deliberately absent.",
+  "tags": [
+    "ome",
+    "multicluster",
+    "control-plane"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "timezone": "",
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "prometheus",
+        "current": {},
+        "refresh": 1
+      },
+      {
+        "type": "query",
+        "name": "cluster",
+        "label": "Control plane",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(controller_runtime_reconcile_total{controller=\"placement\"}, cluster)",
+          "refId": "cluster"
+        },
+        "definition": "label_values(controller_runtime_reconcile_total{controller=\"placement\"}, cluster)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {},
+        "allValue": ".*"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Management cluster \u2014 deployment health",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Controller manager ready",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (deployment) (kube_deployment_status_replicas_available{cluster=~\"$cluster\",namespace=\"ome\",deployment=\"ome-controller-manager\"})",
+          "refId": "A",
+          "legendFormat": "available"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (deployment) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=\"ome\",deployment=\"ome-controller-manager\"})",
+          "refId": "B",
+          "legendFormat": "desired"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "From kube-state-metrics, so it reports even when the pod's own /metrics is down. available < desired is the signal.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Quota manager ready",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (deployment) (kube_deployment_status_replicas_available{cluster=~\"$cluster\",namespace=\"ome\",deployment=\"ome-quota-manager\"})",
+          "refId": "C",
+          "legendFormat": "available"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (deployment) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=\"ome\",deployment=\"ome-quota-manager\"})",
+          "refId": "D",
+          "legendFormat": "desired"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Deployment-level health only. ome-quota-manager is scraped by nothing, so its reconcile loop, quota tree and webhook are invisible here.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Manager leader (must be 1)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(leader_election_master_status{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\",name=\"ome-controller-manager-leader-lock\"})",
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "0 = no leader and nothing is reconciling; >1 = split brain. This binary does register leader_election_*, unlike ome-scheduler.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Container restarts (1h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(increase(kube_pod_container_status_restarts_total{cluster=~\"$cluster\",namespace=\"ome\",container=~\"manager|quota-manager\"}[1h]))",
+          "refId": "F"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Both deployments. Neither carries a PodDisruptionBudget or a priorityClassName, so eviction and OOM-kill surface here first.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Replicas available vs desired",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (deployment) (kube_deployment_status_replicas_available{cluster=~\"$cluster\",namespace=\"ome\",deployment=~\"ome-controller-manager|ome-quota-manager\"})",
+          "refId": "G",
+          "legendFormat": "{{deployment}} available"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (deployment) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=\"ome\",deployment=~\"ome-controller-manager|ome-quota-manager\"})",
+          "refId": "H",
+          "legendFormat": "{{deployment}} desired"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Controller manager \u2014 placement and members",
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile rate by controller",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\",controller=~\"placement|placement-endpoint|workloadcluster\"}[5m]))",
+          "refId": "I",
+          "legendFormat": "{{controller}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "placement is the placer, placement-endpoint the global endpoint publisher, workloadcluster the member connection reconciler. A flat zero on placement means no source InferenceService is being placed.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile outcome mix \u2014 placement",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 12,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (result) (rate(controller_runtime_reconcile_total{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\",controller=\"placement\"}[5m]))",
+          "refId": "J",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "requeue and requeue_after dominating with no success is retrying without converging \u2014 the shape a wedged race or an unreachable member produces.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 12,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\",controller=~\"placement|placement-endpoint|workloadcluster\"}[5m]))",
+          "refId": "K",
+          "legendFormat": "{{controller}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "There is no error taxonomy: every failure class collapses into this counter. The class is recoverable only from the Event reason or the logs.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile latency p99",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\",controller=~\"placement|placement-endpoint|workloadcluster\"}[5m])))",
+          "refId": "L",
+          "legendFormat": "{{controller}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "A placement pass is bounded by PlaceTimeout, so a wedged remote member reads as a normal-length pass. Read this together with the outcome mix.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest unfinished work",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 19,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (name) (workqueue_unfinished_work_seconds{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\",name=~\"placement.*|workloadcluster\"})",
+          "refId": "M",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "The stall detector, and the most load-bearing panel here. A monotonically climbing line is a wedged worker \u2014 the failure mode neither /healthz nor /readyz catches, because both resolve to the webhook's StartedChecker and return 200 regardless.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Apiserver calls by code",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 19,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (code) (rate(rest_client_requests_total{cluster=~\"$cluster\",pod=~\"ome-controller-manager.*\",endpoint=\"metrics\"}[5m]))",
+          "refId": "N",
+          "legendFormat": "{{code}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "409 is a status-write conflict. The placer and the endpoint publisher both write the same source InferenceService, a contention point no OME counter covers.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "OME objects on the control plane",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "InferenceServices (all namespaces)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(apiserver_storage_objects{cluster=~\"$cluster\",job=\"kube-apiserver\",resource=\"inferenceservices.ome.io\"})",
+          "refId": "O",
+          "legendFormat": "inferenceservices"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "description": "Live object count from the apiserver, across all namespaces. A count, not a state breakdown: Ready vs failed vs in-progress is not available here.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "OME custom resources by kind",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 27,
+        "w": 16,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (resource) (apiserver_storage_objects{cluster=~\"$cluster\",job=\"kube-apiserver\",resource=~\"(inferenceservices|inferencereplicas|acceleratorquotas|workloadclusters|basemodels|clusterbasemodels|servingruntimes|clusterservingruntimes|acceleratorclasses|finetunedweights).ome.io\"})",
+          "refId": "P",
+          "legendFormat": "{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "description": "Every OME CRD on the management cluster. The AcceleratorQuota and WorkloadCluster counts are the only quota and multi-cluster object signal available today.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Coverage limits",
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "What this board cannot tell you, and the fix for each",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 24,
+        "h": 11
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Every panel above is a generic signal \u2014 controller-runtime, kube-state-metrics, or the apiserver. Neither the multi-cluster stack nor the quota stack registers a custom metric, so this board shows that the control plane is *running*, never that it is placing *correctly*.\n\n| Gap | Why it is missing | Fix |\n|---|---|---|\n| InferenceService state \u2014 Ready, failed, in-progress, per namespace | The platform kube-state-metrics on a management cluster carries no OME `customResourceState` config, so every `ome_inferenceservice_*` series is absent. Only the raw object count above exists. | Add `config/monitoring/kube-state-metrics-config.yaml` to that KSM. Config only, no OME code change. |\n| Quota manager internals \u2014 tree reconcile, projection lag, chip accounting, webhook decisions | `charts/ome-quota-manager` ships no metrics Service and no ServiceMonitor, and `pkg/quota` registers no metrics. | A Service and ServiceMonitor for the chart; `prometheus.io/*` pod annotations suffice where the bundled Prometheus runs. |\n| The single-active invariant \u2014 two members serving one InferenceService | No metric, no event, no condition. The loser sweep returns void and swallows per-member failures. | Placement instrumentation. |\n| Per-member health | `WorkloadCluster.status.conditions[Ready]` is the only signal, is not exported to Prometheus, and reports True for the whole connection grace window while the member is already failing its probe. | A KSM `customResourceState` entry for WorkloadCluster, or placement instrumentation. |\n| Fan-out latency, race outcome, sweep lag, derived-object reaping | Computed by `tests/perf/multicluster` offline and nowhere in production. | Instrumentation. |\n\nNothing on this board can page anyone: `prometheusRule.enabled` is false everywhere, no PrometheusRule object is deployed, and Alertmanager has no route or receiver.\n\n*The `cluster` variable is scoped to control planes running the placer, so a new tier appears here as soon as it is deployed, with no dashboard change.*"
+      }
+    }
+  ]
+}
