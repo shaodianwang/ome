@@ -57,6 +57,7 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-pause")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -67,6 +68,7 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 		var v1EngineRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "perm-ratio-pause")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
@@ -83,6 +85,8 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 		// Wait for non-Idle so we land the pause mid-rollout.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-pause")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				NotTo(Equal(v1beta1.CoordinationPhaseIdle),
 					"rollout must enter non-Idle before pause is applied")
@@ -99,6 +103,8 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-pause")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
 					"pause annotation must drive RatioBalanced group to Paused")
@@ -106,6 +112,8 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-pause")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused))
 		}, 2*time.Second, 200*time.Millisecond).Should(Succeed())
@@ -119,8 +127,11 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-pause")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"after unpause, engine CurrentRevision must advance to v2")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"RatioBalanced rollout must return to Idle after unpause")

@@ -54,6 +54,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ru-revert")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -71,6 +72,8 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 		// Wait for non-Idle so we revert mid-rollout.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ru-revert")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				NotTo(Equal(v1beta1.CoordinationPhaseIdle),
 					"rollout must enter non-Idle before revert is applied")
@@ -90,6 +93,8 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
 				"engine must be back to 3 serving replicas after revert")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"rollout must return to Idle after revert converges")
@@ -116,12 +121,34 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 				"every alive engine pod must be on fake-serving:v1 after revert (got %d/%d v1 pods); a non-v1 pod = v2 straggler", v1Count, engCount)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Final no-flap check: 2s of stable Idle.
+		// Pod-image convergence leads the rollout bookkeeping: the run closes
+		// and the group walks down to Idle a few reconciles later. Wait for
+		// that settle first — the no-flap invariant is about the SETTLED
+		// state, not the tail of the revert itself.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "perm-ru-revert")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			if c.Status.Rollout != nil {
+				g.Expect(c.Status.Rollout.ActiveRun).To(BeNil(), "the run must close once the revert converges")
+			}
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Final no-flap check: 2s of stable Idle with no run reopening — a
+		// reopen here would mean the straggler trigger is churning on a
+		// converged workload.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ru-revert")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"post-revert state must be stable at Idle")
+			if c.Status.Rollout != nil {
+				g.Expect(c.Status.Rollout.ActiveRun).To(BeNil(), "no run may reopen on a converged workload")
+			}
 		}, kindShortTimeout, kindPollInterval).Should(Succeed())
 	})
 })

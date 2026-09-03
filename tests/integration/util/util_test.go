@@ -80,6 +80,11 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		Expect(cm.Data).To(HaveKey("omeAgent"))
 		Expect(cm.Data).To(HaveKey("lifecycle"))
 		Expect(cm.Data["lifecycle"]).To(MatchJSON(`{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":100,"revisionHistoryLimit":10}`))
+		// The rollout block must round-trip the chart defaults: the canary
+		// capacity-gate escalation timeout has no in-code fallback, so the
+		// seed is what keeps suite behavior chart-equivalent.
+		Expect(cm.Data).To(HaveKey("rollout"))
+		Expect(cm.Data["rollout"]).To(MatchJSON(`{"maxPinnedPlanBytes":16384,"defaultReadyTimeout":"15m"}`))
 		// The deploy block must round-trip the chart-equivalent replica
 		// defaults the ISVC defaulter reads at admission.
 		Expect(cm.Data["deploy"]).To(MatchJSON(`{

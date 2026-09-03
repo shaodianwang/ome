@@ -65,9 +65,11 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "badimg-x1")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -98,6 +100,8 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 		// + status flush headroom. 3 minutes is comfortable.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "badimg-x1")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseFailed),
 					"coordination layer must mark group Failed after the per-Instance timeout")

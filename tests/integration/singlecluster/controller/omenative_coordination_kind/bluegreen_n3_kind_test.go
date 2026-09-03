@@ -55,6 +55,7 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-bg-n3")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			for _, comp := range []v1beta1.ComponentType{
@@ -105,6 +106,8 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 				g.Expect(cs.Lifecycle.ServingReplicas).To(BeNumerically(">=", 1),
 					"Component %s must remain serving on v2", comp)
 			}
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"BlueGreen N=3 rollout must return to Idle")

@@ -58,6 +58,7 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -81,6 +82,8 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 		// invariant).
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			phase := c.Status.RolloutCoordination.Groups[0].Phase
 			g.Expect(phase).NotTo(Equal(v1beta1.CoordinationPhaseIdle),
 				"rollout should have entered a non-Idle phase before revert is applied")
@@ -105,6 +108,8 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			// it's a new revision name that matches the v1 podSpec. The
 			// stronger assertion:
 			// NO pod is running on a v2 image.
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"rollout must return to Idle after revert converges")
@@ -142,13 +147,33 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 					"got %d/%d v1 pods (a non-v1 pod = v2 straggler = revert lost data)", v1Count, engCount)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
+		// Pod-image convergence leads the rollout bookkeeping: the run closes
+		// and the group walks down to Idle a few reconciles later. Wait for
+		// that settle before the no-flap window.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			if c.Status.Rollout != nil {
+				g.Expect(c.Status.Rollout.ActiveRun).To(BeNil(), "the run must close once the revert converges")
+			}
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
 		// Final no-flap check: hold steady for 2s. The revert must not
-		// re-trigger a phantom v1-to-something rollout.
+		// re-trigger a phantom v1-to-something rollout, and no run may
+		// reopen on a converged workload.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"post-revert state must be stable at Idle, no phantom rollouts")
+			if c.Status.Rollout != nil {
+				g.Expect(c.Status.Rollout.ActiveRun).To(BeNil(), "no run may reopen on a converged workload")
+			}
 		}, kindShortTimeout, kindPollInterval).Should(Succeed())
 
 		// Capture a meaningful debug breadcrumb if the spec ever fails.

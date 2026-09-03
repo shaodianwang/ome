@@ -143,6 +143,7 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 				"engine bump should produce at least 2 engine CRs (v1 + v2); got %d", engineCount)
 			g.Expect(decoderCount).To(Equal(1),
 				"decoder must NOT churn on engine bump; got %d decoder CRs (%v)", decoderCount, decoderNames)
+			g.Expect(decoderNames).NotTo(BeEmpty())
 			g.Expect(decoderNames[0]).To(Equal(initialDecoderCR),
 				"decoder CR name must be unchanged after engine bump")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -179,8 +180,10 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pd8-iso")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.Replicas).To(Equal(int32(2)),
 				"engine scale-up should reach 2; got %d", engCS.Lifecycle.Replicas)
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
 			g.Expect(decCS.Lifecycle.Replicas).To(Equal(int32(1)),
 				"decoder must NOT change on engine scale-up; got %d", decCS.Lifecycle.Replicas)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

@@ -199,13 +199,17 @@ manifests: controller-gen yq ## 📄 Generate WebhookConfiguration, ClusterRole 
 
 	@echo "\n📁 Step 6: Copying manifests to Helm charts..."
 	@cp config/crd/full/ome* charts/ome-crd/templates/ && cp config/rbac/role.yaml charts/ome-resources/templates/ome-controller/rbac/role.yaml
-	@# The autoscalerpolicies CRD template is Helm-gated (the feature installs
+	@# The policy CRD templates are Helm-gated (each feature installs
 	@# CRD + controller + webhook together); the raw copy above drops the
 	@# wrapper, so re-wrap after every copy. The ome-crd render test fails
 	@# loudly if this ever regresses.
 	@f=charts/ome-crd/templates/ome.io_autoscalerpolicies.yaml; \
 	if ! head -1 $$f | grep -q 'autoscalerPolicy.enabled'; then \
 		{ echo '{{- if .Values.ome.autoscalerPolicy.enabled }}'; cat $$f; echo '{{- end }}'; } > $$f.tmp && mv $$f.tmp $$f; \
+	fi
+	@f=charts/ome-crd/templates/ome.io_rolloutpolicies.yaml; \
+	if ! head -1 $$f | grep -q 'rolloutPolicy.enabled'; then \
+		{ echo '{{- if .Values.ome.rolloutPolicy.enabled }}'; cat $$f; echo '{{- end }}'; } > $$f.tmp && mv $$f.tmp $$f; \
 	fi
 	@# ome-quota-manager can optionally install the one CRD it needs, for a
 	@# standalone install with no ome-crd. Copied, not symlinked, because Helm

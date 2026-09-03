@@ -41,10 +41,22 @@ data:
   canaryAnalysis: |-
     {
       "bundledPrometheusAddress": "{{ .Values.ome.controller.canaryAnalysis.bundledPrometheusAddress | default (printf "http://ome-prometheus.%s.svc:%v" .Release.Namespace .Values.prometheus.service.port) }}",
+      "defaultProvider": "{{ .Values.ome.controller.canaryAnalysis.defaultProvider | default "" }}",
       "queryTimeout": "{{ .Values.ome.controller.canaryAnalysis.queryTimeout | default "5s" }}",
       "maxConcurrency": {{ .Values.ome.controller.canaryAnalysis.maxConcurrency | default 8 }},
       "cacheTTL": "{{ .Values.ome.controller.canaryAnalysis.cacheTTL | default "2m" }}"
     }
+
+  rollout: |-
+    {
+      "maxPinnedPlanBytes": {{ .Values.ome.controller.rollout.maxPinnedPlanBytes | default 0 }},
+      "defaultReadyTimeout": "{{ .Values.ome.controller.rollout.defaultReadyTimeout | default "" }}"
+    }
+{{- with .Values.ome.metricProviders }}
+
+  metricProviders: |-
+    {{- toJson . | nindent 4 }}
+{{- end }}
 
   coordination: |-
     {

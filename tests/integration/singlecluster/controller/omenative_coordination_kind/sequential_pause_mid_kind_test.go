@@ -54,6 +54,7 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-pause")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -64,7 +65,9 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 		var v1EngineRev, v1DecoderRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "perm-seq-pause")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
@@ -83,6 +86,8 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 		// Wait for the rollout to enter a non-Idle phase, then pause.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-pause")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			phase := c.Status.RolloutCoordination.Groups[0].Phase
 			g.Expect(phase).NotTo(Equal(v1beta1.CoordinationPhaseIdle),
 				"rollout must enter non-Idle before pause is applied")
@@ -100,6 +105,8 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 		// Phase reaches Paused.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-pause")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
 					"pause must drive Sequential group to Paused mid-rollout")
@@ -108,6 +115,8 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 		// Hold Paused for 2s.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-pause")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
 					"paused phase must hold while annotation is set")
@@ -122,10 +131,14 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-pause")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"after unpause, engine CurrentRevision must advance to v2")
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"after unpause, decoder CurrentRevision must advance to v2")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"Sequential rollout must return to Idle after unpause")

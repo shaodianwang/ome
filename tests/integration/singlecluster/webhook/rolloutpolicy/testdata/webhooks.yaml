@@ -1,0 +1,56 @@
+# Suite-local fixture: the RolloutPolicy validator plus the ISVC validator
+# (for the rollout policy-ref rejection specs). The full
+# config/webhook/manifests.yaml would install every OME webhook and require
+# each corresponding handler to be registered in this suite's manager.
+#
+# envtest rewrites caBundle and swaps clientConfig.service for a
+# clientConfig.url pointing at the in-process server, so those values are
+# scaffolding — except the rules and matchConditions, which decide what
+# actually reaches the handlers and are therefore a copy of what the chart
+# installs. The matchConditions CEL is load-bearing: a DELETE review
+# carries no `object`, so the operation check must short-circuit before
+# the deletionTimestamp guard or every delete would be rejected.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: rolloutpolicy.ome.io
+webhooks:
+  - name: rolloutpolicy.ome-webhook-server.validator
+    clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-server-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-rolloutpolicy
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    matchConditions:
+      - name: skip-deletion
+        expression: "request.operation == 'DELETE' || !has(object.metadata.deletionTimestamp)"
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["rolloutpolicies"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: inferenceservice.ome.io
+webhooks:
+  - name: inferenceservice.ome-webhook-server.validator
+    clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-server-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-inferenceservice
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]

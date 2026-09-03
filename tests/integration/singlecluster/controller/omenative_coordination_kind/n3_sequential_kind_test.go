@@ -67,6 +67,7 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "seq-n3-kcg1")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			for _, comp := range []v1beta1.ComponentType{
@@ -88,8 +89,11 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		var v1RouterRev, v1DecoderRev, v1EngineRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "seq-n3-kcg1")
+			g.Expect(preBump.Status.Components[v1beta1.RouterComponent].Lifecycle).NotTo(BeNil())
 			v1RouterRev = preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
+			g.Expect(preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1RouterRev).NotTo(BeEmpty(), "router CurrentRevision must be promoted")
 			g.Expect(v1DecoderRev).NotTo(BeEmpty(), "decoder CurrentRevision must be promoted")
@@ -148,12 +152,17 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		// advanced off v1, group back to Idle.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "seq-n3-kcg1")
+			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1RouterRev),
 				"router CurrentRevision must advance off v1")
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"decoder CurrentRevision must advance off v1")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"chained Sequential rollout must finish and return to Idle")

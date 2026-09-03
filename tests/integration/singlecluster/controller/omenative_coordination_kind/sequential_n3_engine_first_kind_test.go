@@ -61,6 +61,7 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-n3-ef")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			for _, comp := range []v1beta1.ComponentType{
@@ -80,8 +81,11 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 		var v1EngineRev, v1DecoderRev, v1RouterRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "perm-seq-n3-ef")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+			g.Expect(preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			v1DecoderRev = preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+			g.Expect(preBump.Status.Components[v1beta1.RouterComponent].Lifecycle).NotTo(BeNil())
 			v1RouterRev = preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
@@ -132,9 +136,14 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-n3-ef")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev))
+			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1RouterRev))
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

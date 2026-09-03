@@ -199,8 +199,10 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 			_ = freshISVC(g, ns.Name, "pd7-isvc")
 			engInsts := instanceStatuses(g, ns.Name, "pd7-isvc", v1beta1.EngineComponent)
 			decInsts := instanceStatuses(g, ns.Name, "pd7-isvc", v1beta1.DecoderComponent)
+			g.Expect(engInsts).NotTo(BeEmpty())
 			g.Expect(engInsts[0].Incarnation).To(BeNumerically(">", int64(1)),
 				"Engine must have bumped Incarnation through Restart")
+			g.Expect(decInsts).NotTo(BeEmpty())
 			g.Expect(decInsts[0].Incarnation).To(Equal(decoderInc),
 				"Decoder Incarnation must remain unchanged — Engine restart leaked into Decoder reconcile")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

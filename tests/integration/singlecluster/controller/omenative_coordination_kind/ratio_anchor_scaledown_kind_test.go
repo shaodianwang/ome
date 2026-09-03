@@ -63,6 +63,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor across deliberate 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "ratio-co-anchor")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -95,6 +96,8 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor across deliberate 
 			g.Expect(decCS.Lifecycle).NotTo(BeNil())
 			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(1)),
 				"decoder must scale down to 1 — a deliberate scale is not gated by the ratio band")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

@@ -16,9 +16,10 @@ import (
 // SeedDefaultConfigMaps creates the ConfigMap the controllers read at
 // reconcile time:
 //
-//   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent. The
-//     ISVC reconciler reads ingress + deploy; the BaseModel PVC path
-//     reads omeAgent; the InferenceReplica reconciler reads lifecycle.
+//   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent,
+//     rollout. The ISVC reconciler reads ingress + deploy + rollout; the
+//     BaseModel PVC path reads omeAgent; the InferenceReplica reconciler
+//     reads lifecycle.
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -35,6 +36,11 @@ import (
 //     Instance or gang atomic
 //   - omeAgent gets a minimal image so the helpers don't panic on nil
 //     dereferences when a test doesn't override
+//   - rollout mirrors the chart defaults (pinned-plan size cap and the
+//     canary capacity-gate defaultReadyTimeout). The escalation timeout is
+//     config-driven with no in-code fallback, so without this key a canary
+//     step waiting on capacity would never escalate to Failed; supplying
+//     the chart's value keeps suite behavior chart-equivalent
 //
 // Idempotent: subsequent calls with the same desired state are no-ops.
 // If a ConfigMap already exists with different data, this function
@@ -80,6 +86,10 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "cpuLimit": "500m",
   "backoffLimit": 2,
   "ttlSecondsAfterFinished": 3600
+}`,
+		"rollout": `{
+  "maxPinnedPlanBytes": 16384,
+  "defaultReadyTimeout": "15m"
 }`,
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)

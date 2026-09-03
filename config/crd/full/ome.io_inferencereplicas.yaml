@@ -4391,6 +4391,7 @@ spec:
                         - Budget
                         - RetryBlock
                         - Held
+                        - Plan
                       type: string
                     reason:
                       type: string

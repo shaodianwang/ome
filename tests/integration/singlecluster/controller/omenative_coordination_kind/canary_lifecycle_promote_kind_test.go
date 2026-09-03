@@ -128,6 +128,7 @@ var _ = ginkgo.Describe("behavior — canary manual promote lifecycle", ginkgo.O
 
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)),
 				"a promote value that is not the canary hash must not advance the step")
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
@@ -145,6 +146,7 @@ var _ = ginkgo.Describe("behavior — canary manual promote lifecycle", ginkgo.O
 
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.RolledBackRevisionHash).To(BeEmpty(),
 				"rollout-rollback=false must never arm a rollback")
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))

@@ -54,6 +54,7 @@ import (
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
+	rolloutpolicycontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/rolloutpolicy"
 	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
 	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -65,6 +66,7 @@ import (
 	inferencereplicawebhook "github.com/ome-projects/ome/pkg/webhook/admission/inferencereplica"
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	"github.com/ome-projects/ome/pkg/webhook/admission/pod"
+	rolloutpolicywebhook "github.com/ome-projects/ome/pkg/webhook/admission/rolloutpolicy"
 	"github.com/ome-projects/ome/pkg/webhook/admission/runtimepreset"
 	runtimerevisionwebhook "github.com/ome-projects/ome/pkg/webhook/admission/runtimerevision"
 	"github.com/ome-projects/ome/pkg/webhook/admission/servingruntime"
@@ -481,6 +483,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// RolloutPolicy is chart-gated the same way. Run pinning itself is not
+	// gated — only ref resolution, the webhook, and the status controller
+	// ride this probe.
+	rolloutPolicyFound, err := utils.IsCrdAvailable(cfg, v1beta1.SchemeGroupVersion.String(), constants.RolloutPolicyKind)
+	if err != nil {
+		setupLog.Error(err, "Failed to probe for the RolloutPolicy CRD")
+		os.Exit(1)
+	}
+
+	// The inline-plan/policy-body size cap is operator config read once at
+	// startup; a cap change lands on the next manager restart. Absent config
+	// degrades to 0 (uncapped), never an in-code literal.
+	rolloutMaxPlanBytes := 0
+	if rolloutStartupConfig, cfgErr := controllerconfig.NewRolloutConfig(clientSet); cfgErr != nil {
+		setupLog.Error(cfgErr, "Failed to load the rollout operator config; proceeding with no plan-size cap")
+	} else {
+		rolloutMaxPlanBytes = rolloutStartupConfig.MaxPinnedPlanBytes
+	}
+
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
 	if isControlPlane {
@@ -506,6 +527,14 @@ func main() {
 			setupLog.Info("Setting up AutoscalerPolicy status controller")
 			if err := autoscalerpolicycontroller.SetupWithManager(mgr, clientSet, controllerconfig.NewConfigCache(options.configCacheTTL)); err != nil {
 				setupLog.Error(err, "Failed to create AutoscalerPolicy status controller")
+				os.Exit(1)
+			}
+		}
+
+		if rolloutPolicyFound {
+			setupLog.Info("Setting up RolloutPolicy status controller")
+			if err := rolloutpolicycontroller.SetupWithManager(mgr, clientSet, controllerconfig.NewConfigCache(options.configCacheTTL)); err != nil {
+				setupLog.Error(err, "Failed to create RolloutPolicy status controller")
 				os.Exit(1)
 			}
 		}
@@ -683,6 +712,13 @@ func main() {
 			Handler: &autoscalerpolicywebhook.Validator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
+		// RolloutPolicy follows the same chart-gated pattern: the handler is
+		// inert until the chart installs its ValidatingWebhookConfiguration.
+		setupLog.Info("Registering RolloutPolicy validator webhook to the webhook server")
+		hookServer.Register("/validate-ome-io-v1beta1-rolloutpolicy", &webhook.Admission{
+			Handler: &rolloutpolicywebhook.Validator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme()), MaxPlanBytes: rolloutMaxPlanBytes},
+		})
+
 		// The InferenceService defaulter/validator runtime-selects
 		// against the LOCAL cluster's runtime/model catalog. On the control
 		// plane that catalog is empty (runtimes/models live on the workload
@@ -709,6 +745,11 @@ func main() {
 					// the AutoscalerPolicy CRD is absent, so a ref can never
 					// silently no-op on a non-feature cluster.
 					AutoscalerPolicyEnabled: autoscalerPolicyFound,
+					// Same contract for rollout policy refs, plus the shared
+					// inline-plan size cap (pinned plans live in status, so
+					// both authoring paths are bounded by one knob).
+					RolloutPolicyEnabled: rolloutPolicyFound,
+					RolloutMaxPlanBytes:  rolloutMaxPlanBytes,
 					// Reject ome.io/btp.* (Envoy Gateway) when the active
 					// translator is Istio or Noop, and vice versa, at
 					// admission. Sourced from the same translator the

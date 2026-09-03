@@ -119,6 +119,7 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
 				To(Equal(v1beta1.RolloutPhasePending),
 					"losing the canary pod must re-close the capacity gate")
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
 			g.Expect(c.Status.Canary.CanaryRevisionHash).To(Equal(canaryHash),
 				"pod loss must not retarget or reset the canary")
@@ -132,6 +133,7 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
 				To(Equal(v1beta1.RolloutPhasePaused),
 					"the hold must resume once the replacement canary pod serves")
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
 
 			var canaryPods, stablePods []corev1.Pod
@@ -167,6 +169,7 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(2)))
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
 				To(Equal(v1beta1.RolloutPhaseStable))

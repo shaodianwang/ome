@@ -76,6 +76,7 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 		var v1EngineRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "perm-mp-rp")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
@@ -99,6 +100,7 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 			c := freshISVC(g, ns.Name, "perm-mp-rp")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			insts := instanceStatuses(g, ns.Name, "perm-mp-rp", v1beta1.EngineComponent)
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
 			g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
 			g.Expect(insts).To(HaveLen(1))

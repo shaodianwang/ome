@@ -33,3 +33,16 @@ autoscaler_enabled="$("${helm_bin}" template ome-crd "${chart_dir}" \
   --set ome.autoscalerPolicy.enabled=true)"
 grep -Fq 'name: autoscalerpolicies.ome.io' <<<"${autoscaler_enabled}" ||
   fail "AutoscalerPolicy CRD was not rendered with the feature gate on"
+
+# The RolloutPolicy CRD installs only with the feature gate, so a cluster
+# never carries the CRD without the webhook the ome-resources chart gates on
+# the same value.
+if grep -Fq 'name: rolloutpolicies.ome.io' <<<"${rendered}"; then
+  fail "RolloutPolicy CRD was rendered with the feature gate off"
+fi
+
+rollout_enabled="$("${helm_bin}" template ome-crd "${chart_dir}" \
+  --namespace ome \
+  --set ome.rolloutPolicy.enabled=true)"
+grep -Fq 'name: rolloutpolicies.ome.io' <<<"${rollout_enabled}" ||
+  fail "RolloutPolicy CRD was not rendered with the feature gate on"

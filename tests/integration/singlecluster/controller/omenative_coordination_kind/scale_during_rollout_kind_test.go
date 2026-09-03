@@ -98,6 +98,7 @@ var _ = ginkgo.Describe("permutation — scale-out new indices during in-flight 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-scale-rollout")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),

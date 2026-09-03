@@ -62,6 +62,7 @@ var _ = ginkgo.Describe("permutation — InPlaceOnly env-change rejects without 
 		var v1EngineRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "perm-ru-iponly")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the env-change bump")

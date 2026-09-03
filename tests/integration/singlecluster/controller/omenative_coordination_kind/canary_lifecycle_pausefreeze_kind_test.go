@@ -108,6 +108,7 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 		// short plan would complete) inside this window.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)),
 				"a globally paused canary must not advance past its step even after the step timer expires")
 			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(20)),
@@ -127,6 +128,7 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 		// fresh duration (the assertion timeout is far below the step timer).
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(BeNumerically(">=", 1),
 				"clearing the pause must resume the elapsed timed step without restarting its timer")
 		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -137,6 +139,7 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 			c := freshISVC(g, ns.Name, isvcName)
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
 				To(Equal(v1beta1.RolloutPhasePromoting))
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(100)))
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -145,6 +148,7 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 		// probe is far shorter than the window, so it always fits inside it.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(1)),
 				"the drain window must delay completion of the final step")
 		}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
@@ -153,6 +157,7 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 		// phase Stable.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(2)))
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
 				To(Equal(v1beta1.RolloutPhaseStable))

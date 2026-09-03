@@ -68,6 +68,7 @@ var _ = ginkgo.Describe("BLUEGREEN-REV — revision status fields + Service life
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "bluegree-rev")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -117,9 +118,12 @@ var _ = ginkgo.Describe("BLUEGREEN-REV — revision status fields + Service life
 		var v2Name, v2Hash string
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "bluegree-rev")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 
 			hashes := alivePodHashes(g, ns.Name, "bluegree-rev")
@@ -174,6 +178,7 @@ var _ = ginkgo.Describe("BLUEGREEN-REV — revision status fields + Service life
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "bluegree-scale")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -206,6 +211,7 @@ var _ = ginkgo.Describe("BLUEGREEN-REV — revision status fields + Service life
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "bluegree-scale")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)),
 				"scale-up must converge to 2 serving replicas")
 

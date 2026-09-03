@@ -47,6 +47,7 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pause-g")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -64,6 +65,8 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 		// group phase reaches Paused.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pause-g")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
 					"pause annotation must drive group to Paused")
@@ -72,6 +75,8 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 		// Confirm pause holds: phase remains Paused across the polling window.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pause-g")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
 					"paused annotation must hold the group at Paused")
@@ -86,6 +91,8 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pause-g")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"removing pause annotation must let the group return to Idle")

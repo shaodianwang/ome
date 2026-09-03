@@ -60,6 +60,7 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "bluegreen-d5")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -76,6 +77,7 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 		var v1EngineRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "bluegreen-d5")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
@@ -94,6 +96,8 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

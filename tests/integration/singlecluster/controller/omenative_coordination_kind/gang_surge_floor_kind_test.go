@@ -95,6 +95,7 @@ var _ = ginkgo.Describe("Gang SurgeThenDrain capacity floor", ginkgo.Ordered, fu
 		var v1EngineRev string
 		Eventually(func(g Gomega) {
 			preBump := freshISVC(g, ns.Name, "gang-floor")
+			g.Expect(preBump.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
@@ -165,6 +166,7 @@ var _ = ginkgo.Describe("Gang SurgeThenDrain capacity floor", ginkgo.Ordered, fu
 					"every engine gang must be Ready on v2")
 			}
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"group must converge to Idle after rollout completes")

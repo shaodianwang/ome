@@ -437,3 +437,62 @@ autoscaler_provider_config="$("${helm_bin}" template ome-resources "${chart_dir}
   --show-only templates/ome-controller/configmap.yaml)"
 grep -Fq '"cluster-prometheus":{"serverAddress":"http://ome-prometheus.ome.svc:9090"}' <<<"${autoscaler_provider_config}" ||
   fail "autoscalerPolicy metric provider binding was not rendered"
+# The nested map is the deprecated alias: it must never also render the
+# authoritative top-level key, which would mask the alias in the loader.
+if grep -Eq '^  metricProviders:' <<<"${autoscaler_provider_config}"; then
+  fail "nested autoscalerPolicy providers leaked into the top-level metricProviders key"
+fi
+
+# ome.rolloutPolicy.enabled gates the policy validating webhook. Manager RBAC
+# stays ungated in the generated role (the optional-CRD precedent: grants on
+# absent CRDs are inert), and the rollout config block stays ungated too —
+# inline rollout plans exist on every cluster, policy CRD or not.
+if grep -Fq 'path: /validate-ome-io-v1beta1-rolloutpolicy' <<<"${rendered}"; then
+  fail "RolloutPolicy webhook was rendered with the feature gate off"
+fi
+
+rollout_enabled="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.rolloutPolicy.enabled=true)"
+grep -Fq -- '- rolloutpolicies/status' <<<"${rollout_enabled}" ||
+  fail "RolloutPolicy status RBAC was not rendered"
+grep -Fq 'name: rolloutpolicy.ome.io' <<<"${rollout_enabled}" ||
+  fail "RolloutPolicy validating webhook was not rendered with the gate on"
+grep -Fq 'path: /validate-ome-io-v1beta1-rolloutpolicy' <<<"${rollout_enabled}" ||
+  fail "RolloutPolicy webhook path was not rendered with the gate on"
+# In-use deletion denial happens at admission, so the webhook must both
+# register the DELETE operation and pass DELETE through its skip-deletion
+# matchCondition (a DELETE review has no `object` to guard on).
+rollout_webhook="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.rolloutPolicy.enabled=true \
+  --show-only templates/ome-controller/webhooks/rolloutpolicyvalidator.yaml)"
+grep -Fq -- '- DELETE' <<<"${rollout_webhook}" ||
+  fail "RolloutPolicy webhook does not register the DELETE operation"
+grep -Fq "request.operation == 'DELETE'" <<<"${rollout_webhook}" ||
+  fail "RolloutPolicy skip-deletion matchCondition does not pass DELETE through"
+
+# The rollout block and the canaryAnalysis default provider render ungated,
+# and the chart values are the only source of their defaults (the OME binary
+# deliberately has none).
+grep -Fq '"maxPinnedPlanBytes": 16384' <<<"${controller_config}" ||
+  fail "rollout pinned-plan size cap default was not rendered"
+grep -Fq '"defaultReadyTimeout": "15m"' <<<"${controller_config}" ||
+  fail "rollout default ready timeout was not rendered"
+grep -Fq '"defaultProvider": ""' <<<"${controller_config}" ||
+  fail "canaryAnalysis default provider was not rendered"
+# The loader treats a present top-level metricProviders key — even {} — as
+# authoritative, so the chart must omit it entirely when no bindings are set.
+if grep -Eq '^  metricProviders:' <<<"${controller_config}"; then
+  fail "top-level metricProviders key was rendered with no bindings configured"
+fi
+
+metric_providers_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-string 'ome.metricProviders.cluster-prometheus.serverAddress=http://ome-prometheus.ome.svc:9090' \
+  --set-string 'ome.metricProviders.cluster-prometheus.headers.X-Scope-OrgID=tenant-a' \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Eq '^  metricProviders:' <<<"${metric_providers_config}" ||
+  fail "top-level metricProviders key was not rendered when bindings are set"
+grep -Fq '"cluster-prometheus":{"headers":{"X-Scope-OrgID":"tenant-a"},"serverAddress":"http://ome-prometheus.ome.svc:9090"}' <<<"${metric_providers_config}" ||
+  fail "top-level metric provider binding was not rendered"

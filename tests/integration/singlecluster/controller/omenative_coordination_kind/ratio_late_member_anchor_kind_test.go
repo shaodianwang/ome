@@ -62,6 +62,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor for a late-joining
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "ratio-late-anchor")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -97,6 +98,8 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor for a late-joining
 		// membership change itself leaves the group Idle.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "ratio-late-anchor")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			ratio := c.Status.RolloutCoordination.Groups[0].ObservedRatio
 			g.Expect(ratio).NotTo(BeNil())
 			g.Expect(ratio.Original).To(HaveKeyWithValue(v1beta1.RouterComponent, int32(2)),
@@ -108,8 +111,10 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor for a late-joining
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"a membership change is not a rollout")
+			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.ServingReplicas).
 				To(Equal(int32(2)), "the join must not disturb the late member's pods")
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).
 				To(Equal(int32(2)), "leaving the group must not disturb the departed member's pods")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -119,6 +124,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor for a late-joining
 		var v1EngineRev string
 		Eventually(func(g Gomega) {
 			pre := freshISVC(g, ns.Name, "ratio-late-anchor")
+			g.Expect(pre.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			v1EngineRev = pre.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -141,10 +147,14 @@ var _ = ginkgo.Describe("permutation — RatioBalanced anchor for a late-joining
 			c := freshISVC(g, ns.Name, "ratio-late-anchor")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			rtrCS := c.Status.Components[v1beta1.RouterComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1 — a fictitious late-member anchor would wedge it")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(rtrCS.Lifecycle).NotTo(BeNil())
 			g.Expect(rtrCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle), "rollout must return to Idle")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

@@ -117,6 +117,9 @@ ome:
     enabled: false
     # metricProviders binds the logical provider names policies reference
     # (providerRef on endpoint triggers) to this cluster's metric endpoints.
+    # Deprecated alias: prefer the top-level ome.metricProviders map, which
+    # is authoritative whenever it is set; the loader reads this nested map
+    # only when the top-level key is absent.
     # Cluster-admin owned and the ONLY source of endpoints: a policy can only
     # NAME a provider, an unbound name is a render error (fail closed), and
     # the OME binary has NO built-in addresses — this map is the source of
@@ -144,6 +147,37 @@ ome:
       # How long a home may hold a derived policy-referencing ISVC without
       # reporting a resolved digest before the control plane flags it.
       skewDeadlineSeconds: 0
+  # rolloutPolicy is the single gate for the reusable RolloutPolicy feature:
+  # the policy validating webhook installs on this one value — never
+  # install-but-dormant. Alpha; default off. Deliberately the same values path
+  # as the ome-crd chart's ome.rolloutPolicy.enabled: set both charts from one
+  # value so the CRD and its webhook always ship as a unit. Manager RBAC stays
+  # ungated in the generated role (grants on an absent CRD are inert), and the
+  # ome.controller.rollout config block below stays ungated too — inline
+  # rollout plans exist on every cluster, policy CRD or not.
+  rolloutPolicy:
+    enabled: false
+  # metricProviders binds the logical provider names consumers reference (a
+  # policy trigger's providerRef, canaryAnalysis.defaultProvider) to this
+  # cluster's metric endpoints, rendered as the top-level metricProviders key
+  # of inferenceservice-config. Cluster-admin owned and the ONLY source of
+  # endpoints: consumers name providers, the OME binary has NO built-in
+  # addresses. Per provider: serverAddress (required); authSecretRef
+  # ({name, key}, optional) names a Secret key in each consumer namespace
+  # holding a bearer token; headers (optional map) are fleet-default HTTP
+  # headers attached to provider requests. Whenever this map is set it is
+  # authoritative and the deprecated nested ome.autoscalerPolicy.metricProviders
+  # alias is ignored by the loader.
+  # Example:
+  # metricProviders:
+  #   cluster-prometheus:
+  #     serverAddress: "http://ome-prometheus.ome.svc:9090"
+  #     # authSecretRef:
+  #     #   name: prometheus-bearer
+  #     #   key: token
+  #     # headers:
+  #     #   X-Scope-OrgID: tenant-a
+  metricProviders: {}
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.
@@ -245,11 +279,27 @@ ome:
       # ome-prometheus Service at prometheus.service.port. Set to your own
       # Prometheus/Thanos for production.
       bundledPrometheusAddress: ""
+      # Name of an ome.metricProviders binding used as the analysis source when
+      # a canary names neither a providerRef nor its own serverAddress. Empty
+      # keeps the bundledPrometheusAddress fallback; a name with no binding is
+      # a config error surfaced when a run opens, never a silent fallback.
+      defaultProvider: ""
       # Per-sample query timeout, max background query concurrency, and how long a
       # sampled result stays usable in the controller's cache.
       queryTimeout: "5s"
       maxConcurrency: 8
       cacheTTL: "2m"
+    # rollout tunes rollout runs (inline plans and RolloutPolicy-backed alike),
+    # so it applies regardless of ome.rolloutPolicy.enabled. Source of truth
+    # for these values: the OME binary has NO built-in defaults.
+    rollout:
+      # Cap on the JSON-rendered size of a policy/inline plan body pinned into
+      # a run's status. 0 means uncapped.
+      maxPinnedPlanBytes: 16384
+      # Fleet-default readiness deadline applied when a rollout does not set
+      # its own. Empty means no configured default (each consumer keeps its
+      # documented fallback).
+      defaultReadyTimeout: "15m"
     # coordination tunes the OMENative cross-Component coordination layer.
     coordination:
       # Per-revision hysteresis band (percent) for the pod-proportional traffic

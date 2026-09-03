@@ -107,6 +107,7 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pairing-bg")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
@@ -147,9 +148,13 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 				"pair must stay alive to the end: engine=%v decoder=%v",
 				c.Status.Components[v1beta1.EngineComponent].Traffic,
 				c.Status.Components[v1beta1.DecoderComponent].Traffic)
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			assertPairingSurface(g, ns.Name, "pairing-bg", "nixl-v2")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -176,6 +181,7 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pairing-asym")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
@@ -198,9 +204,13 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 		// walk wedges permanently with the decoder still on the old cohort.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pairing-asym")
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(1)))
 			assertPairingSurface(g, ns.Name, "pairing-asym", "nixl-v2")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

@@ -723,7 +723,7 @@ whose only progression is the ref reads as a bare group and would execute the
 **default blueGreen** — the forbidden un-gate, arriving precisely during a
 platform rollback. No in-cluster actor survives the downgrade to detect it.
 Mitigations: (a) the operational gate — before downgrading the controller,
-inflate refs to inline (`ome-policy` renders the diff; the bulk flow is one
+inflate refs to inline (the OME CLI (`kubectl-ome`, maintained upstream) renders the diff; the bulk flow is one
 annotation sweep), mirroring OEP-0013.1's stage-R rule; (b) this row in the
 risk register, so the release runbook carries it; (c) an open question
 ([Open Questions](#open-questions)) on whether a CRD/CEL posture can make a
@@ -944,7 +944,7 @@ are per-service and revert with a PR.
   `portableDigest` everywhere.
 - **3 — preview, one low-risk ISVC:** add `policyRef` beside the inline
   progression. Inline wins — zero behavior change by construction; status
-  shows `shadowedPolicyRef.wouldPinDigest`; CI (`ome-policy check`, extended)
+  shows `shadowedPolicyRef.wouldPinDigest`; CI (the OME CLI's policy check, extended)
   posts the rendered-progression-vs-inline diff, not just digest equality.
   Rollback: remove the ref.
 - **4 — cutover that ISVC:** delete its inline progression in the same PR.
@@ -952,7 +952,7 @@ are per-service and revert with a PR.
   inline body byte-for-byte (the stage-3 diff was empty). Rollback: revert.
 - **5** — sweep the fleet in batches; the absolute-capacity and bespoke
   services stay inline.
-- **6** — CI ratchet: `ome-policy check --require-rollout-ref` forbids new
+- **6** — CI ratchet: the OME CLI's policy check with `--require-rollout-ref` forbids new
   inline canary bodies in the fleet directory without an exemption marker.
 - **R** — rollback rules: restoring an inline arm is atomic and per-service
   (next run sources it). Controller downgrade below the feature: **inflate
@@ -985,7 +985,7 @@ are per-service and revert with a PR.
 7. Multi-cluster: inflate-at-derive, capability-label + provider preflight,
    manual-Pause warning, funnel lift of run digests; MC integration tests.
 8. KIND specs (classified in `KIND_SPEC_GROUPS`) + perf rangespecs;
-   `ome-policy` CLI extension + CI wiring docs.
+   OME CLI (`kubectl-ome`, upstream) policy-verb extension + CI wiring docs — the CLI lives in the public repo and links the same shared packages, so it is authored there, not here.
 
 The OEP lands first (provisional → implementable before step 1 merges).
 
@@ -1000,7 +1000,7 @@ The OEP lands first (provisional → implementable before step 1 merges).
 | KIND | new specs in `KIND_SPEC_GROUPS` | policy-sourced canary end-to-end (pin → steps → promote → lastRun); mid-run policy edit inert + drift + next-run pickup; mid-run inline step-shrink no longer force-completes; group-delete mid-run emits the abort-verb event; repin mid-run (tighten + shorter-ladder hold); upgrade adopt-in-place with a canary in flight; unbound provider parks before traffic moves |
 | Multi-cluster | `tests/integration/multicluster` | inflate-at-derive (member spec carries rendered groups + provenance annotations, no policy CRs); CP policy edit re-derives, member pinned run unaffected; capability-label gate; provider-binding ineligibility; manual-Pause preflight warning; funnel lifts run digests |
 | Perf (rangespec) | `tests/perf` | run open p99 (render + validate + status write) < 50ms; drift fan-out on a policy edit across 100 consumers < 30s; zero status writes on no-op reconciles with an active run |
-| CI (GitOps repo) | `ome-policy check` | render every policy × ISVC pair; progression-body diff vs inline during migration; `--require-rollout-ref`; digest equality raw-file == live object |
+| CI (GitOps repo) | the OME CLI policy check | render every policy × ISVC pair; progression-body diff vs inline during migration; `--require-rollout-ref`; digest equality raw-file == live object |
 
 Behavioral acceptance is asserted on pinned-plan content and traffic/partition
 writes, not on Prometheus behavior — the sampler and gate mechanics are
@@ -1119,14 +1119,14 @@ Rejected mechanics, independent of the surface choice:
    *old* controller's validation loudly instead of defaulting to blueGreen
    (e.g. a required sentinel the old schema rejects)? If not, the procedural
    gate stands. Owner: this OEP's author; experiment before beta.
-4. **Bulk repin tooling** — annotation sweep vs a `ome-policy repin --all`
+4. **Bulk repin tooling** — annotation sweep vs a an OME CLI `repin --all` verb
    subcommand; decide with the first fleet-wide gate-tightening drill.
    Owner: release engineering.
 5. **Verb forwarding for placed ISVCs** — the pinned-run status surface gives
    a future OEP the per-member progress visibility it needs; until then,
    placed canaries should use analysis or timed gates (preflight warns on
    bare manual pauses). Owner: OEP-0018.x maintainers.
-6. **Cross-variant drift lint** — with ≤3 tier policies, `ome-policy check`
+6. **Cross-variant drift lint** — with ≤3 tier policies, the OME CLI policy check
    could diff variants and flag divergence beyond thresholds. Cheap; decide
    at stage 6. Owner: this OEP's author.
 7. **Status unification** — `activeRun` lands under `status.rollout`;

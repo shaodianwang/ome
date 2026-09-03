@@ -133,6 +133,7 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 				"engine UID must be preserved (InPlaceIfPossible + image-only diff = in-place patch); "+
 					"got %s expected %s", string(ePod.UID), engineUIDv1)
 			engInsts := instanceStatuses(g, ns.Name, "mixed-strat-kcg3", v1beta1.EngineComponent)
+			g.Expect(engInsts).NotTo(BeEmpty())
 			g.Expect(engInsts[0].ActiveOrdinal).To(Equal(int32(0)),
 				"engine InPlaceIfPossible must NOT advance ActiveOrdinal")
 
@@ -141,6 +142,7 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 			// new pod at ordinal 1 with a fresh UID. ActiveOrdinal
 			// advances 0 → 1.
 			decInsts := instanceStatuses(g, ns.Name, "mixed-strat-kcg3", v1beta1.DecoderComponent)
+			g.Expect(decInsts).NotTo(BeEmpty())
 			g.Expect(decInsts[0].ActiveOrdinal).To(Equal(int32(1)),
 				"decoder SurgeThenDrain must advance ActiveOrdinal 0 → 1")
 

@@ -122,6 +122,7 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated concurrent ops (KIND)", gink
 				g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
 			engInsts := instanceStatuses(g, ns.Name, "pda2-isvc", v1beta1.EngineComponent)
+			g.Expect(engInsts).NotTo(BeEmpty())
 			initialEngInc = engInsts[0].Incarnation
 			decPod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
