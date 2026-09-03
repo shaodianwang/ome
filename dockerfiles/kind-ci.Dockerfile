@@ -8,7 +8,7 @@
 # (which HAS egress) and mirrored to prod ECR by generate_pipeline.py.
 #
 # Baked in:
-#   - Go 1.25 toolchain + a pre-populated Go module cache (go test runs offline),
+#   - Go 1.26 toolchain + a pre-populated Go module cache (go test runs offline),
 #   - Rust toolchain + a pre-fetched cargo cache for pkg/xet (make xet-build
 #     runs offline; the KIND suite transitively links the xet staticlib),
 #   - docker CLI, kind, kubectl, Helm, Python, crane, jq + build deps,
@@ -23,7 +23,7 @@
 # "." (repo root) — so the COPY steps below see the repo. TARGETARCH is set by
 # buildx per platform.
 #
-ARG GO_BUILDER_IMAGE=golang:1.25
+ARG GO_BUILDER_IMAGE=golang:1.26
 FROM ${GO_BUILDER_IMAGE}
 
 ARG TARGETARCH
@@ -38,6 +38,11 @@ ARG KIND_VERSION=v0.32.0
 ARG KIND_NODE_TAG=v1.35.5
 ARG CRANE_VERSION=v0.20.2
 ARG HELM_VERSION=v3.20.2
+# Pinned independently of GO_BUILDER_IMAGE. fake-serving is a stdlib-only,
+# CGO-free binary outside the main module, so it does not track the module's Go
+# directive, and this tarball is what the no-egress GKE agents build it from.
+# `latest` is only republished from main, so moving this ahead of the tarball
+# main already bakes leaves a branch with no image to build against.
 ARG FAKE_SERVING_BUILD_IMAGE=golang:1.25
 ARG FAKE_SERVING_BASE_IMAGE=gcr.io/distroless/static:nonroot
 ARG CERT_MANAGER_VERSION=v1.16.2

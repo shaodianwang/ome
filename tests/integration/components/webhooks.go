@@ -80,8 +80,7 @@ func SetupInferenceServiceWebhook(mgr ctrl.Manager) error {
 	if err != nil {
 		return fmt.Errorf("SetupInferenceServiceWebhook: build clientset: %w", err)
 	}
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&v1beta1.InferenceService{}).
+	return ctrl.NewWebhookManagedBy(mgr, &v1beta1.InferenceService{}).
 		WithValidator(&isvcwebhook.InferenceServiceValidator{
 			Client:          mgr.GetClient(),
 			RuntimeSelector: runtimeselector.New(mgr.GetClient()),

@@ -1,7 +1,7 @@
 # Tiny CPU-only metrics workload for the OMENative canary-analysis e2e tests
 # (hack/omenative-testing). Stdlib-only Go (no module deps) -> static binary on
 # scratch. Build context is the repo root (matches the other dockerfiles/).
-ARG GO_BUILDER_IMAGE=golang:1.25
+ARG GO_BUILDER_IMAGE=golang:1.26
 FROM ${GO_BUILDER_IMAGE} AS build
 WORKDIR /src
 COPY hack/omenative-testing/metrics-server/ .

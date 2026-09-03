@@ -19,7 +19,7 @@
 # binary is present and readable. Sharing the controller's base keeps the two
 # components able to authenticate the same ways.
 ARG BASE_IMAGE=oraclelinux:10-slim
-ARG GO_BUILDER_IMAGE=golang:1.25
+ARG GO_BUILDER_IMAGE=golang:1.26
 FROM ${GO_BUILDER_IMAGE} AS builder
 WORKDIR /workspace
 

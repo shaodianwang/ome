@@ -81,7 +81,7 @@ func ApplyManifest(ctx context.Context, cfg *rest.Config, path string) error {
 // what the installed controller owns alone.
 func upsert(ctx context.Context, c client.Client, desired *unstructured.Unstructured) error {
 	obj := desired.DeepCopy()
-	if err := c.Patch(ctx, obj, client.Apply,
+	if err := c.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj),
 		client.FieldOwner(manifestFieldOwner), client.ForceOwnership); err != nil {
 		return fmt.Errorf("ApplyManifest: apply %s %s/%s: %w",
 			desired.GetKind(), desired.GetNamespace(), desired.GetName(), err)

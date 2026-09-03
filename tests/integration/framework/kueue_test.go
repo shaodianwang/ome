@@ -61,7 +61,7 @@ func TestStartKueue(t *testing.T) {
 	if _, err := os.Stat(crdDir); err != nil {
 		t.Fatalf("vendored Kueue CRDs missing at %s — run `make kueue-crds`: %v", crdDir, err)
 	}
-	requireCRDServesVersion(t, filepath.Join(crdDir, "kueue.x-k8s.io_clusterqueues.yaml"), kueue.GroupVersion.Version)
+	requireCRDServesVersion(t, filepath.Join(crdDir, "kueue.x-k8s.io_clusterqueues.yaml"), kueue.SchemeGroupVersion.Version)
 	webhookDir, err := framework.KueueWebhookDir()
 	g.Expect(err).NotTo(gomega.HaveOccurred(), "resolve Kueue webhook dir")
 

@@ -72,7 +72,9 @@ func StartKueueCore(ctx context.Context, mgr ctrl.Manager) error {
 	mgr.GetScheme().Default(conf)
 	// A nil RoleTracker is Kueue's standalone mode: every controller acts as the
 	// active one, which is right for a single manager with no leader election.
-	if _, err := core.SetupControllers(mgr, queues, cCache, conf, nil, preemptionExpectations); err != nil {
+	if _, err := core.SetupControllers(mgr, queues, cCache, conf, core.SetupControllersOpts{
+		PreemptionExpectations: preemptionExpectations,
+	}); err != nil {
 		return fmt.Errorf("StartKueueCore: core.SetupControllers: %w", err)
 	}
 	return nil
@@ -158,7 +160,7 @@ func StartKueue(ctx context.Context, mgr ctrl.Manager) error {
 	}
 
 	podRec, err := pod.NewReconciler(ctx, mgr.GetClient(), mgr.GetFieldIndexer(),
-		mgr.GetEventRecorderFor(constants.JobControllerName), opts...)
+		mgr.GetEventRecorder(constants.JobControllerName), opts...)
 	if err != nil {
 		return fmt.Errorf("StartKueue: pod reconciler: %w", err)
 	}
@@ -171,7 +173,9 @@ func StartKueue(ctx context.Context, mgr ctrl.Manager) error {
 	// A nil RoleTracker is Kueue's standalone mode: every controller acts as
 	// the active one. The harness runs a single manager without leader
 	// election, so there is no follower to demote.
-	if _, err := core.SetupControllers(mgr, queues, cCache, conf, nil, preemptionExpectations); err != nil {
+	if _, err := core.SetupControllers(mgr, queues, cCache, conf, core.SetupControllersOpts{
+		PreemptionExpectations: preemptionExpectations,
+	}); err != nil {
 		return fmt.Errorf("StartKueue: core.SetupControllers: %w", err)
 	}
 
@@ -183,7 +187,7 @@ func StartKueue(ctx context.Context, mgr ctrl.Manager) error {
 	}
 
 	sched := scheduler.New(queues, cCache, mgr.GetClient(),
-		mgr.GetEventRecorderFor(constants.AdmissionName),
+		mgr.GetEventRecorder(constants.AdmissionName),
 		scheduler.WithPreemptionExpectations(preemptionExpectations))
 	if err := sched.Start(ctx); err != nil {
 		return fmt.Errorf("StartKueue: scheduler start: %w", err)

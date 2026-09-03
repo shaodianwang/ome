@@ -46,9 +46,9 @@ ECR_REGISTRY = os.environ.get(
 )
 PROD_ECR_REGISTRY = f"{PROD_AWS_ACCOUNT_ID}.dkr.ecr.{AWS_REGION}.amazonaws.com"
 
-CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
+CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.26-bookworm"
 MUSE_RUST_CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/rust:1.95-bookworm"
-GO_BUILDER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25"
+GO_BUILDER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.26"
 RUST_BUILDER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/rust:1-bookworm"
 
 # cf-docker-image plugin handles ECR auth + multi-arch builds. The plugin

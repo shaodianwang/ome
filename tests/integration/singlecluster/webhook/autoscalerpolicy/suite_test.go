@@ -93,8 +93,8 @@ var _ = ginkgo.BeforeSuite(func() {
 		// A second ISVC validator instance runs with the feature disabled;
 		// the namespaceSelector on its webhook config scopes it to
 		// disabledNamespace so the blanket rejection is testable end-to-end.
-		server.Register("/validate-inferenceservice-policy-disabled", admission.WithCustomValidator(
-			mgr.GetScheme(), &v1beta1.InferenceService{},
+		server.Register("/validate-inferenceservice-policy-disabled", admission.WithValidator(
+			mgr.GetScheme(),
 			&isvcwebhook.InferenceServiceValidator{
 				Client:                  mgr.GetClient(),
 				RuntimeSelector:         runtimeselector.New(mgr.GetClient()),
@@ -103,8 +103,7 @@ var _ = ginkgo.BeforeSuite(func() {
 		// The ISVC validator runs with the AutoscalerPolicy feature enabled
 		// so a rejected ref fails on its reserved Kind, not on the blanket
 		// feature-disabled rejection.
-		return ctrl.NewWebhookManagedBy(mgr).
-			For(&v1beta1.InferenceService{}).
+		return ctrl.NewWebhookManagedBy(mgr, &v1beta1.InferenceService{}).
 			WithValidator(&isvcwebhook.InferenceServiceValidator{
 				Client:                  mgr.GetClient(),
 				RuntimeSelector:         runtimeselector.New(mgr.GetClient()),
