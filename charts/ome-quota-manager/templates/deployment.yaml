@@ -17,20 +17,35 @@ spec:
         {{- with .Values.quotaManager.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- $sm := (.Values.quotaManager.metrics | default dict).serviceMonitor | default dict }}
+      {{- $ann := .Values.quotaManager.podAnnotations | default dict }}
+      {{- if or (not $sm.enabled) $ann }}
       annotations:
-        # Unconditional, as ome-controller-manager stamps them. Inert on a
-        # cluster with no annotation-driven collector, and required on one with
-        # the bundled Prometheus, whose ome-control-plane job keeps a pod on
-        # exactly these plus the release namespace.
+        {{- if not $sm.enabled }}
+        # The annotation path, for collectors that discover by pod annotation --
+        # among them the bundled Prometheus in charts/ome-resources, whose
+        # ome-control-plane job keeps a pod on exactly these plus the release
+        # namespace.
+        #
+        # Suppressed when a ServiceMonitor is enabled, because the two paths are
+        # collectors, not preferences: a cluster that runs both scrapes the pod
+        # twice and every unqualified sum() over the result is doubled. The
+        # monitor wins because it carries namespace, pod, service and endpoint,
+        # which the annotation path does not.
+        #
+        # An operator who genuinely wants both can restate these under
+        # podAnnotations below; that is deliberate rather than accidental.
         #
         # The port tracks metricsPort so moving the endpoint cannot leave a
         # collector dialling the old one.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: {{ .Values.quotaManager.metricsPort | quote }}
-        {{- with .Values.quotaManager.podAnnotations }}
+        {{- end }}
+        {{- with $ann }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- end }}
     spec:
       serviceAccountName: {{ .Values.quotaManager.name }}
       {{- with .Values.global.imagePullSecrets }}

@@ -244,11 +244,14 @@ quotaManager:
 
   # Who collects the metrics endpoint. The binary always serves it.
   #
-  # There are two collectors in play and a cluster runs one or the other. The
-  # annotation path needs no configuration -- the Deployment stamps
-  # prometheus.io/scrape unconditionally, as ome-controller-manager does, which
-  # is all the bundled Prometheus in charts/ome-resources consults. This block
-  # configures the other path only.
+  # Two paths, and the chart keeps them mutually exclusive. By default the
+  # Deployment stamps prometheus.io/scrape, which is all the bundled Prometheus
+  # in charts/ome-resources consults. Enabling serviceMonitor below suppresses
+  # those annotations, because a cluster running both collectors scrapes the pod
+  # twice and every unqualified sum() over the result is doubled. The monitor
+  # wins because it carries namespace, pod, service and endpoint, which the
+  # annotation path does not. An operator who genuinely wants both can restate
+  # prometheus.io/scrape under podAnnotations.
   #
   # serviceMonitor is off by default: an object no collector selects is
   # indistinguishable from a broken scrape. additionalLabels has no default for

@@ -582,6 +582,36 @@ grep -Fq 'targetPort: metrics' <<<"${monitored}" ||
 grep -Fq 'port: metrics' <<<"${monitored}" ||
   fail "the ServiceMonitor did not select the metrics port by name"
 
+# --- exactly one collector, never two ---
+#
+# The annotation path and the ServiceMonitor are collectors, not preferences. A
+# cluster that runs both scrapes the pod twice, every unqualified sum() over the
+# result is doubled, and a leader gauge reads 2 on a healthy deployment. The
+# monitor wins because it carries namespace, pod, service and endpoint.
+
+if grep -Fq 'prometheus.io/scrape' <<<"${monitored}"; then
+  fail "both scrape paths are on at once; the pod would be collected twice"
+fi
+# ...and with no operator annotations either, the block must not render empty.
+if grep -Eq '^      annotations:$' <<<"${monitored}"; then
+  fail "an empty annotations block rendered"
+fi
+# Operator annotations still render when the scrape ones are suppressed.
+ident="$(render --set quotaManager.mode=workload \
+  --set quotaManager.metrics.serviceMonitor.enabled=true \
+  --set 'quotaManager.podAnnotations.identity\.example\.com/inject=true')"
+grep -Fq 'identity.example.com/inject: true' <<<"${ident}" ||
+  fail "suppressing the scrape annotations dropped operator podAnnotations"
+if grep -Fq 'prometheus.io/scrape' <<<"${ident}"; then
+  fail "the scrape annotation survived alongside a ServiceMonitor"
+fi
+# The escape hatch: an operator who genuinely wants both restates it explicitly.
+both="$(render --set quotaManager.mode=workload \
+  --set quotaManager.metrics.serviceMonitor.enabled=true \
+  --set 'quotaManager.podAnnotations.prometheus\.io/scrape=true')"
+grep -Fq 'prometheus.io/scrape' <<<"${both}" ||
+  fail "an explicit podAnnotations override could not re-enable the annotation path"
+
 # Metrics without a webhook: the Service exists for the metrics port alone.
 metricsonly="$(render --set quotaManager.mode=workload \
   --set quotaManager.webhook.enabled=false \
