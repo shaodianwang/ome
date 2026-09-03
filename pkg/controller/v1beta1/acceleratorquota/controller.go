@@ -463,19 +463,6 @@ func clusterStatuses(observed map[string]clusterState,
 	return out
 }
 
-// fleetBudgets is the hub's view of one node's budgets: what the admin
-// authorized, and what the fleet is doing with it.
-//
-// Nominal is the authored total rather than the sum of the shares. They agree
-// when every member reported, and when one did not the split is held -- so
-// summing would quietly report a smaller fleet total for as long as a member
-// was missing, which is the same silent shrinkage that caused the over-grant.
-// The authored number is what the admin wrote and stays what the hub reports.
-//
-// The consumption figures ARE sums, because consumption is a fact about the
-// fleet: work admitted on one member is work the fleet is running. Borrowed
-// sums too, and means the same thing one tier up -- how much of what is running
-// sits above the share that authorized it.
 // fleetLeafUsage reshapes the per-cluster view into what the roll expects: one
 // entry per node, summed across the members holding it.
 //
@@ -509,6 +496,19 @@ func fleetLeafUsage(fleet fleetView) map[string]map[usage.Key]usage.Observed {
 	return out
 }
 
+// fleetBudgets is the hub's view of one node's budgets: what the admin
+// authorized, and what the fleet is doing with it.
+//
+// Nominal is the authored total rather than the sum of the shares. They agree
+// when every member reported, and when one did not the split is held -- so
+// summing would quietly report a smaller fleet total for as long as a member
+// was missing.
+// The authored number is what the admin wrote and stays what the hub reports.
+//
+// The consumption figures ARE sums, because consumption is a fact about the
+// fleet: work admitted on one member is work the fleet is running. Borrowed
+// sums too, and means the same thing one tier up -- how much of what is running
+// sits above the share that authorized it.
 func fleetBudgets(authored []v1beta1.AcceleratorBudget,
 	onClusters map[string]clusterState, rolled map[usage.Key]usage.Total,
 ) []v1beta1.AcceleratorBudgetStatus {

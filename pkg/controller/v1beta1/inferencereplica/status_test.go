@@ -1851,9 +1851,9 @@ func TestAggregateAndWriteStatus_RolloutHold_SoakChurnSafeAcrossMultipleReconcil
 	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev-target"}}
 	key := client.ObjectKeyFromObject(ir)
 
-	// The stable shape coordination.CheckSequential now returns for the
-	// whole soak window: component + configured duration + the completed
-	// predecessor, no elapsed/remaining countdown.
+	// coordination.CheckSequential's soak-denial message carries only stable
+	// facts for the whole soak window: component, configured duration, and the
+	// completed predecessor, with no elapsed/remaining countdown.
 	soakHold := &workload.RolloutHold{
 		Gate:   workload.RolloutHoldGateSequential,
 		Reason: "Sequential.Soak: engine waiting out the 15s soak after decoder",
@@ -1871,8 +1871,8 @@ func TestAggregateAndWriteStatus_RolloutHold_SoakChurnSafeAcrossMultipleReconcil
 
 	// Simulate several reconciles landing mid-soak (e.g. the dispatcher's
 	// short requeue firing repeatedly while the soak elapses). Every one
-	// observes the identical exec verdict, since the gate's message no
-	// longer varies with elapsed time.
+	// observes the identical exec verdict, since the gate's message does not
+	// depend on elapsed time.
 	live := first
 	for i := 0; i < 4; i++ {
 		g.Expect(r.aggregateAndWriteStatus(context.Background(), live.DeepCopy(), plan, target, true, soakHold)).To(gomega.Succeed())

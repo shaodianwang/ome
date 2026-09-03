@@ -209,11 +209,6 @@ func backfillEmptyContainerNames(spec *corev1.PodSpec) {
 	}
 }
 
-// applyMigrationOverlay layers migration placement onto the rendered pod.
-// Hard anti-affinity moves the surge off FromNode; preferred affinity
-// nudges toward HintTargetNodes without making placement hard-fail.
-// Idempotent: a second Render after a cache-lag retry doesn't
-// double-stamp the same NotIn / hint term.
 // spreadPolicyRequired is the one TopologySpread value with hard semantics.
 // Matches the API enum byte-for-byte; the workload package stays free of
 // v1beta1 imports.
@@ -268,6 +263,11 @@ func injectTopologySpread(pod *corev1.Pod, plan workload.ComponentPlan, inst wor
 	})
 }
 
+// applyMigrationOverlay layers migration placement onto the rendered pod.
+// Hard anti-affinity moves the surge off FromNode; preferred affinity
+// nudges toward HintTargetNodes without making placement hard-fail.
+// Idempotent: a second Render after a cache-lag retry doesn't
+// double-stamp the same NotIn / hint term.
 func applyMigrationOverlay(pod *corev1.Pod, overlay *workload.MigrationOverlay) {
 	if overlay == nil {
 		return

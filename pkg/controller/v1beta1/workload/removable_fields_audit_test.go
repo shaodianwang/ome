@@ -68,6 +68,9 @@ func TestRemovableObservationFieldsHaveNoUnauditedDirectProductionAccess(t *test
 	fset := token.NewFileSet()
 	for _, productionRoot := range []string{"pkg", "cmd", "internal", "scheduler"} {
 		root := filepath.Join(repoRoot, productionRoot)
+		if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
+			continue
+		}
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr

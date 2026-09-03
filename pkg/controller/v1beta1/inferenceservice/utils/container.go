@@ -85,9 +85,8 @@ func UpdateEnvVars(container *v1.Container, envVar *v1.EnvVar) {
 // controllerconfig.InferenceServicesConfig.AcceleratorResourceNames). There is
 // NO in-code default list: an empty/nil acceleratorResources means the config
 // is absent, and this falls back to recognizing only
-// constants.NvidiaGPUResourceType — the single resource name this function
-// checked before acceleratorResources existed — so an unconfigured cluster's
-// behavior is unchanged on upgrade.
+// constants.NvidiaGPUResourceType, so an unconfigured cluster keeps
+// NVIDIA-only counting.
 func GetGpuCountFromContainer(container *v1.Container, acceleratorResources []string) int {
 	if container == nil {
 		return 0

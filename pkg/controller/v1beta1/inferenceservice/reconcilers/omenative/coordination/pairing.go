@@ -239,12 +239,12 @@ func (ctx GateContext) CheckPairing(strategy workloadtypes.UpdateStrategyType, i
 // serving decoder can pair: equal protocols, or either side empty (empty
 // pairs with anything).
 func pairableServingPairExists(serving map[v1beta1.ComponentType]map[string]int32) bool {
-	for pe, ne := range serving[v1beta1.EngineComponent] {
-		if ne <= 0 {
+	for pe, engines := range serving[v1beta1.EngineComponent] {
+		if engines <= 0 {
 			continue
 		}
-		for pd, nd := range serving[v1beta1.DecoderComponent] {
-			if nd <= 0 {
+		for pd, decoders := range serving[v1beta1.DecoderComponent] {
+			if decoders <= 0 {
 				continue
 			}
 			if pe == "" || pd == "" || pe == pd {
