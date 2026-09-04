@@ -606,6 +606,42 @@ Migration (movement between nodes) always triggers recreate because
 node-affinity change is not in-place capable, regardless of
 `updateStrategy.type`.
 
+**minReadySeconds.** `lifecycle.minReadySeconds` separates the health
+signal from the pacing signal. A pod is *Ready* when kubelet reports
+`PodReady=True`; it is *Available* when it is Ready and the `PodReady`
+condition's `lastTransitionTime` plus `minReadySeconds` is not after
+the current time, evaluated per pod — the same rule as
+`Deployment.spec.minReadySeconds`. Unset or `0` makes Available equal
+to Ready, which is the behavior every strategy has without the field.
+The ISVC controller projects the value onto
+`InferenceReplica.spec.minReadySeconds`; the workload engine reads it
+from the plan and applies it at the point where each strategy would
+otherwise release its budget slot:
+
+| Strategy | Where Available is required |
+|---|---|
+| `SurgeThenDrain` (single-pod) | After the surge pod is `PodReady` and before the old pod is marked not-serving. The surge slot stays in flight, so `maxSurge` holds for the whole window. |
+| `SurgeThenDrain` (gang) | Same point: after every replacement-gang pod is `PodReady`, before the source gang leaves rotation. |
+| `RecreatePod` | At promotion (`Phase=Ready`, `Operation` cleared), so the `maxUnavailable` slot is held until the recreated pods have been Ready for the window. |
+| `InPlaceIfPossible` / `InPlaceOnly` | At promotion, after the patched pod is back in rotation. A pod already relabeled to the target revision is not drained again while promotion waits, so the window is not restarted every pass. |
+
+The engine polls at its in-flight Update cadence while a window is
+open; the wait resolves within one poll interval of the deadline.
+`status.availableReplicas` and each Instance's `availablePodCount`
+count a pod only when it is in rotation on the Component's headless
+Service **and** Available under this rule, so a migration that waits
+on the surge Instance's `availablePodCount` inherits the window.
+Ready-based signals stay on Ready: `readyReplicas`, traffic weights,
+the coordination phase machine, and the Sequential handoff (which
+reads the previous Component's `Ready` condition; that condition
+flips only after every Instance promotes, so it observes the window
+through promotion rather than through a separate check).
+
+Clusters may stamp a default through the `inferenceservice-config`
+ConfigMap (`deploy.minReadySeconds`): the ISVC defaulter copies it
+onto every OMENative Component whose lifecycle leaves the field unset.
+There is no in-code default; an authored value always wins.
+
 A retention limit (default 10 revisions per Component) caps
 `ControllerRevision` object count.
 

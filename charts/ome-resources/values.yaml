@@ -225,6 +225,14 @@ ome:
     # longest expected request, and keep any in-process drain the runtime
     # performs strictly under it so the runtime finishes first.
     terminationGracePeriodSeconds: 600
+    # Admission-time lifecycle.minReadySeconds stamped by the same webhook on
+    # every OMENative component that does not author one: how long a newly
+    # Ready pod must stay Ready before a rollout drains or promotes past it
+    # (the Deployment minReadySeconds rule, applied per pod). Opt-in: the
+    # binary has no built-in default and an unset or 0 value leaves pods
+    # Available as soon as they are Ready; an authored component value
+    # always wins. Uncomment to pace every OMENative rollout in the cluster.
+    # minReadySeconds: 30
     # Max reconciles each controller runs in parallel (distinct objects only —
     # controller-runtime serializes per object key, so independent objects
     # reconcile concurrently). Source of truth for these values (the OME binary

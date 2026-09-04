@@ -408,3 +408,15 @@ in order). Keep
 the `topo=` tag and any `infeasible=1` / `notimpl=1` header flags so the harness
 groups and scores correctly.
 ```
+
+## Future knobs
+
+Dimensions the generators do not permute yet. Each is a candidate axis
+once its KIND spec settles; until then it stays hand-tested.
+
+- `lifecycle.minReadySeconds` — the Ready-age window a rollout waits
+  before draining or promoting past a new pod. The KIND gate covers the
+  single-pod SurgeThenDrain shape (`minreadyseconds_kind_test.go`);
+  gang surge, RecreatePod, and in-place under a window, and the
+  cluster-wide `deploy.minReadySeconds` default, are not yet in the
+  matrix.

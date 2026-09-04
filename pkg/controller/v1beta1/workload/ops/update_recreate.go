@@ -164,6 +164,12 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}
+	// Promotion releases this Instance's unavailability budget slot, so under
+	// a minReadySeconds window it waits until every new pod has stayed Ready
+	// for that long. A zero window keeps the ContainersReady+serving gate.
+	if plan.MinReadySeconds > 0 && !podsAvailable(newPods, plan.MinReadySeconds, input.Now()) {
+		return false, nil
+	}
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
