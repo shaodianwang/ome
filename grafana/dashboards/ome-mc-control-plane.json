@@ -44,9 +44,8 @@
         "refresh": 2,
         "sort": 1,
         "multi": true,
-        "includeAll": true,
-        "current": {},
-        "allValue": ".*"
+        "includeAll": false,
+        "current": {}
       },
       {
         "type": "query",
@@ -809,191 +808,192 @@
         "w": 24,
         "h": 1
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "table",
-      "title": "Member state",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 17,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
+      "collapsed": true,
+      "panels": [
         {
+          "type": "table",
+          "title": "Member state",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (cluster, status, reason, cluster_id) (ome_workload_cluster_status{endpoint=\"metrics\",cluster_id=~\"$control_plane\"})",
-          "refId": "O",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "palette-classic"
+          "gridPos": {
+            "x": 0,
+            "y": 17,
+            "w": 12,
+            "h": 8
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Ready"
-            },
-            "properties": [
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
               },
-              {
-                "id": "mappings",
-                "value": [
+              "expr": "max by (cluster, status, reason, cluster_id) (ome_workload_cluster_status{endpoint=\"metrics\",cluster_id=~\"$control_plane\"})",
+              "refId": "O",
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
                   {
-                    "type": "value",
-                    "options": {
-                      "True": {
-                        "color": "green",
-                        "index": 0
-                      },
-                      "False": {
-                        "color": "red",
-                        "index": 1
-                      },
-                      "Unknown": {
-                        "color": "orange",
-                        "index": 2
-                      }
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Ready"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
                     }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "True": {
+                            "color": "green",
+                            "index": 0
+                          },
+                          "False": {
+                            "color": "red",
+                            "index": 1
+                          },
+                          "Unknown": {
+                            "color": "orange",
+                            "index": 2
+                          }
+                        }
+                      }
+                    ]
                   }
                 ]
               }
             ]
-          }
-        ]
-      },
-      "description": "Current Ready condition per member with its reason, one row per member.",
-      "options": {
-        "showHeader": true
-      },
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
+          },
+          "description": "Current Ready condition per member with its reason, one row per member.",
           "options": {
-            "include": {
-              "names": [
-                "cluster",
-                "status",
-                "reason",
-                "cluster_id"
-              ]
+            "showHeader": true
+          },
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "include": {
+                  "names": [
+                    "cluster",
+                    "status",
+                    "reason",
+                    "cluster_id"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "indexByName": {},
+                "renameByName": {
+                  "cluster": "Workload cluster",
+                  "status": "Ready",
+                  "reason": "Reason",
+                  "cluster_id": "Control plane"
+                }
+              }
             }
-          }
+          ]
         },
         {
-          "id": "organize",
+          "type": "timeseries",
+          "title": "WorkloadCluster reconcile rate and errors",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 17,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(controller_runtime_reconcile_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\",controller=\"workloadcluster\"}[$__rate_interval]))",
+              "refId": "P",
+              "legendFormat": "reconciles/s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(controller_runtime_reconcile_errors_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\",controller=\"workloadcluster\"}[$__rate_interval]))",
+              "refId": "Q",
+              "legendFormat": "errors/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Connection probes run on a health interval, so a flat non-zero rate is normal. A rising error rate means members are unreachable.",
           "options": {
-            "excludeByName": {},
-            "indexByName": {},
-            "renameByName": {
-              "cluster": "Workload cluster",
-              "status": "Ready",
-              "reason": "Reason",
-              "cluster_id": "Control plane"
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
             }
           }
         }
       ]
-    },
-    {
-      "type": "timeseries",
-      "title": "WorkloadCluster reconcile rate and errors",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 17,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(rate(controller_runtime_reconcile_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\",controller=\"workloadcluster\"}[$__rate_interval]))",
-          "refId": "P",
-          "legendFormat": "reconciles/s"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(rate(controller_runtime_reconcile_errors_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\",controller=\"workloadcluster\"}[$__rate_interval]))",
-          "refId": "Q",
-          "legendFormat": "errors/s"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "description": "Connection probes run on a health interval, so a flat non-zero rate is normal. A rising error rate means members are unreachable.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
     },
     {
       "type": "row",
@@ -1004,471 +1004,472 @@
         "w": 24,
         "h": 1
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "piechart",
-      "title": "ISVCs by placement phase",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 26,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
+      "collapsed": true,
+      "panels": [
         {
+          "type": "piechart",
+          "title": "ISVCs by placement phase",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (phase) (max by (exported_namespace, isvc, phase) (ome_isvc_placement_phase{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"}))",
-          "refId": "R",
-          "legendFormat": "{{phase}}",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "palette-classic"
+          "gridPos": {
+            "x": 0,
+            "y": 26,
+            "w": 6,
+            "h": 7
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Placed"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Failed"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Racing"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Pending"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "orange"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "description": "Pending = nothing matched or nothing connected. Racing = fanned out, not yet admitted. Placed = admitted. Failed = terminal.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true
-        },
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count by (phase) (max by (exported_namespace, isvc, phase) (ome_isvc_placement_phase{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"}))",
+              "refId": "R",
+              "legendFormat": "{{phase}}",
+              "instant": true
+            }
           ],
-          "fields": "",
-          "values": false
-        }
-      }
-    },
-    {
-      "type": "table",
-      "title": "Placement phase",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 26,
-        "w": 8,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (exported_namespace, isvc, phase) (ome_isvc_placement_phase{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"})",
-          "refId": "S",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
               }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Phase"
             },
-            "properties": [
+            "overrides": [
               {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
+                "matcher": {
+                  "id": "byName",
+                  "options": "Placed"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
               },
               {
-                "id": "mappings",
-                "value": [
+                "matcher": {
+                  "id": "byName",
+                  "options": "Failed"
+                },
+                "properties": [
                   {
-                    "type": "value",
-                    "options": {
-                      "Placed": {
-                        "color": "green",
-                        "index": 0
-                      },
-                      "Racing": {
-                        "color": "yellow",
-                        "index": 1
-                      },
-                      "Pending": {
-                        "color": "orange",
-                        "index": 2
-                      },
-                      "Failed": {
-                        "color": "red",
-                        "index": 3
-                      }
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Racing"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "yellow"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Pending"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
                     }
                   }
                 ]
               }
             ]
-          }
-        ]
-      },
-      "description": "The namespace arrives as exported_namespace because the controller pod's own namespace already owns the namespace label on this scrape path.",
-      "options": {
-        "showHeader": true
-      },
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
+          },
+          "description": "Pending = nothing matched or nothing connected. Racing = fanned out, not yet admitted. Placed = admitted. Failed = terminal.",
           "options": {
-            "include": {
-              "names": [
-                "exported_namespace",
-                "isvc",
-                "phase"
-              ]
+            "legend": {
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "pieType": "donut",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
             }
           }
         },
         {
-          "id": "organize",
+          "type": "table",
+          "title": "Placement phase",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 6,
+            "y": 26,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (exported_namespace, isvc, phase) (ome_isvc_placement_phase{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"})",
+              "refId": "S",
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Phase"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "Placed": {
+                            "color": "green",
+                            "index": 0
+                          },
+                          "Racing": {
+                            "color": "yellow",
+                            "index": 1
+                          },
+                          "Pending": {
+                            "color": "orange",
+                            "index": 2
+                          },
+                          "Failed": {
+                            "color": "red",
+                            "index": 3
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "description": "The namespace arrives as exported_namespace because the controller pod's own namespace already owns the namespace label on this scrape path.",
           "options": {
-            "excludeByName": {},
-            "indexByName": {},
-            "renameByName": {
-              "exported_namespace": "Namespace",
-              "isvc": "InferenceService",
-              "phase": "Phase"
+            "showHeader": true
+          },
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "include": {
+                  "names": [
+                    "exported_namespace",
+                    "isvc",
+                    "phase"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "indexByName": {},
+                "renameByName": {
+                  "exported_namespace": "Namespace",
+                  "isvc": "InferenceService",
+                  "phase": "Phase"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "title": "Where each ISVC landed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 14,
+            "y": 26,
+            "w": 10,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (exported_namespace, isvc, cluster, phase) (ome_isvc_placement_candidate{endpoint=\"metrics\",cluster_id=~\"$control_plane\",isvc=~\"$isvc\"})",
+              "refId": "T",
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "description": "Every cluster this ISVC was fanned out to. Single mode expects one Admitted winner; All and Split list every serving home.",
+          "options": {
+            "showHeader": true
+          },
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "include": {
+                  "names": [
+                    "exported_namespace",
+                    "isvc",
+                    "cluster",
+                    "phase"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "indexByName": {},
+                "renameByName": {
+                  "exported_namespace": "Namespace",
+                  "isvc": "InferenceService",
+                  "cluster": "Workload cluster",
+                  "phase": "Candidate phase"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "title": "Declared placement policy",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 33,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (exported_namespace, isvc, mode, requirements, cluster_selector, spread) (ome_isvc_placement_policy_info{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"})",
+              "refId": "U",
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "description": "What the ISVC asked for, from spec.placement. Diff this against 'Where each ISVC landed' to see intent against outcome.",
+          "options": {
+            "showHeader": true
+          },
+          "transformations": [
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "include": {
+                  "names": [
+                    "exported_namespace",
+                    "isvc",
+                    "mode",
+                    "requirements",
+                    "cluster_selector",
+                    "spread"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "indexByName": {},
+                "renameByName": {
+                  "exported_namespace": "Namespace",
+                  "isvc": "InferenceService",
+                  "mode": "Mode",
+                  "requirements": "Accelerator requirements",
+                  "cluster_selector": "Cluster selector",
+                  "spread": "Spread"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Replicas per home (admitted vs ready)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 33,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (exported_namespace, isvc, cluster) (ome_isvc_placement_candidate_admitted_replicas{endpoint=\"metrics\",cluster_id=~\"$control_plane\",isvc=~\"$isvc\"})",
+              "refId": "V",
+              "legendFormat": "admitted {{isvc}} @ {{cluster}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (exported_namespace, isvc, cluster) (ome_isvc_placement_candidate_ready_replicas{endpoint=\"metrics\",cluster_id=~\"$control_plane\",isvc=~\"$isvc\"})",
+              "refId": "W",
+              "legendFormat": "ready {{isvc}} @ {{cluster}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0,
+              "min": 0
+            },
+            "overrides": []
+          },
+          "description": "Admitted is what the home's Kueue let through; ready is what actually serves. A persistent gap means pods are admitted but not starting.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
             }
           }
         }
       ]
-    },
-    {
-      "type": "table",
-      "title": "Where each ISVC landed",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 14,
-        "y": 26,
-        "w": 10,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (exported_namespace, isvc, cluster, phase) (ome_isvc_placement_candidate{endpoint=\"metrics\",cluster_id=~\"$control_plane\",isvc=~\"$isvc\"})",
-          "refId": "T",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "description": "Every cluster this ISVC was fanned out to. Single mode expects one Admitted winner; All and Split list every serving home.",
-      "options": {
-        "showHeader": true
-      },
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
-          "options": {
-            "include": {
-              "names": [
-                "exported_namespace",
-                "isvc",
-                "cluster",
-                "phase"
-              ]
-            }
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "indexByName": {},
-            "renameByName": {
-              "exported_namespace": "Namespace",
-              "isvc": "InferenceService",
-              "cluster": "Workload cluster",
-              "phase": "Candidate phase"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Declared placement policy",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 33,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (exported_namespace, isvc, mode, requirements, cluster_selector, spread) (ome_isvc_placement_policy_info{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"})",
-          "refId": "U",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "description": "What the ISVC asked for, from spec.placement. Diff this against 'Where each ISVC landed' to see intent against outcome.",
-      "options": {
-        "showHeader": true
-      },
-      "transformations": [
-        {
-          "id": "filterFieldsByName",
-          "options": {
-            "include": {
-              "names": [
-                "exported_namespace",
-                "isvc",
-                "mode",
-                "requirements",
-                "cluster_selector",
-                "spread"
-              ]
-            }
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "indexByName": {},
-            "renameByName": {
-              "exported_namespace": "Namespace",
-              "isvc": "InferenceService",
-              "mode": "Mode",
-              "requirements": "Accelerator requirements",
-              "cluster_selector": "Cluster selector",
-              "spread": "Spread"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Replicas per home (admitted vs ready)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 33,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (exported_namespace, isvc, cluster) (ome_isvc_placement_candidate_admitted_replicas{endpoint=\"metrics\",cluster_id=~\"$control_plane\",isvc=~\"$isvc\"})",
-          "refId": "V",
-          "legendFormat": "admitted {{isvc}} @ {{cluster}}"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (exported_namespace, isvc, cluster) (ome_isvc_placement_candidate_ready_replicas{endpoint=\"metrics\",cluster_id=~\"$control_plane\",isvc=~\"$isvc\"})",
-          "refId": "W",
-          "legendFormat": "ready {{isvc}} @ {{cluster}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "description": "Admitted is what the home's Kueue let through; ready is what actually serves. A persistent gap means pods are admitted but not starting.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
     },
     {
       "type": "row",
@@ -1479,1910 +1480,2097 @@
         "w": 24,
         "h": 1
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "Nodes (cluster)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 42,
-        "w": 12,
-        "h": 4
-      },
-      "targets": [
+      "collapsed": true,
+      "panels": [
         {
+          "type": "stat",
+          "title": "Nodes (cluster)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(ome_quota_capacity_nodes{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
-          "refId": "X",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
+          "gridPos": {
+            "x": 0,
+            "y": 42,
+            "w": 12,
+            "h": 4
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Nodes backing member capacity, all states.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Unattributed (cluster)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 42,
-        "w": 12,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(ome_quota_capacity_unattributed{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
-          "refId": "Y",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
               },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Accelerators no quota claims. Deliberately no vector(0) fallback: this family is not emitted on every fleet, and an honest 'No data' beats a fake zero.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Capacity: allocatable vs unavailable",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 46,
-        "w": 8,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (resource, flavor) (ome_quota_capacity_allocatable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
-          "refId": "Z",
-          "legendFormat": "allocatable {{resource}}/{{flavor}}"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (resource, flavor) (ome_quota_capacity_unavailable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
-          "refId": "A",
-          "legendFormat": "unavailable {{resource}}/{{flavor}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Capacity on the selected members by resource and flavor. Cluster-wide.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Nodes by state",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 46,
-        "w": 8,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (state) (ome_quota_capacity_nodes{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
-          "refId": "B",
-          "legendFormat": "{{state}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
+              "expr": "sum(ome_quota_capacity_nodes{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
+              "refId": "X",
+              "instant": true
             }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
           },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
+          "description": "Nodes backing member capacity, all states.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
-        "overrides": []
-      },
-      "description": "Node population by state. Cluster-wide.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Kueue objects written",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 46,
-        "w": 8,
-        "h": 8
-      },
-      "targets": [
         {
+          "type": "stat",
+          "title": "Unattributed (cluster)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(ome_quota_backend_applied_total{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}[$__rate_interval]))",
-          "refId": "C",
-          "legendFormat": "applied/s"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
+          "gridPos": {
+            "x": 12,
+            "y": 42,
+            "w": 12,
+            "h": 4
           },
-          "color": {
-            "mode": "palette-classic"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(ome_quota_capacity_unattributed{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}) or (0 * sum(ome_quota_capacity_allocatable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}))",
+              "refId": "Y",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
+          "description": "Accelerators no quota claims. Zero on a member that ran a capacity pass and found nothing wrong; No data on one that measured no capacity at all. The family is absent in both cases, so the fallback is scoped to allocatable rather than unconditional -- a fake zero and a blank panel are each wrong for one of them.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
-        "overrides": []
-      },
-      "description": "The materializer's write path into Kueue. Flat zero while workloads wait means projection is stalled. Carries no quota label, so it is cluster-wide.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        {
+          "type": "timeseries",
+          "title": "Capacity: allocatable vs unavailable",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 46,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (resource, flavor) (ome_quota_capacity_allocatable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
+              "refId": "Z",
+              "legendFormat": "allocatable {{resource}}/{{flavor}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (resource, flavor) (ome_quota_capacity_unavailable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
+              "refId": "A",
+              "legendFormat": "unavailable {{resource}}/{{flavor}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Capacity on the selected members by resource and flavor. Cluster-wide.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        {
+          "type": "timeseries",
+          "title": "Nodes by state",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 46,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (state) (ome_quota_capacity_nodes{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"})",
+              "refId": "B",
+              "legendFormat": "{{state}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Node population by state. Cluster-wide.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Kueue objects written",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 46,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(ome_quota_backend_applied_total{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}[$__rate_interval]))",
+              "refId": "C",
+              "legendFormat": "applied/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "The materializer's write path into Kueue. Flat zero while workloads wait means projection is stalled. Carries no quota label, so it is cluster-wide.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Unattributed accelerators by reason",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 54,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (reason) (ome_quota_capacity_unattributed{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}) or (0 * sum(ome_quota_capacity_allocatable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}))",
+              "refId": "D",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Which fix an unclaimed accelerator needs. NoMatchingFlavor means no ResourceFlavor's node labels matched; AmbiguousFlavor means two matched equally well, so attributing the node to either would be a guess. The total above says something is wrong -- this says what, and they need different repairs.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Unattributed nodes by reason",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 54,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (reason) (ome_quota_capacity_unattributed_nodes{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}) or (0 * sum(ome_quota_capacity_allocatable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}))",
+              "refId": "E",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Distinct machines, not node-resource pairs: a node advertising two unclaimed resources counts once. Read against the panel to its left to tell one badly labelled machine from a whole pool.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Kueue objects reaped",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 54,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (trigger) (rate(ome_quota_backend_swept_total{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}[$__rate_interval])) or (0 * sum(ome_quota_capacity_allocatable{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\"}))",
+              "refId": "F",
+              "legendFormat": "{{trigger}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "The other half of the write path. materialize is routine orphan collection when the tree no longer names an object; finalize is a node being deleted. Written without reaped cannot show a churn loop, where the materializer rewrites every pass what the sweep has just removed.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         }
-      }
+      ]
     },
     {
       "type": "row",
       "title": "\ud83e\uddee Tenant ($tenant) quota details",
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 62,
         "w": 24,
         "h": 1
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "Admitted (tenant)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 55,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
+      "collapsed": true,
+      "panels": [
         {
+          "type": "stat",
+          "title": "Admitted (tenant)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) or vector(0)",
-          "refId": "D",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
+          "gridPos": {
+            "x": 0,
+            "y": 63,
+            "w": 8,
+            "h": 4
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Admitted against tenant quota. Follows $tenant.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Reserved not admitted",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 55,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "(sum(ome_quota_budget_reserved{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) - sum(ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"})) or vector(0)",
-          "refId": "E",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
               },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Quota held but not serving. Sustained non-zero means workloads are stuck in admission. Follows $tenant.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+              "expr": "sum(ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) or vector(0)",
+              "refId": "G",
+              "instant": true
+            }
           ],
-          "fields": "",
-          "values": false
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Admitted against tenant quota. Follows $tenant.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Borrowed (tenant)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 55,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
         {
+          "type": "stat",
+          "title": "Reserved not admitted",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(ome_quota_budget_borrowed{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) or vector(0)",
-          "refId": "F",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
+          "gridPos": {
+            "x": 8,
+            "y": 63,
+            "w": 8,
+            "h": 4
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Borrowed from other tenants' unused quota. Follows $tenant.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "(sum(ome_quota_budget_reserved{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) - sum(ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"})) or vector(0)",
+              "refId": "H",
+              "instant": true
+            }
           ],
-          "fields": "",
-          "values": false
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Quota held but not serving. Sustained non-zero means workloads are stuck in admission. Follows $tenant.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Nominal vs admitted by tenant",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 59,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
         {
+          "type": "stat",
+          "title": "Borrowed (tenant)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (quota) (ome_quota_budget_nominal{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"})",
-          "refId": "G",
-          "legendFormat": "nominal {{quota}}"
+          "gridPos": {
+            "x": 16,
+            "y": 63,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(ome_quota_budget_borrowed{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) or vector(0)",
+              "refId": "I",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Borrowed from other tenants' unused quota. Follows $tenant.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
         {
+          "type": "timeseries",
+          "title": "Nominal vs admitted by tenant",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (quota) (ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"})",
-          "refId": "H",
-          "legendFormat": "admitted {{quota}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
+          "gridPos": {
+            "x": 0,
+            "y": 67,
+            "w": 12,
+            "h": 8
           },
-          "color": {
-            "mode": "palette-classic"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (quota) (ome_quota_budget_nominal{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"})",
+              "refId": "J",
+              "legendFormat": "nominal {{quota}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (quota) (ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"})",
+              "refId": "K",
+              "legendFormat": "admitted {{quota}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
+          "description": "Granted quota against what is admitted, per tenant.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         },
-        "overrides": []
-      },
-      "description": "Granted quota against what is admitted, per tenant.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Utilization by tenant",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 59,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
         {
+          "type": "timeseries",
+          "title": "Utilization by tenant",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (quota) (ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) / clamp_min(sum by (quota) (ome_quota_budget_nominal{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}), 1)",
-          "refId": "I",
-          "legendFormat": "{{quota}}"
+          "gridPos": {
+            "x": 12,
+            "y": 67,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (quota) (ome_quota_budget_admitted{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}) / clamp_min(sum by (quota) (ome_quota_budget_nominal{endpoint=\"metrics\",cluster=~\".*($workload_cluster)$\",plane=\"workload\",role=\"ClusterQueue\",quota=~\"$tenant\"}), 1)",
+              "refId": "L",
+              "legendFormat": "{{quota}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "description": "Admitted over nominal per tenant. Sustained near 1 means the tenant is quota-bound.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "description": "Admitted over nominal per tenant. Sustained near 1 means the tenant is quota-bound.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
+      ]
     },
     {
       "type": "row",
       "title": "\ud83d\udd27 Control plane ($control_plane) component health",
       "gridPos": {
         "x": 0,
-        "y": 67,
+        "y": 75,
         "w": 24,
         "h": 1
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "ome-controller-manager ready",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 68,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
+      "collapsed": true,
+      "panels": [
         {
+          "type": "stat",
+          "title": "ome-controller-manager ready",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(kube_deployment_status_replicas_available{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-controller-manager\"}) / clamp_min(max(kube_deployment_spec_replicas{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-controller-manager\"}), 1)",
-          "refId": "J",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
+          "gridPos": {
+            "x": 0,
+            "y": 76,
+            "w": 8,
+            "h": 4
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
               },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "description": "Available over desired replicas.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+              "expr": "max(kube_deployment_status_replicas_available{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-controller-manager\"}) / clamp_min(max(kube_deployment_spec_replicas{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-controller-manager\"}), 1)",
+              "refId": "M",
+              "instant": true
+            }
           ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "ome-controller-manager leader",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 68,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(leader_election_master_status{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\",name=\"ome-controller-manager-leader-lock\"}) or vector(0)",
-          "refId": "K",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Must be exactly 1. Zero means no active leader and nothing reconciles; above 1 means split brain.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "ome-controller-manager restarts",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 68,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(increase(kube_pod_container_status_restarts_total{cluster=~\"$control_plane\",namespace=\"ome\",container=\"manager\"}[$__range])) or vector(0)",
-          "refId": "L",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
               },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
           },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Container restarts over the selected time range.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-controller-manager CPU (cores)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 72,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (pod) (rate(process_cpu_seconds_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval]))",
-          "refId": "M",
-          "legendFormat": "{{pod}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "description": "Per-pod CPU. Only the leader does real work, so one hot pod is expected.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-controller-manager memory (RSS)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 72,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (pod) (process_resident_memory_bytes{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"})",
-          "refId": "N",
-          "legendFormat": "{{pod}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "description": "Resident set size per pod.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-controller-manager reconcile rate by controller",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 72,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval]))",
-          "refId": "O",
-          "legendFormat": "{{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "description": "Work actually being done, per controller.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-controller-manager reconcile errors",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 18,
-        "y": 72,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval]))",
-          "refId": "P",
-          "legendFormat": "{{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "description": "Sustained non-zero means a controller cannot make progress.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-controller-manager reconcile p99",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 79,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval])))",
-          "refId": "Q",
-          "legendFormat": "{{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "description": "Tail reconcile latency. Cross-cluster fan-out makes the placer slower than a local controller.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-controller-manager queue depth / saturation",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 79,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (name) (workqueue_unfinished_work_seconds{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"})",
-          "refId": "R",
-          "legendFormat": "oldest unfinished {{name}}"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (controller) (controller_runtime_active_workers{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}) / clamp_min(sum by (controller) (controller_runtime_max_concurrent_reconciles{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}), 1)",
-          "refId": "S",
-          "legendFormat": "saturation {{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
+          "description": "Available over desired replicas.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
           }
         },
-        "overrides": []
-      },
-      "description": "Oldest unfinished item in seconds, plus active over max workers. Saturation pinned at 1 means the controller is the bottleneck.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "ome-quota-manager ready",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 86,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
         {
+          "type": "stat",
+          "title": "ome-controller-manager leader",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(kube_deployment_status_replicas_available{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-quota-manager\"}) / clamp_min(max(kube_deployment_spec_replicas{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-quota-manager\"}), 1)",
-          "refId": "T",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
+          "gridPos": {
+            "x": 8,
+            "y": 76,
+            "w": 8,
+            "h": 4
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
               },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "description": "Available over desired replicas.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+              "expr": "sum(leader_election_master_status{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\",name=\"ome-controller-manager-leader-lock\"}) or vector(0)",
+              "refId": "N",
+              "instant": true
+            }
           ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "ome-quota-manager leader",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 86,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(leader_election_master_status{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\",name=\"ome-quota-manager-leader-lock\"}) or vector(0)",
-          "refId": "U",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Must be exactly 1. Zero means no active leader and nothing reconciles; above 1 means split brain.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "ome-quota-manager restarts",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 86,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(increase(kube_pod_container_status_restarts_total{cluster=~\"$control_plane\",namespace=\"ome\",container=\"quota-manager\"}[$__range])) or vector(0)",
-          "refId": "V",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
               },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
           },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "description": "Container restarts over the selected time range.",
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "graphMode": "area",
-        "colorMode": "value"
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-quota-manager CPU (cores)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 90,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (pod) (rate(process_cpu_seconds_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval]))",
-          "refId": "W",
-          "legendFormat": "{{pod}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "description": "Per-pod CPU. Only the leader does real work, so one hot pod is expected.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-quota-manager memory (RSS)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 90,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (pod) (process_resident_memory_bytes{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"})",
-          "refId": "X",
-          "legendFormat": "{{pod}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "description": "Resident set size per pod.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-quota-manager reconcile rate by controller",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 90,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval]))",
-          "refId": "Y",
-          "legendFormat": "{{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "description": "Work actually being done, per controller.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-quota-manager reconcile errors",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 18,
-        "y": 90,
-        "w": 6,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval]))",
-          "refId": "Z",
-          "legendFormat": "{{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "description": "Sustained non-zero means a controller cannot make progress.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-quota-manager reconcile p99",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 97,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval])))",
-          "refId": "A",
-          "legendFormat": "{{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "description": "Tail reconcile latency. Cross-cluster fan-out makes the placer slower than a local controller.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "ome-quota-manager queue depth / saturation",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 97,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max by (name) (workqueue_unfinished_work_seconds{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"})",
-          "refId": "B",
-          "legendFormat": "oldest unfinished {{name}}"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (controller) (controller_runtime_active_workers{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}) / clamp_min(sum by (controller) (controller_runtime_max_concurrent_reconciles{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}), 1)",
-          "refId": "C",
-          "legendFormat": "saturation {{controller}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
+          "description": "Must be exactly 1. Zero means no active leader and nothing reconciles; above 1 means split brain.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
           }
         },
-        "overrides": []
-      },
-      "description": "Oldest unfinished item in seconds, plus active over max workers. Saturation pinned at 1 means the controller is the bottleneck.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Apiserver client calls by code",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 104,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
         {
+          "type": "stat",
+          "title": "ome-controller-manager restarts",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (code) (rate(rest_client_requests_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-.*manager.*\"}[$__rate_interval]))",
-          "refId": "D",
-          "legendFormat": "{{code}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
+          "gridPos": {
+            "x": 16,
+            "y": 76,
+            "w": 8,
+            "h": 4
           },
-          "color": {
-            "mode": "palette-classic"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(kube_pod_container_status_restarts_total{cluster=~\"$control_plane\",namespace=\"ome\",container=\"manager\"}[$__range])) or vector(0)",
+              "refId": "O",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
+          "description": "Container restarts over the selected time range.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
-        "overrides": []
-      },
-      "description": "Control-plane apiserver traffic from the OME components. A rise in 4xx or 5xx precedes reconcile errors.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Webhook requests by code",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 104,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
         {
+          "type": "timeseries",
+          "title": "ome-controller-manager CPU (cores)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (code) (rate(controller_runtime_webhook_requests_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-.*manager.*\"}[$__rate_interval])) or vector(0)",
-          "refId": "E",
-          "legendFormat": "{{code}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
+          "gridPos": {
+            "x": 0,
+            "y": 80,
+            "w": 6,
+            "h": 7
           },
-          "color": {
-            "mode": "palette-classic"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (pod) (rate(process_cpu_seconds_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval]))",
+              "refId": "P",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "min": 0
+            },
+            "overrides": []
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
+          "description": "Per-pod CPU. Only the leader does real work, so one hot pod is expected.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-controller-manager memory (RSS)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 6,
+            "y": 80,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (pod) (process_resident_memory_bytes{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"})",
+              "refId": "Q",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "description": "Resident set size per pod.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-controller-manager reconcile rate by controller",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 80,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval]))",
+              "refId": "R",
+              "legendFormat": "{{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Work actually being done, per controller.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-controller-manager reconcile errors",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 18,
+            "y": 80,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval]))",
+              "refId": "S",
+              "legendFormat": "{{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Sustained non-zero means a controller cannot make progress.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-controller-manager reconcile p99",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 87,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}[$__rate_interval])))",
+              "refId": "T",
+              "legendFormat": "{{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "description": "Tail reconcile latency. Cross-cluster fan-out makes the placer slower than a local controller.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-controller-manager queue depth / saturation",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 87,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (name) (workqueue_unfinished_work_seconds{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"})",
+              "refId": "U",
+              "legendFormat": "oldest unfinished {{name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (controller) (controller_runtime_active_workers{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}) / clamp_min(sum by (controller) (controller_runtime_max_concurrent_reconciles{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-controller-manager.*\"}), 1)",
+              "refId": "V",
+              "legendFormat": "saturation {{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
               }
-            ]
+            },
+            "overrides": []
           },
-          "unit": "reqps"
+          "description": "Oldest unfinished item in seconds, plus active over max workers. Saturation pinned at 1 means the controller is the bottleneck.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         },
-        "overrides": []
-      },
-      "description": "Admission webhook traffic. The placer disables the ISVC webhooks in control-plane role, so quiet is expected here.",
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        {
+          "type": "stat",
+          "title": "ome-quota-manager ready",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 94,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max(kube_deployment_status_replicas_available{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-quota-manager\"}) / clamp_min(max(kube_deployment_spec_replicas{cluster=~\"$control_plane\",namespace=\"ome\",deployment=\"ome-quota-manager\"}), 1)",
+              "refId": "W",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "description": "Available over desired replicas.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        {
+          "type": "stat",
+          "title": "ome-quota-manager leader",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 94,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(leader_election_master_status{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\",name=\"ome-quota-manager-leader-lock\"}) or vector(0)",
+              "refId": "X",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Must be exactly 1. Zero means no active leader and nothing reconciles; above 1 means split brain.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
+        },
+        {
+          "type": "stat",
+          "title": "ome-quota-manager restarts",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 94,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(kube_pod_container_status_restarts_total{cluster=~\"$control_plane\",namespace=\"ome\",container=\"quota-manager\"}[$__range])) or vector(0)",
+              "refId": "Y",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {},
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "description": "Container restarts over the selected time range.",
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value"
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-quota-manager CPU (cores)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 98,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (pod) (rate(process_cpu_seconds_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval]))",
+              "refId": "Z",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "description": "Per-pod CPU. Only the leader does real work, so one hot pod is expected.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-quota-manager memory (RSS)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 6,
+            "y": 98,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (pod) (process_resident_memory_bytes{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"})",
+              "refId": "A",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "description": "Resident set size per pod.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-quota-manager reconcile rate by controller",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 98,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval]))",
+              "refId": "B",
+              "legendFormat": "{{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Work actually being done, per controller.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-quota-manager reconcile errors",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 18,
+            "y": 98,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval]))",
+              "refId": "C",
+              "legendFormat": "{{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Sustained non-zero means a controller cannot make progress.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-quota-manager reconcile p99",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 105,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}[$__rate_interval])))",
+              "refId": "D",
+              "legendFormat": "{{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "description": "Tail reconcile latency. Cross-cluster fan-out makes the placer slower than a local controller.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "ome-quota-manager queue depth / saturation",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 105,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max by (name) (workqueue_unfinished_work_seconds{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"})",
+              "refId": "E",
+              "legendFormat": "oldest unfinished {{name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (controller) (controller_runtime_active_workers{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}) / clamp_min(sum by (controller) (controller_runtime_max_concurrent_reconciles{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-quota-manager.*\"}), 1)",
+              "refId": "F",
+              "legendFormat": "saturation {{controller}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "description": "Oldest unfinished item in seconds, plus active over max workers. Saturation pinned at 1 means the controller is the bottleneck.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Apiserver client calls by code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 112,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (code) (rate(rest_client_requests_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-.*manager.*\"}[$__rate_interval]))",
+              "refId": "G",
+              "legendFormat": "{{code}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Control-plane apiserver traffic from the OME components. A rise in 4xx or 5xx precedes reconcile errors.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Webhook requests by code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 112,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (code) (rate(controller_runtime_webhook_requests_total{endpoint=\"metrics\",cluster=~\"$control_plane\",pod=~\"ome-.*manager.*\"}[$__rate_interval])) or vector(0)",
+              "refId": "H",
+              "legendFormat": "{{code}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "description": "Admission webhook traffic. The placer disables the ISVC webhooks in control-plane role, so quiet is expected here.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         }
-      }
+      ]
     },
     {
       "type": "row",
       "title": "\ud83d\udcd6 Coverage limits",
       "gridPos": {
         "x": 0,
-        "y": 111,
+        "y": 119,
         "w": 24,
         "h": 1
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "text",
-      "title": "What this board cannot tell you, and the fix for each",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 112,
-        "w": 24,
-        "h": 10
-      },
-      "options": {
-        "mode": "markdown",
-        "content": "The placement stack now registers its own metrics, so member health, per-ISVC placement and declared policy are first-class here rather than inferred from generic signals. What remains uncovered:\n\n| Gap | Why it is missing | Fix |\n|---|---|---|\n| InferenceService *serving* state \u2014 Ready, failed, in-progress per namespace | The platform kube-state-metrics on a management cluster carries no OME `customResourceState` config, so every `ome_inferenceservice_*` series is absent. Placement phase is exported, but that is where the ISVC was put, not whether it serves. | Add `config/monitoring/kube-state-metrics-config.yaml` to that KSM. Config only, no OME code change. |\n| Whether quota accounting matches reality | Where Kueue does not gate serving pods, admitted counts read zero while accelerators are consumed, so a healthy zero and an unmeasured fleet look identical. | A pod-derived consumption metric split by whether Kueue governs the pod. |\n| Fan-out latency and sweep lag | Computed by `tests/perf/multicluster` offline and nowhere in production. The phase gauge shows the outcome, not how long the race took or how long a loser's derived object survived. | Placement histograms around fan-out and the loser sweep. |\n| Unattributed capacity | `ome_quota_capacity_unattributed` is not emitted on every fleet, so that panel reads No data rather than zero. | Emit the figure the capacity pass already computes. |\n\nNothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, no PrometheusRule object is deployed, and Alertmanager has no route or receiver. `Failed placements` and `OME errors` are the two panels worth wiring first.\n\n*Selector caveat: `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` carry their own `cluster` label holding the member name, which shadows the collector's control-plane label, so those panels select on `cluster_id`. Renaming the metric label to `workload_cluster` would remove the special case.*"
-      }
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "text",
+          "title": "What this board cannot tell you, and the fix for each",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 120,
+            "w": 24,
+            "h": 10
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "The placement stack registers its own metrics, so member health, per-ISVC placement and declared policy are first-class here rather than inferred from generic signals. Quota lives here too, rather than on a board of its own: capacity is the denominator every tenant number is read against, and the two were being kept in step by hand.\n\nCohort rows are absent from the tenant panels on purpose -- a cohort's nominal contains its children's, so a sum over both double-counts every leaf. What remains uncovered:\n\n| Gap | Why it is missing | Fix |\n|---|---|---|\n| InferenceService *serving* state \u2014 Ready, failed, in-progress per namespace | The platform kube-state-metrics on a management cluster carries no OME `customResourceState` config, so every `ome_inferenceservice_*` series is absent. Placement phase is exported, but that is where the ISVC was put, not whether it serves. | Add `config/monitoring/kube-state-metrics-config.yaml` to that KSM. Config only, no OME code change. |\n| Whether quota accounting matches reality | Where Kueue does not gate serving pods, admitted counts read zero while accelerators are consumed, so a healthy zero and an unmeasured fleet look identical. | A pod-derived consumption metric split by whether Kueue governs the pod. |\n| Where a tenant's share landed across members | `status.budgets[].perCluster` carries it; no metric exports it. The tenant row sums the members selected, so an uneven split reads the same as an even one. | Export the per-cluster breakdown the projection already computes. |\n| Tree structure \u2014 parent, depth, violations by reason | The path label ships in the budget family but nothing reads it yet, so a tenant is a flat name rather than a position. | Label the tenant panels by path, and export the violation reasons the tree check already produces. |\n| Fan-out latency and sweep lag | Computed by `tests/perf/multicluster` offline and nowhere in production. The phase gauge shows the outcome, not how long the race took or how long a loser's derived object survived. | Placement histograms around fan-out and the loser sweep. |\nNothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, no PrometheusRule object is deployed, and Alertmanager has no route or receiver. `Failed placements` and `OME errors` are the two panels worth wiring first.\n\n*Selector caveat: `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` carry their own `cluster` label holding the member name, which shadows the collector's control-plane label, so those panels select on `cluster_id`. Renaming the metric label to `workload_cluster` would remove the special case.*"
+          }
+        }
+      ]
     }
   ]
 }

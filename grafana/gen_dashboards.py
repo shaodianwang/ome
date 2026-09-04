@@ -147,6 +147,28 @@ def row(title, y):
     }
 
 
+def collapse_after(panels, expanded):
+    """Fold each row's panels inside it, leaving the first `expanded` rows open.
+
+    Grafana only honours a shut row when its children are nested in the row's
+    own panels list. Setting collapsed on a flat list draws the row shut and
+    leaves every panel on the page underneath it, still querying.
+    """
+    out, current = [], None
+    rows = 0
+    for panel_ in panels:
+        if panel_["type"] == "row":
+            rows += 1
+            current = panel_
+            current["collapsed"] = rows > expanded
+            out.append(current)
+        elif current is not None and current["collapsed"]:
+            current["panels"].append(panel_)
+        else:
+            out.append(panel_)
+    return out
+
+
 def var_ds():
     return {
         "type": "datasource",
@@ -849,6 +871,22 @@ MC_PHASE_MAP = [{"type": "value", "options": {
     "Failed": {"color": "red", "index": 3}}}]
 
 
+def mc_measured(expr):
+    """Read zero where a capacity pass ran, and No data where none did.
+
+    The capacity families are Reset and repopulated each pass, so a cluster with
+    nothing to report emits no series -- indistinguishable from a cluster running
+    no quota manager. A bare `or vector(0)` calls both zero; no fallback at all
+    calls both No data. Neither is true, and these are the panels that say
+    whether anything is wrong, so a wrong answer here is expensive both ways.
+
+    ome_quota_capacity_allocatable is present exactly where a pass ran and
+    matched a flavor, which makes its presence the difference between the two.
+    It only decides the empty case: where the metric itself has series, they win.
+    """
+    return f'{expr} or (0 * sum(ome_quota_capacity_allocatable{{{MC_CAP}}}))'
+
+
 def mc_ratio(title, num, num_label, den, den_label, gp, desc=None,
              thresholds=T_NONE, decimals=None):
     """A stat carrying a numerator and denominator side by side, e.g. 2 / 2.
@@ -1088,10 +1126,12 @@ def mc_control_plane():
         desc="Nodes backing member capacity, all states."))
     p.append(panel(
         "stat", "Unattributed (cluster)",
-        [target(f'sum(ome_quota_capacity_unattributed{{{MC_CAP}}})', instant=True)],
+        [target(mc_measured(f'sum(ome_quota_capacity_unattributed{{{MC_CAP}}})'), instant=True)],
         (12, y, 12, 4), thresholds=MC_OK_BAD, decimals=0,
-        desc="Accelerators no quota claims. Deliberately no vector(0) fallback: this family is "
-             "not emitted on every fleet, and an honest 'No data' beats a fake zero."))
+        desc="Accelerators no quota claims. Zero on a member that ran a capacity pass and found "
+             "nothing wrong; No data on one that measured no capacity at all. The family is "
+             "absent in both cases, so the fallback is scoped to allocatable rather than "
+             "unconditional -- a fake zero and a blank panel are each wrong for one of them."))
     y += 4
 
     p.append(panel(
@@ -1114,6 +1154,36 @@ def mc_control_plane():
         (16, y, 8, 8), unit="reqps",
         desc="The materializer's write path into Kueue. Flat zero while workloads wait means "
              "projection is stalled. Carries no quota label, so it is cluster-wide."))
+    y += 8
+
+    p.append(panel(
+        "timeseries", "Unattributed accelerators by reason",
+        [target(mc_measured(
+            f'sum by (reason) (ome_quota_capacity_unattributed{{{MC_CAP}}})'), "{{reason}}")],
+        (0, y, 8, 8), decimals=0,
+        desc="Which fix an unclaimed accelerator needs. NoMatchingFlavor means no "
+             "ResourceFlavor's node labels matched; AmbiguousFlavor means two matched equally "
+             "well, so attributing the node to either would be a guess. The total above says "
+             "something is wrong -- this says what, and they need different repairs."))
+    p.append(panel(
+        "timeseries", "Unattributed nodes by reason",
+        [target(mc_measured(
+            f'sum by (reason) (ome_quota_capacity_unattributed_nodes{{{MC_CAP}}})'),
+            "{{reason}}")],
+        (8, y, 8, 8), decimals=0,
+        desc="Distinct machines, not node-resource pairs: a node advertising two unclaimed "
+             "resources counts once. Read against the panel to its left to tell one badly "
+             "labelled machine from a whole pool."))
+    p.append(panel(
+        "timeseries", "Kueue objects reaped",
+        [target(mc_measured(
+            f'sum by (trigger) (rate(ome_quota_backend_swept_total{{{MC_CAP}}}'
+            f'[$__rate_interval]))'), "{{trigger}}")],
+        (16, y, 8, 8), unit="reqps",
+        desc="The other half of the write path. materialize is routine orphan collection when "
+             "the tree no longer names an object; finalize is a node being deleted. Written "
+             "without reaped cannot show a churn loop, where the materializer rewrites every "
+             "pass what the sweep has just removed."))
     y += 8
 
     # --------------------------- tenant quota ------------------------------
@@ -1256,9 +1326,14 @@ def mc_control_plane():
         "datasource": DS,
         "gridPos": {"x": 0, "y": y, "w": 24, "h": 10},
         "options": {"mode": "markdown", "content": (
-            "The placement stack now registers its own metrics, so member health, per-ISVC "
+            "The placement stack registers its own metrics, so member health, per-ISVC "
             "placement and declared policy are first-class here rather than inferred from "
-            "generic signals. What remains uncovered:\n\n"
+            "generic signals. Quota lives here too, rather than on a board of its own: "
+            "capacity is the denominator every tenant number is read against, and the two "
+            "were being kept in step by hand.\n\n"
+            "Cohort rows are absent from the tenant panels on purpose -- a cohort's "
+            "nominal contains its children's, so a sum over both double-counts every "
+            "leaf. What remains uncovered:\n\n"
             "| Gap | Why it is missing | Fix |\n"
             "|---|---|---|\n"
             "| InferenceService *serving* state — Ready, failed, in-progress per namespace | "
@@ -1271,13 +1346,18 @@ def mc_control_plane():
             "pods, admitted counts read zero while accelerators are consumed, so a healthy "
             "zero and an unmeasured fleet look identical. | A pod-derived consumption metric "
             "split by whether Kueue governs the pod. |\n"
+            "| Where a tenant's share landed across members | `status.budgets[].perCluster` "
+            "carries it; no metric exports it. The tenant row sums the members selected, "
+            "so an uneven split reads the same as an even one. | Export the per-cluster "
+            "breakdown the projection already computes. |\n"
+            "| Tree structure — parent, depth, violations by reason | The path label ships "
+            "in the budget family but nothing reads it yet, so a tenant is a flat name "
+            "rather than a position. | Label the tenant panels by path, and export the "
+            "violation reasons the tree check already produces. |\n"
             "| Fan-out latency and sweep lag | Computed by `tests/perf/multicluster` offline "
             "and nowhere in production. The phase gauge shows the outcome, not how long the "
             "race took or how long a loser's derived object survived. | Placement histograms "
             "around fan-out and the loser sweep. |\n"
-            "| Unattributed capacity | `ome_quota_capacity_unattributed` is not emitted on "
-            "every fleet, so that panel reads No data rather than zero. | Emit the figure the "
-            "capacity pass already computes. |\n\n"
             "Nothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, "
             "no PrometheusRule object is deployed, and Alertmanager has no route or receiver. "
             "`Failed placements` and `OME errors` are the two panels worth wiring first.\n\n"
@@ -1297,9 +1377,15 @@ def mc_control_plane():
         "with max by (...) so a controller rollout neither splits a line nor inflates a count.",
         [var_ds(),
          # Self-scoping: only control planes that actually register a WorkloadCluster appear.
+         #
+         # No All option, so the board opens on one hub rather than every hub summed.
+         # Hubs are independent fleets -- each holds its own tree and makes its own
+         # placement decisions -- so a total across them counts unrelated things
+         # together, and the number it produces answers nobody's question. Still
+         # multi-select for deliberately comparing two.
          var_query("control_plane", "Control plane",
                    'label_values(ome_workload_cluster_ready, cluster_id)',
-                   multi=True, include_all=True, all_value=".*"),
+                   multi=True),
          # Members. Quota panels match this as a suffix of the member's full cluster id.
          var_query("workload_cluster", "Workload cluster",
                    'label_values(ome_workload_cluster_ready, cluster)',
@@ -1312,292 +1398,25 @@ def mc_control_plane():
          var_query("isvc", "InferenceService",
                    'label_values(ome_isvc_placement_phase, isvc)',
                    multi=True, include_all=True, all_value=".*")],
-        p, ["ome", "multicluster", "control-plane", "placement", "quota"])
-
-
-# ---------------------------------------------------------------------------
-# 6. Quota — accelerator capacity and how it is divided.
-#
-#    Its own dashboard rather than a row on the multi-cluster board, because
-#    that board's cluster picker lists only clusters running the placer, and
-#    the capacity and tenant usage live on the workload clusters instead.
-#
-#    Scoped by the quota manager's own Deployment, so a cluster appears here
-#    exactly when it runs one, in either mode.
-# ---------------------------------------------------------------------------
-QUOTA = 'cluster=~"$cluster",endpoint="metrics"'
-
-# Budget series, pinned to the workload plane. Both planes publish budgets and
-# mean different things by them -- a management plane's nominal is the authored
-# fleet total, a workload plane's is that cluster's share -- so with the picker
-# on All, an unpinned sum would add a fleet total to the shares that make it up.
-BUDGET = 'cluster=~"$cluster",endpoint="metrics",plane="workload"'
-
-
-
-def _by_tenant(inner):
-    """Label a budget aggregation by tree path, falling back to the object name.
-
-    Two label_replace passes, and the order is the whole trick: the first always
-    writes the quota name, the second overwrites it only where path is
-    non-empty. That leaves a readable label for a node the tree cannot reach
-    from the root, whose path is empty by construction, and on a cluster whose
-    quota manager is older than the path label.
-    """
-    return (f'label_replace(label_replace({inner}, "tenant", "$1", "quota", "(.*)"), '
-            f'"tenant", "$1", "path", "(.+)")')
-
-
-def quota():
-    p, y = [], 0
-
-    p.append(row("🧮 Fleet accelerator capacity", y)); y += 1
-
-    p.append(panel(
-        "stat", "Allocatable",
-        [target(f'sum by (resource, flavor) (ome_quota_capacity_allocatable{{{QUOTA}}})',
-                "{{resource}} · {{flavor}}")],
-        (0, y, 5, 4), decimals=0,
-        desc="Accelerators on nodes that could accept work. Allocatable, not capacity, so "
-             "it will not reconcile against kube_node_status_capacity."))
-
-    p.append(panel(
-        "stat", "Unavailable",
-        [target(f'sum by (resource, flavor) (ome_quota_capacity_unavailable{{{QUOTA}}})',
-                "{{resource}} · {{flavor}}")],
-        (5, y, 5, 4), decimals=0,
-        desc="Accelerators on nodes that matched a ResourceFlavor but are cordoned or not "
-             "Ready. Budgets are sized against allocatable, so this is the parked "
-             "remainder."))
-
-    p.append(panel(
-        "stat", "Parked",
-        [target(f'sum by (resource, flavor) (ome_quota_capacity_unavailable{{{QUOTA}}}) / '
-                f'clamp_min(sum by (resource, flavor) (ome_quota_capacity_allocatable{{{QUOTA}}}) '
-                f'+ sum by (resource, flavor) (ome_quota_capacity_unavailable{{{QUOTA}}}), 1)',
-                "{{resource}} · {{flavor}}")],
-        (10, y, 5, 4), unit="percentunit",
-        thresholds=[(None, "green"), (0.1, "yellow"), (0.25, "red")],
-        desc="Share of matched accelerators that cannot accept work. clamp_min keeps a "
-             "cluster with no capacity from dividing by zero."))
-
-    p.append(panel(
-        "stat", "Unattributed",
-        [target(f'sum by (resource) (ome_quota_capacity_unattributed{{{QUOTA}}}) or vector(0)',
-                "{{resource}}")],
-        (15, y, 9, 4), decimals=0,
-        thresholds=[(None, "green"), (1, "red")],
-        desc="Accelerators no ResourceFlavor claims, so they fund no budget at all. Zero is "
-             "the healthy reading. Non-zero means a missing or ambiguous ResourceFlavor, "
-             "not a shrinking fleet -- and a budget written against that hardware reports "
-             "CapacityExceeded with nothing else to say why.\n\n"
-             "Broken out by resource but not by flavor: an unattributed accelerator is one "
-             "no flavor claimed, so it has no flavor to report."))
-    y += 4
-
-    p.append(panel(
-        "timeseries", "Allocatable vs unavailable",
-        [target(f'sum by (resource, flavor) (ome_quota_capacity_allocatable{{{QUOTA}}})',
-                "{{resource}} / {{flavor}} allocatable"),
-         target(f'sum by (resource, flavor) (ome_quota_capacity_unavailable{{{QUOTA}}})',
-                "{{resource}} / {{flavor}} unavailable")],
-        (0, y, 12, 7), decimals=0,
-        desc="Per (resource, flavor), which is the granularity Kueue keys quota by."))
-
-    p.append(panel(
-        "timeseries", "Nodes by state",
-        [target(f'sum by (state) (ome_quota_capacity_nodes{{{QUOTA}}})', "{{state}}")],
-        (12, y, 12, 7), decimals=0,
-        desc="The node counts behind the accelerator totals. This is what separates a "
-             "one-machine shortfall from a rack: the same missing accelerators look "
-             "identical until you can see how many machines they came from."))
-    y += 7
-
-    p.append(row("📐 Distribution", y)); y += 1
-
-    p.append(panel(
-        "stat", "Governed",
-        [target(f'sum(ome_quota_budget_nominal{{{BUDGET},role="ClusterQueue"}}) / '
-                f'clamp_min(sum(ome_quota_capacity_allocatable{{{QUOTA}}}), 1)')],
-        (0, y, 6, 4), unit="percentunit",
-        desc="Share of the cluster's allocatable accelerators that any budget covers. Low "
-             "means most of the fleet is running outside the quota system entirely, which "
-             "is not visible from any per-tenant number."))
-
-    p.append(panel(
-        "stat", "Allocated",
-        [target(f'sum(ome_quota_budget_nominal{{{BUDGET},role="ClusterQueue"}})')],
-        (6, y, 6, 4), decimals=0,
-        desc="Accelerators promised to tenants, summed over leaves. Leaves only: a cohort's "
-             "nominal contains its children's, so counting both would double."))
-
-    p.append(panel(
-        "stat", "Admitted",
-        [target(f'sum(ome_quota_budget_admitted{{{BUDGET},role="ClusterQueue"}})')],
-        (12, y, 6, 4), decimals=0,
-        desc="Accelerators actually admitted against the materialized queues, including "
-             "anything borrowed."))
-
-    p.append(panel(
-        "stat", "Allocation used",
-        [target(f'sum(ome_quota_budget_admitted{{{BUDGET},role="ClusterQueue"}}) / '
-                f'clamp_min(sum(ome_quota_budget_nominal{{{BUDGET},role="ClusterQueue"}}), 1)')],
-        (18, y, 6, 4), unit="percentunit",
-        thresholds=[(None, "green"), (0.85, "yellow"), (0.95, "red")],
-        desc="Admitted over allocated, across every tenant. This is headroom inside the "
-             "quota system, which is a different question from how much of the fleet the "
-             "system governs at all."))
-    y += 4
-
-    p.append(panel(
-        "timeseries", "Allocated by tenant",
-        [target(_by_tenant(
-            f'sum by (quota, path) (ome_quota_budget_nominal{{{BUDGET},role="ClusterQueue"}})'),
-            "{{tenant}}")],
-        (0, y, 24, 7), decimals=0, stacked=True,
-        desc="How the tree divides the fleet. Stacked, so the top of the stack is everything "
-             "promised and the bands are who it was promised to.\n\n"
-             "Labelled by root-to-node path, because a bare object name does not say which "
-             "parent a tenant hangs off and two tenants under different parents are "
-             "distinguishable only by their ancestry. A band labelled with a plain name "
-             "carries no path: either the node is unreachable from the root, or the cluster "
-             "reporting it predates the path label."))
-    y += 7
-
-    p.append(row("📊 Tenant utilization", y)); y += 1
-
-    p.append(panel(
-        "timeseries", "Utilization by tenant",
-        [target(f'sum by (quota) (ome_quota_budget_admitted{{{BUDGET},role="ClusterQueue"}}) / '
-                f'clamp_min(sum by (quota) (ome_quota_budget_nominal{{{BUDGET},role="ClusterQueue"}}), 1)',
-                "{{quota}}")],
-        (0, y, 8, 7), unit="percentunit", minv=0,
-        desc="Admitted over its own allowance. A tenant walking up to 1 over an hour is the "
-             "shape this board exists to make visible; above 1 means it is borrowing."))
-
-    p.append(panel(
-        "timeseries", "Reserved but not admitted",
-        [target(f'sum by (quota) (ome_quota_budget_reserved{{{BUDGET},role="ClusterQueue"}}) - '
-                f'sum by (quota) (ome_quota_budget_admitted{{{BUDGET},role="ClusterQueue"}})',
-                "{{quota}}")],
-        (8, y, 8, 7), decimals=0,
-        desc="Accelerators a tenant owns but has not started using. Without this a tenant "
-             "sitting at its ceiling reads as idle, because admitted alone cannot tell "
-             "'not running' from 'not entitled'."))
-
-    p.append(panel(
-        "timeseries", "Borrowed by tenant",
-        [target(f'sum by (quota) (ome_quota_budget_borrowed{{{BUDGET},role="ClusterQueue"}})',
-                "{{quota}}")],
-        (16, y, 8, 7), decimals=0,
-        desc="Admitted above a tenant's own nominal, taken from idle siblings and "
-             "reclaimable on contention. One leaf borrowing its whole cohort is the "
-             "saturation case that is invisible from any single tenant's numbers."))
-    y += 7
-
-    p.append(row("🏷️ Attribution", y)); y += 1
-
-    p.append(panel(
-        "timeseries", "Unattributed accelerators by reason",
-        [target(f'sum by (reason) (ome_quota_capacity_unattributed{{{QUOTA}}}) or vector(0)',
-                "{{reason}}")],
-        (0, y, 12, 7), decimals=0,
-        desc="A flat zero line is healthy. NoMatchingFlavor means no ResourceFlavor's node "
-             "labels matched; AmbiguousFlavor means two matched equally well, so counting "
-             "the node into either would be a guess. The two need different fixes, which is "
-             "why they are not merged."))
-
-    p.append(panel(
-        "timeseries", "Unattributed nodes by reason",
-        [target(f'sum by (reason) (ome_quota_capacity_unattributed_nodes{{{QUOTA}}}) or vector(0)',
-                "{{reason}}")],
-        (12, y, 12, 7), decimals=0,
-        desc="Distinct machines, not node-resource pairs: a node advertising two unclaimed "
-             "resources counts once. Read with the panel to its left to tell one badly "
-             "labelled machine from a whole pool."))
-    y += 7
-
-    p.append(row("🔧 Materializer", y)); y += 1
-
-    p.append(panel(
-        "timeseries", "Kueue objects written",
-        [target(f'sum by (cluster) (rate(ome_quota_backend_applied_total{{{QUOTA}}}[30m]))',
-                "{{cluster}}")],
-        (0, y, 12, 7), unit="reqps",
-        desc="Writes are server-side applies issued unconditionally, so this tracks pass "
-             "frequency times render size, not how often the tree changed. A step change "
-             "means the tree grew or the resync interval moved."))
-
-    p.append(panel(
-        "timeseries", "Kueue objects reaped",
-        [target(f'sum by (trigger) (rate(ome_quota_backend_swept_total{{{QUOTA}}}[30m])) or vector(0)',
-                "{{trigger}}")],
-        (12, y, 12, 7), unit="reqps",
-        desc="materialize is routine orphan collection when the tree no longer names an "
-             "object; finalize is a node being deleted. Flat zero is the steady state -- a "
-             "sweep that finds nothing is not recorded, so this stays at zero rather than "
-             "going blank."))
-    y += 7
-
-    p.append(row("📖 Coverage limits", y)); y += 1
-    p.append({
-        "type": "text",
-        "title": "What this board cannot tell you yet",
-        "datasource": DS,
-        "gridPos": {"x": 0, "y": y, "w": 24, "h": 8},
-        "options": {"mode": "markdown", "content": (
-            "Capacity, and how the tree divides it. Cohort rows are absent from the tenant "
-            "panels on purpose: a cohort's nominal contains its children's, so a sum over "
-            "both would double-count. What is still missing:\n\n"
-            "| Gap | Fix |\n"
-            "|---|---|\n"
-            "| Where a tenant's share landed across members | `status.budgets[].perCluster` "
-            "carries it; no metric exports it yet. |\n"
-            "| Whether the accounting matches the hardware | Kueue's admitted figure and a "
-            "pod-derived count are independent views of the same accelerators; nothing "
-            "compares them. |\n"
-            "| Tree structure — parent, depth, violations by reason | The path label lands "
-            "with the next quota-manager rollout, and until then a tenant band is labelled "
-            "with its bare name. The rest has no metric, so a rollup still cannot be shown "
-            "complete rather than assumed. |\n\n"
-            "Nothing here can page anyone: no PrometheusRule is deployed on any cluster and "
-            "Alertmanager has no receiver.\n\n"
-            "*The `cluster` picker lists workload clusters only. A management plane holds "
-            "the authored fleet tree and has no local silicon, so every panel here would "
-            "be empty for one.*"
-        )},
-    })
-
-    return dashboard(
-        "ome-quota", "OME · Quota",
-        "Accelerator capacity and how the quota tree divides it. Capacity is measured on "
-        "each workload cluster by its own quota manager; a management plane holds the "
-        "authored fleet tree and reports no local capacity.",
-        [var_ds(),
-         # Scoped to clusters that run a capacity pass, which is workload mode only --
-         # a management plane holds the authored fleet tree and has no local silicon, so
-         # listing it here would offer a selection whose every capacity panel is empty.
-         #
-         # Matched on the whole ome_quota_capacity_* family rather than on allocatable
-         # alone: a cluster with no ResourceFlavor reports everything as unattributed and
-         # emits no allocatable series at all, and that is precisely the cluster an
-         # operator needs to be able to select.
-         var_query("cluster", "Cluster",
-                   'label_values({__name__=~"ome_quota_capacity_.*"}, cluster)',
-                   multi=True, include_all=True, all_value=".*")],
-        p, ["ome", "quota"])
+        # Overview stays open; the drill-downs below it are keyed on variables and
+        # are what you open once a number up top sends you looking. Expanded, the
+        # board runs every panel's query on load.
+        collapse_after(p, expanded=1),
+        ["ome", "multicluster", "control-plane", "placement", "quota"])
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for build in (control_plane, scheduler, router, slo, mc_control_plane, quota):
+    for build in (control_plane, scheduler, router, slo, mc_control_plane):
         target.n = 0
         d = build()
         path = OUT / f"{d['uid']}.json"
         path.write_text(json.dumps(d, indent=2) + "\n")
-        panels = [p for p in d["panels"] if p["type"] != "row"]
+        # Counted through rows: a collapsed row carries its panels inside itself,
+        # so a top-level count reports a fraction of the board.
+        n = sum(len(q.get("panels", [])) if q["type"] == "row" else 1 for q in d["panels"])
         print(f"wrote {path.relative_to(pathlib.Path(__file__).parent.parent)} "
-              f"({len(panels)} panels)")
+              f"({n} panels)")
 
 
 if __name__ == "__main__":
