@@ -322,7 +322,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, node *tree.Node, froze
 	// only one of them is safe to publish on a failed read.
 	if totals, ok := reading.forNode(node.Name()); ok {
 		updated.Status.Budgets = budgetStatus(node, totals)
-		recordBudgets(string(r.Mode), node.Name(), string(node.Role()), updated.Status.Budgets)
+		recordBudgets(string(r.Mode), node.Name(), node.Path, string(node.Role()), updated.Status.Budgets)
 	}
 
 	// Only a projecting plane has members to report, and only it should clear
