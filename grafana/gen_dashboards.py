@@ -986,7 +986,7 @@ def mc_control_plane():
         desc="ISVCs whose placement failed terminally. Zero is healthy; the natural alert "
              "target."))
     p.append(panel(
-        "stat", "OME errors",
+        "stat", "OME control plane errors",
         [target(f'sum(increase(controller_runtime_reconcile_errors_total'
                 f'{{{MC_PLACE},pod=~"ome-.*manager.*"}}[$__range])) or vector(0)', instant=True)],
         (18, y, 6, 4), thresholds=MC_ERRORS, decimals=0,
@@ -1360,7 +1360,8 @@ def mc_control_plane():
             "around fan-out and the loser sweep. |\n"
             "Nothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, "
             "no PrometheusRule object is deployed, and Alertmanager has no route or receiver. "
-            "`Failed placements` and `OME errors` are the two panels worth wiring first.\n\n"
+            "`Failed placements` and `OME control plane errors` are the two panels worth wiring "
+            "first.\n\n"
             "*Selector caveat: `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` "
             "carry their own `cluster` label holding the member name, which shadows the "
             "collector's control-plane label, so those panels select on `cluster_id`. Renaming "
@@ -1375,6 +1376,12 @@ def mc_control_plane():
         "component health. Every query pins endpoint=\"metrics\" because the OME pods are "
         "scraped twice and unfiltered aggregates double-count; gauges collapse per-pod series "
         "with max by (...) so a controller rollout neither splits a line nor inflates a count.",
+        # No allValue on any picker: with one, All substitutes `.*` and discards the
+        # self-scoping label query, so an aggregate silently spans every cluster in
+        # the stack -- including workload clusters running their own
+        # ome-controller-manager. The error box read 331 fleet-wide against 0 for the
+        # selected control plane. Left unset, All expands to the discovered values
+        # joined with `|`, keeping each panel scoped to what its picker lists.
         [var_ds(),
          # Self-scoping: only control planes that actually register a WorkloadCluster appear.
          #
@@ -1389,15 +1396,15 @@ def mc_control_plane():
          # Members. Quota panels match this as a suffix of the member's full cluster id.
          var_query("workload_cluster", "Workload cluster",
                    'label_values(ome_workload_cluster_ready, cluster)',
-                   multi=True, include_all=True, all_value=".*"),
+                   multi=True, include_all=True),
          # The namespace label on quota metrics is the quota-manager's own namespace, so the
          # tenant is the quota name.
          var_query("tenant", "Tenant (quota)",
                    'label_values(ome_quota_budget_nominal, quota)',
-                   multi=True, include_all=True, all_value=".*"),
+                   multi=True, include_all=True),
          var_query("isvc", "InferenceService",
                    'label_values(ome_isvc_placement_phase, isvc)',
-                   multi=True, include_all=True, all_value=".*")],
+                   multi=True, include_all=True)],
         # Overview stays open; the drill-downs below it are keyed on variables and
         # are what you open once a number up top sends you looking. Expanded, the
         # board runs every panel's query on load.

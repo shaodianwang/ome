@@ -64,8 +64,7 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "current": {},
-        "allValue": ".*"
+        "current": {}
       },
       {
         "type": "query",
@@ -84,8 +83,7 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "current": {},
-        "allValue": ".*"
+        "current": {}
       },
       {
         "type": "query",
@@ -104,8 +102,7 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "current": {},
-        "allValue": ".*"
+        "current": {}
       }
     ]
   },
@@ -594,7 +591,7 @@
     },
     {
       "type": "stat",
-      "title": "OME errors",
+      "title": "OME control plane errors",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -3567,7 +3564,7 @@
           },
           "options": {
             "mode": "markdown",
-            "content": "The placement stack registers its own metrics, so member health, per-ISVC placement and declared policy are first-class here rather than inferred from generic signals. Quota lives here too, rather than on a board of its own: capacity is the denominator every tenant number is read against, and the two were being kept in step by hand.\n\nCohort rows are absent from the tenant panels on purpose -- a cohort's nominal contains its children's, so a sum over both double-counts every leaf. What remains uncovered:\n\n| Gap | Why it is missing | Fix |\n|---|---|---|\n| InferenceService *serving* state \u2014 Ready, failed, in-progress per namespace | The platform kube-state-metrics on a management cluster carries no OME `customResourceState` config, so every `ome_inferenceservice_*` series is absent. Placement phase is exported, but that is where the ISVC was put, not whether it serves. | Add `config/monitoring/kube-state-metrics-config.yaml` to that KSM. Config only, no OME code change. |\n| Whether quota accounting matches reality | Where Kueue does not gate serving pods, admitted counts read zero while accelerators are consumed, so a healthy zero and an unmeasured fleet look identical. | A pod-derived consumption metric split by whether Kueue governs the pod. |\n| Where a tenant's share landed across members | `status.budgets[].perCluster` carries it; no metric exports it. The tenant row sums the members selected, so an uneven split reads the same as an even one. | Export the per-cluster breakdown the projection already computes. |\n| Tree structure \u2014 parent, depth, violations by reason | The path label ships in the budget family but nothing reads it yet, so a tenant is a flat name rather than a position. | Label the tenant panels by path, and export the violation reasons the tree check already produces. |\n| Fan-out latency and sweep lag | Computed by `tests/perf/multicluster` offline and nowhere in production. The phase gauge shows the outcome, not how long the race took or how long a loser's derived object survived. | Placement histograms around fan-out and the loser sweep. |\nNothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, no PrometheusRule object is deployed, and Alertmanager has no route or receiver. `Failed placements` and `OME errors` are the two panels worth wiring first.\n\n*Selector caveat: `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` carry their own `cluster` label holding the member name, which shadows the collector's control-plane label, so those panels select on `cluster_id`. Renaming the metric label to `workload_cluster` would remove the special case.*"
+            "content": "The placement stack registers its own metrics, so member health, per-ISVC placement and declared policy are first-class here rather than inferred from generic signals. Quota lives here too, rather than on a board of its own: capacity is the denominator every tenant number is read against, and the two were being kept in step by hand.\n\nCohort rows are absent from the tenant panels on purpose -- a cohort's nominal contains its children's, so a sum over both double-counts every leaf. What remains uncovered:\n\n| Gap | Why it is missing | Fix |\n|---|---|---|\n| InferenceService *serving* state \u2014 Ready, failed, in-progress per namespace | The platform kube-state-metrics on a management cluster carries no OME `customResourceState` config, so every `ome_inferenceservice_*` series is absent. Placement phase is exported, but that is where the ISVC was put, not whether it serves. | Add `config/monitoring/kube-state-metrics-config.yaml` to that KSM. Config only, no OME code change. |\n| Whether quota accounting matches reality | Where Kueue does not gate serving pods, admitted counts read zero while accelerators are consumed, so a healthy zero and an unmeasured fleet look identical. | A pod-derived consumption metric split by whether Kueue governs the pod. |\n| Where a tenant's share landed across members | `status.budgets[].perCluster` carries it; no metric exports it. The tenant row sums the members selected, so an uneven split reads the same as an even one. | Export the per-cluster breakdown the projection already computes. |\n| Tree structure \u2014 parent, depth, violations by reason | The path label ships in the budget family but nothing reads it yet, so a tenant is a flat name rather than a position. | Label the tenant panels by path, and export the violation reasons the tree check already produces. |\n| Fan-out latency and sweep lag | Computed by `tests/perf/multicluster` offline and nowhere in production. The phase gauge shows the outcome, not how long the race took or how long a loser's derived object survived. | Placement histograms around fan-out and the loser sweep. |\nNothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, no PrometheusRule object is deployed, and Alertmanager has no route or receiver. `Failed placements` and `OME control plane errors` are the two panels worth wiring first.\n\n*Selector caveat: `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` carry their own `cluster` label holding the member name, which shadows the collector's control-plane label, so those panels select on `cluster_id`. Renaming the metric label to `workload_cluster` would remove the special case.*"
           }
         }
       ]
