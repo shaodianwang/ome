@@ -40,40 +40,6 @@ COMPONENTS = [
     ("Model agent", "ome-model-agent-daemonset.*", False),
 ]
 
-# Multi-cluster control plane. Three independent de-duplications are
-# load-bearing on these clusters, because each producer is collected more than
-# once and an unqualified sum() is silently 2-3x too high:
-#
-#   * the manager is scraped twice -- by the ServiceMonitor and by an
-#     annotation-driven kubernetes-pods job. Only the ServiceMonitor path
-#     carries `endpoint`, so it is the discriminator. Without it the leader
-#     gauge reads 2 and looks like split brain.
-#   * kube-state-metrics runs two replicas -> max by (...).
-#   * the apiserver runs three instances -> max by (...).
-MC_MGR = 'cluster=~"$cluster",pod=~"ome-controller-manager.*",endpoint="metrics"'
-MC_CTRL = 'controller=~"placement|placement-endpoint|workloadcluster"'
-
-# The quota plane runs as its own Deployment on the same clusters, with its own
-# WorkloadCluster manager and status funnel. Same de-duplication applies.
-MC_QM = 'cluster=~"$cluster",pod=~"ome-quota-manager.*",endpoint="metrics"'
-
-# The quota tree reconciles whole and resyncs on a 10m tick, so a 5m rate window
-# is usually empty and a 5m histogram_quantile is NaN. Rate over a window that
-# reliably spans a tick instead.
-MC_QM_RATE = "30m"
-
-
-# kube-state-metrics' view of the two OME deployments. Deliberately not the
-# pods' own /metrics: KSM reports desired-vs-available even when a pod is down
-# and therefore not exporting anything, which is exactly the case the top row
-# has to cover.
-MC_KSM = 'cluster=~"$cluster",namespace="ome"'
-
-# The apiserver's own object counter -- the only source of OME custom-resource
-# counts on a management cluster, because the platform kube-state-metrics there
-# carries no OME customResourceState config.
-MC_API = 'cluster=~"$cluster",job="kube-apiserver"'
-
 DS = {"type": "prometheus", "uid": "${datasource}"}
 
 # Threshold steps, mirroring MUSE's dashboardPolicy. `None` is the base step.
@@ -843,258 +809,510 @@ def slo():
 
 # ---------------------------------------------------------------------------
 # 5. Multi-cluster control plane — the management cluster running the OEP-0018
-#    placer and the quota plane. Everything here is a generic signal:
-#    controller-runtime, kube-state-metrics, or the apiserver's object counter.
-#    Neither the placement stack nor the quota stack registers a custom metric
-#    on main, so this dashboard can show that the control plane is running and
-#    never that it is placing correctly. The coverage panel says so explicitly
-#    rather than leaving the reader to infer it from absent panels.
+#    placer and the quota plane. The placement stack registers its own metrics,
+#    so fleet membership, per-ISVC placement and declared policy are reported
+#    directly; the surrounding component health is still generic
+#    controller-runtime, kube-state-metrics and apiserver signal. The coverage
+#    panel lists what remains uncovered rather than leaving the reader to infer
+#    it from absent panels.
 # ---------------------------------------------------------------------------
-def _mc_component(p, y, sel, ctrl, primary, rate, deploy, container):
-    """One controller-runtime process, end to end: health, resources, behaviour.
+#
+# Selector notes, because three scopes coexist on this board:
+#   * ome_workload_cluster_* and ome_isvc_placement_candidate* carry their OWN
+#     `cluster` label holding the MEMBER name, which shadows the collector's
+#     control-plane label. They must be selected on cluster_id.
+#   * ome_isvc_placement_phase / _policy_info have no cluster label of their
+#     own, so the collector's `cluster` is the control plane.
+#   * Quota lives on the MEMBERS, not the control plane: the quota-manager runs
+#     here in projection mode while capacity and budgets are emitted per member.
+#     The member's full cluster id ends with the short member name, hence the
+#     suffix regex.
+# endpoint="metrics" pins the ServiceMonitor scrape; the OME pods are also
+# scraped by a pod-annotation job, so unfiltered aggregates double-count.
+# ---------------------------------------------------------------------------
+MC_EP = 'endpoint="metrics"'
+MC_FLEET = f'{MC_EP},cluster_id=~"$control_plane"'
+MC_PLACE = f'{MC_EP},cluster=~"$control_plane"'
+MC_MEMBER = 'cluster=~".*($workload_cluster)$"'
+MC_CAP = f'{MC_EP},{MC_MEMBER}'
+MC_BUDGET_ALL = f'{MC_CAP},plane="workload",role="ClusterQueue"'
+MC_BUDGET = f'{MC_BUDGET_ALL},quota=~"$tenant"'
 
-    The controller manager and the quota plane are the same kind of thing -- a
-    controller-runtime process with a webhook, a leader lease and a workqueue --
-    so they are built from one function rather than two hand-kept copies that
-    drift. Each gets its own row, because an operator asking "is the quota plane
-    healthy" should not have to read half the answer from a shared row at the
-    top of the page.
+MC_OK_BAD = [(None, "green"), (1, "red")]
+MC_BAD_OK = [(None, "red"), (1, "green")]
+MC_ERRORS = [(None, "green"), (1, "yellow"), (51, "red")]
 
-    `sel` selects the process, `ctrl` narrows to the controllers worth showing
-    (empty for all of them), `primary` is the one controller whose outcome mix
-    earns a panel, and `rate` is the window -- a process reconciling on a slow
-    tick needs one wide enough to span it, or every rate reads zero and every
-    histogram_quantile is NaN.
+MC_PHASE_MAP = [{"type": "value", "options": {
+    "Placed": {"color": "green", "index": 0},
+    "Racing": {"color": "yellow", "index": 1},
+    "Pending": {"color": "orange", "index": 2},
+    "Failed": {"color": "red", "index": 3}}}]
+
+
+def mc_ratio(title, num, num_label, den, den_label, gp, desc=None,
+             thresholds=T_NONE, decimals=None):
+    """A stat carrying a numerator and denominator side by side, e.g. 2 / 2.
+
+    Grafana cannot render a literal "a/b" string from two queries, so the pair
+    is shown as two labelled values in one horizontal stat. The denominator is
+    coloured neutral so the numerator reads as the primary figure.
     """
-    both = f"{sel},{ctrl}" if ctrl else sel
+    t_num = target(num, num_label, instant=True)
+    t_den = target(den, den_label, instant=True)
+    p = panel("stat", title, [t_num, t_den], gp, desc=desc,
+              thresholds=thresholds, decimals=decimals)
+    p["options"].update({"textMode": "value_and_name", "graphMode": "none",
+                         "justifyMode": "center", "orientation": "horizontal"})
+    p["fieldConfig"]["overrides"] = [{
+        "matcher": {"id": "byFrameRefID", "options": t_den["refId"]},
+        "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "text"}}]}]
+    return p
 
-    # -- health ------------------------------------------------------------
-    p.append(panel(
-        "stat", "Ready",
-        [target(f'max by (deployment) (kube_deployment_status_replicas_available'
-                f'{{{MC_KSM},deployment="{deploy}"}})', "available"),
-         target(f'max by (deployment) (kube_deployment_spec_replicas'
-                f'{{{MC_KSM},deployment="{deploy}"}})', "desired")],
-        (0, y, 8, 4), thresholds=[(None, "red"), (1, "green")],
-        desc="From kube-state-metrics, so it still reports when the pod is down and "
-             "therefore exporting nothing. available < desired is the signal."))
 
-    p.append(panel(
-        "stat", "Leader (must be 1)",
-        [target(f'sum(leader_election_master_status{{{sel},name="{deploy}-leader-lock"}})')],
-        (8, y, 8, 4), thresholds=[(None, "red"), (1, "green"), (2, "red")],
-        desc="The gauge is 1 on the leader and 0 on each follower, so a correct sum is 1 at "
-             "any replica count. Reading 2 means the pod is being collected twice, not that "
-             "there are two leaders."))
+def mc_labelled_table(title, expr, gp, keep, rename, desc=None, overrides=None):
+    """An instant table narrowed to named label columns and renamed for reading.
 
-    p.append(panel(
-        "stat", "Container restarts (1h)",
-        [target(f'sum(increase(kube_pod_container_status_restarts_total'
-                f'{{{MC_KSM},container="{container}"}}[1h]))')],
-        (16, y, 8, 4), thresholds=[(None, "green"), (1, "yellow"), (3, "red")],
-        desc="Neither Deployment carries a PodDisruptionBudget or a priorityClassName, so "
-             "eviction and OOM-kill surface here first."))
-    y += 4
-
-    # -- resources, per replica -------------------------------------------
-    p.append(panel(
-        "timeseries", "CPU (cores)",
-        [target(f'sum by (pod) (rate(process_cpu_seconds_total{{{sel}}}[5m]))', "{{pod}}")],
-        (0, y, 12, 7), decimals=3,
-        desc="Absolute cores, one line per replica -- 1 means one core fully used. Taken "
-             "from the process rather than cAdvisor because a container-name selector also "
-             "matches unrelated operators that call their container \"manager\"."))
-
-    p.append(panel(
-        "timeseries", "Memory (RSS)",
-        [target(f'sum by (pod) (process_resident_memory_bytes{{{sel}}})', "{{pod}}")],
-        (12, y, 12, 7), unit="bytes",
-        desc="One line per replica. Growth tracks the informer caches, which on a control "
-             "plane scale with members x derived objects. A single replica climbing while "
-             "its peers stay flat is the leader doing the work."))
-    y += 7
-
-    # -- behaviour ---------------------------------------------------------
-    p.append(panel(
-        "timeseries", "Reconcile rate by controller",
-        [target(f'sum by (controller) (rate(controller_runtime_reconcile_total'
-                f'{{{both}}}[{rate}]))', "{{controller}}")],
-        (0, y, 8, 7), unit="reqps",
-        desc="A controller with no activity in the window drops out rather than drawing a "
-             "line at zero."))
-
-    p.append(panel(
-        "timeseries", f"Outcome mix ({primary})",
-        [target(f'sum by (result) (rate(controller_runtime_reconcile_total'
-                f'{{{sel},controller="{primary}"}}[{rate}]))', "{{result}}")],
-        (8, y, 8, 7), unit="reqps", stacked=True,
-        desc="requeue and requeue_after dominating with no success is retrying without "
-             "converging."))
-
-    p.append(panel(
-        "timeseries", "Reconcile errors",
-        [target(f'sum by (controller) (rate(controller_runtime_reconcile_errors_total'
-                f'{{{both}}}[{rate}]))', "{{controller}}")],
-        (16, y, 8, 7), unit="reqps",
-        desc="There is no error taxonomy: every failure class collapses into this counter. "
-             "The class is recoverable only from the Event reason or the logs."))
-    y += 7
-
-    p.append(panel(
-        "timeseries", "Reconcile latency p99",
-        [target('histogram_quantile(0.99, sum by (controller, le) '
-                f'(rate(controller_runtime_reconcile_time_seconds_bucket'
-                f'{{{both}}}[{rate}])))', "{{controller}}")],
-        (0, y, 8, 7), unit="s",
-        desc="Bounded by whatever timeout the pass runs under, so a wedged remote dependency "
-             "reads as a normal-length pass. Read it with the outcome mix."))
-
-    p.append(panel(
-        "timeseries", "Oldest unfinished work",
-        [target(f'max by (name) (workqueue_unfinished_work_seconds{{{sel}}})', "{{name}}")],
-        (8, y, 8, 7), unit="s",
-        desc="The stall detector. A monotonically climbing line is a wedged worker -- the "
-             "failure mode the probes cannot catch, because neither checks reconcile "
-             "progress."))
-
-    p.append(panel(
-        "timeseries", "Queue wait p99",
-        [target('histogram_quantile(0.99, sum by (name, le) '
-                f'(rate(workqueue_queue_duration_seconds_bucket{{{sel}}}[{rate}])))',
-                "{{name}}")],
-        (16, y, 8, 7), unit="s",
-        desc="Time an item waits for a worker, as distinct from the time the work then "
-             "takes. Rising wait with flat work duration is backpressure."))
-    y += 7
-
-    p.append(panel(
-        "timeseries", "Worker saturation",
-        [target(f'sum by (controller) (controller_runtime_active_workers{{{both}}}) '
-                f'/ sum by (controller) (controller_runtime_max_concurrent_reconciles'
-                f'{{{both}}})', "{{controller}}")],
-        (0, y, 8, 7), unit="percentunit", minv=0, maxv=1,
-        desc="Busy workers over the configured ceiling. These controllers run at "
-             "MaxConcurrentReconciles=1, so one slow pass blocks the queue and this pins "
-             "at 1 for as long as it lasts."))
-
-    p.append(panel(
-        "timeseries", "Apiserver calls by code",
-        [target(f'sum by (code) (rate(rest_client_requests_total{{{sel}}}[{rate}]))',
-                "{{code}}")],
-        (8, y, 8, 7), unit="reqps", stacked=True,
-        desc="409 is a status-write conflict, which is how contention between two writers "
-             "of the same object shows up."))
-
-    p.append(panel(
-        "timeseries", "Webhook requests by code",
-        [target(f'sum by (code) (rate(controller_runtime_webhook_requests_total'
-                f'{{{sel}}}[{rate}]))', "{{code}}")],
-        (16, y, 8, 7), unit="reqps", stacked=True,
-        desc="Flat zero is expected where the role disables its webhooks. Denials are not "
-             "visible here either way: a rejection is HTTP 200 with allowed=false, so it "
-             "is indistinguishable from an approval."))
-    y += 7
-    return y
+    The generic table panel only drops Time and Value; these tables also have to
+    hide the Prometheus plumbing labels (pod, endpoint, service, k8s_*) that
+    would otherwise dominate the row.
+    """
+    p = panel("table", title, [target(expr, instant=True, table=True)], gp, desc=desc)
+    p["transformations"] = [
+        {"id": "filterFieldsByName", "options": {"include": {"names": keep}}},
+        {"id": "organize", "options": {"excludeByName": {}, "indexByName": {},
+                                       "renameByName": rename}},
+    ]
+    if overrides:
+        p["fieldConfig"]["overrides"] = overrides
+    return p
 
 
 def mc_control_plane():
     p, y = [], 0
 
-    p.append(row("📋 Managed resources", y)); y += 1
+    # ---------------------------- overview ---------------------------------
+    p.append(row("🌐 Overview ($control_plane)", y)); y += 1
+
+    p.append(mc_ratio(
+        "Workload clusters",
+        f'sum(max by (cluster) (ome_workload_cluster_ready{{{MC_FLEET}}}))', "ready",
+        f'count(max by (cluster) (ome_workload_cluster_ready{{{MC_FLEET}}}))', "total",
+        (0, y, 6, 4), thresholds=MC_BAD_OK, decimals=0,
+        desc="Members whose Ready condition is True, over all members registered on this "
+             "control plane. Below total means a member is unreachable. max by (cluster) "
+             "collapses the per-pod series so a controller rollout does not inflate the count."))
+    p.append(mc_ratio(
+        "Allocatable accelerators",
+        f'sum(ome_quota_capacity_allocatable{{{MC_CAP}}})', "allocatable",
+        f'(sum(ome_quota_capacity_allocatable{{{MC_CAP}}}) '
+        f'+ sum(ome_quota_capacity_unavailable{{{MC_CAP}}}))', "total",
+        (6, y, 6, 4), thresholds=MC_BAD_OK, decimals=0,
+        desc="Schedulable accelerators over all accelerators present on the selected members. "
+             "The gap is the unavailable pool: cordoned, unhealthy or parked. Cluster-wide -- "
+             "capacity metrics carry no quota label, so $tenant does not narrow this."))
+    p.append(panel(
+        "stat", "Governed quota",
+        [target(f'sum(ome_quota_budget_nominal{{{MC_BUDGET_ALL}}}) or vector(0)', instant=True)],
+        (12, y, 6, 4), decimals=0,
+        desc="Total nominal quota handed to tenants across the selected members. Spans ALL "
+             "tenants regardless of $tenant, so it is the fleet-wide governed total."))
+    p.append(panel(
+        "stat", "Quota usage",
+        [target(f'sum(ome_quota_budget_admitted{{{MC_BUDGET_ALL}}}) / '
+                f'clamp_min(sum(ome_quota_budget_nominal{{{MC_BUDGET_ALL}}}), 1)', instant=True)],
+        (18, y, 6, 4), unit="percentunit", decimals=0,
+        desc="Admitted over governed across all tenants. Approaching 100% means quota, not "
+             "hardware, is the ceiling. clamp_min avoids divide-by-zero when nothing is governed."))
+    y += 4
 
     p.append(panel(
-        "timeseries", "WorkloadClusters",
+        "stat", "Total tenants",
+        [target(f'count(count by (quota) (ome_quota_budget_nominal{{{MC_BUDGET_ALL}}})) or vector(0)',
+                instant=True)],
+        (0, y, 6, 4), decimals=0,
+        desc="Distinct quota tenants on the selected members. Spans ALL tenants regardless of "
+             "$tenant."))
+    p.append(panel(
+        "stat", "Total ISVCs",
+        [target(f'count(max by (exported_namespace, isvc) '
+                f'(ome_isvc_placement_phase{{{MC_PLACE}}})) or vector(0)', instant=True)],
+        (6, y, 6, 4), decimals=0,
+        desc="InferenceServices the placement controller manages on this control plane, in "
+             "every phase."))
+    p.append(panel(
+        "stat", "Failed placements",
+        [target(f'count(max by (exported_namespace, isvc) '
+                f'(ome_isvc_placement_phase{{{MC_PLACE},phase="Failed"}})) or vector(0)',
+                instant=True)],
+        (12, y, 6, 4), thresholds=MC_OK_BAD, decimals=0,
+        desc="ISVCs whose placement failed terminally. Zero is healthy; the natural alert "
+             "target."))
+    p.append(panel(
+        "stat", "OME errors",
+        [target(f'sum(increase(controller_runtime_reconcile_errors_total'
+                f'{{{MC_PLACE},pod=~"ome-.*manager.*"}}[$__range])) or vector(0)', instant=True)],
+        (18, y, 6, 4), thresholds=MC_ERRORS, decimals=0,
+        desc="Reconcile errors across both OME control-plane components, counted over the "
+             "selected time range so the number follows the time picker. Shown whole because "
+             "increase() extrapolates. Container restarts live per component further down."))
+    y += 4
+
+    p.append(panel(
+        "timeseries", "Managed object counts (control plane etcd)",
         [target(f'max by (cluster) (apiserver_storage_objects'
-                f'{{{MC_API},resource="workloadclusters.ome.io"}})', "{{cluster}}")],
+                f'{{cluster=~"$control_plane",job="kube-apiserver",'
+                f'resource="workloadclusters.ome.io"}})', "WorkloadClusters"),
+         target(f'max by (cluster) (apiserver_storage_objects'
+                f'{{cluster=~"$control_plane",job="kube-apiserver",'
+                f'resource="inferenceservices.ome.io"}})', "InferenceServices"),
+         target(f'max by (cluster) (apiserver_storage_objects'
+                f'{{cluster=~"$control_plane",job="kube-apiserver",'
+                f'resource="acceleratorquotas.ome.io"}})', "AcceleratorQuotas")],
         (0, y, 12, 7), decimals=0,
-        desc="Members registered with each control plane -- the fleet this plane places "
-             "onto. A count only: whether a member is reachable is not exported anywhere. "
-             "The Ready condition exists on the CR but no metric carries it, so a member "
-             "that has been unreachable for hours still counts here."))
-
+        desc="Straight from the control plane apiserver, so it still counts objects when a "
+             "controller is wedged."))
     p.append(panel(
-        "timeseries", "InferenceServices (all namespaces)",
-        [target(f'max(apiserver_storage_objects'
-                f'{{{MC_API},resource="inferenceservices.ome.io"}})', "inferenceservices")],
-        (12, y, 12, 7), decimals=0,
-        desc="Live object count from the apiserver, across all namespaces. A count, not a "
-             "state breakdown: Ready vs failed vs in-progress is not available here."))
+        "timeseries", "Member readiness over time",
+        [target(f'max by (cluster) (ome_workload_cluster_ready{{{MC_FLEET}}})', "{{cluster}}")],
+        (12, y, 12, 7), minv=0, maxv=1, decimals=0,
+        desc="1 = Ready, 0 = not. Collapsed with max by (cluster) so a controller rollout does "
+             "not split each member into one broken segment per pod generation."))
     y += 7
 
-    p.append(row("🎛️ ome-controller-manager", y)); y += 1
-    y = _mc_component(p, y, MC_MGR, MC_CTRL, "placement", "5m",
-                      "ome-controller-manager", "manager")
+    # ------------------------------ fleet ----------------------------------
+    p.append(row("🛰️ Workload cluster fleet ($control_plane)", y)); y += 1
 
-    p.append(row("🧮 ome-quota-manager", y)); y += 1
-    y = _mc_component(p, y, MC_QM, "", "acceleratorquota", MC_QM_RATE,
-                      "ome-quota-manager", "quota-manager")
+    p.append(mc_labelled_table(
+        "Member state",
+        f'max by (cluster, status, reason, cluster_id) '
+        f'(ome_workload_cluster_status{{{MC_FLEET}}})',
+        (0, y, 12, 8),
+        ["cluster", "status", "reason", "cluster_id"],
+        {"cluster": "Workload cluster", "status": "Ready", "reason": "Reason",
+         "cluster_id": "Control plane"},
+        desc="Current Ready condition per member with its reason, one row per member.",
+        overrides=[{"matcher": {"id": "byName", "options": "Ready"},
+                    "properties": [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                                   {"id": "mappings", "value": [{"type": "value", "options": {
+                                       "True": {"color": "green", "index": 0},
+                                       "False": {"color": "red", "index": 1},
+                                       "Unknown": {"color": "orange", "index": 2}}}]}]}]))
+    p.append(panel(
+        "timeseries", "WorkloadCluster reconcile rate and errors",
+        [target(f'sum(rate(controller_runtime_reconcile_total'
+                f'{{{MC_PLACE},pod=~"ome-controller-manager.*",controller="workloadcluster"}}'
+                f'[$__rate_interval]))', "reconciles/s"),
+         target(f'sum(rate(controller_runtime_reconcile_errors_total'
+                f'{{{MC_PLACE},pod=~"ome-controller-manager.*",controller="workloadcluster"}}'
+                f'[$__rate_interval]))', "errors/s")],
+        (12, y, 12, 8), unit="reqps",
+        desc="Connection probes run on a health interval, so a flat non-zero rate is normal. A "
+             "rising error rate means members are unreachable."))
+    y += 8
 
+    # ---------------------------- placement --------------------------------
+    p.append(row("🎯 InferenceService ($isvc) placement details", y)); y += 1
+
+    pie = panel("piechart", "ISVCs by placement phase",
+                [target(f'count by (phase) (max by (exported_namespace, isvc, phase) '
+                        f'(ome_isvc_placement_phase{{{MC_PLACE},isvc=~"$isvc"}}))',
+                        "{{phase}}", instant=True)],
+                (0, y, 6, 7),
+                desc="Pending = nothing matched or nothing connected. Racing = fanned out, not "
+                     "yet admitted. Placed = admitted. Failed = terminal.")
+    pie["options"] = {"legend": {"displayMode": "list", "placement": "right", "showLegend": True},
+                      "pieType": "donut",
+                      "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}}
+    pie["fieldConfig"]["overrides"] = [
+        {"matcher": {"id": "byName", "options": n},
+         "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": c}}]}
+        for n, c in (("Placed", "green"), ("Failed", "red"),
+                     ("Racing", "yellow"), ("Pending", "orange"))]
+    p.append(pie)
+
+    p.append(mc_labelled_table(
+        "Placement phase",
+        f'max by (exported_namespace, isvc, phase) '
+        f'(ome_isvc_placement_phase{{{MC_PLACE},isvc=~"$isvc"}})',
+        (6, y, 8, 7),
+        ["exported_namespace", "isvc", "phase"],
+        {"exported_namespace": "Namespace", "isvc": "InferenceService", "phase": "Phase"},
+        desc="The namespace arrives as exported_namespace because the controller pod's own "
+             "namespace already owns the namespace label on this scrape path.",
+        overrides=[{"matcher": {"id": "byName", "options": "Phase"},
+                    "properties": [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                                   {"id": "mappings", "value": MC_PHASE_MAP}]}]))
+    p.append(mc_labelled_table(
+        "Where each ISVC landed",
+        f'max by (exported_namespace, isvc, cluster, phase) '
+        f'(ome_isvc_placement_candidate{{{MC_FLEET},isvc=~"$isvc"}})',
+        (14, y, 10, 7),
+        ["exported_namespace", "isvc", "cluster", "phase"],
+        {"exported_namespace": "Namespace", "isvc": "InferenceService",
+         "cluster": "Workload cluster", "phase": "Candidate phase"},
+        desc="Every cluster this ISVC was fanned out to. Single mode expects one Admitted "
+             "winner; All and Split list every serving home."))
+    y += 7
+
+    p.append(mc_labelled_table(
+        "Declared placement policy",
+        f'max by (exported_namespace, isvc, mode, requirements, cluster_selector, spread) '
+        f'(ome_isvc_placement_policy_info{{{MC_PLACE},isvc=~"$isvc"}})',
+        (0, y, 12, 8),
+        ["exported_namespace", "isvc", "mode", "requirements", "cluster_selector", "spread"],
+        {"exported_namespace": "Namespace", "isvc": "InferenceService", "mode": "Mode",
+         "requirements": "Accelerator requirements", "cluster_selector": "Cluster selector",
+         "spread": "Spread"},
+        desc="What the ISVC asked for, from spec.placement. Diff this against 'Where each ISVC "
+             "landed' to see intent against outcome."))
+    p.append(panel(
+        "timeseries", "Replicas per home (admitted vs ready)",
+        [target(f'max by (exported_namespace, isvc, cluster) '
+                f'(ome_isvc_placement_candidate_admitted_replicas{{{MC_FLEET},isvc=~"$isvc"}})',
+                "admitted {{isvc}} @ {{cluster}}"),
+         target(f'max by (exported_namespace, isvc, cluster) '
+                f'(ome_isvc_placement_candidate_ready_replicas{{{MC_FLEET},isvc=~"$isvc"}})',
+                "ready {{isvc}} @ {{cluster}}")],
+        (12, y, 12, 8), minv=0, decimals=0,
+        desc="Admitted is what the home's Kueue let through; ready is what actually serves. A "
+             "persistent gap means pods are admitted but not starting."))
+    y += 8
+
+    # ------------------------- member capacity -----------------------------
+    p.append(row("🖥️ Member ($workload_cluster) capacity details", y)); y += 1
+
+    p.append(panel(
+        "stat", "Nodes (cluster)",
+        [target(f'sum(ome_quota_capacity_nodes{{{MC_CAP}}})', instant=True)],
+        (0, y, 12, 4), decimals=0,
+        desc="Nodes backing member capacity, all states."))
+    p.append(panel(
+        "stat", "Unattributed (cluster)",
+        [target(f'sum(ome_quota_capacity_unattributed{{{MC_CAP}}})', instant=True)],
+        (12, y, 12, 4), thresholds=MC_OK_BAD, decimals=0,
+        desc="Accelerators no quota claims. Deliberately no vector(0) fallback: this family is "
+             "not emitted on every fleet, and an honest 'No data' beats a fake zero."))
+    y += 4
+
+    p.append(panel(
+        "timeseries", "Capacity: allocatable vs unavailable",
+        [target(f'sum by (resource, flavor) (ome_quota_capacity_allocatable{{{MC_CAP}}})',
+                "allocatable {{resource}}/{{flavor}}"),
+         target(f'sum by (resource, flavor) (ome_quota_capacity_unavailable{{{MC_CAP}}})',
+                "unavailable {{resource}}/{{flavor}}")],
+        (0, y, 8, 8), decimals=0,
+        desc="Capacity on the selected members by resource and flavor. Cluster-wide."))
+    p.append(panel(
+        "timeseries", "Nodes by state",
+        [target(f'sum by (state) (ome_quota_capacity_nodes{{{MC_CAP}}})', "{{state}}")],
+        (8, y, 8, 8), decimals=0, stacked=True,
+        desc="Node population by state. Cluster-wide."))
+    p.append(panel(
+        "timeseries", "Kueue objects written",
+        [target(f'sum(rate(ome_quota_backend_applied_total{{{MC_CAP}}}[$__rate_interval]))',
+                "applied/s")],
+        (16, y, 8, 8), unit="reqps",
+        desc="The materializer's write path into Kueue. Flat zero while workloads wait means "
+             "projection is stalled. Carries no quota label, so it is cluster-wide."))
+    y += 8
+
+    # --------------------------- tenant quota ------------------------------
+    p.append(row("🧮 Tenant ($tenant) quota details", y)); y += 1
+
+    p.append(panel(
+        "stat", "Admitted (tenant)",
+        [target(f'sum(ome_quota_budget_admitted{{{MC_BUDGET}}}) or vector(0)', instant=True)],
+        (0, y, 8, 4), decimals=0,
+        desc="Admitted against tenant quota. Follows $tenant."))
+    p.append(panel(
+        "stat", "Reserved not admitted",
+        [target(f'(sum(ome_quota_budget_reserved{{{MC_BUDGET}}}) '
+                f'- sum(ome_quota_budget_admitted{{{MC_BUDGET}}})) or vector(0)', instant=True)],
+        (8, y, 8, 4), thresholds=MC_OK_BAD, decimals=0,
+        desc="Quota held but not serving. Sustained non-zero means workloads are stuck in "
+             "admission. Follows $tenant."))
+    p.append(panel(
+        "stat", "Borrowed (tenant)",
+        [target(f'sum(ome_quota_budget_borrowed{{{MC_BUDGET}}}) or vector(0)', instant=True)],
+        (16, y, 8, 4), decimals=0,
+        desc="Borrowed from other tenants' unused quota. Follows $tenant."))
+    y += 4
+
+    p.append(panel(
+        "timeseries", "Nominal vs admitted by tenant",
+        [target(f'sum by (quota) (ome_quota_budget_nominal{{{MC_BUDGET}}})', "nominal {{quota}}"),
+         target(f'sum by (quota) (ome_quota_budget_admitted{{{MC_BUDGET}}})', "admitted {{quota}}")],
+        (0, y, 12, 8), decimals=0,
+        desc="Granted quota against what is admitted, per tenant."))
+    p.append(panel(
+        "timeseries", "Utilization by tenant",
+        [target(f'sum by (quota) (ome_quota_budget_admitted{{{MC_BUDGET}}}) / '
+                f'clamp_min(sum by (quota) (ome_quota_budget_nominal{{{MC_BUDGET}}}), 1)',
+                "{{quota}}")],
+        (12, y, 12, 8), unit="percentunit",
+        desc="Admitted over nominal per tenant. Sustained near 1 means the tenant is quota-bound."))
+    y += 8
+
+    # ------------------------ component health -----------------------------
+    p.append(row("🔧 Control plane ($control_plane) component health", y)); y += 1
+
+    for comp, cont, lock in [
+            ("ome-controller-manager", "manager", "ome-controller-manager-leader-lock"),
+            ("ome-quota-manager", "quota-manager", "ome-quota-manager-leader-lock")]:
+        sel = f'{MC_PLACE},pod=~"{comp}.*"'
+        ksm = 'cluster=~"$control_plane",namespace="ome"'
+
+        p.append(panel(
+            "stat", f"{comp} ready",
+            [target(f'max(kube_deployment_status_replicas_available'
+                    f'{{{ksm},deployment="{comp}"}}) / clamp_min(max('
+                    f'kube_deployment_spec_replicas{{{ksm},deployment="{comp}"}}), 1)',
+                    instant=True)],
+            (0, y, 8, 4), unit="percentunit", thresholds=MC_BAD_OK,
+            desc="Available over desired replicas."))
+        p.append(panel(
+            "stat", f"{comp} leader",
+            [target(f'sum(leader_election_master_status{{{sel},name="{lock}"}}) or vector(0)',
+                    instant=True)],
+            (8, y, 8, 4), decimals=0,
+            desc="Must be exactly 1. Zero means no active leader and nothing reconciles; above "
+                 "1 means split brain."))
+        p.append(panel(
+            "stat", f"{comp} restarts",
+            [target(f'sum(increase(kube_pod_container_status_restarts_total'
+                    f'{{{ksm},container="{cont}"}}[$__range])) or vector(0)', instant=True)],
+            (16, y, 8, 4), thresholds=MC_OK_BAD, decimals=0,
+            desc="Container restarts over the selected time range."))
+        y += 4
+
+        p.append(panel(
+            "timeseries", f"{comp} CPU (cores)",
+            [target(f'sum by (pod) (rate(process_cpu_seconds_total{{{sel}}}'
+                    f'[$__rate_interval]))', "{{pod}}")],
+            (0, y, 6, 7), minv=0,
+            desc="Per-pod CPU. Only the leader does real work, so one hot pod is expected."))
+        p.append(panel(
+            "timeseries", f"{comp} memory (RSS)",
+            [target(f'sum by (pod) (process_resident_memory_bytes{{{sel}}})', "{{pod}}")],
+            (6, y, 6, 7), unit="bytes",
+            desc="Resident set size per pod."))
+        p.append(panel(
+            "timeseries", f"{comp} reconcile rate by controller",
+            [target(f'sum by (controller) (rate(controller_runtime_reconcile_total{{{sel}}}'
+                    f'[$__rate_interval]))', "{{controller}}")],
+            (12, y, 6, 7), unit="reqps",
+            desc="Work actually being done, per controller."))
+        p.append(panel(
+            "timeseries", f"{comp} reconcile errors",
+            [target(f'sum by (controller) (rate(controller_runtime_reconcile_errors_total'
+                    f'{{{sel}}}[$__rate_interval]))', "{{controller}}")],
+            (18, y, 6, 7), unit="reqps",
+            desc="Sustained non-zero means a controller cannot make progress."))
+        y += 7
+
+        p.append(panel(
+            "timeseries", f"{comp} reconcile p99",
+            [target(f'histogram_quantile(0.99, sum by (controller, le) (rate('
+                    f'controller_runtime_reconcile_time_seconds_bucket{{{sel}}}'
+                    f'[$__rate_interval])))', "{{controller}}")],
+            (0, y, 12, 7), unit="s",
+            desc="Tail reconcile latency. Cross-cluster fan-out makes the placer slower than a "
+                 "local controller."))
+        p.append(panel(
+            "timeseries", f"{comp} queue depth / saturation",
+            [target(f'max by (name) (workqueue_unfinished_work_seconds{{{sel}}})',
+                    "oldest unfinished {{name}}"),
+             target(f'sum by (controller) (controller_runtime_active_workers{{{sel}}}) / '
+                    f'clamp_min(sum by (controller) ('
+                    f'controller_runtime_max_concurrent_reconciles{{{sel}}}), 1)',
+                    "saturation {{controller}}")],
+            (12, y, 12, 7),
+            desc="Oldest unfinished item in seconds, plus active over max workers. Saturation "
+                 "pinned at 1 means the controller is the bottleneck."))
+        y += 7
+
+    p.append(panel(
+        "timeseries", "Apiserver client calls by code",
+        [target(f'sum by (code) (rate(rest_client_requests_total'
+                f'{{{MC_PLACE},pod=~"ome-.*manager.*"}}[$__rate_interval]))', "{{code}}")],
+        (0, y, 12, 7), unit="reqps",
+        desc="Control-plane apiserver traffic from the OME components. A rise in 4xx or 5xx "
+             "precedes reconcile errors."))
+    p.append(panel(
+        "timeseries", "Webhook requests by code",
+        [target(f'sum by (code) (rate(controller_runtime_webhook_requests_total'
+                f'{{{MC_PLACE},pod=~"ome-.*manager.*"}}[$__rate_interval])) or vector(0)',
+                "{{code}}")],
+        (12, y, 12, 7), unit="reqps",
+        desc="Admission webhook traffic. The placer disables the ISVC webhooks in "
+             "control-plane role, so quiet is expected here."))
+    y += 7
+
+    # --------------------------- coverage ----------------------------------
     p.append(row("📖 Coverage limits", y)); y += 1
     p.append({
         "type": "text",
         "title": "What this board cannot tell you, and the fix for each",
         "datasource": DS,
-        "gridPos": {"x": 0, "y": y, "w": 24, "h": 11},
+        "gridPos": {"x": 0, "y": y, "w": 24, "h": 10},
         "options": {"mode": "markdown", "content": (
-            "Every panel above is a generic signal — controller-runtime, kube-state-metrics, "
-            "or the apiserver. Neither the placement stack nor the quota stack registers a "
-            "custom metric, so this board shows both processes are *running*, never that "
-            "either is *correct*.\n\n"
+            "The placement stack now registers its own metrics, so member health, per-ISVC "
+            "placement and declared policy are first-class here rather than inferred from "
+            "generic signals. What remains uncovered:\n\n"
             "| Gap | Why it is missing | Fix |\n"
             "|---|---|---|\n"
-            "| InferenceService state — Ready, failed, in-progress, per namespace | The "
-            "platform kube-state-metrics on a management cluster carries no OME "
-            "`customResourceState` config, so every `ome_inferenceservice_*` series is "
-            "absent. Only the raw object count above exists. | Add "
-            "`config/monitoring/kube-state-metrics-config.yaml` to that KSM. Config only, "
-            "no OME code change. |\n"
-            "| Quota **correctness** — projection lag per member, chips nominal vs admitted "
-            "vs borrowed, admission decisions by denial reason, tree structural health | The "
-            "quota plane is scraped now, but `pkg/quota` registers no metrics of its own, so "
-            "its row is entirely controller-runtime: it shows the loop turning, never that "
-            "the numbers it produces are right. | Instrument `pkg/quota`. The raw values "
-            "largely exist already — `status.clusters[]` carries applied-vs-materialized "
-            "generations, and the capacity pass computes an unattributed figure it then "
-            "discards. |\n"
-            "| Whether quota accounting matches reality | Kueue does not gate serving pods "
-            "on this fleet, so admitted counts read zero while accelerators are consumed. "
-            "Every usage metric added today would read a healthy zero. | A pod-derived "
-            "consumption metric split by whether Kueue governs the pod, so the two cases "
-            "stop looking alike. |\n"
-            "| The single-active invariant — two members serving one InferenceService | No "
-            "metric, no event, no condition. The loser sweep returns void and swallows "
-            "per-member failures. | Placement instrumentation. |\n"
-            "| Per-member health | `WorkloadCluster.status.conditions[Ready]` is the only "
-            "signal, is not exported to Prometheus, and reports True for the whole "
-            "connection grace window while the member is already failing its probe. | A KSM "
-            "`customResourceState` entry for WorkloadCluster, or placement "
-            "instrumentation. |\n"
-            "| Fan-out latency, race outcome, sweep lag, derived-object reaping | Computed "
-            "by `tests/perf/multicluster` offline and nowhere in production. | "
-            "Instrumentation. |\n\n"
-            "Nothing on this board can page anyone: `prometheusRule.enabled` is false "
-            "everywhere, no PrometheusRule object is deployed, and Alertmanager has no route "
-            "or receiver.\n\n"
-            "*The `cluster` variable is scoped to control planes running the placer, so a new "
-            "tier appears here as soon as it is deployed, with no dashboard change.*"
+            "| InferenceService *serving* state — Ready, failed, in-progress per namespace | "
+            "The platform kube-state-metrics on a management cluster carries no OME "
+            "`customResourceState` config, so every `ome_inferenceservice_*` series is absent. "
+            "Placement phase is exported, but that is where the ISVC was put, not whether it "
+            "serves. | Add `config/monitoring/kube-state-metrics-config.yaml` to that KSM. "
+            "Config only, no OME code change. |\n"
+            "| Whether quota accounting matches reality | Where Kueue does not gate serving "
+            "pods, admitted counts read zero while accelerators are consumed, so a healthy "
+            "zero and an unmeasured fleet look identical. | A pod-derived consumption metric "
+            "split by whether Kueue governs the pod. |\n"
+            "| Fan-out latency and sweep lag | Computed by `tests/perf/multicluster` offline "
+            "and nowhere in production. The phase gauge shows the outcome, not how long the "
+            "race took or how long a loser's derived object survived. | Placement histograms "
+            "around fan-out and the loser sweep. |\n"
+            "| Unattributed capacity | `ome_quota_capacity_unattributed` is not emitted on "
+            "every fleet, so that panel reads No data rather than zero. | Emit the figure the "
+            "capacity pass already computes. |\n\n"
+            "Nothing on this board pages anyone: `prometheusRule.enabled` is false everywhere, "
+            "no PrometheusRule object is deployed, and Alertmanager has no route or receiver. "
+            "`Failed placements` and `OME errors` are the two panels worth wiring first.\n\n"
+            "*Selector caveat: `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` "
+            "carry their own `cluster` label holding the member name, which shadows the "
+            "collector's control-plane label, so those panels select on `cluster_id`. Renaming "
+            "the metric label to `workload_cluster` would remove the special case.*"
         )},
     })
 
     return dashboard(
         "ome-mc-control-plane", "OME · Multi-cluster control plane",
-        "Health of the multi-cluster control plane: the placer and the quota plane, each "
-        "with its own health, resource and behaviour panels. Generic signals only — see the "
-        "coverage-limits panel for what is deliberately absent.",
+        "Fan-out health for the OME multi-cluster control plane: fleet membership, per-ISVC "
+        "placement and declared policy, tenant quota on the members, and control-plane "
+        "component health. Every query pins endpoint=\"metrics\" because the OME pods are "
+        "scraped twice and unfiltered aggregates double-count; gauges collapse per-pod series "
+        "with max by (...) so a controller rollout neither splits a line nor inflates a count.",
         [var_ds(),
-         # Self-scoping: only clusters actually running the placer appear. Deliberately not
-         # label_values(ome_isvc_status_update_total, cluster), which is what the control-plane
-         # and scheduler dashboards use — that metric has no series on a management cluster,
-         # because --multicluster-role=control-plane disables the reconciler that emits it.
-         var_query("cluster", "Control plane",
-                   'label_values(controller_runtime_reconcile_total'
-                   '{controller="placement"}, cluster)',
+         # Self-scoping: only control planes that actually register a WorkloadCluster appear.
+         var_query("control_plane", "Control plane",
+                   'label_values(ome_workload_cluster_ready, cluster_id)',
+                   multi=True, include_all=True, all_value=".*"),
+         # Members. Quota panels match this as a suffix of the member's full cluster id.
+         var_query("workload_cluster", "Workload cluster",
+                   'label_values(ome_workload_cluster_ready, cluster)',
+                   multi=True, include_all=True, all_value=".*"),
+         # The namespace label on quota metrics is the quota-manager's own namespace, so the
+         # tenant is the quota name.
+         var_query("tenant", "Tenant (quota)",
+                   'label_values(ome_quota_budget_nominal, quota)',
+                   multi=True, include_all=True, all_value=".*"),
+         var_query("isvc", "InferenceService",
+                   'label_values(ome_isvc_placement_phase, isvc)',
                    multi=True, include_all=True, all_value=".*")],
-        p, ["ome", "multicluster", "control-plane"])
+        p, ["ome", "multicluster", "control-plane", "placement", "quota"])
 
 
 # ---------------------------------------------------------------------------

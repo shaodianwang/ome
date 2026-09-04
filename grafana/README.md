@@ -9,7 +9,7 @@ into [`dashboards/`](dashboards/).
 | OME · Control plane | `ome-control-plane` | Is OME itself reconciling, and how fast? |
 | OME · Router | `ome-router` | Which engine backends is the router using, and what latency does it add? |
 | OME · Scheduler | `ome-scheduler` | Is work getting placed, and where is placement slow? |
-| OME · Multi-cluster control plane | `ome-mc-control-plane` | Is the management cluster healthy, and is the placer reconciling? |
+| OME · Multi-cluster control plane | `ome-mc-control-plane` | Is the fleet healthy, where did each InferenceService land, and is tenant quota the ceiling? |
 
 The middle three follow one request through OME: the **Control plane** decides what
 should exist, the **Scheduler** places the pods, and the **Router** dispatches
@@ -25,11 +25,14 @@ backend requirements from the others (see below).
 
 **Multi-cluster control plane** stands apart from the other four: it targets a
 *management* cluster running the placer and the quota plane, not a workload
-cluster. Its panels are all generic — controller-runtime, kube-state-metrics, and
-the apiserver's object counter — because neither the placement stack nor the
-quota stack registers a custom metric. It can show that the control plane is
-running; it cannot show that it is placing correctly. The dashboard's last panel
-says so, and lists the fix for each gap.
+cluster. The placement stack registers its own metrics, so it reports fleet
+membership, where each InferenceService landed and the policy it asked for
+directly, rather than inferring them from generic signal; quota is read from the
+members, where capacity and budgets are actually emitted. The surrounding
+component health is still generic — controller-runtime, kube-state-metrics and
+the apiserver's object counter. What remains uncovered — serving state, whether
+quota accounting matches reality, fan-out latency — is listed in the dashboard's
+own coverage panel with the fix for each.
 
 Engine-side serving metrics (SGLang / vLLM latency, tokens, KV cache) are
 deliberately **not** covered here; the Router dashboard stops at the router's own
@@ -129,7 +132,7 @@ discriminator.
 | Control plane | OME control-plane pods scraped (the `prometheus.io/scrape` annotation the chart sets) and standard controller-runtime metrics | Confirm the pods are scraped. Scoping is by `cluster` + pod name, not namespace (see above). |
 | Router | OME router pods exporting the `router_*` family | Confirm router pods are scraped. |
 | Scheduler | `ome-scheduler` (OEP-0022) scraped. It is built on the upstream Kubernetes scheduler framework, so the standard `scheduler_*` metrics apply | Confirm the scheduler pods are annotated for scraping. The OME-specific gang/domain metrics are **not** wired — see the note panel at the bottom of that dashboard. |
-| Multi-cluster control plane | A management cluster running the placer, with the manager scraped, kube-state-metrics running, and the apiserver scraped | The `cluster` picker is `label_values(controller_runtime_reconcile_total{controller="placement"}, cluster)`, so an empty picker means no scraped cluster is running the placer at all. Per-panel gaps are listed in the dashboard's own coverage panel. |
+| Multi-cluster control plane | A management cluster running the placer, with the manager scraped, kube-state-metrics running, and the apiserver scraped. Quota panels additionally need the members scraped, since capacity and budgets are emitted there | The `control_plane` picker is `label_values(ome_workload_cluster_ready, cluster_id)`, so an empty picker means no scraped control plane has registered a WorkloadCluster. Note that `ome_workload_cluster_*` and `ome_isvc_placement_candidate*` carry their own `cluster` label holding the member name, which shadows the collector's control-plane label — hence `cluster_id` here and in those panels. Per-panel gaps are listed in the dashboard's own coverage panel. |
 
 ### The SLO dashboard needs a different backend
 
