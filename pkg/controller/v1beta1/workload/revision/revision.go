@@ -309,8 +309,8 @@ const (
 // these at admission, so a pod already admitted keeps its queue whatever the
 // label later says, and the new value takes effect when the pod is next created.
 //
-// The consequence to know: re-pointing a workload at another queue no longer
-// recreates its pods on its own. It takes effect on the next rollout.
+// The consequence to know: re-pointing a workload at another queue does not
+// recreate its pods on its own. It takes effect on the next rollout.
 func isSchedulingLabel(key string) bool {
 	switch key {
 	case kueueQueueNameLabel, kueuePriorityClassLabel:

@@ -32,7 +32,7 @@ func splitISVC(ns, name string, replicas int32) *v1beta1.InferenceService {
 			Placement: &v1beta1.PlacementSpec{
 				Mode:            v1beta1.PlacementModeSplit,
 				Requirements:    "accelerator=tpu7x",
-				ClusterSelector: "region=lco",
+				ClusterSelector: "region=us-east",
 				Split: &v1beta1.SplitSpec{
 					Replicas:              &replicas,
 					Spread:                true,
@@ -127,7 +127,7 @@ func TestRecordPolicy_SplitFieldsAndModeChange(t *testing.T) {
 	recordPolicy(isvc)
 
 	if got := testutil.ToFloat64(placementPolicyInfo.WithLabelValues(
-		"ns", "svc", "Split", "accelerator=tpu7x", "region=lco", "true")); got != 1 {
+		"ns", "svc", "Split", "accelerator=tpu7x", "region=us-east", "true")); got != 1 {
 		t.Errorf("policy_info = %v, want 1", got)
 	}
 	if got := testutil.ToFloat64(placementSplitReplicas.WithLabelValues("ns", "svc")); got != 8 {
