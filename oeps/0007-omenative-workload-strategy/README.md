@@ -622,7 +622,7 @@ otherwise release its budget slot:
 |---|---|
 | `SurgeThenDrain` (single-pod) | After the surge pod is `PodReady` and before the old pod is marked not-serving. The surge slot stays in flight, so `maxSurge` holds for the whole window. |
 | `SurgeThenDrain` (gang) | Same point: after every replacement-gang pod is `PodReady`, before the source gang leaves rotation. |
-| `RecreatePod` | At promotion (`Phase=Ready`, `Operation` cleared), so the `maxUnavailable` slot is held until the recreated pods have been Ready for the window. |
+| `RecreatePod` | At promotion (`Phase=Ready`, `Operation` cleared). Promotion requires every recreated pod to be `PodReady` (window `0`) and, with a window, to have been Ready for that long; the `maxUnavailable` slot is held until then. |
 | `InPlaceIfPossible` / `InPlaceOnly` | At promotion, after the patched pod is back in rotation. A pod already relabeled to the target revision is not drained again while promotion waits, so the window is not restarted every pass. |
 
 The engine polls at its in-flight Update cadence while a window is

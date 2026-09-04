@@ -431,7 +431,7 @@ func TestPatchPodImages_ReportsIssued(t *testing.T) {
 // TestUpdate_InPlace_InjectedSidecar_Converges is the end-to-end
 // livelock regression: a pod already on the target image but carrying
 // a webhook-injected sidecar (spec + status) absent from the target
-// must converge to Ready — pre-fix every pass re-declared an image
+// must converge to Ready — pre-fix every pass redeclared an image
 // mismatch, patched nothing, and requeued forever with the pod
 // drained.
 func TestUpdate_InPlace_InjectedSidecar_Converges(t *testing.T) {

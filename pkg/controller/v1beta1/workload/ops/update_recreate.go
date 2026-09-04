@@ -150,7 +150,10 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 		return false, nil
 	}
 
-	// Phase C: flip serving, promote Ready+RunningRevision.
+	// Phase C: flip serving, then wait for kubelet to fold the readiness gate
+	// into PodReady before promoting. ContainersReady only proves the runtime
+	// probe passed; a pod is not eligible for its Service until PodReady is
+	// true, and promotion releases the slot that holds the next Instance's drain.
 	if !query.AllPodsRuntimeReady(newPods) {
 		return false, nil
 	}
@@ -164,9 +167,13 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}
-	// Promotion releases this Instance's unavailability budget slot, so under
-	// a minReadySeconds window it waits until every new pod has stayed Ready
-	// for that long. A zero window keeps the ContainersReady+serving gate.
+	for _, pod := range newPods {
+		if !podreadiness.IsPodReady(pod) {
+			return false, nil
+		}
+	}
+	// Under a minReadySeconds window promotion additionally waits until every
+	// new pod has stayed Ready for that long.
 	if plan.MinReadySeconds > 0 && !podsAvailable(newPods, plan.MinReadySeconds, input.Now()) {
 		return false, nil
 	}

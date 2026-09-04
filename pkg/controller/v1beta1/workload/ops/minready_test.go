@@ -174,9 +174,9 @@ func TestGangSurgeUpdate_HoldsSourceDrainForMinReadySeconds(t *testing.T) {
 }
 
 // TestRecreateUpdate_PromotionWaitsForMinReadySeconds: with the old pods
-// gone and the recreated pod ContainersReady + serving, promotion (which
-// clears the Operation and releases the unavailability budget slot) waits
-// until the pod has been Ready for the window.
+// gone and the recreated pod serving and PodReady, promotion (which clears
+// the Operation and releases the unavailability budget slot) waits until
+// the pod has been Ready for the window.
 func TestRecreateUpdate_PromotionWaitsForMinReadySeconds(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)

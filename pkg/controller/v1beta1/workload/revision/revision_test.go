@@ -1088,7 +1088,7 @@ func TestRevisionHash_OwnerUIDPartitionsTheNameSpace(t *testing.T) {
 // end-to-end shape: two ISVCs with the same Name + Spec but different
 // UIDs (simulating delete-and-recreate after cascade GC) must land at
 // distinct CR names so the new owner gets a fresh ControllerRevision
-// history rather than re-using the predecessor's. This is the unit-test
+// history rather than reusing the predecessor's. This is the unit-test
 // analog of the KIND spec lifecycle_kind_test.go:301
 // "delete + recreate same-name ISVC produces a fresh ControllerRevision"
 // — the unit form runs against the fake client so it doesn't depend on

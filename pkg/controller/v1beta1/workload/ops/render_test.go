@@ -736,10 +736,10 @@ func TestRender_TPUTopologyEnv_PrimedPeerHostnamesMatchUncached(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cached render %s/%d: %v", c.runner.Name, c.ordinal, err)
 		}
-		ue, ce := envByName(uncached.Spec.Containers[0].Env), envByName(cached.Spec.Containers[0].Env)
+		uncachedEnv, ce := envByName(uncached.Spec.Containers[0].Env), envByName(cached.Spec.Containers[0].Env)
 		for _, k := range tpuKeys {
-			if ue[k] != ce[k] {
-				t.Errorf("%s/%d %s: cached %q != uncached %q", c.runner.Name, c.ordinal, k, ce[k], ue[k])
+			if uncachedEnv[k] != ce[k] {
+				t.Errorf("%s/%d %s: cached %q != uncached %q", c.runner.Name, c.ordinal, k, ce[k], uncachedEnv[k])
 			}
 		}
 	}
