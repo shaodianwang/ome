@@ -92,6 +92,11 @@ func (r *Reconciler) finalize(ctx context.Context, quota *v1beta1.AcceleratorQuo
 		}
 	}
 
+	// The node's enforcement objects are gone; its accelerator figures describe
+	// nothing now, and a gauge left behind would keep reporting a deleted
+	// tenant's allowance.
+	deleteQuotaSeries(quota.Name)
+
 	updated := quota.DeepCopy()
 	controllerutil.RemoveFinalizer(updated, v1beta1.AcceleratorQuotaFinalizer)
 	if err := r.Patch(ctx, updated, client.MergeFrom(quota)); err != nil {

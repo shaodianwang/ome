@@ -6,6 +6,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/quota/capacity"
 )
 
@@ -105,10 +106,10 @@ func TestRecordCapacitySplitsSchedulableFromParked(t *testing.T) {
 
 	l := prometheus.Labels{"resource": "example.com/gpu", "flavor": "flavor-split"}
 	if got := sampleFor(t, "ome_quota_capacity_allocatable", l); got != 24 {
-		t.Errorf("allocatable chips = %v, want 24", got)
+		t.Errorf("allocatable accelerators = %v, want 24", got)
 	}
 	if got := sampleFor(t, "ome_quota_capacity_unavailable", l); got != 8 {
-		t.Errorf("unavailable chips = %v, want 8", got)
+		t.Errorf("unavailable accelerators = %v, want 8", got)
 	}
 
 	sched := prometheus.Labels{"resource": "example.com/gpu", "flavor": "flavor-split", "state": NodeStateSchedulable}
@@ -121,7 +122,7 @@ func TestRecordCapacitySplitsSchedulableFromParked(t *testing.T) {
 	}
 }
 
-// Unattributed carries one entry per (node, resource). Chips sum across those
+// Unattributed carries one entry per (node, resource). Accelerators sum across those
 // entries; nodes must not, or a node advertising two unclaimed resources is
 // counted twice and the fleet looks bigger than it is.
 func TestRecordCapacityCountsNodesOnceAcrossResources(t *testing.T) {
@@ -137,7 +138,7 @@ func TestRecordCapacityCountsNodesOnceAcrossResources(t *testing.T) {
 	}
 	if got := sampleFor(t, "ome_quota_capacity_unattributed",
 		prometheus.Labels{"resource": "example.com/a", "reason": capacity.ReasonNoFlavor}); got != 8 {
-		t.Errorf("unattributed chips for resource a = %v, want 8 (summed across nodes)", got)
+		t.Errorf("unattributed accelerators for resource a = %v, want 8 (summed across nodes)", got)
 	}
 }
 
@@ -151,16 +152,16 @@ func TestRecordCapacitySeparatesUnattributedReasons(t *testing.T) {
 
 	if got := sampleFor(t, "ome_quota_capacity_unattributed",
 		prometheus.Labels{"resource": "example.com/r", "reason": capacity.ReasonNoFlavor}); got != 1 {
-		t.Errorf("no-flavor chips = %v, want 1", got)
+		t.Errorf("no-flavor accelerators = %v, want 1", got)
 	}
 	if got := sampleFor(t, "ome_quota_capacity_unattributed",
 		prometheus.Labels{"resource": "example.com/r", "reason": capacity.ReasonAmbiguous}); got != 5 {
-		t.Errorf("ambiguous chips = %v, want 5", got)
+		t.Errorf("ambiguous accelerators = %v, want 5", got)
 	}
 }
 
 // A flavor being added has to drive the series it used to own back to zero. A
-// gauge that merely stops updating keeps reporting unattributed chips on a
+// gauge that merely stops updating keeps reporting unattributed accelerators on a
 // cluster that has just been fixed.
 func TestRecordCapacityClearsResolvedSeries(t *testing.T) {
 	recordCapacity(capacity.Result{Unattributed: []capacity.Unattributed{
@@ -168,7 +169,7 @@ func TestRecordCapacityClearsResolvedSeries(t *testing.T) {
 	}})
 	if got := sampleFor(t, "ome_quota_capacity_unattributed",
 		prometheus.Labels{"resource": "example.com/transient", "reason": capacity.ReasonNoFlavor}); got != 9 {
-		t.Fatalf("precondition: chips = %v, want 9", got)
+		t.Fatalf("precondition: accelerators = %v, want 9", got)
 	}
 
 	// The operator adds the flavor; the next pass attributes everything.
@@ -178,7 +179,7 @@ func TestRecordCapacityClearsResolvedSeries(t *testing.T) {
 
 	if got := sampleFor(t, "ome_quota_capacity_unattributed",
 		prometheus.Labels{"resource": "example.com/transient", "reason": capacity.ReasonNoFlavor}); got != 0 {
-		t.Errorf("chips after the flavor was added = %v, want the series gone", got)
+		t.Errorf("accelerators after the flavor was added = %v, want the series gone", got)
 	}
 }
 
@@ -228,5 +229,122 @@ func TestRecordAppliedIgnoresEmptyPasses(t *testing.T) {
 	recordApplied(7)
 	if got := sampleFor(t, "ome_quota_backend_applied_total", nil); got != before+7 {
 		t.Errorf("applied counter = %v, want %v", got, before+7)
+	}
+}
+
+func budgetLabelsFor(quota, resource string) prometheus.Labels {
+	return prometheus.Labels{"quota": quota, "resource": resource}
+}
+
+func oneBudget(t *testing.T, nominal, admitted, reserved, borrowed string) []v1beta1.AcceleratorBudgetStatus {
+	t.Helper()
+	return []v1beta1.AcceleratorBudgetStatus{{
+		ResourceName:   "google.com/tpu",
+		ResourceFlavor: "tpu7x",
+		Nominal:        qty(nominal),
+		Admitted:       qty(admitted),
+		Reserved:       qty(reserved),
+		Borrowed:       qty(borrowed),
+	}}
+}
+
+// The four figures must land on four distinct series. Collapsing any pair would
+// make "at its ceiling" and "holding accelerators it has not started using" read the
+// same.
+func TestRecordBudgetsPublishesEveryFigure(t *testing.T) {
+	recordBudgets(string(ModeWorkload), "tenant-a", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "16", "8", "8", "0"))
+
+	l := budgetLabelsFor("tenant-a", "google.com/tpu")
+	for _, tc := range []struct {
+		metric string
+		want   float64
+	}{
+		{"ome_quota_budget_nominal", 16},
+		{"ome_quota_budget_admitted", 8},
+		{"ome_quota_budget_reserved", 8},
+		{"ome_quota_budget_borrowed", 0},
+	} {
+		if got := sampleFor(t, tc.metric, l); got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.metric, got, tc.want)
+		}
+	}
+}
+
+// The same series name means the authored fleet total on one plane and one
+// cluster's share on the other, so the two must not merge.
+func TestRecordBudgetsSeparatesPlanes(t *testing.T) {
+	recordBudgets(string(ModeWorkload), "shared", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "16", "0", "0", "0"))
+	recordBudgets(string(ModeManagement), "shared", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "64", "0", "0", "0"))
+
+	wl := prometheus.Labels{"quota": "shared", "plane": string(ModeWorkload)}
+	mg := prometheus.Labels{"quota": "shared", "plane": string(ModeManagement)}
+	if got := sampleFor(t, "ome_quota_budget_nominal", wl); got != 16 {
+		t.Errorf("workload nominal = %v, want 16", got)
+	}
+	if got := sampleFor(t, "ome_quota_budget_nominal", mg); got != 64 {
+		t.Errorf("management nominal = %v, want 64", got)
+	}
+}
+
+// A blank plane or quota would land a series keyed on nothing, which no
+// dashboard can select and no sweep can find again.
+func TestRecordBudgetsDropsUnlabelledSamples(t *testing.T) {
+	recordBudgets("", "no-plane", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "1", "0", "0", "0"))
+	recordBudgets(string(ModeWorkload), "", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "1", "0", "0", "0"))
+
+	if got := sampleFor(t, "ome_quota_budget_nominal",
+		prometheus.Labels{"quota": "no-plane"}); got != 0 {
+		t.Errorf("a sample with no plane was published: %v", got)
+	}
+	if got := sampleFor(t, "ome_quota_budget_nominal",
+		prometheus.Labels{"plane": string(ModeWorkload), "quota": ""}); got != 0 {
+		t.Errorf("a sample with no quota name was published: %v", got)
+	}
+}
+
+// Deleting a node has to take its series with it, or a deleted tenant's
+// allowance is reported forever.
+func TestDeleteQuotaSeriesDropsEveryVector(t *testing.T) {
+	recordBudgets(string(ModeWorkload), "doomed", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "8", "4", "4", "0"))
+	if got := sampleFor(t, "ome_quota_budget_nominal",
+		prometheus.Labels{"quota": "doomed"}); got != 8 {
+		t.Fatalf("precondition: nominal = %v, want 8", got)
+	}
+
+	deleteQuotaSeries("doomed")
+
+	for _, m := range []string{
+		"ome_quota_budget_nominal", "ome_quota_budget_admitted",
+		"ome_quota_budget_reserved", "ome_quota_budget_borrowed",
+	} {
+		if got := sampleFor(t, m, prometheus.Labels{"quota": "doomed"}); got != 0 {
+			t.Errorf("%s survived the delete: %v", m, got)
+		}
+	}
+}
+
+// The finalizer is the ordinary path; this is the one that catches a node
+// force-stripped, or deleted while the manager was down.
+func TestSweepBudgetsDropsNodesNoLongerInTheTree(t *testing.T) {
+	recordBudgets(string(ModeWorkload), "stays", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "8", "0", "0", "0"))
+	recordBudgets(string(ModeWorkload), "vanished", string(v1beta1.AcceleratorQuotaRoleClusterQueue),
+		oneBudget(t, "4", "0", "0", "0"))
+
+	sweepBudgets(map[string]struct{}{"stays": {}})
+
+	if got := sampleFor(t, "ome_quota_budget_nominal",
+		prometheus.Labels{"quota": "vanished"}); got != 0 {
+		t.Errorf("a node absent from the tree kept its series: %v", got)
+	}
+	if got := sampleFor(t, "ome_quota_budget_nominal",
+		prometheus.Labels{"quota": "stays"}); got != 8 {
+		t.Errorf("the sweep removed a node that is still in the tree: %v", got)
 	}
 }
