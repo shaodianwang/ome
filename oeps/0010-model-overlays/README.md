@@ -40,11 +40,12 @@ get extra volumes / env vars on their pods.
 
 ## Motivation
 
-Today, when a Sharded BaseModel becomes unhealthy at serving time
-(cluster_cache returns 412 on chunk fetch, daemon fleet partially
-degraded, S3 mtime drift mid-rollout), the operator's only recovery path
-is editing `InferenceService.spec.model.name` to point at a different
-BaseModel of the same architecture (e.g. a PVC-backed copy). That edit:
+Today, when a Sharded BaseModel becomes unhealthy at serving time (the
+model-cache provider fails chunk fetches, the cache data plane is
+partially degraded, S3 mtime drift mid-rollout), the operator's only
+recovery path is editing `InferenceService.spec.model.name` to point at
+a different BaseModel of the same architecture (e.g. a PVC-backed copy).
+That edit:
 
 1. mutates the desired state of the ISVC, which is awkward to undo
    cleanly when the primary recovers;
@@ -130,7 +131,7 @@ For each declared overlay, on every reconcile the ISVC controller:
    - `PVC` → `/opt/ml/model-overlays/<name>`, mounted from the PVC into
      every runner container (read-only).
    - `Sharded` → the raw `storage.storageUri` (e.g. `s3://…`).
-     No mount; the runner is expected to fetch through the cluster_cache
+     No mount; the runner is expected to fetch through the model-cache
      client envs that are already wired in.
    - `PerNode` (HostPath) → `spec.storage.path` value, mounted as
      HostPath identical to the primary HostPath flow.
@@ -139,8 +140,8 @@ For each declared overlay, on every reconcile the ISVC controller:
 5. **Reports** the active selection + the list of mounted overlays via
    `InferenceService.status` (see [Status surface](#status-surface)).
 
-The runner container decides at runtime which env var to read. The
-canonical pattern in our runtimes is a shell or Python wrapper that
+The runner container decides at runtime which env var to read. A
+common pattern for runtime images is a shell or Python wrapper that
 tries `$MODEL_PATH` first and falls back to a configured overlay env on
 specific error classes — but that logic lives in the runner image, not
 in OME.
@@ -149,9 +150,10 @@ in OME.
 
 #### Story 1: Sharded primary, PVC overlay as runtime safety net
 
-Operator runs `foo` via Sharded + cluster_cache for performance.
-Wants the same checkpoint mounted from a PVC as a last-resort path the
-engine can fall back to internally if cluster_cache misbehaves.
+Operator runs `foo` via Sharded distribution (model-cache provider) for
+performance. Wants the same checkpoint mounted from a PVC as a
+last-resort path the engine can fall back to internally if the
+model-cache provider misbehaves.
 
 ```yaml
 spec:
@@ -161,7 +163,7 @@ spec:
       - name: foo-pvc
 ```
 
-Pod gets `MODEL_PATH=s3://…` (primary, cluster_cache) and
+Pod gets `MODEL_PATH=s3://…` (primary, model-cache provider) and
 `OVERLAY_FOO_PVC_MODEL_PATH=/opt/ml/model-overlays/foo-pvc`
 (overlay, PVC mount). Engine wrapper script:
 
@@ -171,7 +173,7 @@ exec python -m sglang.launch_server \
     ...
 ```
 
-If cluster_cache health degrades, operator can flip via annotation
+If the model-cache provider degrades, operator can flip via annotation
 without changing the spec:
 
 ```sh
@@ -226,7 +228,7 @@ the design's flexibility is visible.)
 - **Cross-distribution overlays inflate the pod-spec generation
   surface.** A Sharded primary with a PVC overlay needs both `MODEL_PATH`
   env injection and PVC volume mounting. A PVC primary with a Sharded
-  overlay needs cluster_cache env vars even though the primary doesn't.
+  overlay needs model-cache env vars even though the primary doesn't.
   Mitigation: the controller derives env wiring per overlay
   independently, not from an "effective distribution" of the pod as a
   whole.
@@ -331,7 +333,7 @@ two overlays produce the same `SANITIZED_NAME`.
 ### Volume mounts
 
 Only PVC and PerNode overlays produce volume mounts. Sharded overlays
-do not; their data is fetched at runtime via cluster_cache.
+do not; their data is fetched at runtime via the model-cache provider.
 
 For each PVC overlay:
 - Add a `Volume` with `PersistentVolumeClaim{ClaimName, ReadOnly: true}`
@@ -353,11 +355,11 @@ distribution. The pod can therefore carry, e.g.:
 
 | Primary | Overlay A | Overlay B | Resulting pod adds |
 |---|---|---|---|
-| Sharded | PVC | — | cluster_cache env (primary) + 1 PVC volume + 1 overlay env var |
-| PVC | Sharded | — | PVC mount (primary) + cluster_cache env (overlay needs it) + 1 overlay env var |
-| Sharded | Sharded | PVC | cluster_cache env + 1 PVC volume + 2 overlay env vars |
+| Sharded | PVC | — | model-cache env (primary) + 1 PVC volume + 1 overlay env var |
+| PVC | Sharded | — | PVC mount (primary) + model-cache env (overlay needs it) + 1 overlay env var |
+| Sharded | Sharded | PVC | model-cache env + 1 PVC volume + 2 overlay env vars |
 
-The cluster_cache env vars (`MODEL_CACHE_PROVIDER`,
+The model-cache env vars (`MODEL_CACHE_PROVIDER`,
 `MODEL_CACHE_ENDPOINT`, `CLUSTER_CACHE_HEADLESS_SERVICE`,
 `MODEL_CACHE_OPTIONS`) are injected if the **primary OR any overlay** is
 Sharded. They are pod-level config, not per-model, so a single set
@@ -450,10 +452,10 @@ because the operator pinned a different one.
 Add to `tests/integration/singlecluster/controller/inferenceservice/`:
 
 - **Single PVC overlay, Sharded primary**: pod spec contains
-  cluster_cache envs + PVC volume + `OVERLAY_<name>_MODEL_PATH` env;
+  model-cache envs + PVC volume + `OVERLAY_<name>_MODEL_PATH` env;
   primary `MODEL_PATH` is the raw storage URI.
 - **Single Sharded overlay, PVC primary**: pod spec contains PVC
-  mount + cluster_cache envs (because of overlay) + `OVERLAY_<name>_MODEL_PATH`
+  mount + model-cache envs (because of overlay) + `OVERLAY_<name>_MODEL_PATH`
   = the raw storage URI.
 - **Two overlays, mixed types**: both env vars present, only PVC
   contributes a volume.

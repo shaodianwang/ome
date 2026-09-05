@@ -9,9 +9,6 @@ reviewers:
 approvers:
   - TBD
 
-see-also:
-  - "/oeps/0009-ome-cluster-cache-integration"
-
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
