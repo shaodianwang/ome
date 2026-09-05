@@ -991,8 +991,8 @@ source encoding; the ColumnarV2 measurement deserializes a complete columnar
 object, validates it, and expands rows on that freshly fetched object.
 
 The chart-default DenseV1 path has a hard-fail before/after qualification step;
-the existing soft-fail small-workload performance lane is not evidence for this
-gate. A new runner builds the recorded main merge-base and capability-head
+an advisory small-workload performance lane is not evidence for this gate. A
+new runner builds the recorded main merge-base and capability-head
 manager images, then drives identical accepted 2,000- and 5,000-row DenseV1
 inputs through fresh managers on the same stable worker. The artifact records
 commit and image digests. Ten interleaved samples compare median process CPU and
@@ -1053,45 +1053,41 @@ increase in Pod or EndpointSlice LIST/watch counts relative to DenseV1. The
 authoritative IR LIST used by the transition preflight is an explicit
 administrative operation, not part of reconciliation.
 
-Run every YAML/Python OMENative harness case—343 at proposal time—once per target
-mode from the same commit and images. Assignment, unique case IDs, and executed
-case IDs must match the repository inventory exactly. The ColumnarV2-target run
-records actual representation reads/writes and includes a named subset that
-persists columns, restarts the manager, and reconciles from them. No case may
-produce FAIL, INFRA-FAIL, SKIP, a crash, or a missing result. The parked ledger
-is exact: three cases are declared `infeasible`, and one is declared
-`notimpl` for a known timing nondeterminism in its scenario. Each parked case
-may PASS or be softened from its expected failure to XFAIL under the existing
-harness rule, but its status assertions must still execute and any XFAIL must
-retain the declared reason. Every other case must PASS in both modes, and no new
-parked case or XFAIL is allowed.
+Run every case of the OMENative scenario harness once per target mode from the
+same commit and images. Assignment, unique case IDs, and executed case IDs must
+match the repository inventory exactly. The ColumnarV2-target run records actual
+representation reads/writes and includes a named subset that persists columns,
+restarts the manager, and reconciles from them. No case may produce FAIL,
+INFRA-FAIL, SKIP, a crash, or a missing result. Any case the harness already
+parks as infeasible or not-yet-implemented must still execute its status
+assertions and retain its declared reason; every other case must PASS in both
+modes, and no new parked case or XFAIL is allowed.
 
-This requires two harness changes before the capability PR may merge.
-First, the Python status reader must decode DenseV1 and ColumnarV2 from shared
-golden vectors and must fail a case when an expected IR-status assertion was
-not evaluated; an
-empty dense list may never turn a status check into a vacuous PASS. Second, PR
-CI must package exact SHA/digest-pinned branch images without overwriting stable
-tags and run the full harness rather than relying on the current main-only image
-path.
+This requires two harness changes before the capability PR may merge. First,
+the harness status reader must decode DenseV1 and ColumnarV2 from shared golden
+vectors and must fail a case when an expected IR-status assertion was not
+evaluated; an empty dense list may never turn a status check into a vacuous
+PASS. Second, presubmit must build and run the full harness against
+digest-pinned images of the exact commit under review rather than a previously
+published image.
 
 Every shard requires exactly one terminal result for each assigned case ID and
 rejects missing, duplicate, or extra results; SKIP, FAIL, INFRA-FAIL, unexpected
 XFAIL or XPASS, crashes, and cancellations; and unmet parked-case or
-representation expectations. Before upload, the generator validates the
-concrete emitted manifest against repository inventory and rejects missing or
-duplicate, or extra `(target, case-ID)` assignments. Generation tests
-independently pin the same invariant. Every emitted shard is an unconditional,
-required, non-soft-fail command step, so the build cannot pass unless every
-shard exits zero. The shard-local verifier runs before artifact upload, and
-upload handling cannot mask its nonzero status. These checks compose into exact
-matrix coverage; a cross-job artifact collector is not required for
-correctness. Per-shard result files remain useful diagnostics, but artifact
-upload is not a prerequisite for the pass/fail result.
+representation expectations. Before a run starts, the pipeline validates the
+concrete shard assignment against repository inventory and rejects missing,
+duplicate, or extra `(target, case-ID)` assignments. Pipeline tests
+independently pin the same invariant. Every shard is an unconditional,
+required, hard-failing CI step, so the build cannot pass unless every shard
+exits zero. The shard-local verifier runs before artifact upload, and upload
+handling cannot mask its nonzero status. These checks compose into exact matrix
+coverage; a cross-job artifact collector is not required for correctness.
+Per-shard result files remain useful diagnostics, but artifact upload is not a
+prerequisite for the pass/fail result.
 
-At proposal time, one target uses 26 KIND jobs and 62 harness jobs; naively
-doubling both creates 176 clusters requesting up to 880 CPUs and roughly 2.4 TiB
-of memory. The qualification pipeline therefore shards by measured duration and
+Naively running the full KIND and harness matrix once per target mode roughly
+doubles the number of ephemeral clusters and their aggregate CPU and memory
+demand. The qualification pipeline therefore shards by measured duration and
 may run target modes sequentially on a reused clean cluster, but it may not drop
 or duplicate a `(target, case-ID)` pair. The full dual-target matrix is mandatory
 before the capability PR may merge and for the three Beta main runs.
@@ -1120,7 +1116,7 @@ one reviewable invariant and leaves the cluster in a valid state:
    validated DenseV1 replacement.
 5. Add or extend qualification independently: real-apiserver fault tests, size
    and performance gates, dual-target KIND, and the complete dual-target
-   YAML/Python harness.
+   OMENative scenario harness.
 6. The final capability PR enables config-controlled ColumnarV2 candidate
    selection at the existing writer boundary, adds the ColumnarV2 configuration
    value, and adds the complete repair entry point. CI may select ColumnarV2
