@@ -13,7 +13,7 @@ approvers:
 # One new control-plane object (AcceleratorQuota) is the source of truth. Fleet Quota
 # is an opt-in OME feature; when enabled, the v1 backend materializes budgets to
 # stock Kueue, leaning on OME's existing per-cluster Kueue admission and the
-# WorkloadCluster connection subsystem. The admin console is read-only; budget edits are GitOps.
+# WorkloadCluster connection subsystem. No admin write surface; budget edits are GitOps.
 see-also:
   - "/oeps/0018-multi-cluster-placement"  # per-cluster Kueue admission + WorkloadCluster connection this builds on
   - "/oeps/0019-control-plane-split"      # the management-plane projector runs in the control plane; mode taxonomy
