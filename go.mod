@@ -28,7 +28,7 @@ require (
 	golang.org/x/sync v0.22.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
 	google.golang.org/protobuf v1.36.12
-	istio.io/client-go v1.30.4
+	istio.io/client-go v1.31.0
 	k8s.io/api v0.36.2
 	k8s.io/apiextensions-apiserver v0.36.2
 	k8s.io/apimachinery v0.36.2
@@ -92,7 +92,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260610212136-7ab31c22f7ad // indirect
 	google.golang.org/grpc v1.83.1 // indirect
-	istio.io/api v1.30.4-0.20260824163423-69099aec2678 // indirect
+	istio.io/api v1.31.0-rc.0.0.20260824154656-b943409680a7 // indirect
 	k8s.io/dynamic-resource-allocation v0.36.2 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0 // indirect
 	sigs.k8s.io/cluster-inventory-api v0.1.3 // indirect
