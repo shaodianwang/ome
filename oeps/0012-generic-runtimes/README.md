@@ -893,8 +893,8 @@ Add to `tests/integration/singlecluster/webhook/runtimepreset/`
 
 #### Manual smoke
 
-Migrate the end-to-end PD sample's `cluster-serving-runtime.yaml`
-(under `config/samples/`) to inherit from a profile; verify the
+Migrate an existing PD-disaggregated ClusterServingRuntime sample to
+inherit from a profile; verify the
 resulting Deployment pod spec is byte-identical to the
 pre-migration one. Also create a fresh runtime
 with `ome.io/engine: sglang-pd` and assert the resulting
