@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MUSE — Meta Unified Serving Engine</title>
+<title>MUSE — Multi-cluster Unified Serving Engine</title>
 <style>
   /* ============================================================
      MUSE design system
@@ -24,7 +24,7 @@
     --fg-3:      #6b7382;   /* tertiary / labels */
     --fg-faint:  #4b525f;   /* faint */
 
-    /* accent (Meta-ish blue) */
+    /* accent (brand blue) */
     --accent:    #2f86ff;
     --accent-2:  #1d9bf0;
     --accent-dim:#16314f;
@@ -205,7 +205,7 @@
   .chip:hover { color: var(--fg); background: var(--hover); }
   .chip.active { background: var(--accent-dim); color: var(--accent-fg); border-color: rgba(47,134,255,.3); }
   .chip .cdot { width:6px;height:6px;border-radius:50%; }
-  .cdot.meta { background:#2f86ff; } .cdot.gcp { background:#34a853; } .cdot.oci { background:#ff5a36; } .cdot.cw { background:#9b7bff; }
+  .cdot.onprem { background:#2f86ff; } .cdot.gcp { background:#34a853; } .cdot.oci { background:#ff5a36; } .cdot.cw { background:#9b7bff; }
 
   .icon-btn {
     width: 32px; height: 32px; display: grid; place-items: center;
@@ -404,7 +404,7 @@
   .mcard .pipeline { padding: 14px var(--s5) var(--s5); }
   .mcard .src-logo { width: 30px; height: 30px; border-radius: 7px; display:grid; place-items:center; flex:0 0 auto; font-size: 11px; font-weight:700; }
   .src-hf { background: #2a210a; color: #ffd34d; border:1px solid #4a3a12; }
-  .src-meta { background: #0f2547; color: #7fb3ff; border:1px solid #1d3a63; }
+  .src-onprem { background: #0f2547; color: #7fb3ff; border:1px solid #1d3a63; }
   .src-s3 { background: #102b1a; color: #6fd99c; border:1px solid #1d4a30; }
   .src-oci { background: #2e1510; color: #ff8a6b; border:1px solid #4a2418; }
 
@@ -590,7 +590,7 @@
 
       <div class="chipbar" id="cloudfilter">
         <div class="chip active" data-cloud="all">All</div>
-        <div class="chip" data-cloud="meta"><span class="cdot meta"></span>Meta</div>
+        <div class="chip" data-cloud="onprem"><span class="cdot onprem"></span>On-prem</div>
         <div class="chip" data-cloud="gcp"><span class="cdot gcp"></span>GCP</div>
         <div class="chip" data-cloud="oci"><span class="cdot oci"></span>OCI</div>
         <div class="chip" data-cloud="cw"><span class="cdot cw"></span>CoreWeave</div>
@@ -673,9 +673,9 @@
                 </tr></thead>
                 <tbody>
                   <tr>
-                    <td class="cell-name mono">cw-us-east-2</td>
+                    <td class="cell-name mono">cw-h100-1</td>
                     <td><div class="cloud-cell"><span class="cdot cw"></span>CoreWeave</div></td>
-                    <td class="muted">us-east-2</td>
+                    <td class="muted">us-east</td>
                     <td class="num">512</td>
                     <td><span class="tag">H100·SXM</span></td>
                     <td><div class="util-cell"><div class="bar"><i style="width:81%"></i></div><span class="pct">81%</span></div></td>
@@ -718,8 +718,8 @@
                     <td><span class="pill green"><span class="pdot"></span>Ready</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">meta-rdma-east-3</td>
-                    <td><div class="cloud-cell"><span class="cdot meta"></span>Meta</div></td>
+                    <td class="cell-name mono">onprem-rdma-east-3</td>
+                    <td><div class="cloud-cell"><span class="cdot onprem"></span>On-prem</div></td>
                     <td class="muted">east / RDMA</td>
                     <td class="num">1,024</td>
                     <td><span class="tag">H100·RoCE</span></td>
@@ -727,8 +727,8 @@
                     <td><span class="pill green"><span class="pdot"></span>Ready</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">meta-rdma-west-1</td>
-                    <td><div class="cloud-cell"><span class="cdot meta"></span>Meta</div></td>
+                    <td class="cell-name mono">onprem-rdma-west-1</td>
+                    <td><div class="cloud-cell"><span class="cdot onprem"></span>On-prem</div></td>
                     <td class="muted">west / RDMA</td>
                     <td class="num">2,048</td>
                     <td><span class="tag">H100·RoCE</span></td>
@@ -736,8 +736,8 @@
                     <td><span class="pill amber"><span class="pdot"></span>Pressure</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">meta-rdma-central-2</td>
-                    <td><div class="cloud-cell"><span class="cdot meta"></span>Meta</div></td>
+                    <td class="cell-name mono">onprem-rdma-central-2</td>
+                    <td><div class="cloud-cell"><span class="cdot onprem"></span>On-prem</div></td>
                     <td class="muted">central / RDMA</td>
                     <td class="num">1,536</td>
                     <td><span class="tag">H100·RoCE</span></td>
@@ -745,9 +745,9 @@
                     <td><span class="pill green"><span class="pdot"></span>Ready</span></td>
                   </tr>
                   <tr>
-                    <td class="cell-name mono">cw-us-east-1</td>
+                    <td class="cell-name mono">cw-a100-2</td>
                     <td><div class="cloud-cell"><span class="cdot cw"></span>CoreWeave</div></td>
-                    <td class="muted">us-east-2</td>
+                    <td class="muted">us-east</td>
                     <td class="num">128</td>
                     <td><span class="tag">A100·80G</span></td>
                     <td><div class="util-cell"><div class="bar red"><i style="width:96%"></i></div><span class="pct">96%</span></div></td>
@@ -772,7 +772,7 @@
               <div class="feed-item">
                 <div class="feed-ic violet"><svg viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
                 <div class="feed-body">
-                  <div class="row1"><div class="t"><b>Transfer started</b> Meta → GCP</div><span class="m when">14m</span></div>
+                  <div class="row1"><div class="t"><b>Transfer started</b> On-prem → GCP</div><span class="m when">14m</span></div>
                   <div class="m mono">llama-3.1-405b-instruct → TPU host · 4.7 TB</div>
                 </div>
               </div>
@@ -793,7 +793,7 @@
               <div class="feed-item">
                 <div class="feed-ic amber"><svg viewBox="0 0 24 24" fill="none"><path d="M12 9v4m0 4h.01M10.3 4.3L2.6 18a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 4.3a2 2 0 00-3.4 0z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></div>
                 <div class="feed-body">
-                  <div class="row1"><div class="t"><b>Capacity pressure</b> on meta-rdma-west-1</div><span class="m when">1h</span></div>
+                  <div class="row1"><div class="t"><b>Capacity pressure</b> on onprem-rdma-west-1</div><span class="m when">1h</span></div>
                   <div class="m mono">91% allocatable · 3 pending pods queued in Kueue</div>
                 </div>
               </div>
@@ -808,7 +808,7 @@
                 <div class="feed-ic green"><svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
                 <div class="feed-body">
                   <div class="row1"><div class="t"><b>Blue/Green cutover</b> complete</div><span class="m when">3h</span></div>
-                  <div class="m mono">llama-3.3-70b · meta-rdma-central-2 · green live, blue drained</div>
+                  <div class="m mono">llama-3.3-70b · onprem-rdma-central-2 · green live, blue drained</div>
                 </div>
               </div>
             </div>
@@ -835,7 +835,7 @@
                   <td><span class="pill blue"><span class="pdot"></span>Canary</span></td>
                   <td style="width:230px"><div class="canary-track"><div class="canary-steps"><span class="cstep cur"></span><span class="cstep"></span><span class="cstep"></span><span class="cstep"></span></div><span class="muted" style="font-size:11px">10% → 25% → 50% → 100% · at <b style="color:var(--fg)">10%</b></span></div></td>
                   <td><span class="pill amber"><span class="pdot"></span>analyzing</span></td>
-                  <td class="mono muted">meta-rdma-east-3</td>
+                  <td class="mono muted">onprem-rdma-east-3</td>
                   <td class="right muted nowrap">4m ago</td>
                 </tr>
                 <tr>
@@ -859,7 +859,7 @@
                   <td><span class="pill violet"><span class="pdot"></span>Blue/Green</span></td>
                   <td style="width:230px"><div class="canary-track"><div class="bar violet striped"><i style="width:42%"></i></div><span class="muted" style="font-size:11px">green provisioning · 5 / 12 ready</span></div></td>
                   <td><span class="pill slate"><span class="pdot"></span>warming</span></td>
-                  <td class="mono muted">meta-rdma-central-2</td>
+                  <td class="mono muted">onprem-rdma-central-2</td>
                   <td class="right muted nowrap">3m ago</td>
                 </tr>
               </tbody>
@@ -891,7 +891,7 @@
           </div>
           <div class="input"><select><option>All modes</option><option>RawDeployment</option><option>MultiNode</option><option>PD-Disaggregated</option><option>OMENative</option></select></div>
           <div class="input"><select><option>All status</option><option>Ready</option><option>Degraded</option><option>Failed</option><option>Rolling out</option></select></div>
-          <div class="input"><select><option>All namespaces</option><option>genai-prod</option><option>research</option><option>platform</option></select></div>
+          <div class="input"><select><option>All namespaces</option><option>inference-prod</option><option>research</option><option>platform</option></select></div>
           <button class="btn ghost sm"><svg viewBox="0 0 24 24" fill="none"><path d="M3 5h18l-7 8v6l-4 2v-8L3 5z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>More filters</button>
         </div>
 
@@ -907,11 +907,11 @@
                 <tr class="clickable" onclick="toggleDetail('d1', this)">
                   <td><svg class="chev-i" id="chev-d1" width="14" height="14" viewBox="0 0 24 24" fill="none" style="color:var(--fg-3);transition:transform .15s"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></td>
                   <td class="cell-name mono">llama-3.1-405b-instruct</td>
-                  <td class="muted">genai-prod</td>
+                  <td class="muted">inference-prod</td>
                   <td class="mono" style="font-size:12px">llama-3.1-405b<div class="sub">fp8 · 405B</div></td>
                   <td class="mono" style="font-size:12px">sglang-h100-pd</td>
                   <td><span class="pill cyan"><span class="pdot"></span>PD-Disagg</span></td>
-                  <td class="mono muted">meta-rdma-east-3</td>
+                  <td class="mono muted">onprem-rdma-east-3</td>
                   <td class="num">16 / 16</td>
                   <td><span class="pill blue"><span class="pdot"></span>Canary 10%</span></td>
                   <td class="num muted">18d</td>
@@ -929,7 +929,7 @@
                               <dt>replicas</dt><dd>4 / 4 ready</dd>
                               <dt>accelerator</dt><dd>H100 ×8 / pod</dd>
                               <dt>topology</dt><dd>MultiNode (LWS)</dd>
-                              <dt>cluster</dt><dd>meta-rdma-east-3</dd>
+                              <dt>cluster</dt><dd>onprem-rdma-east-3</dd>
                             </dl>
                           </div>
                           <div class="comp-card">
@@ -938,7 +938,7 @@
                               <dt>replicas</dt><dd>12 / 12 ready</dd>
                               <dt>accelerator</dt><dd>H100 ×8 / pod</dd>
                               <dt>topology</dt><dd>MultiNode (LWS)</dd>
-                              <dt>cluster</dt><dd>meta-rdma-east-3</dd>
+                              <dt>cluster</dt><dd>onprem-rdma-east-3</dd>
                             </dl>
                           </div>
                         </div>
@@ -946,7 +946,7 @@
                         <table class="tbl" style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
                           <thead><tr><th>Cluster</th><th>Engine</th><th>Decoder</th><th>GPUs</th><th>Status</th></tr></thead>
                           <tbody>
-                            <tr><td class="mono">meta-rdma-east-3</td><td class="mono">4</td><td class="mono">12</td><td class="mono">128</td><td><span class="pill green"><span class="pdot"></span>Ready</span></td></tr>
+                            <tr><td class="mono">onprem-rdma-east-3</td><td class="mono">4</td><td class="mono">12</td><td class="mono">128</td><td><span class="pill green"><span class="pdot"></span>Ready</span></td></tr>
                           </tbody>
                         </table>
                       </div>
@@ -980,7 +980,7 @@
                 <tr class="clickable" onclick="toggleDetail('d2', this)">
                   <td><svg class="chev-i" id="chev-d2" width="14" height="14" viewBox="0 0 24 24" fill="none" style="color:var(--fg-3);transition:transform .15s"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></td>
                   <td class="cell-name mono">deepseek-v3</td>
-                  <td class="muted">genai-prod</td>
+                  <td class="muted">inference-prod</td>
                   <td class="mono" style="font-size:12px">deepseek-v3<div class="sub">fp8 · 671B MoE</div></td>
                   <td class="mono" style="font-size:12px">sglang-tpu-v5e</td>
                   <td><span class="pill cyan"><span class="pdot"></span>PD-Disagg</span></td>
@@ -1014,7 +1014,7 @@
                 <tr>
                   <td></td>
                   <td class="cell-name mono">qwen2.5-72b-instruct</td>
-                  <td class="muted">genai-prod</td>
+                  <td class="muted">inference-prod</td>
                   <td class="mono" style="font-size:12px">qwen2.5-72b<div class="sub">bf16 · 72B</div></td>
                   <td class="mono" style="font-size:12px">vllm-h100</td>
                   <td><span class="pill slate"><span class="pdot"></span>MultiNode</span></td>
@@ -1040,11 +1040,11 @@
                 <tr>
                   <td></td>
                   <td class="cell-name mono">llama-3.3-70b-instruct</td>
-                  <td class="muted">genai-prod</td>
+                  <td class="muted">inference-prod</td>
                   <td class="mono" style="font-size:12px">llama-3.3-70b<div class="sub">fp8 · 70B</div></td>
                   <td class="mono" style="font-size:12px">sglang-h100</td>
                   <td><span class="pill blue"><span class="pdot"></span>OMENative</span></td>
-                  <td class="mono muted">meta-rdma-central-2</td>
+                  <td class="mono muted">onprem-rdma-central-2</td>
                   <td class="num">24 / 24</td>
                   <td><span class="pill slate"><span class="pdot"></span>Stable</span></td>
                   <td class="num muted">62d</td>
@@ -1057,7 +1057,7 @@
                   <td class="mono" style="font-size:12px">mixtral-8x22b<div class="sub">fp8 · 141B MoE</div></td>
                   <td class="mono" style="font-size:12px">vllm-h100</td>
                   <td><span class="pill slate"><span class="pdot"></span>MultiNode</span></td>
-                  <td class="mono muted">meta-rdma-central-2</td>
+                  <td class="mono muted">onprem-rdma-central-2</td>
                   <td class="num">5 / 12</td>
                   <td><span class="pill violet"><span class="pdot"></span>BlueGreen</span></td>
                   <td class="num muted">12d</td>
@@ -1096,7 +1096,7 @@
                   <td class="mono" style="font-size:12px">llama-3.1-8b<div class="sub">bf16 · 8B</div></td>
                   <td class="mono" style="font-size:12px">sglang-a100</td>
                   <td><span class="pill slate"><span class="pdot"></span>RawDeploy</span></td>
-                  <td class="mono muted">cw-us-east-1</td>
+                  <td class="mono muted">cw-a100-2</td>
                   <td class="num">0 / 6</td>
                   <td><span class="pill slate"><span class="pdot"></span>Stable</span></td>
                   <td class="num muted">2d</td>
@@ -1142,7 +1142,7 @@
 
         <div class="filterbar">
           <div class="input grow"><svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><input placeholder="Filter models by name, architecture, source…" /></div>
-          <div class="input"><select><option>All sources</option><option>HuggingFace</option><option>S3</option><option>OCI</option><option>internal-Meta</option></select></div>
+          <div class="input"><select><option>All sources</option><option>HuggingFace</option><option>S3</option><option>OCI</option><option>On-prem</option></select></div>
           <div class="input"><select><option>All formats</option><option>safetensors</option><option>pytorch</option></select></div>
           <div class="input"><select><option>All states</option><option>Ready</option><option>Converting</option><option>In Transit</option><option>Importing</option></select></div>
         </div>
@@ -1179,13 +1179,13 @@
             </div>
           </div>
 
-          <!-- model mid-TRANSFER Meta -> GCP -->
+          <!-- model mid-TRANSFER On-prem -> GCP -->
           <div class="mcard">
             <div class="top">
-              <div class="src-logo src-meta">M</div>
+              <div class="src-logo src-onprem">DC</div>
               <div class="mh">
                 <div class="nm">llama-3.1-405b-instruct <span class="pill violet"><span class="pdot"></span>In Transit</span></div>
-                <div class="src">meta://models/llama-3.1-405b-instruct</div>
+                <div class="src">pvc://models/llama-3.1-405b-instruct</div>
               </div>
             </div>
             <div class="specs">
@@ -1203,7 +1203,7 @@
               </div>
               <div class="xfer" style="margin-top:16px">
                 <div class="xh">
-                  <div class="route"><span class="cdot meta" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>Meta·central <span class="arr">→</span> <span class="cdot gcp" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>GCP·us-east5 <span class="muted">(TPU hosting)</span></div>
+                  <div class="route"><span class="cdot onprem" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>On-prem·central <span class="arr">→</span> <span class="cdot gcp" style="display:inline-block;width:6px;height:6px;border-radius:50%"></span>GCP·us-east5 <span class="muted">(TPU hosting)</span></div>
                   <span class="mono" style="color:var(--violet)">71%</span>
                 </div>
                 <div class="bar violet striped"><i style="width:71%"></i></div>
@@ -1230,15 +1230,15 @@
                 <span style="font-size:11px;color:var(--fg-3)">Replicas:</span>
                 <span class="pill slate" style="padding:2px 8px"><span class="cdot gcp" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>GCP</span>
                 <span class="pill slate" style="padding:2px 8px"><span class="cdot oci" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>OCI</span>
-                <span class="pill slate" style="padding:2px 8px"><span class="cdot meta" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>Meta</span>
+                <span class="pill slate" style="padding:2px 8px"><span class="cdot onprem" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>On-prem</span>
               </div>
             </div>
           </div>
 
           <div class="mcard">
             <div class="top">
-              <div class="src-logo src-meta">M</div>
-              <div class="mh"><div class="nm">llama-3.3-70b-instruct <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">meta://models/llama-3.3-70b</div></div>
+              <div class="src-logo src-onprem">DC</div>
+              <div class="mh"><div class="nm">llama-3.3-70b-instruct <span class="pill green"><span class="pdot"></span>Ready</span></div><div class="src">pvc://models/llama-3.3-70b</div></div>
             </div>
             <div class="specs"><span class="tag">70B</span><span class="tag">arch: llama</span><span class="tag">safetensors</span><span class="tag">fp8</span><span class="tag">TEXT_GENERATION</span></div>
             <div class="pipeline">
@@ -1250,7 +1250,7 @@
               </div>
               <div style="display:flex;gap:6px;margin-top:14px;flex-wrap:wrap;align-items:center">
                 <span style="font-size:11px;color:var(--fg-3)">Replicas:</span>
-                <span class="pill slate" style="padding:2px 8px"><span class="cdot meta" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>Meta ×3</span>
+                <span class="pill slate" style="padding:2px 8px"><span class="cdot onprem" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>On-prem ×3</span>
                 <span class="pill slate" style="padding:2px 8px"><span class="cdot cw" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px"></span>CoreWeave</span>
               </div>
             </div>
@@ -1355,7 +1355,7 @@
               </div>
               <div class="field-row" style="margin-top:16px">
                 <div class="field"><label>Accelerator requirement</label><div class="input"><select><option>H100</option><option>H100 (RoCE / RDMA)</option><option>A100-80G</option><option>TPU-v5e</option><option>TPU-v5p</option></select></div></div>
-                <div class="field"><label>Preferred clouds <span class="hint">soft constraint</span></label><div class="input"><select><option>Any (Meta · GCP · OCI · CoreWeave)</option><option>Meta only</option><option>GCP only</option><option>Avoid CoreWeave</option></select></div></div>
+                <div class="field"><label>Preferred clouds <span class="hint">soft constraint</span></label><div class="input"><select><option>Any (On-prem · GCP · OCI · CoreWeave)</option><option>On-prem only</option><option>GCP only</option><option>Avoid CoreWeave</option></select></div></div>
               </div>
             </div>
 
@@ -1422,7 +1422,7 @@
 <span class="k">kind:</span> <span class="d">InferenceService</span>
 <span class="k">metadata:</span>
   <span class="k">name:</span> <span class="s">llama-3.1-405b-instruct</span>
-  <span class="k">namespace:</span> <span class="s">genai-prod</span>
+  <span class="k">namespace:</span> <span class="s">inference-prod</span>
 <span class="k">spec:</span>
   <span class="k">model:</span>
     <span class="k">name:</span> <span class="s">llama-3.1-405b-instruct</span>
@@ -1478,11 +1478,11 @@
           <div class="stat"><div class="label">Pending in Kueue</div><div class="val" style="color:var(--amber)">11</div><div class="meta">awaiting capacity across 3 clusters</div></div>
         </div>
 
-        <!-- META RDMA -->
+        <!-- ON-PREM RDMA -->
         <div class="cap-section">
           <div class="cap-section-head">
-            <div class="cl-logo" style="background:#0f2547;color:#7fb3ff;border:1px solid #1d3a63">M</div>
-            <h2>Meta · RDMA fabric</h2>
+            <div class="cl-logo" style="background:#0f2547;color:#7fb3ff;border:1px solid #1d3a63">DC</div>
+            <h2>On-prem · RDMA fabric</h2>
             <span class="meta mono">H100 · RoCE v2 · 14 islands · 4,608 nodes</span>
             <div class="right"><span class="pill amber"><span class="pdot"></span>2 islands under pressure</span></div>
           </div>
@@ -1606,7 +1606,7 @@
           </div>
           <div class="pool-grid">
             <div class="pool">
-              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-us-east-2 <span class="mono">H100·SXM</span></span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>Ready</span></div>
+              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-h100-1 <span class="mono">H100·SXM</span></span><span class="pill green" style="padding:1px 7px"><span class="pdot"></span>Ready</span></div>
               <div class="nums">
                 <div class="n"><b>4,096</b><span>total GPUs</span></div>
                 <div class="n"><b style="color:var(--accent-2)">3,317</b><span>in use</span></div>
@@ -1636,7 +1636,7 @@
             </div>
 
             <div class="pool">
-              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-us-east-1 <span class="mono">A100·80G</span></span><span class="pill red" style="padding:1px 7px"><span class="pdot"></span>Saturated</span></div>
+              <div class="ph"><span class="nm"><span class="cdot cw"></span>cw-a100-2 <span class="mono">A100·80G</span></span><span class="pill red" style="padding:1px 7px"><span class="pdot"></span>Saturated</span></div>
               <div class="nums">
                 <div class="n"><b>1,024</b><span>total GPUs</span></div>
                 <div class="n"><b style="color:var(--accent-2)">983</b><span>in use</span></div>

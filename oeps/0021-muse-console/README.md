@@ -4,7 +4,7 @@
 
 ## Summary
 
-**Tl;dr:** MUSE ("Meta Unified Serving Engine") is one place — an API service plus a
+**Tl;dr:** MUSE ("Multi-cluster Unified Serving Engine") is one place — an API service plus a
 web console — to deploy a model, onboard and convert its weights, move those
 weights cross-cloud, and see where in the fleet a model can actually fit. It is a
 **read + write layer on the multi-cluster control plane OME already runs**
@@ -29,8 +29,8 @@ The console is "MUSE Console" riding the "MUSE" backend — one name, one produc
 
 ## Motivation
 
-The upstream OME shipped a console; we removed it when we forked. Since then this
-fork has added the features that most need a UI — PD-disaggregated serving, multi-cluster
+OME's web console lives outside the operator tree. Meanwhile OME has added the
+features that most need a UI — PD-disaggregated serving, multi-cluster
 placement (OEP-0018), canary/blue-green rollout (OEP-0015/0017) — and there is no
 operator surface for any of it. The failure mode today is concrete:
 
@@ -40,11 +40,11 @@ operator surface for any of it. The failure mode today is concrete:
   path and no record of "who deployed what, where."
 - **Capacity is invisible.** "Can this 405B model land on a TPU-v5e slice, and is
   there a free one?" has no answer short of `kubectl get nodes` against each
-  cluster and reading provider-specific labels by hand. RDMA islands (Meta) and
+  cluster and reading provider-specific labels by hand. RDMA islands (on-prem) and
   TPU slices (GCP) are topology that vanilla Kubernetes does not surface.
 - **Model onboarding is a pile of scripts.** Converting a checkpoint from PyTorch
   to safetensors, generating a valid `config.json`, and moving weights from
-  internal Meta storage to GCP so a model can be hosted on TPU are all manual,
+  on-prem storage to GCP so a model can be hosted on TPU are all manual,
   one-off, and unobservable.
 
 None of this is a new control loop — it is the *visibility and self-service* layer
@@ -55,12 +55,12 @@ model, see Design Details).
 ### Goals
 
 1. **One pane across clouds.** A single view of OME workloads + node/accelerator
-   capacity across Meta, GCP, OCI, and CoreWeave clusters — read-only, near-real-time.
+   capacity across on-prem, GCP, OCI, and CoreWeave clusters — read-only, near-real-time.
 2. **Self-service deploy.** Create an `InferenceService` from the console with
    runtime auto-selection and a placement choice; OME's existing placement
    controller does the fan-out. Record deploy provenance (who/when/what).
 3. **Model onboarding pipeline.** Convert PyTorch→safetensors, generate
-   `config.json`, and transfer weights Meta→GCP, each as an observable async job
+   `config.json`, and transfer weights on-prem→GCP, each as an observable async job
    with status surfaced in the console.
 4. **Capacity inventory with topology.** Surface RDMA islands and TPU slices, not
    just raw GPU counts, so an operator (or, later, an automated check) can answer
@@ -73,7 +73,7 @@ model, see Design Details).
   a bug.
 - **Not a scheduler.** Placement stays with OME's placement controller + Kueue +
   the Kubernetes scheduler. MUSE *shows* capacity and *requests* a deploy; it does
-  not bin-pack. (Naming honesty: this is why it is not "MARS/Scheduler.")
+  not bin-pack. (Naming honesty: this is why it is not called a scheduler.)
 - **Not a GitOps replacement.** Whether deploy intent is written to clusters
   directly or via Git is an open fork (Design Details); MUSE supports at least the
   direct path in v1 and does not mandate ripping out GitOps.
@@ -108,16 +108,16 @@ OEP about a *layer*, not a new system.
   one `InferenceService` and I watch placement land it on a cluster with free
   H100s.
 - *As an SRE*, I open Capacity, see that `gcp-tpu-us-east5` has two free `v5e-256`
-  slices and `cw-us-east-2` is at 95% H100 allocatable, and I deploy accordingly.
+  slices and `cw-h100-1` is at 95% H100 allocatable, and I deploy accordingly.
 - *As a model owner*, I onboard a PyTorch checkpoint; MUSE converts it to
-  safetensors, generates `config.json`, then transfers it Meta→GCP, and I watch
+  safetensors, generates `config.json`, then transfers it on-prem→GCP, and I watch
   each stage with an ETA instead of tailing a script.
 
 ### Risks (named so they are reviewable)
 
 - **R1 — Read-plane scale/footprint.** Watching Nodes (and Pods, if we are not
   careful) across many clusters can blow up cache memory. We have already been
-  burned: the manager once OOMed by caching all Pods cluster-wide on a 130k-pod
+  burned: the manager once OOMed by caching all Pods cluster-wide on a very large
   cluster. Mitigation in Design Details (scope the cache; do not cache Pods).
 - **R2 — The capacity model is heterogeneous and not in the API.** RDMA islands
   and TPU slices come from provider-specific labels/CRDs, not standard Node fields.
@@ -127,7 +127,7 @@ OEP about a *layer*, not a new system.
   to production clusters needs an audit trail and a safe-by-default scope, or it
   becomes an unaudited way to break serving. (Open fork #2: direct vs GitOps.)
 - **R4 — Cross-cloud weight egress is a governance question, not a code one.**
-  Moving model weights out of Meta's network is gated by data-egress policy;
+  Moving model weights out of the on-prem network is gated by data-egress policy;
   the plumbing is the easy part. (Open fork #3.)
 
 ## Design Details
@@ -178,9 +178,9 @@ non-starter.
   proposal is a new `ome-agent` subcommand run as a Job, with status surfaced via
   the BaseModel status the console already reads. *Open:* whether conversion is a
   first-class BaseModel lifecycle phase or a separate CR (Open Questions).
-- *Transfer* (Meta→GCP for TPU hosting) is, mechanically, what `ome-agent replica`
+- *Transfer* (on-prem→GCP for TPU hosting) is, mechanically, what `ome-agent replica`
   (cross-region replication) already does. The new work is the source/sink
-  (internal-Meta → GCS) and the governance gate (fork #3), not the copy loop.
+  (on-prem storage → GCS) and the governance gate (fork #3), not the copy loop.
 
 ### Where MUSE runs
 
@@ -198,7 +198,7 @@ This is the hard one. RDMA islands and TPU slices are not Node API fields; they
 are conventions per provider. Options:
 
   a) **Node labels only.** Read provider-set labels (e.g. a topology/island label
-     on Meta nodes, the GKE TPU topology labels on GCP) and normalize.
+     on on-prem nodes, the GKE TPU topology labels on GCP) and normalize.
      *Tradeoff:* zero new infrastructure, but entirely dependent on each
      provisioner labeling consistently — a missing/renamed label silently makes a
      pool invisible, and there is no place to attach island-level health.
@@ -207,7 +207,7 @@ are conventions per provider. Options:
      queryable, health-bearing model — but it is new API surface and a new
      producer to keep correct, i.e. the thing OEP-0018-style work already shows is
      non-trivial.
-  c) **Provider APIs** (GKE/TPU API, Meta fabric inventory) queried directly.
+  c) **Provider APIs** (GKE/TPU API, an on-prem fabric inventory service) queried directly.
      *Tradeoff:* the most accurate topology, but couples MUSE to N provider SDKs
      and their auth, and breaks the "everything comes through the WorkloadCluster
      transport" symmetry.
@@ -234,12 +234,12 @@ object: "direct-write to prod with a button is how you get an unaudited outage."
 Fair — which is why provenance + a per-environment guardrail (prod requires an
 explicit confirm/scope) are in scope for v1, not deferred.
 
-### Open fork #3 — Meta→GCP weight egress
+### Open fork #3 — on-prem→GCP weight egress
 
-The transfer's blocker is policy, not code: model weights leaving Meta's network
+The transfer's blocker is policy, not code: model weights leaving the on-prem network
 is a data-governance decision. v1 must treat the egress path as gated — an
 allowlist of (model, destination) pairs and an approval record — rather than an
-open copy. The mechanism is `TBD` and owned jointly with whoever owns Meta egress
+open copy. The mechanism is `TBD` and owned jointly with whoever owns the data-egress
 policy.
 
 ## Test Plan
@@ -283,7 +283,7 @@ policy.
 
 ## Alternatives
 
-1. **Resurrect the upstream OME console.** Rejected: it predates PD, multi-cluster,
+1. **Revive the earlier OME web console.** Rejected: it predates PD, multi-cluster,
    and rollout, and has no concept of cross-cloud capacity or weight onboarding —
    the exact things we need. We would rewrite it anyway.
 2. **No backend; a thin UI that talks straight to each cluster's apiserver.**
