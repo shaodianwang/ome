@@ -1558,7 +1558,7 @@ scheduler, and containerd is now authoritative for the per-policy
 correctness tests below. The suite lives under
 `tests/integration/singlecluster/controller/omenative_coordination_kind/` with
 a 2-node default and a 90-minute outer timeout; see
-[`CLAUDE.md`](../../CLAUDE.md) for run instructions
+the repository's developer documentation for run instructions
 (`make test-kind`).
 
 The envtest harness is retained for webhook and defaulter
