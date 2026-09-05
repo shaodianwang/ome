@@ -73,7 +73,7 @@ A second motivation is **HuggingFace source coverage**. The initial cluster-cach
 - **Not adding Sharded consumption to every runtime.** Engines that do not implement a supported model-cache data-plane integration remain unsupported for `Sharded` BaseModels and are rejected by OME validation.
 - **Not requiring every provider to support every source backend.** The initial cluster-cache provider targets S3 and HF. OCI/GCP/Azure can be added by provider implementations later.
 - **Not adding a `ModelCacheBackend` CRD in Alpha.** Alpha uses cluster-level provider configuration for the controller. A CRD can be added later if OME needs multiple cache providers in one cluster or per-model provider selection.
-- **Not contract negotiation with upstream model-producing teams.** Out of scope; this OEP works with whatever those teams' pipelines produce today.
+- **Not standardizing checkpoint layout produced by model training pipelines.** Out of scope; this OEP works with whatever file layout the model source already contains.
 
 ## Proposal
 
@@ -450,9 +450,9 @@ on, forwarding to `/file_metadata/local` to avoid loops.
 A concrete cluster_cache implementation would look like:
 
 1. Keep `/file_metadata` as the source directory manifest API. It lists objects
-   under the source prefix, normalizes internal source schemes to `s3://`, returns
-   concrete object paths plus size/mtime/etag metadata, and caches listing
-   results in the daemon LRU.
+   under the source prefix, normalizes any provider-specific source scheme
+   aliases to `s3://`, returns concrete object paths plus size/mtime/etag
+   metadata, and caches listing results in the daemon LRU.
 2. Use `/fetch` on a small metadata file such as `config.json` to learn the
    daemon chunk size, then use `/ring_info` and `/packed_byte_ranges_by_key` for
    bounded byte reads. The OME provider computes chunk offsets and routes each
@@ -487,7 +487,7 @@ GET /file_metadata?path=<remote-root>
 Accepted roots:
 
 - `s3://bucket/prefix`
-- internal-scheme roots, normalized by cluster_cache to
+- provider-specific source scheme aliases, normalized by cluster_cache to
   `s3://bucket/prefix`
 
 Response:
