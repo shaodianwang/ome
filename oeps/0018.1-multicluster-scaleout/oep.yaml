@@ -17,7 +17,6 @@ approvers:
 # load-balanced serving".
 see-also:
   - "/oeps/0018-multi-cluster-placement" # the single-active base this builds on
-  - "/oeps/0009-ome-cluster-cache-integration" # model-weight locality per cluster (pre-staging assumption holds)
   - "/oeps/0013-autoscaling" # per-cluster autoscaling must now be apportioned across homes
 
 replaces: []
