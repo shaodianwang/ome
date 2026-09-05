@@ -76,9 +76,10 @@ silent placement failure that no test can catch.
 **Failure mode 2 — there is no performance or regression gate of any kind.** OME
 has modest-scale correctness specs and a handful of unit-level `Benchmark`s, but
 nothing that drives reconcile throughput at scale and asserts a latency or
-utilization bound. The research baseline for this OEP
-(`docs/research/2026-06-26-kueue-ome-mc-study.md`) found the multi-cluster code
-ships at client-go default rate limits (5 QPS / 10 burst), placement at
+utilization bound. The research baseline for this OEP (a 2026-06-26 code study
+of Kueue's MultiKueue implementation against OME's multi-cluster controllers)
+found the multi-cluster code ships at client-go default rate limits (5 QPS / 10
+burst), placement at
 `MaxConcurrentReconciles` 1, and a 30s status poll — exactly the class of scaling
 choice a perf harness exists to catch *before* it reaches a 3-cluster production
 fleet. Without a gate, a 2× reconcile-latency regression merges green and is
@@ -93,8 +94,8 @@ and swallows the resulting conflicts (`simulators.go:281`, "a conflict on the ne
 tick retries naturally"). That best-effort-poll-against-a-racing-reconciler shape
 is inherently timing-dependent. It already cost us the envtest `coordination/` and
 `omenative/` suites: they were **deleted** because the simulator's races made them
-chronically flaky (recorded in `CLAUDE.md`, "PodKubeletSimulator races made them
-chronically flaky"). The consequence is a coverage cliff: authoritative
+chronically flaky (the suite documentation records the deletion and its cause).
+The consequence is a coverage cliff: authoritative
 pod-lifecycle behavior now lives only in KIND, which is a soft-fail step outside the
 default CI gate.
 
@@ -113,8 +114,9 @@ but execute nothing — e.g. the entire `bluegreen_kind_test.go` failure block,
 policy (e.g. `webhook/inferenceservice/coordination_test.go:239,246,253`). A reader
 counting specs over-counts what is actually asserted. Separately, the KIND timing
 slacks are magic literals baked into Go (`kindShortTimeout=30s` etc.), so a slow CI
-host can only be accommodated by editing code — a CLAUDE.md hard-blocker
-(no behavioral magic values in the binary) that this suite currently violates.
+host can only be accommodated by editing code — a hard-blocker under the
+repository's developer guidelines (no behavioral magic values in the binary)
+that this suite currently violates.
 
 ### Goals
 
@@ -197,7 +199,7 @@ Kueue's lifecycle shape (`framework.Init` / `SetupClient` / `StartManager` /
    via `clientcmd.Write` (`pkg/util/testing/kubeconfig.go:102-107`); the MultiKueue
    suite calls it through `cluster.kubeConfigBytes()`
    (`multikueue/suite_test.go:80-82`). OME needs the same helper. *No-magic-values
-   note (CLAUDE.md):* the cluster/user/context **names** in that helper
+   note:* the cluster/user/context **names** in that helper
    (`"default-cluster"`, `"default-user"`, `"default-context"`) are internal
    kubeconfig keys, not behavioral or user-facing values — they never leave the test
    process — so a fixed identifier is acceptable here. There is no production default
@@ -210,8 +212,7 @@ Kueue's lifecycle shape (`framework.Init` / `SetupClient` / `StartManager` /
    kubeconfigs produce real errors. Kueue's `setup_test.go:221,449` deliberately
    feeds missing-Secret, CA-as-path, tokenFile, and insecure kubeconfigs and asserts
    the cluster CR's reason — which is exactly the threat model
-   `workloadcluster/connection.go` already implements
-   (`docs/research/2026-06-26-kueue-ome-mc-study.md`, Part 1). The fake-client tests
+   `workloadcluster/connection.go` already implements. The fake-client tests
    can never reach this code.
 
 **The one required test seam (called out, not silent).** To wire `placement` +
@@ -344,8 +345,8 @@ only with evidence.
 
 ### Part 5: KIND / CI hygiene
 
-**Why.** Failure mode 5 (overstated coverage) plus a CLAUDE.md hard-blocker (magic
-timing values).
+**Why.** Failure mode 5 (overstated coverage) plus a no-magic-values hard-blocker
+(magic timing values).
 
 **The contract — five concrete cleanups:**
 
@@ -353,7 +354,7 @@ timing values).
    production default, and it has a KIND suite
    (`tests/integration/singlecluster/controller/irmanaged_kind/`), but CI runs only
    `omenative_coordination_kind`, soft-fail, because the CI agents expose no Docker
-   daemon (`CLAUDE.md`). When the CI agents get Docker, the default path's KIND suite
+   daemon. When the CI agents get Docker, the default path's KIND suite
    must become a gating step. *Integration note for the maintainer:* this is a
    CI-pipeline + Makefile wiring change, owned outside this OEP's file scope.
 2. **Prune the 13 dead `PIt` and 8 dead `Skip` stubs.** A `ginkgo.PIt("…", func(){})`
@@ -365,13 +366,15 @@ timing values).
    them.
 3. **Config-drive the KIND timing slacks.** `kindShortTimeout=30s` /
    `kindMediumTimeout=2m` / `kindLongTimeout=5m` and the 100ms poll are tuned for one
-   host's kubelet latency and are baked into Go. Per CLAUDE.md (no behavioral magic
-   values in the binary), move them to an env-overridable knob with the current value
+   host's kubelet latency and are baked into Go. Per the no-magic-values rule (no
+   behavioral magic values in the binary), move them to an env-overridable knob with
+   the current value
    as the *config* default (not an in-code literal that silently wins), so a slow CI
    host needs no code edit.
 4. **Codify "new pod-lifecycle assertions go to KIND, not envtest."** The
    `PodKubeletSimulator` flake (failure mode 3) is structural; the durable mitigation
-   is a written rule, in `CLAUDE.md` and the suite docs, that any *new* assertion
+   is a written rule, in the developer documentation and the suite docs, that any
+   *new* assertion
    about drain ordering, recreate timing, in-place convergence, or readiness-gate
    flips lands in a KIND suite. envtest keeps webhooks, defaulters, and
    non-pod-lifecycle reconcile logic.
@@ -419,7 +422,7 @@ simulator would re-import its flake into the one place that must be deterministi
 produce a stable threshold. Kueue keeps these separate for the same reason — its
 perf runner has its own `controller.go`, not its integration helpers.
 
-**No-magic-values audit (CLAUDE.md hard-blocker).** Every tunable this OEP
+**No-magic-values audit (repository hard-blocker).** Every tunable this OEP
 introduces — apiserver inflight limits, harness load size, rangespec thresholds,
 KIND timing slacks, MC poll cadence — is a **flag or a checked-in config file**, with
 no in-code default that silently wins. The single fixed-string exception (kubeconfig
@@ -455,8 +458,8 @@ This OEP *is* test plan, so "test plan" here means how we validate the harness i
   worked example.
 - **Beta:** Part 2 lands with a calibrated `rangespec.yaml` for ISVC reconcile
   throughput and a CI job that runs the checker; Part 5's prunes are done and the
-  KIND timing slacks are config-driven. The "pod-lifecycle → KIND" rule is in
-  `CLAUDE.md`.
+  KIND timing slacks are config-driven. The "pod-lifecycle → KIND" rule is in the
+  developer documentation.
 - **Stable:** the MC perf sweep (placement fan-out across the three in-process
   clusters) is calibrated and gating; `irmanaged_kind` runs in CI as a gating step
   (gated on Docker availability on the agents).
