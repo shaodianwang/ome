@@ -9,9 +9,8 @@ reviewers:
 approvers:
   - TBD
 
-# Related surfaces (data locality, quota, autoscaling that this leans on):
+# Related surfaces (quota, autoscaling that this leans on):
 see-also:
-  - "/oeps/0009-ome-cluster-cache-integration" # model-weight locality per cluster
   - "/oeps/0013-autoscaling"                    # per-cluster autoscaling interacts with per-cluster quota
 
 stage: alpha
