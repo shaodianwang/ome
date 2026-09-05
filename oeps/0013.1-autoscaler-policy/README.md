@@ -3,7 +3,7 @@
 > **Status: provisional.** Follow-up to OEP-0013 (component-scoped
 > autoscaling). Additive: one new layer in 0013's resolution chain; its
 > verbatim pass-through contract is preserved. Nothing here is implemented.
-> Source line references are as of `main@a17f709a` (2026-09-01).
+> Source line references are as of the tree at 2026-09-01 and may drift.
 
 <!-- toc -->
 - [Summary](#summary)
@@ -95,8 +95,8 @@ That repetition is three live failure modes:
 
 One service in the same fleet legitimately scales on a different, bespoke
 metric — so any fix that hardcodes the standard query into OME breaks the
-exception *and* bakes org-specific PromQL into an upstreamed binary (the
-repo's hardest blocker).
+exception *and* bakes organization-specific PromQL into the OME binary (a
+hardcoded behavioral value, which the project forbids).
 
 Why not the existing mechanisms: inline blocks are the escape hatch, not a
 fleet surface (above). Runtime-carried defaults have the wrong ownership axis
@@ -283,8 +283,8 @@ N:1 config earns a referenced object. This is N:1 by its whole point: the 1:1
 encoding was tried (1,157 duplicated lines, three desync-prone values, a live
 multi-cluster hazard); reuse-by-reference is already the repo convention
 (ServingRuntime, AcceleratorClass, AcceleratorQuota); a typed `strategy:`
-field would compile org PromQL into an upstreamed binary — a cost 0011 never
-faced; and the ecosystem is converging on the same shape (KServe
+field would compile organization-specific PromQL into the OME binary — a cost
+0011 never faced; and the ecosystem is converging on the same shape (KServe
 `LLMInferenceServiceConfig`; kedacore/keda#2757 has asked for exactly this
 templating since 2022). The inline field is not displaced — which is also
 GEP-713's own 2025 conclusion ("in many cases it will be better to include
@@ -906,7 +906,7 @@ rollback is one `git revert`.
   ref; renders every pair.
 - **7** — the exception graduates only when a second consumer appears: a
   sibling policy authored from its live inline block, verified by the
-  stage-3/4 diff protocol. (Its `probe_requests_total` is a *counter*: the
+  stage-3/4 diff protocol. (Its activity metric is a *counter*: the
   activity term must be a windowed `rate()` — a bare `sum(counter) > bool 0`
   latches true forever.)
 - **R** — global rollback any time: revert the cutover PRs; inline precedence
@@ -928,7 +928,7 @@ rollback is one `git revert`.
 5. Config: the `autoscalerPolicy` block + chart values.
 6. Multi-cluster: preflight, homes[] fields, funnel lift, ResolveTimeout +
    FieldPruned detectors; MC integration tests.
-7. KIND specs (classified in `KIND_SPEC_GROUPS`) + perf rangespecs.
+7. KIND specs + perf rangespecs.
 8. `ome-policy` CLI (`cmd/ome-policy`, thin over the render package) + CI
    wiring docs + the Argo health-check snippet.
 
@@ -942,7 +942,7 @@ The OEP itself lands first (provisional → implementable before PR 1 merges).
 | Unit | reconcilers/autoscaler | precedence × {inline, runtime, legacy, default} × Raw/OMENative parity; fail-closed branches; bounds-stamp-during-freeze; Raw annotation LKG recovery |
 | envtest webhook | `singlecluster/webhook/autoscalerpolicy` | class↔template coherence; `Required` rejection; template + metadata-key rules; providerRef required; AverageValue force; explicit ignoreNullValues; feature-disabled ref rejection; ref+inline coexistence admitted; in-use DELETE denied / admitted at zero refs / break-glass / terminating ns; Split+ref+unset-cap warning |
 | envtest controller | `singlecluster/controller/autoscalerpolicy` | policy status (Ready, digest, count); index fan-out; LKG freeze on delete/invalid; dangling-ref ISVC still converges unrelated spec changes (success on NotFound, no requeue storm); preview digests; MultiNode condition |
-| KIND | new specs in `KIND_SPEC_GROUPS` | cutover SO-UID stability; in-place SO update, zero pod churn; KEDA-absent fail-closed; fake-Prometheus outage ⇒ fallback pins max; paused-canary tracked-keys survive a policy edit |
+| KIND | new KIND specs | cutover SO-UID stability; in-place SO update, zero pod churn; KEDA-absent fail-closed; fake-Prometheus outage ⇒ fallback pins max; paused-canary tracked-keys survive a policy edit |
 | Multi-cluster | `tests/integration/multicluster` | label gate; digest mismatch ⇒ ineligible; member GET timeout ⇒ member ineligible, placement proceeds; Split derive ⇒ per-home literals, never global; Split hard gate holds; FieldPruned; ResolveTimeout; Single race among capable homes only |
 | Perf (rangespec) | `tests/perf` | render p99 <1ms cached / <20ms cold; 1,000-consumer policy-edit convergence <2min; zero SO writes on no-op reconciles |
 | CI (GitOps repo) | `ome-policy check` | all policies × ISVCs rendered + PromQL-parsed; SO-diff PR artifact; `--require-ref`; digest equality raw-file == live object |
@@ -1001,14 +1001,16 @@ verified evidence base (weighted means; weights in parentheses):
   derive-time per-home bounds; no runtime provenance. Survives as the
   `ome-policy check` CLI inside G1.
 - **C — inline semantic field (6.68):** compiles the org query shape into OME
-  (hard blocker); fleet changes stay 24-file sweeps; old-apiserver field
-  pruning ⇒ silent default-HPA. Its typed-ValueSource idea is absorbed.
+  (a forbidden hardcoded value); fleet changes stay 24-file sweeps;
+  old-apiserver field pruning ⇒ silent default-HPA. Its typed-ValueSource
+  idea is absorbed.
 - **D — ConfigMap store (5.77):** the Knative anti-lesson — no schema, status,
   or review unit; invisible to Argo health.
 - **E — ServingRuntime inheritance (5.43):** wrong ownership axis; verbatim
   block ⇒ a runtime fork per max value; an explicit non-goal.
 - **F — namespace label → built-in strategy (3.80):** org behavior compiled
-  into Go; invisible attachment; violates the hardcode blocker outright.
+  into Go; invisible attachment; violates the no-hardcoded-behavior rule
+  outright.
 - **G1 — namespaced CRD, explicit ref (8.13): chosen.** Wins every top-weight
   criterion; loses only the two cost axes.
 - **G2 — selector attachment (6.42):** conflict machinery, invisible binding,
