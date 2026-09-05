@@ -2,8 +2,7 @@
 
 > **Status: provisional.** Follow-up to OEP-0017 (composable rollout groups).
 > Additive: the group grammar and every admission rejection are preserved.
-> Nothing here is implemented. Source references are as of `main@e5208902`
-> (2026-09-02).
+> Nothing here is implemented. Source references are as of 2026-09-02.
 
 <!-- toc -->
 - [Summary](#summary)
@@ -100,7 +99,7 @@ because a drifted copy fails open:
 3. **Mid-flight edits are live and unguarded — today, for everyone.** Every
    rollout consumer re-reads `spec.rollout` each reconcile and indexes the
    live plan with a persisted counter (`plan.Steps[cs.CurrentStep]`,
-   `omenative/canary/reconciler.go`). Concretely, on `main@e5208902`:
+   `omenative/canary/reconciler.go`). Concretely, as of 2026-09-02:
    shrinking the step list below the current index hits the done sentinel and
    the canary *instantly completes* — every instance rolls onto the canary
    revision with the remaining gates skipped; editing the current step can
@@ -723,7 +722,7 @@ whose only progression is the ref reads as a bare group and would execute the
 **default blueGreen** — the forbidden un-gate, arriving precisely during a
 platform rollback. No in-cluster actor survives the downgrade to detect it.
 Mitigations: (a) the operational gate — before downgrading the controller,
-inflate refs to inline (the OME CLI (`kubectl-ome`, maintained upstream) renders the diff; the bulk flow is one
+inflate refs to inline (the OME CLI, `kubectl-ome`, renders the diff; the bulk flow is one
 annotation sweep), mirroring OEP-0013.1's stage-R rule; (b) this row in the
 risk register, so the release runbook carries it; (c) an open question
 ([Open Questions](#open-questions)) on whether a CRD/CEL posture can make a
@@ -985,7 +984,7 @@ are per-service and revert with a PR.
 7. Multi-cluster: inflate-at-derive, capability-label + provider preflight,
    manual-Pause warning, funnel lift of run digests; MC integration tests.
 8. KIND specs (classified in `KIND_SPEC_GROUPS`) + perf rangespecs;
-   OME CLI (`kubectl-ome`, upstream) policy-verb extension + CI wiring docs — the CLI lives in the public repo and links the same shared packages, so it is authored there, not here.
+   OME CLI (`kubectl-ome`) policy-verb extension + CI wiring docs — the CLI links the same shared packages as the controller, so the validation and digest code is shared, not duplicated.
 
 The OEP lands first (provisional → implementable before step 1 merges).
 
