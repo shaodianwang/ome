@@ -1309,7 +1309,7 @@ helper.
 - TBD: Proportional scaling coordinator.
 - TBD: Bundled Prometheus Helm template under
   `charts/ome-resources/templates/prometheus*.yaml`.
-- 2026-06-01: **Slice 6 completed — legacy fields hard-deleted.**
+- 2026-06-01: **Legacy fields hard-deleted.**
   `ComponentExtensionSpec.ScaleTarget`, `ComponentExtensionSpec.ScaleMetric`,
   and the `ScaleMetric` enum (`MetricCPU` / `MetricMemory` / `MetricTPS`
   constants) are removed from `pkg/apis/ome/v1beta1/component.go`. The
@@ -1344,7 +1344,7 @@ helper.
   type signatures in their CRDs.
 - ~~Two valid spec shapes (legacy `ScaleMetric` / `ScaleTarget` + new
   `Autoscaler` block) coexist on the HPA path through Alpha.~~
-  Resolved 2026-06-01: Slice 6 hard-deleted the legacy fields. The
+  Resolved 2026-06-01: the legacy fields were hard-deleted. The
   per-Component `Autoscaler` block is now the only authoring surface
   (the `ome.io/autoscalerClass` annotation is still consulted for the
   Raw Deployment dispatch; its removal is deferred to Stable
