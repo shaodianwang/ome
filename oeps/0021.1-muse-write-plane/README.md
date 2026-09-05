@@ -62,12 +62,10 @@ intervening feasibility work made concrete:
    its blast radius is "can open a PR," not "can mutate any cluster." That is
    strictly smaller than direct-write, and it keeps the read plane's read-only
    guarantee intact across the whole product.
-3. **The sanctioned internal pattern is already GitOps.** The OME
-   `InferenceService`/`ServingRuntime` deploy path today is a Helm chart committed
-   to the GitOps repository and reconciled by Argo CD, and the internal design of
-   record for programmatic deploys is "convert input → CR → commit to
-   GitHub → Argo applies". PR-per-write *is* that pattern; direct-write
-   would fork it.
+3. **The deploy path is already GitOps.** Where OME is deployed via a GitOps
+   repository reconciled by Argo CD, the established programmatic path is
+   "convert input → CR → commit → Argo applies". PR-per-write *is* that
+   pattern; direct-write would fork it.
 
 The honest cost is stated in Non-Goals and Drawbacks: **day-2 operations become PR
 round-trips.** A replica bump is open-PR → review → merge → Argo-sync, not an
@@ -178,17 +176,16 @@ is a separate token obtained separately (below).
 **Approach (how).** Options:
 
   a) **Verify the gateway `jwt_header`.** MUSE is already fronted by the gateway.
-     Verify the JWT signature against the gateway's published public key (accepting
-     current+next `kid`, since the key rotates monthly), validate `exp` yourself
-     (the sanctioned in-house crypto libraries verify the signature but *not*
-     claims), and restrict `muse-writer` to the gateway with a CiliumNetworkPolicy
-     so the header cannot be injected off-path. *Tradeoff:* smallest new surface,
-     but the sanctioned verifier libraries have no Rust implementation — so
-     `muse-writer` verifies against the exported public key with a Rust JOSE
-     library, a real, bounded cost, and it must get rotation right or identity
-     breaks for a few milliseconds each month.
+     Verify the JWT signature against the gateway's published public key (accept
+     the current and next `kid` so key rotation does not break identity), validate
+     `exp`/`iss`/`aud` explicitly rather than assuming the verifier does, and
+     restrict `muse-writer` to gateway-originated traffic with a NetworkPolicy so
+     the header cannot be injected off-path. *Tradeoff:* smallest new surface, but
+     `muse-writer` must carry its own JOSE verification in Rust and must get key
+     rotation right.
   b) **App-run OIDC** (the ArgoCD/Kargo precedent): `muse-writer` runs its own
-     corporate-IdP OIDC login (PKCE), reading `email`/`username`/`groups`.
+     OIDC login (PKCE) against the deployment's identity provider, reading
+     `email`/`username`/`groups`.
      *Tradeoff:* richer claims (group-based authz for free) and path-independent,
      but a full OIDC + session flow to build.
 
@@ -210,7 +207,7 @@ write is produced, and it is always reviewable.
 
 ### The change pipeline (how)
 
-Two stages, both anchored to sanctioned patterns:
+Two stages, both anchored to established patterns:
 
 1. **Validate without cluster-write.** We deliberately grant `muse-writer` no
    cluster verbs — not even a server dry-run, which requires `create`/`patch`
@@ -228,11 +225,11 @@ Two stages, both anchored to sanctioned patterns:
      leaves semantic rules to the webhook; reimplementing OME's semantic validation
      in Rust is explicitly out of scope (drift risk).
 2. **Render + open the PR as the user.** Use a **first-party GitHub App with the
-   OAuth user-access-token flow** — a pattern an existing internal app already
-   ships in production: the user does a one-time "Login with GitHub," MUSE stores
+   OAuth user-access-token flow** — the flow GitHub documents for Apps acting on
+   a user's behalf: the user does a one-time "Login with GitHub," MUSE stores
    their `ghu_` token (encrypted, server-side, short-lived), and opens the
    branch/commit/PR *as them*, so the PR is attributed to the user. If a user has
-   not linked GitHub, the fallback is an installation token (`ghs_`, the existing
+   not linked GitHub, the fallback is an installation token (`ghs_`, the
    bot-committer pattern) — but that PR is **bot-attributed**, which loses goal #3,
    so it is a fallback, not the default.
 
@@ -248,7 +245,7 @@ I recommend the **source-CR model**, because it keeps the write plane consistent
 with OEP-0018 and avoids MUSE learning per-cluster layout. But it depends on a fact
 I cannot yet confirm: whether the GitOps/Argo flow reconciles into a control-plane
 cluster *running OEP-0018 placement*, or applies `InferenceService`/`ServingRuntime`
-directly to workload clusters (as the existing deploy chart appears to). If the
+directly to workload clusters (as a per-cluster deploy chart would). If the
 latter, MUSE must emit a *concrete* per-cluster CR instead. This is Open Question #1;
 it blocks nothing in slices 0–1 except the exact render target.
 
@@ -271,30 +268,20 @@ write.
 
 ### Where `muse-writer` runs
 
-A separate deployment in the management-plane cluster, beside `muse-server`. It
-holds the GitHub App key + per-user OAuth tokens and egresses to
-`github.com`/`api.github.com`. Egress is already available there: the cluster's
-egress policy imports the platform's shared CI/CD domain list, whose
-`(.*\.)?github\.com` regex covers both hosts — so no allowlist diff is needed.
-The one requirement is that `muse-writer`'s pod opts into the cluster's pod
-identity (a pod annotation); MUSE's chart today mints only the
-chat-proxy mTLS cert, a *separate* credential. Verify allow/deny in the egress
-proxy's audit log; a 403 after opting in is an identity gap, not a missing domain.
-Do **not** set an explicit `HTTPS_PROXY` — egress on this platform is transparent,
-and pointing at a forward proxy breaks it (a prior bring-up hit exactly this).
+A separate deployment in the same cluster as `muse-server`. It holds the GitHub
+App key and per-user OAuth tokens and needs egress to `github.com` and
+`api.github.com`. Operators must permit that egress in whatever network/egress
+policy governs the cluster and grant the pod any workload identity the egress
+path requires; MUSE's chart mints no such identity today. If egress is proxied
+transparently, do not also set an explicit `HTTPS_PROXY` — a forward proxy layered
+on transparent egress breaks the connection.
 
 ### Why this is mostly assembly
 
-Every non-trivial piece has a sanctioned internal precedent, which is why the risk
-is integration, not invention:
-
-- identity verification → the gateway's `jwt_header` plugin + its signing-key
-  infrastructure (an existing production service is a working consumer);
-- PR-as-user → an existing internal app's user-token flow; bot fallback → the
-  existing installation-token bot committer;
-- CR-commit-for-Argo → the internal design of record and the existing deploy
-  chart;
-- egress → already covered by the platform's shared CI/CD domain list.
+Every non-trivial piece is a well-trodden pattern, which is why the risk is
+integration, not invention: gateway-injected JWT verification (standard JOSE), the
+GitHub App user-access-token flow (documented by GitHub; installation tokens as
+the bot fallback), and commit-a-CR-for-Argo (ordinary GitOps).
 
 The one genuinely new piece is the Rust-side gateway-JWT verification plus the
 pipeline glue.
@@ -353,13 +340,14 @@ once the App + egress land:
    records. Rejected — it is the exact "unaudited button" failure mode this OEP
    exists to avoid.
 2. **Bot-attributed PRs only (installation token).** *Tradeoff:* simplest (no
-   per-user OAuth), but every PR is `[bot]`, losing goal #3. The team behind the
-   precedent app hit this and added the user-token flow specifically to fix it.
-   Rejected as the default; kept as the link-less fallback.
+   per-user OAuth), but every PR is `[bot]`, losing goal #3 — the attribution
+   loss the user-token flow exists to fix. Rejected as the default; kept as the
+   link-less fallback.
 3. **OIDC → github.com token exchange.** *Tradeoff:* would avoid per-user GitHub
-   OAuth entirely, but no such exchange exists today (the GitHub org shares the
-   corporate SAML IdP for interactive login, but there is no OIDC→github-API token
-   exchange), so it is net-new token-exchange (crypto) work. Rejected for v1.
+   OAuth entirely, but no such exchange exists today (SAML SSO into a GitHub org
+   authenticates interactive logins but does not yield API tokens, and GitHub
+   offers no OIDC-to-API-token exchange), so it is net-new token-exchange
+   (crypto) work. Rejected for v1.
 4. **Fold the write plane into `muse-server`.** *Tradeoff:* one fewer process, but
    the read plane inherits GitHub tokens + egress. Rejected on trust-domain grounds.
 
@@ -369,14 +357,14 @@ once the App + egress land:
    scaffolding). Does the GitOps/Argo flow reconcile into a control-plane cluster
    running OEP-0018 placement (→ emit a source CR), or apply directly to workload
    clusters (→ emit a concrete per-cluster CR)? Owner: `TBD` (confirm with the
-   deploy-chart owners).
-2. **Which repo + path.** The repo the existing bot committer writes to today, or a
-   dedicated config repo? Owner: `TBD`.
+   GitOps repository owners).
+2. **Which repo + path.** The GitOps repo Argo already reconciles, or a dedicated
+   config repo? Owner: `TBD`.
 3. **Identity: gateway JWT vs app-run OIDC — final call.** (a) ships v1; (b) is the
    group-RBAC upgrade. When do we actually need groups? Owner: `TBD`.
 4. **GitHub App onboarding owner.** A first-party App (secret-store ACLs, scheduled
-   token rotation, `github.com` egress policy) must be filed with the owning
-   oncall. Owner: `TBD`.
+   token rotation, `github.com` egress policy) must be requested from whoever
+   administers the GitHub org and the cluster's egress policy. Owner: `TBD`.
 5. **Authz model.** Who may open a PR, to which environments/namespaces? v1 can start
    with an allowlist; the fuller model is `TBD`.
 
