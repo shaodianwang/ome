@@ -1,0 +1,82 @@
+# The same 32 chips, split against capacity the members measured themselves.
+#
+#   root                  Cohort        32 chips
+#   └── mc-demo           Cohort        32 chips, travels budget-less
+#       └── mc-demo-serving  ClusterQueue  32 chips  ns ome-mc-test
+#                                          Proportional (the manager's default)
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     apply -f hack/quota-mc-demo/fixtures/11-tree-proportional.yaml
+#
+# No node names a policy, so the hub's configured default applies — it runs with
+# --default-distribution-policy=Proportional. The split is taken against the
+# allocatable capacity each member reported on its OWN root, not against
+# anything authored here. Read the denominators first:
+#
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-rc-1  get aq root -o jsonpath='{.status.capacity}'
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq root -o jsonpath='{.status.capacity}'
+#
+# then read what the hub resolved:
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     get aq mc-demo-serving -o jsonpath='{.status.budgets[0].perCluster}'
+#
+# This is the fixture that proves the capacity read is live rather than
+# fixtured: the shares move when nodes are cordoned or a pool is added, and no
+# number here says anything about hardware.
+#
+# It is NOT the fixture to run the ISVC demos against. rc-1's allocatable dwarfs
+# dev-1's, so 32 chips apportion to roughly 30 and 2 — dev-1's share cannot fund
+# even one 4-chip replica of mc-demo-tpu, and every placement lands on one
+# member. Use 10-tree-explicit.yaml for those.
+#
+# Shares are snapshotted at reconcile and held between passes, so they do not
+# drift under you mid-demo. They will move on the next resync (the hub runs
+# --resync-interval=10m) if capacity has changed.
+#
+# The node names are shared with 10-tree-explicit.yaml, so applying one after
+# the other retargets the same tree in place. Run one at a time.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32
+---
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: mc-demo
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32
+---
+# No distribution block and no per-budget policy: the manager's default decides.
+# Proportional computes the split from capacity, so perCluster means nothing
+# under it. Note where that is and is not enforced — a CEL rule on the CRD
+# rejects perCluster only when the policy is named Proportional explicitly, and
+# this node names no policy at all, so the rule's guard never fires. A stray
+# perCluster here is admitted and then silently ignored by the split.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: mc-demo-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: mc-demo
+  namespaces:
+  - ome-mc-test
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32

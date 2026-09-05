@@ -1,0 +1,257 @@
+# A real TPU serving runtime: JAX on live tpu7x chips, behind an OpenAI-shaped
+# HTTP API. Namespaced to ome-mc-test, applied to a MEMBER.
+#
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 \
+#     apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
+#
+# WHAT IS AND IS NOT REAL HERE
+#
+# Real: the chips. The container is the vLLM TPU image the fleet already pulls,
+# JAX initializes against libtpu, the pods claim 4 google.com/tpu each, and every
+# request runs a matmul on a TPU device and reports the timing.
+#
+# Not real: the weights. There is no model. /v1/chat/completions answers in
+# OpenAI's response shape with text describing the mesh it ran on, which is
+# enough to point a client at and enough to prove the accelerator is live, and is
+# not a language model.
+#
+# Serving an actual LLM here would not be minimal and would not fit the demo.
+# The production path on this fleet is the internal msl-tpu-kernel vLLM fork with
+# tensor-parallel-size=16, 500-800Gi of memory, a Ray leader/worker bootstrap, an
+# XLA warm-cache tarball and a checkpoint mounted from a per-cluster GCS bucket
+# over the gcsfuse CSI driver. One replica of that is 16 chips -- an entire
+# member's budget under 10-tree-explicit.yaml -- so it could not demonstrate a
+# quota ceiling at all.
+#
+# WHY 2x2x2 AND NOT A SINGLE POD
+#
+# A single 4-chip pod would be simpler, and works on a 2x2x1 single-host pool.
+# Only one member has those: the other carries 2x2x2 and larger, where a lone pod
+# half-claims a two-host slice. 2x2x2 (1 leader + 1 worker = 2 pods = 8 chips) is
+# the smallest shape both members can actually schedule, and is the shape already
+# proven running on this fleet.
+#
+# 8 chips per replica means a 16-chip member share funds exactly TWO replicas.
+# That is a different budget arithmetic from 01-runtime.yaml, which is 4 chips per
+# replica; the two runtimes are for different jobs and the ISVC fixtures for each
+# are numbered to match.
+#
+# Multi-host TPU needs three things lined up, all of them below:
+#   - topologyKey on the ISVC (not here) co-locates leader and worker in ONE
+#     slice. Without it the two pods land in different slices and libtpu never
+#     forms a mesh. See 41-isvc-tpu-jax.yaml.
+#   - schedulerName: ome-scheduler, per component. The gang needs OMEGangPack to
+#     place both pods together or neither.
+#   - OME injects TPU_WORKER_ID and TPU_PROCESS_ADDRESSES into both pods, and
+#     libtpu reads them directly, so a plain `import jax` joins the mesh. Do NOT
+#     call jax.distributed.initialize() or set TPU_* by hand; both fight it.
+#
+# READING THE DEVICE COUNTS, because they are easy to misread as chips. Measured
+# on a live 2x2x2 gang: both pods report global=16, local=8, with the two hosts
+# at process_index 0 and 1 and coords spanning z=0 and z=1. Those are CORES.
+# tpu7x is two cores per chip, so 16 cores = 8 chips = 2 hosts x 4 chips, and 4
+# chips per host is exactly the google.com/tpu: 4 each pod requests. A host that
+# failed to join the mesh would report global=8, not an error.
+apiVersion: ome.io/v1beta1
+kind: ServingRuntime
+metadata:
+  name: mc-demo-tpu-jax
+  namespace: ome-mc-test
+  labels:
+    ome.io/mc-demo: "true"
+spec:
+  disabled: false
+  protocolVersions:
+  - openAI
+  engineConfig:
+    leader:
+      schedulerName: ome-scheduler
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x2
+      tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      runner:
+        name: ome-container
+        image: 168653207203.dkr.ecr.us-west-2.amazonaws.com/pt_dockerio/vllm/vllm-tpu:nightly-20260428-99e0d15-fd74c90
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        # The probe is an HTTP GET, so the server must not start unless the TPU
+        # came up — otherwise a dead accelerator reports Ready, which is the one
+        # failure this runtime would otherwise hide.
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 30
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi
+            google.com/tpu: "4"
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -uo pipefail
+          cat >/tmp/tpu_api.py <<'PY'
+          import json, os, time, uuid
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          import jax, jax.numpy as jnp
+
+          NDEV, LOCAL = jax.device_count(), jax.local_device_count()
+          print(f"JAX {jax.__version__} global={NDEV} local={LOCAL} "
+                f"devices={jax.local_devices()}", flush=True)
+
+          # Committed to one LOCAL device on purpose. This process is one host of
+          # a multi-host mesh, and a computation over a global array is a
+          # collective every host must join -- the worker is not running this
+          # code, so a collective here would hang the server forever.
+          _dev = jax.local_devices()[0]
+          _x = jax.device_put(jnp.arange(512 * 512, dtype=jnp.float32).reshape(512, 512), _dev)
+
+          def on_tpu():
+              t0 = time.perf_counter()
+              v = float(jnp.sum(_x @ _x.T))
+              return v, (time.perf_counter() - t0) * 1000.0
+
+          on_tpu()  # compile once, before anything is served
+          MODEL = os.environ.get("SERVED_MODEL_NAME", "tpu-jax-echo")
+
+          class H(BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
+              def log_message(self, *a): pass
+              def _send(self, code, obj):
+                  body = json.dumps(obj).encode()
+                  self.send_response(code)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def do_GET(self):
+                  p = self.path.split("?")[0].rstrip("/")
+                  if p in ("", "/health"):
+                      v, ms = on_tpu()
+                      self._send(200, {"status": "ok", "jax": jax.__version__,
+                                       "global_devices": NDEV, "local_devices": LOCAL,
+                                       "device": str(_dev), "probe_ms": round(ms, 2)})
+                  elif p == "/v1/models":
+                      self._send(200, {"object": "list", "data": [
+                          {"id": MODEL, "object": "model", "owned_by": "ome"}]})
+                  else:
+                      self._send(404, {"error": {"message": f"no route {p}"}})
+
+              def do_POST(self):
+                  p = self.path.split("?")[0].rstrip("/")
+                  n = int(self.headers.get("Content-Length") or 0)
+                  try:
+                      req = json.loads(self.rfile.read(n) or b"{}")
+                  except Exception:
+                      self._send(400, {"error": {"message": "invalid JSON"}}); return
+                  if p not in ("/v1/chat/completions", "/v1/completions"):
+                      self._send(404, {"error": {"message": f"no route {p}"}}); return
+                  v, ms = on_tpu()
+                  text = (f"Computed on {_dev} in {ms:.2f}ms (reduction {v:.6e}). "
+                          f"This mesh reports {NDEV} JAX devices, {LOCAL} local to "
+                          f"this host. No model is loaded; this is an accelerator "
+                          f"liveness endpoint in OpenAI response shape.")
+                  now, rid = int(time.time()), uuid.uuid4().hex[:24]
+                  if p == "/v1/chat/completions":
+                      self._send(200, {
+                          "id": f"chatcmpl-{rid}", "object": "chat.completion",
+                          "created": now, "model": req.get("model", MODEL),
+                          "choices": [{"index": 0, "finish_reason": "stop",
+                                       "message": {"role": "assistant", "content": text}}],
+                          "usage": {"prompt_tokens": 0, "completion_tokens": 0,
+                                    "total_tokens": 0}})
+                  else:
+                      self._send(200, {
+                          "id": f"cmpl-{rid}", "object": "text_completion",
+                          "created": now, "model": req.get("model", MODEL),
+                          "choices": [{"index": 0, "finish_reason": "stop", "text": text}],
+                          "usage": {"prompt_tokens": 0, "completion_tokens": 0,
+                                    "total_tokens": 0}})
+
+          # The container runs this as PID 1, and the kernel does not apply
+          # default signal dispositions to PID 1 — an unhandled SIGTERM is
+          # discarded, not fatal. Without this the pod ignores every graceful
+          # delete and lingers for the full terminationGracePeriodSeconds (600s
+          # on this fleet) before SIGKILL, which makes teardown, rollout and
+          # scale-down all look wedged.
+          import signal, sys
+          signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+          signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+
+          ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()
+          PY
+          exec python3 /tmp/tpu_api.py
+    worker:
+      schedulerName: ome-scheduler
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x2
+      tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      runner:
+        name: ome-container
+        image: 168653207203.dkr.ecr.us-west-2.amazonaws.com/pt_dockerio/vllm/vllm-tpu:nightly-20260428-99e0d15-fd74c90
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi
+            google.com/tpu: "4"
+        # The worker serves nothing and is never probed. It initializes JAX so
+        # its chips join the mesh, then holds so the mesh stays up for the
+        # leader. Exiting here would tear the leader's mesh down with it.
+        #
+        # `exec sleep infinity` is the obvious way to hold and is WRONG here: it
+        # makes sleep PID 1, and the kernel does not apply default signal
+        # dispositions to PID 1, so an unhandled SIGTERM is discarded rather than
+        # fatal. Measured on this fleet — the pod ignored a graceful delete and
+        # was still Running 13 minutes later, holding its 4 chips, past the whole
+        # 600s terminationGracePeriodSeconds.
+        #
+        # Keeping bash as PID 1 with an explicit trap fixes it: bash installs a
+        # real handler when a trap is set, and `wait` returns as soon as the
+        # signal arrives.
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -uo pipefail
+          python3 -c "
+          import jax
+          print(f'JAX {jax.__version__} global={jax.device_count()} '
+                f'local={jax.local_device_count()} devices={jax.local_devices()}', flush=True)
+          " || { echo 'TPU init FAILED on worker'; sleep 600; exit 1; }
+          trap 'exit 0' TERM INT
+          sleep infinity &
+          wait $!

@@ -1,0 +1,91 @@
+# The demo tree: 32 fleet chips, split by hand, 16 to each member.
+#
+#   root                  Cohort        32 chips, the fleet total
+#   └── mc-demo           Cohort        32 chips, travels budget-less
+#       └── mc-demo-serving  ClusterQueue  32 chips  ns ome-mc-test
+#                                          Explicit: rc-1 16, dev-1 16
+#
+# Applied on the HUB only:
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     apply -f hack/quota-mc-demo/fixtures/10-tree-explicit.yaml
+#
+# The reserved root is declared here. A workload cluster's own controller
+# creates that cluster's root and derives capacity onto it, but the hub runs no
+# such controller for itself: on a management plane the root is the admin's to
+# write, and without it the tiers below have no parent and the tree never
+# assembles.
+#
+# WHY EXPLICIT AND NOT PROPORTIONAL
+#
+# The two members are wildly unequal — rc-1 reports thousands of allocatable
+# chips, dev-1 reports 256 — so Proportional over a 32-chip total gives dev-1
+# barely more than one chip and rc-1 the rest. That is a correct split and a
+# useless demo: dev-1 could not fund a single 4-chip replica, and every ISVC
+# fixture would land entirely on one member. See 11-tree-proportional.yaml for
+# the same tree with the capacity read left to do the work.
+#
+# 16/16 is also self-evidently NOT what the hardware would produce, which is the
+# point: the numbers on the members say which policy ran.
+#
+# perCluster names WorkloadClusters (`kubectl get workloadclusters` on the hub)
+# and its entries MUST sum to nominal — Explicit means the admin's arithmetic is
+# taken verbatim, so a sum that disagrees is a contradiction rather than a hint.
+# Nothing refuses the apply, though: the sum is checked on the projection pass,
+# not at admission, and a tree that fails it stops projecting while still
+# reporting Ready. 12-tree-badsum.yaml is that failure.
+#
+# 16 chips per member is four replicas of mc-demo-tpu. Every ISVC fixture's
+# arithmetic is against that number.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: root
+spec:
+  role: Cohort
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32
+---
+# A grouping tier. It travels to both members as pure topology: a fleet total on
+# a grouping is a number no single cluster holds, and a Cohort materializes as a
+# Kueue Cohort with no resourceGroups, so its budget is never quota anyone can
+# spend — only the containment guardrail the children are checked against.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: mc-demo
+spec:
+  role: Cohort
+  parentRef:
+    name: root
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32
+---
+# The tenant. Its 32 is the fleet-wide figure; each member receives only its own
+# resolved share, and the copy that lands there carries no trace of the split —
+# read `kubectl get aq mc-demo-serving -o yaml` on a member and it says 16.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: mc-demo-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: mc-demo
+  namespaces:
+  - ome-mc-test
+  distribution:
+    policy: Explicit
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32
+    perCluster:
+    - cluster: msl-gcp-usc1-rc-1-tpu
+      nominal: 16
+    - cluster: msl-gcp-usc1-dev-1-tpu
+      nominal: 16

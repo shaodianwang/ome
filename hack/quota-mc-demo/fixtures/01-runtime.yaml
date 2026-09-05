@@ -1,0 +1,102 @@
+# The demo serving runtime. Applied to ALL THREE clusters.
+#
+# One pod per replica, one whole tpu7x node's worth of chips per pod
+# (google.com/tpu: 4 on tpu7x-standard-4t). That is what makes the arithmetic in
+# every fixture below readable: one replica is 4 chips, a 16-chip share is four
+# replicas, and pod count equals node count.
+#
+# Deliberately SINGLE-POD — no leader/worker. A multi-host gang would drag in
+# PodGroups, a topology key and ome-scheduler's co-location plugin, none of
+# which the quota plane touches; the admission story is identical and the
+# failure surface is a fraction of the size. Multi-node is the follow-on, not
+# the first demo.
+#
+# The accelerator label is EXACTLY the tpu7x ResourceFlavor's node label
+# (`kubectl get resourceflavor tpu7x -o yaml` on either member). Keep it that
+# way: Kueue assigns a workload to a flavor only if the pod's own node selection
+# is compatible with that flavor's labels. Narrower is fine — the topology pin
+# below is narrower — but a selector that CONTRADICTS the flavor makes the
+# workload unassignable, and it then sits pending with no quota charged and no
+# obvious reason.
+#
+# 2x2x2 is pinned because it is the one shape BOTH members have free. Measured:
+# dev-1 has 16 schedulable 2x2x2 nodes and rc-1 has 960, while 2x2x1 exists on
+# both and is schedulable on neither but dev-1 — rc-1's 256 are Ready and every
+# one of them cordoned. Pinning a shape a member lacks fails in a way that reads
+# as success: Kueue admits before the scheduler runs, so the budget is charged
+# and ADMITTED climbs while the pods sit Pending on node affinity forever. Verify
+# before demoing, on each member:
+#
+#   kubectl get nodes -l cloud.google.com/gke-tpu-topology=2x2x2 \
+#     -o json | jq '[.items[]|select((.spec.unschedulable // false)==false)]|length'
+#
+# A 2x2x2 slice is two hosts, and this runtime puts ONE pod on one of them, so a
+# replica half-claims a slice. That is fine only because this container never
+# touches libtpu — nothing here forms a TPU mesh, so there is no peer to miss.
+# A workload that actually initializes JAX must take the whole slice; see
+# 40-runtime-tpu-jax.yaml, which is leader+worker for exactly that reason.
+#
+# The nodes carry google.com/tpu=present:NoSchedule, so an untolerated pod sees
+# zero capacity however much quota it holds.
+#
+# The image is a sleep container, not a model server: this demo measures where
+# chips are BUDGETED and ADMITTED, not what runs on them. It is pulled through
+# the ECR mirror both members already use. If it fails to pull, swap it for
+# anything the target clusters can reach — `pt_dockerio/library/nginx:alpine` is
+# in use on both today.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: mc-demo-tpu
+  labels:
+    ome.io/mc-demo: "true"
+spec:
+  disabled: false
+  protocolVersions:
+  - openAI
+  engineConfig:
+    nodeSelector:
+      cloud.google.com/gke-tpu-accelerator: tpu7x
+      cloud.google.com/gke-tpu-topology: 2x2x2
+    tolerations:
+    - key: google.com/tpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
+    runner:
+      name: ome-container
+      image: 168653207203.dkr.ecr.us-west-2.amazonaws.com/pt_dockerio/library/busybox:latest
+      # NOT `sh -c "sleep infinity"`. A shell given one simple command execs it,
+      # so sleep becomes PID 1 — and the kernel does not apply default signal
+      # dispositions to PID 1, so an unhandled SIGTERM is discarded rather than
+      # fatal. The pod then ignores every graceful delete and lingers for the
+      # full terminationGracePeriodSeconds (600s on this fleet) before SIGKILL,
+      # still holding its chips. Measured here on a container built that way.
+      #
+      # Keeping the shell as PID 1 with an explicit trap fixes it: a shell
+      # installs a real handler once a trap is set, and `wait` returns the moment
+      # the signal lands. The bounded sleep in a loop is for busybox ash, whose
+      # sleep takes a number rather than `infinity`.
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        trap 'exit 0' TERM INT
+        while :; do sleep 3600 & wait $!; done
+      ports:
+      - containerPort: 8080
+        name: http
+        protocol: TCP
+      # cpu and memory are token amounts. Both are covered on the materialized
+      # ClusterQueue (the members run --cover-resources=cpu=16M,memory=16Pi), so
+      # Kueue never gates on them and the only budgeted dimension is the chips.
+      # One pod still lands per node regardless: it claims all four of the
+      # node's chips.
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+          google.com/tpu: "4"
+        limits:
+          cpu: "1"
+          memory: 2Gi
+          google.com/tpu: "4"

@@ -1,0 +1,75 @@
+# An Explicit split whose entries do not sum to the total. It is accepted, the
+# hub's tree goes on reading green, and the members end up with nothing.
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     apply -f hack/quota-mc-demo/fixtures/12-tree-badsum.yaml
+#
+# 16 + 8 is 24 against a nominal of 32. Observed on the live fleet:
+#
+#   1. The apply SUCCEEDS. The validating webhook admits it — the object is
+#      created at generation 1, not edited into this state afterwards. Share
+#      arithmetic is not an admission check; the webhook does same-object CEL
+#      and parent resolution, and the sum is re-checked on every projection pass
+#      instead, because a hub re-splits each pass and a source can be edited
+#      between them.
+#
+#   2. NO AcceleratorQuota reaches either member. The leaf resolves to no shares,
+#      so nothing is rendered for any cluster — and because the ancestors of a
+#      leaf are pulled in only when that leaf has a share, the mc-demo cohort is
+#      not rendered either. Both members keep only their own bare root.
+#
+# Read the reason on the hub. It is the only place it exists:
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     get aq -o json | jq -r '.items[] | .metadata.name as $n
+#       | (.status.clusters // [])[] | "\($n) -> \(.cluster): \(.message // "ok")"'
+#
+#   mc-demo-serving -> msl-gcp-usc1-dev-1-tpu: budget google.com/tpu/tpu7x is 32
+#     but its per-cluster shares sum to 24
+#
+# WHAT MAKES IT WORTH DEMOING
+#
+# `kubectl get aq` looks entirely healthy the whole time. Every node reports
+# Ready=True and Degraded=False and the budget columns read exactly as they do on
+# a working tree, because the ShareUnresolved reason the API documents is never
+# actually raised for this. The whole signal is status.clusters[].message, which
+# no column carries — status.sh prints a projection-state section for this
+# reason.
+#
+# WARNING: on a tree that has ALREADY projected, this does not merely stall. The
+# unresolved leaf is absent from what the pass wrote and, not being frozen, is
+# absent from the keep-set the sweep spares — so the projector DELETES the copies
+# already on each member, and the cohort above goes with them when it is the only
+# leaf. A tenant that was serving is torn down fleet-wide, from an edit the hub
+# accepted without complaint.
+#
+# That is worth separating from the capacity guardrail, which behaves the way
+# this one does not. A budget that overshoots what a member actually holds IS
+# projected, and refused there as Degraded/CapacityExceeded with the last-good
+# materialization frozen rather than replaced — because whether a number fits is
+# knowable only on the member. Arithmetic that contradicts itself is knowable on
+# the hub, and never leaves it.
+#
+# Re-apply 10-tree-explicit.yaml to recover: the node names are shared, so it
+# repairs the leaf in place and the next pass projects normally.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
+metadata:
+  name: mc-demo-serving
+spec:
+  role: ClusterQueue
+  parentRef:
+    name: mc-demo
+  namespaces:
+  - ome-mc-test
+  distribution:
+    policy: Explicit
+  budgets:
+  - resourceName: google.com/tpu
+    resourceFlavor: tpu7x
+    nominal: 32
+    perCluster:
+    - cluster: msl-gcp-usc1-rc-1-tpu
+      nominal: 16
+    - cluster: msl-gcp-usc1-dev-1-tpu
+      nominal: 8

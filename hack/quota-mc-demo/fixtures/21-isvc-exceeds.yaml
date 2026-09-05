@@ -1,0 +1,63 @@
+# The not-admitted case: a service that asks for more than its share.
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     apply -f hack/quota-mc-demo/fixtures/21-isvc-exceeds.yaml
+#
+# Five replicas is 5 pods = 20 chips per member, against a 16-chip share. The
+# derived InferenceService lands on both members and all five pods are created;
+# Kueue funds the four it can pay for and holds the fifth at the gate.
+#
+# Expect, on each member: 5 pods, 4 Running and 1 SchedulingGated, and
+# mc-demo-serving's ADMITTED pinned at exactly 16 of 16 — the ceiling holding,
+# not an error.
+#
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get pods
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get workloads
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo-serving -o wide
+#
+# The gated pod carries Kueue's scheduling gate; that is the whole mechanism:
+#
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
+#     get pods -o custom-columns=NAME:.metadata.name,GATES:.spec.schedulingGates[*].name
+#
+# WHAT THE FAILURE LOOKS LIKE FROM THE HUB, AND WHY THAT MATTERS
+#
+# The hub reports the placement as healthy: the derived objects exist, both
+# candidates are listed, nothing is Degraded. Only readyReplicas is short. A
+# quota refusal is not an error condition anywhere up the stack — it is a
+# workload waiting. That is the thing worth showing, because it is also exactly
+# what a misrouted queue looks like, and the two are told apart only at the pod.
+#
+# RUN IT AFTER 20-isvc-fits.yaml FOR THE STRONGER VERSION
+#
+# With mc-demo-fits already holding 8 of the 16, only two of these five fit —
+# 8 + 8 = 16 — and three stay gated. Delete mc-demo-fits and watch them admit
+# without anything being re-applied:
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test delete isvc mc-demo-fits
+#
+# A NOTE ON PARTIAL ADMISSION
+#
+# Each pod is its own Kueue Workload — OME stamps the queue-name label and no
+# pod-group label — so a service is funded pod by pod rather than all-or-
+# nothing. For a single-pod runtime that is the natural unit. A multi-host gang
+# would want group semantics, and does not get them today.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: mc-demo-exceeds
+  namespace: ome-mc-test
+  labels:
+    ome.io/mc-demo: "true"
+spec:
+  # See 20-isvc-fits.yaml: the typed field is what selects OMENative. The
+  # top-level annotation is not read by the reconciler.
+  deploymentMode: OMENative
+  placement:
+    mode: All
+    requirements: accelerator=tpu7x
+  runtime:
+    name: mc-demo-tpu
+  engine:
+    minReplicas: 5
+    maxReplicas: 5

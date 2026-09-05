@@ -1,0 +1,80 @@
+# One replica of the real-TPU runtime, applied DIRECTLY to a member.
+#
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 \
+#     apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 \
+#     apply -f hack/quota-mc-demo/fixtures/41-isvc-tpu-jax.yaml
+#
+# No spec.placement, on purpose: this is the local proof that the runtime works
+# on real silicon, separate from whether the hub can place it. Get this Ready
+# first — a gang that will not schedule looks identical to a placement that never
+# fanned out, and debugging both at once is what makes multi-cluster demos slow.
+#
+# 1 leader + 1 worker = 2 pods = 2 nodes = 8 chips, in one 2x2x2 slice.
+#
+# Call it. Measured responses, not illustrations:
+#
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
+#     port-forward svc/mc-demo-jax 8080:8080
+#
+#   curl -s localhost:8080/health
+#   {"status": "ok", "jax": "0.9.2", "global_devices": 16, "local_devices": 8,
+#    "device": "TPU_8(process=1,(0,0,1,0))", "probe_ms": 1.19}
+#
+#   curl -s localhost:8080/v1/chat/completions -H 'content-type: application/json' \
+#     -d '{"model":"tpu-jax-echo","messages":[{"role":"user","content":"hi"}]}' | jq -r \
+#     '.choices[0].message.content'
+#   Computed on TPU_8(process=1,(0,0,1,0)) in 0.89ms (reduction 2.305827e+18).
+#   This mesh reports 16 JAX devices, 8 local to this host. ...
+#
+# NOTE: applied locally like this the pods carry NO kueue.x-k8s.io/queue-name
+# label — that is stamped only when the hub derives an ISVC — so they hold 8 real
+# chips while charging no budget. That is the "runs outside quota" case in
+# miniature. Place it from the hub instead (below) to have it charge a leaf.
+#
+# TO PLACE IT FROM THE HUB INSTEAD: add the placement block below and apply to
+# the hub rather than a member. The runtime is namespaced, so it must exist in
+# ome-mc-test on every member that could be chosen.
+#
+#   spec:
+#     placement:
+#       mode: All
+#       requirements: accelerator=tpu7x
+#
+# topologyKey is what co-locates the gang. OME reads it twice: it annotates the
+# Instance's PodGroup with ome.io/topology-key, which is what OMEGangPack packs
+# on, and it generates the worker-to-leader affinity on the same key. The
+# partition id is the label every node in one 2x2x2 slice shares, so both pods
+# land in the same slice and libtpu can form a mesh across them. Drop it and the
+# two pods can land in different slices, where the mesh never forms and the
+# leader hangs in jax initialization rather than failing.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: mc-demo-jax
+  namespace: ome-mc-test
+  labels:
+    ome.io/mc-demo: "true"
+spec:
+  # Redundant here — a leader+worker engine already resolves to OMENative from
+  # the shape rung — but stated rather than inferred, and matching the quota
+  # fixtures. The top-level ome.io/deploymentMode annotation is deliberately
+  # absent: it is not in the mode-resolution chain at all. See 20-isvc-fits.yaml.
+  deploymentMode: OMENative
+  runtime:
+    apiGroup: ome.io
+    kind: ServingRuntime
+    name: mc-demo-tpu-jax
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    topologyKey: cloud.google.com/gke-tpu-partition-2x2x2-id
+    annotations:
+      cloud.google.com/gke-tpu-slice-topology: 2x2x2
+    leader:
+      runner:
+        name: ome-container
+    worker:
+      size: 1
+      runner:
+        name: ome-container

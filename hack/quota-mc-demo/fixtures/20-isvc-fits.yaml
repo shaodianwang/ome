@@ -1,0 +1,76 @@
+# The admitted case: a service that fits inside every member's share.
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#     apply -f hack/quota-mc-demo/fixtures/20-isvc-fits.yaml
+#
+# All mode places on EVERY candidate that admits it; there is no winner and no
+# sweep. Two replicas is 2 pods = 8 chips per member, against a 16-chip share
+# from 10-tree-explicit.yaml. It fits with room to spare, so both members admit
+# in full.
+#
+# Expect, on each member: a derived InferenceService in ome-mc-test, 2 pods
+# Running, and mc-demo-serving's ADMITTED at 8 of 16.
+#
+#   hack/quota-mc-demo/status.sh
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo-serving -o wide
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get pods
+#
+# On the hub, status.placement.cluster is EMPTY — All mode has no single winner,
+# so status.placement.candidates is the whole answer:
+#
+#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test \
+#     get isvc mc-demo-fits -o jsonpath='{range .status.placement.candidates[*]}{.cluster}={.readyReplicas}{"\n"}{end}'
+#
+# Three things on this object are load-bearing and easy to drop:
+#
+#   placement.requirements  is matched against WorkloadCluster LABELS and
+#     nothing else. An ISVC declaring no requirement matches NO cluster — it is
+#     deliberately not fanned out fleet-wide. Both members must carry
+#     accelerator=tpu7x; see the README's registration step.
+#
+#   spec.deploymentMode: OMENative  is required, not cosmetic, and the TOP-LEVEL
+#     ome.io/deploymentMode annotation does NOT do it. Only OMENative dispatches
+#     through InferenceReplicas, which is where the per-instance admitted flag
+#     the placer reads lives; under RawDeployment nothing ever reports admission
+#     and the placement never converges.
+#
+#     DetermineEngineDeploymentMode resolves the mode from exactly four things,
+#     in order: spec.engine.annotations, this field, leader/worker shape, then
+#     RawDeployment. metadata.annotations is not among them and nothing copies
+#     it into this field — so an ISVC carrying only the top-level annotation
+#     says OMENative and renders a Deployment. A leader+worker engine gets
+#     OMENative from the shape rung instead, which is why multi-node fixtures
+#     appear to work with the annotation alone; a single-pod engine does not.
+#
+#     Expect the object on a MEMBER to read as though it disagrees with itself.
+#     Measured with a server-side dry-run: the hub leaves annotations untouched,
+#     but the member's defaulting webhook back-fills
+#     ome.io/deploymentMode: RawDeployment from its own configured default,
+#     against spec.deploymentMode: OMENative here. The field wins and the
+#     behaviour is OMENative; only the annotation is misleading. Read
+#     `kubectl get isvc -o jsonpath='{.spec.deploymentMode}'`, or just look for
+#     InferenceReplicas, and ignore that annotation entirely.
+#
+#   no spec.model.  The runtime is pinned by name, which is the lean path: the
+#     controller skips model fetch and runtime auto-selection. It also skips
+#     injecting the models.ome.io/clusterbasemodel.<name>=Ready nodeSelector,
+#     the label a model-agent would write — and no node in either member carries
+#     one, so a model reference here would leave every pod Pending on node
+#     affinity with the quota story invisible behind it.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: mc-demo-fits
+  namespace: ome-mc-test
+  labels:
+    ome.io/mc-demo: "true"
+spec:
+  deploymentMode: OMENative
+  placement:
+    mode: All
+    requirements: accelerator=tpu7x
+  runtime:
+    name: mc-demo-tpu
+  engine:
+    minReplicas: 2
+    maxReplicas: 2

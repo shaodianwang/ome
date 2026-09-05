@@ -1,0 +1,23 @@
+# The serving namespace. Applied to ALL THREE clusters.
+#
+# The hub needs it because the source InferenceServices are created there and an
+# apply into a missing namespace is refused outright. Each member needs it
+# because a quota leaf NAMES a namespace rather than creating one — without it
+# the ClusterQueue still lands but its LocalQueue is never written, and a
+# workload in the namespace has no queue to charge.
+#
+# kueue.x-k8s.io/managed is what puts the namespace inside Kueue's scope. Every
+# Kueue webhook on these members carries
+# `namespaceSelector: matchLabels{kueue.x-k8s.io/managed: "true"}`, so an
+# unlabelled namespace is invisible to Kueue: its pods are never gated, never
+# become Workloads, and run outside quota whatever queue they name. It is also
+# the blast-radius fence on the members' `pod` integration, which can gate a pod
+# only in a namespace carrying this label.
+#
+# Harmless on the hub, which runs no Kueue.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ome-mc-test
+  labels:
+    kueue.x-k8s.io/managed: "true"
