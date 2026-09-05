@@ -60,4 +60,4 @@ flaw.
 
 - [`WRITING-STYLE.md`](WRITING-STYLE.md) — the required style guide, with a
   worked before/after.
-- The `OEP Convention` and `PR Conventions` sections in the repo's `CLAUDE.md`.
+- The OEP and PR conventions in the repository's developer documentation.

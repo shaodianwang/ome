@@ -44,7 +44,7 @@ Three named failure modes at fleet scale:
 - **Event-driven status:** a remote watch-funnel so winner/loss/admission converge on events, not a 30s poll.
 - **A scalable placement reconciler:** configurable concurrency, an indexed cluster-change re-enqueue (no fleet-wide List), per-cluster fault isolation, and a winner-lost grace window before re-placement.
 - **A real endpoint publisher** for one concrete backend (Gateway API HTTPRoute), behind a pluggable interface.
-- **No `InferenceService`/CRD API change**; every new value config-driven with no in-code magic default (per `CLAUDE.md`).
+- **No `InferenceService`/CRD API change**; every new value config-driven with no in-code magic default (the repository's no-magic-values rule).
 
 ### Non-Goals
 
