@@ -118,10 +118,10 @@ The reader's reasonable objection: "These are three unrelated jobs. Why not thre
 
 This is also where the **archived `ome-operator` Alfred** re-enters the design. That component (in the retired, pre-open-source `ome-operator` repository) carried four pieces, audited as:
 
-- **Auto-patching** (`pkg/alfred/autopatching/autopatching.go`) — cordons nodes, triggers GPU node image rotation via the OCI Compute API, drains single-replica InferenceServices.
-- **Auto-repair** (`pkg/alfred/autorepair/autorepair.go`) — watches for a `GpuUnhealthy` node condition, then cordons, drains, and triggers a soft reset via the OCI Compute API.
-- **Rescheduling** (`pkg/alfred/rescheduling/rescheduling.go`) — a 6-line stub; its one function `gpuEfficiencyScore` was never called.
-- **Capacity check** (`pkg/alfred/application/capacityCheck.go`) — a stub returning hardcoded `true` with a `// will add real logic later` comment.
+- **Auto-patching** — cordoned nodes, triggered GPU node image rotation via the OCI Compute API, and drained single-replica InferenceServices.
+- **Auto-repair** — watched for a `GpuUnhealthy` node condition, then cordoned, drained, and triggered a soft reset via the OCI Compute API.
+- **Rescheduling** — a stub; its GPU-efficiency scoring function was never called.
+- **Capacity check** — a stub that always returned `true`.
 
 The rescheduling and bin-packing logic never shipped; **Policy #1 (Defragmentation)** is the realization of that original, never-built vision. The old auto-repair is **partially** realized here as **Policy #2 (Node-Health Evacuation)** — but only the safe half. On a bad node condition, Policy #2 evacuates OME workloads off the node through the *same narrow Dispatcher contract every other policy uses*, and emits a remediation signal (a Prometheus metric and a K8s Event) for whatever system actually owns hardware remediation. It explicitly does **not** cordon, drain, terminate, or reboot the node, and it does **not** call any cloud Compute API. That is the line between the archived design and this one: we keep "react to a `GpuUnhealthy` node," we drop "patch/repair the hardware." (Refined non-goal below.)
 
@@ -949,7 +949,7 @@ drained it, and triggered a soft reset via the OCI Compute API. Why is the new
 Policy #2 strictly weaker — why not just cordon and repair the node like before?
 
 A. Because hardware remediation is cloud-specific and high-blast-radius, and OME
-core is cloud-neutral. The old auto-repair path (`pkg/alfred/autorepair`) was
+core is cloud-neutral. The old auto-repair path was
 welded to the OCI Compute API: it only worked on OCI, it held credentials that
 could reboot any instance, and a bug in it could take down a healthy node. We are
 not reintroducing that into OME core. Cordon is itself a node spec write —
