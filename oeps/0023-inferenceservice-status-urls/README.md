@@ -44,7 +44,7 @@ shared-host + path-prefix. For isvc `prod/my-model`:
 | actual `HTTPRoute` host | `llm.int-gw-https.example.com` |
 | actual `HTTPRoute` path | `PathPrefix: /prod/my-model/` |
 | real reachable URL | `https://llm.int-gw-https.example.com/prod/my-model/` |
-| gateway listeners that exist | `llm-int-gw-https`, `llm-ext-gw-https`, `llm-int-gw-tls`, `llm-ext-gw-tls` |
+| gateway listeners that exist | `int-gw-https`, `ext-gw-https`, `int-gw-tls`, `ext-gw-tls` |
 
 The advertised host `my-model.prod.int-gw-https…` is a
 per-ISVC subdomain that **has no gateway listener** and the URL **omits the
@@ -165,8 +165,7 @@ Defined before use, with the consequence baked in:
 - **Additional / external gateway** (`additionalIngressGateways[]`, each with its
   own `omeIngressGateway` + `ingressDomain`): extra gateways every route *also*
   attaches to; by convention the externally-exposed ("ext") gateway, e.g.
-  `…ext-gw-https…` (on the prod cluster this is an actual internet-facing
-  load balancer).
+  `…ext-gw-https…` (typically an internet-facing load balancer).
 - **Per-namespace gateway** (`namespaceIngressGateways[<ns>]`): overrides the
   primary and additional gateways for isvcs in `<ns>` (e.g. `team-a` routes via
   `team-a-int-gw-https` / `team-a-ext-gw-https` instead of the cluster
@@ -182,16 +181,16 @@ Cross-cluster snapshot, showing `status.url` against the real route:
 
 | Cluster | mode | gateways (OME config) | real reachable URL | `status.url` today | correct? |
 |---|---|---|---|---|---|
-| TPU cluster | subdomain | int + ext (cluster-default **and** per-ns) | `…int…` **and** `…ext…` host | `…int…` only | reachable, **external missing** |
-| prod cluster | shared-host/path | int only (ext load balancer exists, unused by OME) | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` (subdomain, no path) | **non-routable** |
-| dev cluster | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` | **non-routable** |
+| TPU | subdomain | int + ext (cluster-default **and** per-ns) | `…int…` **and** `…ext…` host | `…int…` only | reachable, **external missing** |
+| prod | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` (subdomain, no path) | **non-routable** |
+| dev | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` | **non-routable** |
 
-Note the prod cluster exposes `llm-ext-gw-https` (a real internet-facing load
-balancer) at the infrastructure layer, but OME's prod config has
-`additionalIngressGateways:
-null` — so prod isvcs are not wired to it *and* status has no external URL. That
-is a config gap (out of scope) but it underscores why status must faithfully
-report whatever gateways a route is attached to, not a fixed assumption.
+Consider a cluster that exposes an internet-facing gateway alongside the shared
+internal one (e.g. `ext-gateway-https`) at the infrastructure layer, while its
+OME config leaves `additionalIngressGateways` unset. Its isvcs are not wired to
+that gateway *and* status has no external URL. That is a config gap (out of
+scope) but it underscores why status must faithfully report whatever gateways a
+route is attached to, not a fixed assumption.
 
 ## Proposal
 
