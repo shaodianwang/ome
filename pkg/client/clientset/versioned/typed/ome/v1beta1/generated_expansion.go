@@ -22,4 +22,6 @@ type InferenceServiceExpansion interface{}
 
 type ServingRuntimeExpansion interface{}
 
+type TrafficMapExpansion interface{}
+
 type WorkloadClusterExpansion interface{}
