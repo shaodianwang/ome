@@ -132,66 +132,37 @@ var _ = ginkgo.Describe("ClusterServingRuntime inheritance reconciler", ginkgo.O
 		gomega.Eventually(hasReadyChain(leaf, "csr-root", "csr-mid", "csr-near", "csr-leaf"), reconcilerSettleTimeout, 200*time.Millisecond).Should(gomega.Succeed())
 	})
 
-	ginkgo.It("propagates a parent profile update by re-reconciling dependents", func() {
-		// Profile, child, grandchild — three-level chain. We change
-		// the profile's annotations so the controller has an obvious
-		// "this changed" signal (generation bump) for the dependents
-		// watcher to react to. Chain content itself doesn't change,
-		// but we verify the watcher fan-out by observing the dependent's
-		// status condition gets re-recorded (LastTransitionTime stays,
-		// ObservedGeneration tracks).
+	ginkgo.It("re-resolves the whole subtree when a mid-chain runtime is repointed", func() {
+		// Two profiles and a three-level chain hanging off the first.
+		// Repointing the middle runtime rewrites what everything below
+		// it resolves to, so both the child and the grandchild must land
+		// on the new chain. inherit-from is an annotation, so this edit
+		// leaves .metadata.generation untouched — the watch has to react
+		// to metadata, and the cascade has to reach past direct children.
 		profile := mkProfile("csr-prop-profile", envSpec(corev1.EnvVar{Name: "VERSION", Value: "v1"}))
+		other := mkProfile("csr-prop-other", envSpec(corev1.EnvVar{Name: "VERSION", Value: "v2"}))
 		child := mkInheritor("csr-prop-child", "csr-prop-profile", envSpec())
 		grand := mkInheritor("csr-prop-grand", "csr-prop-child", envSpec())
-		gomega.Expect(k8sClient.Create(suiteCtx, profile)).To(gomega.Succeed())
-		gomega.Expect(k8sClient.Create(suiteCtx, child)).To(gomega.Succeed())
-		gomega.Expect(k8sClient.Create(suiteCtx, grand)).To(gomega.Succeed())
+		for _, obj := range []*v1beta1.ClusterServingRuntime{profile, other, child, grand} {
+			gomega.Expect(k8sClient.Create(suiteCtx, obj)).To(gomega.Succeed())
+		}
 		ginkgo.DeferCleanup(func() {
-			deleteIfExists(grand)
-			deleteIfExists(child)
-			deleteIfExists(profile)
+			for _, obj := range []*v1beta1.ClusterServingRuntime{grand, child, other, profile} {
+				deleteIfExists(obj)
+			}
 		})
 
 		gomega.Eventually(hasReadyChain(grand, "csr-prop-profile", "csr-prop-child", "csr-prop-grand"),
 			reconcilerSettleTimeout, 200*time.Millisecond).Should(gomega.Succeed())
 
-		// Capture the dependent's initial ObservedGeneration.
-		initial := currentStatus(grand)
-		var initialObservedGen int64
-		for _, c := range initial.Conditions {
-			if c.Type == constants.InheritanceReadyConditionType {
-				initialObservedGen = c.ObservedGeneration
-			}
-		}
+		gomega.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: child.Name}, child)).To(gomega.Succeed())
+		child.Annotations[constants.RuntimeInheritFromAnnotationKey] = other.Name
+		gomega.Expect(k8sClient.Update(suiteCtx, child)).To(gomega.Succeed())
 
-		// Edit the root profile (spec change → generation bump).
-		gomega.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: profile.Name}, profile)).To(gomega.Succeed())
-		profile.Spec.Containers[0].Env[0].Value = "v2"
-		gomega.Expect(k8sClient.Update(suiteCtx, profile)).To(gomega.Succeed())
-
-		// Cascade should reach the grandchild on the next pass. We
-		// can't directly observe the merged spec from status anymore,
-		// so we verify the dependentsOf mapper fired by waiting for
-		// the grandchild's condition to be re-recorded with a fresh
-		// (or equal) timestamp — proves the reconciler ran again.
-		gomega.Eventually(func() error {
-			s := currentStatus(grand)
-			for _, c := range s.Conditions {
-				if c.Type != constants.InheritanceReadyConditionType {
-					continue
-				}
-				if c.Status != metav1.ConditionTrue {
-					return fmt.Errorf("condition not True: %s", c.Reason)
-				}
-				// ObservedGeneration shouldn't change for the grandchild
-				// itself, but the reconciler re-ran (proven by chain
-				// still being correct after parent change). Keep this
-				// loose to avoid flakiness on the fake clock.
-				_ = initialObservedGen
-				return nil
-			}
-			return fmt.Errorf("InheritanceReady not found")
-		}, reconcilerSettleTimeout, 200*time.Millisecond).Should(gomega.Succeed())
+		gomega.Eventually(hasReadyChain(child, "csr-prop-other", "csr-prop-child"),
+			reconcilerSettleTimeout, 200*time.Millisecond).Should(gomega.Succeed())
+		gomega.Eventually(hasReadyChain(grand, "csr-prop-other", "csr-prop-child", "csr-prop-grand"),
+			reconcilerSettleTimeout, 200*time.Millisecond).Should(gomega.Succeed())
 	})
 
 	ginkgo.It("flips condition to False/ParentNotFound when a mid-chain parent is deleted (preserves prior chain)", func() {
