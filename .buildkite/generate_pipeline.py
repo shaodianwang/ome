@@ -15,6 +15,7 @@ Environment variables read at runtime:
     BUILDKITE_PULL_REQUEST    – pull request number, or "false"
     BUILDKITE_PULL_REQUEST_BASE_BRANCH – pull request base branch
     OME_PIPELINE_MODE         – pipeline to generate ("daily" or "standard")
+    KARGO_BUILD               – daily mode: run smoke tests for BUILDKITE_COMMIT only
     AWS_ACCOUNT_ID            – dev AWS account for ECR (default: 588845226011)
     PROD_AWS_ACCOUNT_ID       – prod AWS account for ECR (default: 168653207203)
     AWS_REGION                – AWS region for ECR (default: us-east-2)

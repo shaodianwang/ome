@@ -20,10 +20,12 @@ case "$SMOKE_NAME" in
   ""|*[!a-z0-9-]*) echo "invalid smoke name: $SMOKE_NAME" >&2; exit 1 ;;
 esac
 
-buildkite-agent meta-data get daily-candidate-b64 \
-  | base64 -d >"$ARTIFACT_DIR/candidate.json"
-daily_rc_load_candidate "$ARTIFACT_DIR/candidate.json"
-EXPECTED_CRD_CHART="$(jq -er '.charts["ome-crd"]' "$ARTIFACT_DIR/candidate.json")"
+daily_rc_load_requested_candidate "$ARTIFACT_DIR/candidate.json"
+if daily_rc_kargo_build_enabled; then
+  EXPECTED_CRD_CHART="revision ${EXPECTED_CHART_REVISION}"
+else
+  EXPECTED_CRD_CHART="$(jq -er '.charts["ome-crd"]' "$ARTIFACT_DIR/candidate.json")"
+fi
 
 daily_rc_setup_kubeconfig "$NAMESPACE"
 
@@ -101,7 +103,7 @@ for resource in persistentvolumeclaims jobs.batch basemodels.ome.io servingrunti
   require_permission delete "$resource"
 done
 
-echo "--- wait for RC to run the discovered release"
+echo "--- wait for RC to run the requested release"
 record "candidate-chart: ome-crd=$EXPECTED_CRD_CHART"
 record "candidate-chart: ome-resources=$EXPECTED_RESOURCES_CHART"
 record "candidate-chart: ome-scheduler=$EXPECTED_SCHEDULER_CHART"

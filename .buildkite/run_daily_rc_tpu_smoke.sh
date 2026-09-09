@@ -42,9 +42,7 @@ case "$MONITOR_INTERVAL" in
   ""|*[!0-9]*) echo "invalid monitor interval: $MONITOR_INTERVAL" >&2; exit 1 ;;
 esac
 
-buildkite-agent meta-data get daily-candidate-b64 \
-  | base64 -d >"$ARTIFACT_DIR/candidate.json"
-daily_rc_load_candidate "$ARTIFACT_DIR/candidate.json"
+daily_rc_load_requested_candidate "$ARTIFACT_DIR/candidate.json"
 daily_rc_setup_kubeconfig "$NAMESPACE"
 
 record() {
@@ -182,7 +180,7 @@ echo "--- verify Argo-managed TPU prerequisites"
 kubectl -n "$NAMESPACE" get configmap gcs-rapid-reader >/dev/null
 kubectl -n "$NAMESPACE" get servingruntime "$RUNTIME_NAME" >/dev/null
 record "prerequisites: runtime=$RUNTIME_NAME gcs-config=gcs-rapid-reader"
-echo "--- wait for RC to run the discovered release"
+echo "--- wait for RC to run the requested release"
 daily_rc_wait_for_live_release 900
 record "release-images: manager=$live_manager scheduler=$live_scheduler agent=$live_agent"
 record "release-charts: resources=$live_resources_chart scheduler=$live_scheduler_chart"

@@ -3,11 +3,54 @@
 
 daily_rc_load_candidate() {
   candidate_file="$1"
+  EXPECTED_CHART_REVISION=""
   EXPECTED_MANAGER="$(jq -er '.images["ome-manager"]' "$candidate_file")"
   EXPECTED_AGENT="$(jq -er '.images["ome-agent"]' "$candidate_file")"
   EXPECTED_SCHEDULER="$(jq -er '.images["ome-scheduler"]' "$candidate_file")"
   EXPECTED_RESOURCES_CHART="$(jq -er '.charts["ome-resources"]' "$candidate_file")"
   EXPECTED_SCHEDULER_CHART="$(jq -er '.charts["ome-scheduler"]' "$candidate_file")"
+}
+
+daily_rc_kargo_build_enabled() {
+  case "${KARGO_BUILD:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+daily_rc_load_kargo_candidate() {
+  requested_commit="$1"
+  case "$requested_commit" in
+    ""|*[!0-9a-f]*)
+      echo "KARGO_BUILD_COMMIT must be a lowercase hexadecimal commit ID" >&2
+      return 1
+      ;;
+  esac
+  if [ "${#requested_commit}" -lt 8 ] || [ "${#requested_commit}" -gt 64 ]; then
+    echo "KARGO_BUILD_COMMIT must contain between 8 and 64 characters" >&2
+    return 1
+  fi
+
+  EXPECTED_CHART_REVISION="$(printf '%.8s' "$requested_commit")"
+  registry="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}"
+  image_prefix="${OME_IMAGE_REPOSITORY_PREFIX:-msl_infra}"
+  EXPECTED_MANAGER="${registry}/${image_prefix}/ome-manager:${EXPECTED_CHART_REVISION}"
+  EXPECTED_AGENT="${registry}/${image_prefix}/ome-agent:${EXPECTED_CHART_REVISION}"
+  EXPECTED_SCHEDULER="${registry}/${image_prefix}/ome-scheduler:${EXPECTED_CHART_REVISION}"
+  EXPECTED_RESOURCES_CHART="revision ${EXPECTED_CHART_REVISION}"
+  EXPECTED_SCHEDULER_CHART="revision ${EXPECTED_CHART_REVISION}"
+}
+
+daily_rc_load_requested_candidate() {
+  candidate_file="$1"
+  if daily_rc_kargo_build_enabled; then
+    daily_rc_load_kargo_candidate "${KARGO_BUILD_COMMIT:?KARGO_BUILD_COMMIT is required when KARGO_BUILD is enabled}"
+    return
+  fi
+
+  buildkite-agent meta-data get daily-candidate-b64 \
+    | base64 -d >"$candidate_file"
+  daily_rc_load_candidate "$candidate_file"
 }
 
 daily_rc_setup_kubeconfig() {
@@ -89,8 +132,22 @@ daily_rc_live_release_identity_matches_candidate() {
   [ "$live_manager" = "$EXPECTED_MANAGER" ] \
     && [ "$live_scheduler" = "$EXPECTED_SCHEDULER" ] \
     && [ "$live_agent" = "$EXPECTED_AGENT" ] \
-    && [ "$live_resources_chart" = "$EXPECTED_RESOURCES_CHART" ] \
-    && [ "$live_scheduler_chart" = "$EXPECTED_SCHEDULER_CHART" ]
+    && daily_rc_chart_matches_candidate "$live_resources_chart" "$EXPECTED_RESOURCES_CHART" \
+    && daily_rc_chart_matches_candidate "$live_scheduler_chart" "$EXPECTED_SCHEDULER_CHART"
+}
+
+daily_rc_chart_matches_candidate() {
+  live_chart="$1"
+  expected_chart="$2"
+  if [ -z "${EXPECTED_CHART_REVISION:-}" ]; then
+    [ "$live_chart" = "$expected_chart" ]
+    return
+  fi
+
+  case "$live_chart" in
+    *.g"$EXPECTED_CHART_REVISION"|*."$EXPECTED_CHART_REVISION") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 daily_rc_print_release_mismatch() {
@@ -115,7 +172,7 @@ daily_rc_wait_for_live_release() {
       return
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "RC did not converge to the discovered release within ${timeout_seconds}s" >&2
+      echo "RC did not converge to the requested release within ${timeout_seconds}s" >&2
       daily_rc_print_release_mismatch
       return 1
     fi
