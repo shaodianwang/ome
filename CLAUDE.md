@@ -29,6 +29,36 @@ Comments describe what the code **is** and **why** — never what *changed* or w
 - **No references in code comments.** Issue/PR numbers, incident dates, image/build hashes, cluster names, and investigation shorthand do not belong in source comments or test names — they are meaningless to a reader without tracker access and rot as context moves. References live in commit messages and PR bodies. A comment must carry its full meaning in-place: state the invariant, not a pointer to where the invariant was once discussed.
 - Keep comments short (1–3 lines), match the surrounding density, and explain the "why" over the "what".
 
+## Kubeconfig Hygiene (HARD BLOCKER)
+
+**Never let an ephemeral local cluster touch the ambient `$KUBECONFIG`.** That file points at the developer's real clusters. `kind create cluster` — and `kwokctl`, `k3d`, `minikube` — merges a `kind-<name>` context into whatever `$KUBECONFIG` names *and flips `current-context`* to it. A single verification or bugfix run therefore leaves dead contexts behind and silently re-aims the next bare `kubectl` at a cluster that no longer exists.
+
+This binds every Claude session, subagent, and workflow — and any script or `make` target one of them invokes — as much as it binds a human at a terminal. Point the throwaway cluster at a throwaway file: a temp file first, `~/.kube/config` only if a tool insists on the default path.
+
+```sh
+# Own one file for the whole session, then clean up.
+export KUBECONFIG="$(mktemp -t ome-kind-XXXXXX.kubeconfig)"
+make test-kind
+rm -f "$KUBECONFIG"
+```
+
+```sh
+# Or scope it to a single command.
+KUBECONFIG=/tmp/ome-kind.kubeconfig make test-kind
+KUBECONFIG=/tmp/ome-kind.kubeconfig hack/kwok-sim/fleet-up.sh
+kind create cluster --name scratch --kubeconfig /tmp/ome-kind.kubeconfig
+```
+
+| Never | Instead |
+|---|---|
+| `kind create` / `delete` / `export kubeconfig` with neither `--kubeconfig` nor an overridden `KUBECONFIG` | pass `--kubeconfig <tmp>`, or run it under `KUBECONFIG=<tmp>` |
+| `kubectl config use-context` / `set-context` / `set-cluster` / `delete-context` against the ambient file | select per command: `kubectl --kubeconfig <tmp> --context kind-<name> …` |
+| exporting `KUBECONFIG` to a real-cluster path and then running a cluster-creating target | export the temp path *before* the target runs |
+
+`kind get kubeconfig --name <c> > "$tmp"` is read-only and safe — it is how `tests/integration/kindutil` and `make test-kind-perm-up` obtain credentials.
+
+No in-tree creator passes `--kubeconfig`, so every one of them inherits the caller's: `createCluster` in `tests/integration/kindutil/cluster.go` (behind the `make test-kind*` targets), `hack/kwok-sim/fleet-up.sh`, and the `.buildkite/run_*_gke.sh` scripts. The temp-file wrapper above is what contains them. Treat a new caller that skips it like a hardcoded magic value: call it out, don't add it silently.
+
 ## Common Commands
 
 ### Build
@@ -120,6 +150,7 @@ make test-kind-clean                                 # delete leftover KIND clus
 Requirements:
 - Docker daemon running on the host (KIND brings up the cluster as a Docker container).
 - `kind` binary on `PATH` or at `bin/kind`; run `make kind` to install the pinned version.
+- A throwaway `KUBECONFIG` — these targets create the cluster in whatever the caller exports. See **Kubeconfig Hygiene** above.
 
 `KIND_KEEP_CLUSTER=true` is on by default in `make test-kind` — the cluster persists between runs for fast iteration. Set `KIND_RECREATE=true` to force a fresh cluster (use after suspected dirty state).
 
