@@ -28,6 +28,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
@@ -450,6 +451,10 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 				// UpdateItem.CoordGateExempt).
 				if allowed, gate, reason := input.UpdateGate(sel.Strategy, inFlightSurge, gateUnavail); !allowed {
 					anyGated = true
+					logf.FromContext(ctx).V(1).Info("update start denied by coordination gate",
+						"component", plan.Component, "instance", item.Instance.Index,
+						"target", target.Name, "gate", gate, "reason", reason,
+						"inFlightSurge", inFlightSurge, "gateUnavail", gateUnavail)
 					if hold == nil {
 						hold = &RolloutHold{Gate: gate, Reason: reason, Target: target.Name}
 					}
