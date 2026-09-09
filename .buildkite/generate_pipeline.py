@@ -152,7 +152,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("update-core", "Core update strategies", (
         "update", "inplace", "recreate_pod", "mixed_strategy",
-        "percomponent_surge", "minreadyseconds",
+        "percomponent_surge", "minreadyseconds", "strategy_switch_midsurge",
     )),
     ("percomponent-maxsurge", "Multi-instance maxSurge", (
         "percomponent_maxsurge_multiinstance",
