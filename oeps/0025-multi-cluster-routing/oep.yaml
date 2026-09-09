@@ -1,0 +1,32 @@
+title: "Multi-Cluster Routing: capacity-aware traffic maps"
+oep-number: "0025"
+authors:
+  - "@fanyang-real"
+status: provisional
+creation-date: 2026-09-04
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# A new control-plane object (TrafficMap) is the routing projection of an
+# InferenceService's multi-cluster placement: one per ISVC, controller-generated
+# from status.placement + AcceleratorQuota allocation, consumed by a
+# gateway-neutral publisher. Placement decides WHERE, quota decides HOW MUCH,
+# TrafficMap decides the WEIGHTS. Opt-in via Helm; SMG is one optional backend.
+see-also:
+  - "/oeps/0018-multi-cluster-placement"   # placement race + per-home status.placement this projects from
+  - "/oeps/0018.3-placement-modes"         # Single/All/Split; Split apportions the replicas we weight by
+  - "/oeps/0024-quota"                      # AcceleratorQuota is the capacity denominator for weights
+  - "/oeps/0011-inference-traffic-policy"   # L7 policy (headers/retries/hash) is orthogonal to home weights
+  - "/oeps/0023-inferenceservice-status-urls" # per-home endpoint URLs TrafficMap references
+  - "/oeps/0019-control-plane-split"        # the routing controller runs in the control plane
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
