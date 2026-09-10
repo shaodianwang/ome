@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -115,8 +116,14 @@ func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, bool) {
 	// plus provenance, both in the same cluster-sorted order.
 	homes := make([]Home, len(cands))
 	for i, c := range cands {
-		// Factor is resolved by a later slice; nil here means the identity 1.0.
-		homes[i] = Home{Cluster: c.Cluster, Allocated: c.AdmittedReplicas, Ready: c.ReadyReplicas}
+		// A nil factor is the identity 1.0; a per-cluster override scales the home's
+		// share for heterogeneous hardware.
+		homes[i] = Home{
+			Cluster:   c.Cluster,
+			Allocated: c.AdmittedReplicas,
+			Ready:     c.ReadyReplicas,
+			Factor:    capacityFactor(isvc, c.Cluster),
+		}
 	}
 	weights := Weights(homes)
 
@@ -130,6 +137,7 @@ func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, bool) {
 			Capacity: &v1beta1.TrafficMapCapacity{
 				Allocated: c.AdmittedReplicas,
 				Ready:     c.ReadyReplicas,
+				Factor:    homes[i].Factor,
 			},
 		}
 	}
@@ -153,6 +161,20 @@ func servingCandidates(pl *v1beta1.PlacementStatus) []*v1beta1.CandidatePlacemen
 	}
 	sort.Slice(cs, func(i, j int) bool { return cs[i].Cluster < cs[j].Cluster })
 	return cs
+}
+
+// capacityFactor returns the per-replica relative serving capacity the ISVC
+// declares for a workload cluster, or nil when none is set. Nil is the identity
+// factor 1.0 — the weight computation treats a nil or non-positive factor as 1.
+func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Quantity {
+	if isvc.Spec.Placement == nil || isvc.Spec.Placement.CapacityFactors == nil {
+		return nil
+	}
+	if q, ok := isvc.Spec.Placement.CapacityFactors[cluster]; ok {
+		qc := q.DeepCopy()
+		return &qc
+	}
+	return nil
 }
 
 // placementMode returns the ISVC's declared placement mode, or empty when none

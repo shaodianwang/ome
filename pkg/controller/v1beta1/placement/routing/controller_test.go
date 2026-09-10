@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -210,6 +211,51 @@ func TestReconcile_UpdatesExistingTrafficMapOnCapacityChange(t *testing.T) {
 	assert.Equal(t, int32(1), tm.Spec.Entries[1].Weight)
 }
 
+func TestReconcile_CapacityFactorWeightsHomes(t *testing.T) {
+	// Two homes with equal admitted+ready replicas: without factors they would
+	// weight 1:1. A per-cluster factor of 2 on "a" doubles its share -> 2:1.
+	isvc := splitISVC([]string{"a", "b"}, []int32{5, 5}, []int32{5, 5})
+	isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{
+		"a": resource.MustParse("2"),
+	}
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, ok := getTrafficMap(t, c)
+	require.True(t, ok)
+	require.Len(t, tm.Spec.Entries, 2)
+
+	assert.Equal(t, "a", tm.Spec.Entries[0].Cluster)
+	assert.Equal(t, int32(2), tm.Spec.Entries[0].Weight, "factor-2 home carries double the share")
+	require.NotNil(t, tm.Spec.Entries[0].Capacity)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity.Factor, "factor recorded as provenance")
+	assert.Equal(t, "2", tm.Spec.Entries[0].Capacity.Factor.String())
+
+	assert.Equal(t, "b", tm.Spec.Entries[1].Cluster)
+	assert.Equal(t, int32(1), tm.Spec.Entries[1].Weight)
+	require.NotNil(t, tm.Spec.Entries[1].Capacity)
+	assert.Nil(t, tm.Spec.Entries[1].Capacity.Factor, "home absent from map uses the identity factor")
+}
+
+func TestReconcile_FractionalCapacityFactor(t *testing.T) {
+	// "500m" halves a home's per-replica capacity: a(4 replicas)*0.5 vs b(4)*1
+	// -> 2:4 -> reduced 1:2.
+	isvc := splitISVC([]string{"a", "b"}, []int32{4, 4}, []int32{4, 4})
+	isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{
+		"a": resource.MustParse("500m"),
+	}
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, ok := getTrafficMap(t, c)
+	require.True(t, ok)
+	require.Len(t, tm.Spec.Entries, 2)
+	assert.Equal(t, int32(1), tm.Spec.Entries[0].Weight)
+	assert.Equal(t, int32(2), tm.Spec.Entries[1].Weight)
+}
+
 func TestRoutingTableChangePredicate(t *testing.T) {
 	base := splitISVC([]string{"a", "b"}, []int32{5, 5}, []int32{5, 5})
 
@@ -235,6 +281,12 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 		nw := base.DeepCopy()
 		now := metav1.Now()
 		nw.DeletionTimestamp = &now
+		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
+	})
+
+	t.Run("capacity factor change is admitted", func(t *testing.T) {
+		nw := base.DeepCopy()
+		nw.Spec.Placement.CapacityFactors = map[string]resource.Quantity{"a": resource.MustParse("2")}
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
 	})
 }
