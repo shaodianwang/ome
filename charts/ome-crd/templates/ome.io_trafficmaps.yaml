@@ -12,6 +12,7 @@ spec:
     listKind: TrafficMapList
     plural: trafficmaps
     shortNames:
+    - tm
     - tmap
     singular: trafficmap
   scope: Namespaced
