@@ -336,11 +336,27 @@ kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test delete isvc mc-de
 kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test delete servingruntime mc-demo-tpu-jax --ignore-not-found
 ```
 
-Delete the leaf before its ancestors: a finalizer reaps the Kueue objects a node
-owns, and a `Cohort` deleted first leaves its children briefly `Unreachable`.
-Deleting the hub's `root` withdraws the projections; each member's own controller
-recreates its local root immediately, bare and capacity-only, because capacity is
-a property of the cluster rather than of anything an admin authored.
+Delete the leaf before its ancestors, and note that the order is not advice: the
+validating webhook covers `DELETE`, and a `Cohort` removed while its children are
+still there is **refused**, because that delete orphans a subtree and the damage
+is invisible from the deleted object alone. A node stays in the tree until its
+finalizer releases, so a parent is deniable for as long as its child is
+`Terminating`.
+
+Deleting the leaf is already enough to take every Kueue object down. A leaf's
+ancestors are projected only in service of that leaf, so `mc-demo` stops being
+projected the moment `mc-demo-serving` leaves the tree, and the sweep removes the
+`LocalQueue`, the `ClusterQueue` and the `Cohort` together. Each member keeps only
+its own bare root, which the hub never projects and never reaps — capacity is a
+property of the cluster rather than of anything an admin authored, and the
+high-water marks every split is sized against live on that object.
+
+> [!IMPORTANT]
+> Delete the ISVCs first, as the block above does. Kueue holds
+> `kueue.x-k8s.io/resource-in-use` on a `ClusterQueue` until nothing is reserving
+> quota against it, so a queue swept while workloads are still admitted sits
+> `Terminating` / `Active=Terminating` — by which point the `AcceleratorQuota`
+> above it is gone from both the member and the hub.
 
 Everything the prerequisites set up is harmless to leave — the runtime, the
 namespace label, the WorkloadCluster labels, and Kueue's frameworks list, which
