@@ -20,9 +20,8 @@ or a leaf budget), linked to its parent by `spec.parentRef` and all descending f
 a single reserved `root` node that holds the fleet-wide total. A fleet is a handful
 of these CRs; a validating webhook **assembles and verifies the whole tree at
 admission** (every non-root node has a resolvable parent, no cycle, within depth,
-node-kind consistent, parent ≥ Σ children, namespaces unique within the tree it can
-see) so a CR that would break the tree is rejected up front, not silently
-mis-materialized. Delivery
+node-kind consistent, parent ≥ Σ children) so a CR that would break the tree is
+rejected up front, not silently mis-materialized. Delivery
 is **two-level**: the management plane splits each node's budget into per-cluster
 shares and projects `AcceleratorQuota` CRs onto each workload cluster, where a
 local controller renders them into **stock Kueue** objects. The management plane
@@ -41,26 +40,27 @@ behind `AcceleratorQuota`; the materialization layer may evolve, but the
 
 `AcceleratorQuota` is a CRD on the OME control plane, modeled on Kueue's own tree:
 **one CR is one node**. `spec.role` declares which kind: a `Cohort` node groups
-other nodes, and a `ClusterQueue` node is a leaf that binds serving namespaces and
-carries a **per-`(resource, flavor)` budget** (a `ClusterQueue` plus a `LocalQueue` per
-namespace). `spec.parentRef` names its parent CR; the fleet's whole quota tree
+other nodes, and a `ClusterQueue` node is a leaf that **is itself a tenant** and
+carries a **per-`(resource, flavor)` budget** (a `ClusterQueue` plus a `LocalQueue` in
+every enrolled namespace). `spec.parentRef` names its parent CR; the fleet's whole quota tree
 is the graph of those edges, rooted at a single reserved `root` node whose budget
 is the fleet-wide total. A leaf also carries a **priority tier** and a
 **distribution policy**. Because every node is a first-class API object, a
 **validating webhook can assemble the entire tree at admission** — it lists the
 existing `AcceleratorQuota`s, splices in the incoming one, and rejects it unless the
 result is a well-formed tree (parent resolves, no cycle, within depth, node-kind
-consistent, parent ≥ Σ children, namespaces unique within the plane's visible set —
-see Open Question #6 for the residual cross-plane hole). A
+consistent, parent ≥ Σ children — see Open Question #6 for the residual cross-plane
+hole). A
 **management-mode** controller then reconciles the admitted tree by (1) computing
 each leaf's per-cluster share of every `(resource, flavor)` pair and (2)
 server-side-applying **one `AcceleratorQuota` per matched cluster** — the leaf plus
 its ancestor chain, carrying that cluster's resolved share — over OME's existing
 `WorkloadCluster` connection subsystem. A **workload-mode** controller on each
 member renders those projections locally: a `Cohort` per internal node, a
-`ClusterQueue` per leaf, a `LocalQueue` per serving namespace. Both controllers
+`ClusterQueue` per leaf, and a `LocalQueue` per leaf in every namespace that member
+enrolls. Kueue objects are written **only** on a member, never by the hub. Both controllers
 re-run the tree checks, but they are authoritative for different things: the hub
-owns fleet containment and cross-source namespace uniqueness; the member owns
+owns fleet containment and cross-source tenant uniqueness; the member owns
 per-cluster materialization and a capacity veto. Anything that slips past a
 concurrent admission surfaces as a `Degraded` condition and a **frozen** last-good
 materialization — never a deletion. No OME CRD exists below the budget — the
@@ -103,13 +103,16 @@ Five concrete failure modes, each anchored to current code:
    the 30-minute admission deadline.
 
 2. **Tenancy is an opaque string.** `SetPodLabelsFromAnnotations`
-   (`pkg/controller/v1beta1/inferenceservice/utils/annotations.go:67-82`) copies the
+   (`pkg/controller/v1beta1/inferenceservice/utils/annotations.go:59-74`) copies the
    `ome.io/dedicated-ai-cluster` (DAC) annotation into a queue-name label with no
    interpretation — `kueue.x-k8s.io/queue-name` when the `kueue-enabled` key is also
    present, `volcano.sh/queue-name` otherwise, with a `volcano-queue` annotation
-   taking precedence over both. There is no tenant object, no namespace↔queue
-   binding, no hierarchy — the "tenant" is whatever `LocalQueue` the string
-   happens to name. Priority is a single hard-coded class,
+   taking precedence over both. There is no tenant object, nothing that declares
+   which values are legal, no hierarchy — the "tenant" is whatever `LocalQueue`
+   the string happens to name, including one that does not exist. Note what this
+   *does* establish, because the design below builds on it rather than replacing
+   it: tenancy in OME is already a property of the workload, not of its namespace.
+   Priority is a single hard-coded class,
    `DedicatedAiClusterPreemptionWorkloadPriorityClass = "kueue-scheduling-high-priority"`
    (`constants.go:231`), applied uniformly — which also violates the repo's
    no-magic-values rule.
@@ -137,6 +140,10 @@ Five concrete failure modes, each anchored to current code:
 
 - **G1.** One declarative, control-plane source of truth for fleet capacity
   budgets: `AcceleratorQuota`, per tenant, per `(resource, ResourceFlavor)` pair.
+- **G1a.** Tenancy that survives contact with a real fleet: a handful of serving
+  namespaces — often exactly one — hosting dozens of tenants. A tenant is
+  identified by a value the workload carries, never by the namespace it runs in,
+  and the tree alone decides which values are legal and which leaf each charges.
 - **G2.** Deterministic materialization of a budget into **native Kueue** objects
   on each workload cluster; OME owns the budget, Kueue owns admission/preemption/
   fair-share/borrowing. The management plane never holds a Kueue credential on a
@@ -147,8 +154,8 @@ Five concrete failure modes, each anchored to current code:
 - **G2b.** State honestly which invariants are *enforced* and which are only
   *checked at authoring time*, so nobody builds on a guarantee that is not there.
 - **G3.** A single ISVC→(queue, priority) **resolver** replacing the two
-  divergent stampers (DAC path + placement `stampQueue`), with the DAC annotation
-  kept working as a back-compat alias.
+  divergent stampers (DAC path + placement `stampQueue`), keyed on a value the
+  tree has validated rather than one that names a queue nobody checked.
 - **G4.** Single-cluster and multi-cluster share the **same API and the same
   materialization path**: workload mode renders a tree identically whether that tree
   was locally authored or projected. Multi-cluster adds a management-mode
@@ -194,10 +201,18 @@ Five concrete failure modes, each anchored to current code:
 - **Quota node** — one `AcceleratorQuota` CR, one position in the tree, its kind
   declared by `spec.role`. Called just "node" where the context is the tree;
   a bare `Node` in code font always means the Kubernetes object. A **`Cohort` node** groups other nodes (maps to a Kueue `Cohort`); a
-  **`ClusterQueue` node** is a leaf that binds one or more serving namespaces, carries the
+  **`ClusterQueue` node** is a leaf that is itself a tenant, carries the
   per-`(resource, flavor)` budget, and is the unit a workload charges against (maps to a Kueue
-  `ClusterQueue` plus a `LocalQueue` per namespace). `spec.parentRef` names the
+  `ClusterQueue` plus a `LocalQueue` in every enrolled namespace). `spec.parentRef` names the
   parent CR; the single reserved `root` node is the only one with no `parentRef`.
+- **Tenant** — the opaque string that identifies which leaf a workload charges,
+  read from the workload under an operator-configured **tenant key**. It names no
+  object; there is no `Tenant` CRD. It is a leaf's own `metadata.name`, and so
+  fleet-unique for free. A workload carrying no tenant, or one matching no leaf,
+  is simply not governed.
+- **Enrolled namespace** — a namespace a member materializes `LocalQueue`s into,
+  listed in that member's own deploy config. It is where workloads happen to run,
+  not who owns a budget, so it appears nowhere in the API.
 - **Global budget** — a leaf's fleet-wide allowance of one `(resource, flavor)`
   pair (`team-a: 40 google.com/tpu on tpu7x`): the sum it may consume across all
   clusters.
@@ -258,14 +273,14 @@ spec:
       resourceFlavor: gb300
       nominal: 100
 ---
-# a leaf node: binds namespaces, carries the budget (ClusterQueue)
+# a leaf node: is a tenant, carries the budget (ClusterQueue)
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
-metadata: {name: team-a}
+metadata: {name: org.team-a}               # named by its path; this one name is the tenant,
+                                           # the ClusterQueue, and each of its LocalQueues
 spec:
   role: ClusterQueue                       # leaf node
   parentRef: {name: org}                   # edge to the parent node
-  namespaces: [team-a-prod]                # leaf → one LocalQueue per namespace, per cluster
   priorityTier: production                 # default WorkloadPriorityClass; workloads may override
   distribution:
     policy: Proportional                   # this node's default; Explicit = admin sets perCluster
@@ -290,6 +305,103 @@ status:
 Below this object there is **no OME CRD** — the workload-mode controller writes stock Kueue
 `Cohort`, `ClusterQueue`, and `LocalQueue`.
 
+### Tenancy: how a workload finds its leaf
+
+A leaf has to answer one question — *which workloads charge this budget?* — and the
+answer cannot be "the ones in these namespaces". Real fleets do not partition
+tenants by namespace: a handful of serving namespaces, often exactly one, host
+dozens of tenants. Under that shape a namespace carries no tenant information at
+all and cannot be the resolver's lookup key.
+
+Workload-carried tenancy is also not new here. `SetPodLabelsFromAnnotations`
+(`pkg/controller/v1beta1/inferenceservice/utils/annotations.go:59-74`) already
+derives a workload's queue from an annotation the workload carries, not from the
+namespace it runs in. What follows extends the shape OME already has; a
+namespace-bound model would have been the departure from it.
+
+So **a leaf's tenant is its own name.** There is no tenancy field on the CR at all:
+
+- The resolver reads the operator-configured tenant key from a workload's labels,
+  then its annotations, and charges the leaf whose `metadata.name` equals that
+  value — `dedicated.content-understanding` under the path convention in *Identity*.
+- **Tenant uniqueness therefore costs nothing to enforce, and needs no check at
+  all.** `AcceleratorQuota` is cluster-scoped, so the apiserver already guarantees
+  one leaf per name. The per-namespace uniqueness check this replaces goes away
+  with nothing put in its place.
+
+**Carrying the tenant key is the workload's half of the contract.** A workload that
+sets it is asking to be subject to quota admission; one that does not, is not. So a
+value matching no leaf is *not* rerouted to some fallback budget — the resolver
+stamps nothing, and Kueue leaves the workload alone:
+
+> `ManageJobsWithoutQueueName` … Defaults to false; therefore, those jobs are not
+> managed and if they are created unsuspended, they will start immediately.
+> — Kueue `apis/config/v1beta1/configuration_types.go`
+
+The obvious alternative is a designated catch-all leaf to absorb these, and it is
+rejected for a reason worth stating: it converts a **loud** failure into a
+**quiet** one. A mistyped tenant with no fallback runs with no `queue-name` label,
+which is trivially detectable; with a fallback it silently charges a shared budget
+and looks perfectly healthy. For a system whose entire purpose is accounting, that
+is the wrong direction. The resolver therefore emits an Event and a metric when it
+declines to stamp, so ungoverned work is visible rather than inferred.
+
+A cluster that wants the strict posture does not need OME machinery for it: setting
+Kueue's `manageJobsWithoutQueueName: true` suspends unlabelled workloads instead of
+running them. That puts permissive-versus-strict on the cluster operator, which is
+where it belongs.
+
+The cost of binding tenant to name is that **renaming a tenant means renaming the
+CR**, which deletes and recreates its `ClusterQueue` — the same drain the path
+convention already implies for re-parenting, and the reason *Restructuring the tree*
+prefers stale names to renames. Decoupling the two later is purely additive: a
+`spec.tenants[]` claim list defaulting to `[metadata.name]` would not break a single
+existing object. It is left out because nothing needs it today.
+
+A dozen tenants, as authored:
+
+```
+root (Cohort)
+├── dedicated (Cohort)
+│   ├── dedicated.content-understanding  (ClusterQueue)
+│   ├── dedicated.business-agent         (ClusterQueue)
+│   └── dedicated.maiba                  (ClusterQueue)
+├── shared (Cohort)
+│   ├── shared.pool                      (ClusterQueue)   # the group's own workloads
+│   ├── shared.avocado-9b                (ClusterQueue)
+│   └── shared.avocado-t5                (ClusterQueue)
+└── msl (Cohort)
+    ├── msl.fair-research                (ClusterQueue)
+    ├── msl.par-product                  (ClusterQueue)
+    ├── msl.tbd-infra                    (ClusterQueue)
+    └── msl.tbd-research                 (ClusterQueue)
+```
+
+Every leaf carries exactly one name, which is at once its tenant, its
+`ClusterQueue`, and its `LocalQueue` in each enrolled namespace. Note `shared`. A
+node that both groups children *and* holds workloads of its own is not expressible
+— Kueue `ClusterQueue`s cannot have child `ClusterQueue`s — so the group is a
+`Cohort` and its own workloads move into an explicit leaf child (`shared.pool`)
+standing alongside its siblings.
+
+Namespaces are absent from the API. Which namespaces a cluster serves from is a
+property of that cluster, not of who owns a budget, so the set is member-side
+deploy config; see *Budget → Kueue mapping* for what materializes there and *Where
+it runs* for the flag.
+
+The resolver **overwrites** the queue label rather than defaulting it, so a
+hand-written `queue-name` never survives to charge a budget the tree did not
+adjudicate.
+
+**What this gives up, stated plainly.** `ClusterQueue.spec.namespaceSelector` stops
+being a tenant boundary — every leaf's queue selects every enrolled namespace — so
+a workload that stamps another tenant's value charges that tenant, from anywhere in
+the cluster. That is parity with the DAC path above rather than a new hole, and
+closing it needs an identity gate on the ISVC, not a namespace: the tree can prove
+the *mapping* is unambiguous, but no field a workload author writes is unforgeable.
+Tenant names being fleet-unique follows from the same choice — `team-a` cannot
+mean two different things in two namespaces.
+
 ### Assembling the tree from `parentRef`
 
 The tree is the graph of `parentRef` edges across all `AcceleratorQuota`s — a node in
@@ -308,14 +420,15 @@ result is a well-formed tree before admitting it. A CR that would break the tree
 - **Depth** — the node's distance from `root` exceeds `maxTreeDepth`.
 - **Node-kind violation** — the structure contradicts the declared `spec.role`: a
   `parentRef` targets a `role: ClusterQueue` node (leaves take no children), or a
-  `role: Cohort` node carries `namespaces`/`priorityTier`. A node is *either* a
+  `role: Cohort` node carries `priorityTier`. A node is *either* a
   `Cohort` *or* a `ClusterQueue`, never both; `role` is declared, and a
   `ClusterQueue`→`Cohort` change is admitted only on a drained leaf (see *Node kind*).
 - **Containment** — a parent's `nominal` for some `(resource, flavor)` pair is less than the sum of its
   children's (including the incoming one).
-- **Namespace collision** — a namespace bound by this leaf is already bound by
-  another leaf in the tree this plane can see. This is *not* a fleet-wide
-  guarantee; see Open Question #6.
+
+There is no tenant check in that list. A leaf's tenant is its `metadata.name`, which
+the apiserver already keeps unique across a cluster-scoped kind; the cross-plane
+residue is Open Question #6.
 
 Admission is fast feedback but not a serialization point: two children admitted
 concurrently can each pass containment yet together bust the parent, and a parent
@@ -330,7 +443,7 @@ acted on once broken.
 
 The two planes are authoritative for **different** invariants, and it is worth
 being precise since their inputs differ: the management plane owns fleet
-containment and cross-source namespace uniqueness, because only it sees the whole
+containment and cross-source tenant uniqueness, because only it sees the whole
 authored tree; the member owns per-cluster materialization and the capacity veto,
 because only it sees its own silicon. "The same checks on both planes" is not quite
 true once a member's numbers are shares rather than fleet totals.
@@ -350,8 +463,9 @@ true once a member's numbers are shares rather than fleet totals.
    mirroring the `parentRef` edges among internal nodes (no `resourceGroups` — see
    *Budget → Kueue mapping*); one `ClusterQueue` per leaf node (`nominal` →
    `nominalQuota`; `borrowingLimit`/`lendingLimit` passed through); one
-   `LocalQueue` per listed namespace. `WorkloadPriorityClass`es referenced by
-   `priorityTier` are referenced, not created.
+   `LocalQueue` per leaf in each namespace this cluster enrolls.
+   `WorkloadPriorityClass`es referenced by `priorityTier` are referenced, not
+   created.
 3. The resolver stamps each ISVC's engine pods with the tenant's `LocalQueue`
    name and priority class.
 4. Kueue admits/gates as usual; OME reads `InstanceStatus.Admitted` (unchanged).
@@ -644,12 +758,13 @@ edges:
 
 - **Render** — assemble the per-node CRs (from a directory or a live cluster) into
   the full tree and print it: parent/child structure, per-`(resource, flavor)` `nominal` vs. Σ
-  children, depth, and each leaf's namespaces.
+  children, depth, and each leaf's name — which is also its tenant and its queue.
 - **Validate (dry-run)** — run the *same* checks as the admission webhook offline,
   against a proposed change, before it reaches the cluster or a GitOps PR — so a
   containment or node-kind violation is caught at author time, not at `apply`.
 - **Scaffold** — generate a child CR under a named parent (wiring `parentRef` and
-  the parent's flavor set), and optionally expand a single compact "whole-tree"
+  the parent's flavor set, and naming it by its path per *Identity*), and
+  optionally expand a single compact "whole-tree"
   description into the individual per-node CRs a GitOps repo stores.
 
 The tool is pure client-side validation and code-gen: it holds no privilege and is
@@ -668,12 +783,15 @@ the tree is authorable and checkable as a whole.
   `Cohort.spec.parentName`).
 - `spec.role` ∈ `{Cohort, ClusterQueue}` — what the node **is**, declared not
   inferred. `Cohort` = an internal grouping node; `ClusterQueue` = a leaf that
-  carries the budget and binds namespaces. Structure is validated *against* this
+  carries the budget and is a tenant. Structure is validated *against* this
   field, which is **mutable only on a drained leaf** (see *Node kind*).
 - There is **no** cluster-selector field; a leaf's matched set is derived from
   what it already declares (see *Why the matched set is derived*).
-- `spec.namespaces[]` — `ClusterQueue` nodes only; each becomes a `LocalQueue` in that
-  namespace, on every **matched** cluster, bound to this node's `ClusterQueue`.
+- There is **no tenancy field**: a leaf's tenant is its `metadata.name`, matched
+  against the value the resolver reads from a workload under the operator-configured
+  tenant key (see *Tenancy*). Nor is there a namespace field — which namespaces a
+  member materializes `LocalQueue`s into is that member's deploy config, not the
+  budget's business.
 - `spec.priorityTier` — `ClusterQueue` nodes only; the **default**
   `WorkloadPriorityClass` the resolver stamps on the leaf's workloads. It is a
   default, not a partition: a workload may declare its own priority, and the leaf's
@@ -699,8 +817,11 @@ the tree is authorable and checkable as a whole.
   `Proportional` on a fungible one. `perCluster[] {cluster, nominal}` is required
   iff the entry's effective policy is `Explicit`, and rejected otherwise.
 - `status` reports:
-  - `parent` and `path` — the resolved edge and the computed root-to-node path,
-    for humans.
+  - `parent` — the resolved edge. There is deliberately no computed `path`
+    alongside it: under the naming convention in *Identity* a path duplicates
+    `metadata.name`, and it diverges only when someone departed from the
+    convention — leaving a reader two values and no rule for which is
+    authoritative. Ancestry is a walk over `parent`, which the authoring tool does.
   - `budgets[] {resourceName, resourceFlavor, nominal, admitted, borrowed,
     effectiveCeiling?, perCluster[]}` — the resolved allowance and the usage rolled
     up from each cluster's `ClusterQueue.status`. `perCluster[]` is the single
@@ -747,30 +868,45 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
   cohort quota is additive (see *Budget → Kueue mapping*).
 - **Identity.** A node is identified by its CR `metadata.name`, which is globally
   unique because `AcceleratorQuota` is cluster-scoped — and that name is what the
-  materializer uses for the Kueue object. Because that name is fleet-unique,
-  reusing a short label under two parents requires two distinct CR names
-  (`org1-team-b`, `org2-team-b`) — there is no per-parent namespace in which a bare
-  `team-b` could appear twice, and the second `apply` would simply collide.
-  `status.path` reports ancestry for humans and carries **no** uniqueness semantics.
-  Kueue object names are deliberately **not** derived from
-  ancestry: a path-derived name would rename — and therefore delete and recreate —
-  a live `ClusterQueue` whenever a node is re-parented (see *Restructuring the
-  tree*).
+  materializer uses for the Kueue object, verbatim, for both the `ClusterQueue` and
+  each of its `LocalQueue`s.
+
+  **Nodes SHOULD be named by their path** — the dot-joined chain of ancestors from
+  the top tier down to the node, `root` omitted: `dedicated.content-understanding`,
+  `msl.fair-research`. This is a convention on an author-written name, **not** a
+  string the controller computes, and that distinction is the whole of it. A
+  computed path would rename a node the instant it is re-parented, and a rename is
+  a delete and recreate — taking the live `ClusterQueue` and everything admitted
+  against it (see *Restructuring the tree*). An author-written path is renamed only
+  when an operator decides to pay for it; until then it may describe the wrong
+  ancestry, which is a legibility debt rather than an outage.
+
+  Both halves validate. Kueue's `LocalQueueName` and `ClusterQueueReference` accept
+  dot-separated segments up to 253 characters, and the queue name reaches a workload
+  in a label value, where dots are also legal. The binding limit is OME's own
+  63-character cap on a node name — it is copied into the
+  `ome.io/accelerator-quota` label value — so a deep tree with long segments hits
+  that first, and the existing cap rejects it at admission.
+
+  Because names are fleet-unique, reusing a short label under two parents is
+  impossible by construction rather than by check: `dedicated.maiba` and `msl.maiba`
+  are two distinct CRs, and a bare `maiba` written twice would collide on the second
+  `apply`. `status.parent` records the resolved edge; there is no separate `path`
+  field, because under this convention the name is the path.
 - **Disjoint subtrees.** Sibling subtrees MUST NOT overlap: no node and no
-  namespace is shared between two of them — two similarly-labelled tenants under
+  tenant is shared between two of them — two similarly-labelled tenants under
   different parents are two distinct CRs with distinct names (see *Identity*), not a
   shared node. This is a
   consequence of the rules above, not a separate check — node-disjointness follows
   from each node being a distinct CR with a single parent (a subtree cannot hang
-  under two parents; a DAG is impossible), and namespace-disjointness from the
-  fleet-wide *Namespace binding* invariant. Note this is **structural** overlap
+  under two parents; a DAG is impossible), and tenant-disjointness from the
+  fleet-wide *Tenant binding* invariant. Note this is **structural** overlap
   only: two top-tier subtrees MAY target the same `ResourceFlavor` on the same
   cluster — that is how `root`'s capacity is divided among them (the materializer
   sums every leaf's share per `(resource, flavor)` per cluster), not an overlap.
 - **Depth.** A node's distance from `root` MUST NOT exceed a configurable
-  maximum, `maxTreeDepth`, supplied via the `quota` block of
-  `inferenceservice-config` (the OME chart ships 5; there is no in-code default, and
-  an unset value disables the check — see *Where it runs*). Operators
+  maximum, `--max-tree-depth` (the OME chart ships 5; there is no in-code default,
+  and an unset value disables the check — see *Where it runs*). Operators
   who need deeper hierarchies can raise it (e.g. 10), with a cost: the materializer
   builds the `Cohort` tree **top-down** — a parent `Cohort` must exist before its
   children reference it, or Kueue silently substitutes its implicit default cohort
@@ -782,8 +918,8 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
   from whether children happen to exist:
   - `role: Cohort` MAY carry `budgets` — the parent number containment is checked
     against, an authoring guardrail that never materializes (see *Budget → Kueue
-    mapping*) — but MUST NOT carry `namespaces`/`priorityTier`, since no workload
-    binds to a `Cohort`; nor `distribution`, since only a leaf's budget is split
+    mapping*) — but MUST NOT carry `priorityTier`, since no
+    workload binds to a `Cohort`; nor `distribution`, since only a leaf's budget is split
     across clusters; nor `borrowingLimit`/`lendingLimit`, which have no meaning on a
     quota that is never materialized.
   - `role: ClusterQueue` MUST carry ≥1 `(resource, flavor)` budget entry and MUST NOT be named as any other
@@ -795,20 +931,22 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
     and no third party can silently convert a leaf into a grouping by adding a child.
     It is **mutable only under a guard**: a `ClusterQueue`→`Cohort` change (a leaf
     growing sub-projects) is admitted only when the leaf is **drained** (its
-    `ClusterQueue` has no admitted workloads and binds no namespaces), because the
+    `ClusterQueue` has no admitted workloads), because the
     conversion deletes the underlying `ClusterQueue`; a change on a live leaf is
     rejected, and the zero-downtime path is the grouping-above pattern in
     *Restructuring the tree*. `Cohort`→`ClusterQueue` is likewise rejected while the
     node still has children.
-- **Namespace binding.** Each namespace maps to **exactly one** `ClusterQueue` node (a
-  leaf may list many namespaces, but a namespace belongs to one leaf), or the
-  resolver cannot decide which queue a workload in that namespace charges. Each
-  plane rejects a collision **within the set it can see**; the cross-plane case — a
-  projected leaf on one cluster, a locally-authored leaf on another — is caught only
-  at reconcile, as `Degraded`. Open Question #6. A
-  consequence: `LocalQueue`s exist **only at leaves**, so no namespace is ever
-  bound at both a grouping and its descendant; sibling leaves under one grouping
-  each get their own `LocalQueue`s in their own namespaces.
+- **Tenant binding.** Each tenant maps to **exactly one** `ClusterQueue` node, or
+  the resolver cannot decide which queue a workload carrying it charges. Because a
+  leaf's tenant *is* its `metadata.name` and `AcceleratorQuota` is cluster-scoped,
+  the apiserver already guarantees this and no tree-level check is needed. What does
+  need watching is the cross-plane case — a projected leaf on one cluster, a
+  locally-authored leaf of the same name on another — which no per-cluster
+  apiserver can see and which surfaces only at reconcile, as `Degraded`. Open
+  Question #6. A
+  consequence: `LocalQueue`s exist **only at leaves**, so no tenant is ever bound at
+  both a grouping and its descendant; sibling leaves under one grouping get their
+  own `LocalQueue`s, distinguished by name rather than by namespace.
 
 ### Why the matched set is derived
 
@@ -856,15 +994,34 @@ The concrete translation:
 | node `borrowingLimit` | `ClusterQueue` resource `borrowingLimit` (burst up, within-cluster cohort borrow) |
 | node `lendingLimit` | `ClusterQueue` resource `lendingLimit` (share released to siblings when idle) |
 | internal-node budget | **nothing** — an authoring guardrail only, see below |
-| leaf `namespaces[]` | `LocalQueue` per namespace, `spec.clusterQueue` = leaf CQ; **plus** `ClusterQueue.spec.namespaceSelector` covering them |
+| leaf node (any) | one `LocalQueue` of the leaf's own name in **every enrolled namespace**, `spec.clusterQueue` = leaf CQ; **plus** `ClusterQueue.spec.namespaceSelector` covering those namespaces |
 | `priorityTier` | referenced `WorkloadPriorityClass` |
 
-Two shape requirements the table cannot carry, both of which fail quietly:
+**Kueue objects are written only on a member.** The hub projects `AcceleratorQuota`
+CRs and nothing else; the enrolled-namespace set is read from the member's own
+deploy config, so the projection carries no namespace at all and two members may
+enroll different namespaces without the hub knowing.
+
+Three shape requirements the table cannot carry, all of which fail quietly:
+
+**A `LocalQueue` is mandatory, and it is the only route to a `ClusterQueue`.**
+Kueue's `Workload.spec.queueName` is typed `LocalQueueName` and resolved in the
+workload's own namespace (Kueue `apis/kueue/v1beta2/workload_types.go`); there is no
+label or field that names a `ClusterQueue` directly, and naming a `LocalQueue` that
+is absent does not fall through — Kueue's queue manager returns
+`ErrLocalQueueDoesNotExistOrInactive` (Kueue `pkg/cache/queue/manager.go`) and the
+workload is never queued. So the leaf × enrolled-namespace
+cross product is not over-materialization: since tenancy is not namespace-scoped,
+any leaf's workloads may appear in any enrolled namespace, and every one of those
+pointers is one a workload could legitimately need.
 
 **`ClusterQueue.spec.namespaceSelector` must be set.** A null selector admits
 *nothing* — the queue exists, the `LocalQueue`s point at it, and every workload
-stays pending with no object in an error state. Binding namespaces via `LocalQueue`
-alone is not enough.
+stays pending with no object in an error state. It is rendered as
+`kubernetes.io/metadata.name In (enrolled namespaces)`. That is not a tenant
+boundary — every leaf's queue selects every enrolled namespace — but it makes the
+*enrollment* boundary Kueue-enforced rather than merely implied by where
+`LocalQueue`s happen to exist.
 
 **A leaf emits exactly one `resourceGroup`, never one per flavor.** Kueue scopes
 its uniqueness checks across *all* of a `ClusterQueue`'s groups: a resource may
@@ -983,7 +1140,7 @@ landing on the wrong member after a kubeconfig swap is detectable rather than
 silently rendered. A source carries none of them.
 
 **What differs on a projection.** Same `metadata.name` (so the Kueue object name is
-stable), same `role`, `parentRef`, `namespaces`, `priorityTier`, `borrowingLimit`,
+stable), same `role`, `parentRef`, `priorityTier`, `borrowingLimit`,
 `lendingLimit`. `nominal` is replaced by that cluster's resolved share.
 `distribution`, `budgets[].policy`, and `budgets[].perCluster` are **omitted** — a
 projection carries a resolved number, never an unresolved split.
@@ -1045,8 +1202,8 @@ the local `AcceleratorQuota`, and kube GC handles uninstall. That was impossible
 a direct-SSA design only because the owner lived on a different cluster; two-level
 projection removes the obstacle. *Lean:* OwnerReferences as the primary reaper,
 with a label sweep and a finalizer as belt-and-braces. The sweep is not redundant:
-removing an entry from `namespaces[]` orphans that namespace's `LocalQueue` while its
-owner still exists, so OwnerReference GC will **not** reap it. (A `metadata.name`
+un-enrolling a namespace orphans every leaf's `LocalQueue` there while each owning
+node still exists, so OwnerReference GC will **not** reap them. (A `metadata.name`
 change cannot orphan anything — names are immutable in Kubernetes.) `TBD:` whether
 SSA field-manager conflicts on
 `metadata.ownerReferences` make this awkward in practice — needs a spike.
@@ -1084,18 +1241,28 @@ The order matters, because containment is checked at every step:
    `team-a-group`. `parentRef` is freely mutable (`role` changes only under the drain guard in
    *Node kind*), and since Kueue
    object names come from `metadata.name`, this is an **in-place update** of the
-   existing `ClusterQueue`'s `spec.cohortName`: the queue object, its namespaces,
-   its `LocalQueue`s, and its admitted workloads all survive. Only the node's
-   `status.path` changes.
+   existing `ClusterQueue`'s `spec.cohortName`: the queue object, its name and so
+   its tenant, its `LocalQueue`s, and its admitted workloads all survive. Only the node's
+   `status.parent` changes — and, under the naming convention, its name is now
+   stale, which *Identity* prefers to a rename.
 3. **Size the grouping, shrink the incumbent, then add the sibling** — set
    `team-a-group` to 60 (now that `team-a` is its child, not `org-1`'s), lower
    `team-a` to 40, then create `proj-x` at 20. Every apply keeps parent ≥ Σ children
    true; adding `proj-x` first, or sizing the grouping in step 1, would be
    rejected.
 
+**Under the path naming convention, re-parenting leaves a name stale, deliberately.**
+Step 2 puts `org-1.team-a` under `org-1.team-a-group`, where its name now describes
+the wrong ancestry. Renaming the CR to match would delete and recreate its
+`ClusterQueue` and evict everything admitted against it — which is precisely why
+*Identity* makes the path a convention on an author-written name rather than a
+string the controller computes. Correct the name later during a drain, or never. A
+legibility debt paid when convenient beats an outage taken at the moment of
+restructuring.
+
 Two variants worth calling out:
 
-- **Moving namespaces between leaves** (e.g. `proj-x` takes over a namespace from
+- **Moving a tenant between leaves** (e.g. `proj-x` takes over a tenant from
   `team-a`) is workload-visible: the resolver stamps a different `queue-name`, so
   *newly created* pods charge the new leaf while already-admitted pods keep running
   against the old one until they are recreated. It is a rollout, not an instant cut.
@@ -1112,7 +1279,7 @@ rejected apply.
 
 ### Where it runs
 
-One binary, two modes, selected by `--quota-mode={workload,management}` (empty
+A dedicated binary, `ome-quota-manager`, two modes selected by `--mode` (unset
 means off — a flag rather than ConfigMap data, following the rule at
 `pkg/controller/v1beta1/controllerconfig/multicluster.go:20-23`: topology decides
 which controllers run, so it is a restart-time decision).
@@ -1134,24 +1301,45 @@ as its own Deployment with its own ServiceAccount, so the Kueue write is scoped 
 the process that needs it. Doing otherwise concedes most of the argument for
 two-level delivery.
 
-Everything else is a `quota` block in the `inferenceservice-config` ConfigMap with
-**no in-code default** — `rootName`, `maxTreeDepth`, `acceleratorResources`,
-`coverResources`, `budgetedNodeSelector`, `capacityHysteresisPercent`,
-`overcommitPercent`, `defaultDistributionPolicy`, `fieldManager`, `originIdentity`
-(hub-side, stamped on projections), `projectorServiceAccount` and `expectedOrigin`
-(member-side pins), `resyncInterval`.
+**Everything else is a flag too, not ConfigMap data.** This binary has a handful of
+deploy-time decisions and no hot-tunable ones, so a flag avoids a ConfigMap read,
+the RBAC to do it, and a parse layer that could disagree with what the chart
+rendered — the reasoning recorded at `cmd/ome-quota-manager/main.go`. The chart
+supplies every one, and none has an in-code default:
+`--max-tree-depth`, `--accelerator-resources`, `--cover-resources`,
+`--budgeted-node-selector`, `--capacity-hysteresis-percent`, `--overcommit-percent`,
+`--default-distribution-policy`, `--field-manager`, `--projection-origin`
+(hub-side, stamped on projections), `--projector-service-account` and
+`--expected-origin` (member-side pins), `--resync-interval`.
 
-Two of those decide what "capacity" even means and deserve naming here.
-`acceleratorResources` is the list of resource names that count as accelerators
+Two decide what "capacity" even means. `--accelerator-resources` is the list of
+resource names that count as accelerators
 (`nvidia.com/gpu`, `google.com/tpu`, …) — absent, capacity derivation is off, since
 OME should not guess which of a node's scalar resources is the expensive one.
-`budgetedNodeSelector` narrows which nodes OME budgets at all, so nodes reserved for
+`--budgeted-node-selector` narrows which nodes OME budgets at all, so nodes reserved for
 another tenant or another scheduler do not inflate the denominator. `TBD:` how a
 node's allocatable is attributed to a `ResourceFlavor` — matching the flavor's
 `spec.nodeLabels` is the obvious rule and costs nothing given the reference-only
 stance in Open Question #4, but it is unspecified today.
-Absent config **disables** rather than assumes: no `maxTreeDepth` means the depth
+Absent config **disables** rather than assumes: no `--max-tree-depth` means the depth
 check does not run, not that 5 is assumed.
+
+Two more decide tenancy, and both are member-side:
+
+- **`--enrolled-namespaces`** — the namespaces this member materializes
+  `LocalQueue`s into, and the set `ClusterQueue.spec.namespaceSelector` is built
+  from. Absent, nothing materializes: OME will not guess where a cluster serves
+  from. It lives here rather than on the CR because it describes the cluster, not
+  the budget, which is also why two members may enroll different namespaces and the
+  projection carries none. It is the one knob that genuinely dents the
+  no-hot-tunables premise above — onboarding a namespace needs a restart of this
+  Deployment, cheap because it touches no serving pod, but the first candidate for
+  a watch if the list ever grows.
+- **`--tenant-key`** — the key whose value identifies a workload's tenant, read
+  from the workload's labels and then its annotations. Absent, the resolver stamps
+  nothing and no workload is governed. Any key will do — including an annotation a
+  fleet already stamps for another purpose, such as `ome.io/dedicated-ai-cluster` —
+  since the tree validates the value regardless of where it came from.
 
 The reserved root's **name** is deliberately **not** in that list, and not
 configurable at all. It is a wire-contract identity: every `AcceleratorQuota` in
@@ -1166,13 +1354,35 @@ the value being part of the API contract rather than a behavioral default.
 ### The resolver and a hard prerequisite
 
 The resolver unifies `SetPodLabelsFromAnnotations` and placement's `stampQueue`
-into one function: given a workload's leaf node (from namespace binding or the DAC
-annotation alias), stamp `kueue.x-k8s.io/queue-name` = the leaf's `LocalQueue`
-and `kueue.x-k8s.io/priority-class` = the leaf's default tier, left intact if the
-workload already declares its own `WorkloadPriorityClass`. It runs in the ISVC
-reconciler
+into one function. Read the workload's tenant from `--tenant-key` — labels first,
+then annotations — and find the leaf of that name. Two outcomes, and only two:
+
+| Tenant | Resolver |
+|---|---|
+| matches a leaf | Stamp `kueue.x-k8s.io/queue-name` = the leaf's name and `kueue.x-k8s.io/priority-class` = its tier, the latter left intact if the workload declares its own `WorkloadPriorityClass`. |
+| matches nothing, or is absent | Stamp nothing, emit an Event, count a metric. The workload is not governed, and that is visible rather than inferred. |
+
+It runs in the ISVC reconciler
 for both `RawDeployment` and `OMENative` (the labels already flow to pods via
 `irprojector`/render — no webhook needed).
+
+**It overwrites the queue label; it does not default it.** A hand-written
+`queue-name` never survives to charge a budget the tree did not adjudicate. That is
+the whole difference from the stamper it replaces: the value a workload carries is
+now a claim, not a queue name taken on trust.
+
+**A stamp that outruns its queue self-heals.** An ISVC resolved before its leaf's
+`LocalQueue` renders is stamped anyway; Kueue declines to queue the workload
+(`ErrLocalQueueDoesNotExistOrInactive`) and admits it once the `LocalQueue` lands,
+since the `LocalQueue` controller requeues that namespace's workloads. Waiting is
+the correct behavior for a workload whose budget is not yet in place, and it needs
+no fallback queue to catch it.
+
+It also replaces placement's single configured queue name (`LocalQueue string` on
+the placement reconciler, stamped identically onto every derived ISVC). That field
+predates any notion of per-tenant queues and cannot express one. The hub should
+stop stamping entirely and leave it to the member's resolver, which is the only
+side that knows the rendered `LocalQueue` names.
 
 **Not a prerequisite — already satisfied.** The concern was that
 `InstanceReadyTimeout` measured from operation start would fail a
@@ -1232,8 +1442,8 @@ here.
   and recovers.
 - **Tree validation, per plane** — the two webhooks reject different things:
   - *hub:* dangling parent, second root, cycle, over-depth, node-kind clash, `role`
-    flip on a non-drained leaf, parent < Σ children, namespace collision **within
-    the authored tree** (the residual cross-plane hole is Open Question #6).
+    flip on a non-drained leaf, parent < Σ children **within the authored tree**
+    (the residual cross-plane hole is Open Question #6).
   - *member:* over-capacity projection, unknown flavor, foreign projector,
     hand-edit of an origin-labelled CR, and `distribution`/`perCluster` on a
     locally-authored source.
@@ -1247,11 +1457,18 @@ here.
   today, so standing one up is part of this work — a leaf becomes a `ClusterQueue` with a
   cpu/mem cover; an internal node becomes a `Cohort` with **no** `resourceGroups`;
   usage rolls up from `ClusterQueue.status.flavorsUsage`; a pre-existing *unlabeled*
-  `ClusterQueue` of the same name is refused rather than adopted.
+  `ClusterQueue` of the same name is refused rather than adopted. Plus the tenancy
+  shape: **many leaves coexist in one enrolled namespace**, each with its own
+  path-named `LocalQueue`; a dotted node name survives round-tripping into both
+  Kueue objects and the `queue-name` label; un-enrolling a namespace sweeps the
+  orphaned `LocalQueue`s that OwnerReference GC will not reach.
 - **Single-cluster integration:** on a KWOK cluster with Kueue installed from the
-  pinned module's chart, apply an `AcceleratorQuota` tree, deploy ISVCs in two
-  tenants, assert each pod lands in its tenant's `LocalQueue`, that over-budget
-  pods gate, that `status` usage matches `ClusterQueue.status`, and — the
+  pinned module's chart, apply an `AcceleratorQuota` tree, deploy ISVCs for two
+  tenants **in the same namespace**, assert each pod lands in its own tenant's
+  `LocalQueue` and charges only that leaf's budget, that a workload carrying an
+  unknown tenant is left unstamped and ungoverned rather than charged to anyone,
+  that an ISVC stamped before its `LocalQueue` renders admits once it lands, that
+  over-budget pods gate, that `status` usage matches `ClusterQueue.status`, and — the
   regression that matters — that **cordoning a node deletes no `ClusterQueue` and
   changes no `nominalQuota`.**
 - **Multi-cluster:** one management cluster + 2 members. Assert projections carry
@@ -1264,14 +1481,14 @@ here.
 
 - **Alpha — workload mode only, no management plane.** A locally-authored
   `AcceleratorQuota` tree materializes to Kueue on one cluster; derived root
-  capacity; freeze-on-violation; the ISVC→(queue, priority) resolver; the authoring
-  tool's render + dry-run validate.
+  capacity; freeze-on-violation; the ISVC→(queue, priority) resolver, with several
+  tenants served from one namespace and unknown tenants left ungoverned; the
+  authoring tool's render + dry-run validate.
 - **Beta — management mode.** Projection of each matched leaf and its ancestor
   chain; `Explicit` then `Proportional` (snapshot) apportionment with `Σ shares ==
   nominal` exactly, including pinned clusters; the member veto with `Pending` and
   `SharesExhausted` reporting; OwnerReference GC with the label sweep as
-  belt-and-braces; `status` complete enough to drive a read-only capacity vs quota vs usage view; DAC-annotation
-  migration path documented.
+  belt-and-braces; `status` complete enough to drive a read-only capacity vs quota vs usage view.
 - **Stable:** the authoring-time containment check and the projection contract
   battle-tested; priority tiers proven; usage rollup in `status` proven against
   `ClusterQueue.status`; runbooks for over-subscription, starvation, and a long
@@ -1279,6 +1496,15 @@ here.
 
 ## Drawbacks
 
+- **The namespace stops being a quota boundary.** Because a tenant rides on the
+  workload rather than on its namespace, `ClusterQueue.spec.namespaceSelector` no
+  longer separates tenants, and anyone who can create an ISVC in an enrolled
+  namespace can charge any tenant's budget from anywhere in the cluster. This is
+  parity with the DAC path it replaces rather than a new hole, and the tree still
+  makes the *mapping* unambiguous and auditable — but a fleet that needs quota to
+  be a security boundary and not just an accounting one will need an identity gate
+  on the ISVC, keyed on `req.UserInfo` the way the projection provenance gate is.
+  Not in this OEP.
 - **Two controllers and a duplicated object set.** Two-level delivery costs a
   second controller and a copy of every matched node on every member, versus one
   distributor writing Kueue directly. The exchange is that the hub holds no Kueue
@@ -1320,8 +1546,8 @@ here.
    `Workload`s to members. *Rejected:* OME already rejected MultiKueue in
    OEP-0018 in favor of fan-out + its own `WorkloadCluster` connection; adopting
    it now would fork the placement model.
-3. **One jumbo CR holding the whole tenant tree** (a flat `tenants[]` list, the
-   hierarchy encoded in dot-path names). *Rejected —* though note the honest
+3. **One jumbo CR holding the whole tenant tree** (a flat list of tenant entries,
+   the hierarchy encoded in dot-path names). *Rejected —* though note the honest
    trade: a jumbo CR makes cross-node validation **easier**, because one admission
    sees the entire tree with no concurrency window at all. What it costs is
    everything else: the structure hides in string parsing, every edit funnels
@@ -1338,6 +1564,23 @@ here.
    the hub, and gives the member no veto over what lands — see *Multi-cluster flow*,
    option (a), for the full comparison. It is genuinely the simpler data path, and
    *Drawbacks* names the condition under which we would go back to it.
+6. **Namespace-bound tenancy, with tenants migrated one per namespace.** The
+   original shape of this proposal. *Rejected:* it asks dozens of teams to
+   re-home their workloads before quota can ship, the migration is theirs and not
+   ours, and it does not help at all where the single serving namespace is imposed
+   from outside. It also regresses against the DAC path, which already tenants by
+   workload.
+7. **The leaf claims workloads by label selector rather than by exact value.**
+   More expressive — one field could carry both a namespace restriction and a
+   wildcard. *Rejected for v1:* proving two arbitrary `matchExpressions` disjoint is
+   the NetworkPolicy-overlap problem, so admission would degrade from *proving* the
+   mapping unambiguous to warning about it. Exact values keep the check a map
+   lookup. A selector remains addable later without renaming anything.
+8. **A second CRD owning the tenant→leaf map**, so a namespace owner could
+   subdivide their namespace without write access to the fleet tree. *Rejected for
+   v1:* it costs the "one CRD is the entire new API surface" property and gives
+   two-level projection a second object kind to project, GC, and validate. It is
+   the right answer if per-tenant delegation ever outweighs that.
 
 ## Open Questions
 
@@ -1365,10 +1608,10 @@ here.
    GitOps applies but weakens the "admission proves a valid tree" guarantee.
    *Lean:* strict for v1; revisit if GitOps ordering proves painful.
 6. **Should locally-authored nodes be rejected on a cluster that receives
-   projections?** Fleet-wide namespace uniqueness cannot actually be checked by a
+   projections?** Fleet-wide tenant uniqueness cannot actually be checked by a
    per-cluster webhook: on a member the visible set is projections plus local CRs (a
    subset), and on the hub it is the fleet tree minus each member's locally-authored
-   nodes. The invariant holds strictly in **neither** place, so a namespace claimed
+   nodes. The invariant holds strictly in **neither** place, so a tenant claimed
    by a projected leaf on one cluster and a local leaf on another is caught only at
    reconcile. Rejecting local authoring on a projection-receiving cluster would make
    the sets disjoint and close the hole, at the cost of a per-cluster escape hatch.
@@ -1376,10 +1619,12 @@ here.
    forbidding it earlier breaks the single-cluster path.
 7. **Bound the shrinking-share window?** See Drawbacks. *Lean:* start unbounded and
    measure; a projection deadline that `Degrade`s the source node is easy to add.
-8. **Namespace absent on a member.** `LocalQueue` is namespaced, so a leaf binding a
-   namespace that does not exist on some cluster cannot materialize there. Create
-   it, or `Degrade` and skip? *Lean:* skip — OME creating serving namespaces is a
-   new and surprising power.
+8. **Namespace absent on a member.** *Resolved by moving enrollment member-side.*
+   The namespaces a member materializes into come from its own
+   `--enrolled-namespaces`, not from a leaf, so the fleet can no longer ask a
+   cluster for a namespace it does not have. An enrolled namespace that does not
+   exist is a purely local misconfiguration: skip it, report it, create nothing.
+   OME creating serving namespaces remains a surprising power we decline to take.
 9. **What unblocks quota-aware ISVC dispatch?** Placement is deliberately untouched
    (see *Interplay with placement*), and it must stay that way until the control
    plane can answer "does this ISVC fit". It cannot today: the ISVC defaulter
@@ -1387,25 +1632,20 @@ here.
    (`cmd/manager/main.go:628-637`), so placement's only hub-side inputs are label
    selectors. Either the ISVC declares its accelerator demand explicitly, or the
    runtime catalog is projected to the hub. Both are their own OEP.
-10. **Resolver ordering.** Two-level delivery creates a hazard for G3: a leaf's
-    `LocalQueue` exists only after the projection renders, so an ISVC created in
-    that namespace beforehand gets stamped with a `queue-name` that does not
-    resolve. Leave the pod unstamped (it runs unquota'd — a billing decision) or
-    stamp anyway (Kueue holds it until the queue appears)? A policy choice, not an
-    implementation detail. `TBD`.
+10. **Resolver ordering.** *Resolved.* Two-level delivery looks like a hazard for
+    G3: a leaf's `LocalQueue` exists only after the projection renders, so an ISVC
+    resolved beforehand carries a `queue-name` nothing answers to yet.
 
-    **There is a third outcome, and it is not ours to choose.** Kueue defaults a
-    workload's queue when its integration is enabled for the kind, the namespace
-    passes `managedJobsNamespaceSelector`, and a `LocalQueue` literally named
-    `default` exists there — in which case the workload is silently stamped and
-    gated onto *that* queue. OME satisfies the first condition by construction, and
-    the defaulting webhook covers `Deployment`, `StatefulSet` and `LeaderWorkerSet`
-    as well as bare pods, so it reaches RawDeployment and MultiNode alike.
+    **Stamp anyway, and let Kueue wait.** The workload is not queued
+    (`ErrLocalQueueDoesNotExistOrInactive`) and is admitted once the `LocalQueue`
+    lands, because the `LocalQueue` controller requeues that namespace's workloads.
+    Holding a workload whose budget is not yet in place is the correct behavior for
+    a quota system, not a degradation of it, and it converges without operator
+    action.
 
-    This makes the leaf `LocalQueue` **naming scheme** load-bearing, which this
-    document has so far left unstated. Naming it `default` — OME's existing
-    convention — means Kueue's guard is satisfied the moment the projection lands
-    and the race window closes itself. Any other name means option 1 additionally
-    requires that no `default` `LocalQueue` exists in a budgeted namespace, or the
-    workload is charged to a hand-provisioned leftover from the pre-quota era
-    rather than running unquota'd.
+    The other half of the question — a workload whose tenant matches no leaf at all
+    — is settled in *Tenancy*: it is left unstamped, Kueue does not manage it
+    (`manageJobsWithoutQueueName` defaults false), and the resolver records an Event
+    and a metric. Neither case needs a fallback queue, and OME therefore materializes
+    no `LocalQueue` named `default`, which also keeps Kueue's own queue-defaulting
+    from silently charging a budget nobody chose.
