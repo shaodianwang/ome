@@ -10,14 +10,28 @@
 # workers = 16 pods = 16 nodes = 64 chips. Member A holds two cubes, member B
 # one, so this leaves A with a spare cube and fills B.
 #
-# Needs a tree applied first (any of the 5*-fleet-*.yaml): the derived pods
-# carry Kueue's queue-name label, so with no LocalQueue in kwok-sim they gate
-# and never admit.
+# Needs a tree applied first (any of the 5*-fleet-*.yaml). This names
+# sim-tenants.serving, and a workload naming a LocalQueue that does not exist is
+# never queued — the pods are created and gated, and stay there. Drop the
+# annotation to place without quota instead: with placement.localQueue empty the
+# derived pods carry no queue-name label at all, so Kueue leaves them alone.
+#
+# Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
+# every cluster. No fixture declares it: it is shared, so a file that owned it
+# would take every other tenant down on `kubectl delete -f`. If it is missing:
+# `kubectl create namespace kwok-sim`.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:
   name: place-all
   namespace: kwok-sim
+  annotations:
+    # The leaf this workload charges. Placement resolves the queue from this
+    # first and the operator-configured default second, and that default is
+    # empty on purpose: a LocalQueue is named for its leaf, so no one fleet-wide
+    # name can address more than one tenant. Until the ISVC->(queue, priority)
+    # resolver lands, a workload names its own leaf.
+    ome.io/local-queue: sim-tenants.serving
   labels:
     kwok-sim/managed: "true"
 spec:

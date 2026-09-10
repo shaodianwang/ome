@@ -308,7 +308,10 @@ capacity at all (see below).
 `fixtures/31-acceleratorquota.yaml` is a tree to start from when you want one:
 `root` → `sim-tenants` → two leaves, budgeting one cube between a serving and a
 batch tenant, with two levels of grouping so containment is exercised at both.
-It carries its own tenant namespaces, so it applies standalone:
+It carries its own `root`, so it applies standalone — parents are admitted
+before children, and a dangling `parentRef` is refused rather than held, so a
+tree that did not bring one would be rejected node by node on a cluster that has
+none. The enrolled namespaces it does *not* carry; `up.sh` creates those:
 
 ```sh
 kubectl apply -f hack/kwok-sim/fixtures/31-acceleratorquota.yaml
@@ -321,11 +324,11 @@ created it imperatively, and `kubectl` patches the annotation on as it goes.
 
 ```
 == accelerator quota ==
-NAME          ROLE           PARENT        RESOURCE         FLAVOR   NOMINAL   ADMITTED   READY   DEGRADED   AGE
-root          Cohort                                                                      True    False      2m
-sim-batch     ClusterQueue   sim-tenants   google.com/tpu   tpu7x    16        0          True    False      5s
-sim-serving   ClusterQueue   sim-tenants   google.com/tpu   tpu7x    48        0          True    False      5s
-sim-tenants   Cohort         root          google.com/tpu   tpu7x    64        0          True    False      5s
+NAME                  ROLE           PARENT        RESOURCE         FLAVOR   NOMINAL   ADMITTED   READY   DEGRADED   AGE
+root                  Cohort                                                                      True    False      2m
+sim-tenants           Cohort         root          google.com/tpu   tpu7x    64        0          True    False      5s
+sim-tenants.batch     ClusterQueue   sim-tenants   google.com/tpu   tpu7x    16        0          True    False      5s
+sim-tenants.serving   ClusterQueue   sim-tenants   google.com/tpu   tpu7x    48        0          True    False      5s
 ```
 
 `NOMINAL` is what the tree authored, so it appears whether or not anything can
@@ -397,7 +400,7 @@ independent events.
 A tree with Kueue behind it still reports `admitted=0` until a workload charges
 one of its queues, and nothing here does: an InferenceService takes OME's own
 path and never passes through a LocalQueue. `fixtures/40-job-batch.yaml` is a
-kwok Job that does — three pods of four chips against `sim-batch`'s 16.
+kwok Job that does — three pods of four chips against `sim-tenants.batch`'s 16.
 
 ```sh
 kubectl apply -f hack/kwok-sim/fixtures/40-job-batch.yaml
@@ -405,11 +408,11 @@ kubectl get aq -o wide
 ```
 
 ```
-NAME          ROLE           PARENT        RESOURCE         FLAVOR   NOMINAL   ADMITTED   BORROWED   READY   DEGRADED   AGE   PATH
-root          Cohort                                                                                 True    False      4m    /root
-sim-batch     ClusterQueue   sim-tenants   google.com/tpu   tpu7x    16        12         0          True    False      2m    /root/sim-tenants/sim-batch
-sim-serving   ClusterQueue   sim-tenants   google.com/tpu   tpu7x    48        0          0          True    False      2m    /root/sim-tenants/sim-serving
-sim-tenants   Cohort         root          google.com/tpu   tpu7x    64        12         0          True    False      2m    /root/sim-tenants
+NAME                  ROLE           PARENT        RESOURCE         FLAVOR   NOMINAL   ADMITTED   BORROWED   READY   DEGRADED   AGE
+root                  Cohort                                                                                 True    False      4m
+sim-tenants           Cohort         root          google.com/tpu   tpu7x    64        12         0          True    False      2m
+sim-tenants.batch     ClusterQueue   sim-tenants   google.com/tpu   tpu7x    16        12         0          True    False      2m
+sim-tenants.serving   ClusterQueue   sim-tenants   google.com/tpu   tpu7x    48        0          0          True    False      2m
 ```
 
 The 12 appears on `sim-tenants` as well as on the leaf, because usage rolls up
@@ -420,11 +423,11 @@ root's capacity alongside:
 ```
 google.com/tpu on flavor tpu7x
 
-NAME               ROLE          NOMINAL  ADMITTED  READY  AGE
-root               Cohort        -        -                4m
-└─ sim-tenants     Cohort        64       12               2m
-   ├─ sim-batch    ClusterQueue  16       12               2m
-   └─ sim-serving  ClusterQueue  48       0                2m
+NAME                      ROLE          NOMINAL  ADMITTED  READY  AGE
+root                      Cohort        -        -                4m
+└─ sim-tenants            Cohort        64       12               2m
+   ├─ sim-tenants.batch   ClusterQueue  16       12               2m
+   └─ sim-tenants.serving ClusterQueue  48       0                2m
 ```
 
 The root's dashes are the same fact the flat list shows as blanks: it carries no
@@ -497,7 +500,7 @@ a management plane holds no silicon and schedules nothing.
 | `ome-manager` | ✅ `control-plane` role | ✅ | ✅ |
 | `PodGroup` CRD | ✅ | ✅ | ✅ |
 | model + runtimes, ns `kwok-sim` | ✅ (inert) | ✅ | ✅ |
-| the tenant namespaces the fixtures bind | ✅ | ✅ | ✅ |
+| the enrolled namespaces | ✅ | ✅ | ✅ |
 | `ome-scheduler` | — | 🅿️ | 🅿️ |
 | `ome-quota-manager` | ✅ **management** mode | ✅ **workload** mode | ✅ **workload** mode |
 | Kueue CRDs + `ResourceFlavor` | — | ✅ | ✅ |
@@ -546,11 +549,22 @@ unforgettable:
 `--topology` becomes forwardable under this flag, since it is what puts a
 scheduler on the members for the mode to mean anything.
 
-**Apply a quota tree first.** A derived workload carries Kueue's `queue-name`
-label, so with no `LocalQueue` in `kwok-sim` its pods gate and never run. Every
-`5*-fleet-*.yaml` binds that namespace, and each leaf materializes a `LocalQueue`
-named `default` — the name Kueue itself defaults to, and the one the placer
-stamps.
+**Apply a quota tree first.** Each `6*-placement-*.yaml` names
+`sim-tenants.serving` in its `ome.io/local-queue` annotation, and a workload
+naming a `LocalQueue` that does not exist is never queued — its pods are created,
+gated, and stay there. Any `5*-fleet-*.yaml` provides that leaf.
+
+The workload names the leaf because nothing else can. `placement.localQueue` —
+one operator-wide string stamped on every derived workload — is empty by default,
+since a `LocalQueue` is named for the quota leaf it belongs to and no single name
+addresses more than one tenant. Placement resolves the annotation first and that
+default second, so until the ISVC→(queue, priority) resolver lands, naming the
+leaf on the workload is the mechanism. `67-placement-two-tenants.yaml` is the
+case that makes it visible: two tenants in one namespace, told apart only by the
+leaf each names.
+
+Drop the annotation to place *without* quota — the derived pods then carry no
+`queue-name` label at all, Kueue leaves them alone, and they run ungoverned.
 
 ```sh
 hack/kwok-sim/fleet-up.sh --with-kueue --with-placement
@@ -676,7 +690,7 @@ it here.
 | `fixtures/2*-isvc-*.yaml` | one slice, and one whole cube |
 | `fixtures/30-resourceflavor.yaml` | the Kueue `ResourceFlavor` the fleet's chips attribute to |
 | `fixtures/31-acceleratorquota.yaml` | a four-node quota tree over one cube; not applied by `up.sh` |
-| `fixtures/40-job-batch.yaml` | a kwok Job charging the `sim-batch` leaf, so the tree reports usage |
+| `fixtures/40-job-batch.yaml` | a kwok Job charging the `sim-tenants.batch` leaf, so the tree reports usage |
 | `fixtures/5*-fleet-*.yaml` | fleet quota trees for `fleet-up.sh`; not applied by it |
 | `fixtures/60-placement-rbac.yaml` | binds the chart's placement ClusterRole onto the members' quota SA |
 | `fixtures/6[1-6]-placement-*.yaml` | one OEP-0018 placement scenario each; needs `--with-placement` |

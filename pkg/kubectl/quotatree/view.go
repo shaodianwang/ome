@@ -45,10 +45,6 @@ type NodeView struct {
 	Name string `json:"name"`
 	Role string `json:"role"`
 
-	// Path is the root-to-node path the controller computed, empty on a node
-	// with no position in the tree.
-	Path string `json:"path,omitempty"`
-
 	// CreationTimestamp is carried raw rather than as an age, so JSON output
 	// matches how it appears on the CR and stays comparable between two runs.
 	// The table humanizes it against the render's own clock.
@@ -61,8 +57,7 @@ type NodeView struct {
 	// resolve — that gap is the diagnosis.
 	Parent string `json:"parent,omitempty"`
 
-	PriorityTier string   `json:"priorityTier,omitempty"`
-	Namespaces   []string `json:"namespaces,omitempty"`
+	PriorityTier string `json:"priorityTier,omitempty"`
 
 	// Budgets is the union of spec and status budgets, keyed by
 	// (resource, flavor). See BudgetView.FromSpec.
@@ -223,11 +218,9 @@ func newNodeView(n *tree.Node) *NodeView {
 	nv := &NodeView{
 		Name:              n.Name(),
 		Role:              string(n.Role()),
-		Path:              n.Path,
 		Depth:             n.Depth,
 		CreationTimestamp: q.CreationTimestamp,
 		PriorityTier:      q.Spec.PriorityTier,
-		Namespaces:        append([]string(nil), q.Spec.Namespaces...),
 		Budgets:           budgetViews(q),
 		Capacity:          capacityViews(q),
 	}

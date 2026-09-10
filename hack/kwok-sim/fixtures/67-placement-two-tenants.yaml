@@ -1,46 +1,59 @@
-# Two tenants, two namespaces, two budgets — and neither can spend the other's.
+# Two tenants sharing ONE namespace, two budgets — and neither can spend the
+# other's.
 #
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/52-fleet-mixed.yaml
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/67-placement-two-tenants.yaml
 #
-# kwok-sim-batch has to exist on the hub, which is where these are applied, and
-# on both members, which is where the leaf binds it. fleet-up.sh creates every
-# namespace the fixtures bind on all three, so neither apply needs a step first.
+# Isolation is by QUEUE NAME, not by namespace. A leaf's tenant is its own
+# metadata.name, and it materializes a LocalQueue of that name in every enrolled
+# namespace — so both tenants below live in kwok-sim and are told apart by the
+# queue-name label their pods carry. That is the shape a real fleet has: a
+# handful of serving namespaces, often one, holding dozens of tenants.
 #
-# Isolation here is by NAMESPACE, not by queue name. OME materializes exactly one
-# LocalQueue per bound namespace and always calls it "default" — it is Kueue's own
-# default-queue name, so Kueue's webhook stamps workloads there without anyone
-# naming it. Two tenants are therefore two namespaces bound to two leaves, and a
-# workload charges whichever leaf owns the namespace it was created in.
+# Each names its own leaf, because the ISVC->(queue, priority) resolver is not
+# built yet; afterwards the reconciler will derive the same label from the
+# tenant key the ISVC carries. ome.io/local-queue is placement's own first step
+# in resolving a queue, so this is the mechanism rather than a workaround — and
+# it reaches every component, where spec.<component>.labels would reach only
+# the one it is written on.
 #
 # Against 52-fleet-mixed each member holds:
 #
-#                sim-serving   sim-batch
-#   member-a          64           16
-#   member-b          32           32
+#              sim-tenants.serving   sim-tenants.batch
+#   member-a                    64                  16
+#   member-b                    32                  32
 #
 # Each tenant below asks for one tpu7x-2x2x2 replica: 1 leader + 1 worker = 2 pods
 # = 8 chips, on every matching member. So after both are placed:
 #
-#   sim-serving  admitted 8 on member-a, 8 on member-b
-#   sim-batch    admitted 8 on member-a, 8 on member-b
+#   sim-tenants.serving  admitted 8 on member-a, 8 on member-b
+#   sim-tenants.batch    admitted 8 on member-a, 8 on member-b
 #
 #   kubectl --context kind-ome-quota-a get aq -o wide
 #
-# The point is the two lines side by side. Neither leaf's admitted figure counts
-# the other's pods, and sim-batch's 16 on member-a is untouched by a sim-serving
+# The point is the two lines side by side, from workloads that are neighbours in
+# one namespace. Neither leaf's admitted figure counts the other's pods, and
+# sim-tenants.batch's 16 on member-a is untouched by a sim-tenants.serving
 # tenant that has 64 to play with. A single shared queue would show one leaf
 # carrying 16 and the other 0.
 #
-# Worth trying next: apply this twice under different names in kwok-sim-batch.
-# The second copy needs 8 more of sim-batch's 16 on member-a, which exactly
-# exhausts it; a third gates. That is the ceiling holding per tenant rather than
-# per fleet.
+# Worth trying next: apply this twice under different names. The second copy
+# needs 8 more of sim-tenants.batch's 16 on member-a, which exactly exhausts it;
+# a third gates. That is the ceiling holding per tenant rather than per fleet.
+#
+# Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
+# every cluster. No fixture declares it: it is shared, so a file that owned it
+# would take every other tenant down on `kubectl delete -f`. If it is missing:
+# `kubectl create namespace kwok-sim`.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:
   name: tenant-serving
   namespace: kwok-sim
+  annotations:
+    # The leaf this workload charges. Placement stamps every component from it;
+    # spec.<component>.labels would reach only the one it is written on.
+    ome.io/local-queue: sim-tenants.serving
   labels:
     kwok-sim/managed: "true"
 spec:
@@ -58,13 +71,15 @@ spec:
     worker:
       size: 1
 ---
-# The same shape in the other tenant's namespace, so the only difference between
-# the two workloads is which leaf owns the namespace they land in.
+# The other tenant, in the SAME namespace. The only difference between the two
+# workloads is the leaf each one names.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:
   name: tenant-batch
-  namespace: kwok-sim-batch
+  namespace: kwok-sim
+  annotations:
+    ome.io/local-queue: sim-tenants.batch
   labels:
     kwok-sim/managed: "true"
 spec:

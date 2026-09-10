@@ -1,11 +1,11 @@
 # A subtree that violates containment on purpose, to watch the freeze rule.
 #
-#   root               Cohort        (self-created, no budget)
-#   └── frozen-parent  Cohort        16 chips   <- less than its children total
-#       ├── frozen-a   ClusterQueue  16 chips   ns kwok-sim-frozen-a
-#       └── frozen-b   ClusterQueue  16 chips   ns kwok-sim-frozen-b
+#   root                Cohort        no budget
+#   └── frozen          Cohort        16 chips  <- less than its children total
+#       ├── frozen.a    ClusterQueue  16 chips
+#       └── frozen.b    ClusterQueue  16 chips
 #
-# The violation is authored on frozen-parent rather than on the root, because
+# The violation is authored on frozen rather than on the root, because
 # the root is the controller's and it creates it with no budgets — and a node
 # carrying no budgets is skipped by the containment check, which compares
 # numbers it does not have.
@@ -18,9 +18,9 @@
 #
 #   kubectl apply -f hack/kwok-sim/fixtures/33-acceleratorquota-frozen.yaml
 #   kubectl get aq
-#   kubectl describe aq frozen-parent | sed -n '/Conditions/,$p'
+#   kubectl describe aq frozen | sed -n '/Conditions/,$p'
 #
-# Expect Degraded=True with reason ContainmentViolated on frozen-parent, and
+# Expect Degraded=True with reason ContainmentViolated on frozen, and
 # Materialized=False with reason Frozen on it and both leaves. Expect their
 # Kueue objects NOT to be created — and, if this subtree was valid and
 # materialized earlier, to be left exactly as they were rather than deleted.
@@ -33,20 +33,19 @@
 # The webhook may refuse the second leaf, since by then the violation is visible
 # in one write. Apply the file twice, or apply it where the quota webhook is not
 # serving, to reach the state the controller reports.
-apiVersion: v1
-kind: Namespace
+# Bare, exactly as a workload-mode controller makes it. Carried here so the file
+# applies on a management plane too, where nothing creates a root.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
 metadata:
-  name: kwok-sim-frozen-a
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kwok-sim-frozen-b
+  name: root
+spec:
+  role: Cohort
 ---
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: frozen-parent
+  name: frozen
 spec:
   role: Cohort
   parentRef:
@@ -59,13 +58,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: frozen-a
+  name: frozen.a
 spec:
   role: ClusterQueue
   parentRef:
-    name: frozen-parent
-  namespaces:
-  - kwok-sim-frozen-a
+    name: frozen
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu7x
@@ -74,13 +71,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: frozen-b
+  name: frozen.b
 spec:
   role: ClusterQueue
   parentRef:
-    name: frozen-parent
-  namespaces:
-  - kwok-sim-frozen-b
+    name: frozen
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu7x

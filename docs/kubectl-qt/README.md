@@ -4,8 +4,8 @@
 hierarchy they describe.
 
 An AcceleratorQuota is one node of a single-rooted tree. A **Cohort** groups
-other nodes; a **ClusterQueue** is a leaf that binds serving namespaces and
-carries the accelerator budget. The edges live in `spec.parentRef` on each node,
+other nodes; a **ClusterQueue** is a leaf that is itself a tenant and carries
+the accelerator budget. The edges live in `spec.parentRef` on each node,
 so `kubectl get aq` shows you a flat list and the shape stays invisible until
 the whole set is assembled. That assembly is what this plugin does.
 
@@ -13,13 +13,13 @@ the whole set is assembled. That assembly is what this plugin does.
 $ kubectl qt
 nvidia.com/gpu on flavor a100
 
-NAME                ROLE          NOMINAL  ADMITTED  READY  AGE
-root                Cohort        512      288              2d2h
-├─ org-product      Cohort        256      128              3h
-│  └─ team-serving  ClusterQueue  256      128       False  3h
-└─ org-research     Cohort        256      160              3h
-   ├─ team-nlp      ClusterQueue  128      96               3h
-   └─ team-vision   ClusterQueue  128      64               3h
+NAME                            ROLE          NOMINAL  ADMITTED  READY  AGE
+root                            Cohort        512      288              2d2h
+├─ org-product                  Cohort        256      128              3h
+│  └─ org-product.serving       ClusterQueue  256      128       False  3h
+└─ org-research                 Cohort        256      160              3h
+   ├─ org-research.nlp          ClusterQueue  128      96               3h
+   └─ org-research.vision       ClusterQueue  128      64               3h
 ```
 
 Where the tree is authored, each leaf's fleet-wide budget is divided into a
@@ -114,21 +114,21 @@ Because nothing has written `status.budgets` on those nodes:
 $ kubectl qt
 google.com/tpu on flavor tpu7x
 
-NAME               ROLE          NOMINAL  ADMITTED  READY  AGE
-root               Cohort        -        -                12m
-├─ sim-tenants     Cohort        64*      -                12m
-│  ├─ sim-batch    ClusterQueue  16*      -                12m
-│  └─ sim-serving  ClusterQueue  48*      -                12m
-└─ solo            ClusterQueue  16*      -                12m
+NAME                       ROLE          NOMINAL  ADMITTED  READY  AGE
+root                       Cohort        -        -                12m
+├─ sim-tenants             Cohort        64*      -                12m
+│  ├─ sim-tenants.batch    ClusterQueue  16*      -                12m
+│  └─ sim-tenants.serving  ClusterQueue  48*      -                12m
+└─ solo                    ClusterQueue  16*      -                12m
 ```
 
 This tree is **healthy**, not broken. A blank `READY` means every node is
 `Ready=True`, so the quota controller is running and has accepted the tree —
-it validated the edges, computed each `status.path`, and found no violations.
+it validated the edges, resolved each `status.parent`, and found no violations.
 
 What it has not done is publish resolved budgets. `status.budgets` is written by
 whatever resolves budgets on the plane being read, and where nothing does, the
-controller writes only `observedGeneration`, `path`, `parent`, `conditions`,
+controller writes only `observedGeneration`, `parent`, `conditions`,
 and — on the root, when capacity derivation is enabled — `status.capacity`.
 `NOMINAL` then falls back to spec and `ADMITTED` has no source at all. This is a
 steady state, not a pending one: the `*` will not clear by waiting.
@@ -166,8 +166,8 @@ root               Cohort           192      0                3h
 A `WorkloadCluster` row's `NOMINAL` is the share the management plane assigned
 that cluster, and its `ADMITTED` is what the cluster reports holding against it,
 read back off the projection. The columns that describe a node rather than a
-share — `READY`, `AGE`, `TIER`, `NAMESPACES`, `PATH` — are blank, because a
-cluster holds no position in the quota tree.
+share — `READY`, `AGE`, `TIER` — are blank, because a cluster holds no
+position in the quota tree.
 
 Three things follow from where the numbers come from:
 
@@ -201,21 +201,21 @@ $ kubectl qt --view cluster
 nvidia.com/gpu on flavor a100
 
 NAME                ROLE             NOMINAL  ADMITTED  READY  AGE
-member-a            WorkloadCluster  448      248
-├─ org-product      Cohort           256      128              3h
-│  └─ team-serving  ClusterQueue     256      128              3h
-└─ org-research     Cohort           192      120              3h
-   ├─ team-nlp      ClusterQueue     96       72               3h
-   └─ team-vision   ClusterQueue     96       48               3h
-member-b            WorkloadCluster  64       40
-└─ org-research     Cohort           64       40               3h
-   ├─ team-nlp      ClusterQueue     32       24               3h
-   └─ team-vision   ClusterQueue     32       16               3h
+member-a                        WorkloadCluster  448      248
+├─ org-product                  Cohort           256      128              3h
+│  └─ org-product.serving       ClusterQueue     256      128              3h
+└─ org-research                 Cohort           192      120              3h
+   ├─ org-research.nlp          ClusterQueue     96       72               3h
+   └─ org-research.vision       ClusterQueue     96       48               3h
+member-b                        WorkloadCluster  64       40
+└─ org-research                 Cohort           64       40               3h
+   ├─ org-research.nlp          ClusterQueue     32       24               3h
+   └─ org-research.vision       ClusterQueue     32       16               3h
 
 Cohort and WorkloadCluster rows total the leaf shares below them; only a ClusterQueue row is a resolved budget
 ```
 
-`member-b` has no `org-product` branch at all — `team-serving` is `Explicit` on
+`member-b` has no `org-product` branch at all — `org-product.serving` is `Explicit` on
 `member-a` alone. On the tenant axis that fact is a row quietly *absent* under
 one leaf several tiers down; here it is a missing subtree, which is the kind of
 thing this axis exists to make obvious.
@@ -237,8 +237,8 @@ Three more things to know:
 - **The reserved `root` is not repeated.** It sits under every cluster and says
   the same thing each time. A tree re-rooted by `--node` *is* kept, because that
   node is what you asked to see.
-- **Filters apply first.** `kubectl qt --for-namespace serving-prod --view
-  cluster` answers "which clusters is this tenant on", not "every cluster".
+- **Filters apply first.** `kubectl qt --node org-product.serving --view cluster`
+  answers "which clusters is this tenant on", not "every cluster".
 - **Orphans stay where they are.** A node with no position in the tree has none
   in a cluster's slice of it either, so it keeps its own section on both axes.
 
@@ -351,8 +351,8 @@ rather than spelled out:
 ## Common tasks
 
 ```sh
-# Every column: split policy, capacity, borrowed, ceiling, namespaces, tier,
-# path, all conditions.
+# Every column: split policy, capacity, borrowed, ceiling, tier, all
+# conditions.
 kubectl qt -o wide
 
 # The tree alone, without each budget's per-cluster split.
@@ -362,16 +362,13 @@ kubectl qt --split=false
 kubectl qt --view cluster
 
 # Which clusters is one tenant on, and how much on each?
-kubectl qt --for-namespace nlp-prod --view cluster
+kubectl qt --node org-research.nlp --view cluster
 
 # How one tenant's budget is spread across the fleet.
-kubectl qt --node team-nlp
+kubectl qt --node org-research.nlp
 
 # One subtree, re-rooted. Works on an orphan too.
 kubectl qt --node org-research
-
-# Which leaf charges a serving namespace — and where it sits.
-kubectl qt --for-namespace nlp-prod
 
 # Only the budget-carrying leaves, each with the path that leads to it.
 kubectl qt --leaves-only
@@ -386,8 +383,8 @@ kubectl qt --max-depth 3
 kubectl qt -o json | jq '.violations[] | {node, reason}'
 ```
 
-`--for-namespace` and `--leaves-only` prune rather than flatten: a matched leaf
-keeps its ancestors so you can see where it sits. Those ancestors are context,
+`--leaves-only` prunes rather than flattens: a matched leaf keeps its ancestors
+so you can see where it sits. Those ancestors are context,
 not answers — they are dimmed when color is on, and the `ROLE` column separates
 them either way, since only a `ClusterQueue` can match. A branch containing no
 match is dropped entirely, so on a tree where every Cohort leads to some leaf,
@@ -405,8 +402,7 @@ parent of the leaves that do.
 | `--view` | `tenant` | What to anchor on: `tenant`, the quota tree as authored; or `cluster`, one workload cluster per tree carrying its slice. |
 | `--split` | `true` | Draw each budget's per-cluster shares as a tier below the node. `--split=false` for the tree alone. Has no effect under `--view cluster`, which is already the split. |
 | `--node` | | Re-root the render at one node. |
-| `--leaves-only` | `false` | Keep only budget-carrying leaves, with their paths. |
-| `--for-namespace` | | Keep the leaves binding this serving namespace. |
+| `--leaves-only` | `false` | Keep only budget-carrying leaves, with the chain that leads to each. |
 | `--resource` | | Restrict budget rows to one resource, e.g. `nvidia.com/gpu`. |
 | `--flavor` | | Restrict budget rows to one Kueue ResourceFlavor. |
 | `--max-depth` | `0` | Report nodes deeper than this many edges. `0` disables the check. |
@@ -421,9 +417,10 @@ uses. Apiserver deprecation warnings are suppressed, since one landing mid-table
 would break the alignment the tree depends on.
 
 > [!NOTE]
-> There is no `-n/--namespace`. AcceleratorQuota is cluster-scoped, so the flag
-> would be accepted and do nothing. Use `--for-namespace` to ask which leaf
-> charges a given serving namespace.
+> There is no `-n/--namespace`, and no namespace selector of any kind.
+> AcceleratorQuota is cluster-scoped, and a leaf's tenant is its own name rather
+> than a namespace it binds — dozens of tenants routinely share one namespace, so
+> a namespace names no single leaf to select. Use `--node` to select a subtree.
 
 `--max-depth` defaults to off on purpose. The depth limit is operator
 configuration the plugin cannot see from outside the cluster, so guessing one
@@ -451,7 +448,7 @@ flattened, so a script and an operator read one structure:
     ],
     "conditions": { "Ready": "True" },
     "children": [
-      { "name": "team-nlp",
+      { "name": "org-research.nlp",
         "role": "ClusterQueue",
         "budgets": [
           { "resourceName": "nvidia.com/gpu", "resourceFlavor": "a100",

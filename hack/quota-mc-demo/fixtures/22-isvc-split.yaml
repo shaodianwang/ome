@@ -43,6 +43,13 @@ kind: InferenceService
 metadata:
   name: mc-demo-split
   namespace: ome-mc-test
+  annotations:
+    # The leaf this workload charges. Placement resolves the queue from this
+    # first and the operator-configured placement.localQueue second, and that
+    # default is empty on purpose: a LocalQueue is named for its leaf, so no one
+    # fleet-wide name can address more than one tenant. Until the
+    # ISVC->(queue, priority) resolver lands, a workload names its own leaf.
+    ome.io/local-queue: mc-demo.serving
   labels:
     ome.io/mc-demo: "true"
 spec:

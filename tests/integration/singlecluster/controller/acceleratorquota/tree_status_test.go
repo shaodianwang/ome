@@ -2,7 +2,6 @@ package acceleratorquota
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -12,7 +11,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/quota/tree"
 )
 
 const (
@@ -90,13 +88,13 @@ func conditionOf(name, condType string) func() *metav1.Condition {
 	}
 }
 
-func pathOf(name string) func() string {
+func parentOf(name string) func() string {
 	return func() string {
 		var q v1beta1.AcceleratorQuota
 		if err := k8sClient.Get(suiteCtx, client.ObjectKey{Name: name}, &q); err != nil {
 			return ""
 		}
-		return q.Status.Path
+		return q.Status.Parent
 	}
 }
 
@@ -112,11 +110,10 @@ var _ = ginkgo.Describe("AcceleratorQuota tree status", func() {
 			leaf(team, org, budget("60")),
 		)
 
-		// Absolute, so a single-segment path is distinguishable from a bare
-		// node name.
-		gomega.Eventually(pathOf(team), timeout, interval).
-			Should(gomega.Equal(tree.PathSeparator + strings.Join(
-				[]string{root, org, team}, tree.PathSeparator)))
+		// The resolved edge, which is the whole of what status reports about a
+		// node's position: ancestry is a walk over it, and the node's own name
+		// already spells the path out.
+		gomega.Eventually(parentOf(team), timeout, interval).Should(gomega.Equal(org))
 		gomega.Eventually(func() metav1.ConditionStatus {
 			c := conditionOf(team, v1beta1.AcceleratorQuotaReady)()
 			if c == nil {
@@ -180,9 +177,9 @@ var _ = ginkgo.Describe("AcceleratorQuota tree status", func() {
 		}
 	})
 
-	// A node beneath a break must not be left Ready with an empty path: it would
-	// otherwise materialize a ClusterQueue under a Cohort that was never created,
-	// which Kueue silently rehomes onto an implicit default cohort.
+	// A node beneath a break must not be left Ready: it would otherwise
+	// materialize a ClusterQueue under a Cohort that was never created, which
+	// Kueue silently rehomes onto an implicit default cohort.
 	ginkgo.It("marks descendants of an unresolved parent Unreachable", func() {
 		orphan := uniqueName("orphan")
 		child := uniqueName("child")
@@ -209,8 +206,19 @@ var _ = ginkgo.Describe("AcceleratorQuota tree status", func() {
 			return c.Reason
 		}, timeout, interval).Should(gomega.Equal(v1beta1.AcceleratorQuotaReasonUnreachable))
 
-		gomega.Consistently(pathOf(child), "2s", interval).Should(gomega.BeEmpty(),
-			"an unreachable node must not advertise a position")
+		// status.parent still reports the edge the author declared and the tree
+		// resolved -- that is the diagnosis, not a claim of position. What must
+		// never happen is the node reading Ready, which is what a materializer
+		// acts on.
+		gomega.Expect(parentOf(child)()).To(gomega.Equal(orphan))
+		gomega.Consistently(func() metav1.ConditionStatus {
+			c := conditionOf(child, v1beta1.AcceleratorQuotaReady)()
+			if c == nil {
+				return metav1.ConditionUnknown
+			}
+			return c.Status
+		}, "2s", interval).ShouldNot(gomega.Equal(metav1.ConditionTrue),
+			"an unreachable node must never read Ready")
 	})
 
 	ginkgo.It("enforces depth against the configured bound", func() {
@@ -239,12 +247,12 @@ var _ = ginkgo.Describe("AcceleratorQuota tree status", func() {
 // construct Go structs directly and never go through apiserver validation, so a
 // broken CEL rule would be invisible there.
 var _ = ginkgo.Describe("AcceleratorQuota admission", func() {
-	ginkgo.It("rejects a Cohort that binds namespaces", func() {
+	ginkgo.It("rejects a Cohort carrying a leaf-only field", func() {
 		c := cohort(uniqueName("bad-cohort"), v1beta1.AcceleratorQuotaRootName)
-		c.Spec.Namespaces = []string{"nope"}
+		c.Spec.PriorityTier = "nope"
 		err := k8sClient.Create(suiteCtx, c)
 		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("must not set namespaces"))
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("must not set priorityTier"))
 	})
 
 	ginkgo.It("rejects a leaf with no budget", func() {

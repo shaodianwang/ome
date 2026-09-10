@@ -8,12 +8,12 @@
 # Kueue funds the four it can pay for and holds the fifth at the gate.
 #
 # Expect, on each member: 5 pods, 4 Running and 1 SchedulingGated, and
-# mc-demo-serving's ADMITTED pinned at exactly 16 of 16 — the ceiling holding,
+# mc-demo.serving's ADMITTED pinned at exactly 16 of 16 — the ceiling holding,
 # not an error.
 #
 #   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get pods
 #   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get workloads
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo-serving -o wide
+#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo.serving -o wide
 #
 # The gated pod carries Kueue's scheduling gate; that is the whole mechanism:
 #
@@ -47,6 +47,13 @@ kind: InferenceService
 metadata:
   name: mc-demo-exceeds
   namespace: ome-mc-test
+  annotations:
+    # The leaf this workload charges. Placement resolves the queue from this
+    # first and the operator-configured placement.localQueue second, and that
+    # default is empty on purpose: a LocalQueue is named for its leaf, so no one
+    # fleet-wide name can address more than one tenant. Until the
+    # ISVC->(queue, priority) resolver lands, a workload names its own leaf.
+    ome.io/local-queue: mc-demo.serving
   labels:
     ome.io/mc-demo: "true"
 spec:

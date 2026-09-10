@@ -158,9 +158,7 @@ A Cohort's figure there is what its tenants hold on that cluster between them.`,
 	flags.StringVar(&o.Filter.Node, "node", "",
 		"Render only this node and its descendants.")
 	flags.BoolVar(&o.Filter.LeavesOnly, "leaves-only", false,
-		"Show only budget-carrying leaves, with the path that leads to each.")
-	flags.StringVar(&o.Filter.Namespace, "for-namespace", "",
-		"Show the leaf that charges this serving namespace, with its path.")
+		"Show only budget-carrying leaves, with the chain that leads to each.")
 	flags.StringVar(&o.Filter.ResourceName, "resource", "",
 		"Show budgets for this resource only, such as nvidia.com/gpu.")
 	flags.StringVar(&o.Filter.ResourceFlavor, "flavor", "",
@@ -210,10 +208,6 @@ func (o *Options) Complete(output, color, axis string, loading clientcmd.ClientC
 	if o.MaxDepth < 0 {
 		return fmt.Errorf("invalid --max-depth %d: want a non-negative number of edges", o.MaxDepth)
 	}
-	if o.Filter.Node != "" && o.Filter.Namespace != "" {
-		return fmt.Errorf("--node and --for-namespace select different things; use one")
-	}
-
 	if o.Lister != nil {
 		return nil
 	}

@@ -67,21 +67,6 @@ var _ = ginkgo.Describe("AcceleratorQuota admission", func() {
 		gomega.Expect(msg).To(gomega.ContainSubstring("is a ClusterQueue node, which takes no children"))
 	})
 
-	ginkgo.It("rejects a namespace already bound by another leaf", func() {
-		org, incumbent, poacher := uniqueName("org"), uniqueName("team"), uniqueName("team")
-		ns := uniqueName("ns")
-
-		first := leaf(incumbent, org, budget("60"))
-		first.Spec.Namespaces = []string{ns}
-		mustCreate(cohort(org, root, budget("100")), first)
-
-		second := leaf(poacher, org, budget("10"))
-		second.Spec.Namespaces = []string{ns}
-		msg := denial(k8sClient.Create(suiteCtx, second))
-		gomega.Expect(msg).To(gomega.ContainSubstring(
-			"is already bound by leaf " + `"` + incumbent + `"`))
-	})
-
 	// A DELETE admission review carries no object body, so the handler has to
 	// work from the request name against live state. Nothing about that is
 	// exercised by a CREATE.
@@ -136,11 +121,11 @@ var _ = ginkgo.Describe("AcceleratorQuota admission", func() {
 	// rule silently migrating between tiers changes what an operator sees.
 	ginkgo.It("rejects a leaf-only field on a grouping before the webhook is reached", func() {
 		grouping := cohort(uniqueName("org"), root, budget("8"))
-		grouping.Spec.Namespaces = []string{"somewhere"}
+		grouping.Spec.PriorityTier = "production"
 
 		msg := denial(k8sClient.Create(suiteCtx, grouping))
 		gomega.Expect(msg).To(gomega.ContainSubstring(
-			"a Cohort node must not set namespaces, priorityTier, or distribution"))
+			"a Cohort node must not set priorityTier or distribution"))
 		gomega.Expect(msg).NotTo(gomega.ContainSubstring("admission webhook"),
 			"this is a CEL rejection; the webhook should never see it")
 	})

@@ -1,9 +1,9 @@
 # Two tenants under one tier, each split by a different policy (OEP-0024).
 #
-#   root                Cohort        192 chips
-#   └── sim-tenants     Cohort        192 chips, travels budget-less
-#       ├── sim-serving ClusterQueue   96 chips  ns kwok-sim        Proportional
-#       └── sim-batch   ClusterQueue   48 chips  ns kwok-sim-batch  Explicit
+#   root                         Cohort        192 chips
+#   └── sim-tenants              Cohort        192 chips, travels budget-less
+#       ├── sim-tenants.serving  ClusterQueue   96 chips  Proportional
+#       └── sim-tenants.batch    ClusterQueue   48 chips  Explicit
 #
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/52-fleet-mixed.yaml
 #
@@ -14,22 +14,23 @@
 #
 # What each member ends up with:
 #
-#              sim-serving   sim-batch   total   capacity
-#   member-a        64          16         80      128
-#   member-b        32          32         64       64
+#             sim-tenants.serving   sim-tenants.batch   total   capacity
+#   member-a                   64                  16      80        128
+#   member-b                   32                  32      64         64
 #
-# sim-serving follows the hardware, 2:1. sim-batch inverts it, 1:2. Reading the
-# two side by side on one member is the point: the same tree, the same pass, two
-# different answers, and neither policy leaking into the other's numbers.
+# sim-tenants.serving follows the hardware, 2:1. sim-tenants.batch inverts it,
+# 1:2. Reading the two side by side on one member is the point: the same tree,
+# the same pass, two different answers, and neither policy leaking into the
+# other's numbers.
 #
 # Containment holds at sim-tenants: a parent's nominal must be at least the sum
 # of its children's per (resource, flavor), and 96 + 48 is within 192. The
 # webhook checks that at admission.
 #
-# kwok-sim-batch has to exist on both members before this binds it — a leaf
-# names a namespace, it does not create one, and without it the LocalQueue
-# cannot be written even though the ClusterQueue lands. fleet-up.sh creates
-# every namespace these fixtures bind, so applying this needs no second step.
+# kwok-sim-batch has to exist on both members, since each enrolls it: OME never
+# creates a serving namespace, and an enrolled one that is absent holds no
+# LocalQueue even though the ClusterQueue lands. fleet-up.sh creates the
+# enrolled namespaces, so applying this needs no second step.
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
@@ -59,13 +60,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: sim-serving
+  name: sim-tenants.serving
 spec:
   role: ClusterQueue
   parentRef:
     name: sim-tenants
-  namespaces:
-  - kwok-sim
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu7x
@@ -75,13 +74,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: sim-batch
+  name: sim-tenants.batch
 spec:
   role: ClusterQueue
   parentRef:
     name: sim-tenants
-  namespaces:
-  - kwok-sim-batch
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu7x

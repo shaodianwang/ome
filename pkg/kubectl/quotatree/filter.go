@@ -3,8 +3,6 @@ package quotatree
 import (
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -21,11 +19,6 @@ type Filter struct {
 	// LeavesOnly keeps the nodes that carry a budget.
 	LeavesOnly bool
 
-	// Namespace keeps the leaves binding this serving namespace. A namespace
-	// charges exactly one leaf fleet-wide, so a result with two is a
-	// NamespaceConflict the violation list also reports.
-	Namespace string
-
 	// ResourceName and ResourceFlavor narrow which budgets are shown. They
 	// filter rows within a node, never which nodes appear: a Cohort carrying no
 	// budget for the pair is still the parent of leaves that do.
@@ -35,16 +28,15 @@ type Filter struct {
 
 // Empty reports whether the filter would keep the view unchanged.
 func (f Filter) Empty() bool {
-	return f.Node == "" && !f.LeavesOnly && f.Namespace == "" &&
+	return f.Node == "" && !f.LeavesOnly &&
 		f.ResourceName == "" && f.ResourceFlavor == ""
 }
 
 // Apply narrows v in place and returns it.
 //
 // Node selection prunes rather than flattens: a kept node drags its ancestors
-// along, so the answer to "which leaf charges namespace X" arrives with the path
-// that leads to it. Ancestors kept only as context are marked so the renderer
-// can dim them.
+// along, so a leaf arrives with the chain that leads to it. Ancestors kept only
+// as context are marked so the renderer can dim them.
 //
 // Returns an error only when a selector matches nothing, which is a question
 // answered "no" rather than an empty tree that reads like a healthy one.
@@ -89,10 +81,6 @@ func (f Filter) Apply(v *View) error {
 // budgets only.
 func (f Filter) nodePredicate() func(*NodeView) bool {
 	switch {
-	case f.Namespace != "":
-		// Only a leaf binds namespaces, so the namespace selector subsumes
-		// LeavesOnly rather than intersecting with it.
-		return func(n *NodeView) bool { return bindsNamespace(n, f.Namespace) }
 	case f.LeavesOnly:
 		return func(n *NodeView) bool { return n.Role == roleClusterQueue }
 	default:
@@ -101,9 +89,6 @@ func (f Filter) nodePredicate() func(*NodeView) bool {
 }
 
 func (f Filter) noMatchMessage() string {
-	if f.Namespace != "" {
-		return fmt.Sprintf("no AcceleratorQuota leaf binds namespace %q", f.Namespace)
-	}
 	return "no AcceleratorQuota leaf matched"
 }
 
@@ -128,15 +113,6 @@ func (f Filter) narrowBudgets(n *NodeView) {
 }
 
 func matches(selector, value string) bool { return selector == "" || selector == value }
-
-func bindsNamespace(n *NodeView, ns string) bool {
-	for _, have := range n.Namespaces {
-		if have == ns {
-			return true
-		}
-	}
-	return false
-}
 
 // prune keeps n when it matches or when any descendant does, and reports
 // through matched whether anything matched at all. A node kept only because a
@@ -211,14 +187,4 @@ func visibleNodes(v *View) map[string]bool {
 	names := map[string]bool{}
 	eachNode(v, func(n *NodeView) { names[n.Name] = true })
 	return names
-}
-
-// SortedNamespaces renders a leaf's namespaces for a single cell.
-func SortedNamespaces(n *NodeView) string {
-	if len(n.Namespaces) == 0 {
-		return ""
-	}
-	ns := append([]string(nil), n.Namespaces...)
-	sort.Strings(ns)
-	return strings.Join(ns, ",")
 }

@@ -1,9 +1,14 @@
 # The demo tree: 32 fleet chips, split by hand, 16 to each member.
 #
-#   root                  Cohort        32 chips, the fleet total
-#   └── mc-demo           Cohort        32 chips, travels budget-less
-#       └── mc-demo-serving  ClusterQueue  32 chips  ns ome-mc-test
+#   root                     Cohort        32 chips, the fleet total
+#   └── mc-demo              Cohort        32 chips, travels budget-less
+#       └── mc-demo.serving  ClusterQueue  32 chips
 #                                          Explicit: rc-1 16, dev-1 16
+#
+# The leaf is named by its path — the dot-joined chain from the top tier down,
+# root omitted. That name is the tenant, the ClusterQueue, and the LocalQueue in
+# every namespace the member enrolls, so a workload reaches this budget by
+# carrying "mc-demo.serving" in kueue.x-k8s.io/queue-name.
 #
 # Applied on the HUB only:
 #
@@ -67,17 +72,15 @@ spec:
 ---
 # The tenant. Its 32 is the fleet-wide figure; each member receives only its own
 # resolved share, and the copy that lands there carries no trace of the split —
-# read `kubectl get aq mc-demo-serving -o yaml` on a member and it says 16.
+# read `kubectl get aq mc-demo.serving -o yaml` on a member and it says 16.
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: mc-demo-serving
+  name: mc-demo.serving
 spec:
   role: ClusterQueue
   parentRef:
     name: mc-demo
-  namespaces:
-  - ome-mc-test
   distribution:
     policy: Explicit
   budgets:

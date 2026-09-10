@@ -327,23 +327,17 @@ func TestRenderColorWrapsWithoutBreakingAlignment(t *testing.T) {
 func TestRenderWideAddsTheDetailColumns(t *testing.T) {
 	got := render(t, buildView(t, healthyFleet(), 0), RenderOptions{Wide: true})
 
-	for _, col := range []string{"BORROWED", "ALLOCATABLE", "PEAK", "DEGRADED", "MATERIALIZED", "TIER", "NAMESPACES", "PATH", "AGE"} {
+	for _, col := range []string{"BORROWED", "ALLOCATABLE", "PEAK", "DEGRADED", "MATERIALIZED", "TIER", "AGE"} {
 		if !strings.Contains(got, col) {
 			t.Errorf("wide output missing %s column", col)
 		}
 	}
-	// AGE is last in both layouts, so PATH no longer ends the wide header.
+	// AGE is last in both layouts.
 	if header := strings.SplitN(got, "\n", 4)[2]; !strings.HasSuffix(header, "AGE") {
 		t.Errorf("AGE is not the final wide column:\n%s", header)
 	}
 	if !strings.Contains(got, "2d2h") {
 		t.Error("wide output does not age the root against the render clock")
-	}
-	if !strings.Contains(got, "nlp-dev,nlp-prod") {
-		t.Error("wide output does not list a leaf's bound namespaces, sorted")
-	}
-	if !strings.Contains(got, "/root/org-research/team-nlp") {
-		t.Error("wide output does not show the computed path")
 	}
 	if !strings.Contains(got, "544") {
 		t.Error("wide output does not show the capacity high-water mark")

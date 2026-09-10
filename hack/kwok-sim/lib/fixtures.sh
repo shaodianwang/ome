@@ -11,25 +11,24 @@
 # In a real cluster the namespace exists long before anyone writes a budget
 # against it. A simulator has to make that true for itself.
 
-# fixture_namespaces prints every namespace the given fixtures bind, one per
-# line. Read from the fixtures rather than listed here, so a fixture that binds
-# a new namespace needs no second edit elsewhere to work.
-fixture_namespaces() { # $@ = fixture files
-  awk '
-    /^[[:space:]]*namespaces:[[:space:]]*$/ { in_ns = 1; next }
-    in_ns && /^[[:space:]]*-[[:space:]]/ {
-      sub(/^[[:space:]]*-[[:space:]]*/, ""); print; next
-    }
-    { in_ns = 0 }
-  ' "$@" | sort -u
+# ENROLLED_NAMESPACES are the namespaces the simulated clusters serve budgeted
+# workloads from. It is a list here rather than something scraped out of the
+# fixtures because that is where it lives in a real install too: enrollment is
+# deploy config on ome-quota-manager, not a field on any AcceleratorQuota. Every
+# leaf gets a LocalQueue named after it in each of these, and every rendered
+# ClusterQueue selects exactly this set.
+ENROLLED_NAMESPACES="kwok-sim kwok-sim-batch"
+
+# enrolled_namespaces_csv renders them for --set / --enrolled-namespaces.
+enrolled_namespaces_csv() {
+  echo "$ENROLLED_NAMESPACES" | tr ' ' ','
 }
 
 # ensure_namespaces creates them on one cluster, idempotently.
-ensure_namespaces() { # $1 = kube context, rest = fixture files
+ensure_namespaces() { # $1 = kube context
   local ctx="$1"
-  shift
   local ns
-  for ns in $(fixture_namespaces "$@"); do
+  for ns in $ENROLLED_NAMESPACES; do
     kubectl --context "$ctx" create namespace "$ns" --dry-run=client -o yaml |
       kubectl --context "$ctx" apply -f - >/dev/null
   done

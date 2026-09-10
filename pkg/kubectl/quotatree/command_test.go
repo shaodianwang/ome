@@ -178,11 +178,6 @@ func TestCompleteValidatesFlags(t *testing.T) {
 		{"bad color", Options{Lister: fakeLister{}}, "tree", "sometimes", "tenant", "invalid --color"},
 		{"bad view", Options{Lister: fakeLister{}}, "tree", "auto", "fleet", "invalid --view"},
 		{"negative depth", Options{Lister: fakeLister{}, MaxDepth: -1}, "tree", "auto", "tenant", "invalid --max-depth"},
-		{
-			"conflicting selectors",
-			Options{Lister: fakeLister{}, Filter: Filter{Node: "a", Namespace: "b"}},
-			"tree", "auto", "tenant", "use one",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.o.Complete(tc.output, tc.color, tc.axis, loading, overrides)
@@ -212,7 +207,7 @@ func TestNewCommandRegistersTheExpectedFlags(t *testing.T) {
 
 	for _, name := range []string{
 		"output", "color", "ascii", "split", "view",
-		"node", "leaves-only", "for-namespace", "resource", "flavor", "max-depth",
+		"node", "leaves-only", "resource", "flavor", "max-depth",
 		"request-timeout",
 		// The standard connection flags, so the plugin behaves like kubectl.
 		"kubeconfig", "context", "cluster", "user", "server",
@@ -234,9 +229,9 @@ func TestNewCommandRegistersTheExpectedFlags(t *testing.T) {
 		}
 	}
 
-	// AcceleratorQuota is cluster-scoped. Accepting -n and doing nothing would
-	// be worse than rejecting it, since it is what an operator reaches for when
-	// they mean --for-namespace.
+	// AcceleratorQuota is cluster-scoped, and tenancy is not namespace-scoped
+	// either, so -n has nothing to select. Accepting it and doing nothing would
+	// be worse than rejecting it.
 	if cmd.Flags().Lookup("namespace") != nil || cmd.Flags().ShorthandLookup("n") != nil {
 		t.Error("--namespace/-n is registered but would have no effect on a cluster-scoped resource")
 	}
@@ -281,7 +276,7 @@ func TestNewCommandWritesHelpToTheGivenStream(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("--help: %v", err)
 	}
-	if !strings.Contains(out.String(), "--for-namespace") {
+	if !strings.Contains(out.String(), "--leaves-only") {
 		t.Errorf("help did not reach the provided writer:\n%s", out.String())
 	}
 }

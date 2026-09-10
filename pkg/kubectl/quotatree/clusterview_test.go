@@ -115,7 +115,7 @@ func TestByClusterNarrowsToWhatAFilterKept(t *testing.T) {
 	// Asking for one tenant and then for the fleet axis should answer "which
 	// clusters is this tenant on", not "every cluster there is".
 	v := buildView(t, fleetSplitAcrossClusters(), 0)
-	if err := (Filter{Namespace: "serving-prod"}).Apply(v); err != nil {
+	if err := (Filter{Node: "team-serving"}).Apply(v); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if err := ByCluster(v); err != nil {
@@ -127,7 +127,7 @@ func TestByClusterNarrowsToWhatAFilterKept(t *testing.T) {
 		names = append(names, c.Name)
 	}
 	if !cmp.Equal(names, []string{"member-a"}) {
-		t.Errorf("clusters = %v, want only member-a; no other cluster hosts serving-prod", names)
+		t.Errorf("clusters = %v, want only member-a; no other cluster hosts team-serving", names)
 	}
 }
 

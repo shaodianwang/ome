@@ -159,9 +159,8 @@ var _ = ginkgo.Describe("Management-plane quota projection", ginkgo.Ordered, fun
 		mustCreate(controlCluster, &v1beta1.AcceleratorQuota{
 			ObjectMeta: metav1.ObjectMeta{Name: team},
 			Spec: v1beta1.AcceleratorQuotaSpec{
-				Role:       v1beta1.AcceleratorQuotaRoleClusterQueue,
-				ParentRef:  &v1beta1.AcceleratorQuotaParentRef{Name: org},
-				Namespaces: []string{"tenant-ns"},
+				Role:      v1beta1.AcceleratorQuotaRoleClusterQueue,
+				ParentRef: &v1beta1.AcceleratorQuotaParentRef{Name: org},
 				Budgets: []v1beta1.AcceleratorBudget{{
 					ResourceName:   tpu,
 					ResourceFlavor: flavor,

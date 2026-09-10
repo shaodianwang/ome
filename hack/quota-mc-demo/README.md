@@ -69,6 +69,17 @@ webhook scope. Every Kueue webhook on these members is scoped by that selector,
 so an unlabelled namespace is invisible to Kueue and its pods run ungated
 whatever queue they name. It is also the blast-radius fence for step 4.
 
+> [!IMPORTANT]
+> Each member's `ome-quota-manager` must also **enroll** the namespace —
+> `--enrolled-namespaces=ome-mc-test`, from
+> `quotaManager.materialize.enrolledNamespaces` on the chart. That is where the
+> set lives: a leaf is a tenant and names no namespace, so which namespaces a
+> cluster serves from is a property of the install. Without it the member writes
+> no Kueue objects at all — materialization is disabled rather than partial,
+> because a ClusterQueue selecting no namespace admits nothing and reports the
+> reason in no object. `status.sh` shows an empty LocalQueue section when this
+> is missing.
+
 ### 3. Install the runtime on all three clusters
 
 ```sh
@@ -107,7 +118,11 @@ integrations:
 > cannot be demoed at all** — and nothing reports an error.
 
 OME's placer stamps exactly one Kueue mark on a derived ISVC: the
-`kueue.x-k8s.io/queue-name` label on each component's pod metadata. Kueue acts
+`kueue.x-k8s.io/queue-name` label on each component's pod metadata, taken from
+the source ISVC's `ome.io/local-queue` annotation — which every `2*-isvc-*`
+fixture sets to `mc-demo.serving`. The operator-wide fallback
+(`placement.localQueue`) is empty by default: a LocalQueue is named for its
+leaf, so no one fleet-wide name addresses more than one tenant. Kueue acts
 on that label only when `pod` is in `integrations.frameworks`, and the stock
 Kueue chart enables `batch/job` alone. With the list at that default the label
 is inert: pods are never gated, never become `Workload`s, and consume chips
@@ -144,7 +159,7 @@ hack/quota-mc-demo/status.sh
 ```
 root                     Cohort        32          the fleet total, authored here
 └── mc-demo              Cohort        32          grouping, travels budget-less
-    └── mc-demo-serving  ClusterQueue  32          Explicit: rc-1 16, dev-1 16
+    └── mc-demo.serving  ClusterQueue  32          Explicit: rc-1 16, dev-1 16
 ```
 
 What to point at, in order:
@@ -155,12 +170,15 @@ What to point at, in order:
    any fixture wrote.
 2. **The tree is one document, authored once.** Each member receives a copy
    whose `nominal` is already resolved to *that member's* share. `get aq
-   mc-demo-serving -o yaml` on a member says `16`, with no trace of the split
+   mc-demo.serving -o yaml` on a member says `16`, with no trace of the split
    and no `perCluster`.
 3. **The leaf became stock Kueue.** A `ClusterQueue` named for the node, a
-   `LocalQueue` named `default` in `ome-mc-test`, and the grouping above it a
-   `Cohort` with no `resourceGroups` — pure topology that pools what its
-   children lend but contributes no quota of its own.
+   `LocalQueue` of the SAME name in every namespace the member enrolls, and the
+   grouping above it a `Cohort` with no `resourceGroups` — pure topology that
+   pools what its children lend but contributes no quota of its own. The queue
+   is named for the leaf because the name is the tenant: it is what a workload
+   puts in `kueue.x-k8s.io/queue-name` to reach one budget out of many sharing
+   a namespace.
 4. **The hub authenticates as `ome-quota-access`**, an identity the *members*
    issued, whose grant is `acceleratorquotas` plus the placement role and
    nothing else. A projector reaching for a `Node` or a `ResourceFlavor` is
@@ -194,7 +212,7 @@ no column carries, which is why `status.sh` prints a projection-state section:
 
 ```
 -- projection state per cluster (a message here means it did NOT land)
-  mc-demo-serving -> msl-gcp-usc1-rc-1-tpu: STALLED: budget google.com/tpu/tpu7x is 32 but its per-cluster shares sum to 24
+  mc-demo.serving -> msl-gcp-usc1-rc-1-tpu: STALLED: budget google.com/tpu/tpu7x is 32 but its per-cluster shares sum to 24
 ```
 
 > [!WARNING]
@@ -226,7 +244,7 @@ hack/quota-mc-demo/status.sh
 mode places on every candidate; there is no winner and no sweep.
 
 Expect on each member: a derived InferenceService in `ome-mc-test`, 2 pods
-`Running`, `mc-demo-serving` at `ADMITTED 8` of `16`.
+`Running`, `mc-demo.serving` at `ADMITTED 8` of `16`.
 
 ### Part 3 — ISVC distribution, not admitted
 
@@ -241,7 +259,7 @@ pods are created on each member; Kueue funds four and holds the fifth.
 ```sh
 kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
   get pods -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,GATES:.spec.schedulingGates[*].name
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo-serving -o wide
+kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo.serving -o wide
 ```
 
 `ADMITTED` pins at exactly 16 and stays there. The point worth landing: **from
@@ -319,9 +337,11 @@ Three things this fixture pair pins down, each of which fails quietly if dropped
   than an error.
 
 > [!NOTE]
-> Applied locally like this the pods carry no `kueue.x-k8s.io/queue-name` label —
-> that is stamped only when the hub *derives* an ISVC — so they hold 8 real chips
-> while charging no budget. Place it from the hub (see the comment in
+> This fixture names no leaf, so its pods carry no `kueue.x-k8s.io/queue-name`
+> label and hold 8 real chips while charging no budget. Placement stamps that
+> label from the ISVC's own `ome.io/local-queue` annotation and nothing else —
+> the operator-wide fallback is empty, since a LocalQueue is named for its leaf.
+> Add the annotation and place it from the hub (see the comment in
 > `41-isvc-tpu-jax.yaml`) to have it charge a leaf. At 8 chips a replica, a
 > 16-chip share funds two.
 
@@ -329,7 +349,7 @@ Three things this fixture pair pins down, each of which fails quietly if dropped
 
 ```sh
 kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test delete isvc --all
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc delete acceleratorquota mc-demo-serving mc-demo root
+kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc delete acceleratorquota mc-demo.serving mc-demo root
 
 # only if the real-TPU pair was applied; it holds 8 chips until removed
 kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test delete isvc mc-demo-jax --ignore-not-found

@@ -1,4 +1,4 @@
-# A batch Job that charges the sim-batch leaf, so the quota tree reports usage
+# A batch Job that charges the sim-tenants.batch leaf, so the quota tree reports usage
 # instead of a budget nothing has ever drawn against.
 #
 # Nothing else here submits anything to Kueue. An InferenceService takes OME's
@@ -14,7 +14,7 @@
 #   kubectl apply -f hack/kwok-sim/fixtures/40-job-batch.yaml
 #   kubectl get aq -o wide
 #
-# Three pods of four chips is 12 of sim-batch's 16, so the leaf reports 12
+# Three pods of four chips is 12 of sim-tenants.batch's 16, so the leaf reports 12
 # admitted with headroom left and sim-tenants rolls the same 12 up to itself.
 # Apply a second copy under another name and the 24 does not fit: Kueue funds
 # neither of the two pods it cannot pay for, that Job stays suspended, and
@@ -23,17 +23,23 @@
 #   kubectl -n kwok-sim-batch get jobs,pods
 #   kubectl -n kwok-sim-batch get workloads
 ---
+#
+# Needs the enrolled namespace kwok-sim-batch, which up.sh and fleet-up.sh
+# create on every cluster. No fixture declares it: it is shared, so a file that
+# owned it would take every other tenant down on `kubectl delete -f`. If it is
+# missing: `kubectl create namespace kwok-sim-batch`.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: kwok-batch
   namespace: kwok-sim-batch
   labels:
-    # The leaf's LocalQueue. Every one OME materializes takes Kueue's own
-    # default-queue name, so this value is the same in every bound namespace and
-    # does not track the AcceleratorQuota it belongs to. Without the label Kueue
-    # ignores the Job entirely: it runs unmanaged and charges nothing.
-    kueue.x-k8s.io/queue-name: default
+    # The leaf's LocalQueue, which is named for the leaf: this value IS the
+    # AcceleratorQuota node whose budget the Job charges, and the same name
+    # resolves in every enrolled namespace. Point it at a different leaf and the
+    # Job charges that budget instead. Without the label Kueue ignores the Job
+    # entirely: it runs unmanaged and charges nothing.
+    kueue.x-k8s.io/queue-name: sim-tenants.batch
 spec:
   # Kueue's webhook suspends a queued Job itself. Declaring it means the Job is
   # never briefly running unadmitted in the window before that webhook serves.

@@ -34,6 +34,12 @@ const (
 	gpuFlavor   = "a100"
 	fieldOwner  = "ome-quota-test"
 
+	// enrolledNS is the one namespace this install serves from, fixed for the
+	// suite because enrollment is deploy config rather than anything a node
+	// declares. Specs keep their leaves apart by name, not by namespace —
+	// which is the shape a real install has, several tenants sharing one.
+	enrolledNS = "quota-materialize"
+
 	timeout  = "30s"
 	interval = "200ms"
 )
@@ -73,6 +79,10 @@ var _ = ginkgo.BeforeSuite(func() {
 	k8sClient = s.Client
 	suiteCtx, suiteCancel = context.WithCancel(s.Ctx)
 
+	// Enrolled before the manager starts: a LocalQueue is namespaced, so a
+	// namespace the install names but the cluster does not have holds none.
+	mustCreateNamespace(enrolledNS)
+
 	// The flavor deliberately sets NO topologyName. TopologyAwareScheduling is
 	// on by default at the Kueue version we target and the Topology CRD is
 	// installed by this bundle, so a flavor that set it would be admitted, not
@@ -88,7 +98,7 @@ var _ = ginkgo.BeforeSuite(func() {
 				map[corev1.ResourceName]resource.Quantity{
 					corev1.ResourceCPU:    resource.MustParse("1k"),
 					corev1.ResourceMemory: resource.MustParse("1Ti"),
-				}),
+				}, enrolledNS),
 			components.WithQuotaResync(10*time.Minute),
 		); err != nil {
 			return err
@@ -129,8 +139,8 @@ func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, seq)
 }
 
-// mustCreateNamespace makes a bound namespace real. A LocalQueue is namespaced,
-// so a leaf binding a namespace that does not exist cannot materialize.
+// mustCreateNamespace makes an enrolled namespace real. A LocalQueue is
+// namespaced, so an enrolled namespace that does not exist holds none.
 func mustCreateNamespace(name string) {
 	ginkgo.GinkgoHelper()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
@@ -167,13 +177,12 @@ func cohortNode(name, parent string) *v1beta1.AcceleratorQuota {
 	return q
 }
 
-func leafNode(name, parent string, namespaces []string, flavor, nominal string) *v1beta1.AcceleratorQuota {
+func leafNode(name, parent, flavor, nominal string) *v1beta1.AcceleratorQuota {
 	return &v1beta1.AcceleratorQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1beta1.AcceleratorQuotaSpec{
-			Role:       v1beta1.AcceleratorQuotaRoleClusterQueue,
-			ParentRef:  &v1beta1.AcceleratorQuotaParentRef{Name: parent},
-			Namespaces: namespaces,
+			Role:      v1beta1.AcceleratorQuotaRoleClusterQueue,
+			ParentRef: &v1beta1.AcceleratorQuotaParentRef{Name: parent},
 			Budgets: []v1beta1.AcceleratorBudget{{
 				ResourceName:   gpuResource,
 				ResourceFlavor: flavor,

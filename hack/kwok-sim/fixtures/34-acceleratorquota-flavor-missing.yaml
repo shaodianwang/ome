@@ -1,6 +1,6 @@
 # A leaf budgeted against a flavor the cluster does not have.
 #
-#   root           Cohort        (self-created, no budget)
+#   root           Cohort        no budget
 #   └── stranded   ClusterQueue  16 chips  tpu9z  <- no such ResourceFlavor
 #
 # This is the failure worth seeing, because Kueue's own handling of it is quiet:
@@ -21,10 +21,14 @@
 # Fix it by correcting the flavor to tpu7x, or by creating the flavor. OME reads
 # flavors and never authors them: a flavor names a hardware class by node
 # labels, and node labelling is not OME's to own.
-apiVersion: v1
-kind: Namespace
+# Bare, exactly as a workload-mode controller makes it. Carried here so the file
+# applies on a management plane too, where nothing creates a root.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
 metadata:
-  name: kwok-sim-stranded
+  name: root
+spec:
+  role: Cohort
 ---
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
@@ -34,8 +38,6 @@ spec:
   role: ClusterQueue
   parentRef:
     name: root
-  namespaces:
-  - kwok-sim-stranded
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu9z

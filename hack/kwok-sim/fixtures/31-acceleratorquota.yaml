@@ -1,21 +1,36 @@
 # A three-node AcceleratorQuota tree over the simulated fleet (OEP-0024).
 #
-#   root                 Cohort        (self-created, no budget)
-#   └── sim-tenants      Cohort        64 chips
-#       ├── sim-serving  ClusterQueue  48 chips   ns kwok-sim
-#       └── sim-batch    ClusterQueue  16 chips   ns kwok-sim-batch
+#   root                         Cohort        no budget
+#   └── sim-tenants              Cohort        64 chips
+#       ├── sim-tenants.serving  ClusterQueue  48 chips
+#       └── sim-tenants.batch    ClusterQueue  16 chips
 #
-# The reserved root is NOT declared here. The controller creates it itself, and
-# creates it bare, so a cluster reports its derived capacity before anyone has
-# authored a budget — a management plane sizing a Proportional split needs to
-# read a member's capacity exactly when that member has no tree yet. Declaring
-# it in a fixture would duplicate that and hand the object to a second writer.
+# Nodes are named by their path — the dot-joined chain from the top tier down,
+# with root omitted. That name is the tenant, the ClusterQueue, and the
+# LocalQueue in every enrolled namespace, so a workload reaches this budget by
+# carrying "sim-tenants.batch" in kueue.x-k8s.io/queue-name. The convention is
+# the author's, not the controller's: re-parenting a node leaves its name stale
+# rather than renaming a live queue out from under its workloads.
+#
+# The reserved root is declared here, bare, which is byte-for-byte what a
+# workload-mode controller creates for itself — so applying this on a cluster
+# that already has one is a no-op, and applying it on one that does not is the
+# difference between the tree landing and every node being refused.
+#
+# It has to be here because root is auto-created only where capacity derivation
+# runs, which is workload mode alone: a management plane holds no silicon to
+# measure. Apply this to a fleet hub without it and admission refuses the whole
+# file, blaming each node for a parentRef that does not resolve — three errors
+# with one cause, since a child is rejected for a parent that was itself
+# rejected a moment earlier. Parents before children is deliberate (a dangling
+# parentRef is refused rather than held), so a self-contained file has to carry
+# its own root.
 #
 # Containment is exercised at sim-tenants: a parent's nominal must be at least
 # the sum of its children's, per (resource, flavor), and 48 + 16 is exactly 64.
 # It is NOT exercised at the root, because a node carrying no budgets is skipped
 # — the check compares numbers and the root has none. To enforce a fleet total,
-# patch one onto the root the controller made:
+# patch one onto it:
 #
 #   kubectl patch aq root --type=merge -p \
 #     '{"spec":{"budgets":[{"resourceName":"google.com/tpu","resourceFlavor":"tpu7x","nominal":64}]}}'
@@ -31,10 +46,11 @@
 #   kubectl get aq -o wide
 #   kubectl get cohorts,clusterqueues,localqueues -A
 #
-# 32, 33 and 34 are smaller trees for particular behaviours. They hang off the
-# same self-created root and bind their own namespaces, so they coexist with
-# this one — until you patch a fleet total onto the root, at which point they
-# all count against it and the sum matters. Remove one with
+# 32, 33 and 34 are smaller trees for particular behaviours. They declare the
+# same bare root and hang off it under their own names, so they coexist with
+# this one —
+# until you patch a fleet total onto the root, at which point they all count
+# against it and the sum matters. Remove one with
 # `kubectl delete aq <name>`, which is also what reaps its Kueue objects: the
 # nodes carry a finalizer and nothing else removes them, since a frozen node
 # keeps its objects on purpose.
@@ -43,17 +59,27 @@
 #   33  containment violated on purpose — the freeze rule
 #   34  a budget naming a flavor that does not exist — FlavorMissing
 #
-# The tenant namespaces are carried here rather than left to up.sh so that
-# stays a single self-contained command.
-apiVersion: v1
-kind: Namespace
+# The enrolled namespaces are NOT carried here. up.sh and fleet-up.sh create
+# them, on every cluster, from one list in lib/fixtures.sh — which is where they
+# belong: enrollment is deploy config on ome-quota-manager
+# (--enrolled-namespaces), not something any leaf binds, and every leaf gets a
+# LocalQueue in each of them regardless of which tree is applied.
+#
+# They are shared, so no fixture owns them. A file that declared one would
+# delete it on `kubectl delete -f`, taking every other tenant's workloads with
+# it. If they are missing — a standup that did not finish — create them by hand:
+#
+#   kubectl create namespace kwok-sim
+#   kubectl create namespace kwok-sim-batch
+#
+# Bare, exactly as a workload-mode controller makes it: role and nothing else.
+# Applying it where one already exists changes nothing.
+apiVersion: ome.io/v1beta1
+kind: AcceleratorQuota
 metadata:
-  name: kwok-sim
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kwok-sim-batch
+  name: root
+spec:
+  role: Cohort
 ---
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
@@ -71,15 +97,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: sim-serving
+  name: sim-tenants.serving
 spec:
   role: ClusterQueue
   parentRef:
     name: sim-tenants
-  # A namespace charges exactly one leaf fleet-wide, which is why the second
-  # tenant below gets its own.
-  namespaces:
-  - kwok-sim
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu7x
@@ -88,13 +110,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: sim-batch
+  name: sim-tenants.batch
 spec:
   role: ClusterQueue
   parentRef:
     name: sim-tenants
-  namespaces:
-  - kwok-sim-batch
   budgets:
   - resourceName: google.com/tpu
     resourceFlavor: tpu7x

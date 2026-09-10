@@ -321,21 +321,17 @@ OME_KWOK_CLUSTER="$MEMBER_B" hack/kwok-sim/up.sh \
   --skip-build >/dev/null
 
 # Before any tree is authored, the way a real cluster has them before anyone
-# budgets against one. All three clusters get every namespace the fixtures bind,
-# not just the one the fixture in hand uses, so switching between fixtures needs
-# no second step.
+# budgets against one. All three clusters get the same set, so the three are
+# interchangeable to a fixture.
 #
 # The hub included, and it is the one that is easy to forget: a member needs the
-# namespace because a leaf binding one that does not exist materializes no
-# LocalQueue, but the hub needs it because the hub is where the tree and the
-# placement ISVCs are applied, and an apply into a missing namespace is refused
-# outright. Same set on all three, so the three are interchangeable to a
-# fixture.
-echo "==> the namespaces the fixtures bind"
+# namespaces because it materializes a LocalQueue per leaf in each of them, and
+# an enrolled namespace that does not exist holds none; the hub needs them
+# because the hub is where the tree and the placement ISVCs are applied, and an
+# apply into a missing namespace is refused outright.
+echo "==> the enrolled namespaces"
 for ctx in "kind-${HUB}" "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do
-  ensure_namespaces "$ctx" \
-    hack/kwok-sim/fixtures/3*-acceleratorquota*.yaml \
-    hack/kwok-sim/fixtures/5*-fleet-*.yaml
+  ensure_namespaces "$ctx"
 done
 
 echo "==> the member-issued grant on each member"
@@ -532,9 +528,10 @@ DONE
 if [ "$WITH_PLACEMENT" -eq 1 ]; then
   cat <<'DONE'
 Placement is wired: both members are labelled accelerator=tpu7x (zone=a, zone=b)
-and the hub may write derived InferenceServices there. Apply a tree FIRST — a
-derived workload carries Kueue's queue-name label, so with no LocalQueue in
-kwok-sim its pods gate and never run — then one of:
+and the hub may write derived InferenceServices there. Apply a tree FIRST: each
+of these names sim-tenants.serving in ome.io/local-queue, and a workload naming
+a LocalQueue that does not exist is never queued -- its pods are created, gated,
+and stay there. Drop that annotation to place without quota instead.
 
   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/<one of>
 
@@ -545,6 +542,12 @@ kwok-sim its pods gate and never run — then one of:
   65-placement-pinned.yaml        clusterSelector zone=b     -> member-b only
   66-placement-nomatch.yaml       matches nothing            -> never placed
 
-They all charge the same leaf, so run one at a time.
+They all charge sim-tenants.serving, so run one at a time.
+
+67-placement-two-tenants.yaml is the one that shows why the queue name matters:
+two tenants sharing one namespace, told apart only by the leaf each names. A
+LocalQueue is named for its leaf, so no single operator-wide default could
+address both -- which is why placement.localQueue is empty and each workload
+names its own.
 DONE
 fi

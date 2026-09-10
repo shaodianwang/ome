@@ -6,16 +6,17 @@
 #
 # The queue a derived workload joins is resolved in two steps: the source's
 # ome.io/local-queue annotation first, then the operator-configured default
-# (charts/ome-resources sets placement.localQueue: "default", which is the name
-# OME gives every leaf's LocalQueue). This fixture overrides the first step with
-# a name nothing provisioned.
+# (charts/ome-resources leaves placement.localQueue empty, because a LocalQueue
+# is named for the quota leaf it belongs to and one fleet-wide name cannot
+# address more than one tenant). This fixture supplies the first step with a
+# name nothing provisioned.
 #
 # Expect: the derived InferenceService appears on both members and its pods are
 # created and GATED — Kueue's pod webhook stamps them from the label and then
-# finds no LocalQueue by that name to admit them through. sim-serving's admitted
+# finds no LocalQueue by that name to admit them through. sim-tenants.serving's admitted
 # figure stays at 0 on both members:
 #
-#   kubectl --context kind-ome-quota-a get aq sim-serving -o wide
+#   kubectl --context kind-ome-quota-a get aq sim-tenants.serving -o wide
 #   kubectl --context kind-ome-quota-a -n kwok-sim get pods
 #   kubectl --context kind-ome-quota-a -n kwok-sim get pods -o jsonpath=
 #     '{.items[0].spec.schedulingGates}{"\n"}'
@@ -25,18 +26,23 @@
 # names its homes — and nothing runs. The only signal is at the pods, which is
 # not where an operator looks first.
 #
-# The opposite failure has no fixture because it cannot be expressed in one. If
-# the annotation is absent AND the operator's default is empty, the queue label
-# is left off entirely, Kueue never gates the pods, and they run OUTSIDE quota
-# altogether — a tree can be in place, correct, and completely bypassed. That is
-# a deployment setting rather than a workload field, so to see it:
+# The opposite failure needs no fixture either, only a deletion: strip the
+# annotation from 61-placement-all.yaml and the operator's default is empty, so
+# the queue label is left off entirely, Kueue never manages the pods, and they
+# run OUTSIDE quota — a tree can be in place, correct, and completely bypassed.
+# The pods run with no queue-name label while admitted stays at 0 and the chips
+# are genuinely consumed.
 #
-#   helm upgrade ome charts/ome-resources/ --kube-context kind-ome-quota-a \
-#     --namespace ome --reuse-values \
-#     --set ome.multicluster.placement.localQueue=""
+# The two failures are the two halves of the same gap, and the ISVC->(queue,
+# priority) resolver closes both: until it lands, a workload reaches a budget
+# only by naming its leaf, and nothing checks that the name it wrote is one the
+# tree knows. Carrying the label is the workload's half of the contract, and one
+# that does not carry it is not asking to be governed.
 #
-# then apply 61-placement-all.yaml and watch the pods run with no queue-name
-# label and admitted stay at 0 while the chips are genuinely consumed.
+# Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
+# every cluster. No fixture declares it: it is shared, so a file that owned it
+# would take every other tenant down on `kubectl delete -f`. If it is missing:
+# `kubectl create namespace kwok-sim`.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:

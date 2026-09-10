@@ -1,9 +1,9 @@
 # A split one member cannot hold, to exercise the capacity guardrail (OEP-0024).
 #
-#   root                 Cohort        192 chips
-#   └── sim-tenants      Cohort        192 chips, travels budget-less
-#       └── sim-serving  ClusterQueue  192 chips  ns kwok-sim
-#                                      Explicit: member-a 64, member-b 128
+#   root                         Cohort        192 chips
+#   └── sim-tenants              Cohort        192 chips, travels budget-less
+#       └── sim-tenants.serving  ClusterQueue  192 chips
+#                                              Explicit: member-a 64, member-b 128
 #
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/53-fleet-oversubscribed.yaml
 #
@@ -58,13 +58,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: sim-serving
+  name: sim-tenants.serving
 spec:
   role: ClusterQueue
   parentRef:
     name: sim-tenants
-  namespaces:
-  - kwok-sim
   distribution:
     policy: Explicit
   budgets:

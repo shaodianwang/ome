@@ -10,7 +10,6 @@ import (
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	kueuebackend "github.com/ome-projects/ome/pkg/quota/backend/kueue"
 )
 
 // getCQ fetches a rendered ClusterQueue once it exists.
@@ -28,14 +27,12 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 	ginkgo.It("renders a tree Kueue accepts and marks active", func() {
 		root := uniqueName("root-active")
 		leaf := uniqueName("leaf-active")
-		ns := uniqueName("ns-active")
-		mustCreateNamespace(ns)
 
 		// The reserved root cannot be renamed, so a suite that needs a parent
 		// cohort authors one under it rather than instead of it.
 		mustCreateQuota(cohortNode(v1beta1.AcceleratorQuotaRootName, ""))
 		mustCreateQuota(cohortNode(root, v1beta1.AcceleratorQuotaRootName))
-		mustCreateQuota(leafNode(leaf, root, []string{ns}, gpuFlavor, "8"))
+		mustCreateQuota(leafNode(leaf, root, gpuFlavor, "8"))
 
 		cq := getCQ(leaf)
 
@@ -70,12 +67,12 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 		// as load-bearing as the quota itself.
 		gomega.Expect(cq.Spec.NamespaceSelector).NotTo(gomega.BeNil())
 
-		// One LocalQueue per bound namespace, under Kueue's own default name so
-		// Kueue's defaulting stamps workloads onto it.
+		// One LocalQueue per enrolled namespace, named for the leaf: the name is
+		// the tenant, and it is what a workload's queue-name label points at.
 		var lq kueuev1beta2.LocalQueue
 		gomega.Eventually(func() error {
 			return k8sClient.Get(suiteCtx,
-				client.ObjectKey{Name: kueuebackend.LocalQueueName, Namespace: ns}, &lq)
+				client.ObjectKey{Name: leaf, Namespace: enrolledNS}, &lq)
 		}, timeout, interval).Should(gomega.Succeed())
 		gomega.Expect(string(lq.Spec.ClusterQueue)).To(gomega.Equal(leaf))
 
@@ -90,11 +87,9 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 
 	ginkgo.It("marks the node Materialized once its objects are written", func() {
 		leaf := uniqueName("leaf-cond")
-		ns := uniqueName("ns-cond")
-		mustCreateNamespace(ns)
 
 		mustCreateQuota(cohortNode(v1beta1.AcceleratorQuotaRootName, ""))
-		mustCreateQuota(leafNode(leaf, v1beta1.AcceleratorQuotaRootName, []string{ns}, gpuFlavor, "4"))
+		mustCreateQuota(leafNode(leaf, v1beta1.AcceleratorQuotaRootName, gpuFlavor, "4"))
 
 		gomega.Eventually(func() metav1.ConditionStatus {
 			var q v1beta1.AcceleratorQuota
@@ -111,11 +106,9 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 
 	ginkgo.It("reports a budget naming an absent flavor instead of rendering it inactive", func() {
 		leaf := uniqueName("leaf-flavor")
-		ns := uniqueName("ns-flavor")
-		mustCreateNamespace(ns)
 
 		mustCreateQuota(cohortNode(v1beta1.AcceleratorQuotaRootName, ""))
-		mustCreateQuota(leafNode(leaf, v1beta1.AcceleratorQuotaRootName, []string{ns}, "no-such-flavor", "8"))
+		mustCreateQuota(leafNode(leaf, v1beta1.AcceleratorQuotaRootName, "no-such-flavor", "8"))
 
 		// FlavorMissing rather than a queue Kueue silently deactivates: an
 		// inactive queue admits nothing and explains itself only in Kueue's
@@ -135,8 +128,6 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 
 	ginkgo.It("refuses to adopt a ClusterQueue it does not own", func() {
 		leaf := uniqueName("leaf-conflict")
-		ns := uniqueName("ns-conflict")
-		mustCreateNamespace(ns)
 
 		// A queue an operator authored by hand, carrying no ownership label.
 		foreign := &kueuev1beta2.ClusterQueue{
@@ -151,7 +142,7 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 		})
 
 		mustCreateQuota(cohortNode(v1beta1.AcceleratorQuotaRootName, ""))
-		mustCreateQuota(leafNode(leaf, v1beta1.AcceleratorQuotaRootName, []string{ns}, gpuFlavor, "8"))
+		mustCreateQuota(leafNode(leaf, v1beta1.AcceleratorQuotaRootName, gpuFlavor, "8"))
 
 		gomega.Eventually(func() string {
 			var q v1beta1.AcceleratorQuota
@@ -179,11 +170,9 @@ var _ = ginkgo.Describe("AcceleratorQuota materialization", func() {
 
 	ginkgo.It("reaps a deleted leaf's Kueue objects", func() {
 		leaf := uniqueName("leaf-reap")
-		ns := uniqueName("ns-reap")
-		mustCreateNamespace(ns)
 
 		mustCreateQuota(cohortNode(v1beta1.AcceleratorQuotaRootName, ""))
-		q := leafNode(leaf, v1beta1.AcceleratorQuotaRootName, []string{ns}, gpuFlavor, "8")
+		q := leafNode(leaf, v1beta1.AcceleratorQuotaRootName, gpuFlavor, "8")
 		gomega.Expect(k8sClient.Create(suiteCtx, q)).To(gomega.Succeed())
 
 		getCQ(leaf)

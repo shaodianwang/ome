@@ -116,16 +116,8 @@ func withStatus(budgets ...v1beta1.AcceleratorBudgetStatus) nodeOpt {
 	return func(q *v1beta1.AcceleratorQuota) { q.Status.Budgets = append(q.Status.Budgets, budgets...) }
 }
 
-func withNamespaces(ns ...string) nodeOpt {
-	return func(q *v1beta1.AcceleratorQuota) { q.Spec.Namespaces = append(q.Spec.Namespaces, ns...) }
-}
-
 func withTier(tier string) nodeOpt {
 	return func(q *v1beta1.AcceleratorQuota) { q.Spec.PriorityTier = tier }
-}
-
-func withPath(path string) nodeOpt {
-	return func(q *v1beta1.AcceleratorQuota) { q.Status.Path = path }
 }
 
 func withCondition(condType, status string) nodeOpt {
@@ -173,31 +165,22 @@ func healthyFleet() []v1beta1.AcceleratorQuota {
 			withSpec(specBudget(gpu, a100, "512")),
 			withStatus(statusBudget(gpu, a100, "512", "288")),
 			withCapacity(gpu, a100, "520", "544"),
-			withAge(50*time.Hour),
-			withPath("/root"), ready()),
+			withAge(50*time.Hour), ready()),
 		cohort("org-research", "root",
 			withSpec(specBudget(gpu, a100, "256")),
-			withStatus(statusBudget(gpu, a100, "256", "160")),
-			withPath("/root/org-research"), ready()),
+			withStatus(statusBudget(gpu, a100, "256", "160")), ready()),
 		leaf("team-nlp", "org-research",
 			withSpec(specBudget(gpu, a100, "128")),
-			withStatus(statusBudget(gpu, a100, "128", "96")),
-			withNamespaces("nlp-prod", "nlp-dev"), withTier("high"),
-			withPath("/root/org-research/team-nlp"), ready()),
+			withStatus(statusBudget(gpu, a100, "128", "96")), withTier("high"), ready()),
 		leaf("team-vision", "org-research",
 			withSpec(specBudget(gpu, a100, "128")),
-			withStatus(statusBudget(gpu, a100, "128", "64")),
-			withNamespaces("vision-prod"),
-			withPath("/root/org-research/team-vision"), ready()),
+			withStatus(statusBudget(gpu, a100, "128", "64")), ready()),
 		cohort("org-product", "root",
 			withSpec(specBudget(gpu, a100, "256")),
-			withStatus(statusBudget(gpu, a100, "256", "128")),
-			withPath("/root/org-product"), ready()),
+			withStatus(statusBudget(gpu, a100, "256", "128")), ready()),
 		leaf("team-serving", "org-product",
 			withSpec(specBudget(gpu, a100, "256")),
 			withStatus(statusBudget(gpu, a100, "256", "128")),
-			withNamespaces("serving-prod"),
-			withPath("/root/org-product/team-serving"),
 			withCondition(v1beta1.AcceleratorQuotaReady, "False")),
 	}
 }
@@ -219,14 +202,12 @@ func fleetSplitAcrossClusters() []v1beta1.AcceleratorQuota {
 			withSpec(specBudget(gpu, a100, "128")),
 			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional),
 			withStatus(splitAcross(statusBudget(gpu, a100, "128", "96"),
-				share("member-a", "96", "72"), share("member-b", "32", "24"))),
-			withNamespaces("nlp-prod"), ready()),
+				share("member-a", "96", "72"), share("member-b", "32", "24"))), ready()),
 		leaf("team-vision", "org-research",
 			withSpec(specBudget(gpu, a100, "128")),
 			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional),
 			withStatus(splitAcross(statusBudget(gpu, a100, "128", "64"),
-				share("member-a", "96", "48"), share("member-b", "32", "16"))),
-			withNamespaces("vision-prod"), ready()),
+				share("member-a", "96", "48"), share("member-b", "32", "16"))), ready()),
 		cohort("org-product", "root",
 			withSpec(specBudget(gpu, a100, "256")),
 			withStatus(statusBudget(gpu, a100, "256", "128")), ready()),
@@ -234,8 +215,7 @@ func fleetSplitAcrossClusters() []v1beta1.AcceleratorQuota {
 			withSpec(specBudget(gpu, a100, "256")),
 			withPolicy(v1beta1.AcceleratorQuotaDistributionExplicit),
 			withStatus(splitAcross(statusBudget(gpu, a100, "256", "128"),
-				share("member-a", "256", "128"))),
-			withNamespaces("serving-prod"), ready()),
+				share("member-a", "256", "128"))), ready()),
 	}
 }
 
@@ -256,7 +236,6 @@ func splitFleet() []v1beta1.AcceleratorQuota {
 			withPolicy(v1beta1.AcceleratorQuotaDistributionProportional),
 			withStatus(splitAcross(statusBudget(tpu, tpu7x, "192", "24"),
 				share("member-a", "128", "16"),
-				share("member-b", "64", "8"))),
-			withNamespaces("serving-prod"), ready()),
+				share("member-b", "64", "8"))), ready()),
 	}
 }

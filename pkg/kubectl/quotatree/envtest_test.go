@@ -92,8 +92,8 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		if strings.Contains(got, "*") {
 			t.Errorf("a budget was marked unresolved though every node has status:\n%s", got)
 		}
-		if !strings.Contains(got, "/root/org-research/team-nlp") {
-			t.Errorf("status.path missing from wide output:\n%s", got)
+		if !strings.Contains(got, "org-research") {
+			t.Errorf("status.parent missing from wide output:\n%s", got)
 		}
 	})
 
@@ -104,7 +104,7 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		tbl := fetchTable(ctx, t, cfg)
 
 		wantDefault := "NAME ROLE PARENT RESOURCE FLAVOR NOMINAL ADMITTED READY DEGRADED AGE"
-		wantWide := "NAME ROLE PARENT RESOURCE FLAVOR NOMINAL ADMITTED BORROWED READY DEGRADED AGE PATH"
+		wantWide := "NAME ROLE PARENT RESOURCE FLAVOR NOMINAL ADMITTED BORROWED READY DEGRADED AGE"
 		if got := strings.Join(columnNames(tbl, false), " "); got != wantDefault {
 			t.Errorf("default columns:\n got %s\nwant %s", got, wantDefault)
 		}
@@ -148,16 +148,16 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		}
 	})
 
-	t.Run("namespace lookup", func(t *testing.T) {
+	t.Run("node lookup", func(t *testing.T) {
 		got := runAgainst(ctx, t, cfg, Options{
 			Output: OutputTree, Color: ColorNever,
-			Filter: Filter{Namespace: "nlp-prod"},
+			Filter: Filter{Node: "team-nlp"},
 		})
 		if !strings.Contains(got, "team-nlp") {
-			t.Errorf("charging leaf not found:\n%s", got)
+			t.Errorf("selected leaf not found:\n%s", got)
 		}
 		if strings.Contains(got, "team-vision") {
-			t.Errorf("unrelated leaf survived the namespace filter:\n%s", got)
+			t.Errorf("unrelated leaf survived the node filter:\n%s", got)
 		}
 	})
 
@@ -166,8 +166,8 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(got), "{") {
 			t.Errorf("not JSON:\n%s", got)
 		}
-		if !strings.Contains(got, `"path": "/root/org-research/team-nlp"`) {
-			t.Errorf("JSON missing the computed path:\n%s", got)
+		if !strings.Contains(got, `"parent": "org-research"`) {
+			t.Errorf("JSON missing the resolved parent:\n%s", got)
 		}
 	})
 

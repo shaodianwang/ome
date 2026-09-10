@@ -412,10 +412,10 @@ fi
 if [ "$WITH_QUOTA" -eq 1 ]; then
   echo "==> ResourceFlavor (no AcceleratorQuota; the controller makes its own root)"
   k apply -f hack/kwok-sim/fixtures/30-resourceflavor.yaml >/dev/null
-  # Every namespace the quota fixtures bind, so any of them can be applied by
-  # hand and fully materialize. None is created by the tree itself: a leaf names
-  # a namespace, it does not own one.
-  ensure_namespaces "$KCTX" hack/kwok-sim/fixtures/3*-acceleratorquota*.yaml
+  # The namespaces this install enrolls, so any quota fixture applied by hand
+  # fully materializes. None is created by the tree: a leaf is a tenant, and a
+  # tenant is not a namespace.
+  ensure_namespaces "$KCTX"
 fi
 
 if [ "$WITH_MANAGER" -eq 1 ]; then
@@ -574,6 +574,7 @@ if [ "$WITH_QUOTA" -eq 1 ]; then
     --set quotaManager.leaderElect=false \
     --set quotaManager.podDisruptionBudget.enabled=false \
     --set quotaManager.podAnnotations.kwok-sim/image-id="$(image_id "$QUOTA_IMAGE")" \
+    --set "quotaManager.materialize.enrolledNamespaces={$(enrolled_namespaces_csv)}" \
     "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
 
   # The AcceleratorQuota webhook is failurePolicy=Fail, and it gates the

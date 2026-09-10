@@ -2,9 +2,12 @@
 #
 # The hub needs it because the source InferenceServices are created there and an
 # apply into a missing namespace is refused outright. Each member needs it
-# because a quota leaf NAMES a namespace rather than creating one — without it
-# the ClusterQueue still lands but its LocalQueue is never written, and a
-# workload in the namespace has no queue to charge.
+# because it ENROLLS this namespace — `--enrolled-namespaces=ome-mc-test` on the
+# member's ome-quota-manager, which is where the set lives now: a leaf is a
+# tenant and names no namespace, so which namespaces a cluster serves from is a
+# property of the install. OME never creates one, and an enrolled namespace that
+# does not exist holds no LocalQueue: the ClusterQueue still lands, but a
+# workload in that namespace has no queue to charge.
 #
 # kueue.x-k8s.io/managed is what puts the namespace inside Kueue's scope. Every
 # Kueue webhook on these members carries

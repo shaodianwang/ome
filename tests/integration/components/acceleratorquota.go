@@ -43,22 +43,30 @@ func WithQuotaCapacity(resources []string, hysteresisPercent int32) AcceleratorQ
 }
 
 // WithQuotaMaterialization turns on rendering the tree into Kueue. Off unless a
-// suite asks, matching the binary: absent cover resources disable it rather
-// than inventing a ceiling that would surface as a real quota.
+// suite asks, matching the binary: absent cover resources or enrolled
+// namespaces disable it rather than inventing a ceiling that would surface as a
+// real quota, or a queue that selects nothing and admits nobody.
+//
+// enrolled are the namespaces every leaf gets a LocalQueue in and every
+// ClusterQueue selects — deploy config in the binary, so a parameter here rather
+// than anything a fixture declares.
 //
 // The writer is the manager's client and the reader its uncached APIReader,
 // exactly as cmd/ome-quota-manager wires it — the ownership check before every
 // apply is a read-then-write, and a cached read would let an object created
 // moments earlier be adopted as if it were not there.
-func WithQuotaMaterialization(mgr ctrl.Manager, fieldManager string, cover map[corev1.ResourceName]resource.Quantity) AcceleratorQuotaOption {
+func WithQuotaMaterialization(mgr ctrl.Manager, fieldManager string,
+	cover map[corev1.ResourceName]resource.Quantity, enrolled ...string,
+) AcceleratorQuotaOption {
 	return func(r *acceleratorquota.Reconciler) {
 		r.Materialize = acceleratorquota.MaterializeOptions{
 			Backend: &kueuebackend.Backend{
 				Writer: mgr.GetClient(),
 				Reader: mgr.GetAPIReader(),
 				Options: kueuebackend.Options{
-					FieldManager:   fieldManager,
-					CoverResources: cover,
+					FieldManager:       fieldManager,
+					CoverResources:     cover,
+					EnrolledNamespaces: enrolled,
 				},
 			},
 		}

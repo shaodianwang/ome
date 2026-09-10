@@ -91,58 +91,6 @@ func TestFilterLeavesOnlyKeepsThePathToEachLeaf(t *testing.T) {
 	}
 }
 
-func TestFilterForNamespaceFindsTheChargingLeaf(t *testing.T) {
-	v := buildView(t, healthyFleet(), 0)
-
-	if err := (Filter{Namespace: "nlp-dev"}).Apply(v); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	names := visibleNodes(v)
-	for _, want := range []string{"root", "org-research", "team-nlp"} {
-		if !names[want] {
-			t.Errorf("%q missing; the answer needs the path that leads to it", want)
-		}
-	}
-	for _, unwanted := range []string{"team-vision", "org-product", "team-serving"} {
-		if names[unwanted] {
-			t.Errorf("%q survived --for-namespace but binds nothing relevant", unwanted)
-		}
-	}
-}
-
-func TestFilterForNamespaceUnboundIsAnError(t *testing.T) {
-	v := buildView(t, healthyFleet(), 0)
-
-	err := (Filter{Namespace: "not-bound"}).Apply(v)
-	if err == nil {
-		t.Fatal("Apply succeeded for an unbound namespace")
-	}
-	if !strings.Contains(err.Error(), "not-bound") {
-		t.Errorf("error %q does not name the namespace asked about", err)
-	}
-}
-
-func TestFilterForNamespaceShowsBothLeavesOnAConflict(t *testing.T) {
-	// A namespace charges exactly one leaf. When two bind it the tool has to
-	// show both, since picking one would hide the conflict.
-	quotas := []v1beta1.AcceleratorQuota{
-		cohort("root", "", withSpec(specBudget(gpu, a100, "64"))),
-		leaf("first", "root", withSpec(specBudget(gpu, a100, "32")), withNamespaces("shared")),
-		leaf("second", "root", withSpec(specBudget(gpu, a100, "32")), withNamespaces("shared")),
-	}
-	v := buildView(t, quotas, 0)
-
-	if err := (Filter{Namespace: "shared"}).Apply(v); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if got, want := nodeNames(v.Root.Children), []string{"first", "second"}; !cmp.Equal(got, want) {
-		t.Errorf("leaves = %v, want %v", got, want)
-	}
-	if len(v.Violations) == 0 {
-		t.Error("no NamespaceConflict reported for two leaves binding one namespace")
-	}
-}
-
 func TestFilterNarrowsBudgetsWithoutDroppingNodes(t *testing.T) {
 	// Restricting to one accelerator must not delete the Cohorts that carry no
 	// budget for it — they are still the parents of the leaves that do.
@@ -195,19 +143,6 @@ func TestFilterNarrowsCapacityToo(t *testing.T) {
 	}
 }
 
-func TestFilterNamespaceOverridesLeavesOnly(t *testing.T) {
-	// Only a leaf binds namespaces, so combining the two must not intersect
-	// into nothing.
-	v := buildView(t, healthyFleet(), 0)
-
-	if err := (Filter{Namespace: "vision-prod", LeavesOnly: true}).Apply(v); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if names := visibleNodes(v); !names["team-vision"] {
-		t.Error("team-vision missing when both selectors are set")
-	}
-}
-
 func TestFilterEmptyReportsItself(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -217,7 +152,6 @@ func TestFilterEmptyReportsItself(t *testing.T) {
 		{"zero", Filter{}, true},
 		{"node", Filter{Node: "x"}, false},
 		{"leaves", Filter{LeavesOnly: true}, false},
-		{"namespace", Filter{Namespace: "x"}, false},
 		{"resource", Filter{ResourceName: gpu}, false},
 		{"flavor", Filter{ResourceFlavor: a100}, false},
 	} {

@@ -1,6 +1,10 @@
 # An Explicit split whose entries do not sum to the total. It is accepted, the
 # hub's tree goes on reading green, and the members end up with nothing.
 #
+# This is the leaf alone, applied OVER 10-tree-explicit.yaml — it shares the node
+# name, so it edits that leaf in place. Applied to a hub with no tree it is
+# refused instead, for a parentRef "mc-demo" that does not resolve.
+#
 #   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
 #     apply -f hack/quota-mc-demo/fixtures/12-tree-badsum.yaml
 #
@@ -24,7 +28,7 @@
 #     get aq -o json | jq -r '.items[] | .metadata.name as $n
 #       | (.status.clusters // [])[] | "\($n) -> \(.cluster): \(.message // "ok")"'
 #
-#   mc-demo-serving -> msl-gcp-usc1-dev-1-tpu: budget google.com/tpu/tpu7x is 32
+#   mc-demo.serving -> msl-gcp-usc1-dev-1-tpu: budget google.com/tpu/tpu7x is 32
 #     but its per-cluster shares sum to 24
 #
 # WHAT MAKES IT WORTH DEMOING
@@ -55,13 +59,11 @@
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: mc-demo-serving
+  name: mc-demo.serving
 spec:
   role: ClusterQueue
   parentRef:
     name: mc-demo
-  namespaces:
-  - ome-mc-test
   distribution:
     policy: Explicit
   budgets:

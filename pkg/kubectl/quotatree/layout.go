@@ -49,7 +49,7 @@ func (l layout) columnNames() []string {
 		names = append(names,
 			"BORROWED", "ALLOCATABLE", "PEAK",
 			"READY", "DEGRADED", "MATERIALIZED",
-			"TIER", "NAMESPACES", "PATH",
+			"TIER",
 		)
 	} else {
 		names = append(names, "READY")
@@ -227,8 +227,6 @@ func (l layout) budgetRow(n *NodeView, b BudgetView, prefix, name string, first 
 	}
 	cells = append(cells,
 		text(firstOnly(first, orUnset(n.PriorityTier))),
-		text(firstOnly(first, orUnset(SortedNamespaces(n)))),
-		dim(firstOnly(first, orUnset(n.Path))),
 		l.ageCell(n, first),
 	)
 	return row{cells: cells, dim: n.contextDim()}

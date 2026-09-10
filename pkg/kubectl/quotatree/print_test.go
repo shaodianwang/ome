@@ -49,8 +49,7 @@ func TestPrintJSONNestsTheTree(t *testing.T) {
 			Children []struct {
 				Name     string `json:"name"`
 				Children []struct {
-					Name       string   `json:"name"`
-					Namespaces []string `json:"namespaces"`
+					Name string `json:"name"`
 				} `json:"children"`
 			} `json:"children"`
 		} `json:"root"`
@@ -76,8 +75,8 @@ func TestPrintJSONNestsTheTree(t *testing.T) {
 
 func TestPrintJSONCarriesTheSplitWhateverTheTreeDrew(t *testing.T) {
 	// The machine formats are not width-constrained, so they carry the split
-	// the same way they already carry capacity and namespaces the default tree
-	// keeps behind -o wide.
+	// the same way they already carry the capacity the default tree keeps
+	// behind -o wide.
 	var b strings.Builder
 	if err := Print(&b, buildView(t, splitFleet(), 0), OutputJSON, RenderOptions{}); err != nil {
 		t.Fatalf("Print: %v", err)

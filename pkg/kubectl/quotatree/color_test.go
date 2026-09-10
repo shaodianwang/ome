@@ -149,12 +149,12 @@ func TestColorSetsAPerClusterRowApartFromTheNodes(t *testing.T) {
 }
 
 func TestColorSeparatesFilterMatchesFromTheirPath(t *testing.T) {
-	// --for-namespace keeps the ancestors so you can see where the leaf sits.
+	// --leaves-only keeps the ancestors so you can see where each leaf sits.
 	// They are the path to the answer, not the answer, and have to read that
 	// way — otherwise the flag looks like it did nothing on a tree it pruned
 	// nothing from.
 	v := buildView(t, healthyFleet(), 0)
-	if err := (Filter{Namespace: "nlp-prod"}).Apply(v); err != nil {
+	if err := (Filter{LeavesOnly: true}).Apply(v); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	out := colored(t, v, RenderOptions{})
@@ -174,11 +174,11 @@ func TestColorNeverDimsAFaultAwayAsContext(t *testing.T) {
 	// the match. Receding would be the filter concealing the fault.
 	quotas := []v1beta1.AcceleratorQuota{
 		cohort("root", "", withSpec(specBudget(gpu, a100, "10"))),
-		leaf("team", "root", withSpec(specBudget(gpu, a100, "8")), withNamespaces("prod")),
+		leaf("team", "root", withSpec(specBudget(gpu, a100, "8"))),
 		leaf("hog", "root", withSpec(specBudget(gpu, a100, "99"))),
 	}
 	v := buildView(t, quotas, 0)
-	if err := (Filter{Namespace: "prod"}).Apply(v); err != nil {
+	if err := (Filter{LeavesOnly: true}).Apply(v); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	out := colored(t, v, RenderOptions{})

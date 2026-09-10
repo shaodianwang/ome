@@ -1,9 +1,9 @@
 # A fleet tree split by numbers the admin wrote, not by capacity (OEP-0024).
 #
-#   root                 Cohort         96 chips
-#   └── sim-tenants      Cohort         96 chips, travels budget-less
-#       └── sim-serving  ClusterQueue   96 chips  ns kwok-sim
-#                                       Explicit: member-a 32, member-b 64
+#   root                         Cohort         96 chips
+#   └── sim-tenants              Cohort         96 chips, travels budget-less
+#       └── sim-tenants.serving  ClusterQueue   96 chips
+#                                              Explicit: member-a 32, member-b 64
 #
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/51-fleet-explicit.yaml
 #
@@ -53,13 +53,11 @@ spec:
 apiVersion: ome.io/v1beta1
 kind: AcceleratorQuota
 metadata:
-  name: sim-serving
+  name: sim-tenants.serving
 spec:
   role: ClusterQueue
   parentRef:
     name: sim-tenants
-  namespaces:
-  - kwok-sim
   distribution:
     policy: Explicit
   budgets:

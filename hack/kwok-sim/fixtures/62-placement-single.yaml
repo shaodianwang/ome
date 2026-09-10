@@ -18,11 +18,23 @@
 #   kubectl --context kind-ome-quota-b -n kwok-sim get isvc,pods -w
 #
 # Needs a tree applied first (any of the 5*-fleet-*.yaml).
+#
+# Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
+# every cluster. No fixture declares it: it is shared, so a file that owned it
+# would take every other tenant down on `kubectl delete -f`. If it is missing:
+# `kubectl create namespace kwok-sim`.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:
   name: place-single
   namespace: kwok-sim
+  annotations:
+    # The leaf this workload charges. Placement resolves the queue from this
+    # first and the operator-configured default second, and that default is
+    # empty on purpose: a LocalQueue is named for its leaf, so no one fleet-wide
+    # name can address more than one tenant. Until the ISVC->(queue, priority)
+    # resolver lands, a workload names its own leaf.
+    ome.io/local-queue: sim-tenants.serving
   labels:
     kwok-sim/managed: "true"
 spec:

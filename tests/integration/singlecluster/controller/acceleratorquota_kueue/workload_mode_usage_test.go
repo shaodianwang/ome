@@ -13,7 +13,6 @@ import (
 	podtesting "sigs.k8s.io/kueue/pkg/util/testingjobs/pod"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	kueuebackend "github.com/ome-projects/ome/pkg/quota/backend/kueue"
 )
 
 var _ = ginkgo.Describe("A workload-mode quota plane against a real Kueue", func() {
@@ -40,18 +39,19 @@ var _ = ginkgo.Describe("A workload-mode quota plane against a real Kueue", func
 
 		ginkgo.By("authoring a grouping tier and two leaves beneath the root")
 		tier := quota(tenantsName, v1beta1.AcceleratorQuotaRootName,
-			v1beta1.AcceleratorQuotaRoleCohort, nil)
+			v1beta1.AcceleratorQuotaRoleCohort)
 		tier.Spec.Budgets[0].Nominal = *resource.NewQuantity(tierNominal, resource.DecimalSI)
 		gomega.Expect(k8sClient.Create(suiteCtx, tier)).To(gomega.Succeed())
 		gomega.Expect(k8sClient.Create(suiteCtx,
 			quota(leafName, tenantsName,
-				v1beta1.AcceleratorQuotaRoleClusterQueue, []string{tenantNS}))).To(gomega.Succeed())
-		// The idle sibling. Its namespace stays empty, so its whole share is
-		// available for the cohort to lend and nothing of its own ever competes
-		// for it.
+				v1beta1.AcceleratorQuotaRoleClusterQueue))).To(gomega.Succeed())
+		// The idle sibling. No workload carries its queue name, so its whole
+		// share is available for the cohort to lend and nothing of its own ever
+		// competes for it. Both leaves hold a LocalQueue in both enrolled
+		// namespaces -- what keeps them apart is the name a workload stamps.
 		gomega.Expect(k8sClient.Create(suiteCtx,
 			quota(idleName, tenantsName,
-				v1beta1.AcceleratorQuotaRoleClusterQueue, []string{idleNS}))).To(gomega.Succeed())
+				v1beta1.AcceleratorQuotaRoleClusterQueue))).To(gomega.Succeed())
 
 		ginkgo.By("materializing a ClusterQueue that Kueue accepts")
 		gomega.Eventually(func(g gomega.Gomega) {
@@ -71,11 +71,11 @@ var _ = ginkgo.Describe("A workload-mode quota plane against a real Kueue", func
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: tenantsName}, cohort)).To(gomega.Succeed())
 		}, timeout, interval).Should(gomega.Succeed())
 
-		ginkgo.By("materializing a LocalQueue in the bound namespace")
+		ginkgo.By("materializing a LocalQueue named for the leaf in an enrolled namespace")
 		gomega.Eventually(func(g gomega.Gomega) {
 			lq := &kueuev1beta2.LocalQueue{}
 			g.Expect(k8sClient.Get(suiteCtx,
-				types.NamespacedName{Namespace: tenantNS, Name: kueuebackend.LocalQueueName}, lq)).
+				types.NamespacedName{Namespace: tenantNS, Name: leafName}, lq)).
 				To(gomega.Succeed())
 		}, timeout, interval).Should(gomega.Succeed())
 
@@ -245,17 +245,16 @@ func capacityFor(root *v1beta1.AcceleratorQuota) int64 {
 // an equal limit.
 func workload(name string) *corev1.Pod {
 	return podtesting.MakePod(name, tenantNS).
-		Queue(kueuebackend.LocalQueueName).
+		Queue(leafName).
 		RequestAndLimit(acceleratorResource, fmt.Sprintf("%d", perPod)).
 		Obj()
 }
 
-func quota(name, parent string, role v1beta1.AcceleratorQuotaRole, namespaces []string) *v1beta1.AcceleratorQuota {
+func quota(name, parent string, role v1beta1.AcceleratorQuotaRole) *v1beta1.AcceleratorQuota {
 	q := &v1beta1.AcceleratorQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1beta1.AcceleratorQuotaSpec{
-			Role:       role,
-			Namespaces: namespaces,
+			Role: role,
 			Budgets: []v1beta1.AcceleratorBudget{{
 				ResourceName:   acceleratorResource,
 				ResourceFlavor: flavorName,

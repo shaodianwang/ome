@@ -27,15 +27,21 @@
 #   Computed on TPU_8(process=1,(0,0,1,0)) in 0.89ms (reduction 2.305827e+18).
 #   This mesh reports 16 JAX devices, 8 local to this host. ...
 #
-# NOTE: applied locally like this the pods carry NO kueue.x-k8s.io/queue-name
-# label — that is stamped only when the hub derives an ISVC — so they hold 8 real
-# chips while charging no budget. That is the "runs outside quota" case in
-# miniature. Place it from the hub instead (below) to have it charge a leaf.
+# NOTE: this fixture names no leaf, so its pods carry NO
+# kueue.x-k8s.io/queue-name label and hold 8 real chips while charging no
+# budget. That is the "runs outside quota" case in miniature, and it is now the
+# default rather than an accident of applying locally: placement stamps the
+# label from the ISVC's own ome.io/local-queue annotation, and the
+# operator-configured fallback is empty because a LocalQueue is named for its
+# leaf and one fleet-wide name cannot address more than one tenant.
 #
-# TO PLACE IT FROM THE HUB INSTEAD: add the placement block below and apply to
-# the hub rather than a member. The runtime is namespaced, so it must exist in
-# ome-mc-test on every member that could be chosen.
+# TO PLACE IT FROM THE HUB AND CHARGE A BUDGET: add both blocks below and apply
+# to the hub rather than a member. The runtime is namespaced, so it must exist
+# in ome-mc-test on every member that could be chosen.
 #
+#   metadata:
+#     annotations:
+#       ome.io/local-queue: mc-demo.serving
 #   spec:
 #     placement:
 #       mode: All

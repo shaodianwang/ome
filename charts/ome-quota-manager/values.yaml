@@ -120,12 +120,36 @@ quotaManager:
     hysteresisPercent: 10
 
   # materialize renders the tree into Kueue: a Cohort per internal node, a
-  # ClusterQueue per leaf, a LocalQueue in every bound namespace.
+  # ClusterQueue per leaf, and a LocalQueue named for that leaf in every
+  # enrolled namespace.
   #
-  # Leaving coverResources empty disables it and drops the cluster-wide Kueue
-  # write RBAC with it, so a cluster can observe its quota tree long before it
-  # enforces one.
+  # Leaving coverResources or enrolledNamespaces empty disables it and drops the
+  # cluster-wide Kueue write RBAC with it, so a cluster can observe its quota
+  # tree long before it enforces one.
   materialize:
+    # enrolledNamespaces are the namespaces this cluster serves budgeted
+    # workloads from. Every leaf gets a LocalQueue named after it in each of
+    # them, and every rendered ClusterQueue selects exactly this set.
+    #
+    # It lives here rather than on the AcceleratorQuota because it describes the
+    # cluster, not the budget. A leaf is a tenant, and a tenant is not confined
+    # to a namespace — dozens routinely share one — so which namespaces exist to
+    # serve from is a property of the install. Two clusters in a fleet may
+    # enroll different sets; the projection carries none.
+    #
+    # A workload reaches its budget by carrying the leaf's name in
+    # kueue.x-k8s.io/queue-name. Kueue has no way to name a ClusterQueue
+    # directly, so the per-namespace LocalQueue is a mandatory pointer, not a
+    # convenience.
+    #
+    # Empty disables materialization: a ClusterQueue whose selector matches no
+    # namespace admits nothing and reports the reason in no object. A namespace
+    # listed here that does not exist on the cluster simply holds no LocalQueue.
+    #
+    # Changing this needs a restart of this Deployment. It touches no serving
+    # pod, but it is not hot.
+    enrolledNamespaces: []
+
     # coverResources are the non-accelerator resources every rendered
     # ClusterQueue funds alongside its budget.
     #
