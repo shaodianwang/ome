@@ -320,6 +320,37 @@ contract possible.
 - **Created only for multi-cluster ISVCs** (those with `spec.placement`), and only
   when routing is enabled (Helm). A `Single`-mode ISVC gets a one-entry map so
   winner-cutover is expressible; a non-placement ISVC gets none.
+- **The map exists for the whole life of the ISVC, even with zero entries.** It is
+  created as soon as the ISVC is placer-owned and routing is on, and is deleted
+  only by GC when the ISVC goes away or by the Helm toggle going off. Emptiness is
+  a *state of the map*, never its absence. *Rationale:* absence is unattributable
+  — feature off, ISVC not placed, no addressable home, and a wedged controller all
+  look identical, so the operator's only recourse is manager logs. Worse, deleting
+  on degradation removes the object exactly when it is most wanted: a map that has
+  been serving real traffic disappears the moment its last home stops being
+  addressable, taking `capacity.allocated`, `capacity.ready` and the per-home
+  factors with it — the very fields that say *what* went away. Kubernetes makes the
+  same call for the same kind of object: a selector `Service` keeps its
+  `EndpointSlice` when no pod is ready, marking addresses `conditions.ready:
+  false`, and an empty slice for no pods at all. `TrafficMap` is that object for a
+  fleet, so it behaves that way.
+- **An empty map must say why it is empty**, or we have traded "absent and
+  ambiguous" for "present and ambiguous". The router owns a `Routable` condition on
+  `status.conditions` — `True` when at least one entry is addressable, otherwise
+  `False` with a machine-readable reason: `NotPlaced`, `NoAddressableHome`, or
+  `AllHomesUnready`. *Rationale:* a zero-entry map still cannot distinguish "the
+  placer has not chosen homes" from "the homes exist but publish no endpoint"; the
+  reason is what makes the object debuggable rather than merely present.
+  `status.conditions` is already a `listType=map` keyed on `type`, so the router's
+  `Routable` and the publisher's `Programmed` coexist under server-side apply
+  without either clobbering the other — but they are two writers on one subresource
+  and each must patch only its own condition.
+
+Note what this does *not* change: health is already an entry field, not a gate.
+`Healthy: readyReplicas > 0` is per-entry, an admitted-but-unready home is already
+emitted, and the weight function already has an explicit all-zero branch ("every
+home is zero — equal-weight fallback so traffic is never black-holed"). Degradation
+was representable everywhere except when it was total; this closes that gap.
 
 ### Publisher contract (pluggable, gateway-neutral)
 
@@ -452,6 +483,15 @@ programs a global gateway object). Neither runs on workload clusters.
    fast-cutoff goal). Not the v1 backend.
 
 ## Open Questions
+
+0. ~~Should a `TrafficMap` exist when nothing is routable?~~ **Resolved: yes,
+   always, with a `Routable=False` reason.** Deleting on degradation made the
+   object vanish at the moment of greatest diagnostic value and made a
+   never-created map indistinguishable from a broken controller. See
+   *Ownership & lifecycle*. Implementation note: the two `reap()` calls in
+   `pkg/controller/v1beta1/placement/routing` collapse to one (feature-disabled
+   only); the not-placed and no-addressable-home paths become an empty map plus a
+   reason.
 
 1. **Proportional vs. binary health gate.** Should v2 scale weight by a *bounded*
    `min(ready/allocated, 1)` to avoid overloading a barely-ready home, or does that
