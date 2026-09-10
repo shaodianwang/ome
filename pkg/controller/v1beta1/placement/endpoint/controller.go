@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,7 +69,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.reconcileDelete(ctx, isvc)
 	}
 
-	target, ok, err := r.resolveTarget(isvc)
+	target, ok, err := r.resolveTarget(isvc, r.trafficMapWeights(ctx, isvc))
 	if err != nil {
 		// A bad global-host template is the operator's config error; surface it
 		// and retry on the next change/poll rather than hot-looping.
@@ -99,7 +100,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // addressable endpoint host yet, or no global host resolvable from config. In
 // every not-ok case the caller tears down any stale backend rather than leaving
 // the global host pointed at a cluster that no longer wins.
-func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService) (Target, bool, error) {
+func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService, weights map[string]int32) (Target, bool, error) {
 	host, err := r.Config.GlobalHostFor(isvc)
 	if err != nil {
 		return Target{}, false, err
@@ -116,7 +117,46 @@ func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService) (Target, bool
 		// Placed but no home is addressable yet — nothing concrete to point at.
 		return Target{}, false, nil
 	}
+	applyTrafficMapWeights(homes, weights)
 	return Target{GlobalHost: host, Homes: homes}, true, nil
+}
+
+// trafficMapWeights returns the per-cluster apply-verbatim weights the routing
+// controller published for the ISVC in its TrafficMap, keyed by cluster, or nil
+// when no TrafficMap exists (routing disabled, or not yet generated). The
+// TrafficMap is an optional input: a missing map — or a read that fails — leaves
+// the reactive ready-replica weights in place, so the publisher works unchanged
+// when routing is off.
+func (r *Reconciler) trafficMapWeights(ctx context.Context, isvc *v1beta1.InferenceService) map[string]int32 {
+	tm := &v1beta1.TrafficMap{}
+	if err := r.Get(ctx, types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, tm); err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.Log.V(1).Info("endpoint: TrafficMap read failed, using reactive weights",
+				"isvc", client.ObjectKeyFromObject(isvc).String(), "err", err.Error())
+		}
+		return nil
+	}
+	weights := make(map[string]int32, len(tm.Spec.Entries))
+	for _, e := range tm.Spec.Entries {
+		weights[e.Cluster] = e.Weight
+	}
+	return weights
+}
+
+// applyTrafficMapWeights overlays the TrafficMap's capacity-aware, health-gated
+// weights onto the serving homes, replacing the reactive ready-replica weight
+// homesFromPlacement seeds. A home absent from the map — or a nil map, when no
+// TrafficMap exists — keeps its reactive weight, so publication degrades to the
+// live ready-replica split when routing is off or the map lags placement.
+func applyTrafficMapWeights(homes []Home, weights map[string]int32) {
+	if weights == nil {
+		return
+	}
+	for i := range homes {
+		if w, ok := weights[homes[i].Cluster]; ok {
+			homes[i].Weight = w
+		}
+	}
 }
 
 // homesFromPlacement extracts the serving homes — admitted candidates that

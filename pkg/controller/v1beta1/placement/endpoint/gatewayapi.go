@@ -320,12 +320,13 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 	homes := append([]Home(nil), target.Homes...)
 	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
 
-	// Traffic weight per home. In Split each home carries its ready-replica
-	// count, so traffic follows where replicas landed (a home with 0 ready gets 0
-	// — no traffic until it is serving). When no home carries a weight
-	// (Single/All, or a Split placement before any home is ready) every weight is
-	// zero; Gateway API sends no traffic if ALL backendRef weights are zero, so
-	// fall back to equal weight (1 each) rather than black-holing the route.
+	// Traffic weight per home, resolved upstream: the TrafficMap's capacity-aware
+	// weight when routing is on, else the reactive ready-replica count (a home
+	// with 0 ready gets 0 — no traffic until it is serving). When no home carries
+	// a weight (Single/All, or a Split placement before any home is ready) every
+	// weight is zero; Gateway API sends no traffic if ALL backendRef weights are
+	// zero, so fall back to equal weight (1 each) rather than black-holing the
+	// route.
 	var totalWeight int32
 	for _, h := range homes {
 		totalWeight += h.Weight
