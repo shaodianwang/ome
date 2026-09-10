@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -37,6 +38,7 @@ type Reconciler struct {
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices/finalizers,verbs=update
+// +kubebuilder:rbac:groups=ome.io,resources=trafficmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
@@ -245,14 +247,23 @@ func requeueOnConflict(err error) (ctrl.Result, error) {
 
 // SetupWithManager wires the controller: reconcile ISVCs, but only react to
 // events that can change a publication decision — placement-status changes,
-// deletions, and the global-host annotation — so routine ISVC spec churn does
-// not re-publish on every reconcile.
+// deletions, and the global-host annotation — plus TrafficMap spec changes, so a
+// weight-only update (which does not touch ISVC status) still re-publishes.
+// Routine ISVC spec churn does not re-publish on every reconcile.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Named explicitly so it doesn't collide with the placement controller
 	// (both do For(&InferenceService{})).
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(PlacementEndpointControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(placementPublishChange)).
+		// A TrafficMap is named after and owner-ref'd to its ISVC, so map a spec
+		// change back to that ISVC. Generation-gated: a weight change bumps the
+		// spec generation, while any future status write does not, so the publisher
+		// re-runs on new weights but not on its own status echo.
+		Watches(&v1beta1.TrafficMap{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
+				&v1beta1.InferenceService{}, handler.OnlyControllerOwner()),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }
 

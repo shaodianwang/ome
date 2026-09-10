@@ -38,6 +38,7 @@ type MultiClusterConfig struct {
 	WorkloadCluster WorkloadClusterConfig `json:"workloadCluster,omitempty"`
 	Placement       PlacementConfig       `json:"placement,omitempty"`
 	Endpoint        EndpointConfig        `json:"endpoint,omitempty"`
+	Routing         RoutingConfig         `json:"routing,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -139,6 +140,19 @@ type EndpointConfig struct {
 	// BackendPort is the port on the winner cluster's ingress the global host
 	// forwards to.
 	BackendPort int `json:"backendPort,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// RoutingConfig tunes the TrafficMap routing controller (control plane only),
+// which projects a placed InferenceService into the capacity-aware, health-gated
+// TrafficMap a gateway consumes. Generation is off by default: the field exists
+// so an operator opts in, never so the control plane silently starts writing a
+// routing table.
+type RoutingConfig struct {
+	// Enabled turns on TrafficMap generation. False (the default) leaves the
+	// routing controller a no-op that reaps any TrafficMap it previously created,
+	// so enabling or disabling the feature is reversible without stranding objects.
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // NewMultiClusterConfig loads the "multicluster" block from the

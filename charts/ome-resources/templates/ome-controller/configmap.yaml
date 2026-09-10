@@ -138,6 +138,9 @@ data:
         "globalGateway": "{{ .Values.ome.multicluster.config.endpoint.globalGateway | default "" }}",
         "routeNamespace": "{{ .Values.ome.multicluster.config.endpoint.routeNamespace | default "" }}",
         "backendPort": {{ .Values.ome.multicluster.config.endpoint.backendPort | default 0 }}
+      },
+      "routing": {
+        "enabled": {{ .Values.ome.multicluster.config.routing.enabled | default false }}
       }
     }
 {{- if .Values.ome.autoscalerPolicy.enabled }}

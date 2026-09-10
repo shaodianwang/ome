@@ -249,6 +249,7 @@ rules:
   - inferenceservices/finalizers
   - servingruntimes
   - servingruntimes/finalizers
+  - trafficmaps
   - workloadclusters
   verbs:
   - create

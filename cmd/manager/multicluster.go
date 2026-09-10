@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
+	placementrouting "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
 	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 )
 
@@ -50,12 +51,13 @@ type mcWiring struct {
 	funnelBufferSize       int
 
 	endpoint placementendpoint.Config
+	routing  placementrouting.Config
 }
 
 // resolveMCWiring maps a loaded MultiClusterConfig to the wiring values used to
 // build the multi-cluster controllers.
 func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
-	wc, pl, ep := mc.WorkloadCluster, mc.Placement, mc.Endpoint
+	wc, pl, ep, rt := mc.WorkloadCluster, mc.Placement, mc.Endpoint, mc.Routing
 
 	// Status-convergence backstop: with the cache (and thus the watch funnel) on,
 	// events drive freshness and the safety requeue only recovers a missed event;
@@ -99,6 +101,9 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 			GlobalGateway:      ep.GlobalGateway,
 			RouteNamespace:     ep.RouteNamespace,
 			BackendPort:        int32(ep.BackendPort),
+		},
+		routing: placementrouting.Config{
+			Enabled: rt.Enabled,
 		},
 	}
 }
@@ -257,6 +262,19 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		Config:    w.endpoint,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create PlacementEndpoint controller: %w", err)
+	}
+
+	// Project placement into the capacity-aware TrafficMap the publisher consumes.
+	// Always wired: when disabled the controller is a no-op that reaps any
+	// TrafficMap it previously created, so toggling the feature (a restart, since
+	// config loads once) reverses cleanly without stranding routing tables.
+	setupLog.Info("Setting up multi-cluster TrafficMap routing controller", "enabled", w.routing.Enabled)
+	if err := (&placementrouting.Reconciler{
+		Client: mgr.GetClient(),
+		Log:    ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
+		Config: w.routing,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("create PlacementRouting controller: %w", err)
 	}
 	return nil
 }

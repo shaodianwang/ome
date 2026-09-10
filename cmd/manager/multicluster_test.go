@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
+	placementrouting "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
 	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 )
 
@@ -60,7 +61,8 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 		"endpoint": {
 			"globalHostTemplate": "{{.Name}}.global", "globalGateway": "ome/gw",
 			"routeNamespace": "ome-routes", "backendPort": 8080
-		}
+		},
+		"routing": { "enabled": true }
 	}`)
 
 	// WorkloadCluster transport.
@@ -94,6 +96,9 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 	assert.Equal(t, "ome/gw", w.endpoint.GlobalGateway)
 	assert.Equal(t, "ome-routes", w.endpoint.RouteNamespace)
 	assert.Equal(t, int32(8080), w.endpoint.BackendPort)
+
+	// Routing.
+	assert.True(t, w.routing.Enabled)
 }
 
 // TestResolveMCWiringSafetyRequeueDependsOnCache pins the one non-trivial bit of
@@ -133,6 +138,7 @@ func TestResolveMCWiringAbsentBlockIsZero(t *testing.T) {
 	assert.Equal(t, 0, w.funnelBufferSize)
 	assert.Equal(t, placement.DispatcherMode(""), w.dispatcherMode)
 	assert.Equal(t, placementendpoint.Config{}, w.endpoint)
+	assert.Equal(t, placementrouting.Config{}, w.routing)
 }
 
 // TestResolveMCWiringMissingConfigMapErrors confirms the loader (and thus

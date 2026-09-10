@@ -19,6 +19,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
+// +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ome.io,resources=trafficmaps,verbs=get;list;watch;create;update;patch;delete
+
 // Reconciler watches InferenceServices on the control-plane cluster and, for a
 // Placed ISVC, generates the capacity-aware TrafficMap a gateway consumes: one
 // namespaced TrafficMap per ISVC, named after it and owner-ref'd to it so it is
