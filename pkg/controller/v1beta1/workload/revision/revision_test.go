@@ -558,11 +558,15 @@ func TestRevisionHash_OnlyLocalQueueAnnotationEqualsNoMeta(t *testing.T) {
 }
 
 // Taking an already-running workload under multi-cluster management stamps
-// provenance on it: which source it derives from, and which control plane
-// placed it. That is identity bookkeeping written by the placer, not spec the
-// user authored, and a running pod cannot act on it — so it must not mint a
-// revision. Hashing it makes a live migration a full rollout, which is the one
-// thing the migration exists to avoid.
+// provenance LABELS on it: which source it derives from, and which control
+// plane placed it. That is identity bookkeeping written by the placer, not
+// spec the user authored, and a running pod cannot act on it — so it must not
+// mint a revision. Hashing it makes a live migration a full rollout.
+//
+// Labels only. The annotation half (ome.io/placement-origin-uid) is stripped
+// before this function ever sees it, by the InferenceReplica reconciler's
+// ome.io/revision-excluded-annotation-keys set — asserting it here would pass
+// for a reason that does not hold in production.
 func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 	ps := basicPodSpecForRevision()
 	base := &metav1.ObjectMeta{
@@ -585,19 +589,6 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 			},
 		},
 		{
-			name: "origin uid annotation stamped alongside it",
-			meta: &metav1.ObjectMeta{
-				Labels: map[string]string{
-					"app":                     "llama",
-					"ome.io/placement-origin": "3b6514b9-91dd-4caf-ad46-2315dd9feade",
-				},
-				Annotations: map[string]string{
-					"ome.io/deploymentMode":       "OMENative",
-					"ome.io/placement-origin-uid": "3b6514b9-91dd-4caf-ad46-2315dd9feade",
-				},
-			},
-		},
-		{
 			name: "control-plane identity added when a second hub appears",
 			meta: &metav1.ObjectMeta{
 				Labels: map[string]string{
@@ -605,10 +596,7 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 					"ome.io/placement-origin":        "3b6514b9-91dd-4caf-ad46-2315dd9feade",
 					"ome.io/placement-control-plane": "msl-mks-ome-lco-0-rc",
 				},
-				Annotations: map[string]string{
-					"ome.io/deploymentMode":       "OMENative",
-					"ome.io/placement-origin-uid": "3b6514b9-91dd-4caf-ad46-2315dd9feade",
-				},
+				Annotations: map[string]string{"ome.io/deploymentMode": "OMENative"},
 			},
 		},
 		{
@@ -619,10 +607,7 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 					"ome.io/placement-origin":        "0e2f1a77-0000-4000-8000-000000000000",
 					"ome.io/placement-control-plane": "msl-mks-ome-lco-1-rc",
 				},
-				Annotations: map[string]string{
-					"ome.io/deploymentMode":       "OMENative",
-					"ome.io/placement-origin-uid": "0e2f1a77-0000-4000-8000-000000000000",
-				},
+				Annotations: map[string]string{"ome.io/deploymentMode": "OMENative"},
 			},
 		},
 	} {
@@ -637,7 +622,7 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 }
 
 // Mirrors the queue cases: a template carrying nothing but the provenance
-// markers has to hash as though it carried no metadata, or the exclusion merely
+// labels has to hash as though it carried no metadata, or the exclusion merely
 // relocates the drift.
 func TestRevisionHash_OnlyPlacementMarkersEqualNoMeta(t *testing.T) {
 	ps := basicPodSpecForRevision()
@@ -645,9 +630,6 @@ func TestRevisionHash_OnlyPlacementMarkersEqualNoMeta(t *testing.T) {
 		Labels: map[string]string{
 			"ome.io/placement-origin":        "3b6514b9-91dd-4caf-ad46-2315dd9feade",
 			"ome.io/placement-control-plane": "msl-mks-ome-lco-0-rc",
-		},
-		Annotations: map[string]string{
-			"ome.io/placement-origin-uid": "3b6514b9-91dd-4caf-ad46-2315dd9feade",
 		},
 	}
 

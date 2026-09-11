@@ -76,15 +76,16 @@ var controlPlaneOnlyAnnotations = []string{
 }
 
 // controlPlaneOnlyAnnotationPrefixes are the bookkeeping families of whatever
-// deploys the SOURCE object. A derived copy belongs to the placer, not to the
-// control plane's GitOps tool, so carrying them across both mislabels the
-// member's object as managed by an application that does not manage it and —
-// since ISVC annotations reach the pod template and are barely filtered out of
-// the revision hash — rolls the workload whenever the source's own management
-// metadata changes.
+// deploys the SOURCE object. A derived copy belongs to the placer.
 //
-// A prefix, not the one key: ArgoCD writes tracking-id, sync-options,
-// compare-options and sync-wave, all equally meaningless on a derived object.
+// The hazard is ownership, not rollout: ArgoCD reads tracking-id to decide
+// which application owns a resource, so copying the source's reassigns the
+// member's object to an application on another cluster that does not manage
+// it. (No rollout — an ISVC-level annotation is object-scoped and excluded
+// from the revision hash; see TemplateMeta in workload/revision.)
+//
+// A prefix, not the one key: ArgoCD also writes sync-options, compare-options
+// and sync-wave, equally meaningless on a derived object.
 var controlPlaneOnlyAnnotationPrefixes = []string{
 	"argocd.argoproj.io/",
 }

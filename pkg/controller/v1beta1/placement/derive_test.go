@@ -84,9 +84,9 @@ func TestDeriveISVC(t *testing.T) {
 	assert.Nil(t, src.Spec.Engine.ComponentExtensionSpec.Labels, "source ISVC must be untouched")
 }
 
-// None of the deploying tool's bookkeeping describes the derived copy, and all
-// of it reaches the member's pod template — so leaving it on would overwrite
-// the member object's own tracking-id and roll the workload at adoption.
+// Leaving it on overwrites the member object's own tracking-id, which is what
+// ArgoCD reads to decide ownership — reassigning it to an application on
+// another cluster that does not manage it.
 func TestDeriveISVC_StripsGitOpsAnnotations(t *testing.T) {
 	src := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
