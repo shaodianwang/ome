@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -272,10 +273,10 @@ func TemplateMeta(src *metav1.ObjectMeta) *metav1.ObjectMeta {
 		}
 	}
 	labels := src.Labels
-	if hasSchedulingLabel(src.Labels) {
+	if hasDerivedLabel(src.Labels) {
 		labels = make(map[string]string, len(src.Labels))
 		for k, v := range src.Labels {
-			if isSchedulingLabel(k) {
+			if isDerivedLabel(k) {
 				continue
 			}
 			labels[k] = v
@@ -319,11 +320,37 @@ func isSchedulingLabel(key string) bool {
 	return false
 }
 
-// hasSchedulingLabel reports whether any key is admission-plane owned. Fast path
-// so the common case skips the copy in TemplateMeta.
-func hasSchedulingLabel(labels map[string]string) bool {
+// isPlacementMarker reports whether the label is one the multi-cluster control
+// plane stamps on a derived workload to record its provenance: which source
+// InferenceService it was derived from, and which control plane derived it.
+//
+// It is identity bookkeeping, not workload configuration — the values are a UID
+// and a control-plane name, neither of which a running pod can act on. Hashing
+// it would make taking an already-running workload under control-plane
+// management a full rollout of that workload, which is precisely the downtime a
+// live migration exists to avoid. The markers are also written by the placer
+// rather than by whoever authored the spec, so they are not user intent.
+func isPlacementMarker(key string) bool {
+	switch key {
+	case constants.PlacementOrigin, constants.PlacementControlPlane:
+		return true
+	}
+	return false
+}
+
+// isDerivedLabel reports whether a label is written by a controller from
+// cluster state rather than authored by the user, and so must not feed the
+// pod-template revision hash. Two families qualify: the admission plane's queue
+// assignment and the control plane's placement provenance.
+func isDerivedLabel(key string) bool {
+	return isSchedulingLabel(key) || isPlacementMarker(key)
+}
+
+// hasDerivedLabel reports whether any key is controller-written. Fast path so
+// the common case skips the copy in TemplateMeta.
+func hasDerivedLabel(labels map[string]string) bool {
 	for k := range labels {
-		if isSchedulingLabel(k) {
+		if isDerivedLabel(k) {
 			return true
 		}
 	}
@@ -372,7 +399,15 @@ func isLifecycleAnnotation(key string) bool {
 		return true
 	}
 	switch key {
-	case pausedRolloutAnnotation, rolloutPromoteAnnotation, rolloutRollbackAnnotation:
+	case pausedRolloutAnnotation, rolloutPromoteAnnotation, rolloutRollbackAnnotation,
+		// Excluded like the queue labels it selects: Kueue reads the queue at
+		// admission, so re-queueing would otherwise roll the whole fleet.
+		constants.LocalQueue,
+		// The annotation half of the placement provenance markers; see
+		// isPlacementMarker for why identity bookkeeping must not mint a
+		// revision. Both halves have to be excluded or the exclusion only
+		// relocates the drift.
+		constants.PlacementOriginUID:
 		return true
 	}
 	return false

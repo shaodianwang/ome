@@ -26,16 +26,25 @@ const (
 	// own, make an ISVC eligible for fleet-wide fan-out.
 	ClusterSelectorAnnotation = "ome.io/cluster-selector"
 
-	// LocalQueueAnnotation names the Kueue LocalQueue the derived workload's
-	// pods join on the target cluster. It overrides the operator-configured
-	// queue; with neither set, no queue label is stamped.
-	LocalQueueAnnotation = "ome.io/local-queue"
+	// PlacementFinalizer lets the controller delete the derived ISVC before the
+	// source ISVC is removed.
+	PlacementFinalizer = "ome.io/placement"
+)
 
+// LocalQueueAnnotation names the Kueue LocalQueue the derived workload's
+// pods join on the target cluster. It overrides the operator-configured
+// queue; with neither set, no queue label is stamped.
+var LocalQueueAnnotation = constants.LocalQueue
+
+// The placement provenance markers, aliased from pkg/constants so the revision
+// layer can exclude them from the pod-template hash without importing this
+// package. Vars rather than consts because the shared definitions are vars.
+var (
 	// PlacementOriginLabel marks a derived ISVC as created by this control
 	// plane (for tracking + future GC). Value: the source ISVC's origin id.
-	PlacementOriginLabel = "ome.io/placement-origin"
+	PlacementOriginLabel = constants.PlacementOrigin
 	// PlacementOriginUIDAnnotation records the source ISVC UID on the derived ISVC.
-	PlacementOriginUIDAnnotation = "ome.io/placement-origin-uid"
+	PlacementOriginUIDAnnotation = constants.PlacementOriginUID
 	// PlacementControlPlaneLabel records WHICH control plane created a derived
 	// ISVC. Its value is the operator-supplied control-plane identity
 	// (config-driven via --placement-control-plane-id / the chart, no in-code
@@ -44,11 +53,7 @@ const (
 	// deriveds and never another's. Empty identity degrades gracefully: nothing
 	// is stamped and the GC keeps its single-control-plane (origin-UID-only)
 	// behavior.
-	PlacementControlPlaneLabel = "ome.io/placement-control-plane"
-
-	// PlacementFinalizer lets the controller delete the derived ISVC before the
-	// source ISVC is removed.
-	PlacementFinalizer = "ome.io/placement"
+	PlacementControlPlaneLabel = constants.PlacementControlPlane
 )
 
 // controlPlaneOnlyAnnotations are ome.io directives that drive the CONTROL
