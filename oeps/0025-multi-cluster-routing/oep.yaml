@@ -13,7 +13,10 @@ approvers:
 # InferenceService's multi-cluster placement: one per ISVC, controller-generated
 # from status.placement + AcceleratorQuota allocation, consumed by a
 # gateway-neutral publisher. Placement decides WHERE, quota decides HOW MUCH,
-# TrafficMap decides the WEIGHTS. Opt-in via Helm; SMG is one optional backend.
+# TrafficMap decides the WEIGHTS. Both weight inputs -- a home's capacity and
+# whether it is serving -- default to control-plane state and may each be refined
+# by an observed signal: endpoint-reported capacity (a ceiling, never a raise) and
+# an active end-to-end health probe. Opt-in via Helm; SMG is one optional backend.
 see-also:
   - "/oeps/0018-multi-cluster-placement"   # placement race + per-home status.placement this projects from
   - "/oeps/0018.3-placement-modes"         # Single/All/Split; Split apportions the replicas we weight by
