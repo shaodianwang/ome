@@ -155,7 +155,7 @@ materializing="$(render --set quotaManager.mode=workload \
 # Flags and grants have to appear together: flags without the grants is a
 # crash-looping RBAC error, grants without the flags is cluster-wide write on
 # Kueue that nothing uses.
-grep -Fq -- '--cover-resources=cpu=16M,memory=16Pi' <<<"${materializing}" ||
+grep -Fq -- '--cover-resources=cpu=16M,ephemeral-storage=16Pi,memory=16Pi' <<<"${materializing}" ||
   fail "the default cover resources were not passed"
 grep -Fq -- '--enrolled-namespaces=ml-serving' <<<"${materializing}" ||
   fail "the enrolled namespaces were not passed"
@@ -167,14 +167,14 @@ manyns="$(render --set quotaManager.mode=workload \
 grep -Fq -- '--enrolled-namespaces=ml-batch,ml-serving' <<<"${manyns}" ||
   fail "the enrolled namespaces were not sorted and deduplicated"
 
-# An operator overrides one key and keeps the other: Helm merges the map rather
+# An operator overrides one key and keeps the rest: Helm merges the map rather
 # than replacing it, and the whole point of a default is that omitting a key
 # leaves it alone.
 onekey="$(render --set quotaManager.mode=workload \
   --set 'quotaManager.materialize.enrolledNamespaces={ml-serving}' \
   --set quotaManager.materialize.coverResources.cpu=2k)"
-grep -Fq -- '--cover-resources=cpu=2k,memory=16Pi' <<<"${onekey}" ||
-  fail "overriding one cover resource did not leave the other at its default"
+grep -Fq -- '--cover-resources=cpu=2k,ephemeral-storage=16Pi,memory=16Pi' <<<"${onekey}" ||
+  fail "overriding one cover resource did not leave the others at their defaults"
 
 # A Cohort's subtree quota sums the cover across its children, and the Kueue this
 # repo compiles against wraps rather than clamps on int64 overflow. Ei-scale
@@ -244,7 +244,8 @@ done
 blankqty="$(render --set quotaManager.mode=workload \
   --set 'quotaManager.materialize.enrolledNamespaces={ml-serving}' \
   --set quotaManager.materialize.coverResources.cpu= \
-  --set quotaManager.materialize.coverResources.memory=)"
+  --set quotaManager.materialize.coverResources.memory= \
+  --set quotaManager.materialize.coverResources.ephemeral-storage=)"
 if grep -Fq -- 'resources: ["cohorts", "clusterqueues", "localqueues"]' <<<"${blankqty}"; then
   fail "blank cover quantities still granted the Kueue write"
 fi

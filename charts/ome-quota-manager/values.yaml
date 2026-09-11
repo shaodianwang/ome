@@ -159,6 +159,9 @@ quotaManager:
     # and reports the reason nowhere: the queue exists, its LocalQueues resolve,
     # and workloads simply stay pending.
     #
+    # So the list tracks what pods actually request: ephemeral-storage is here
+    # because the sidecars that mount models request it.
+    #
     # These are not a budget. They are a ceiling set high enough not to be one:
     # the accelerator entry is what actually limits a tenant. Kueue has no
     # "unlimited" value for a nominalQuota, and omitting a covered resource is
@@ -180,21 +183,24 @@ quotaManager:
     # The units differ, which is easy to miss: cpu is held in MILLI-units, so
     # its ceiling is a thousand times lower than memory's for the same digits.
     #
-    # Scale to size against: one 4-chip TPU node is ~224 cpu and ~0.28Ti, so
+    # Scale to size against: one 4-chip TPU node is ~224 cpu, ~0.28Ti memory and
+    # ~0.157Ti ephemeral-storage, so
     #
-    #     32 nodes    7k cpu     0.01Pi
-    #   7500 nodes  1.68M cpu    2.07Pi
+    #     32 nodes    7k cpu     0.01Pi mem    0.005Pi eph
+    #   7500 nodes  1.68M cpu    2.07Pi mem    1.15Pi  eph
     #
     # The defaults are ~9x the 7500-node figure — unreachable in practice, and
     # far enough from the ceiling that a Cohort can hold ~500 sibling leaves
-    # before the subtree sum is at risk.
+    # before the subtree sum is at risk. The sums are per-resource, so
+    # ephemeral-storage gets that same headroom from memory's ceiling.
     #
-    # Override either key on its own; Helm merges the map, so setting cpu leaves
-    # memory at its default. Emptying the map disables materialization and drops
-    # the Kueue write RBAC with it.
+    # Override any key on its own; Helm merges the map, so setting cpu leaves
+    # the rest at their defaults. Emptying the map disables materialization and
+    # drops the Kueue write RBAC with it.
     coverResources:
       cpu: 16M
       memory: 16Pi
+      ephemeral-storage: 16Pi
 
     # fieldManager owns the applied Kueue objects and is the value of the
     # managed-by label the orphan sweep selects by. Two quota managers pointed
