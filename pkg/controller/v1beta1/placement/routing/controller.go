@@ -77,16 +77,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // apply creates or updates the ISVC's TrafficMap to carry the desired spec,
 // owner-ref'd to the ISVC. It touches only spec; the status subresource (owned
 // by the publisher) is left untouched.
+//
+// It retries on conflict rather than surfacing the rejection: owning the
+// TrafficMap re-enqueues this reconciler on its own spec writes, and the
+// Routable status write bumps the same object's resourceVersion, so a cached
+// read can lag a concurrent pass. CreateOrUpdate re-reads on each attempt, so a
+// retry converges on the live version instead of returning a 409 that would log
+// as a spurious reconcile error.
 func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, spec v1beta1.TrafficMapSpec) error {
-	tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{Name: isvc.Name, Namespace: isvc.Namespace}}
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, tm, func() error {
-		if err := controllerutil.SetControllerReference(isvc, tm, r.Scheme()); err != nil {
-			return err
-		}
-		tm.Spec = spec
-		return nil
-	})
-	if err != nil {
+	var op controllerutil.OperationResult
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{Name: isvc.Name, Namespace: isvc.Namespace}}
+		var err error
+		op, err = controllerutil.CreateOrUpdate(ctx, r.Client, tm, func() error {
+			if err := controllerutil.SetControllerReference(isvc, tm, r.Scheme()); err != nil {
+				return err
+			}
+			tm.Spec = spec
+			return nil
+		})
+		return err
+	}); err != nil {
 		return err
 	}
 	if op != controllerutil.OperationResultNone {
