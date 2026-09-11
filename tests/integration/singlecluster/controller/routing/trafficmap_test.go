@@ -7,6 +7,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -20,7 +21,7 @@ import (
 // an InferenceService's placement status directly (nothing else writes it in
 // this suite) and assert the TrafficMap the controller generates — its entries,
 // capacity-planned health-gated weights, provenance, owner reference, and the
-// reap when the ISVC leaves Placed.
+// emptied-but-retained table the ISVC keeps when it leaves Placed.
 var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	var isvcNS string
 
@@ -131,14 +132,14 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 		}).Should(gomega.Succeed())
 	})
 
-	ginkgo.It("reaps the TrafficMap when the ISVC leaves the Placed phase", func() {
+	ginkgo.It("keeps an emptied TrafficMap that explains itself when the ISVC leaves Placed", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, nil)
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 1, 1))
 
-		ginkgo.By("waiting for the TrafficMap to be generated")
+		ginkgo.By("waiting for the TrafficMap to be generated with a routable home")
 		gomega.Eventually(func(g gomega.Gomega) {
-			getTrafficMap(g, isvcNS, name)
+			g.Expect(getTrafficMap(g, isvcNS, name).Spec.Entries).To(gomega.HaveLen(1))
 		}).Should(gomega.Succeed())
 
 		ginkgo.By("demoting the ISVC out of Placed")
@@ -146,10 +147,18 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 			s.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
 		})
 
-		gomega.Eventually(func() error {
-			return k8sClient.Get(suiteCtx, types.NamespacedName{Namespace: isvcNS, Name: name}, &v1beta1.TrafficMap{})
-		}).Should(ometesting.BeNotFoundError(),
-			"a no-longer-routable ISVC must have its TrafficMap reaped")
+		// The map is not reaped on unplacement: it is emptied and the Routable
+		// condition carries the reason, so a consumer distinguishes "known and
+		// unroutable" from "unknown". Only disabling the feature reaps.
+		gomega.Eventually(func(g gomega.Gomega) {
+			tm := getTrafficMap(g, isvcNS, name)
+			g.Expect(tm.Spec.Entries).To(gomega.BeEmpty(),
+				"an unplaced ISVC keeps its TrafficMap but with no routing entries")
+			cond := apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapRoutable)
+			g.Expect(cond).NotTo(gomega.BeNil(), "the Routable condition must explain the empty table")
+			g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonNotPlaced))
+		}).Should(gomega.Succeed())
 	})
 })
 

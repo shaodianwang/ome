@@ -11,6 +11,24 @@ import (
 // Gateway API HTTPRoute). Its status mirrors spec.programmed.
 const TrafficMapProgrammed = "Programmed"
 
+// TrafficMapRoutable is the condition type reporting whether this map carries a
+// target a gateway can send traffic to. It is owned by the routing controller,
+// which writes it on every pass so an empty table always explains itself: the
+// map exists for the whole life of a routed InferenceService, and emptiness is a
+// state of the map rather than its absence.
+const TrafficMapRoutable = "Routable"
+
+// Reasons for the Routable condition. NotPlaced and NoAddressableHome accompany
+// Routable=False and an empty table; AllHomesUnready accompanies Routable=True,
+// because the weight fallback still spreads traffic across homes that are
+// addressable but not yet ready rather than black-holing it.
+const (
+	TrafficMapReasonRoutable          = "Routable"
+	TrafficMapReasonNotPlaced         = "NotPlaced"
+	TrafficMapReasonNoAddressableHome = "NoAddressableHome"
+	TrafficMapReasonAllHomesUnready   = "AllHomesUnready"
+)
+
 // TrafficMap is the capacity-aware routing projection of one multi-cluster
 // InferenceService: the per-home traffic split a gateway consumes. Placement
 // decides WHERE an ISVC's replicas run and quota decides HOW MUCH each home may
@@ -19,8 +37,10 @@ const TrafficMapProgrammed = "Programmed"
 // never hand-edited, and consumed by a gateway-neutral publisher.
 //
 // One TrafficMap exists per routed ISVC, named after it and owned by it (so it
-// is garbage-collected with the ISVC). The routing controller owns spec; the
-// publisher owns status.
+// is garbage-collected with the ISVC), for as long as that ISVC is routed --
+// including while no home is routable, when the table is empty and the
+// Routable condition says why. The routing controller owns spec and the
+// Routable condition; the publisher owns the rest of status.
 // +genclient
 // +k8s:openapi-gen=true
 // +kubebuilder:object:root=true
@@ -28,6 +48,8 @@ const TrafficMapProgrammed = "Programmed"
 // +kubebuilder:resource:scope=Namespaced,shortName=tm;tmap
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Programmed",type=string,JSONPath=`.status.conditions[?(@.type=="Programmed")].status`
+// +kubebuilder:printcolumn:name="Routable",type=string,JSONPath=`.status.conditions[?(@.type=="Routable")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Routable")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type TrafficMap struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -134,7 +156,11 @@ type TrafficMapCapacity struct {
 }
 
 // TrafficMapStatus reports whether the active publisher has realized this map
-// onto a concrete data plane. Written by the publisher, not the generator.
+// onto a concrete data plane, and whether the map has anything to realize.
+// Two writers share it: the publisher owns Programmed, GatewayRef and
+// ObservedTrafficMapGeneration, and the routing controller owns the Routable
+// condition. Conditions is keyed on type, so each writer must patch only its
+// own and never rewrite the list.
 type TrafficMapStatus struct {
 	// Programmed reports whether the active publisher has realized this map onto
 	// its data plane.

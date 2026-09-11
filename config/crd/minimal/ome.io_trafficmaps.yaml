@@ -23,6 +23,12 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Programmed")].status
       name: Programmed
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Routable")].status
+      name: Routable
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Routable")].reason
+      name: Reason
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

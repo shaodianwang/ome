@@ -48,9 +48,9 @@ var _ = ginkgo.BeforeSuite(func() {
 
 	mgrSetup := func(_ context.Context, mgr ctrl.Manager) error {
 		// Generation on: the controller must produce TrafficMaps for Placed
-		// ISVCs so the specs can assert the projection. Reap-on-unplace is the
-		// same controller's disabled/not-routable path, exercised by unplacing an
-		// ISVC rather than by toggling the feature.
+		// ISVCs so the specs can assert the projection. Unplacing an ISVC does
+		// not reap its map here; it empties the map and records why on the
+		// Routable condition. Only disabling the feature reaps.
 		return (&routing.Reconciler{
 			Client: mgr.GetClient(),
 			Log:    ctrl.Log.WithName("PlacementRouting"),

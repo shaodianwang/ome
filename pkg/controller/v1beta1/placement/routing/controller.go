@@ -2,13 +2,17 @@ package routing
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,14 +25,21 @@ import (
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ome.io,resources=trafficmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=ome.io,resources=trafficmaps/status,verbs=get;update;patch
 
-// Reconciler watches InferenceServices on the control-plane cluster and, for a
-// Placed ISVC, generates the capacity-aware TrafficMap a gateway consumes: one
-// namespaced TrafficMap per ISVC, named after it and owner-ref'd to it so it is
+// Reconciler watches InferenceServices on the control-plane cluster and
+// generates the capacity-aware TrafficMap a gateway consumes: one namespaced
+// TrafficMap per ISVC, named after it and owner-ref'd to it so it is
 // garbage-collected with the ISVC. It recomputes the routing table whenever
-// placement or per-home capacity changes, and reaps the TrafficMap when the
-// ISVC is no longer placed or the feature is disabled. It writes only spec; the
-// downstream publisher owns status.
+// placement or per-home capacity changes.
+//
+// The map exists for as long as the ISVC does, even when nothing is routable:
+// an empty table plus a Routable=False reason. Absence would be
+// unattributable — feature off, not placed, no addressable home and a wedged
+// controller all look the same — and deleting on degradation would drop the
+// capacity provenance at the moment it is most wanted. Only the feature toggle
+// reaps. It writes spec and the Routable condition; the publisher owns the
+// rest of status.
 type Reconciler struct {
 	client.Client
 	Log logr.Logger
@@ -54,13 +65,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	spec, ok := buildSpec(isvc)
-	if !ok {
-		// Not placed, or no serving home is addressable yet — remove any stale
-		// TrafficMap rather than leave a routing table pointing nowhere.
-		return ctrl.Result{}, r.reap(ctx, isvc)
+	// Unroutable is a state of the map, not a reason to remove it: build the
+	// table (possibly empty) and let the condition carry the explanation.
+	spec, status, reason := buildSpec(isvc)
+	if err := r.apply(ctx, isvc, spec); err != nil {
+		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.apply(ctx, isvc, spec)
+	return ctrl.Result{}, r.setRoutable(ctx, isvc, status, reason)
 }
 
 // apply creates or updates the ISVC's TrafficMap to carry the desired spec,
@@ -85,6 +96,56 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 	return nil
 }
 
+// setRoutable writes the routing controller's Routable condition onto the
+// ISVC's TrafficMap, explaining an empty or degraded table.
+//
+// It re-reads and retries on conflict rather than patching blind: the publisher
+// owns Programmed on the same subresource, so a lost update here would silently
+// drop whichever condition wrote second. SetStatusCondition keys on type, so the
+// two writers do not collide, and it leaves LastTransitionTime alone when the
+// status has not actually changed — no write amplification on a steady map.
+func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceService,
+	status metav1.ConditionStatus, reason string) error {
+	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		tm := &v1beta1.TrafficMap{}
+		if err := r.Get(ctx, key, tm); err != nil {
+			// Gone, or not ours to annotate: nothing to report on.
+			return client.IgnoreNotFound(err)
+		}
+		if !metav1.IsControlledBy(tm, isvc) {
+			return nil
+		}
+		cond := metav1.Condition{
+			Type:               v1beta1.TrafficMapRoutable,
+			Status:             status,
+			Reason:             reason,
+			Message:            routableMessage(reason, len(tm.Spec.Entries)),
+			ObservedGeneration: tm.Generation,
+		}
+		if !apimeta.SetStatusCondition(&tm.Status.Conditions, cond) {
+			return nil // unchanged; skip the write
+		}
+		return r.Status().Update(ctx, tm)
+	})
+}
+
+// routableMessage renders the operator-facing explanation for a Routable reason.
+// The entry count is included because "empty" and "degraded" are different
+// problems and the reason alone does not distinguish how many homes exist.
+func routableMessage(reason string, entries int) string {
+	switch reason {
+	case v1beta1.TrafficMapReasonNotPlaced:
+		return "InferenceService is not Placed; no homes to route to yet"
+	case v1beta1.TrafficMapReasonNoAddressableHome:
+		return "placed, but no admitted home reports an addressable endpoint"
+	case v1beta1.TrafficMapReasonAllHomesUnready:
+		return fmt.Sprintf("%d home(s) addressable but none ready; traffic spread equally rather than dropped", entries)
+	default:
+		return fmt.Sprintf("%d home(s) serving", entries)
+	}
+}
+
 // reap deletes the ISVC's TrafficMap if we own it. It is a no-op when none
 // exists or when the object is not controlled by this ISVC (never delete
 // something we did not generate).
@@ -100,19 +161,29 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 	return client.IgnoreNotFound(r.Delete(ctx, tm))
 }
 
-// buildSpec projects an ISVC's placement into the desired TrafficMap spec. ok is
-// false when the ISVC is not in a routable state: not Placed, or no admitted
-// candidate reports an addressable endpoint. It is a pure function of the ISVC
-// so the watch predicate can use it to react only to changes that alter the
+// buildSpec projects an ISVC's placement into the desired TrafficMap spec, plus
+// the Routable verdict that explains it. An unroutable ISVC yields an empty
+// table rather than no table, so a consumer can tell "known and unroutable"
+// from "unknown".
+//
+// AllHomesUnready is reported with status True: every home is addressable, and
+// the weight fallback spreads traffic across them rather than black-holing it,
+// so the map IS routable — just degraded. It is a pure function of the ISVC so
+// the watch predicate can use it to react only to changes that alter the
 // generated table.
-func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, bool) {
+func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
+	empty := v1beta1.TrafficMapSpec{
+		Service:                isvc.Name,
+		Mode:                   placementMode(isvc),
+		ObservedISVCGeneration: isvc.Generation,
+	}
 	pl := isvc.Status.Placement
 	if pl == nil || pl.Phase != v1beta1.PlacementPhasePlaced {
-		return v1beta1.TrafficMapSpec{}, false
+		return empty, metav1.ConditionFalse, v1beta1.TrafficMapReasonNotPlaced
 	}
 	cands := servingCandidates(pl)
 	if len(cands) == 0 {
-		return v1beta1.TrafficMapSpec{}, false
+		return empty, metav1.ConditionFalse, v1beta1.TrafficMapReasonNoAddressableHome
 	}
 
 	// Index-aligned: homes feed the weight computation, entries carry the result
@@ -144,12 +215,16 @@ func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, bool) {
 			},
 		}
 	}
+	reason := v1beta1.TrafficMapReasonRoutable
+	if !slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Healthy }) {
+		reason = v1beta1.TrafficMapReasonAllHomesUnready
+	}
 	return v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
 		Mode:                   placementMode(isvc),
 		Entries:                entries,
 		ObservedISVCGeneration: isvc.Generation,
-	}, true
+	}, metav1.ConditionTrue, reason
 }
 
 // servingCandidates returns the admitted candidates that report an addressable
@@ -202,7 +277,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // routingTableChange admits ISVC events that can change the generated TrafficMap:
 // any create/delete, a deletion-timestamp transition, and updates where the
-// projected spec (or its routable-ness) differs. Routine ISVC churn that does
+// projected spec, or the Routable status/reason we would report, differs. Routine ISVC churn that does
 // not alter the table is dropped.
 var routingTableChange = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
@@ -214,9 +289,13 @@ var routingTableChange = predicate.Funcs{
 		if oldISVC.DeletionTimestamp.IsZero() != newISVC.DeletionTimestamp.IsZero() {
 			return true
 		}
-		oldSpec, oldOK := buildSpec(oldISVC)
-		newSpec, newOK := buildSpec(newISVC)
-		if oldOK != newOK {
+		// The condition is part of what we write, so a change in status or reason
+		// has to wake us even when the table itself is byte-identical — an ISVC
+		// going NotPlaced -> NoAddressableHome keeps an empty table but must
+		// re-explain itself.
+		oldSpec, oldStatus, oldReason := buildSpec(oldISVC)
+		newSpec, newStatus, newReason := buildSpec(newISVC)
+		if oldStatus != newStatus || oldReason != newReason {
 			return true
 		}
 		return !equality.Semantic.DeepEqual(oldSpec, newSpec)
