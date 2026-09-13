@@ -19,8 +19,9 @@ import (
 type InferenceServiceOption func(*inferenceServiceOpts)
 
 type inferenceServiceOpts struct {
-	modelCacheProvider sharded.Provider
-	trafficTranslator  traffic.Translator
+	modelCacheProvider        sharded.Provider
+	trafficTranslator         traffic.Translator
+	quotaAcceleratorResources []string
 }
 
 // WithISVCModelCacheProvider sets the ISVC reconciler's ModelCache.
@@ -41,6 +42,15 @@ func WithISVCModelCacheProvider(p sharded.Provider) InferenceServiceOption {
 // Noop otherwise).
 func WithTrafficTranslator(tr traffic.Translator) InferenceServiceOption {
 	return func(o *inferenceServiceOpts) { o.trafficTranslator = tr }
+}
+
+// WithQuotaAcceleratorResources names the resources that put a Component under
+// the quota backend, mirroring the manager's --accelerator-resources flag. Only
+// a suite asserting that a cpu-only Component sheds its Kueue queue-name label
+// needs it; unset governs every Component, which is what every other suite
+// expects.
+func WithQuotaAcceleratorResources(names ...string) InferenceServiceOption {
+	return func(o *inferenceServiceOpts) { o.quotaAcceleratorResources = names }
 }
 
 // SetupInferenceService registers the InferenceServiceReconciler with
@@ -81,6 +91,8 @@ func SetupInferenceService(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		Recorder:          mgr.GetEventRecorderFor("InferenceService"),
 		ModelCache:        cfg.modelCacheProvider,
 		TrafficReconciler: trafficReconciler,
+
+		QuotaAcceleratorResources: cfg.quotaAcceleratorResources,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("SetupInferenceService: SetupWithManager: %w", err)

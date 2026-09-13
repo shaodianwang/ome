@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -112,8 +113,13 @@ var _ = ginkgo.BeforeSuite(func() {
 			components.WithModelCacheProvider(provider)); err != nil {
 			return err
 		}
+		// The chart's accelerator list, so the queue-label specs see a
+		// production-shaped manager. Every other spec here is unaffected: this
+		// only decides which Components carry the Kueue queue-name label, and
+		// nothing else in this suite sets one.
 		return components.SetupInferenceService(ctx, mgr,
-			components.WithISVCModelCacheProvider(provider))
+			components.WithISVCModelCacheProvider(provider),
+			components.WithQuotaAcceleratorResources(constants.NvidiaGPUResourceType, constants.GoogleTPUResourceType))
 	}
 	gomega.Expect(suiteFwk.StartManager(suiteCtx, s.Cfg, mgrSetup)).To(gomega.Succeed())
 })
