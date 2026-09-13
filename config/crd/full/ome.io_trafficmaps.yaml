@@ -63,6 +63,16 @@ spec:
                         ready:
                           format: int32
                           type: integer
+                        reported:
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        source:
+                          default: ControlPlane
+                          enum:
+                          - ControlPlane
+                          - Endpoint
+                          type: string
                       type: object
                     cluster:
                       type: string
@@ -70,6 +80,24 @@ spec:
                       type: string
                     healthy:
                       type: boolean
+                    probe:
+                      properties:
+                        consecutiveFailures:
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        lastProbeTime:
+                          format: date-time
+                          type: string
+                        message:
+                          type: string
+                        result:
+                          enum:
+                          - Passing
+                          - Failing
+                          - Unknown
+                          type: string
+                      type: object
                     weight:
                       format: int32
                       minimum: 0

@@ -186,6 +186,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapEntry":                  schema_pkg_apis_ome_v1beta1_TrafficMapEntry(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapGatewayRef":             schema_pkg_apis_ome_v1beta1_TrafficMapGatewayRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapList":                   schema_pkg_apis_ome_v1beta1_TrafficMapList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapProbe":                  schema_pkg_apis_ome_v1beta1_TrafficMapProbe(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapSpec":                   schema_pkg_apis_ome_v1beta1_TrafficMapSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapStatus":                 schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                      schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
@@ -12835,6 +12836,20 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapCapacity(ref common.ReferenceCallback
 							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
 						},
 					},
+					"source": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Source names which input produced Allocated. Without it an operator reading an unexpected weight cannot tell \"the home reported less capacity\" from \"the endpoint source was configured but failed open and the plan was used\" — the same number with opposite remediations.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reported": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reported is the home's own servable-capacity figure, recorded whenever the endpoint source answered — including when it was at or above the plan and therefore did not lower Allocated. Keeping it visible in that case is what makes the ceiling auditable: Allocated alone cannot show that a report was received and found non-binding.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 				},
 			},
 		},
@@ -12886,12 +12901,18 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapEntry(ref common.ReferenceCallback) c
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapCapacity"),
 						},
 					},
+					"probe": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Probe is the active end-to-end health probe's contribution to Healthy, present only when probing is configured. Healthy alone does not say whether readiness or reachability failed, and those are different faults with different owners: readiness is the workload's, reachability is the path's (ingress, DNS, certificate, route).",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapProbe"),
+						},
+					},
 				},
 				Required: []string{"cluster"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapCapacity", "knative.dev/pkg/apis.URL"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapCapacity", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapProbe", "knative.dev/pkg/apis.URL"},
 	}
 }
 
@@ -12984,6 +13005,48 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapList(ref common.ReferenceCallback) co
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMap", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_TrafficMapProbe(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "TrafficMapProbe records what the active end-to-end probe observed for one home. The probe targets the entry's Endpoint — the URL a client uses — so it covers the whole serving path rather than pod readiness inside the home.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"result": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Result is the most recent probe verdict. Only a sustained Failing gates the weight; Unknown never does.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"lastProbeTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastProbeTime is when the probe last reached a verdict, so a stalled prober is visible rather than being read as a steady pass.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"consecutiveFailures": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ConsecutiveFailures counts unbroken Failing verdicts. The weight is gated only once this reaches the configured failure threshold: a single dropped packet must not move a large traffic share, and the reprogramming churn from flapping would itself be the outage.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Message explains the current Result — the observed status code, the transport error, or why the probe could not run.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

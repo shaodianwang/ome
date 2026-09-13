@@ -7207,6 +7207,15 @@
           "description": "Ready is the home's live ready-replica count — the health signal. Zero means the entry is health-gated to weight 0.",
           "type": "integer",
           "format": "int32"
+        },
+        "reported": {
+          "description": "Reported is the home's own servable-capacity figure, recorded whenever the endpoint source answered — including when it was at or above the plan and therefore did not lower Allocated. Keeping it visible in that case is what makes the ceiling auditable: Allocated alone cannot show that a report was received and found non-binding.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "description": "Source names which input produced Allocated. Without it an operator reading an unexpected weight cannot tell \"the home reported less capacity\" from \"the endpoint source was configured but failed open and the plan was used\" — the same number with opposite remediations.",
+          "type": "string"
         }
       }
     },
@@ -7234,6 +7243,10 @@
           "description": "Healthy is the health-gate result for this home (readyReplicas \u003e 0). An unhealthy home is weighted 0 (unless every home is unhealthy).",
           "type": "boolean",
           "default": false
+        },
+        "probe": {
+          "description": "Probe is the active end-to-end health probe's contribution to Healthy, present only when probing is configured. Healthy alone does not say whether readiness or reachability failed, and those are different faults with different owners: readiness is the workload's, reachability is the path's (ingress, DNS, certificate, route).",
+          "$ref": "#/definitions/v1beta1.TrafficMapProbe"
         },
         "weight": {
           "description": "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. When every home is unhealthy the controller writes equal weights rather than all-zero, so traffic is never black-holed.",
@@ -7295,6 +7308,29 @@
         "metadata": {
           "default": {},
           "$ref": "#/definitions/v1.ListMeta"
+        }
+      }
+    },
+    "v1beta1.TrafficMapProbe": {
+      "description": "TrafficMapProbe records what the active end-to-end probe observed for one home. The probe targets the entry's Endpoint — the URL a client uses — so it covers the whole serving path rather than pod readiness inside the home.",
+      "type": "object",
+      "properties": {
+        "consecutiveFailures": {
+          "description": "ConsecutiveFailures counts unbroken Failing verdicts. The weight is gated only once this reaches the configured failure threshold: a single dropped packet must not move a large traffic share, and the reprogramming churn from flapping would itself be the outage.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "lastProbeTime": {
+          "description": "LastProbeTime is when the probe last reached a verdict, so a stalled prober is visible rather than being read as a steady pass.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "message": {
+          "description": "Message explains the current Result — the observed status code, the transport error, or why the probe could not run.",
+          "type": "string"
+        },
+        "result": {
+          "description": "Result is the most recent probe verdict. Only a sustained Failing gates the weight; Unknown never does.",
+          "type": "string"
         }
       }
     },

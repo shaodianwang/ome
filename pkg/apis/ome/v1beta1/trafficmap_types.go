@@ -29,6 +29,42 @@ const (
 	TrafficMapReasonAllHomesUnready   = "AllHomesUnready"
 )
 
+// CapacitySource names which input produced an entry's Allocated count.
+// +kubebuilder:validation:Enum=ControlPlane;Endpoint
+type CapacitySource string
+
+const (
+	// CapacitySourceControlPlane means Allocated came from the control plane's
+	// own view — status.placement intersected with quota. The default.
+	CapacitySourceControlPlane CapacitySource = "ControlPlane"
+
+	// CapacitySourceEndpoint means the home reported a lower servable capacity
+	// than the plan and that report became Allocated. A reported value is only
+	// ever a ceiling, so this source implies Allocated is below the plan.
+	CapacitySourceEndpoint CapacitySource = "Endpoint"
+)
+
+// ProbeResult is the outcome of the most recent end-to-end health probe.
+// +kubebuilder:validation:Enum=Passing;Failing;Unknown
+type ProbeResult string
+
+const (
+	// ProbeResultPassing means the last probe reached the endpoint and got an
+	// accepted status.
+	ProbeResultPassing ProbeResult = "Passing"
+
+	// ProbeResultFailing means the last probe reached a verdict that counts
+	// against the home: a gating status code, a transport error, or a timeout.
+	// It gates the weight only once the consecutive-failure threshold is met.
+	ProbeResultFailing ProbeResult = "Failing"
+
+	// ProbeResultUnknown means no verdict was reached — the probe has not run
+	// yet, or it could not run at all (missing credentials, blocked egress, a
+	// misconfigured prober). Unknown never gates: that condition is uniform
+	// across homes, so treating it as failure would zero the whole fleet at once.
+	ProbeResultUnknown ProbeResult = "Unknown"
+)
+
 // TrafficMap is the capacity-aware routing projection of one multi-cluster
 // InferenceService: the per-home traffic split a gateway consumes. Placement
 // decides WHERE an ISVC's replicas run and quota decides HOW MUCH each home may
@@ -129,6 +165,42 @@ type TrafficMapEntry struct {
 	// allocated * factor, gated to 0 when the home has no ready replicas.
 	// +optional
 	Capacity *TrafficMapCapacity `json:"capacity,omitempty"`
+
+	// Probe is the active end-to-end health probe's contribution to Healthy,
+	// present only when probing is configured. Healthy alone does not say
+	// whether readiness or reachability failed, and those are different faults
+	// with different owners: readiness is the workload's, reachability is the
+	// path's (ingress, DNS, certificate, route).
+	// +optional
+	Probe *TrafficMapProbe `json:"probe,omitempty"`
+}
+
+// TrafficMapProbe records what the active end-to-end probe observed for one
+// home. The probe targets the entry's Endpoint — the URL a client uses — so it
+// covers the whole serving path rather than pod readiness inside the home.
+type TrafficMapProbe struct {
+	// Result is the most recent probe verdict. Only a sustained Failing gates
+	// the weight; Unknown never does.
+	// +optional
+	Result ProbeResult `json:"result,omitempty"`
+
+	// LastProbeTime is when the probe last reached a verdict, so a stalled
+	// prober is visible rather than being read as a steady pass.
+	// +optional
+	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
+
+	// ConsecutiveFailures counts unbroken Failing verdicts. The weight is gated
+	// only once this reaches the configured failure threshold: a single dropped
+	// packet must not move a large traffic share, and the reprogramming churn
+	// from flapping would itself be the outage.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
+
+	// Message explains the current Result — the observed status code, the
+	// transport error, or why the probe could not run.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // TrafficMapCapacity records why an entry's weight is what it is.
@@ -153,6 +225,23 @@ type TrafficMapCapacity struct {
 	// +optional
 	// +kubebuilder:default="1"
 	Factor *resource.Quantity `json:"factor,omitempty"`
+
+	// Source names which input produced Allocated. Without it an operator
+	// reading an unexpected weight cannot tell "the home reported less capacity"
+	// from "the endpoint source was configured but failed open and the plan was
+	// used" — the same number with opposite remediations.
+	// +optional
+	// +kubebuilder:default=ControlPlane
+	Source CapacitySource `json:"source,omitempty"`
+
+	// Reported is the home's own servable-capacity figure, recorded whenever the
+	// endpoint source answered — including when it was at or above the plan and
+	// therefore did not lower Allocated. Keeping it visible in that case is what
+	// makes the ceiling auditable: Allocated alone cannot show that a report was
+	// received and found non-binding.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Reported *int32 `json:"reported,omitempty"`
 }
 
 // TrafficMapStatus reports whether the active publisher has realized this map
