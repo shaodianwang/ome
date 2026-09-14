@@ -114,6 +114,13 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 				FailureThreshold: rt.Probe.FailureThreshold,
 				SuccessThreshold: rt.Probe.SuccessThreshold,
 			},
+			Capacity: placementrouting.CapacityConfig{
+				Path:    rt.Capacity.Path,
+				Method:  rt.Capacity.Method,
+				Period:  rt.Capacity.PeriodDuration(),
+				Timeout: rt.Capacity.TimeoutDuration(),
+				MaxAge:  rt.Capacity.MaxAgeDuration(),
+			},
 		},
 	}
 }
@@ -159,6 +166,9 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 	// behaving arbitrarily. Validate after resolution so the check sees the
 	// parsed durations rather than the raw strings.
 	if err := w.routing.Probe.Validate(); err != nil {
+		return fmt.Errorf("invalid multi-cluster configuration: %w", err)
+	}
+	if err := w.routing.Capacity.Validate(); err != nil {
 		return fmt.Errorf("invalid multi-cluster configuration: %w", err)
 	}
 
@@ -280,6 +290,11 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		return fmt.Errorf("create PlacementEndpoint controller: %w", err)
 	}
 
+	// Both observed inputs talk to the same homes with the same credentials, so
+	// they share one HTTP client: two would mean two transports and two auth
+	// paths for one conversation.
+	observerClient := placementrouting.NewObserverClient()
+
 	// Project placement into the capacity-aware TrafficMap the publisher consumes.
 	// Always wired: when disabled the controller is a no-op that reaps any
 	// TrafficMap it previously created, so toggling the feature (a restart, since
@@ -289,8 +304,10 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
 		Config: w.routing,
-		Prober: placementrouting.NewProber(w.routing.Probe,
+		Prober: placementrouting.NewProber(w.routing.Probe, observerClient,
 			ctrl.Log.WithName("controllers").WithName("PlacementRoutingProbe")),
+		Capacity: placementrouting.NewCapacityPoller(w.routing.Capacity, observerClient,
+			ctrl.Log.WithName("controllers").WithName("PlacementRoutingCapacity")),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create PlacementRouting controller: %w", err)
 	}

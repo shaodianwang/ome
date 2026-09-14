@@ -35,7 +35,7 @@ func testProbeConfig() ProbeConfig {
 
 func newTestProber(t *testing.T, cfg ProbeConfig) *Prober {
 	t.Helper()
-	p := NewProber(cfg, logr.Discard())
+	p := NewProber(cfg, NewObserverClient(), logr.Discard())
 	return p
 }
 

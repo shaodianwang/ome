@@ -51,6 +51,10 @@ type Reconciler struct {
 	// each home's health gate. Nil, or configured off, means the gate stays
 	// readyReplicas > 0 and no entry carries probe provenance.
 	Prober *Prober
+	// Capacity supplies the optional home-reported ceiling on each home's
+	// planned allocation. Nil, or configured off, means the plan stands and
+	// every entry records CapacitySourceControlPlane.
+	Capacity *CapacityPoller
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -73,7 +77,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Unroutable is a state of the map, not a reason to remove it: build the
 	// table (possibly empty) and let the condition carry the explanation.
-	spec, status, reason := buildSpec(isvc, r.Prober)
+	spec, status, reason := buildSpec(isvc, r.Prober, r.Capacity)
 	if err := r.apply(ctx, isvc, spec); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -191,7 +195,7 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 // ISVC. Passing nil yields the plan alone, which is what the watch predicate
 // compares so it reacts only to ISVC changes that alter the table; probe
 // verdicts arrive on their own path and enqueue directly.
-func buildSpec(isvc *v1beta1.InferenceService, probe *Prober) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
+func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *CapacityPoller) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
 	empty := v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
 		Mode:                   placementMode(isvc),
@@ -220,6 +224,7 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober) (v1beta1.TrafficMa
 			Ready:     c.ReadyReplicas,
 			Factor:    capacityFactor(isvc, c.Cluster),
 			Reachable: probe.Reachable(mapKey, c.Cluster),
+			Reported:  capacity.Reported(mapKey, c.Cluster),
 		}
 	}
 	weights := Weights(homes)
@@ -238,7 +243,8 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober) (v1beta1.TrafficMa
 				Allocated: homes[i].EffectiveAllocated(),
 				Ready:     c.ReadyReplicas,
 				Factor:    homes[i].Factor,
-				Source:    v1beta1.CapacitySourceControlPlane,
+				Source:    allocationSource(homes[i]),
+				Reported:  homes[i].Reported,
 			},
 			Probe: probe.Provenance(mapKey, c.Cluster),
 		}
@@ -253,6 +259,17 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober) (v1beta1.TrafficMa
 		Entries:                entries,
 		ObservedISVCGeneration: isvc.Generation,
 	}, metav1.ConditionTrue, reason
+}
+
+// allocationSource names which input produced the entry's allocation. Endpoint
+// only when a report actually lowered the plan: a report that matched or
+// exceeded the plan left Allocated untouched, so claiming Endpoint there would
+// misattribute a control-plane number to the home.
+func allocationSource(h Home) v1beta1.CapacitySource {
+	if h.Reported != nil && h.EffectiveAllocated() != h.Allocated {
+		return v1beta1.CapacitySourceEndpoint
+	}
+	return v1beta1.CapacitySourceControlPlane
 }
 
 // servingCandidates returns the admitted candidates that report an addressable
@@ -312,30 +329,48 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(routingTableChange)).
 		Owns(&v1beta1.TrafficMap{})
 
-	if r.Prober != nil && r.Prober.Config.IsEnabled() {
+	probing := r.Prober != nil && r.Prober.Config.IsEnabled()
+	polling := r.Capacity != nil && r.Capacity.Config.IsEnabled()
+	if probing || polling {
 		events := make(chan event.GenericEvent, probeEventBuffer)
-		r.Prober.Targets = func(ctx context.Context) ([]Target, error) {
+		// Both observers read the same routing tables, so they share one target
+		// view rather than each keeping its own.
+		targets := func(ctx context.Context) ([]Target, error) {
 			var maps v1beta1.TrafficMapList
 			if err := mgr.GetClient().List(ctx, &maps); err != nil {
 				return nil, err
 			}
 			return TargetsFromTrafficMaps(maps.Items), nil
 		}
-		r.Prober.OnChange = func(nn types.NamespacedName) {
-			// The TrafficMap shares the ISVC's name and namespace, so the stub
-			// addresses the right reconcile key without a lookup.
-			obj := &v1beta1.InferenceService{}
-			obj.Name, obj.Namespace = nn.Name, nn.Namespace
-			select {
-			case events <- event.GenericEvent{Object: obj}:
-			default:
-				// Full buffer means a reconcile for this map is already queued;
-				// dropping a duplicate trigger loses nothing.
-				r.Log.V(1).Info("probe event buffer full, trigger coalesced", "trafficmap", nn.String())
+		notify := func(kind string) func(types.NamespacedName) {
+			return func(nn types.NamespacedName) {
+				// The TrafficMap shares the ISVC's name and namespace, so the
+				// stub addresses the right reconcile key without a lookup.
+				obj := &v1beta1.InferenceService{}
+				obj.Name, obj.Namespace = nn.Name, nn.Namespace
+				select {
+				case events <- event.GenericEvent{Object: obj}:
+				default:
+					// Full buffer means a reconcile for this map is already
+					// queued; dropping a duplicate trigger loses nothing.
+					r.Log.V(1).Info("observer event buffer full, trigger coalesced",
+						"source", kind, "trafficmap", nn.String())
+				}
 			}
 		}
-		if err := mgr.Add(r.Prober); err != nil {
-			return fmt.Errorf("add end-to-end health prober: %w", err)
+		if probing {
+			r.Prober.Targets = targets
+			r.Prober.OnChange = notify("probe")
+			if err := mgr.Add(r.Prober); err != nil {
+				return fmt.Errorf("add end-to-end health prober: %w", err)
+			}
+		}
+		if polling {
+			r.Capacity.Targets = targets
+			r.Capacity.OnChange = notify("capacity")
+			if err := mgr.Add(r.Capacity); err != nil {
+				return fmt.Errorf("add endpoint capacity poller: %w", err)
+			}
 		}
 		b = b.WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{}))
 	}
@@ -361,8 +396,8 @@ var routingTableChange = predicate.Funcs{
 		// has to wake us even when the table itself is byte-identical — an ISVC
 		// going NotPlaced -> NoAddressableHome keeps an empty table but must
 		// re-explain itself.
-		oldSpec, oldStatus, oldReason := buildSpec(oldISVC, nil)
-		newSpec, newStatus, newReason := buildSpec(newISVC, nil)
+		oldSpec, oldStatus, oldReason := buildSpec(oldISVC, nil, nil)
+		newSpec, newStatus, newReason := buildSpec(newISVC, nil, nil)
 		if oldStatus != newStatus || oldReason != newReason {
 			return true
 		}

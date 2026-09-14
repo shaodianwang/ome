@@ -84,16 +84,31 @@ type Prober struct {
 	state map[key]*homeState
 }
 
-// NewProber builds a prober for the given config. The caller is responsible for
-// checking cfg.IsEnabled(); a disabled config yields a prober that reports
-// Unknown for every home, which never gates.
-func NewProber(cfg ProbeConfig, log logr.Logger) *Prober {
+// NewProber builds a prober for the given config, using the supplied HTTP
+// client. The caller is responsible for checking cfg.IsEnabled(); a disabled
+// config yields a prober that reports Unknown for every home, which never
+// gates.
+//
+// The client carries no timeout of its own: each request is bounded by a
+// context deadline instead, so one client can be shared with the capacity
+// poller even though the two have different timeouts.
+func NewProber(cfg ProbeConfig, client *http.Client, log logr.Logger) *Prober {
 	return &Prober{
 		Config: cfg,
 		Log:    log,
-		Client: &http.Client{Timeout: cfg.Timeout},
+		Client: client,
 		state:  map[key]*homeState{},
 	}
+}
+
+// NewObserverClient builds the HTTP client both observers share. They talk to
+// the same homes with the same credentials and fail the same ways, so a single
+// client keeps one transport, one connection pool and one auth path rather
+// than two of each.
+func NewObserverClient() *http.Client {
+	// No client-level timeout: per-request context deadlines carry the probe's
+	// and the poller's different bounds.
+	return &http.Client{}
 }
 
 // Reachable reports the probe's contribution to a home's health gate.

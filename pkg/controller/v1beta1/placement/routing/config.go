@@ -20,6 +20,15 @@ type Config struct {
 	// Probe configures the active end-to-end health probe. Zero-valued (no path)
 	// means no probing, and the health gate stays readyReplicas > 0.
 	Probe ProbeConfig
+
+	// Capacity configures endpoint-reported capacity. Zero-valued (no path)
+	// means allocation comes from the control-plane plan alone.
+	//
+	// Independent of Probe: the two fix different failure modes (reachability
+	// versus capacity overstatement), cost differently -- a deep probe consumes
+	// serving capacity, a capacity poll does not -- and enabling one never
+	// enables the other.
+	Capacity CapacityConfig
 }
 
 // IsEnabled reports whether TrafficMap generation is on. When false the routing
@@ -168,4 +177,74 @@ func (p ProbeConfig) ClassifyStatus(code int) Verdict {
 		}
 	}
 	return VerdictInconclusive
+}
+
+// CapacityConfig configures polling a home for what it can currently serve,
+// applied as a CEILING on the control-plane plan.
+//
+// Like the probe, every field is operator-supplied with no in-code default, and
+// Path is the enable switch: without a target there is nothing to ask and the
+// plan stands.
+//
+// +kubebuilder:object:generate=false
+type CapacityConfig struct {
+	// Path is the capacity endpoint appended to each home's endpoint. Empty
+	// turns the input off.
+	Path string
+
+	// Method is the HTTP method for the capacity request.
+	Method string
+
+	// Period is how often each home is polled.
+	Period time.Duration
+
+	// Timeout bounds a single capacity request.
+	Timeout time.Duration
+
+	// MaxAge is how old a report's observedAt stamp may be and still be
+	// applied. Beyond it the poller falls open to the plan, so a home whose
+	// reporter froze releases its ceiling instead of holding a stale one
+	// forever.
+	MaxAge time.Duration
+}
+
+// IsEnabled reports whether endpoint-reported capacity is configured.
+func (c CapacityConfig) IsEnabled() bool {
+	return c.Path != ""
+}
+
+// Validate rejects a partially-configured capacity source, for the same reason
+// the probe does: half-configured reads as enabled while behaving arbitrarily.
+func (c CapacityConfig) Validate() error {
+	if !c.IsEnabled() {
+		return nil
+	}
+	if c.Path[0] != '/' {
+		return fmt.Errorf("routing.capacity.path %q must begin with %q", c.Path, "/")
+	}
+	if c.Method == "" {
+		return fmt.Errorf("routing.capacity.method is required when routing.capacity.path is set")
+	}
+	if c.Period <= 0 {
+		return fmt.Errorf("routing.capacity.period must be positive when routing.capacity.path is set")
+	}
+	if c.Timeout <= 0 {
+		return fmt.Errorf("routing.capacity.timeout must be positive when routing.capacity.path is set")
+	}
+	if c.Timeout >= c.Period {
+		return fmt.Errorf("routing.capacity.timeout (%s) must be shorter than routing.capacity.period (%s)",
+			c.Timeout, c.Period)
+	}
+	if c.MaxAge <= 0 {
+		// Without a bound the staleness guard cannot fire, and a frozen reporter
+		// would pin a home's ceiling indefinitely.
+		return fmt.Errorf("routing.capacity.maxAge must be positive when routing.capacity.path is set")
+	}
+	if c.MaxAge < c.Period {
+		// Every report would age out before the next poll, so the ceiling would
+		// flap between applied and fallen-open on every cycle.
+		return fmt.Errorf("routing.capacity.maxAge (%s) must be at least routing.capacity.period (%s)",
+			c.MaxAge, c.Period)
+	}
+	return nil
 }

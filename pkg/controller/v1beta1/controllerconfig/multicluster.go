@@ -157,6 +157,65 @@ type RoutingConfig struct {
 	// Probe configures the optional active end-to-end health probe. Absent (no
 	// path) means no probing and the health gate stays readyReplicas > 0.
 	Probe ProbeConfig `json:"probe,omitempty"`
+
+	// Capacity configures the optional endpoint-reported capacity ceiling.
+	// Absent (no path) means allocation comes from the control-plane plan alone.
+	// Independent of Probe: enabling one never enables the other.
+	Capacity CapacityConfig `json:"capacity,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// CapacityConfig is the operator-supplied configuration for polling each home
+// for what it can currently serve, applied as a ceiling on the planned
+// allocation -- never a raise.
+type CapacityConfig struct {
+	// Path is the capacity endpoint appended to each home's endpoint. Empty
+	// turns the input off.
+	Path string `json:"path,omitempty"`
+
+	// Method is the HTTP method for the capacity request.
+	Method string `json:"method,omitempty"`
+
+	// Period is how often each home is polled, as a duration string.
+	Period string `json:"period,omitempty"`
+
+	// Timeout bounds one capacity request, as a duration string.
+	Timeout string `json:"timeout,omitempty"`
+
+	// MaxAge is how old a report's observedAt stamp may be and still be
+	// applied, as a duration string. Beyond it the poller falls open to the
+	// plan, so a home whose reporter froze releases its ceiling rather than
+	// pinning a stale one forever.
+	MaxAge string `json:"maxAge,omitempty"`
+}
+
+// PeriodDuration parses Period, yielding 0 on an unparseable value so Validate
+// rejects it rather than a default being silently substituted.
+func (c CapacityConfig) PeriodDuration() time.Duration {
+	d, err := time.ParseDuration(c.Period)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// TimeoutDuration parses Timeout, with the same rejection-over-substitution
+// rule as PeriodDuration.
+func (c CapacityConfig) TimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(c.Timeout)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// MaxAgeDuration parses MaxAge, with the same rejection-over-substitution rule.
+func (c CapacityConfig) MaxAgeDuration() time.Duration {
+	d, err := time.ParseDuration(c.MaxAge)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // +kubebuilder:object:generate=false
@@ -266,6 +325,9 @@ func (c MultiClusterConfig) Validate() error {
 		"placement.dispatcherRoundTimeout":     c.Placement.DispatcherRoundTimeout,
 		"routing.probe.period":                 c.Routing.Probe.Period,
 		"routing.probe.timeout":                c.Routing.Probe.Timeout,
+		"routing.capacity.period":              c.Routing.Capacity.Period,
+		"routing.capacity.timeout":             c.Routing.Capacity.Timeout,
+		"routing.capacity.maxAge":              c.Routing.Capacity.MaxAge,
 	}
 	keys := make([]string, 0, len(durations))
 	for k := range durations {
