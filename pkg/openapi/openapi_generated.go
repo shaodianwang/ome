@@ -2699,6 +2699,13 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 				Description: "CanaryStatus tracks progress of a spec.rollout.groups[].canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"targetID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TargetID identifies the canary group's pinned Component target set. A new target set re-arms the canary even when the externally routed Component's revision did not change. It is scoped to the canary group rather than the whole rollout run, so unrelated groups cannot reset canary progress.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"canaryRevisionHash": {
 						SchemaProps: spec.SchemaProps{
 							Description: "CanaryRevisionHash is the revision hash being rolled out.",
@@ -2751,7 +2758,7 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 					},
 					"rolledBackRevisionHash": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback) abandons a canary: it records the rejected revision hash. While set, the component is held on the stable revision and the rejected revision is NOT retried — even after the annotation is cleared. The rollout re-arms only when a different target revision appears (a fresh spec change / fix).",
+							Description: "RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback) abandons a canary: it records the primary Component's rejected revision hash. While set, the group is held on its stable revisions and the rejected target set is NOT retried — even after the annotation is cleared. The rollout re-arms only when a different target set appears.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

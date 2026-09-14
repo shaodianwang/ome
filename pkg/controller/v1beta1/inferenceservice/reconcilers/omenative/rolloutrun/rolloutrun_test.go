@@ -99,6 +99,9 @@ func TestOpenPinsInlinePlan(t *testing.T) {
 	if err != nil || out.Parked {
 		t.Fatalf("unexpected: %v %+v", err, out)
 	}
+	if !out.Opened || out.Adopted {
+		t.Fatalf("new rollout boundary = %+v, want fresh open", out)
+	}
 	active := isvc.Status.Rollout.ActiveRun
 	if active == nil || len(active.Plan.Groups) != 1 {
 		t.Fatalf("run not pinned: %+v", isvc.Status.Rollout)
@@ -113,6 +116,37 @@ func TestOpenPinsInlinePlan(t *testing.T) {
 	}
 	if cond := planReady(isvc); cond == nil || cond.Status != corev1.ConditionTrue || cond.Reason != v1beta1.RolloutPlanReasonPinned {
 		t.Fatalf("condition = %+v", cond)
+	}
+}
+
+func TestOpenPinsUnchangedGroupMemberAsStable(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent},
+		Canary:     canaryBody(10, 100),
+	})
+	isvc.Spec.Router = &v1beta1.RouterSpec{}
+	router := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm-a-router", Namespace: "ns", Generation: 1},
+		Status: v1beta1.InferenceReplicaStatus{
+			ObservedGeneration: 1,
+			CurrentRevision:    "llm-a-router-rrrrrrrr",
+			UpdateRevision:     "llm-a-router-rrrrrrrr",
+		},
+	}
+	in := testInputs(t, isvc, router, irFixture(oldRev, newRev))
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	got := map[v1beta1.ComponentType]v1beta1.RolloutRunTarget{}
+	for _, target := range isvc.Status.Rollout.ActiveRun.TargetRevisions {
+		got[target.Component] = target
+	}
+	if got[v1beta1.RouterComponent].Revision != "rrrrrrrr" || got[v1beta1.RouterComponent].StableRevision != "rrrrrrrr" {
+		t.Fatalf("unchanged router identity = %+v", got[v1beta1.RouterComponent])
+	}
+	if got[v1beta1.EngineComponent].Revision != "bbbbbbbb" || got[v1beta1.EngineComponent].StableRevision != "aaaaaaaa" {
+		t.Fatalf("changed engine identity = %+v", got[v1beta1.EngineComponent])
 	}
 }
 
@@ -259,12 +293,16 @@ func TestRetargetClosesSupersededAndReopens(t *testing.T) {
 	ir.Status.UpdateRevision = "llm-a-engine-cccccccc"
 	isvc.Spec.Rollout.Groups[0].Canary = canaryBody(25, 100)
 	in = testInputs(t, isvc, ir)
-	if _, err := Reconcile(context.Background(), in); err != nil {
+	out, err := Reconcile(context.Background(), in)
+	if err != nil {
 		t.Fatal(err)
 	}
 	active := isvc.Status.Rollout.ActiveRun
 	if active == nil || active.RunID == firstID {
 		t.Fatalf("retarget must open a fresh run: %+v", active)
+	}
+	if !out.Opened || out.Adopted {
+		t.Fatalf("retarget boundary = %+v, want fresh open rather than adoption", out)
 	}
 	if isvc.Status.Rollout.LastRun == nil || isvc.Status.Rollout.LastRun.Outcome != v1beta1.RolloutRunSuperseded {
 		t.Fatalf("lastRun = %+v", isvc.Status.Rollout.LastRun)
@@ -277,6 +315,27 @@ func TestRetargetClosesSupersededAndReopens(t *testing.T) {
 	}
 	if active.Plan.Groups[0].Group.Canary.Steps[0].Traffic != 25 {
 		t.Fatal("fresh run must render the edited plan")
+	}
+}
+
+func TestStatusLossRecoveryReportsAdoption(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary:     canaryBody(10, 100),
+	})
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "bbbbbbbb",
+		StableRevisionHash: "aaaaaaaa",
+		CurrentStep:        0,
+	}
+	in := testInputs(t, isvc, irFixture(oldRev, newRev))
+
+	out, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Opened || !out.Adopted {
+		t.Fatalf("status-loss recovery boundary = %+v, want adopted open", out)
 	}
 }
 

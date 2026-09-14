@@ -73,6 +73,11 @@ type Outcome struct {
 	Parked       bool
 	StateChanged bool
 	RequeueAfter time.Duration
+	// Opened reports that this pass created a fresh ActiveRun. Adopted
+	// distinguishes status-loss recovery, whose existing executor progress must
+	// be bound to the run without being reset.
+	Opened  bool
+	Adopted bool
 }
 
 // composedPlan is one rendered effective plan: the pinnable groups plus their
@@ -102,6 +107,7 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 	}
 
 	active := activeRun(isvc)
+	retargeting := false
 
 	// Every group deleted mid-run: the pinned plan continues (an inert edit,
 	// like any other); deleting a group never aborts a run, so point at the
@@ -136,6 +142,7 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 			return Outcome{RequeueAfter: shortRequeue}, nil
 		}
 		if retargeted(isvc, active, targets) {
+			retargeting = true
 			for _, target := range active.TargetRevisions {
 				stableOverrides[target.Component] = target.StableRevision
 			}
@@ -186,8 +193,8 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 		return Outcome{Parked: true, RequeueAfter: parkRequeue}, nil
 	}
 
-	adopting := isvc.Status.Canary != nil && canaryMidFlight(isvc)
-	openRun(isvc, plan, targets, stableOverrides, now)
+	adopting := !retargeting && isvc.Status.Canary != nil && canaryMidFlight(isvc)
+	openRun(isvc, plan, targets, stableOverrides, adopting, now)
 	recordRunOpened(isvc, plan, adopting)
 	setPlanReady(isvc, corev1.ConditionTrue, v1beta1.RolloutPlanReasonPinned,
 		fmt.Sprintf("run %s pinned", isvc.Status.Rollout.ActiveRun.RunID), now)
@@ -199,7 +206,7 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 		emit(in.Recorder, isvc, corev1.EventTypeNormal, EventRunOpened,
 			"run %s opened (%s)", isvc.Status.Rollout.ActiveRun.RunID, combinedPlanDigest(plan.digests))
 	}
-	return Outcome{StateChanged: true, RequeueAfter: shortRequeue}, nil
+	return Outcome{StateChanged: true, RequeueAfter: shortRequeue, Opened: true, Adopted: adopting}, nil
 }
 
 func activeRun(isvc *v1beta1.InferenceService) *v1beta1.RolloutRun {
@@ -298,7 +305,7 @@ func composePlan(ctx context.Context, in Inputs, reads client.Reader) (composedP
 // canary and coordination engines own their counters and reset them under
 // their own rules (which is what makes adopt-in-place a no-op for a roll
 // already in flight).
-func openRun(isvc *v1beta1.InferenceService, plan composedPlan, targets map[v1beta1.ComponentType]targetPair, stableOverrides map[v1beta1.ComponentType]string, now metav1.Time) {
+func openRun(isvc *v1beta1.InferenceService, plan composedPlan, targets map[v1beta1.ComponentType]targetPair, stableOverrides map[v1beta1.ComponentType]string, adopting bool, now metav1.Time) {
 	var pinned []v1beta1.RolloutRunTarget
 	seen := map[v1beta1.ComponentType]bool{}
 	for i := range plan.groups {
@@ -314,7 +321,7 @@ func openRun(isvc *v1beta1.InferenceService, plan composedPlan, targets map[v1be
 			}
 			stable, carried := stableOverrides[comp]
 			if !carried {
-				stable = componentStableRevision(isvc, comp, rev, t)
+				stable = componentStableRevision(isvc, comp, rev, t, adopting)
 			}
 			pinned = append(pinned, v1beta1.RolloutRunTarget{
 				Component:      comp,
@@ -363,7 +370,7 @@ func closeRun(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, outcom
 // A distinct IR current revision is authoritative at run open. The scalar
 // primary and per-Component rollout status cover adoption of an older run that
 // has already advanced CurrentRevision to its target.
-func componentStableRevision(isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, pinnedRevision string, target targetPair) string {
+func componentStableRevision(isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, pinnedRevision string, target targetPair, adopting bool) string {
 	if target.current != "" && target.current != pinnedRevision {
 		return target.current
 	}
@@ -374,6 +381,9 @@ func componentStableRevision(isvc *v1beta1.InferenceService, comp v1beta1.Compon
 		if hash := query.RevisionFromName(status.LatestRolledoutRevision).Hash(); hash != "" {
 			return hash
 		}
+	}
+	if !adopting {
+		return target.current
 	}
 	return ""
 }

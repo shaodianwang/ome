@@ -31580,6 +31580,8 @@ spec:
                     stepEnteredTime:
                       format: date-time
                       type: string
+                    targetID:
+                      type: string
                   required:
                     - currentStep
                     - observedTrafficWeight

@@ -1177,6 +1177,58 @@ func TestDispatch_PDRouterRollbackTargetsStable(t *testing.T) {
 	}
 }
 
+func TestDispatch_SecondaryOnlyTargetStartsCanary(t *testing.T) {
+	ns := "default"
+	n1, n4 := 1, 4
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "secondary-only"}}
+	isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent},
+		Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+			{Capacity: intstr.FromString("50%"), Traffic: 25, Pause: &v1beta1.RolloutPause{}},
+			{Capacity: intstr.FromString("100%"), Traffic: 100},
+		}},
+	}}}
+	pinActiveRun(isvc)
+	isvc.Status.Rollout.ActiveRun.RunID = "engine-run"
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.RouterComponent, Revision: "router", StableRevision: "router"},
+		{Component: v1beta1.EngineComponent, Revision: "enginenew", StableRevision: "engineold"},
+	}
+	routerIR := ir(ns, isvc.Name, v1beta1.RouterComponent, "router")
+	routerIR.Status.CurrentRevision = "secondary-only-router-router"
+	engineIR := ir(ns, isvc.Name, v1beta1.EngineComponent, "enginenew")
+	engineIR.Status.CurrentRevision = "secondary-only-engine-engineold"
+	objects := []runtime.Object{
+		isvc,
+		routerIR,
+		engineIR,
+		canaryPod(ns, isvc.Name, "router", "router", "secondary-only-router-0"),
+		canaryPod(ns, isvc.Name, "engine", "engineold", "secondary-only-engine-0"),
+		canaryPod(ns, isvc.Name, "engine", "engineold", "secondary-only-engine-1"),
+		canaryPod(ns, isvc.Name, "engine", "enginenew", "secondary-only-engine-2"),
+		canaryPod(ns, isvc.Name, "engine", "enginenew", "secondary-only-engine-3"),
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objects...).Build()
+
+	if _, err := Dispatch(context.Background(), DispatchDeps{
+		Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if isvc.Status.Canary == nil || isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("secondary-only target must initialize canary step 0, got %+v", isvc.Status.Canary)
+	}
+	if got := isvc.Status.Components[v1beta1.RouterComponent].RolloutPhase; got != v1beta1.RolloutPhasePaused {
+		t.Fatalf("secondary capacity reached step 0; phase = %q, want Paused", got)
+	}
+	traffic := isvc.Status.Components[v1beta1.RouterComponent].Traffic
+	if len(traffic) != 1 || traffic[0].Percent != 100 || query.RevisionFromName(traffic[0].RevisionName).Hash() != "router" {
+		t.Fatalf("unchanged primary traffic = %+v, want one 100%% router target", traffic)
+	}
+}
+
 // TestDispatch_RollbackTargetsPersistedStableAfterRetarget pins the
 // controller-side rollback resolution: after a stable-A → partial-B →
 // retarget-C sequence, the rollback signal must point the IR at A's

@@ -158,17 +158,19 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	}
 	// The IR revision pair authoritatively assigns current=stable and
 	// update=canary while the two revisions are distinct.
-	stableHash := ""
-	if revisions.currentHash != canaryHash {
-		stableHash = revisions.currentHash
-	}
-	if sc := d.ISVC.Status.Canary; sc != nil && sc.StableRevisionHash != "" {
-		// A distinct authoritative current revision can repair an active canary
-		// whose persisted stable and target identities are the same.
-		if revisions.fromIR && revisions.currentHash != "" && revisions.currentHash != canaryHash && sc.StableRevisionHash == canaryHash {
+	stableHash := activeRunStableRevisionHash(d.ISVC, primary)
+	if stableHash == "" {
+		if revisions.currentHash != canaryHash {
 			stableHash = revisions.currentHash
-		} else {
-			stableHash = sc.StableRevisionHash
+		}
+		if sc := d.ISVC.Status.Canary; sc != nil && sc.StableRevisionHash != "" {
+			// A distinct authoritative current revision can repair an active canary
+			// whose persisted stable and target identities are the same.
+			if revisions.fromIR && revisions.currentHash != "" && revisions.currentHash != canaryHash && sc.StableRevisionHash == canaryHash {
+				stableHash = revisions.currentHash
+			} else {
+				stableHash = sc.StableRevisionHash
+			}
 		}
 	}
 	// Resolve the two revisions' pairing protocols through the cached client:
@@ -202,6 +204,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		BundledPrometheusAddress: d.BundledPrometheusAddress,
 		QueryTimeout:             d.QueryTimeout,
 		RunActive:                v1beta1.RolloutRunActive(d.ISVC),
+		TargetID:                 activeCanaryTargetID(d.ISVC),
 		DefaultReadyTimeout:      d.DefaultReadyTimeout,
 	})
 	if err != nil {
@@ -323,14 +326,10 @@ func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.
 // The scalar canary field and component rollout status support objects written
 // before per-Component run targets carried stable revisions.
 func componentStableRevisionHash(isvc *v1beta1.InferenceService, comp, primary v1beta1.ComponentType) string {
+	if stable := activeRunStableRevisionHash(isvc, comp); stable != "" {
+		return stable
+	}
 	if isvc.Status.Rollout != nil {
-		if active := isvc.Status.Rollout.ActiveRun; active != nil {
-			for _, target := range active.TargetRevisions {
-				if target.Component == comp && target.StableRevision != "" {
-					return target.StableRevision
-				}
-			}
-		}
 		if last := isvc.Status.Rollout.LastRun; last != nil && last.Outcome == v1beta1.RolloutRunRolledBack {
 			for _, target := range last.TargetRevisions {
 				if target.Component == comp && target.StableRevision != "" {
@@ -344,6 +343,13 @@ func componentStableRevisionHash(isvc *v1beta1.InferenceService, comp, primary v
 	}
 	if status, ok := isvc.Status.Components[comp]; ok {
 		return query.RevisionFromName(status.LatestRolledoutRevision).Hash()
+	}
+	return ""
+}
+
+func activeRunStableRevisionHash(isvc *v1beta1.InferenceService, comp v1beta1.ComponentType) string {
+	if target, ok := activeRunTarget(isvc, comp); ok {
+		return target.StableRevision
 	}
 	return ""
 }
