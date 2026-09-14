@@ -9505,7 +9505,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutAnalysis(ref common.ReferenceCallback) c
 					},
 					"onInconclusive": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OnInconclusive selects what to do when a sample cannot be completed (Prometheus unreachable, query error, or empty result) past the stall timeout — distinct from a metric breach.\n  - Hold (default): keep traffic at the current step and escalate to Failed\n    for an operator decision. A monitoring outage is not evidence the canary\n    is bad.\n  - Rollback: fail-safe — treat \"can't tell\" as \"assume bad\" and roll back.",
+							Description: "OnInconclusive selects what to do when a sample cannot be completed (Prometheus unreachable, query error, or empty result) past the stall timeout — distinct from a metric breach.\n  - Hold (default): keep traffic at the current step and escalate to Failed\n    for an operator decision. A monitoring outage is not evidence the canary\n    is bad.\n  - Rollback: fail-safe — treat \"can't tell\" as \"assume bad\" and roll back\n    on the first inconclusive sample, without waiting out the stall timeout.\n  - RollbackOnStall: ride out transient gaps like Hold, but roll back\n    instead of parking once the stall timeout expires.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

@@ -26919,6 +26919,7 @@ spec:
                                           enum:
                                             - Hold
                                             - Rollback
+                                            - RollbackOnStall
                                           type: string
                                       required:
                                         - failureLimit
@@ -32259,6 +32260,7 @@ spec:
                                                       enum:
                                                         - Hold
                                                         - Rollback
+                                                        - RollbackOnStall
                                                       type: string
                                                   required:
                                                     - failureLimit
