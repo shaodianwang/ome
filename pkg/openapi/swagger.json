@@ -5838,7 +5838,7 @@
           "default": ""
         },
         "targetRevisions": {
-          "description": "TargetRevisions records, per grouped Component, the revision hash this run is rolling toward. A Component's target changing mid-run is a retarget: the run closes (Superseded) and a fresh run opens with a fresh render.",
+          "description": "TargetRevisions records, per grouped Component, the revision hash this run is rolling toward and the stable hash it can roll back to. A Component's target changing mid-run is a retarget: the run closes (Superseded) and a fresh run opens with a fresh render.",
           "type": "array",
           "items": {
             "default": {},
@@ -5942,6 +5942,18 @@
         "outcome": {
           "type": "string",
           "default": ""
+        },
+        "targetRevisions": {
+          "description": "TargetRevisions retains each Component's target and stable revision so a rolled-back hold has an exact per-Component identity after ActiveRun is dropped.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutRunTarget"
+          },
+          "x-kubernetes-list-map-keys": [
+            "component"
+          ],
+          "x-kubernetes-list-type": "map"
         }
       }
     },
@@ -5958,6 +5970,10 @@
         },
         "revision": {
           "description": "Revision is the Component's target revision hash at run open.",
+          "type": "string"
+        },
+        "stableRevision": {
+          "description": "StableRevision is the Component's last promoted revision hash at run open. It is preserved across retargets and is the exact rollback target.",
           "type": "string"
         }
       }

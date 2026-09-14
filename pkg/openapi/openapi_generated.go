@@ -10382,7 +10382,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutRun(ref common.ReferenceCallback) common
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "TargetRevisions records, per grouped Component, the revision hash this run is rolling toward. A Component's target changing mid-run is a retarget: the run closes (Superseded) and a fresh run opens with a fresh render.",
+							Description: "TargetRevisions records, per grouped Component, the revision hash this run is rolling toward and the stable hash it can roll back to. A Component's target changing mid-run is a retarget: the run closes (Superseded) and a fresh run opens with a fresh render.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -10552,6 +10552,28 @@ func schema_pkg_apis_ome_v1beta1_RolloutRunRecord(ref common.ReferenceCallback) 
 							Ref: ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
 						},
 					},
+					"targetRevisions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"component",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "TargetRevisions retains each Component's target and stable revision so a rolled-back hold has an exact per-Component identity after ActiveRun is dropped.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutRunTarget"),
+									},
+								},
+							},
+						},
+					},
 					"groups": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -10576,7 +10598,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutRunRecord(ref common.ReferenceCallback) 
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutRunProvenance", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutRunProvenance", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutRunTarget", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -10597,6 +10619,13 @@ func schema_pkg_apis_ome_v1beta1_RolloutRunTarget(ref common.ReferenceCallback) 
 					"revision": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Revision is the Component's target revision hash at run open.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"stableRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StableRevision is the Component's last promoted revision hash at run open. It is preserved across retargets and is the exact rollback target.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

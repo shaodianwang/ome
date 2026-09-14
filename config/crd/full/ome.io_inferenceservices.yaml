@@ -32394,6 +32394,8 @@ spec:
                                 type: string
                               revision:
                                 type: string
+                              stableRevision:
+                                type: string
                             required:
                               - component
                             type: object
@@ -32500,6 +32502,22 @@ spec:
                             - RolledBack
                             - Superseded
                           type: string
+                        targetRevisions:
+                          items:
+                            properties:
+                              component:
+                                type: string
+                              revision:
+                                type: string
+                              stableRevision:
+                                type: string
+                            required:
+                              - component
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - component
+                          x-kubernetes-list-type: map
                       required:
                         - outcome
                       type: object
