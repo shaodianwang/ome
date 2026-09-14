@@ -25,7 +25,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
 	google.golang.org/protobuf v1.36.12
 	istio.io/client-go v1.31.0
