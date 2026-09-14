@@ -128,7 +128,7 @@ discriminator.
 
 | Dashboard | Needs | If it's empty |
 |---|---|---|
-| SLO | A long-retention store scraping **both** the OME control plane and kube-state-metrics | See "The SLO dashboard needs a different backend" below. |
+| SLO | A **long-retention** store scraping the OME control plane | See "The SLO dashboard needs a different backend" below. Empty latency panels usually mean the store is short-retention, or that a colliding `namespace` label was renamed to `exported_namespace` on scrape. |
 | Control plane | OME control-plane pods scraped (the `prometheus.io/scrape` annotation the chart sets) and standard controller-runtime metrics | Confirm the pods are scraped. Scoping is by `cluster` + pod name, not namespace (see above). |
 | Router | OME router pods exporting the `router_*` family | Confirm router pods are scraped. |
 | Scheduler | `ome-scheduler` (OEP-0022) scraped. It is built on the upstream Kubernetes scheduler framework, so the standard `scheduler_*` metrics apply | Confirm the scheduler pods are annotated for scraping. The OME-specific gang/domain metrics are **not** wired — see the note panel at the bottom of that dashboard. |
@@ -137,26 +137,32 @@ discriminator.
 ### The SLO dashboard needs a different backend
 
 The other three work against any Prometheus that scrapes OME. The SLO dashboard
-does not, for two reasons:
+needs one more thing: **retention**. OME's bundled Prometheus is configured with
+`retention: 30m` and exists to feed KEDA, not to answer questions about
+yesterday. An SLO is a statement about a window — a day, 28 days — so it needs a
+store that keeps one.
 
-- **Retention.** OME's bundled Prometheus is configured with `retention: 30m`
-  and exists to feed KEDA, not to answer questions about yesterday. An SLO is a
-  statement about a window — a day, 28 days — so it needs a store that keeps one.
-- **kube-state-metrics.** `SLI 1` is built on
-  `ome_inferenceservice_transition_status`, which is *not* exported by OME's own
-  binaries. It comes from kube-state-metrics running with
-  [`config/monitoring/kube-state-metrics-config.yaml`](../config/monitoring/kube-state-metrics-config.yaml)
-  applied and `--custom-resource-state-config-file` pointed at it. The bundled
-  Prometheus does not scrape KSM at all.
+Otherwise its only dependency is that the OME control-plane pods are scraped:
+`ome_isvc_time_to_ready_seconds` is exported by the controller-manager.
 
-`SLI 2` (`ome_isvc_time_to_ready_seconds`) *is* exported by the
-controller-manager, so it only needs the control plane scraped.
+#### Deployment success rate (SLI 1) is not on the dashboard
 
-Note that these two indicators disagree by construction, and the disagreement is
-informative: SLI 1 is a gauge ratio over the ISVCs that exist right now, while
-SLI 2 is a histogram over deployments that completed. A fleet where every ISVC is
-`UpToDate` but nothing has deployed in a week reads as 100% on the first and
-"No data" on the second.
+It was, and it was wrong. It was built on
+`ome_inferenceservice_transition_status`, a kube-state-metrics projection of
+`status.modelStatus.transitionStatus`. Every write to that field comes from
+`StatusReconciler`, reached only via `PropagateRawStatus` on the
+**RawDeployment** path (`components/engine.go` dispatches OMENative through
+`InferenceReplica` instead, and nothing under `irprojector/` touches
+`ModelStatus`). Because the StateSet emits no series for an unset field, every
+OMENative InferenceService fell out of both the numerator and the denominator —
+the panel reported a confident percentage for a subset of the fleet without
+saying so. The same applies to "lean" ISVCs, which leave the field unset by
+design.
+
+Measuring it correctly needs a counter on the **readiness edge**, which is the
+one thing both deployment modes converge on — the same two call sites that
+already record `ome_isvc_time_to_ready_seconds`. Until that exists the panel is
+absent rather than wrong.
 
 #### What the deployment SLIs do not cover
 

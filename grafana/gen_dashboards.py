@@ -18,18 +18,6 @@ OUT = pathlib.Path(__file__).parent / "dashboards"
 # Control-plane pods carry namespace/pod only; they are selected by pod name.
 CP = 'cluster="$cluster",pod=~"ome-controller-manager.*",pod=~"$pod"'
 
-# kube-state-metrics exports the ome_* CustomResourceState series (see
-# config/monitoring/kube-state-metrics-config.yaml). They describe OME's
-# managed objects, not OME's pods, so they carry the CR's own name/namespace
-# and the KSM pod's identity -- never the controller-manager's. Scoping them
-# by an OME pod name yields an empty result.
-KSM = 'cluster="$cluster",namespace=~"$namespace"'
-
-# Transition states an InferenceService can settle in. InProgress is excluded:
-# it is not an outcome, so counting it as a failure would make every rollout
-# depress the success rate.
-ISVC_SETTLED = "UpToDate|BlockedByFailedLoad|InvalidSpec"
-
 # OME's own long-running components, by pod-name prefix. `redundant` marks a
 # leader-elected or multi-replica component where the meaningful availability
 # question is "was at least one replica up", as opposed to a DaemonSet where
@@ -645,17 +633,16 @@ def router():
 def slo():
     p, y = [], 0
 
-    settled = f'ome_inferenceservice_transition_status{{{KSM},status=~"{ISVC_SETTLED}"}}'
-    converged = f'ome_inferenceservice_transition_status{{{KSM},status="UpToDate"}}'
-    success_ratio = f"sum({converged}) / sum({settled})"
-    # Time-average the ratio across the picker's window rather than reading it
-    # instantaneously, so the tile reports the SLI over the stated period.
-    success_over_range = f"avg_over_time(({success_ratio})[$__range:])"
-
-    ttr = f'ome_isvc_time_to_ready_seconds_bucket{{{KSM}}}'
+    # Every series on this dashboard is exported by the controller-manager, so
+    # they share one selector. The namespace matcher resolves against the same
+    # metric the template variable is populated from, which keeps the filter
+    # self-consistent on a store that renames a colliding `namespace` label to
+    # `exported_namespace`: the variable and the query move together.
+    ttr_sel = f'cluster="$cluster",namespace=~"$namespace"'
+    ttr = f'ome_isvc_time_to_ready_seconds_bucket{{{ttr_sel}}}'
 
     def ttr_quantile(q, extra="", by=""):
-        sel = f'ome_isvc_time_to_ready_seconds_bucket{{{KSM}{extra}}}'
+        sel = f'ome_isvc_time_to_ready_seconds_bucket{{{ttr_sel}{extra}}}'
         grp = f"{by}, le" if by else "le"
         return (f"histogram_quantile({q}, sum by ({grp}) "
                 f"(rate({sel}[$__rate_interval])))")
@@ -668,20 +655,18 @@ def slo():
         return (f'avg_over_time(({agg}(up{{cluster="$cluster",'
                 f'pod=~"{pod_re}"}}))[$__range:])')
 
-    # SLO thresholds. Two nines for a deploy path that a human is waiting on,
-    # three for the control plane that everything else depends on.
-    slo_two_nines = [(None, "red"), (0.95, "yellow"), (0.99, "green")]
+    # Three nines for the control plane that everything else depends on.
     slo_three_nines = [(None, "red"), (0.99, "yellow"), (0.999, "green")]
 
     p.append(row("SLO summary — over the selected time range", y)); y += 1
-    p.append(panel("stat", "Deployment success rate", [target(success_over_range)],
-                   (0, y, 6, 4), unit="percentunit", decimals=2,
-                   thresholds=slo_two_nines,
-                   desc="Share of InferenceServices in a settled state that settled "
-                        "healthy: UpToDate over (UpToDate + BlockedByFailedLoad + "
-                        "InvalidSpec). InProgress is deliberately excluded — it is "
-                        "not an outcome, and counting it would make every rollout "
-                        "look like a partial failure. Target 99%."))
+    p.append(panel("stat", "Deployments observed",
+                   [target(f'sum(increase(ome_isvc_time_to_ready_seconds_count'
+                           f'{{{ttr_sel}}}[$__range]))')],
+                   (0, y, 6, 4), decimals=0,
+                   desc="Deployments that reached Ready in the window. This is the "
+                        "sample count behind every percentile on this dashboard — "
+                        "read it first, because a p95 over a handful of deploys is "
+                        "noise rather than a signal."))
     p.append(panel("stat", "Time to ready p95 · first deploy",
                    [target(ttr_quantile(0.95, extra=',deploy_kind="create"'))],
                    (6, y, 6, 4), unit="s",
@@ -704,34 +689,11 @@ def slo():
                         "replica scraping successfully."))
     y += 4
 
-    p.append(row("SLI 1 — Deployment success rate", y)); y += 1
-    p.append(panel("timeseries", "Success rate", [target(success_ratio, "Success rate")],
-                   (0, y, 12, 8), unit="percentunit", minv=0, maxv=1,
-                   thresholds=slo_two_nines,
-                   desc="The ratio over time. Dips are ISVCs entering "
-                        "BlockedByFailedLoad or InvalidSpec, not ISVCs mid-rollout."))
-    p.append(panel("timeseries", "InferenceServices by transition status", [target(
-        f'sum by (status) (ome_inferenceservice_transition_status{{{KSM}}})',
-        "{{status}}")], (12, y, 12, 8), stacked=True,
-        desc="The whole population, including InProgress. A band that stops "
-             "draining is a rollout that stopped making progress."))
-    p.append(panel("timeseries", "Stalled — InProgress for 30m without interruption",
-                   [target(f'count(min_over_time('
-                           f'ome_inferenceservice_transition_status{{{KSM},'
-                           f'status="InProgress"}}[30m]) == 1)', "Stalled ISVCs")],
-                   (0, y + 8, 12, 7), thresholds=[(None, "green"), (1, "red")],
-                   desc="A stall emits nothing new, so it cannot be caught by a rate. "
-                        "min_over_time == 1 means the ISVC held InProgress for every "
-                        "sample in the window — it never briefly settled."))
-    p.append(panel("table", "Not converged, by InferenceService", [target(
-        f'ome_inferenceservice_transition_status{{{KSM},'
-        f'status=~"InProgress|BlockedByFailedLoad|InvalidSpec"}} == 1',
-        instant=True, table=True)], (12, y + 8, 12, 7),
-        desc="Who to go look at. BlockedByFailedLoad points at the model import "
-             "path; InvalidSpec is a spec the webhook admitted but the reconciler "
-             "cannot act on; InProgress is only interesting if it persists."))
-    y += 15
-
+    # SLI 1 (deployment success rate) has no panels here. It was built on
+    # ome_inferenceservice_transition_status, which reports only on the
+    # RawDeployment path -- see the note panel at the bottom. Numbering follows
+    # the operational model, so SLI 2 keeps its number rather than being
+    # renumbered into the gap.
     p.append(row("SLI 2 — Deployment latency (time to ready)", y)); y += 1
     p.append(panel("timeseries", "Time to ready percentiles", [
         target(ttr_quantile(0.50), "p50"),
@@ -753,12 +715,12 @@ def slo():
         f'(rate({ttr}[$__rate_interval]))))', "{{namespace}}/{{isvc}}")],
         (0, y + 8, 12, 7), unit="s",
         desc="Which workloads carry the tail."))
-    p.append(panel("timeseries", "Deployments observed", [target(
-        f'sum(rate(ome_isvc_time_to_ready_seconds_count{{{KSM}}}[$__rate_interval])) '
+    p.append(panel("timeseries", "Deploy rate", [target(
+        f'sum(rate(ome_isvc_time_to_ready_seconds_count{{{ttr_sel}}}[$__rate_interval])) '
         f'* 3600', "Deploys/hour")], (12, y + 8, 12, 7),
-        desc="Sample volume behind the percentiles above. A p99 computed from a "
-             "handful of deploys an hour is noise, not a signal — check this before "
-             "treating a latency change as a regression."))
+        desc="Sample volume behind the percentiles above, over time. A p99 computed "
+             "from a handful of deploys an hour is noise, not a signal — check this "
+             "before treating a latency change as a regression."))
     y += 15
 
     p.append(row("Component uptime", y)); y += 1
@@ -801,10 +763,14 @@ def slo():
             "**This is not the bundled Prometheus.** The chart's Prometheus keeps "
             "`retention: 30m` and exists to feed KEDA; it cannot answer a question "
             "about yesterday. Point this dashboard at your long-retention store.\n\n"
-            "**SLI 1 needs kube-state-metrics** running with "
-            "`config/monitoring/kube-state-metrics-config.yaml` applied and "
-            "`--custom-resource-state-config-file` set. Without it the "
-            "`ome_inferenceservice_transition_status` panels are empty.\n\n"
+            "**SLI 1 (deployment success rate) is not on this dashboard.** It was "
+            "built on `ome_inferenceservice_transition_status`, which reports "
+            "`status.modelStatus.transitionStatus` — a field written only by the "
+            "RawDeployment status path. Nothing on the OMENative path sets it, so "
+            "the ratio silently excluded every OMENative InferenceService while "
+            "still reporting a confident percentage. Measuring it correctly needs a "
+            "counter on the readiness edge, which both deployment modes share; "
+            "until that exists, no number here is better than a wrong one.\n\n"
             "**SLI 2 needs the OME control-plane pods scraped** — "
             "`ome_isvc_time_to_ready_seconds` is exported by the controller-manager.\n\n"
             "There is no warm/cold model split here. Model-resident nodes are "
@@ -816,14 +782,16 @@ def slo():
 
     return dashboard(
         "ome-slo", "OME · SLO",
-        "Service-level indicators for OME deployments: did the InferenceService the "
-        "user asked for converge, how long did it take, and were the components "
-        "responsible for it actually running. Requires a long-retention Prometheus "
-        "scraping both the OME control plane and kube-state-metrics.",
+        "Service-level indicators for OME deployments: how long a deployment took to "
+        "reach Ready, and whether the components responsible for it were running. "
+        "Requires a long-retention Prometheus scraping the OME control plane. "
+        "Deployment success rate is deliberately absent — see the note panel.",
         [var_ds(),
          var_query("cluster", "Cluster", "label_values(up, cluster)"),
+         # Sourced from the same metric the panels query, so the variable and the
+         # filter agree even on a store that renames a colliding namespace label.
          var_query("namespace", "Namespace",
-                   'label_values(ome_inferenceservice_transition_status'
+                   'label_values(ome_isvc_time_to_ready_seconds_count'
                    '{cluster="$cluster"}, namespace)',
                    multi=True, include_all=True, all_value=".*")],
         p, ["ome", "slo", "on-call"])
