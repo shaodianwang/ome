@@ -329,3 +329,60 @@ func TestCapacityPoller_PollAllRecordsPerHome(t *testing.T) {
 		t.Fatalf("notified %d times (%v), want 1 for the shared map", len(notified), notified)
 	}
 }
+
+func TestCapacityConfig_ValidateFormats(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*CapacityConfig)
+		wantErr bool
+	}{
+		{"default format is Report", func(c *CapacityConfig) { c.Format = "" }, false},
+		{"explicit Report is valid", func(c *CapacityConfig) { c.Format = FormatReport }, false},
+		// A format this build does not carry is a startup error, not a silent
+		// fallback: ignoring it would drop the operator's intent and leave the
+		// plan in force with no explanation.
+		{"unregistered format rejected", func(c *CapacityConfig) { c.Format = "Bogus" }, true},
+		// Report needs no format-specific settings, so an option here is either
+		// a typo or a misunderstanding; either way it must not be ignored.
+		{"options rejected for Report", func(c *CapacityConfig) {
+			c.Options = map[string]string{"unitsPerReplica": "4"}
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testCapacityConfig()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() = nil, want error for %+v", cfg)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestCapacityFormatRegistry_DefaultBuildCarriesOnlyTheBuiltIn(t *testing.T) {
+	// The deletion contract: a build without the optional tree registers
+	// exactly the built-in format. If this fails under a plain `go test`, an
+	// optional format has leaked into the default build.
+	got := RegisteredCapacityFormats()
+	if len(got) != 1 || got[0] != string(FormatReport) {
+		t.Fatalf("default build registered %v, want only %q", got, FormatReport)
+	}
+}
+
+func TestRegisterCapacityFormat_RejectsDuplicatesAndIncompletePlugins(t *testing.T) {
+	// Two packages silently competing for one name would make the active
+	// decoder depend on import order.
+	if err := RegisterCapacityFormat(FormatReport, CapacityFormatPlugin{Decode: decodeReport}); err == nil {
+		t.Fatal("re-registering an existing format succeeded, want an error")
+	}
+	if err := RegisterCapacityFormat("NoDecoder", CapacityFormatPlugin{}); err == nil {
+		t.Fatal("registering a plugin with no Decode succeeded, want an error")
+	}
+	if err := RegisterCapacityFormat("", CapacityFormatPlugin{Decode: decodeReport}); err == nil {
+		t.Fatal("registering an empty name succeeded, want an error")
+	}
+}

@@ -176,6 +176,16 @@ type CapacityConfig struct {
 	// Method is the HTTP method for the capacity request.
 	Method string `json:"method,omitempty"`
 
+	// Format names the response shape the home answers with. Empty means
+	// "Report", the built-in servable-count object. Other formats come from
+	// optional packages compiled into the binary; naming one this build does
+	// not carry is a startup error rather than a silent fallback.
+	Format string `json:"format,omitempty"`
+
+	// Options carries settings specific to the selected format, interpreted by
+	// that format and opaque to the control plane.
+	Options map[string]string `json:"options,omitempty"`
+
 	// Period is how often each home is polled, as a duration string.
 	Period string `json:"period,omitempty"`
 

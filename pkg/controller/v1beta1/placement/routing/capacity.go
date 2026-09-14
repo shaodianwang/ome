@@ -2,7 +2,6 @@ package routing
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -219,25 +218,43 @@ func (c *CapacityPoller) pollOne(ctx context.Context, tgt Target) (*int32, strin
 	if err != nil {
 		return nil, fmt.Sprintf("reading capacity response: %v", err)
 	}
-	var report CapacityReport
-	if err := json.Unmarshal(body, &report); err != nil {
-		return nil, fmt.Sprintf("capacity response is not a valid report: %v", err)
+	report, reason := c.Config.decode(body)
+	if reason != "" {
+		return nil, reason
 	}
 	if report.Servable < 0 {
 		// Malformed, not an instruction to serve nothing. A parse or arithmetic
 		// bug on the home must not be able to black-hole it.
 		return nil, fmt.Sprintf("capacity report is negative (%d)", report.Servable)
 	}
-	if report.ObservedAt.IsZero() {
-		// Without a stamp a frozen reporter is indistinguishable from a fresh
-		// one, so the staleness guard below could never fire.
-		return nil, "capacity report has no observedAt stamp"
-	}
 	if age := time.Since(report.ObservedAt); age > c.Config.MaxAge {
 		return nil, fmt.Sprintf("capacity report is stale (observed %s ago, max %s)", age.Truncate(time.Second), c.Config.MaxAge)
 	}
 	v := report.Servable
 	return &v, ""
+}
+
+// decode turns a response body into a report in servable units by handing it to
+// the configured format, or explains why it cannot.
+func (c CapacityConfig) decode(body []byte) (CapacityReport, string) {
+	name := c.resolvedFormat()
+	plugin, ok := lookupCapacityFormat(name)
+	if !ok {
+		// Validate rejects this at startup, so reaching here means the registry
+		// changed under us. Fall open rather than guess at the shape.
+		return CapacityReport{}, fmt.Sprintf("capacity format %q is not registered in this build", name)
+	}
+	report, reason := plugin.Decode(body, c)
+	if reason != "" {
+		return CapacityReport{}, reason
+	}
+	if report.ObservedAt.IsZero() {
+		// A format that does not stamp its own reading gets one at receipt, so
+		// the staleness comparison below has something to work with. Note this
+		// makes MaxAge inert for such a format: the value is always ~0 old.
+		report.ObservedAt = time.Now()
+	}
+	return report, ""
 }
 
 // record stores a home's outcome and reports whether the applied ceiling

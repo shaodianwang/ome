@@ -117,6 +117,8 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 			Capacity: placementrouting.CapacityConfig{
 				Path:    rt.Capacity.Path,
 				Method:  rt.Capacity.Method,
+				Format:  placementrouting.CapacityFormat(rt.Capacity.Format),
+				Options: rt.Capacity.Options,
 				Period:  rt.Capacity.PeriodDuration(),
 				Timeout: rt.Capacity.TimeoutDuration(),
 				MaxAge:  rt.Capacity.MaxAgeDuration(),
@@ -299,7 +301,11 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 	// Always wired: when disabled the controller is a no-op that reaps any
 	// TrafficMap it previously created, so toggling the feature (a restart, since
 	// config loads once) reverses cleanly without stranding routing tables.
-	setupLog.Info("Setting up multi-cluster TrafficMap routing controller", "enabled", w.routing.Enabled)
+	setupLog.Info("Setting up multi-cluster TrafficMap routing controller", "enabled", w.routing.Enabled,
+		// Optional capacity formats are compiled in, so log what this build
+		// carries: a binary missing one should be obvious here rather than at
+		// the first poll.
+		"capacityFormats", placementrouting.RegisteredCapacityFormats())
 	if err := (&placementrouting.Reconciler{
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("PlacementRouting"),

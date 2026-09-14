@@ -195,6 +195,18 @@ type CapacityConfig struct {
 	// Method is the HTTP method for the capacity request.
 	Method string
 
+	// Format names the response shape the home answers with. Empty means
+	// FormatReport, the built-in shape. Other formats come from optional
+	// packages compiled into the binary; naming one this build does not carry
+	// is a startup error, not a silent fallback.
+	Format CapacityFormat
+
+	// Options carries format-specific settings, interpreted by the selected
+	// format and opaque here. Keeping them out of this struct is what lets an
+	// optional format own its own knobs -- and lets that format be removed
+	// without leaving a field behind that nothing reads.
+	Options map[string]string
+
 	// Period is how often each home is polled.
 	Period time.Duration
 
@@ -211,6 +223,14 @@ type CapacityConfig struct {
 // IsEnabled reports whether endpoint-reported capacity is configured.
 func (c CapacityConfig) IsEnabled() bool {
 	return c.Path != ""
+}
+
+// resolvedFormat returns the configured format, treating empty as FormatReport.
+func (c CapacityConfig) resolvedFormat() CapacityFormat {
+	if c.Format == "" {
+		return FormatReport
+	}
+	return c.Format
 }
 
 // Validate rejects a partially-configured capacity source, for the same reason
@@ -245,6 +265,18 @@ func (c CapacityConfig) Validate() error {
 		// flap between applied and fallen-open on every cycle.
 		return fmt.Errorf("routing.capacity.maxAge (%s) must be at least routing.capacity.period (%s)",
 			c.MaxAge, c.Period)
+	}
+	name := c.resolvedFormat()
+	plugin, ok := lookupCapacityFormat(name)
+	if !ok {
+		// Distinguish a typo from a build that simply does not carry the
+		// format: silently ignoring the setting would drop the operator's
+		// intent and leave the plan in force with no explanation.
+		return fmt.Errorf("routing.capacity.format %q is not registered in this build (available: %v)",
+			name, RegisteredCapacityFormats())
+	}
+	if plugin.Validate != nil {
+		return plugin.Validate(c)
 	}
 	return nil
 }

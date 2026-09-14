@@ -344,9 +344,15 @@ helm-version-update: yq ## 🔄 Update Helm chart version
 ##@ 🛠️  Build
 
 .PHONY: ome-manager
+# Optional, deployment-specific extensions under meta-internal/ compile in only
+# under this tag. Empty builds the repository's own feature set; the tag matches
+# no files once that directory is removed, so it degrades to a no-op rather than
+# an error.
+GO_BUILD_TAGS ?= meta_internal
+
 ome-manager: xet-build ## 🏗️  Build ome-manager binary.
 	@echo "🏗️  Building ome-manager..."
-	$(GO_BUILD_ENV) $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/manager ./cmd/manager
+	$(GO_BUILD_ENV) $(GO_CMD) build -tags "$(GO_BUILD_TAGS)" -ldflags="$(LD_FLAGS)" -o bin/manager ./cmd/manager
 	@echo "✅ Build complete"
 
 .PHONY: ome-agent
