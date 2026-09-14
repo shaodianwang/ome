@@ -101,6 +101,17 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 			GlobalGateway:      ep.GlobalGateway,
 			RouteNamespace:     ep.RouteNamespace,
 			BackendPort:        int32(ep.BackendPort),
+			GatewayBackend: placementendpoint.GatewayBackendConfig{
+				RewriteHostname: ep.GatewayBackend.RewriteHostname,
+				TLS: placementendpoint.GatewayBackendTLSConfig{
+					Enabled:                 ep.GatewayBackend.TLS.Enabled,
+					WellKnownCACertificates: ep.GatewayBackend.TLS.WellKnownCACertificates,
+				},
+				EndpointSlices: placementendpoint.GatewayBackendEndpointSliceConfig{
+					Enabled:                ep.GatewayBackend.EndpointSlices.Enabled,
+					AddressRefreshInterval: ep.GatewayBackend.EndpointSlices.AddressRefreshIntervalDuration(),
+				},
+			},
 		},
 		routing: placementrouting.Config{
 			Enabled: rt.Enabled,
@@ -286,10 +297,16 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 	utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
 	setupLog.Info("Setting up multi-cluster endpoint publisher")
 	if err := (&placementendpoint.Reconciler{
-		Client:    mgr.GetClient(),
-		Log:       ctrl.Log.WithName("controllers").WithName("PlacementEndpoint"),
-		Publisher: placementendpoint.NewGatewayAPIPublisher(mgr.GetClient(), w.endpoint),
-		Config:    w.endpoint,
+		Client: mgr.GetClient(),
+		Log:    ctrl.Log.WithName("controllers").WithName("PlacementEndpoint"),
+		Publisher: placementendpoint.NewGatewayAPIPublisher(
+			mgr.GetClient(),
+			w.endpoint,
+			placementendpoint.WithBackendAddressResolver(
+				placementendpoint.NewGatewayAddressResolver(clusterManager),
+			),
+		),
+		Config: w.endpoint,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create PlacementEndpoint controller: %w", err)
 	}

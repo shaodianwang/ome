@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // MultiClusterConfigName is the inferenceservice-config ConfigMap key holding
@@ -135,11 +137,54 @@ type EndpointConfig struct {
 	// published HTTPRoute attaches to. Empty makes the publisher a no-op.
 	GlobalGateway string `json:"globalGateway,omitempty"`
 	// RouteNamespace is the namespace for the published HTTPRoute and backing
-	// Service. Empty uses the ISVC's own namespace.
+	// resources. Empty uses the ISVC's own namespace.
 	RouteNamespace string `json:"routeNamespace,omitempty"`
 	// BackendPort is the port on the winner cluster's ingress the global host
 	// forwards to.
 	BackendPort int `json:"backendPort,omitempty"`
+	// GatewayBackend configures hostname rewriting, backend TLS, and an optional
+	// direct-address fallback while retaining ExternalName as the baseline.
+	GatewayBackend EndpointGatewayBackendConfig `json:"gatewayBackend,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// EndpointGatewayBackendConfig configures the standard Gateway API behavior
+// used when forwarding from the global Gateway to workload cluster Gateways.
+type EndpointGatewayBackendConfig struct {
+	// RewriteHostname replaces the forwarded Host header with the selected
+	// workload cluster ingress hostname.
+	RewriteHostname bool `json:"rewriteHostname,omitempty"`
+	// TLS configures backend TLS independently of address resolution.
+	TLS EndpointGatewayBackendTLSConfig `json:"tls,omitempty"`
+	// EndpointSlices configures the direct-address fallback for environments
+	// where ExternalName DNS does not return a routable Gateway address.
+	EndpointSlices EndpointGatewayBackendEndpointSliceConfig `json:"endpointSlices,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// EndpointGatewayBackendTLSConfig configures BackendTLSPolicy publication.
+type EndpointGatewayBackendTLSConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// WellKnownCACertificates is the Gateway API trust-root set written to each
+	// BackendTLSPolicy. The currently supported standard value is "System".
+	WellKnownCACertificates string `json:"wellKnownCACertificates,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// EndpointGatewayBackendEndpointSliceConfig configures direct Gateway address
+// publication through EndpointSlices.
+type EndpointGatewayBackendEndpointSliceConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// AddressRefreshInterval is how often child Gateway status addresses are
+	// refreshed.
+	AddressRefreshInterval string `json:"addressRefreshInterval,omitempty"`
+}
+
+// AddressRefreshIntervalDuration returns the parsed refresh interval, or zero
+// when absent or malformed. MultiClusterConfig.Validate rejects a malformed or
+// missing value when EndpointSlice publication is enabled.
+func (c EndpointGatewayBackendEndpointSliceConfig) AddressRefreshIntervalDuration() time.Duration {
+	return parseDurationOrZero(c.AddressRefreshInterval)
 }
 
 // +kubebuilder:object:generate=false
@@ -328,26 +373,27 @@ func parseMultiClusterConfig(configMap *v1.ConfigMap) (*MultiClusterConfig, erro
 // composition root calls this so the deploy fails loudly instead.
 func (c MultiClusterConfig) Validate() error {
 	durations := map[string]string{
-		"workloadCluster.perCallTimeout":       c.WorkloadCluster.PerCallTimeout,
-		"workloadCluster.healthInterval":       c.WorkloadCluster.HealthInterval,
-		"workloadCluster.connectionGrace":      c.WorkloadCluster.ConnectionGrace,
-		"workloadCluster.eventsBatchPeriod":    c.WorkloadCluster.EventsBatchPeriod,
-		"workloadCluster.establishInitial":     c.WorkloadCluster.EstablishInitial,
-		"workloadCluster.establishMax":         c.WorkloadCluster.EstablishMax,
-		"workloadCluster.reconnectRetryMax":    c.WorkloadCluster.ReconnectRetryMax,
-		"workloadCluster.funnelResyncInterval": c.WorkloadCluster.FunnelResyncInterval,
-		"placement.requeueInterval":            c.Placement.RequeueInterval,
-		"placement.gcInterval":                 c.Placement.GCInterval,
-		"placement.fanoutTimeout":              c.Placement.FanoutTimeout,
-		"placement.winnerLostGrace":            c.Placement.WinnerLostGrace,
-		"placement.statusBatchPeriod":          c.Placement.StatusBatchPeriod,
-		"placement.statusSafetyRequeue":        c.Placement.StatusSafetyRequeue,
-		"placement.dispatcherRoundTimeout":     c.Placement.DispatcherRoundTimeout,
-		"routing.probe.period":                 c.Routing.Probe.Period,
-		"routing.probe.timeout":                c.Routing.Probe.Timeout,
-		"routing.capacity.period":              c.Routing.Capacity.Period,
-		"routing.capacity.timeout":             c.Routing.Capacity.Timeout,
-		"routing.capacity.maxAge":              c.Routing.Capacity.MaxAge,
+		"workloadCluster.perCallTimeout":                                c.WorkloadCluster.PerCallTimeout,
+		"workloadCluster.healthInterval":                                c.WorkloadCluster.HealthInterval,
+		"workloadCluster.connectionGrace":                               c.WorkloadCluster.ConnectionGrace,
+		"workloadCluster.eventsBatchPeriod":                             c.WorkloadCluster.EventsBatchPeriod,
+		"workloadCluster.establishInitial":                              c.WorkloadCluster.EstablishInitial,
+		"workloadCluster.establishMax":                                  c.WorkloadCluster.EstablishMax,
+		"workloadCluster.reconnectRetryMax":                             c.WorkloadCluster.ReconnectRetryMax,
+		"workloadCluster.funnelResyncInterval":                          c.WorkloadCluster.FunnelResyncInterval,
+		"placement.requeueInterval":                                     c.Placement.RequeueInterval,
+		"placement.gcInterval":                                          c.Placement.GCInterval,
+		"placement.fanoutTimeout":                                       c.Placement.FanoutTimeout,
+		"placement.winnerLostGrace":                                     c.Placement.WinnerLostGrace,
+		"placement.statusBatchPeriod":                                   c.Placement.StatusBatchPeriod,
+		"placement.statusSafetyRequeue":                                 c.Placement.StatusSafetyRequeue,
+		"placement.dispatcherRoundTimeout":                              c.Placement.DispatcherRoundTimeout,
+		"endpoint.gatewayBackend.endpointSlices.addressRefreshInterval": c.Endpoint.GatewayBackend.EndpointSlices.AddressRefreshInterval,
+		"routing.probe.period":                                          c.Routing.Probe.Period,
+		"routing.probe.timeout":                                         c.Routing.Probe.Timeout,
+		"routing.capacity.period":                                       c.Routing.Capacity.Period,
+		"routing.capacity.timeout":                                      c.Routing.Capacity.Timeout,
+		"routing.capacity.maxAge":                                       c.Routing.Capacity.MaxAge,
 	}
 	keys := make([]string, 0, len(durations))
 	for k := range durations {
@@ -378,6 +424,26 @@ func (c MultiClusterConfig) Validate() error {
 	// otherwise publish nothing and report nothing.
 	if c.Endpoint.GlobalGateway != "" && c.Endpoint.BackendPort <= 0 {
 		errs = append(errs, fmt.Errorf("endpoint.backendPort: must be set when endpoint.globalGateway is configured (%q)", c.Endpoint.GlobalGateway))
+	}
+	gb := c.Endpoint.GatewayBackend
+	if gb.RewriteHostname || gb.TLS.Enabled || gb.EndpointSlices.Enabled {
+		if strings.TrimSpace(c.Endpoint.GlobalGateway) == "" {
+			errs = append(errs, errors.New("endpoint.globalGateway: must be set when gateway backend features are enabled"))
+		}
+	}
+	if gb.TLS.Enabled {
+		if gb.TLS.WellKnownCACertificates != string(gatewayapiv1.WellKnownCACertificatesSystem) {
+			errs = append(errs, fmt.Errorf("endpoint.gatewayBackend.tls.wellKnownCACertificates: %q must be %q when enabled", gb.TLS.WellKnownCACertificates, gatewayapiv1.WellKnownCACertificatesSystem))
+		}
+	} else if gb.TLS.WellKnownCACertificates != "" {
+		errs = append(errs, errors.New("endpoint.gatewayBackend.tls.enabled: must be true when TLS settings are supplied"))
+	}
+	if gb.EndpointSlices.Enabled {
+		if strings.TrimSpace(gb.EndpointSlices.AddressRefreshInterval) == "" {
+			errs = append(errs, errors.New("endpoint.gatewayBackend.endpointSlices.addressRefreshInterval: must be set when enabled"))
+		}
+	} else if gb.EndpointSlices.AddressRefreshInterval != "" {
+		errs = append(errs, errors.New("endpoint.gatewayBackend.endpointSlices.enabled: must be true when EndpointSlice settings are supplied"))
 	}
 	return errors.Join(errs...)
 }

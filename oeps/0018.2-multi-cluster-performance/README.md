@@ -86,13 +86,17 @@ A subtlety to settle at wiring time: once the derived `InferenceService` is a ca
 **[planned]** Split nomination from execution: a `status.placement` nominated-cluster list written by a nomination step, with the existing clone/delete executor acting on it; add an `Incremental` dispatcher (batches of N, one round-timeout) alongside `AllAtOnce` to bound remote churn at high cluster counts (mirror Kueue `incrementaldispatcher.go`).
 
 ### Endpoint publisher
-**[done]** New package `placement/endpoint` with an `EndpointPublisher` interface + a Gateway API HTTPRoute backend: it programs the global host to resolve to the current winner's ingress (an `ExternalName` Service aliasing the off-cluster winner host + an HTTPRoute on the configured global gateway), repoints on re-placement, and cleans up via a finalizer. All values config-driven; an unconfigured global gateway degrades to a no-op. Caveats (ExternalName backend support, cross-namespace `ReferenceGrant`, the winner URL being externally resolvable) are documented at the call site and remain the OEP-0018 "largest integration unknown".
+**[done]** New package `placement/endpoint` with an `EndpointPublisher` interface + a Gateway API HTTPRoute backend: it programs the global host to resolve to every serving home's ingress, applies the TrafficMap weights, repoints on re-placement, and cleans up via a finalizer. The portable default uses an `ExternalName` Service. Operators independently enable per-backend hostname rewrites and BackendTLSPolicies for HTTPS origination. A separate direct-address fallback reads the matching remote HTTPRoute and its parent `Gateway.status.addresses`, then publishes those literal IPs through EndpointSlices. The publisher periodically refreshes Gateway addresses; it does not take a one-time DNS answer as durable routing state. All values are config-driven, and an unconfigured global gateway degrades to a no-op.
 
 ### Multi-node gang
 **[planned / open]** OME's scheduler-plugins `PodGroup` and Kueue's pod-group both gate a Size>1 Instance's pods; their cooperation is untested and is OEP-0018's Alpha-blocking open question. No code yet; must be proven before Alpha for PD-disaggregated/multi-node.
 
 ## Test Plan
 
+- **Endpoint publisher (done):** unit coverage for per-backend hostname rewrites,
+  remote Gateway selection, IPv4/IPv6 EndpointSlices, BackendTLSPolicy SNI and
+  trust roots, address rotation, idempotency, stale-resource pruning, and
+  teardown.
 - **Multi-cluster envtest (done):** 1 control + 2 member envtest apiservers in one process; a source ISVC fans out to both members, winner selection + loser deletion + status flowback, re-placement when the winner's derived is deleted, and negative kubeconfig paths — all hermetic, no KIND/Docker. This is the local bed for every change above. (Framework details in OEP-0020.)
 - **Performance harness (done):** the local envtest + fake-executor + `rangespec.yaml` checker (OEP-0020) gives a regression gate for reconcile throughput as the cache/concurrency changes land.
 - **KIND e2e (planned, authoritative):** the ≥2-cluster suite against real Kueue (race, preemption, gated-wait, winner-loss re-placement, multi-node gang) — the paths that only reproduce against real Kueue.
@@ -107,7 +111,7 @@ A subtlety to settle at wiring time: once the derived `InferenceService` is a ca
 
 - **Cache memory per cluster.** An informer over the derived `InferenceService` per worker cluster costs memory ∝ (#clusters × #derived); bounded because only that one low-cardinality kind is cached (Pods are banned) and scoped by the origin label.
 - **Behavior change: winner-lost is no longer instant.** Re-placement now waits the grace window on a connected-but-absent winner (set grace=0 to restore the old behavior); two existing placement tests were updated to the new contract.
-- **Endpoint backend portability.** The HTTPRoute + ExternalName approach is vendor-neutral but some Gateway implementations restrict ExternalName backends or need a `ReferenceGrant`; the interface lets a DNS/GSLB backend replace it.
+- **Endpoint backend portability.** The HTTPRoute + Service approach is vendor-neutral, but backend-level hostname rewrite and BackendTLSPolicy are extended Gateway API features. The direct-address fallback also requires permission to read the generated HTTPRoute and Gateway from each workload cluster. The interface lets a DNS/GSLB backend replace it.
 
 ## Alternatives
 
@@ -119,7 +123,7 @@ A subtlety to settle at wiring time: once the derived `InferenceService` is a ca
 
 - **Watch-funnel cutover.** When the funnel lands, how long a safety requeue do we keep behind it, and do we feature-gate the poll→event switch? Owner: TBD.
 - **GC vs cache.** Should the GC's remote derived-list bypass the cache (a dedicated uncached client) or accept the cold-cache under-report (safe, self-correcting)? Decide at wiring. Owner: TBD.
-- **Endpoint backend.** Is HTTPRoute+ExternalName sufficient for the target environments, or is a DNS/GSLB backend needed first? This is OEP-0018's largest integration unknown. Owner: TBD.
+- **Endpoint backend.** Which environments can stay on ExternalName-only publication, and which require direct Gateway addresses? A DNS/GSLB publisher remains an option for networks where the control-plane Gateway cannot reach workload Gateway addresses. Owner: TBD.
 - **Multi-node gang.** Do `PodGroup` and Kueue's pod-group cooperate for a Size>1 Instance, or deadlock/double-count? Must be proven before Alpha. Owner: TBD.
 
 See also: OEP-0018 (the alpha this hardens), OEP-0018.1 (the sibling fractional-admission scale-out follow-up — a complementary axis), and OEP-0020 (the multi-cluster + perf test beds).

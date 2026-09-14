@@ -60,7 +60,12 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 		},
 		"endpoint": {
 			"globalHostTemplate": "{{.Name}}.global", "globalGateway": "ome/gw",
-			"routeNamespace": "ome-routes", "backendPort": 8080
+			"routeNamespace": "ome-routes", "backendPort": 443,
+			"gatewayBackend": {
+				"rewriteHostname": true,
+				"tls": {"enabled": true, "wellKnownCACertificates": "System"},
+				"endpointSlices": {"enabled": true, "addressRefreshInterval": "1m"}
+			}
 		},
 		"routing": { "enabled": true }
 	}`)
@@ -95,7 +100,12 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 	assert.Equal(t, "{{.Name}}.global", w.endpoint.GlobalHostTemplate)
 	assert.Equal(t, "ome/gw", w.endpoint.GlobalGateway)
 	assert.Equal(t, "ome-routes", w.endpoint.RouteNamespace)
-	assert.Equal(t, int32(8080), w.endpoint.BackendPort)
+	assert.Equal(t, int32(443), w.endpoint.BackendPort)
+	assert.True(t, w.endpoint.GatewayBackend.RewriteHostname)
+	assert.True(t, w.endpoint.GatewayBackend.TLS.Enabled)
+	assert.Equal(t, "System", w.endpoint.GatewayBackend.TLS.WellKnownCACertificates)
+	assert.True(t, w.endpoint.GatewayBackend.EndpointSlices.Enabled)
+	assert.Equal(t, time.Minute, w.endpoint.GatewayBackend.EndpointSlices.AddressRefreshInterval)
 
 	// Routing.
 	assert.True(t, w.routing.Enabled)

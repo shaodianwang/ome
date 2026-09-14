@@ -3,6 +3,7 @@ package endpoint
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,6 +79,25 @@ func TestReconcile_PlacedPublishesAndFinalizes(t *testing.T) {
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "prod"}, got))
 	assert.True(t, controllerutil.ContainsFinalizer(got, EndpointFinalizer))
+}
+
+func TestReconcile_GatewayBackendSchedulesAddressRefresh(t *testing.T) {
+	cfg := gatewayBackendConfig()
+	cfg.GatewayBackend.EndpointSlices.AddressRefreshInterval = 45 * time.Second
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(placedISVC("cluster-a", "svc.prod.cloud-a.example")).Build()
+	publisher := NewGatewayAPIPublisher(c, cfg, WithBackendAddressResolver(staticBackendAddressResolver{
+		"cluster-a": {{Address: "192.0.2.10", Type: "IPv4"}},
+	}))
+	r := &Reconciler{Client: c, Log: log.Log, Publisher: publisher, Config: cfg}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "svc", Namespace: "prod"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Second, result.RequeueAfter)
 }
 
 func TestReconcile_RepointsOnReplacement(t *testing.T) {

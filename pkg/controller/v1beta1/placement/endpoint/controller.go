@@ -40,7 +40,9 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ome.io,resources=trafficmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=backendtlspolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	isvc := &v1beta1.InferenceService{}
@@ -94,6 +96,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	r.Log.Info("endpoint published", "isvc", req.String(), "backend", r.Publisher.Name(),
 		"globalHost", target.GlobalHost, "homes", len(target.Homes))
+	if r.Config.GatewayBackend.EndpointSlices.Enabled && r.Config.GatewayBackend.EndpointSlices.AddressRefreshInterval > 0 {
+		return ctrl.Result{RequeueAfter: r.Config.GatewayBackend.EndpointSlices.AddressRefreshInterval}, nil
+	}
 	return ctrl.Result{}, nil
 }
 

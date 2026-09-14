@@ -34,30 +34,44 @@ const (
 
 // GatewayAPIPublisher implements EndpointPublisher by programming, on the
 // control-plane cluster, one Gateway API HTTPRoute per InferenceService whose
-// backends are ExternalName Services aliasing each serving workload cluster's
-// ingress host. Because the homes' ingresses live on other clusters, an
-// ExternalName Service is the portable, implementation-agnostic way to name an
-// off-cluster backend a Gateway API HTTPRoute can reference (no vendor-specific
-// external-backend CRD).
+// backends are Services representing each serving workload cluster's ingress
+// host. In the portable default mode those Services are ExternalName aliases.
+// Optional gateway-backend settings add per-home hostname rewrites, backend TLS,
+// and direct addresses through EndpointSlices without a vendor-specific
+// external-backend CRD.
 //
 // Single mode yields one backend Service and a single-backendRef route; All/Split
 // yield one Service per home and a route that load-balances across all of them
-// (equal weight today). As homes come and go the Service set is reconciled — new
-// homes get a Service, departed homes' Services are garbage-collected — and the
-// route's backendRefs track the current set. Teardown removes the route and every
-// per-home Service.
+// using their resolved traffic weights. As homes come and go the Service set is
+// reconciled — new homes get a Service, departed homes' Services are
+// garbage-collected — and the route's backendRefs track the current set.
+// Teardown removes the route and every per-home backing resource.
 type GatewayAPIPublisher struct {
-	client client.Client
-	config Config
+	client          client.Client
+	config          Config
+	addressResolver BackendAddressResolver
 }
 
 var _ EndpointPublisher = (*GatewayAPIPublisher)(nil)
 
+// GatewayAPIPublisherOption configures an optional publisher dependency.
+type GatewayAPIPublisherOption func(*GatewayAPIPublisher)
+
+// WithBackendAddressResolver supplies the resolver used when gateway-backend
+// publication is enabled.
+func WithBackendAddressResolver(resolver BackendAddressResolver) GatewayAPIPublisherOption {
+	return func(p *GatewayAPIPublisher) { p.addressResolver = resolver }
+}
+
 // NewGatewayAPIPublisher constructs the Gateway API backend. The client is the
 // control-plane cluster client (the global gateway and the published resources
 // live there).
-func NewGatewayAPIPublisher(c client.Client, cfg Config) *GatewayAPIPublisher {
-	return &GatewayAPIPublisher{client: c, config: cfg}
+func NewGatewayAPIPublisher(c client.Client, cfg Config, opts ...GatewayAPIPublisherOption) *GatewayAPIPublisher {
+	p := &GatewayAPIPublisher{client: c, config: cfg}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 func (p *GatewayAPIPublisher) Name() string { return "GatewayAPI" }
@@ -106,22 +120,33 @@ func (p *GatewayAPIPublisher) routeNamespace(isvc *v1beta1.InferenceService) str
 	return isvc.Namespace
 }
 
-// Publish reconciles the per-home ExternalName Services and the HTTPRoute so the
+// Publish reconciles the per-home backing resources and the HTTPRoute so the
 // global host load-balances across exactly target.Homes.
 func (p *GatewayAPIPublisher) Publish(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
+	addresses, err := p.resolveBackendAddresses(ctx, isvc, target)
+	if err != nil {
+		return err
+	}
 	desired, err := p.ensureServices(ctx, isvc, target)
+	if err != nil {
+		return err
+	}
+	desiredSlices, desiredPolicies, err := p.ensureGatewayBackendResources(ctx, isvc, target, addresses)
 	if err != nil {
 		return err
 	}
 	if err := p.applyRoute(ctx, isvc, target); err != nil {
 		return err
 	}
+	if err := p.pruneGatewayBackendResources(ctx, isvc, desiredSlices, desiredPolicies); err != nil {
+		return err
+	}
 	return p.pruneServices(ctx, isvc, desired)
 }
 
-// Unpublish deletes the HTTPRoute and every per-home Service this publisher owns
-// for the ISVC. Missing resources are tolerated so a double-teardown (finalizer +
-// a re-queued unplaced pass) is a no-op.
+// Unpublish deletes the HTTPRoute and every per-home resource this publisher
+// owns for the ISVC. Missing resources are tolerated so a double-teardown
+// (finalizer + a re-queued unplaced pass) is a no-op.
 func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	ns := p.routeNamespace(isvc)
 	var errs []error
@@ -140,9 +165,13 @@ func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.Infer
 			errs = append(errs, fmt.Errorf("delete global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
 		}
 	}
+	if err := p.deleteGatewayBackendResources(ctx, isvc); err != nil {
+		errs = append(errs, err)
+	}
 	owned, err := p.ownedServices(ctx, isvc)
 	if err != nil {
-		return errors.Join(append(errs, err)...)
+		errs = append(errs, err)
+		return errors.Join(errs...)
 	}
 	for i := range owned {
 		s := &owned[i]
@@ -227,6 +256,9 @@ func (p *GatewayAPIPublisher) applyService(ctx context.Context, isvc *v1beta1.In
 	}
 	if err != nil {
 		return err
+	}
+	if !p.ownsResource(existing, isvc) {
+		return fmt.Errorf("global backend Service %s/%s belongs to another InferenceService", desired.Namespace, desired.Name)
 	}
 	// Repoint (re-placement) or label drift: update in place. Carry the live
 	// ResourceVersion and preserve the cluster-assigned spec fields we do not own.
@@ -337,7 +369,7 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 		if totalWeight > 0 {
 			weight = h.Weight
 		}
-		refs = append(refs, gatewayapiv1.HTTPBackendRef{
+		ref := gatewayapiv1.HTTPBackendRef{
 			BackendRef: gatewayapiv1.BackendRef{
 				BackendObjectReference: gatewayapiv1.BackendObjectReference{
 					Kind:      ptr.To(gatewayapiv1.Kind(constants.ServiceKind)),
@@ -347,7 +379,16 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 				},
 				Weight: ptr.To(weight),
 			},
-		})
+		}
+		if p.config.GatewayBackend.RewriteHostname {
+			ref.Filters = []gatewayapiv1.HTTPRouteFilter{{
+				Type: gatewayapiv1.HTTPRouteFilterURLRewrite,
+				URLRewrite: &gatewayapiv1.HTTPURLRewriteFilter{
+					Hostname: ptr.To(gatewayapiv1.PreciseHostname(h.BackendHost)),
+				},
+			}}
+		}
+		refs = append(refs, ref)
 	}
 
 	return &gatewayapiv1.HTTPRoute{
