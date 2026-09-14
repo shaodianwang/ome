@@ -119,6 +119,8 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 				Method:  rt.Capacity.Method,
 				Format:  placementrouting.CapacityFormat(rt.Capacity.Format),
 				Options: rt.Capacity.Options,
+				Samples: rt.Capacity.Samples,
+				Quorum:  rt.Capacity.Quorum,
 				Period:  rt.Capacity.PeriodDuration(),
 				Timeout: rt.Capacity.TimeoutDuration(),
 				MaxAge:  rt.Capacity.MaxAgeDuration(),

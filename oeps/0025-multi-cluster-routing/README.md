@@ -547,15 +547,34 @@ workload clusters.
 8. **Where the prober runs.** One control-plane prober, or must the probe
    originate where client traffic actually enters? The second is more faithful and
    materially more machinery; I am not yet convinced the fidelity pays for itself.
-9. **Capacity aggregation across a home's router replicas.** `min`, `max`, or
-   any-responder? The OEP leaned `min` as conservative. **Evidence against that
-   lean:** an existing publisher already solves this problem by skipping failed
-   members and taking the **`max`** successful reading, on the grounds that one
-   lagging replica should not drag a whole home down. Note the two are answering
-   different questions — that publisher is choosing a *weight*, whereas here the
-   value is a *ceiling*, and `max` is the less conservative choice for a ceiling.
-   Unresolved, but no longer a matter of taste: pick one and say which failure
-   it is protecting against.
+9. ~~Capacity aggregation across a home's router replicas.~~ **Resolved:
+   believe the pessimist, but require corroboration — the quorum-th smallest of
+   a bounded window, not the smallest.**
+   *Why not `max`:* an existing publisher answers the same question with `max`,
+   skipping failed members so one lagging replica cannot drag a home down. That
+   is a sound answer to a *different* question, because it is choosing a
+   **weight** while this value is a **ceiling**. The two fail in opposite
+   directions: too high a weight under-uses a home, whereas too high a ceiling
+   sends a home more traffic than it said it could serve. Only the second
+   reaches an engine.
+   *Why not a strict `min` either:* the control plane polls one address per
+   home, so successive polls may reach different reporters behind a balancer.
+   A strict minimum lets whichever reporter is broken set the ceiling alone —
+   one that has lost its watch reports near zero — and hold the home there for
+   the whole window. With a round-robin balancer and a window at least as long
+   as the replica count, the bad reading is always present and the home never
+   recovers. Enlarging the window, the obvious way to smooth, makes that
+   strictly *more* likely.
+   *The rule:* the ceiling is the **quorum-th smallest** reading in the window.
+   A reporter can still always lower it; it just cannot do so alone. This
+   tolerates `quorum-1` misbehaving reporters, and it covers the
+   partially-synced reporter returning a small non-zero figure — which
+   discarding zeros alone would miss. Below the quorum no ceiling applies and
+   the plan stands, since a ceiling drawn from fewer readings than the quorum
+   is precisely what the quorum prevents.
+   *Cost we accept:* a genuine drop is believed only after `quorum` readings,
+   and a unanimous zero is still honoured, so a home that truly can serve
+   nothing can still say so.
 10. **Probe granularity and fan-out.** One probe per entry means (ISVCs × homes)
     probes per period, each potentially a real inference request. Does the shared
     path warrant a per-home probe amortized across ISVCs? `TBD` — depends on

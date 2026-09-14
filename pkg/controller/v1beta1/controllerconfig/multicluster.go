@@ -186,6 +186,16 @@ type CapacityConfig struct {
 	// that format and opaque to the control plane.
 	Options map[string]string `json:"options,omitempty"`
 
+	// Samples is how many recent readings the applied ceiling is derived from.
+	// Zero uses the routing package's default.
+	Samples int `json:"samples,omitempty"`
+
+	// Quorum is how many readings must corroborate a lower value before it is
+	// applied -- the ceiling is the Quorum-th smallest, not the smallest, so a
+	// single misbehaving reporter cannot set it. Zero uses the routing
+	// package's default.
+	Quorum int `json:"quorum,omitempty"`
+
 	// Period is how often each home is polled, as a duration string.
 	Period string `json:"period,omitempty"`
 

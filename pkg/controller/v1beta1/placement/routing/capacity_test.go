@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,6 +21,14 @@ func testCapacityConfig() CapacityConfig {
 		Timeout: 500 * time.Millisecond,
 		MaxAge:  30 * time.Second,
 	}
+}
+
+// singleSampleConfig applies each reading immediately (window of one, quorum of
+// one), isolating tests that are about plumbing rather than aggregation.
+func singleSampleConfig() CapacityConfig {
+	c := testCapacityConfig()
+	c.Samples, c.Quorum = 1, 1
+	return c
 }
 
 func newTestPoller(cfg CapacityConfig) *CapacityPoller {
@@ -142,7 +151,7 @@ func TestCapacityPoller_ReportedIsNilWhenPollingIsOff(t *testing.T) {
 }
 
 func TestCapacityPoller_NotifiesOnlyWhenTheCeilingChanges(t *testing.T) {
-	p := newTestPoller(testCapacityConfig())
+	p := newTestPoller(singleSampleConfig())
 	tgt := Target{Map: testMap, Cluster: "cluster-a"}
 	two, three := int32(2), int32(3)
 
@@ -166,7 +175,7 @@ func TestCapacityPoller_NotifiesOnlyWhenTheCeilingChanges(t *testing.T) {
 }
 
 func TestCapacityPoller_ForgetsHomesThatAreNoLongerTargets(t *testing.T) {
-	p := newTestPoller(testCapacityConfig())
+	p := newTestPoller(singleSampleConfig())
 	tgt := Target{Map: testMap, Cluster: "cluster-a"}
 	two := int32(2)
 	p.record(tgt, &two, "")
@@ -306,7 +315,7 @@ func TestCapacityPoller_PollAllRecordsPerHome(t *testing.T) {
 	full := capacityServer(t, http.StatusOK, freshReport(8))
 	scarce := capacityServer(t, http.StatusOK, freshReport(1))
 
-	p := newTestPoller(testCapacityConfig())
+	p := newTestPoller(singleSampleConfig())
 	p.Targets = func(context.Context) ([]Target, error) {
 		return []Target{
 			{Map: testMap, Cluster: "cluster-a", URL: full.URL},
@@ -384,5 +393,174 @@ func TestRegisterCapacityFormat_RejectsDuplicatesAndIncompletePlugins(t *testing
 	}
 	if err := RegisterCapacityFormat("", CapacityFormatPlugin{Decode: decodeReport}); err == nil {
 		t.Fatal("registering an empty name succeeded, want an error")
+	}
+}
+
+// feed pushes readings through the poller and returns the applied ceiling, or
+// nil when the plan still stands.
+func feed(cfg CapacityConfig, readings ...int32) *int32 {
+	p := newTestPoller(cfg)
+	tgt := Target{Map: testMap, Cluster: "cluster-a"}
+	for _, r := range readings {
+		v := r
+		p.record(tgt, &v, "")
+	}
+	return p.Reported(testMap, "cluster-a")
+}
+
+func TestCapacityPoller_QuorumToleratesAMisbehavingReporter(t *testing.T) {
+	// The control plane polls one address per home, so consecutive readings may
+	// come from different reporters behind a balancer. A strict minimum would
+	// let whichever reporter is broken set the ceiling alone -- and with a
+	// round-robin balancer and a window at least as long as the replica count,
+	// hold it there permanently. The quorum is what makes a low reading need
+	// corroboration.
+	cfg := testCapacityConfig() // Samples 10, Quorum 2 by default
+	tests := []struct {
+		name     string
+		readings []int32
+		want     *int32
+	}{
+		{
+			// The case that motivated this: one router lost its watch.
+			name:     "a single zero among healthy readings is ignored",
+			readings: []int32{0, 7, 7, 7, 7},
+			want:     ptr(int32(7)),
+		},
+		{
+			// Filtering only zeros would miss this: a partially-synced reporter
+			// returns a small non-zero figure, not nothing.
+			name:     "a single low non-zero reading is ignored",
+			readings: []int32{2, 7, 7, 7, 7},
+			want:     ptr(int32(7)),
+		},
+		{
+			// Corroborated, so believed -- the pessimist knows something.
+			name:     "two agreeing low readings are believed",
+			readings: []int32{3, 3, 7, 7, 7},
+			want:     ptr(int32(3)),
+		},
+		{
+			// One broken reporter plus one genuine pessimist: drop the outlier,
+			// keep the pessimist.
+			name:     "a broken reporter does not mask a real pessimist",
+			readings: []int32{0, 3, 7, 7, 7},
+			want:     ptr(int32(3)),
+		},
+		{
+			// A home that really can serve nothing must still be able to say so.
+			name:     "a unanimous zero is believed",
+			readings: []int32{0, 0, 0, 0},
+			want:     ptr(int32(0)),
+		},
+		{
+			// Believing a drop takes exactly Quorum readings -- stated, so the
+			// lag is predictable rather than emergent.
+			name:     "a sustained drop is applied once corroborated",
+			readings: []int32{9, 9, 4, 4},
+			want:     ptr(int32(4)),
+		},
+		{
+			// Anti-any-responder: a lucky high reading must not undo a ceiling
+			// that corroborated readings already lowered.
+			name:     "one high reading cannot raise a corroborated ceiling",
+			readings: []int32{4, 4, 9},
+			want:     ptr(int32(4)),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := feed(cfg, tt.readings...)
+			if got == nil || *got != *tt.want {
+				g := "nil"
+				if got != nil {
+					g = fmt.Sprint(*got)
+				}
+				t.Fatalf("readings %v -> ceiling %s, want %d", tt.readings, g, *tt.want)
+			}
+		})
+	}
+}
+
+func TestCapacityPoller_NoCeilingUntilCorroborated(t *testing.T) {
+	// Before the quorum is reached the plan stands. A ceiling derived from
+	// fewer readings than the quorum is exactly what the quorum prevents: the
+	// first reading after startup could be the broken reporter's.
+	cfg := testCapacityConfig()
+	if got := feed(cfg, 0); got != nil {
+		t.Fatalf("a lone reading set a ceiling of %d; the plan should still stand", *got)
+	}
+	if got := feed(cfg, 3); got != nil {
+		t.Fatalf("a lone reading set a ceiling of %d; the plan should still stand", *got)
+	}
+}
+
+func TestCapacityPoller_WindowAgesOutAStaleLow(t *testing.T) {
+	// Bounded so a home recovers. An all-time minimum would pin it at its worst
+	// reading forever.
+	cfg := testCapacityConfig()
+	cfg.Samples, cfg.Quorum = 3, 2
+	if got := feed(cfg, 1, 1, 9, 9, 9); got == nil || *got != 9 {
+		t.Fatalf("ceiling = %v after the low readings aged out, want 9", got)
+	}
+}
+
+func TestCapacityPoller_FailedPollReleasesTheWindow(t *testing.T) {
+	// Fail-open means the ceiling is released, so the window cannot survive --
+	// retaining readings would keep constraining a home we can no longer see.
+	cfg := testCapacityConfig()
+	cfg.Samples, cfg.Quorum = 4, 2
+	p := newTestPoller(cfg)
+	tgt := Target{Map: testMap, Cluster: "cluster-a"}
+	for _, v := range []int32{2, 2} {
+		x := v
+		p.record(tgt, &x, "")
+	}
+	if got := p.Reported(testMap, "cluster-a"); got == nil || *got != 2 {
+		t.Fatalf("ceiling = %v before the failure, want 2", got)
+	}
+	p.record(tgt, nil, "capacity endpoint unreachable")
+	if got := p.Reported(testMap, "cluster-a"); got != nil {
+		t.Fatalf("ceiling = %d after a failed poll, want nil (fail open)", *got)
+	}
+	// And the old low readings must not come back with the next success.
+	nine := int32(9)
+	p.record(tgt, &nine, "")
+	if got := p.Reported(testMap, "cluster-a"); got != nil {
+		t.Fatalf("ceiling = %d from one reading after recovery, want nil until corroborated", *got)
+	}
+	p.record(tgt, &nine, "")
+	if got := p.Reported(testMap, "cluster-a"); got == nil || *got != 9 {
+		t.Fatalf("ceiling = %v after recovery, want 9 (stale lows must not persist)", got)
+	}
+}
+
+func TestCapacityConfig_QuorumAndSamplesValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*CapacityConfig)
+		wantErr bool
+	}{
+		{"unset uses package defaults", func(*CapacityConfig) {}, false},
+		{"explicit values are valid", func(c *CapacityConfig) { c.Samples, c.Quorum = 5, 3 }, false},
+		{"negative samples rejected", func(c *CapacityConfig) { c.Samples = -1 }, true},
+		{"negative quorum rejected", func(c *CapacityConfig) { c.Quorum = -1 }, true},
+		// Unreachable quorum means no reading could ever lower a ceiling, so the
+		// input would silently do nothing.
+		{"quorum above samples rejected", func(c *CapacityConfig) { c.Samples, c.Quorum = 3, 4 }, true},
+		{"quorum equal to samples is valid", func(c *CapacityConfig) { c.Samples, c.Quorum = 3, 3 }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testCapacityConfig()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() = nil, want error for samples=%d quorum=%d", cfg.Samples, cfg.Quorum)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
 	}
 }

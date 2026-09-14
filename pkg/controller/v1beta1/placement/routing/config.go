@@ -213,6 +213,34 @@ type CapacityConfig struct {
 	// Timeout bounds a single capacity request.
 	Timeout time.Duration
 
+	// Samples is how many recent readings the applied ceiling is derived from.
+	// Zero uses DefaultCapacitySamples.
+	//
+	// The control plane polls one address per home, so behind a load balancer
+	// successive polls may sample different reporters. Keeping only the latest
+	// is neither min nor max but any-responder: a lucky high reading raises a
+	// ceiling that an earlier reading correctly lowered.
+	//
+	// The window smooths; it does not protect. A longer window delays recovery,
+	// because a low reading has to age out before the ceiling rises again.
+	// Outlier protection is Quorum's job.
+	Samples int
+
+	// Quorum is how many readings in the window must corroborate a lower value
+	// before it is applied: the ceiling is the Quorum-th smallest reading, not
+	// the smallest. Zero uses DefaultCapacityQuorum.
+	//
+	// It tolerates Quorum-1 misbehaving reporters. That is the difference
+	// between believing a pessimist and believing a bug: one router that has
+	// lost its watch reports a near-zero figure, and a strict minimum would take
+	// it at face value and hold the home there for the whole window -- with a
+	// round-robin balancer and a window at least as long as the replica count,
+	// permanently. Requiring corroboration means a reporter can still always
+	// lower the ceiling; it just cannot do so alone.
+	//
+	// It is also the lag before a genuine drop is believed: Quorum polls.
+	Quorum int
+
 	// MaxAge is how old a report's observedAt stamp may be and still be
 	// applied. Beyond it the poller falls open to the plan, so a home whose
 	// reporter froze releases its ceiling instead of holding a stale one
@@ -260,6 +288,17 @@ func (c CapacityConfig) Validate() error {
 		// would pin a home's ceiling indefinitely.
 		return fmt.Errorf("routing.capacity.maxAge must be positive when routing.capacity.path is set")
 	}
+	if c.Samples < 0 {
+		return fmt.Errorf("routing.capacity.samples must not be negative")
+	}
+	if c.Quorum < 0 {
+		return fmt.Errorf("routing.capacity.quorum must not be negative")
+	}
+	if q, n := c.quorum(), c.samples(); q > n {
+		// A quorum larger than the window can never be reached, so no reading
+		// would ever lower a ceiling and the input would silently do nothing.
+		return fmt.Errorf("routing.capacity.quorum (%d) must not exceed routing.capacity.samples (%d)", q, n)
+	}
 	if c.MaxAge < c.Period {
 		// Every report would age out before the next poll, so the ceiling would
 		// flap between applied and fallen-open on every cycle.
@@ -279,4 +318,41 @@ func (c CapacityConfig) Validate() error {
 		return plugin.Validate(c)
 	}
 	return nil
+}
+
+// Defaults for the capacity sampling window. They live here, in the package
+// that owns the behavior, rather than in the config loader -- the same
+// single-sourcing the other control-plane tuning knobs use. These are algorithm
+// parameters with a safe universal choice, unlike a probe path or a gateway
+// host, which name a specific deployment and so have no default at all.
+const (
+	// DefaultCapacitySamples smooths over enough polls to see several reporters
+	// behind a balancer without making recovery from a low reading slow.
+	DefaultCapacitySamples = 10
+
+	// DefaultCapacityQuorum tolerates exactly one misbehaving reporter, the
+	// case that motivated corroboration. Raise it if more than one reporter can
+	// plausibly be wrong at the same time.
+	DefaultCapacityQuorum = 2
+)
+
+// samples is the effective window length.
+func (c CapacityConfig) samples() int {
+	if c.Samples <= 0 {
+		return DefaultCapacitySamples
+	}
+	return c.Samples
+}
+
+// quorum is the effective corroboration count.
+//
+// Deliberately does not clamp to the window. An unreachable quorum is rejected
+// by Validate at startup instead, because quietly lowering it would hand the
+// operator a different corroboration guarantee than the one they configured --
+// and they would have no way to notice.
+func (c CapacityConfig) quorum() int {
+	if c.Quorum <= 0 {
+		return DefaultCapacityQuorum
+	}
+	return c.Quorum
 }

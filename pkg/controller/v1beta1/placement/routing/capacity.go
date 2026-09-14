@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -34,14 +35,41 @@ type CapacityReport struct {
 	ObservedAt time.Time `json:"observedAt"`
 }
 
-// capacityState is the poller's last result for one home.
+// capacityState is the poller's running view of one home.
 type capacityState struct {
-	// reported is the last accepted figure, or nil when the home has not
-	// answered usably. Nil means the control-plane plan stands.
+	// window holds the most recent accepted readings, oldest first. The applied
+	// ceiling is their Quorum-th smallest, so no single reading -- however low
+	// -- can set it alone.
+	window []int32
+	// reported is the applied ceiling, or nil when the home has not answered
+	// usably. Nil means the control-plane plan stands.
 	reported *int32
 	// reason explains why reported is nil, for the fail-open condition. Empty
 	// when the last poll was accepted.
 	reason string
+}
+
+// observe folds one accepted reading into the window and returns the resulting
+// ceiling -- the quorum-th smallest retained reading -- and whether one applies
+// at all.
+//
+// Until the window holds quorum readings, none does: the plan stands. A ceiling
+// derived from fewer readings than the quorum would be exactly the thing the
+// quorum exists to prevent, since the first reading after startup or recovery
+// could come from the one broken reporter and would set the ceiling with
+// nothing to corroborate it.
+func (st *capacityState) observe(v int32, samples, quorum int) (int32, bool) {
+	st.window = append(st.window, v)
+	if len(st.window) > samples {
+		st.window = st.window[len(st.window)-samples:]
+	}
+	if len(st.window) < quorum {
+		return 0, false
+	}
+	sorted := make([]int32, len(st.window))
+	copy(sorted, st.window)
+	slices.Sort(sorted)
+	return sorted[quorum-1], true
 }
 
 // CapacityPoller asks each home what it can currently serve and turns the
@@ -270,8 +298,19 @@ func (c *CapacityPoller) record(tgt Target, reported *int32, reason string) bool
 		st = &capacityState{}
 		c.state[k] = st
 	}
-	changed := !sameReport(st.reported, reported)
-	st.reported = reported
+	var applied *int32
+	if reported != nil {
+		if v, ok := st.observe(*reported, c.Config.samples(), c.Config.quorum()); ok {
+			applied = &v
+		}
+	} else {
+		// A failed poll falls open and releases the ceiling, so the window must
+		// not survive it: retaining readings would keep constraining a home we
+		// can no longer observe, which is the opposite of failing open.
+		st.window = nil
+	}
+	changed := !sameReport(st.reported, applied)
+	st.reported = applied
 	st.reason = reason
 	return changed
 }
