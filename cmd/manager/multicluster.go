@@ -104,6 +104,16 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 		},
 		routing: placementrouting.Config{
 			Enabled: rt.Enabled,
+			Probe: placementrouting.ProbeConfig{
+				Path:             rt.Probe.Path,
+				Method:           rt.Probe.Method,
+				AcceptStatuses:   rt.Probe.AcceptStatuses,
+				GateStatuses:     rt.Probe.GateStatuses,
+				Period:           rt.Probe.PeriodDuration(),
+				Timeout:          rt.Probe.TimeoutDuration(),
+				FailureThreshold: rt.Probe.FailureThreshold,
+				SuccessThreshold: rt.Probe.SuccessThreshold,
+			},
 		},
 	}
 }
@@ -144,6 +154,12 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 	w := resolveMCWiring(mcConfig)
 	if err := validateDispatcherMode(w.dispatcherMode); err != nil {
 		return err
+	}
+	// A half-configured probe is worse than none: it reads as enabled while
+	// behaving arbitrarily. Validate after resolution so the check sees the
+	// parsed durations rather than the raw strings.
+	if err := w.routing.Probe.Validate(); err != nil {
+		return fmt.Errorf("invalid multi-cluster configuration: %w", err)
 	}
 
 	clusterManager := workloadcluster.NewManager(mgr.GetScheme())
@@ -273,6 +289,8 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
 		Config: w.routing,
+		Prober: placementrouting.NewProber(w.routing.Probe,
+			ctrl.Log.WithName("controllers").WithName("PlacementRoutingProbe")),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create PlacementRouting controller: %w", err)
 	}

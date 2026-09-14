@@ -153,6 +153,71 @@ type RoutingConfig struct {
 	// routing controller a no-op that reaps any TrafficMap it previously created,
 	// so enabling or disabling the feature is reversible without stranding objects.
 	Enabled bool `json:"enabled,omitempty"`
+
+	// Probe configures the optional active end-to-end health probe. Absent (no
+	// path) means no probing and the health gate stays readyReplicas > 0.
+	Probe ProbeConfig `json:"probe,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// ProbeConfig is the operator-supplied configuration for the active end-to-end
+// health probe: the control plane periodically requests each home's
+// externally-addressable endpoint, so the verdict covers the whole serving path
+// rather than pod readiness inside the home.
+//
+// Every field is required once Path is set, and none has an in-code default. A
+// guessed probe path would be a behavioral value baked into the binary, and its
+// particular harm is that it looks like it works: a shallow probe against a
+// wrong-but-live path returns 200 forever while catching nothing.
+type ProbeConfig struct {
+	// Path is the request path appended to each home's endpoint. Empty turns
+	// probing off — it is the enable switch, not just an unset default.
+	Path string `json:"path,omitempty"`
+
+	// Method is the HTTP method for the probe request.
+	Method string `json:"method,omitempty"`
+
+	// AcceptStatuses are the response codes counted as a pass.
+	AcceptStatuses []int `json:"acceptStatuses,omitempty"`
+
+	// GateStatuses are the response codes counted as a failure. Codes in
+	// neither list are inconclusive and move nothing: 429 means alive and
+	// overloaded, and 401/403 means the prober's own credentials are wrong.
+	GateStatuses []int `json:"gateStatuses,omitempty"`
+
+	// Period is how often each home is probed, as a duration string.
+	Period string `json:"period,omitempty"`
+
+	// Timeout bounds one probe request, as a duration string.
+	Timeout string `json:"timeout,omitempty"`
+
+	// FailureThreshold is the number of consecutive failures before a home is
+	// gated to weight 0.
+	FailureThreshold int `json:"failureThreshold,omitempty"`
+
+	// SuccessThreshold is the number of consecutive passes before a gated home
+	// is restored.
+	SuccessThreshold int `json:"successThreshold,omitempty"`
+}
+
+// PeriodDuration parses Period. An unparseable value yields 0, which the
+// routing config's Validate rejects rather than silently substituting a rate.
+func (p ProbeConfig) PeriodDuration() time.Duration {
+	d, err := time.ParseDuration(p.Period)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// TimeoutDuration parses Timeout, with the same rejection-over-substitution
+// rule as PeriodDuration.
+func (p ProbeConfig) TimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(p.Timeout)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // NewMultiClusterConfig loads the "multicluster" block from the
@@ -199,6 +264,8 @@ func (c MultiClusterConfig) Validate() error {
 		"placement.statusBatchPeriod":          c.Placement.StatusBatchPeriod,
 		"placement.statusSafetyRequeue":        c.Placement.StatusSafetyRequeue,
 		"placement.dispatcherRoundTimeout":     c.Placement.DispatcherRoundTimeout,
+		"routing.probe.period":                 c.Routing.Probe.Period,
+		"routing.probe.timeout":                c.Routing.Probe.Timeout,
 	}
 	keys := make([]string, 0, len(durations))
 	for k := range durations {

@@ -1,9 +1,14 @@
 package routing
 
+import (
+	"fmt"
+	"time"
+)
+
 // Config holds the operator-supplied, config-driven inputs for the routing
 // controller. TrafficMap generation carries no host/gateway/port values of its
-// own — those belong to the downstream publisher — so the only knob is an
-// explicit enable toggle.
+// own — those belong to the downstream publisher — so the knobs here are the
+// enable toggle and the optional observed inputs.
 //
 // +kubebuilder:object:generate=false
 type Config struct {
@@ -11,10 +16,156 @@ type Config struct {
 	// no-op and reaps any TrafficMap it previously created, so enabling or
 	// disabling the feature is reversible without stranding objects.
 	Enabled bool
+
+	// Probe configures the active end-to-end health probe. Zero-valued (no path)
+	// means no probing, and the health gate stays readyReplicas > 0.
+	Probe ProbeConfig
 }
 
 // IsEnabled reports whether TrafficMap generation is on. When false the routing
 // controller publishes nothing and releases what it already owns.
 func (c Config) IsEnabled() bool {
 	return c.Enabled
+}
+
+// ProbeConfig configures the active end-to-end probe of each home's
+// externally-addressable endpoint — the URL a client uses, so the verdict
+// covers the whole serving path rather than pod readiness inside the home.
+//
+// Every field is operator-supplied with no in-code default. An unconfigured
+// probe does not run, rather than silently probing a guessed path: a guess is a
+// hardcoded behavioral value, and its specific harm is that it appears to work,
+// because a shallow probe against a wrong-but-live path returns 200 forever.
+//
+// +kubebuilder:object:generate=false
+type ProbeConfig struct {
+	// Path is the request path appended to each entry's endpoint. Empty turns
+	// probing off entirely — it is the enable switch, not merely a default.
+	//
+	// Depth is the whole decision here: a liveness path proves a process is up,
+	// while an inference path proves the home can actually serve, and only the
+	// second catches the failure this feature exists for. The trade is cost —
+	// on a disaggregated home a synthetic inference request occupies real
+	// serving capacity — so the choice is the operator's, per install.
+	Path string
+
+	// Method is the HTTP method. Empty is rejected rather than defaulted, so the
+	// cost of the probe is always an explicit choice: GET and POST against an
+	// inference path are very different loads.
+	Method string
+
+	// AcceptStatuses are the response codes counted as a pass. Empty is
+	// rejected: "not 200 means down" is too blunt a policy to infer.
+	AcceptStatuses []int
+
+	// GateStatuses are the response codes counted as a failure. Any status that
+	// is in neither list is inconclusive and leaves the gate untouched.
+	//
+	// The two lists are explicit and separate because the interesting codes are
+	// the ones that belong to neither: 429 means alive and overloaded, so gating
+	// it removes capacity exactly when the fleet is hot, and 401/403 means the
+	// prober's own credentials are wrong, so failing the home hides a
+	// control-plane defect and takes traffic down with it.
+	GateStatuses []int
+
+	// Period is how often each home is probed.
+	Period time.Duration
+
+	// Timeout bounds a single probe request. A timeout counts as a failure.
+	Timeout time.Duration
+
+	// FailureThreshold is the number of consecutive failures before a home is
+	// gated. A single failed probe must never move a large traffic share, and
+	// the reprogramming churn from flapping would itself be the outage.
+	FailureThreshold int
+
+	// SuccessThreshold is the number of consecutive passes before a gated home
+	// is restored.
+	SuccessThreshold int
+}
+
+// IsEnabled reports whether probing is configured. Path is the switch: without
+// a target there is nothing to probe and the health gate stays readyReplicas.
+func (p ProbeConfig) IsEnabled() bool {
+	return p.Path != ""
+}
+
+// Validate rejects a partially-configured probe. A half-configured probe is
+// worse than none: it reads as enabled while behaving arbitrarily, so every
+// field is required once Path is set rather than quietly acquiring a default.
+func (p ProbeConfig) Validate() error {
+	if !p.IsEnabled() {
+		return nil
+	}
+	if p.Path[0] != '/' {
+		return fmt.Errorf("routing.probe.path %q must begin with %q", p.Path, "/")
+	}
+	if p.Method == "" {
+		return fmt.Errorf("routing.probe.method is required when routing.probe.path is set")
+	}
+	if len(p.AcceptStatuses) == 0 {
+		return fmt.Errorf("routing.probe.acceptStatuses is required when routing.probe.path is set")
+	}
+	if len(p.GateStatuses) == 0 {
+		return fmt.Errorf("routing.probe.gateStatuses is required when routing.probe.path is set")
+	}
+	for _, s := range p.AcceptStatuses {
+		for _, g := range p.GateStatuses {
+			if s == g {
+				return fmt.Errorf("routing.probe: status %d is in both acceptStatuses and gateStatuses", s)
+			}
+		}
+	}
+	if p.Period <= 0 {
+		return fmt.Errorf("routing.probe.period must be positive when routing.probe.path is set")
+	}
+	if p.Timeout <= 0 {
+		return fmt.Errorf("routing.probe.timeout must be positive when routing.probe.path is set")
+	}
+	if p.Timeout >= p.Period {
+		// Otherwise a slow home's probes overlap and pile up, and the effective
+		// probe rate silently stops matching the configured period.
+		return fmt.Errorf("routing.probe.timeout (%s) must be shorter than routing.probe.period (%s)",
+			p.Timeout, p.Period)
+	}
+	if p.FailureThreshold <= 0 {
+		return fmt.Errorf("routing.probe.failureThreshold must be positive when routing.probe.path is set")
+	}
+	if p.SuccessThreshold <= 0 {
+		return fmt.Errorf("routing.probe.successThreshold must be positive when routing.probe.path is set")
+	}
+	return nil
+}
+
+// Verdict classifies one probe outcome against the configured status policy.
+type Verdict int
+
+const (
+	// VerdictInconclusive leaves the gate and the failure count untouched. It
+	// covers a status in neither list — 429 (alive but overloaded), 401/403 (the
+	// prober's credentials, not the home's health) — and the probe that could
+	// not run at all. That last case is uniform across homes, so counting it as
+	// failure would zero the whole fleet at once.
+	VerdictInconclusive Verdict = iota
+
+	// VerdictPass counts toward restoring a gated home.
+	VerdictPass
+
+	// VerdictFail counts toward gating a home.
+	VerdictFail
+)
+
+// ClassifyStatus maps an HTTP status onto the configured policy.
+func (p ProbeConfig) ClassifyStatus(code int) Verdict {
+	for _, s := range p.AcceptStatuses {
+		if s == code {
+			return VerdictPass
+		}
+	}
+	for _, s := range p.GateStatuses {
+		if s == code {
+			return VerdictFail
+		}
+	}
+	return VerdictInconclusive
 }

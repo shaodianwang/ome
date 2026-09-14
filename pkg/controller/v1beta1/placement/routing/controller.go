@@ -18,7 +18,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -45,6 +47,10 @@ type Reconciler struct {
 	Log logr.Logger
 	// Config gates generation. When disabled the controller reaps what it owns.
 	Config Config
+	// Prober supplies the optional end-to-end reachability verdict ANDed into
+	// each home's health gate. Nil, or configured off, means the gate stays
+	// readyReplicas > 0 and no entry carries probe provenance.
+	Prober *Prober
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -67,7 +73,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Unroutable is a state of the map, not a reason to remove it: build the
 	// table (possibly empty) and let the condition carry the explanation.
-	spec, status, reason := buildSpec(isvc)
+	spec, status, reason := buildSpec(isvc, r.Prober)
 	if err := r.apply(ctx, isvc, spec); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -151,7 +157,7 @@ func routableMessage(reason string, entries int) string {
 	case v1beta1.TrafficMapReasonNoAddressableHome:
 		return "placed, but no admitted home reports an addressable endpoint"
 	case v1beta1.TrafficMapReasonAllHomesUnready:
-		return fmt.Sprintf("%d home(s) addressable but none ready; traffic spread equally rather than dropped", entries)
+		return fmt.Sprintf("%d home(s) addressable but none passing the health gate; traffic spread equally rather than dropped", entries)
 	default:
 		return fmt.Sprintf("%d home(s) serving", entries)
 	}
@@ -179,10 +185,13 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 //
 // AllHomesUnready is reported with status True: every home is addressable, and
 // the weight fallback spreads traffic across them rather than black-holing it,
-// so the map IS routable — just degraded. It is a pure function of the ISVC so
-// the watch predicate can use it to react only to changes that alter the
-// generated table.
-func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
+// so the map IS routable — just degraded.
+//
+// The prober is an optional overlay on an otherwise pure projection of the
+// ISVC. Passing nil yields the plan alone, which is what the watch predicate
+// compares so it reacts only to ISVC changes that alter the table; probe
+// verdicts arrive on their own path and enqueue directly.
+func buildSpec(isvc *v1beta1.InferenceService, probe *Prober) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
 	empty := v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
 		Mode:                   placementMode(isvc),
@@ -199,15 +208,18 @@ func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, metav1.C
 
 	// Index-aligned: homes feed the weight computation, entries carry the result
 	// plus provenance, both in the same cluster-sorted order.
+	mapKey := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	homes := make([]Home, len(cands))
 	for i, c := range cands {
 		// A nil factor is the identity 1.0; a per-cluster override scales the home's
-		// share for heterogeneous hardware.
+		// share for heterogeneous hardware. A nil reachability verdict does not
+		// gate — probing off, or no verdict yet.
 		homes[i] = Home{
 			Cluster:   c.Cluster,
 			Allocated: c.AdmittedReplicas,
 			Ready:     c.ReadyReplicas,
 			Factor:    capacityFactor(isvc, c.Cluster),
+			Reachable: probe.Reachable(mapKey, c.Cluster),
 		}
 	}
 	weights := Weights(homes)
@@ -218,12 +230,17 @@ func buildSpec(isvc *v1beta1.InferenceService) (v1beta1.TrafficMapSpec, metav1.C
 			Cluster:  c.Cluster,
 			Endpoint: c.Endpoint.DeepCopy(),
 			Weight:   weights[i],
-			Healthy:  c.ReadyReplicas > 0,
+			// Healthy is the gate the weight actually used, so it must fold in
+			// reachability too: an entry reading Healthy=true beside Weight=0
+			// would be unexplainable.
+			Healthy: c.ReadyReplicas > 0 && (homes[i].Reachable == nil || *homes[i].Reachable),
 			Capacity: &v1beta1.TrafficMapCapacity{
-				Allocated: c.AdmittedReplicas,
+				Allocated: homes[i].EffectiveAllocated(),
 				Ready:     c.ReadyReplicas,
 				Factor:    homes[i].Factor,
+				Source:    v1beta1.CapacitySourceControlPlane,
 			},
+			Probe: probe.Provenance(mapKey, c.Cluster),
 		}
 	}
 	reason := v1beta1.TrafficMapReasonRoutable
@@ -275,15 +292,55 @@ func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 	return isvc.Spec.Placement.Mode
 }
 
+// probeEventBuffer bounds the queue of probe-driven reconcile triggers. Events
+// are coalesced by the workqueue anyway, so a bounded buffer only ever drops
+// duplicates of work already pending.
+const probeEventBuffer = 256
+
 // SetupWithManager wires the controller: reconcile ISVCs, reacting only to
 // events that can change the generated table, and own the TrafficMaps it writes
 // so a drifted or deleted map is corrected.
+//
+// When probing is configured it also registers the prober as a manager runnable
+// and feeds its gate flips back in as reconcile triggers. A probe verdict is
+// not an ISVC change, so without that channel a newly unreachable home would
+// wait for unrelated ISVC churn before its weight dropped — which would defeat
+// the fast-cutoff goal the probe exists to serve.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		Named(RoutingControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(routingTableChange)).
-		Owns(&v1beta1.TrafficMap{}).
-		Complete(r)
+		Owns(&v1beta1.TrafficMap{})
+
+	if r.Prober != nil && r.Prober.Config.IsEnabled() {
+		events := make(chan event.GenericEvent, probeEventBuffer)
+		r.Prober.Targets = func(ctx context.Context) ([]Target, error) {
+			var maps v1beta1.TrafficMapList
+			if err := mgr.GetClient().List(ctx, &maps); err != nil {
+				return nil, err
+			}
+			return TargetsFromTrafficMaps(maps.Items), nil
+		}
+		r.Prober.OnChange = func(nn types.NamespacedName) {
+			// The TrafficMap shares the ISVC's name and namespace, so the stub
+			// addresses the right reconcile key without a lookup.
+			obj := &v1beta1.InferenceService{}
+			obj.Name, obj.Namespace = nn.Name, nn.Namespace
+			select {
+			case events <- event.GenericEvent{Object: obj}:
+			default:
+				// Full buffer means a reconcile for this map is already queued;
+				// dropping a duplicate trigger loses nothing.
+				r.Log.V(1).Info("probe event buffer full, trigger coalesced", "trafficmap", nn.String())
+			}
+		}
+		if err := mgr.Add(r.Prober); err != nil {
+			return fmt.Errorf("add end-to-end health prober: %w", err)
+		}
+		b = b.WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{}))
+	}
+
+	return b.Complete(r)
 }
 
 // routingTableChange admits ISVC events that can change the generated TrafficMap:
@@ -304,8 +361,8 @@ var routingTableChange = predicate.Funcs{
 		// has to wake us even when the table itself is byte-identical — an ISVC
 		// going NotPlaced -> NoAddressableHome keeps an empty table but must
 		// re-explain itself.
-		oldSpec, oldStatus, oldReason := buildSpec(oldISVC)
-		newSpec, newStatus, newReason := buildSpec(newISVC)
+		oldSpec, oldStatus, oldReason := buildSpec(oldISVC, nil)
+		newSpec, newStatus, newReason := buildSpec(newISVC, nil)
 		if oldStatus != newStatus || oldReason != newReason {
 			return true
 		}
