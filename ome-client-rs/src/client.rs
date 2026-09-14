@@ -10,7 +10,7 @@ use kube::{Api, Client};
 
 use crate::{
     BaseModel, ClusterBaseModel, ClusterServingRuntime, FineTunedWeight, InferenceReplica,
-    InferenceService, ServingRuntime, WorkloadCluster,
+    InferenceService, ServingRuntime, TrafficMap, WorkloadCluster,
 };
 
 /// A `kube::Client` plus typed `Api` accessors for every OME kind.
@@ -57,6 +57,13 @@ impl OmeClient {
         Api::namespaced(self.client.clone(), ns)
     }
     pub fn inference_replicas_all(&self) -> Api<InferenceReplica> {
+        Api::all(self.client.clone())
+    }
+
+    pub fn traffic_maps(&self, ns: &str) -> Api<TrafficMap> {
+        Api::namespaced(self.client.clone(), ns)
+    }
+    pub fn traffic_maps_all(&self) -> Api<TrafficMap> {
         Api::all(self.client.clone())
     }
 

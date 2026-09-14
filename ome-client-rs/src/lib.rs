@@ -19,9 +19,10 @@ pub mod finetunedweights;
 pub mod inferencereplicas;
 pub mod inferenceservices;
 pub mod servingruntimes;
+pub mod trafficmaps;
 pub mod workloadclusters;
 
-// Re-export the eight Kind types at the crate root. The Kind names are unique
+// Re-export the nine Kind types at the crate root. The Kind names are unique
 // across the OME API group, so these flat re-exports never collide; the
 // per-Kind spec/status/sub-structs stay namespaced under their module.
 pub use basemodels::BaseModel;
@@ -31,6 +32,7 @@ pub use finetunedweights::FineTunedWeight;
 pub use inferencereplicas::InferenceReplica;
 pub use inferenceservices::InferenceService;
 pub use servingruntimes::ServingRuntime;
+pub use trafficmaps::TrafficMap;
 pub use workloadclusters::WorkloadCluster;
 
 // Re-export k8s-openapi so consumers get version-matched access to built-in kinds
