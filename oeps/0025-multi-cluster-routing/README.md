@@ -239,8 +239,29 @@ control plane makes no outbound call at all.
      decode partner and so *overstates* capacity during exactly the skew this
      exists for — plus a staleness stamp, a stated cross-replica aggregation rule
      (`TBD`, Q9), and **fail-open** to `plan_h` with a condition and a metric.
-   - **Not shippable yet:** no pair-aware capacity route exists on the data plane.
-     Sequenced last.
+   - **Still not pair-aware anywhere.** An existing router surface does report a
+     capacity figure, so the *plumbing* is buildable — but it counts prefill-side
+     accelerators and does not observe decode, so it reports full capacity in
+     exactly the skew window this input was justified by. Treat it as coverage
+     for unhealthy or ejected accelerators, not for skew. A genuinely pair-aware
+     endpoint remains a data-plane prerequisite.
+   - **A reading may need converting.** A figure in weighted accelerators is not
+     the same quantity as a replica count, and one that already folds in
+     hardware weighting must not then be multiplied by `c_h` — that applies the
+     weighting twice. Conversion is operator-supplied config, and pairing an
+     already-weighted source with a per-home factor is rejected rather than
+     silently double-counted.
+   - **The response shape is pluggable, and only one shape is ours.** The
+     control plane defines a single format — an absolute servable count plus a
+     producer-set timestamp — and registers it like any other; a deployment
+     compiles in more for producers it does not control. *Rationale:* a format
+     is not merely a parse target. Where a number lives is the easy part; what
+     it means decides whether a ceiling is safe, so a format owns its decoder,
+     its own configuration, and whether the producer timestamps its reading at
+     all — which is what determines whether the staleness bound can fire.
+     Naming a format the binary does not carry is a startup error listing what
+     it does, never a silent fallback to the plan: a dropped setting and a
+     satisfied one are indistinguishable from the resulting weight.
 
 5. **Probe result — ANDed into the health gate** *(optional, off by default)*. A
    periodic request to the entry's `endpoint`, the same URL a client uses.
@@ -527,9 +548,14 @@ workload clusters.
    originate where client traffic actually enters? The second is more faithful and
    materially more machinery; I am not yet convinced the fidelity pays for itself.
 9. **Capacity aggregation across a home's router replicas.** `min`, `max`, or
-   any-responder? `min` is the conservative lean but lets one lagging replica
-   dominate. Must be settled with the data-plane owners **before** the endpoint
-   input is built, since it changes what the endpoint computes.
+   any-responder? The OEP leaned `min` as conservative. **Evidence against that
+   lean:** an existing publisher already solves this problem by skipping failed
+   members and taking the **`max`** successful reading, on the grounds that one
+   lagging replica should not drag a whole home down. Note the two are answering
+   different questions — that publisher is choosing a *weight*, whereas here the
+   value is a *ceiling*, and `max` is the less conservative choice for a ceiling.
+   Unresolved, but no longer a matter of taste: pick one and say which failure
+   it is protecting against.
 10. **Probe granularity and fan-out.** One probe per entry means (ISVCs × homes)
     probes per period, each potentially a real inference request. Does the shared
     path warrant a per-home probe amortized across ISVCs? `TBD` — depends on
