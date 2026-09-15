@@ -1,4 +1,4 @@
-# p320: REJECT canary group missing entrypoint (router present, group=[engine,decoder])  mode=canary expect=reject reason=CanaryInvalid Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 topo=pd
+# p320: REJECT canary group missing its unit entrypoint (group=[decoder], engine unit)  mode=canary expect=reject reason=CanaryInvalid Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p320 }
@@ -19,9 +19,10 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
   rollout:
     groups:
-        # router is the external entrypoint but is omitted -> stepped traffic would
-        # land on an internal Service only -> admission rejects (CanaryInvalid).
-        - components: [engine, decoder]
+        # The decoder is a SECONDARY of the engine unit, not a unit of its own.
+        # A group that names it without the engine has no Component to drive the
+        # step machine and traffic weight through -> CanaryInvalid.
+        - components: [decoder]
           canary:
             steps:
               - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }

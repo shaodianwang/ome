@@ -52,13 +52,25 @@ var _ = ginkgo.Describe("InferenceService rollout policy-ref admission", func() 
 	})
 
 	// The shape rules evaluate over the ref's DECLARED kind without
-	// dereferencing the policy: a declared-canary group on a router-fronted
-	// ISVC must contain the router, or the stepped traffic would only move
-	// on an internal Service.
-	ginkgo.It("rejects a declared-canary group omitting the router entrypoint", func() {
+	// dereferencing the policy. A declared-canary group covering only the
+	// engine unit admits on a router-fronted ISVC: the router discovers
+	// engine endpoints by label selector with no revision term, so a capacity
+	// step moves roughly that fraction of real requests.
+	ginkgo.It("admits a declared-canary group covering the engine unit on a router-fronted isvc", func() {
 		isvc := mkConsumer(uniqueName("llm-a"),
 			refGroup(uniqueName("canary-std"), v1beta1.RolloutProgressionCanary, v1beta1.EngineComponent))
 		isvc.Spec.Router = omeNativeRouter()
+		gomega.Expect(k8sClient.Create(suiteCtx, isvc)).To(gomega.Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+	})
+
+	// A group that stages a secondary without its unit entrypoint has no
+	// Component driving the roll.
+	ginkgo.It("rejects a declared-canary group omitting its unit entrypoint", func() {
+		isvc := mkConsumer(uniqueName("llm-a"),
+			refGroup(uniqueName("canary-std"), v1beta1.RolloutProgressionCanary, v1beta1.DecoderComponent))
+		isvc.Spec.Router = omeNativeRouter()
+		isvc.Spec.Decoder = omeNativeDecoder()
 		msg := denial(k8sClient.Create(suiteCtx, isvc))
 		gomega.Expect(msg).To(gomega.ContainSubstring(validation.ReasonCanaryInvalid))
 		gomega.Expect(msg).To(gomega.ContainSubstring("entrypoint"))

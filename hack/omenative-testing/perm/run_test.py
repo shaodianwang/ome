@@ -145,6 +145,69 @@ class CanaryCommandStateTest(unittest.TestCase):
         self.assertEqual(("new", 0, True, True, False), got)
 
 
+class CanaryUnitTest(unittest.TestCase):
+    """The unit is the granularity a canary run owns: the router alone, or
+    engine+decoder. The harness has to resolve the same unit the product does,
+    or it observes a Component that carries no run."""
+
+    @staticmethod
+    def _ctx(groups, configured=("engine", "decoder", "router"), hdr=None):
+        return {
+            "configured": set(configured),
+            "hdr": hdr or {},
+            "info": {"canary_groups": [
+                {"unit": run.canary_unit_entrypoint(m), "members": list(m),
+                 "order": [], "policy": "auto", "steps": []}
+                for m in groups]},
+        }
+
+    def test_decoder_belongs_to_the_engine_unit(self):
+        self.assertEqual("engine", run.canary_unit("decoder"))
+        self.assertEqual("engine", run.canary_unit("engine"))
+        self.assertEqual("router", run.canary_unit("router"))
+
+    def test_entrypoint_is_the_group_not_the_isvc(self):
+        """An engine unit behind a router drives its own ladder. Reading the
+        router there would watch a Component with no canary run at all."""
+        ctx = self._ctx([("engine", "decoder")])
+        self.assertEqual("engine", run._canary_primary(ctx))
+
+    def test_router_group_keeps_the_router_as_primary(self):
+        ctx = self._ctx([("router",)])
+        self.assertEqual("router", run._canary_primary(ctx))
+
+    def test_unit_header_selects_among_per_unit_groups(self):
+        groups = [("router",), ("engine", "decoder")]
+        self.assertEqual("engine", run._canary_primary(
+            self._ctx(groups, hdr={"unit": "engine"})))
+        self.assertEqual("engine", run._canary_primary(
+            self._ctx(groups, hdr={"unit": "decoder"})))
+        self.assertEqual("router", run._canary_primary(
+            self._ctx(groups, hdr={"unit": "router"})))
+
+    def test_unit_header_naming_an_undeclared_unit_resolves_to_no_group(self):
+        ctx = self._ctx([("engine", "decoder")], hdr={"unit": "router"})
+        self.assertIsNone(run._canary_group(ctx))
+
+    def test_run_state_is_read_off_the_unit_entrypoint(self):
+        """Two units rolling at once: the top-level alias follows the ISVC
+        entrypoint, so reading it for the engine would report the router's
+        step counter and revision pair."""
+        st = {"canary": {"canaryRevisionHash": "router-new", "currentStep": 0},
+              "components": {
+                  "router": {"canary": {"canaryRevisionHash": "router-new", "currentStep": 0}},
+                  "engine": {"canary": {"canaryRevisionHash": "engine-new", "currentStep": 1}}}}
+        self.assertEqual("engine-new", run._canary_run(st, "engine")["canaryRevisionHash"])
+        self.assertEqual("engine-new", run._canary_run(st, "decoder")["canaryRevisionHash"])
+        self.assertEqual("router-new", run._canary_run(st, "router")["canaryRevisionHash"])
+
+    def test_run_state_falls_back_to_the_legacy_alias(self):
+        """A run persisted before per-unit state exists only on the alias."""
+        st = {"canary": {"canaryRevisionHash": "legacy"}, "components": {"engine": {}}}
+        self.assertEqual("legacy", run._canary_run(st, "engine")["canaryRevisionHash"])
+        self.assertEqual({}, run._canary_run({"components": {}}, "engine"))
+
+
 class GeneratedCorpusTest(unittest.TestCase):
     def test_regeneration_is_byte_stable(self):
         """The gen-* corpus is a pure function of generate_cases.py: a hand

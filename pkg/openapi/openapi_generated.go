@@ -3674,6 +3674,12 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							},
 						},
 					},
+					"canary": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Canary tracks the canary step machine for the unit this Component belongs to — the router alone, or engine+decoder together. It is written on the unit's entrypoint Component (the router, or the engine) and is absent on a secondary, so a reader never sees two copies of one run. Absent when the unit has no canary running.\n\nUnits advance independently, which is why the state cannot live in the single InferenceServiceStatus.Canary: two runs would overwrite each other's step counter and revision pair. That field is retained as an alias for the entrypoint unit's run so existing readers keep working.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus"),
+						},
+					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer for RawDeployment- and OMENative-managed Components. See ComponentAutoscalerStatus for the full field semantics.",
@@ -3690,7 +3696,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 

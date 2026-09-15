@@ -1747,6 +1747,11 @@ func (in *ComponentStatusSpec) DeepCopyInto(out *ComponentStatusSpec) {
 		*out = make([]ComponentTrafficTarget, len(*in))
 		copy(*out, *in)
 	}
+	if in.Canary != nil {
+		in, out := &in.Canary, &out.Canary
+		*out = new(CanaryStatus)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Autoscaler != nil {
 		in, out := &in.Autoscaler, &out.Autoscaler
 		*out = new(ComponentAutoscalerStatus)

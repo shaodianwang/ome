@@ -1,0 +1,35 @@
+# p314: canary ENGINE UNIT behind a router, pd auto 50/100 (router idle)  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 canary=auto co=none topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p314 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        # The engine unit canaries on its own while the router keeps fronting the
+        # tier. The router discovers engine endpoints by label selector with no
+        # revision term, so a step that puts a fraction of engine replicas on the
+        # new revision moves roughly that fraction of requests — capacity, not an
+        # exact gateway weight, is the contract for a unit that does not own the
+        # external entrypoint. ceil_r=2 asserts the router never surged.
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

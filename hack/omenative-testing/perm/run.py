@@ -259,6 +259,26 @@ def resolve_max_unavailable(mu, n):
         return 0
 
 
+def canary_unit(comp):
+    """The canary unit a Component belongs to, named by the unit's entrypoint.
+
+    The router is its own unit; engine and decoder are one unit, because a P/D
+    pair speaks a pairing protocol to each other. A unit is what one canary run
+    owns — its step counter, revision pair and traffic entry live on the
+    entrypoint. Mirrors rollout.CanaryUnit.
+    """
+    return "engine" if comp == "decoder" else comp
+
+
+def canary_unit_entrypoint(components):
+    """The Component a canary group's step machine is driven through: the
+    entrypoint of the unit the group covers. Mirrors canary.primaryComponent."""
+    for c in ("router", "engine", "decoder"):
+        if c in components:
+            return c
+    return ""
+
+
 def get_spec_info(case_id):
     """Read spec.rollout.groups + per-Component update strategy from the live ISVC.
 
@@ -268,7 +288,7 @@ def get_spec_info(case_id):
     """
     info = {"policy": None, "members": [], "order": [], "soak": 0, "strat": {},
             "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {},
-            "canary": None, "pairing": ""}
+            "canary": None, "canary_groups": [], "pairing": ""}
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
         return info
@@ -309,16 +329,27 @@ def get_spec_info(case_id):
     # revision). "" = unset = pairs with anything.
     info["pairing"] = str(spec.get("rollout", {}).get("pairingProtocol") or "")
     groups = spec.get("rollout", {}).get("groups", []) or []
-    # Canary group first (canary lives on a group; it's not a coordination policy).
-    cg = next((g for g in groups if isinstance(g, dict) and isinstance(g.get("canary"), dict)), None)
-    if cg is not None:
-        can = cg["canary"]
-        info["canary"] = {
+    # Canary groups first (canary lives on a group; it's not a coordination
+    # policy). One group per canary UNIT — an ISVC may carry a router run and an
+    # engine run at once — so every canary group is recorded, keyed by its unit.
+    # info["canary"]/["members"] keep naming the first for the legacy readers;
+    # the canary handler selects its group out of canary_groups.
+    for g in groups:
+        if not (isinstance(g, dict) and isinstance(g.get("canary"), dict)):
+            continue
+        can, comps = g["canary"], (g.get("components", []) or [])
+        cg = {
+            "unit": canary_unit_entrypoint(comps),
+            "members": comps,
+            "order": g.get("order", []) or [],
             "policy": (str(can.get("promotion") or "").lower() or None),
             "steps": can.get("steps", []) or [],
         }
-        info["members"] = cg.get("components", []) or []
-        info["order"] = cg.get("order", []) or []
+        info["canary_groups"].append(cg)
+        if info["canary"] is None:
+            info["canary"] = {"policy": cg["policy"], "steps": cg["steps"]}
+            info["members"] = cg["members"]
+            info["order"] = cg["order"]
     # Coordination groups (the non-canary ones).
     coord_groups = [g for g in groups if isinstance(g, dict) and not isinstance(g.get("canary"), dict)]
     bg_groups = [g for g in coord_groups if isinstance(g.get("blueGreen"), dict)]
@@ -1479,6 +1510,9 @@ HDR_VALIDATORS = {
     "pause": lambda v: v in {"true", "freeze"},
     "inst": _int_list,
     "canary": lambda v: str(v).lower() in {"auto", "manual"},
+    # Which canary unit's ladder to drive when the ISVC carries a group per unit
+    # (router, or engine+decoder). The units not named are asserted idle.
+    "unit": lambda v: str(v).lower() in {"router", "engine", "decoder"},
     "rollback": lambda v: v in (0, 1),
     "analysis": lambda v: str(v).lower() in {"pass", "breach", "inconclusive"},
     "health": lambda v: str(v).lower() in {"pass", "breach", "inconclusive"},
@@ -4191,14 +4225,51 @@ def _pairing(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
-def _canary_primary(ctx):
-    """The externally-routed component the canary step machine drives + reports on:
-    router > engine > decoder (mirrors canary.primaryComponent). The harness reads
-    status.components.<primary>.rolloutPhase / .traffic on exactly this component."""
+def _canary_group(ctx):
+    """The canary group this case drives. With one group that is simply it; with
+    several (one per unit) the `unit=` header names which unit's ladder is driven
+    and the rest are asserted untouched."""
+    cgs = [g for g in (ctx["info"].get("canary_groups") or [])
+           if canary_unit_entrypoint(g["members"]) in ctx["configured"]]
+    if not cgs:
+        return None
+    want = str(ctx["hdr"].get("unit") or "").lower()
+    if want:
+        return next((g for g in cgs if g["unit"] == canary_unit(want)), None)
+    return cgs[0]
+
+
+def _canary_primary(ctx, group=None):
+    """The component the canary step machine drives + reports on: the entrypoint
+    of the UNIT the canary group covers (mirrors canary.primaryComponent). The
+    harness reads status.components.<primary>.rolloutPhase / .traffic / .canary on
+    exactly this component.
+
+    It is the group's entrypoint, not the ISVC's: an engine unit behind a router
+    runs its own ladder, and reading the router there would watch a Component
+    that has no canary run at all."""
+    group = group or _canary_group(ctx)
+    if group:
+        entry = canary_unit_entrypoint(group["members"])
+        if entry in ctx["configured"]:
+            return entry
     for c in ("router", "engine", "decoder"):
         if c in ctx["configured"]:
             return c
     return ""
+
+
+def _canary_run(st, primary):
+    """The canary run state for the unit `primary` belongs to.
+
+    Run state lives on the unit entrypoint's ComponentStatusSpec; the top-level
+    status.canary is an alias for whichever unit owns the ISVC entrypoint, so it
+    is the wrong copy to read whenever two units are rolling. Fall back to it
+    only when the per-unit entry is absent (a run persisted before per-unit
+    state existed)."""
+    unit = canary_unit(primary)
+    comp = ((st.get("components") or {}).get(unit) or {})
+    return comp.get("canary") or st.get("canary") or {}
 
 
 def _canary_command_state(canary, current_hash, old_hashes, promoted_step):
@@ -4226,7 +4297,9 @@ def _canary(case_id, yaml_file, desc, hdr):
     Header keys: canary=auto|manual (else read from the live spec), rollback=1
     (set ome.io/rollout-rollback mid-rollout and assert the canary drains every
     Instance back to the stable revision, holds there at RolledBack, and records
-    the rejected revision in status.canary.rolledBackRevisionHash).
+    the rejected revision in the unit's rolledBackRevisionHash), unit=<component>
+    (which unit's ladder to drive when the ISVC carries a group per unit; the
+    units not named are asserted to stay on their stable revision with no run).
 
     Asserts the STATUS-level contract (rolloutPhase progression, currentStep,
     status.components.<primary>.traffic[] weights stepping to 100 on the canary
@@ -4237,7 +4310,11 @@ def _canary(case_id, yaml_file, desc, hdr):
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
-    cinfo = ctx["info"].get("canary") or {}
+    cgroup = _canary_group(ctx)
+    if hdr.get("unit") and cgroup is None:
+        return _write_fail(case_id, desc, hdr, "NO_PRIMARY",
+                           f"no canary group covers the {hdr['unit']} unit")
+    cinfo = cgroup or ctx["info"].get("canary") or {}
     policy = str(hdr.get("canary") or cinfo.get("policy") or "auto").lower()
     do_rollback = bool(hdr.get("rollback"))
     # Analysis (OEP-0015.2): the gate is a Prometheus query, not a timer/promote.
@@ -4272,17 +4349,23 @@ def _canary(case_id, yaml_file, desc, hdr):
     else:
         expect = "RolledBack" if do_rollback else "Stable"
     nsteps = len(cinfo.get("steps") or []) or 2
-    primary = _canary_primary(ctx)
+    primary = _canary_primary(ctx, cgroup)
     if not primary:
         return _write_fail(case_id, desc, hdr, "NO_PRIMARY", "no configured component to canary")
     N = ctx["N"]
     # Bump EVERY configured member of the canary group, not just the primary — a
-    # coupled multi-component canary (e.g. [engine, decoder, router]) must roll all
+    # coupled multi-component canary (e.g. [engine, decoder]) must roll all
     # members for the secondary-capacity gate to be genuinely exercised (mirrors
     # the coordination trigger path, which bumps all group members). The primary
     # stays the component whose status/traffic the step machine is observed on.
-    group = (set(ctx["info"].get("members") or []) & ctx["configured"]) or {primary}
+    group = (set(cinfo.get("members") or ctx["info"].get("members") or []) & ctx["configured"]) or {primary}
+    # Components of every OTHER canary unit. Nothing bumps them, so they must
+    # stay whole on their stable revision with no run of their own — the
+    # real-cluster proof that one unit's ladder does not drive another's.
+    others = sorted((ctx["configured"] - group) &
+                    {c for g in (ctx["info"].get("canary_groups") or []) for c in g["members"]})
     print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary} bump={sorted(group)}"
+          + (f" idle_units={others}" if others else "")
           + ("  +rollback" if do_rollback else ""))
     if not _bump_rev(ctx, group, extra=analysis_extra):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
@@ -4318,7 +4401,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         st = fetch_status(case_id)
         comp = (st.get("components", {}) or {}).get(primary, {}) or {}
         phase = comp.get("rolloutPhase", "") or ""
-        can = st.get("canary") or {}
+        can = _canary_run(st, primary)
         if phase:
             phases.add(phase)
         previous_canary_hash = canary_hash
@@ -4416,6 +4499,24 @@ def _canary(case_id, yaml_file, desc, hdr):
     verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+
+    # Unit isolation: a unit nobody bumped must sit out the whole run. Its
+    # entrypoint carries no run of its own and every one of its Instances stays
+    # on the stable revision — if the ladders shared state it would inherit the
+    # driven unit's revision pair and roll behind it, ungated.
+    if others:
+        idle_st = fetch_status(case_id)
+        for c in others:
+            idle_new, _ = _inst_rev_split(ctx, c)
+            good(idle_new == 0,
+                 f"{c} (idle unit) held on its stable revision through the {primary} canary",
+                 f"{c} rolled {idle_new} Instance(s) off stable while only {primary} was canaried")
+            u = canary_unit(c)
+            if u != canary_unit(primary):
+                idle_run = ((idle_st.get("components") or {}).get(u) or {}).get("canary")
+                good(not idle_run,
+                     f"{u} unit recorded no canary run of its own",
+                     f"{u} unit picked up a canary run it was never given: {idle_run}")
 
     want = expect
     good(state == "CONVERGED",

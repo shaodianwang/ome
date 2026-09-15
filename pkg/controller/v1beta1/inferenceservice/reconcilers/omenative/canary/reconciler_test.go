@@ -519,6 +519,9 @@ func TestReconcile_NewRunRearmsRollbackWithUnchangedPrimary(t *testing.T) {
 
 func TestReconcile_UnchangedPrimaryRollbackCompletes(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
+	// The primary under test is the router, so its unit must be the one the
+	// group drives — a plan is resolved per unit.
+	isvc.Spec.Rollout.Groups[0].Components = []v1beta1.ComponentType{v1beta1.RouterComponent}
 	isvc.Status.Canary = &v1beta1.CanaryStatus{
 		TargetID:               "target-1",
 		CanaryRevisionHash:     "router",

@@ -209,6 +209,38 @@ capacity** (the primary fully rolls to the canary revision). Gateway data-plane
 weighting is a downstream consumer (per-revision Services + weighted HTTPRoute)
 and is intentionally out of scope here.
 
+#### Canary units (`unit=`)
+
+A **canary unit** is the smallest set of Components that advance through a
+ladder together: the **router** alone, or **engine+decoder** (a P/D pair speaks
+a pairing protocol to each other, so splitting it can leave a new-protocol
+prefill with no pairable decode). A group must contain the entrypoint of every
+unit it covers, and at most one group may drive a unit — but different units may
+each carry their own run.
+
+The primary is therefore the entrypoint of the **group's** unit, not the ISVC's:
+an engine ladder behind a router is driven and observed on the *engine*. Run
+state lives at `status.components.<unit>.canary`; the top-level `status.canary`
+is an alias for whichever unit owns the ISVC entrypoint, so it is the wrong copy
+to read once two units roll.
+
+p314–p318 cover the shapes:
+
+| case | shape | drives |
+|------|-------|--------|
+| p314 | engine unit behind a router, PD, auto | engine (router idle) |
+| p315 | engine unit behind a router, PD, manual | engine (router idle) |
+| p316 | engine unit behind a router, no decoder | engine (router idle) |
+| p317 | a group per unit on one ISVC | engine (`unit=engine`) |
+| p318 | a group per unit on one ISVC | router (`unit=router`) |
+
+`unit=router|engine|decoder` names which unit's ladder to drive when the ISVC
+carries more than one group. Every unit the case does **not** drive is asserted
+idle: no run of its own on its entrypoint, and every Instance still on its stable
+revision — the real-cluster proof that one ladder does not pull another along
+ungated. The idle unit's `ceil_*` is set to N (no surge), so a stray rotation
+fails the case rather than passing quietly.
+
 ### Canary analysis (`analysis=…`, OEP-0015.2)
 
 `isvcs/canary/` p330–p343 gate steps on a **Prometheus query** instead of a
@@ -298,7 +330,8 @@ timers; `canary=manual` is not supported in this mode).
 
 ### Negative cases (`expect=reject`)
 
-`isvcs/reject/` (p320+) are **admission-rejection** cases: the ISVC spec is
+`isvcs/reject/` (p320–p329, continued at p364+) are **admission-rejection**
+cases: the ISVC spec is
 deliberately invalid and the validating webhook must deny the `kubectl apply`.
 These are the only end-to-end proof that the validation rules have teeth on the
 *deployed* webhook — unit tests can't see it. A case with `expect=reject` in its
@@ -309,9 +342,12 @@ header skips the watcher/rollout entirely:
 - **FAIL** = the apply is accepted (the rule didn't fire) — the ISVC is then
   deleted so it doesn't leak.
 
-Current cases: canary group missing the entrypoint (p320), soak on a canary
-group (p321), soak on a non-collapsing rollout (p322), maintainRatio on a canary
-group (p323). Run them like any other case: `python3 batch.py --conc 4 p320-p323`.
+Current cases: canary group missing its unit entrypoint (p320 — `[decoder]`
+without the engine), soak on a canary group (p321), soak on a non-collapsing
+rollout (p322), maintainRatio on a canary group (p323), a canary group splitting
+a declared P/D pair (p329 — `[router, engine]`), and two canary groups driving
+the same unit (p364). Run them like any other case:
+`python3 batch.py --conc 4 p320-p323 p329 p364`.
 
 **Concurrency is bounded by the controller, not the cluster.** The OME manager
 runs `MaxConcurrentReconciles=1` (controller-runtime default) behind leader

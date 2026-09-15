@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/rollout"
 )
 
 // ReconcileInputs is the input bag the top-level OMENative dispatcher
@@ -131,7 +132,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	groups := ResolveGroups(v1beta1.EffectiveRollout(in.ISVC), GroupDefaults{RatioTolerancePercent: in.DefaultRatioTolerancePercent})
+	groups := ResolveGroups(rollout.Effective(in.ISVC), GroupDefaults{RatioTolerancePercent: in.DefaultRatioTolerancePercent})
 	result := &Result{}
 
 	// Bind a logger keyed to the ISVC so every downstream V(1)

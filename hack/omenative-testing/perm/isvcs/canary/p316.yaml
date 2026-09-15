@@ -1,0 +1,27 @@
+# p316: canary ENGINE UNIT behind a router, no decoder, auto 50/100 (router idle)  mode=canary Ne=6 Nd=0 Nr=2 ceil_e=7 ceil_d=0 ceil_r=2 canary=auto co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p316 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 6
+    maxReplicas: 6
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        # No decoder declared, so the engine unit is the engine alone. The group
+        # names it and nothing else — an engine-only ladder on a router-fronted
+        # tier, which the entrypoint rule used to make unexpressible.
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

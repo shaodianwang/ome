@@ -1,0 +1,38 @@
+# p317: TWO canary units on one ISVC, drives the engine unit (router unit idle)  mode=canary unit=engine Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 canary=auto co=none topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p317 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        # A ladder per unit. The router's is declared but never triggered — only
+        # the engine unit's revision is bumped — so the router must sit the run
+        # out entirely: no run of its own, every Instance on its stable revision.
+        # Ladders that shared state would drag it along ungated.
+        - components: [router]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: {  } }
+              - { capacity: "100%", traffic: 100 }
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

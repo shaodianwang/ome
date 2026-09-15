@@ -90,18 +90,19 @@ var _ = ginkgo.Describe("InferenceService webhook validation — ordered-group s
 	// SQ-3: a canary group inside a multi-group list would run
 	// concurrently with its neighbors while the list promises order.
 	ginkgo.It("SQ-3 rejects a canary group inside a multi-group list → GroupOrderingNotHonored", func() {
-		// The canary group carries the engine: canary's own structural
-		// rule requires the entrypoint Component, and this spec needs the
-		// ordering rejection to be the one that fires.
-		isvc := coordISVC("sequenti-sq3",
+		// The canary group carries a whole unit — engine+decoder, which roll
+		// as one — so canary's own structural rules pass and the ordering
+		// rejection is the one that fires. The blueGreen neighbour takes the
+		// router so the two groups stay disjoint.
+		isvc := threeComponentISVC("sequenti-sq3",
 			v1beta1.RolloutGroup{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
 					{Capacity: intstr.FromString("50%"), Traffic: 50},
 					{Capacity: intstr.FromString("100%"), Traffic: 100},
 				}},
 			},
-			singleBG(v1beta1.DecoderComponent),
+			singleBG(v1beta1.RouterComponent),
 		)
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())

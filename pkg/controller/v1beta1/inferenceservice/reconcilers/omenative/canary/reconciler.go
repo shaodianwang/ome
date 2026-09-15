@@ -7,6 +7,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
+	"github.com/ome-projects/ome/pkg/rollout"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -29,8 +30,11 @@ type ReconcileInputs struct {
 	// Reader is the live API reader for one-off reads of types the manager does
 	// not watch (the analysis auth Secret): reading those through the cached
 	// Client would spin up a cluster-wide informer for the type.
-	Reader             client.Reader
-	ISVC               *v1beta1.InferenceService
+	Reader client.Reader
+	ISVC   *v1beta1.InferenceService
+	// Group is the canary group being dispatched — the unit's own ladder. Nil
+	// resolves it from Component.
+	Group              *v1beta1.RolloutGroup
 	Component          v1beta1.ComponentType
 	CanaryRevisionHash string
 	// StableRevisionHash is the stable revision for the canary's component:
@@ -129,13 +133,21 @@ type Result struct {
 // performs capacity → traffic → pause, advancing on promotion; the final step
 // (TrafficWeight 100) drains and scales the stable revision down.
 func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
-	g := v1beta1.EffectiveCanaryGroup(in.ISVC)
+	// The legacy single-run field is a projection of per-unit state, so it is
+	// re-derived on every exit path rather than written alongside each mutation
+	// — a copy published once would freeze while the run advanced past it.
+	defer rollout.SyncLegacyCanaryAlias(&in.ISVC.Status)
+
+	g := in.Group
+	if g == nil {
+		g = rollout.CanaryGroupFor(in.ISVC, in.Component)
+	}
 	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
 		return &Result{Active: false}, nil
 	}
 	plan := g.Canary
 
-	cs := in.ISVC.Status.Canary
+	cs := rollout.CanaryStatusFor(&in.ISVC.Status, in.Component)
 	// Status is an unvalidated subresource: clamp a negative step (an external
 	// write) before it can index plan.Steps.
 	if cs != nil && cs.CurrentStep < 0 {
@@ -274,14 +286,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		if !in.RunActive {
 			return &Result{Active: false}, nil
 		}
-		in.ISVC.Status.Canary = &v1beta1.CanaryStatus{
+		rollout.SetCanaryStatusFor(&in.ISVC.Status, in.Component, &v1beta1.CanaryStatus{
 			TargetID:           in.TargetID,
 			CanaryRevisionHash: in.CanaryRevisionHash,
 			StableRevisionHash: in.StableRevisionHash,
 			CurrentStep:        0,
 			StepEnteredTime:    &metav1.Time{Time: in.Now},
-		}
-		cs = in.ISVC.Status.Canary
+		})
+		cs = rollout.CanaryStatusFor(&in.ISVC.Status, in.Component)
 	}
 
 	// Backfill a missing stable identity from the observed stable revision (a
@@ -554,8 +566,8 @@ func resolveReadyTimeout(in ReconcileInputs, plan *v1beta1.GroupCanary) time.Dur
 
 // effectiveCanaryPlan is the effective canary body for callers that hold only
 // ReconcileInputs (the plan indexing itself stays in Reconcile).
-func effectiveCanaryPlan(isvc *v1beta1.InferenceService) *v1beta1.GroupCanary {
-	g := v1beta1.EffectiveCanaryGroup(isvc)
+func effectiveCanaryPlan(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) *v1beta1.GroupCanary {
+	g := rollout.CanaryGroupFor(isvc, component)
 	if g == nil {
 		return nil
 	}
