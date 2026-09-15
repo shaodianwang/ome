@@ -41,9 +41,12 @@ import (
 //     (StartedAt + InstanceReadyTimeout, stamped by the per-op writers)
 //     elapses. Instances whose blamed pods (own bucket, plus the
 //     SurgeIndex bucket for a gang-surge source) are held by an
-//     admission scheduling gate (e.g. Kueue) are excluded: the
-//     deadline-parking step (ReconcileGatedDeadlines) owns their clock,
-//     and a queued wait must not count against the timeout.
+//     admission scheduling gate (e.g. Kueue) are excluded, as are those
+//     whose operation is parked on the capacity-blocked Waiting token
+//     (a create admission refused for lack of quota leaves no pod to
+//     carry a gate): the deadline-parking step (ReconcileGatedDeadlines)
+//     owns their clock, and a queued wait must not count against the
+//     timeout.
 //
 // BOTH paths skip operations whose state machine owns its own terminal
 // handling:
@@ -173,6 +176,16 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			continue
 		}
 		if s.Operation != nil && s.Operation.SurgeIndex != nil && anyPodAdmissionGated(byIdx[*s.Operation.SurgeIndex]) {
+			continue
+		}
+		// Same rationale, no pod to read it from: a create admission
+		// refused for lack of quota leaves nothing to carry a scheduling
+		// gate, so the wait is recorded on the Operation instead — on the
+		// surge row for a gang surge, whose source this check follows the
+		// same way the gate check above follows the SurgeIndex bucket. The
+		// parking step zeroes that deadline; one stamped before the park
+		// landed must not expire either.
+		if instanceCapacityBlocked(&s, input.ObservedState.InstanceStatuses) {
 			continue
 		}
 		op := s.Operation

@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // DispositionOutcome reports which branch DisposeExpiredAttempt took.
@@ -433,30 +434,13 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 	return true, nil
 }
 
-// failInstanceClearingOperation stamps Phase=Failed AND clears the
-// in-flight Operation in one MutateInstance call — the abandon-analogue
-// for single-pod / create attempts. Failed-with-no-Operation hands control
-// back to operation-specific recovery on a later reconcile; clearing the
-// Operation prevents the current attempt's stamper from extending it. A
-// fresh-empty slot (Phase=="") from MutateInstance's append path is a
-// sentinel for a slot deleted out from under us — don't resurrect. termination, when
-// non-nil, is recorded on LastFailure in the same write.
+// failInstanceClearingOperation delegates to the shared writer in the
+// types package (types.FailInstanceClearingOperation) — one
+// implementation for the dispositions here and the apiserver-rejection
+// path in workload/ops. Kept as a package-local name so the call sites
+// below read unchanged.
 func failInstanceClearingOperation(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) error {
-	return input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
-		if s.Phase == "" {
-			return false
-		}
-		if s.Phase == InstancePhaseFailed && s.Operation == nil {
-			return false
-		}
-		s.Phase = InstancePhaseFailed
-		s.Operation = nil
-		if termination != nil {
-			captured := *termination
-			s.LastFailure = &captured
-		}
-		return true
-	})
+	return types.FailInstanceClearingOperation(ctx, input, idx, termination)
 }
 
 // dispositionLedgerOwner / dispositionLedgerOwnerGVK mirror the ops

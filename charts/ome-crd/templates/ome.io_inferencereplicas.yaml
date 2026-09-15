@@ -3962,6 +3962,8 @@ spec:
                                   - Migrate
                                   - Delete
                                 type: string
+                              waiting:
+                                type: string
                             required:
                               - id
                               - lastProgressAt
@@ -4240,6 +4242,8 @@ spec:
                               - Restart
                               - Migrate
                               - Delete
+                            type: string
+                          waiting:
                             type: string
                         required:
                           - id

@@ -377,7 +377,10 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
-		if _, err := createMissingPods(ctx, deps, input, plan, newInst, inst.Index, missing, revisionHashForInstance(input, inst.Index)); err != nil {
+		if _, err := createMissingPods(ctx, deps, input, plan, newInst, inst.Index, missing, revisionForInstance(input, inst.Index)); err != nil {
+			if createRejectionHandled(err) {
+				return false, nil
+			}
 			return false, err
 		}
 		return false, nil
@@ -517,27 +520,28 @@ func sameTermination(a, b *workload.InstanceTermination) bool {
 	}
 }
 
-// revisionHashForInstance returns the revision hash to stamp on pods
+// revisionForInstance returns the revision to stamp on pods
 // being recreated for one Instance. Restart keeps the Instance on its
 // existing revision, so we read RunningRevision from the observed
 // status. An Instance that never ran a revision (a gang rebuilt after
 // losing a member while still forming) has only the revision its attempt
-// pinned on the Operation. Returns "" when nothing records a revision.
-func revisionHashForInstance(input workload.ReconcileInput, idx int32) string {
+// pinned on the Operation. Returns the zero RevisionID when nothing
+// records a revision.
+func revisionForInstance(input workload.ReconcileInput, idx int32) query.RevisionID {
 	s := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
 	if s == nil {
-		return ""
+		return query.RevisionID{}
 	}
 	if s.RunningRevision != "" {
-		return query.RevisionFromName(s.RunningRevision).Hash()
+		return query.RevisionFromName(s.RunningRevision)
 	}
 	if s.TargetRevision != "" {
-		return query.RevisionFromName(s.TargetRevision).Hash()
+		return query.RevisionFromName(s.TargetRevision)
 	}
 	if s.Operation != nil && s.Operation.TargetRevision != "" {
-		return query.RevisionFromName(s.Operation.TargetRevision).Hash()
+		return query.RevisionFromName(s.Operation.TargetRevision)
 	}
-	return ""
+	return query.RevisionID{}
 }
 
 // runnerRestartedSinceReady reports whether pod's runner container carries

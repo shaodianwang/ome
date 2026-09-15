@@ -93,6 +93,12 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	if deps.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("workload.Reconcile: nil client (component=%s)", plan.Component)
 	}
+	// One pacing sink per pass. The op state machines report progress as
+	// (done, error) and a throttled write is neither, so the server's
+	// suggested delay is deposited here and floors the wake-up below.
+	if input.Pacing == nil {
+		input.Pacing = &APIPacing{}
+	}
 
 	// Teardown mode: the owner is being deleted. The planned index set is
 	// treated as empty so every observed Instance is a scale-down extra
@@ -134,7 +140,8 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	if perr != nil {
 		return ctrl.Result{}, perr
 	}
-	return Execute(ctx, deps, input, plan, target, snapshot, decision)
+	res, err := Execute(ctx, deps, input, plan, target, snapshot, decision)
+	return floorRetryAfter(res, input.Pacing.Throttle()), err
 }
 
 // Execute applies the Decision: the op-pass action loop, then — when
@@ -613,6 +620,21 @@ func foldRetryAfter(res ctrl.Result, retryAfter time.Duration) ctrl.Result {
 		return res
 	}
 	if res.RequeueAfter == 0 || retryAfter < res.RequeueAfter {
+		res.RequeueAfter = retryAfter
+	}
+	return res
+}
+
+// floorRetryAfter raises res's wake-up to at least retryAfter. Used for a
+// delay the apiserver itself asked for: unlike foldRetryAfter's min, a
+// server-suggested Retry-After is a FLOOR — waking sooner just re-earns
+// the rejection. An immediate requeue is left alone; the caller's own
+// reasons to come straight back outrank a pacing hint.
+func floorRetryAfter(res ctrl.Result, retryAfter time.Duration) ctrl.Result {
+	if retryAfter <= 0 || res.Requeue {
+		return res
+	}
+	if retryAfter > res.RequeueAfter {
 		res.RequeueAfter = retryAfter
 	}
 	return res

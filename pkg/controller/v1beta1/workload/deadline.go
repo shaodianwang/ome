@@ -62,22 +62,32 @@ func PodAdmissionGated(pod *corev1.Pod) bool {
 }
 
 // ReconcileGatedDeadlines keeps InstanceReadyTimeout measured from
-// admission, not from operation start, so a workload an external admission
-// authority (e.g. Kueue) legitimately holds queued is not failed by the
-// deadline backstop (the escalation pass additionally skips gated
-// Instances outright, covering the window before a gate-enter is parked).
+// admission, not from operation start, so a workload an external
+// authority legitimately holds queued is not failed by the deadline
+// backstop (the escalation pass additionally skips gated Instances
+// outright, covering the window before a gate-enter is parked).
+//
+// Two waits qualify, both external to the workload:
+//   - a pod still carrying an admission scheduling gate (e.g. Kueue) —
+//     supplied by the caller in `gated`, which maps Instance index ->
+//     "any of its pods is gated";
+//   - an operation parked on the capacity-blocked waiting token
+//     (instanceCapacityBlocked): admission refused the create for lack of
+//     quota, so there is no pod to carry a gate and the create path
+//     records the wait on the Operation instead — on the surge row for a
+//     gang surge, which the source is held by in turn.
 //
 // For each transient-phase Instance with an in-flight Operation:
-//   - gated  -> PARK: zero the deadline (the "never expires" sentinel
+//   - held    -> PARK: zero the deadline (the "never expires" sentinel
 //     the deadline predicate already honors). The clock pauses.
-//   - un-gated with a parked (zero) deadline -> RESTART: now+timeout. The
+//   - released with a parked (zero) deadline -> RESTART: now+timeout. The
 //     clock starts from admission.
-//   - un-gated with a live (non-zero) deadline -> untouched, so the
-//     no-gate path behaves exactly as the per-op writer stamped it.
+//   - released with a live (non-zero) deadline -> untouched, so the
+//     no-hold path behaves exactly as the per-op writer stamped it.
 //
-// Edge-triggered: it writes only on the gate-enter (park) and gate-exit
+// Edge-triggered: it writes only on the hold-enter (park) and hold-exit
 // (restart) transitions — a workload queued for hours does not churn its
-// status. `gated` maps Instance index -> "any of its pods is gated".
+// status.
 func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instances []InstanceStatus, gated map[int32]bool, timeout time.Duration) error {
 	now := input.Now()
 	for i := range instances {
@@ -85,18 +95,44 @@ func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instance
 		if s.Operation == nil || !isTransientPhase(s.Phase) {
 			continue
 		}
+		held := gated[s.Index] || instanceCapacityBlocked(s, instances)
 		switch {
-		case gated[s.Index] && !s.Operation.Deadline.IsZero():
+		case held && !s.Operation.Deadline.IsZero():
 			if err := setInstanceDeadline(ctx, input, s.Index, metav1.Time{}); err != nil {
-				return fmt.Errorf("park deadline for gated instance %d: %w", s.Index, err)
+				return fmt.Errorf("park deadline for held instance %d: %w", s.Index, err)
 			}
-		case !gated[s.Index] && s.Operation.Deadline.IsZero():
+		case !held && s.Operation.Deadline.IsZero():
 			if err := setInstanceDeadline(ctx, input, s.Index, metav1.NewTime(now.Add(timeout))); err != nil {
-				return fmt.Errorf("restart deadline for ungated instance %d: %w", s.Index, err)
+				return fmt.Errorf("restart deadline for released instance %d: %w", s.Index, err)
 			}
 		}
 	}
 	return nil
+}
+
+// instanceCapacityBlocked reports whether s's operation is waiting on
+// capacity — its own waiting token, or the one on the surge row its
+// Operation.SurgeIndex points at. The surge indirection matters because a
+// gang surge creates pods under the SURGE index while the governing
+// operation and its deadline live on the SOURCE: without it, the source's
+// clock would keep running through a wait its own replacement is stuck
+// in. Mirrors how an admission-gated surge bucket parks its source.
+func instanceCapacityBlocked(s *InstanceStatus, statuses []InstanceStatus) bool {
+	if s == nil || s.Operation == nil {
+		return false
+	}
+	if OperationCapacityBlocked(s.Operation) {
+		return true
+	}
+	if s.Operation.SurgeIndex == nil {
+		return false
+	}
+	for i := range statuses {
+		if statuses[i].Index == *s.Operation.SurgeIndex {
+			return OperationCapacityBlocked(statuses[i].Operation)
+		}
+	}
+	return false
 }
 
 // setInstanceDeadline writes Operation.Deadline via MutateInstance,

@@ -225,6 +225,15 @@ type ReconcileInput struct {
 	// escalation (the InstanceReadyTimeout backstop still fires).
 	StuckPodGrace time.Duration
 
+	// Pacing collects the wake-up the apiserver itself asked for while
+	// refusing writes during this pass. The op entry points report
+	// progress as (done, error) and have no result channel of their own,
+	// so a server-suggested Retry-After is deposited here and folded into
+	// the pass's requeue by the dispatcher. Reconcile allocates one per
+	// pass; nil is safe (every method no-ops) for adapters and tests that
+	// call an op directly.
+	Pacing *APIPacing
+
 	// Disposition carries the operator-config inputs the terminal-failure
 	// disposition (DisposeExpiredAttempt) branches on. The zero value
 	// fails safe (no relocation, terminal branch for non-workload-caused

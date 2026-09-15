@@ -1,9 +1,11 @@
 package types
 
-// workloadCausedWaitingReasons is the set of kubelet container
-// state.Waiting reasons that are DETERMINISTICALLY scoped to the
-// workload revision — the failure travels with the pod template, so
-// relocating the pod to another node reproduces it identically. These
+// workloadCausedWaitingReasons is the set of failure reasons —
+// kubelet container state.Waiting reasons plus the apiserver rejection
+// reasons the create/patch classifier stamps — that are
+// DETERMINISTICALLY scoped to the workload revision: the failure travels
+// with the pod template, so relocating the pod to another node (or
+// simply retrying) reproduces it identically. These
 // are Kubernetes API semantics, identical on every cluster; they are
 // declared as package constants, not config (a knob here could only be
 // set wrongly: removing an entry re-enables retrying a fault that
@@ -34,6 +36,15 @@ package types
 //	                           projection) was rejected at container
 //	                           create. The config travels with the
 //	                           revision, not the node.
+//	InvalidPodSpec             the apiserver rejected the pod object
+//	                           itself (422 Invalid) — a field the pod
+//	                           template sets is unacceptable. Not a
+//	                           kubelet reason: it is stamped by the
+//	                           create/patch rejection classifier (see
+//	                           RejectionReasonInvalidPodSpec). No node
+//	                           ever sees the pod, so placement is
+//	                           irrelevant; only a corrected revision is
+//	                           admissible.
 //
 // EXCLUDED — ambiguous scope (could be the revision OR the
 // device/node): CrashLoopBackOff, RunContainerError,
@@ -50,10 +61,11 @@ package types
 // AutoRecover records and resets the budget. Ambiguous reasons therefore
 // route to bounded relocation, never to revision blame.
 var workloadCausedWaitingReasons = map[string]struct{}{
-	"ImagePullBackOff":           {},
-	"ErrImagePull":               {},
-	"InvalidImageName":           {},
-	"CreateContainerConfigError": {},
+	"ImagePullBackOff":            {},
+	"ErrImagePull":                {},
+	"InvalidImageName":            {},
+	"CreateContainerConfigError":  {},
+	RejectionReasonInvalidPodSpec: {},
 }
 
 // IsWorkloadCausedReason reports whether reason — a kubelet waiting

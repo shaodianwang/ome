@@ -62,6 +62,7 @@ type (
 	DemotionSelection       = types.DemotionSelection
 	ForceDeletePolicy       = types.ForceDeletePolicy
 	DispositionDeps         = types.DispositionDeps
+	APIPacing               = types.APIPacing
 )
 
 type InstanceMutationSnapshot = types.InstanceMutationSnapshot
@@ -221,6 +222,13 @@ func PodTerminationWithReason(pod *corev1.Pod, reason string, now metav1.Time) *
 // that charges a revision's retry ladder toward Held.
 func IsWorkloadCausedReason(reason string) bool {
 	return types.IsWorkloadCausedReason(reason)
+}
+
+// OperationCapacityBlocked re-exports types.OperationCapacityBlocked:
+// whether an operation is parked on the capacity-blocked Waiting token.
+// The deadline-parking step and the escalation pass both read it.
+func OperationCapacityBlocked(op *InstanceOperation) bool {
+	return types.OperationCapacityBlocked(op)
 }
 
 // RecordUpdateFailureInRetryBlock re-exports the shared RetryBlock

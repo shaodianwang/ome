@@ -13,6 +13,19 @@ const (
 	EventReasonInstanceCreated EventReason = "InstanceCreated"
 	EventReasonInstanceReady   EventReason = "InstanceReady"
 
+	// EventReasonInstanceRejected fires when the apiserver PERMANENTLY
+	// rejects an Instance's pod create or in-place patch — an invalid pod
+	// template (422) or a terminating namespace. The attempt is disposed
+	// Failed; retrying the same revision would reproduce the rejection
+	// byte for byte. Names the pod and the apiserver's own explanation.
+	EventReasonInstanceRejected EventReason = "InstanceRejected"
+
+	// EventReasonInstanceQuotaBlocked fires once per blocking episode
+	// when admission refuses an Instance's pods for lack of quota. The
+	// attempt is NOT failed: it waits with its InstanceReadyTimeout clock
+	// parked until quota frees up.
+	EventReasonInstanceQuotaBlocked EventReason = "InstanceQuotaBlocked"
+
 	// In-place update (workload/ops/update.go).
 	EventReasonInPlaceUpdateStarted     EventReason = "InPlaceUpdateStarted"
 	EventReasonInPlaceUpdateCompleted   EventReason = "InPlaceUpdateCompleted"
