@@ -1,0 +1,54 @@
+title: Per-Component Canary Plans
+oep-number: "0017.2"
+authors:
+  - "@benj"
+status: provisional
+creation-date: 2026-09-12
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0017 (spec.rollout.groups[] and the one-of
+# canary|blueGreen|rollingUpdate grammar) and OEP-0017.1 (RolloutPolicy +
+# pinned runs). Today admission permits at most one canary group per
+# InferenceService and requires that group to contain the external entrypoint,
+# so an ISVC can gate exactly one ladder with exactly one gate set across every
+# Component it lists. This OEP lifts the count to one canary run per canary
+# unit -- the router, and the engine+decoder pair, which stays a single
+# lockstepped unit -- each with its own steps, timeouts and analysis, and moves
+# the canary step machine's state from the singular status.canary onto the
+# per-Component status it already keys everything else by. Additive: the
+# single-group shape stays valid and keeps its current semantics.
+see-also:
+  - "/oeps/0017-unified-rollout-v2"
+  - "/oeps/0017.1-rollout-policy"
+  - "/oeps/0015.1-canary-executor"
+  - "/oeps/0015.2-canary-analysis"
+  - "/oeps/0007.1-omenative-coordinated-rollout"
+
+# Additive to 0017 and 0017.1, not a supersession.
+replaces: []
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# Reuses the existing chart-level rollout-policy gate rather than adding a
+# runtime one: a cluster that cannot run policy-backed canaries cannot run
+# per-Component ones either. Multi-canary admission is gated separately at
+# alpha so a cluster can adopt the status change without accepting concurrent
+# runs; see Graduation Criteria.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_canary_runs_active            # gauge; labels: namespace, isvc, component
+  - ome_canary_component_step         # gauge; labels: namespace, isvc, component
+  - ome_canary_component_outcome_total # labels: namespace, component, outcome (promoted|rolledback|failed)
+  - ome_canary_concurrent_components  # gauge; labels: namespace, isvc
