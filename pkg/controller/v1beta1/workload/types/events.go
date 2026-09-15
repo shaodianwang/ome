@@ -108,7 +108,7 @@ const (
 	// Pending. Status-only; recovery stays with the ordinary passes.
 	EventReasonInstanceDemoted EventReason = "InstanceDemoted"
 
-	// EventReasonPodForceDeleted fires when scale-down escalation
+	// EventReasonPodForceDeleted fires when a teardown escalation
 	// force-deletes (grace 0, UID-preconditioned) a Terminating pod
 	// overdue past its own deletion deadline on a node that provably
 	// cannot acknowledge the termination (gone, or unreachable-tainted /

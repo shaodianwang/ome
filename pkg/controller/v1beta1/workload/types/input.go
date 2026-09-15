@@ -211,7 +211,8 @@ type ReconcileInput struct {
 	// nil = unconfigured → fail-safe: first failure Holds.
 	UpdateRetryPolicy *RetryPolicy
 
-	// ForceDelete gates the stuck-Terminating force-delete escalation.
+	// ForceDelete gates the stuck-Terminating force-delete escalation
+	// that scale-down, migration, and update teardown all share.
 	// nil = unconfigured → the escalation is disabled entirely (does not
 	// exist); when non-nil both durations are > 0 — config validation
 	// guarantees it, consumers never re-check.
