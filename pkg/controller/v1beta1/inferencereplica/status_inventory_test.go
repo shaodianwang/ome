@@ -32,13 +32,16 @@ import (
 //     writer.
 //
 // A new site anywhere fails until it is classified here; a stale entry fails
-// so the table never drifts from the code.
+// so the table never drifts from the code. An import-graph check keeps the
+// shared test-fixture package out of every production package, which is what
+// makes its classification below true.
 
 const (
-	omeAPIPackagePath = "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	codecPackagePath  = "github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	decodedAccessor   = "GetDecoded"
-	singleWriter      = "persistInferenceReplicaStatus"
+	omeAPIPackagePath  = "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	codecPackagePath   = "github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
+	fixturePackagePath = codecPackagePath + "/irstatustest"
+	decodedAccessor    = "GetDecoded"
+	singleWriter       = "persistInferenceReplicaStatus"
 )
 
 var representationFields = map[string]struct{}{
@@ -68,6 +71,10 @@ const (
 	// object is classified through the codec (ObservedEncoding, DecodeStatus)
 	// and no row is consumed by a decision.
 	administrativeCensus = "administrative paginated census classified through the codec"
+	// testFixtureBuilder: the function builds logical statuses for the codec
+	// and qualification suites to measure; its package is test support that
+	// no production package imports (TestIRStatusFixturePackageImportInventory).
+	testFixtureBuilder = "test-fixture builder constructing logical statuses; imported only by tests"
 )
 
 type accessCounts struct {
@@ -142,6 +149,10 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/placement/admission.go", "admittedReplicaCount", read(2), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/placement/admission.go", "componentHasAdmittedInstance", read(1), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/placement/failed.go", "IsTerminallyFailed", read(1), decodedObjectRows, rows)
+
+	// Shared test fixtures: the builder writes dense rows into a status it
+	// constructs; nothing outside tests links it.
+	approve("pkg/controller/v1beta1/irstatus/irstatustest/fixtures.go", "LogicalStatus", accessCounts{writes: 1}, testFixtureBuilder, rows)
 
 	inv := loadStatusInventory(t)
 	actual := map[fieldUse]accessCounts{}
@@ -219,6 +230,33 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 		if _, ok := actual[site]; !ok {
 			t.Errorf("stale fetch approval for %s in %s:%s (%s)", site.method, site.file, site.function, want.reason)
 		}
+	}
+}
+
+// The shared fixture package writes the dense representation directly, so its
+// read-inventory classification holds only while no production package links
+// it. The inventory loads non-test files only, so any importer found here is
+// production code; the fixture package itself must be among the loaded
+// packages so a rename cannot make the check pass vacuously.
+func TestIRStatusFixturePackageImportInventory(t *testing.T) {
+	inv := loadStatusInventory(t)
+	loaded := false
+	var importers []string
+	for _, pkg := range inv.pkgs {
+		if pkg.PkgPath == fixturePackagePath {
+			loaded = true
+			continue
+		}
+		if _, ok := pkg.Imports[fixturePackagePath]; ok {
+			importers = append(importers, pkg.PkgPath)
+		}
+	}
+	if !loaded {
+		t.Fatalf("fixture package %s is not among the loaded production packages; update fixturePackagePath", fixturePackagePath)
+	}
+	sort.Strings(importers)
+	if len(importers) != 0 {
+		t.Fatalf("production packages import the test-only fixture package %s: %v", fixturePackagePath, importers)
 	}
 }
 

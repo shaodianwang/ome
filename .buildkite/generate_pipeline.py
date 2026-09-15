@@ -105,9 +105,9 @@ KIND_SPEC_GROUPS = (
         "single_replica", "regression", "watches", "manager_restart_identity",
     )),
     ("status-events-services", "Status, events, and services", (
-        "events", "status", "status_surface", "producer_services",
-        "producer_traffic", "peer_discovery", "multipod_rank0_service",
-        "concurrent_isvcs",
+        "events", "status", "status_surface", "status_encoding",
+        "producer_services", "producer_traffic", "peer_discovery",
+        "multipod_rank0_service", "concurrent_isvcs",
     )),
     ("runtime-retry-recovery", "Runtime, retry, and recovery", (
         "bad_image", "disposition", "retry_block", "runtime_corrective_recovery",

@@ -184,12 +184,17 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 			if err != nil {
 				return fmt.Errorf("load lifecycle scale settings: %w", err)
 			}
+			decoder, err := components.InstanceStatusDecoderFromConfig(ctx, clientset)
+			if err != nil {
+				return fmt.Errorf("load status representation settings: %w", err)
+			}
 			return (&inferencereplica.Reconciler{
 				Client:                   mgr.GetClient(),
 				Clientset:                clientset,
 				Log:                      ctrl.Log.WithName("InferenceReplica"),
 				APIReader:                mgr.GetAPIReader(),
 				Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
+				InstanceStatusDecoder:    decoder,
 				ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 				ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 				ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,

@@ -192,3 +192,16 @@ A `GO` proves the barrier only for the clusters and roles the inventory
 declares. A reader that is not in the inventory, such as an external script
 with its own credentials, cannot be found by the command; completeness of the
 inventory remains the operator's attestation.
+
+## Codec size and cost gates
+
+The codec's unit tests pin the encoded-size gates on every run: the complete
+selected status of the steady and representative fixtures stays under 256 KiB
+and under half of the DenseV1 status, no selected representation is larger
+than DenseV1, the mass-failure status stays below the etcd request limit, and
+the selected status grows by no more than 3.25x from 2,000 to 5,000 rows. The
+benchmark-backed encode, decode, and growth cost ceilings are enforced only
+when the test process runs with `OME_CODEC_COST_GATES=strict`, as the
+qualification lane does; any other run measures them once and reports the
+ratios without gating, because a timing ratio on a shared worker is not
+evidence either way.

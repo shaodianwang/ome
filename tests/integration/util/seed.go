@@ -13,6 +13,12 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
+// SeededMaxDecodedInstances is the ColumnarV2 row bound the seeded
+// omenativeStatus block declares. The in-process test managers derive their
+// per-Instance status decoder from it, and qualification specs that store a
+// ColumnarV2 payload directly encode under the same bound.
+const SeededMaxDecodedInstances = 10000
+
 // SeedDefaultConfigMaps creates the ConfigMap the controllers read at
 // reconcile time:
 //
@@ -20,7 +26,9 @@ import (
 //     rollout, omenativeStatus. The ISVC reconciler reads ingress + deploy +
 //     rollout; the BaseModel PVC path reads omeAgent; the InferenceReplica
 //     reconciler reads lifecycle; the manager binary requires omenativeStatus
-//     at startup (DenseV1 here, matching the chart default).
+//     at startup (the DenseV1 target the chart ships, with a decode bound so a
+//     stored ColumnarV2 payload is decoded and converted rather than failing
+//     closed).
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -92,9 +100,10 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "maxPinnedPlanBytes": 16384,
   "defaultReadyTimeout": "15m"
 }`,
-		"omenativeStatus": `{
-  "instanceStatusEncoding": "DenseV1"
-}`,
+		"omenativeStatus": fmt.Sprintf(`{
+  "instanceStatusEncoding": "DenseV1",
+  "maxDecodedInstances": %d
+}`, SeededMaxDecodedInstances),
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)
 	}

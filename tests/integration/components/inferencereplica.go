@@ -52,6 +52,10 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	if err != nil {
 		return fmt.Errorf("SetupInferenceReplica: load lifecycle scale settings: %w", err)
 	}
+	decoder, err := InstanceStatusDecoderFromConfig(ctx, clientset)
+	if err != nil {
+		return fmt.Errorf("SetupInferenceReplica: load status representation settings: %w", err)
+	}
 
 	r := &inferencereplica.Reconciler{
 		Client:                   mgr.GetClient(),
@@ -59,6 +63,7 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		Log:                      ctrl.Log.WithName("InferenceReplica"),
 		APIReader:                mgr.GetAPIReader(),
 		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
+		InstanceStatusDecoder:    decoder,
 		MaxConcurrentReconciles:  cfg.maxConcurrentReconciles,
 		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,

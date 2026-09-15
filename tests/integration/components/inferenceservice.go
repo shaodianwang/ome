@@ -82,15 +82,20 @@ func SetupInferenceService(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		translator = tr
 	}
 	trafficReconciler := traffic.NewReconciler(mgr.GetClient(), mgr.GetScheme(), translator)
+	decoder, err := InstanceStatusDecoderFromConfig(ctx, clientset)
+	if err != nil {
+		return fmt.Errorf("SetupInferenceService: load status representation settings: %w", err)
+	}
 
 	r := &v1beta1isvccontroller.InferenceServiceReconciler{
-		Client:            mgr.GetClient(),
-		Clientset:         clientset,
-		Log:               ctrl.Log.WithName("InferenceService"),
-		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorderFor("InferenceService"),
-		ModelCache:        cfg.modelCacheProvider,
-		TrafficReconciler: trafficReconciler,
+		Client:                mgr.GetClient(),
+		Clientset:             clientset,
+		Log:                   ctrl.Log.WithName("InferenceService"),
+		Scheme:                mgr.GetScheme(),
+		Recorder:              mgr.GetEventRecorderFor("InferenceService"),
+		InstanceStatusDecoder: decoder,
+		ModelCache:            cfg.modelCacheProvider,
+		TrafficReconciler:     trafficReconciler,
 
 		QuotaAcceleratorResources: cfg.quotaAcceleratorResources,
 	}

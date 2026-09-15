@@ -1136,9 +1136,12 @@ external baseline-subtracted process measurement around repeated operations.
 From 2,000 to 5,000 rows, each measure grows no more than 3.25x: the row count
 grows 2.5x and the remaining allowance covers sorting and allocator variance
 without accepting superlinear growth. Ten interleaved samples compare medians
-so machine speed does not become the gate. The qualification PR records the raw
-benchmark results; changing a ceiling requires OEP review rather than weakening
-a test to admit the implementation.
+so machine speed does not become the gate. The codec test enforces these
+ceilings only when it runs with `OME_CODEC_COST_GATES=strict`, which the
+qualification lane sets; the unit lane measures the same ratios once and
+reports them without gating, so a shared worker's speed cannot fail it. The
+qualification PR records the raw benchmark results; changing a ceiling requires
+OEP review rather than weakening a test to admit the implementation.
 
 ### KIND tests
 
