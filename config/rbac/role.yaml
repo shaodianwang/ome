@@ -217,6 +217,7 @@ rules:
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - sidecars
   verbs:
   - create
