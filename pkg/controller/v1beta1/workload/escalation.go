@@ -250,8 +250,12 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 // rotation: at least `desired` live (non-deleting) pods, every one of
 // them ContainersReady AND carrying the serving gate. Deleting pods are
 // excluded rather than disqualifying — a completed surge leaves the old
-// pod draining next to the serving replacement. desired <= 0 never
-// counts as serving (nothing is expected, so nothing can prove health).
+// pod draining next to the serving replacement. A terminal pod is never
+// live and disqualifies the set outright: it is failure evidence that
+// must reach escalation even when stale conditions on it still read
+// healthy, or when a serving sibling would otherwise cover the count.
+// desired <= 0 never counts as serving (nothing is expected, so nothing
+// can prove health).
 func podSetFullyServing(pods []*corev1.Pod, desired int32) bool {
 	if desired <= 0 {
 		return false
@@ -261,7 +265,7 @@ func podSetFullyServing(pods []*corev1.Pod, desired int32) bool {
 		if p == nil || p.DeletionTimestamp != nil {
 			continue
 		}
-		if !podreadiness.IsContainersReady(p) || !podreadiness.IsServing(p) {
+		if query.IsTerminalPod(p) || !podreadiness.IsContainersReady(p) || !podreadiness.IsServing(p) {
 			return false
 		}
 		live++

@@ -112,8 +112,11 @@ func createFiltered(ctx context.Context, deps workload.Deps, input workload.Reco
 }
 
 type createStartAction struct {
-	instance       workload.InstancePlan
-	missing        []podTarget
+	instance workload.InstancePlan
+	missing  []podTarget
+	// terminal holds the dead pods still occupying missing targets' names;
+	// they are recycled before the targets can be created.
+	terminal       []*corev1.Pod
 	firstCreate    bool
 	statusChanges  bool
 	transition     statusTransition
@@ -216,6 +219,7 @@ func createFilteredBatched(
 			action := &createStartAction{
 				instance:      inst,
 				missing:       missing,
+				terminal:      terminalTargetPods(existing, missing),
 				firstCreate:   observed == nil,
 				statusChanges: mutation.Mutate(&probe),
 				transition:    statusTransition{index: inst.Index},
@@ -349,6 +353,16 @@ func processStartActions(
 			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceCreated,
 				"OMENative %s materialized; %d pod(s) requested",
 				instanceKey(input.Key.Component, action.instance.Index), len(action.missing))
+		}
+		// A dead pod on a stable name must be gone before the name can be
+		// reused; the create waits for a later pass.
+		recycling, err := recycleTerminalPods(ctx, deps, input, action.instance.Index, workload.InstanceOperationCreate, action.terminal)
+		if err != nil {
+			rollbackErr := rollbackStartActions(ctx, input, actions[i+1:])
+			return true, errors.Join(err, rollbackErr)
+		}
+		if recycling {
+			continue
 		}
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, action.instance.Index) {
 			continue
@@ -632,9 +646,12 @@ func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInp
 	return true, flipRetryBlockOnAttemptStart(ctx, input, target.Name)
 }
 
+// missingPodTargets diffs the desired pod names against the live pods. A
+// terminal pod is absent for this purpose: it still holds its stable name,
+// but nothing will ever run in it again, so the target must be recreated.
 func missingPodTargets(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod) []podTarget {
 	desired := expectedPodNamesForInstance(input, plan, inst)
-	existingByName := query.IndexPodsByName(existing)
+	existingByName := query.IndexPodsByName(query.ExcludeTerminalPods(existing))
 	missing := make([]podTarget, 0)
 	for _, target := range desired {
 		if _, ok := existingByName[target.Name]; !ok {

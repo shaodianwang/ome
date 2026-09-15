@@ -27,6 +27,11 @@ const (
 	EventReasonRestartTriggered EventReason = "RestartTriggered"
 	EventReasonRestartCompleted EventReason = "RestartCompleted"
 
+	// EventReasonTerminalPodRecycled fires when Create or Restart deletes
+	// a terminal pod (phase Failed or Succeeded) that occupied one of an
+	// Instance's stable pod names, so the target can be recreated.
+	EventReasonTerminalPodRecycled EventReason = "TerminalPodRecycled"
+
 	// EventReasonFoundOrphan fires when Restart or recreate-Update
 	// finds a pod under the OMENative selector but missing the
 	// ome.io/instance-incarnation label. The reconciler refuses to
