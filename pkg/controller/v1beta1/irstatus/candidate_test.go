@@ -213,6 +213,75 @@ func TestSelectCandidateClearsPodDerivedFieldsOnBothCandidatesOnly(t *testing.T)
 	}
 }
 
+func TestDenseCandidateNormalizesInPlaceWithoutCopying(t *testing.T) {
+	t.Parallel()
+	rows := uniformRows(40)
+	for i := range rows {
+		rows[i].ReadyPodCount = 7
+		rows[i].ScheduledPodCount = 3
+		rows[i].NodesOccupied = []string{"node-a", "node-b"}
+	}
+	logical := logicalStatus(rows)
+	logical.Conditions = []metav1.Condition{{Type: "Available", Status: metav1.ConditionTrue, Reason: "Ready", LastTransitionTime: fixtureTime}}
+
+	candidate, err := DenseCandidate(logical)
+	if err != nil {
+		t.Fatalf("DenseCandidate() error = %v", err)
+	}
+	if candidate.Encoding != EncodingDenseV1 || candidate.Status != logical {
+		t.Fatalf("candidate = %+v, want the DenseV1 candidate built on the input itself", candidate)
+	}
+	if logical.InstanceStatusEncoding != nil || logical.InstanceStatusColumns != nil || len(logical.InstanceStatuses) != 40 {
+		t.Fatal("dense candidate does not carry exactly the dense representation")
+	}
+	for _, row := range logical.InstanceStatuses {
+		if row.ReadyPodCount != 0 || row.ScheduledPodCount != 0 || row.NodesOccupied != nil {
+			t.Fatalf("dense candidate kept Pod-derived fields: %+v", row)
+		}
+	}
+	if got, want := len(mustJSON(t, logical)), candidate.Size; got != want {
+		t.Fatalf("Size = %d, serialized %d", want, got)
+	}
+	if !equality.Semantic.DeepEqual(logical.Conditions, []metav1.Condition{{Type: "Available", Status: metav1.ConditionTrue, Reason: "Ready", LastTransitionTime: fixtureTime}}) {
+		t.Fatal("candidate lost status fields outside the per-Instance representation")
+	}
+
+	// The selection's dense candidate is the same normalization applied to a
+	// copy, so both entry points measure identical bytes for equal input.
+	selection, err := SelectCandidate(logical, testLimit)
+	if err != nil {
+		t.Fatalf("SelectCandidate() error = %v", err)
+	}
+	if selection.DenseV1.Size != candidate.Size {
+		t.Fatalf("dense sizes differ: DenseCandidate %d, SelectCandidate %d", candidate.Size, selection.DenseV1.Size)
+	}
+}
+
+func TestDenseCandidateRejectsNonLogicalInput(t *testing.T) {
+	t.Parallel()
+	encoding := v1beta1.InstanceStatusEncodingColumnarV2
+	columns := mustEncode(t, uniformRows(3), testLimit)
+	for name, status := range map[string]*v1beta1.InferenceReplicaStatus{
+		"nil":            nil,
+		"marker":         {InstanceStatusEncoding: &encoding},
+		"columns":        {InstanceStatusColumns: columns},
+		"marker+columns": {InstanceStatusEncoding: &encoding, InstanceStatusColumns: columns},
+	} {
+		var before []byte
+		if status != nil {
+			before = mustJSON(t, status)
+		}
+		candidate, err := DenseCandidate(status)
+		if candidate != nil {
+			t.Fatalf("%s: returned a candidate", name)
+		}
+		assertCodecReason(t, err, ErrorReasonRepresentationUnion)
+		if status != nil && !bytes.Equal(before, mustJSON(t, status)) {
+			t.Fatalf("%s: a rejected status was modified", name)
+		}
+	}
+}
+
 func TestSelectCandidateIsDeterministic(t *testing.T) {
 	t.Parallel()
 	for name, rows := range map[string][]v1beta1.OMENativeInstanceStatus{

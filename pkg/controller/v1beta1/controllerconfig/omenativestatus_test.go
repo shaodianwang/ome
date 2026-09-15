@@ -121,7 +121,7 @@ func TestParseOMENativeStatusConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseOMENativeStatusConfig(&v1.ConfigMap{Data: tt.data})
+			got, err := ParseOMENativeStatusConfig(&v1.ConfigMap{Data: tt.data})
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got config %+v", tt.wantErr, got)

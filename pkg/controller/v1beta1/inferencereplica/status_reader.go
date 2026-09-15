@@ -8,6 +8,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 )
 
 // EventReasonInstanceStatusDecodeFailed is the Warning emitted when a stored
@@ -36,6 +37,7 @@ func (r *Reconciler) instanceStatusDecodeError(ir *v1beta1.InferenceReplica, err
 	if !ok {
 		return err
 	}
+	obsmetrics.RecordIRStatusCodecError(string(reason))
 	if r.Recorder != nil {
 		r.Recorder.Eventf(ir, corev1.EventTypeWarning, EventReasonInstanceStatusDecodeFailed,
 			"InferenceReplica %s/%s per-Instance status cannot be decoded (%s); reconciliation is suspended until the status is repaired",

@@ -53,13 +53,14 @@ func NewOMENativeStatusConfig(clientset kubernetes.Interface) (*OMENativeStatusC
 	if err != nil {
 		return nil, err
 	}
-	return parseOMENativeStatusConfig(configMap)
+	return ParseOMENativeStatusConfig(configMap)
 }
 
-// parseOMENativeStatusConfig decodes the block strictly: it must be a single
+// ParseOMENativeStatusConfig decodes the block strictly: it must be a single
 // JSON object with no unknown, duplicate, or trailing content, and every
-// present value must be well typed and in range.
-func parseOMENativeStatusConfig(configMap *v1.ConfigMap) (*OMENativeStatusConfig, error) {
+// present value must be well typed and in range. Operator tooling that reads
+// a cluster's ConfigMap applies the same rules the manager applies at startup.
+func ParseOMENativeStatusConfig(configMap *v1.ConfigMap) (*OMENativeStatusConfig, error) {
 	raw, ok := configMap.Data[OMENativeStatusConfigName]
 	if !ok {
 		return nil, fmt.Errorf("inferenceservice-config is missing the required %q block; set %s to %s or %s",

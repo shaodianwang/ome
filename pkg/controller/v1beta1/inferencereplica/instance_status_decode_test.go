@@ -2,7 +2,6 @@ package inferencereplica
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"sort"
 	"strings"
@@ -104,55 +103,6 @@ func TestReconcilerReadsDecodeColumnarV2Identically(t *testing.T) {
 	}
 	if !want.anyFailed || want.ready.Reason != ReasonInstanceFailed || want.stalled.Status != metav1.ConditionTrue || len(want.liveRevisions) != 2 {
 		t.Fatalf("fixture does not exercise the decision seams as intended: %+v", want)
-	}
-}
-
-// TestReconcileColumnarV2WriteIsRefusedBeforeEffects pins the slice
-// boundary end to end: a ColumnarV2 object decodes and plans like its dense
-// twin, but the first status write is refused with the typed error and no
-// Pod is created for it.
-func TestReconcileColumnarV2WriteIsRefusedBeforeEffects(t *testing.T) {
-	ctx := context.Background()
-	ir := baselineIR("llama-engine", "default", 2)
-	ir.Status.Replicas = 1
-	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "llama-engine-aaaaaaaa", PodCount: 1, ServingPodCount: 1, Admitted: true},
-	}
-	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
-
-	rDense, cDense := newReconciler(t, ir)
-	if _, err := rDense.Reconcile(ctx, req); err != nil {
-		t.Fatalf("dense reconcile: %v", err)
-	}
-	densePods := &corev1.PodList{}
-	if err := cDense.List(ctx, densePods, client.InNamespace(ir.Namespace)); err != nil {
-		t.Fatalf("list dense pods: %v", err)
-	}
-	if len(densePods.Items) == 0 {
-		t.Fatal("dense fixture must create at least one Pod so the columnar twin has an effect to refuse")
-	}
-
-	rColumnar, cColumnar := newReconciler(t, columnarTwin(t, ir))
-	rColumnar.InstanceStatusDecoder = irstatus.NewDecoder(8)
-	recorder := record.NewFakeRecorder(32)
-	rColumnar.Recorder = recorder
-	_, err := rColumnar.Reconcile(ctx, req)
-	if !errors.Is(err, ErrColumnarV2StatusWrite) {
-		t.Fatalf("columnar reconcile must fail closed at the status writer, got %v", err)
-	}
-	columnarPods := &corev1.PodList{}
-	if err := cColumnar.List(ctx, columnarPods, client.InNamespace(ir.Namespace)); err != nil {
-		t.Fatalf("list columnar pods: %v", err)
-	}
-	if len(columnarPods.Items) != 0 {
-		t.Fatalf("a refused status write must not be followed by Pod effects, got %d Pods", len(columnarPods.Items))
-	}
-	stored := &v1beta1.InferenceReplica{}
-	if err := cColumnar.Get(ctx, req.NamespacedName, stored); err != nil {
-		t.Fatalf("get stored IR: %v", err)
-	}
-	if stored.Status.InstanceStatusColumns == nil || len(stored.Status.InstanceStatuses) != 0 {
-		t.Fatalf("stored ColumnarV2 representation must be untouched: %+v", stored.Status)
 	}
 }
 

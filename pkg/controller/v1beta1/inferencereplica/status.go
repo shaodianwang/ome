@@ -222,7 +222,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			fresh.Status.UpdatedReadyReplicas = counters.UpdatedReadyReplicas
 			fresh.Status.UpdateRevision = target.Name
 		}
-		clearPodDerivedInstanceObservations(fresh)
+		irstatus.ClearPodDerivedObservations(fresh.Status.InstanceStatuses)
 
 		fresh.Status.ObservedGeneration = fresh.Generation
 		fresh.Status.LabelSelector = irLabelSelectorString(fresh.Spec.ParentRef.Name, fresh.Spec.Component)
@@ -257,7 +257,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return nil
 		}
 
-		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh, source); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.statusWriter(), fresh, source); err != nil {
 			if apierrors.IsNotFound(err) {
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
 				ownerUnavailable = true
@@ -381,7 +381,7 @@ func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) worklo
 		Key:                     buildKey(ir),
 		ObservedState:           observedFromIR(ir),
 		Clock:                   r.Clock,
-		MutateInstance:          buildMutateInstance(r.Client, r.liveReader(), ir),
+		MutateInstance:          buildMutateInstance(r.statusWriter(), r.liveReader(), ir),
 		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
 		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
 		WarnInstanceFailed:      func(_ int32, _, _ string) {},

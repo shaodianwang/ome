@@ -52,14 +52,13 @@ func SelectCandidate(logical *v1beta1.InferenceReplicaStatus, maxInstances uint6
 		return nil, newCodecError(ErrorReasonRepresentationUnion)
 	}
 
-	dense := logical.DeepCopy()
-	ClearPodDerivedObservations(dense.InstanceStatuses)
-	denseSize, err := serializedSize(dense)
+	denseCandidate, err := DenseCandidate(logical.DeepCopy())
 	if err != nil {
 		return nil, err
 	}
+	dense, denseSize := denseCandidate.Status, denseCandidate.Size
 	selection := &Selection{
-		DenseV1:  Candidate{Encoding: EncodingDenseV1, Status: dense, Size: denseSize},
+		DenseV1:  *denseCandidate,
 		Selected: EncodingDenseV1,
 	}
 
@@ -84,6 +83,24 @@ func SelectCandidate(logical *v1beta1.InferenceReplicaStatus, maxInstances uint6
 	selection.ColumnarV2 = &Candidate{Encoding: EncodingColumnarV2, Status: &columnar, Size: columnarSize}
 	selection.Selected = selectEncoding(denseSize, columnarSize)
 	return selection, nil
+}
+
+// DenseCandidate normalizes status in place into the complete DenseV1 write
+// candidate: it clears the three Pod-derived row fields and measures the
+// serialized status. status must be in the logical shape; a marker or column
+// payload is a representation-union error and leaves status untouched. It
+// builds no second candidate and copies nothing, so a DenseV1 write pays no
+// per-write copy of the rows.
+func DenseCandidate(status *v1beta1.InferenceReplicaStatus) (*Candidate, error) {
+	if status == nil || status.InstanceStatusEncoding != nil || status.InstanceStatusColumns != nil {
+		return nil, newCodecError(ErrorReasonRepresentationUnion)
+	}
+	ClearPodDerivedObservations(status.InstanceStatuses)
+	size, err := serializedSize(status)
+	if err != nil {
+		return nil, err
+	}
+	return &Candidate{Encoding: EncodingDenseV1, Status: status, Size: size}, nil
 }
 
 // selectEncoding applies the strict-smaller rule: columns win only when they

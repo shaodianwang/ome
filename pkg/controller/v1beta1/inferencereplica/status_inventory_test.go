@@ -38,7 +38,7 @@ const (
 	omeAPIPackagePath = "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	codecPackagePath  = "github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	decodedAccessor   = "GetDecoded"
-	singleWriter      = "updateInferenceReplicaStatus"
+	singleWriter      = "persistInferenceReplicaStatus"
 )
 
 var representationFields = map[string]struct{}{
@@ -51,18 +51,11 @@ var representationFields = map[string]struct{}{
 const (
 	// decodedObjectRows: the function consumes rows of an object that the
 	// decoded accessor rewrote into the dense logical shape before the
-	// function ran.
+	// function ran, or that the single writer decoded after its commit.
 	decodedObjectRows = "logical rows of an object decoded at the boundary"
-	// writerReturnedRows: the function reads the object the DenseV1 writer
-	// returned after a successful update; the writer refuses any other
-	// representation.
-	writerReturnedRows = "rows of the object returned by the DenseV1 status writer"
 	// inMemoryMirror: the function copies committed rows onto the decoded
 	// in-memory object so later work in the same pass observes them.
 	inMemoryMirror = "in-memory mirror of committed rows onto the decoded object"
-	// writerBoundary: the single writer's representation guard and
-	// Pod-derived field normalization.
-	writerBoundary = "single status writer"
 	// passThroughSpecMetadata: the fetch serves a spec- or metadata-only
 	// path and never inspects the per-Instance representation.
 	passThroughSpecMetadata = "pass-through: spec/metadata only"
@@ -71,6 +64,10 @@ const (
 	passThroughTopLevelStatus = "pass-through: top-level status only"
 	// decodedBoundary: the fetch is the decoded accessor itself.
 	decodedBoundary = "decoded-accessor boundary"
+	// administrativeCensus: the operator preflight's paginated list; every
+	// object is classified through the codec (ObservedEncoding, DecodeStatus)
+	// and no row is consumed by a decision.
+	administrativeCensus = "administrative paginated census classified through the codec"
 )
 
 type accessCounts struct {
@@ -115,14 +112,14 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	// fetched through irstatus.GetDecoded (see the fetch inventory). Counts
 	// are reads / writes / read-writes of the field selector.
 	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "observedFromIR", read(1), decodedObjectRows, rows)
-	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "buildMutateInstance", accessCounts{reads: 4, writes: 1}, decodedObjectRows+"; "+writerReturnedRows, rows)
-	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "buildApplyInstanceMutationsWithRetryBlockFromReader", accessCounts{reads: 7, writes: 1}, decodedObjectRows+"; "+writerReturnedRows, rows)
+	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "buildMutateInstance", accessCounts{reads: 4, writes: 1}, decodedObjectRows, rows)
+	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "buildApplyInstanceMutationsWithRetryBlockFromReader", accessCounts{reads: 7, writes: 1}, decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "instanceMutationPostconditionsHold", read(3), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "replaceInstanceStatuses", accessCounts{writes: 1}, inMemoryMirror, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "mirrorInstanceStatuses", accessCounts{reads: 4, writes: 1, readWrites: 2}, inMemoryMirror, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "buildPromoteCurrentRevision", read(1), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/convert.go", "buildRemoveInstance", accessCounts{reads: 1, writes: 1}, decodedObjectRows, rows)
-	approve("pkg/controller/v1beta1/inferencereplica/status.go", "Reconciler.aggregateAndWriteStatus", accessCounts{reads: 2, readWrites: 7}, decodedObjectRows, rows)
+	approve("pkg/controller/v1beta1/inferencereplica/status.go", "Reconciler.aggregateAndWriteStatus", accessCounts{reads: 3, readWrites: 7}, decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/status.go", "Reconciler.reconcileHeldDeadlines", accessCounts{reads: 3, readWrites: 2}, decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/status.go", "mirrorInstanceCounters", accessCounts{reads: 1, readWrites: 1}, inMemoryMirror, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/status.go", "stagedAtPartition", read(1), decodedObjectRows, rows)
@@ -133,8 +130,7 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferencereplica/reconciler.go", "Reconciler.stampAutoRelocationSuccess", accessCounts{reads: 1, readWrites: 1}, decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/reset_instances.go", "Reconciler.resetInstances", accessCounts{reads: 2, readWrites: 2}, decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/retention.go", "Reconciler.sweepRevisions", read(1), decodedObjectRows, rows)
-	approve("pkg/controller/v1beta1/inferencereplica/status_writer.go", "updateInferenceReplicaStatus", read(1), writerBoundary, "InstanceStatusColumns", "InstanceStatusEncoding")
-	approve("pkg/controller/v1beta1/inferencereplica/status_writer.go", "clearPodDerivedInstanceObservations", accessCounts{reads: 1, readWrites: 3}, writerBoundary, rows)
+	approve("pkg/controller/v1beta1/inferencereplica/status_transition.go", "Reconciler.convertStoredRepresentation", read(1), decodedObjectRows, rows)
 
 	// Remote readers: coordination and placement consume the object that
 	// irprojector.DecodedComponentIR(Status) returned.
@@ -180,6 +176,7 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	}
 
 	approve("pkg/controller/v1beta1/irstatus/reader.go", decodedAccessor, "Get", 1, decodedBoundary)
+	approve("pkg/controller/v1beta1/irstatus/transitionpreflight/preflight.go", "checkReplicas", "List", 1, administrativeCensus)
 
 	// InferenceReplica reconciler pass-through reads.
 	approve("pkg/controller/v1beta1/inferencereplica/reconciler.go", "Reconciler.Reconcile", "Get", 1, passThroughSpecMetadata+" (finalizer add rejected: re-read DeletionTimestamp)")

@@ -32,3 +32,8 @@ OME uses a component-based architecture built on Kubernetes custom resources:
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for build commands, test instructions, and detailed architecture reference.
+
+## Operations
+
+- [OMENative InferenceReplica status representation](docs/omenative-status-representation.md): the `omenativeStatus` configuration block, the schema-first rollout order, the downgrade rule, the status write-boundary metrics and events, and the read-only `ome-status-preflight` command.
+- [kubectl-qt](docs/kubectl-qt/README.md): render the AcceleratorQuota hierarchy as a tree.
