@@ -240,7 +240,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 			g.Expect(got.Status.NodesReady).To(ConsistOf(stayNode, goNode))
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		ginkgo.By("delete one node — its CM is orphaned; processModelStatus skips ConfigMaps with no live Node, so the entry must drop from NodesReady")
+		ginkgo.By("delete one node — its CM is orphaned; processModelStatus garbage-collects ConfigMaps whose Node is confirmed absent, so the entry must drop from NodesReady")
 		Expect(k8sClient.Delete(suiteCtx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: goNode}})).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}

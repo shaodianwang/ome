@@ -592,6 +592,7 @@ func TestBaseModelReconcile(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "deleted-node",
 						Namespace: constants.OMENamespace,
+						UID:       types.UID("deleted-node-configmap"),
 						Labels: map[string]string{
 							constants.ModelStatusConfigMapLabel: "true",
 						},
@@ -635,8 +636,9 @@ func TestBaseModelReconcile(t *testing.T) {
 
 			// Run reconciliation
 			reconciler := &BaseModelReconciler{
-				Client: c,
-				Scheme: c.Scheme(),
+				Client:    c,
+				APIReader: c,
+				Scheme:    c.Scheme(),
 			}
 
 			result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
@@ -850,9 +852,10 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 			}
 
 			reconciler := &ClusterBaseModelReconciler{
-				Client: c,
-				Log:    ctrl.Log.WithName("test"),
-				Scheme: scheme,
+				Client:    c,
+				APIReader: c,
+				Log:       ctrl.Log.WithName("test"),
+				Scheme:    scheme,
 			}
 
 			req := ctrl.Request{
@@ -1423,12 +1426,14 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 			},
 		}
 
+		// The Node must exist: an entry on a live Node is what blocks
+		// deletion, an orphaned one is garbage-collected instead.
 		c := ctrlclientfake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(baseModel).
+			WithObjects(baseModel, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}).
 			Build()
 
-		// Stale entry NOT marked deleted — should keep finalizer + requeue.
+		// Live entry NOT marked deleted — should keep finalizer + requeue.
 		modelKey := constants.GetModelConfigMapKey("default", "pernode-delete-me", false)
 		entry, _ := json.Marshal(shared.ModelEntry{Status: shared.ModelStatusReady})
 		cm := &corev1.ConfigMap{
@@ -1441,7 +1446,7 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 		}
 		g.Expect(c.Create(context.TODO(), cm)).NotTo(gomega.HaveOccurred())
 
-		reconciler := &BaseModelReconciler{Client: c, Scheme: scheme}
+		reconciler := &BaseModelReconciler{Client: c, APIReader: c, Scheme: scheme}
 		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace},
 		})
