@@ -18,57 +18,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// workloadCausedWaitingReasons is the set of kubelet container
-// state.Waiting reasons that are DETERMINISTICALLY scoped to the
-// workload revision — the failure travels with the pod template, so
-// relocating the pod to another node reproduces it identically. These
-// are Kubernetes API semantics, identical on every cluster; they are
-// declared as package constants, not config (a knob here could only be
-// set wrongly: removing an entry re-enables retrying a fault that
-// cannot self-recover, adding an ambiguous entry pins workloads to
-// dead hardware).
-//
-// Contract table (reason → what it means → why relocation cannot help):
-//
-//	ImagePullBackOff           kubelet exhausted its pull retries for
-//	                           the image reference. The registry serves
-//	                           the same reference to every node — a new
-//	                           node re-pulls the same missing/broken
-//	                           image and parks in the same state.
-//	ErrImagePull               the pull itself failed (manifest absent,
-//	                           tag deleted, access denied for the ref).
-//	                           The reference is part of the revision;
-//	                           every node resolves it the same way.
-//	InvalidImageName           the image reference fails validation
-//	                           before any pull is attempted. No node
-//	                           can parse an unparsable reference.
-//	CreateContainerConfigError the container's config (missing
-//	                           ConfigMap/Secret key, invalid env
-//	                           projection) was rejected at container
-//	                           create. The config travels with the
-//	                           revision, not the node.
-//
-// EXCLUDED — ambiguous scope (could be the revision OR the
-// device/node): CrashLoopBackOff, RunContainerError,
-// CreateContainerError. A repeated process exit or a runtime start
-// rejection can equally be a broken binary (revision fault) or a dead
-// GPU / broken driver / node-local runtime damage (placement fault).
-// For those, a wrong suppression (holding the revision) is an
-// UNBOUNDED loop on dead hardware — the revision is fine, the block
-// never lifts, and nothing relocates the pod — while a wrong migration
-// is RELOCATION-bounded by the operator's autoMigrate.maxAttempts.
-// Operation-specific recovery may retry only when the persisted
-// relocation evidence authorizes it; otherwise it leaves the Instance
-// Failed for operator action. An instance that reaches Ready prunes its
-// AutoRecover records and resets the budget. Ambiguous reasons therefore
-// route to bounded relocation, never to revision blame.
-var workloadCausedWaitingReasons = map[string]struct{}{
-	"ImagePullBackOff":           {},
-	"ErrImagePull":               {},
-	"InvalidImageName":           {},
-	"CreateContainerConfigError": {},
-}
-
 // DispositionOutcome reports which branch DisposeExpiredAttempt took.
 type DispositionOutcome int
 
@@ -103,8 +52,8 @@ const (
 // DisposeExpiredAttempt classifies one expired / stuck Create-or-Update
 // attempt and acts:
 //
-//  1. WORKLOAD-CAUSED — a live pod shows a waiting reason in
-//     workloadCausedWaitingReasons AND a target revision is resolvable
+//  1. WORKLOAD-CAUSED — a live pod shows a workload-caused waiting
+//     reason (IsWorkloadCausedReason) AND a target revision is resolvable
 //     (Operation.TargetRevision, falling back to the owner's
 //     UpdateRevision for an unpinned Create whose pod does not prove a
 //     different revision): record the RetryBlock for that revision,
@@ -185,8 +134,10 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 			// Writer ordering: RetryBlock upsert lands BEFORE the mutation
 			// that clears the failed attempt's Operation. Crash-safe: a
 			// re-entered disposition (block landed, clear didn't) refreshes
-			// the block via the writer's wave dedup without recounting.
-			if err := RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched); err != nil {
+			// the block via the writer's wave dedup without recounting. The
+			// evidence here is workload-caused by construction, so the wave
+			// charges the ladder.
+			if err := RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, true); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
 			}
 			termination := PodTerminationWithReason(pod, matched, now)
@@ -280,8 +231,8 @@ func migrationModeAllowsRelocation(mode MigrationMode) bool {
 }
 
 // firstWorkloadCausedPod returns the first live (non-deleting) pod with
-// a container or init-container waiting reason in
-// workloadCausedWaitingReasons, plus the matched reason.
+// a workload-caused container or init-container waiting reason
+// (IsWorkloadCausedReason), plus the matched reason.
 func firstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil {
@@ -291,7 +242,7 @@ func firstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
 			if cs.State.Waiting == nil {
 				continue
 			}
-			if _, ok := workloadCausedWaitingReasons[cs.State.Waiting.Reason]; ok {
+			if IsWorkloadCausedReason(cs.State.Waiting.Reason) {
 				return pod, cs.State.Waiting.Reason
 			}
 		}
@@ -299,7 +250,7 @@ func firstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
 			if cs.State.Waiting == nil {
 				continue
 			}
-			if _, ok := workloadCausedWaitingReasons[cs.State.Waiting.Reason]; ok {
+			if IsWorkloadCausedReason(cs.State.Waiting.Reason) {
 				return pod, cs.State.Waiting.Reason
 			}
 		}

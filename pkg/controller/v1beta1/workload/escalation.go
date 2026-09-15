@@ -186,7 +186,15 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			continue
 		}
 		idx := s.Index
-		buf.add(idx, deadlineFailedMutation(now, op), func() {
+		// The teardown that follows deletes the blamed pods, so revision-scoped
+		// evidence must survive on LastFailure: a workload-caused waiting reason
+		// names the cause more precisely than the elapsed timeout, and it is what
+		// the gang abandon charges the revision's retry ladder on.
+		termination := deadlineTermination(now, op)
+		if pod, reason := firstWorkloadCausedPod(pods); pod != nil {
+			termination = PodTerminationWithReason(pod, reason, metav1.NewTime(now))
+		}
+		buf.add(idx, deadlineFailedMutation(termination), func() {
 			input.WarnInstanceFailed(idx, "", deadlineFailureMessage(op))
 		})
 	}

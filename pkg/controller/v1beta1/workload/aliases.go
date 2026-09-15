@@ -213,12 +213,19 @@ func PodTerminationWithReason(pod *corev1.Pod, reason string, now metav1.Time) *
 	return types.PodTerminationWithReason(pod, reason, now)
 }
 
+// IsWorkloadCausedReason re-exports types.IsWorkloadCausedReason: whether
+// a failure reason is in the workload-caused set — the only evidence
+// that charges a revision's retry ladder toward Held.
+func IsWorkloadCausedReason(reason string) bool {
+	return types.IsWorkloadCausedReason(reason)
+}
+
 // RecordUpdateFailureInRetryBlock re-exports the shared RetryBlock
 // failure writer (types.RecordUpdateFailureInRetryBlock) — one
 // implementation used by the ops gang abandon and the workload-root
 // deadline disposition.
-func RecordUpdateFailureInRetryBlock(ctx context.Context, input ReconcileInput, targetRev, reason string) error {
-	return types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason)
+func RecordUpdateFailureInRetryBlock(ctx context.Context, input ReconcileInput, targetRev, reason string, workloadCaused bool) error {
+	return types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason, workloadCaused)
 }
 
 // DefaultExpectations re-exports the package-level cache the

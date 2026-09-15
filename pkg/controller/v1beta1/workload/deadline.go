@@ -10,11 +10,13 @@ import (
 )
 
 // DeadlineExceededReason is the LastFailure.Reason stamped when an
-// Instance is failed because its in-flight Operation.Deadline elapsed.
-// Distinct from the kubelet waiting-state reasons the stuck-pod
-// escalator records so operators can tell a broad-timeout backstop
-// ("gang never became Ready") from a fast terminal-state escalation
-// ("pod stuck in CrashLoopBackOff").
+// Instance is failed because its in-flight Operation.Deadline elapsed
+// and no blamed pod shows a workload-caused waiting reason (that reason
+// is recorded instead — see escalateFromEvidence). Distinct from the
+// kubelet waiting-state reasons the stuck-pod escalator records so
+// operators can tell a broad-timeout backstop ("gang never became
+// Ready") from a terminal-state escalation ("pod stuck in
+// CrashLoopBackOff").
 const DeadlineExceededReason = "DeadlineExceeded"
 
 // operationDeadlinePassed reports whether s is in a transient phase with
@@ -123,19 +125,29 @@ func deadlineFailureMessage(op *InstanceOperation) string {
 	return fmt.Sprintf("%s: %s/%s exceeded InstanceReadyTimeout", DeadlineExceededReason, op.Type, op.Step)
 }
 
+// deadlineTermination is the LastFailure record for an elapsed Operation
+// deadline with no more specific evidence: the DeadlineExceeded reason and
+// the operator-facing message naming what was in flight.
+func deadlineTermination(now time.Time, op *InstanceOperation) *InstanceTermination {
+	return &InstanceTermination{
+		Reason:  DeadlineExceededReason,
+		Message: deadlineFailureMessage(op),
+		Time:    metav1.NewTime(now),
+	}
+}
+
 // deadlineFailedMutation builds the Phase=Failed stamp for an elapsed
-// Operation deadline, recording the DeadlineExceeded diagnostic on
-// LastFailure. Mirrors stuckPodFailedMutation's guard logic: a
-// fresh-empty slot (Phase=="") from the writer's append path is a
-// sentinel for a slot deleted out from under us (don't resurrect), an
-// already-Failed slot is a no-op, and any other phase flips to Failed.
-// A slot whose Operation is already gone is also a no-op: the attempt
-// concluded (or was disposed) since the deadline was observed, so there
-// is nothing in flight left to expire.
+// Operation deadline, recording termination on LastFailure. Mirrors
+// stuckPodFailedMutation's guard logic: a fresh-empty slot (Phase=="")
+// from the writer's append path is a sentinel for a slot deleted out
+// from under us (don't resurrect), an already-Failed slot is a no-op,
+// and any other phase flips to Failed. A slot whose Operation is already
+// gone is also a no-op: the attempt concluded (or was disposed) since the
+// deadline was observed, so there is nothing in flight left to expire.
 //
 // The Operation is preserved — operators want to see WHAT was in flight
 // when the deadline elapsed.
-func deadlineFailedMutation(now time.Time, op *InstanceOperation) func(*InstanceStatus) bool {
+func deadlineFailedMutation(termination *InstanceTermination) func(*InstanceStatus) bool {
 	return func(s *InstanceStatus) bool {
 		if s.Phase == "" {
 			return false
@@ -147,11 +159,8 @@ func deadlineFailedMutation(now time.Time, op *InstanceOperation) func(*Instance
 			return false
 		}
 		s.Phase = InstancePhaseFailed
-		s.LastFailure = &InstanceTermination{
-			Reason:  DeadlineExceededReason,
-			Message: deadlineFailureMessage(op),
-			Time:    metav1.NewTime(now),
-		}
+		captured := *termination
+		s.LastFailure = &captured
 		return true
 	}
 }
