@@ -62,6 +62,24 @@ incarnation 1, one set of counters, and `admitted: true`. That repetition is
 stored and transmitted on every IR status update. A single large update can
 still reach the API-server or etcd request budget even after write batching.
 
+The shape that reached that budget in practice was **not** the healthy uniform
+one. After a whole-cluster power loss, one IR with 4,000 single-Pod Instances
+settled at 2,812 Ready, 814 Restarting with an in-flight Restart operation, and
+374 Failed with a preserved Restart operation; every one of the 4,000 rows
+carried a `lastFailure` record whose message was about 140 bytes—a
+`DeadlineExceeded: Restart/Drain exceeded InstanceReadyTimeout` message or a
+kubelet reason—and the rows split 3,999/1 across two revisions. In compact
+JSON, the whole object measured 1,572,914 bytes against etcd's default
+1,572,864-byte request limit; the status alone was 1,554,415 bytes, of which
+`lastFailure` records were 523,539 and `operation` records 341,575. In that
+shape the sparse per-Instance entries, not the repeated healthy rows, dominate
+the bytes. Every status write that grew the object was rejected with
+`etcdserver: request is too large`, and only writes that shrank it succeeded,
+so the controller could not record any lifecycle transition: 331 Instances
+whose Pods were healthy stayed idle because the row change that puts an
+Instance into service could never be persisted. The Test Plan pins this shape
+as the `mass-failure` fixture.
+
 Simply deleting the remaining rows is unsafe. Create, Update, Restart,
 Migrate, and Delete persist intent before changing Pods and must recover while
 no Pod exists. V2 must compact those facts without deriving them from a newer
@@ -793,6 +811,56 @@ API rejection leaves the previously committed status unchanged and returns the
 write error. Error messages are bounded, and metrics never contain payloads or
 IR identity labels.
 
+### Companion changes
+
+ColumnarV2 removes repeated healthy-row bytes. It does not shrink sparse
+entries, and it does not stop them from accumulating; the mass-failure shape
+in the Motivation grows from parked operations and retained failure records,
+which the representation only stores more cheaply. Three companion changes,
+tracked outside this OEP and described here by behavior, address that growth
+and its visibility. This document does not assert which of them have landed;
+the qualification PR must state it.
+
+1. **Terminal-Pod recycling in Create and Restart.** When a Pod owned by an
+   in-flight Create or Restart reaches a terminal phase, the operation deletes
+   and recreates it instead of waiting on a Pod that cannot become Ready.
+   Without it, a mass failure parks Instances in Restarting or Failed with a
+   preserved operation—814 and 374 in the incident—and each parked row keeps
+   its roughly 290-byte `operation` entry for as long as it stays parked. V2
+   composes with this change: recycling keeps the sparse-entry population
+   transient, which is what makes the `mass-failure` headroom a peak rather
+   than a steady state.
+2. **An operator reset annotation on the InferenceReplica.** An operator sets
+   it to ask the reconciler to discard parked lifecycle state—preserved
+   operations and failure records on Instances that are not mid-flight—and
+   re-drive those Instances from a clean row; the exact clearing rules belong
+   to that change, not to this OEP. It matters here for one reason:
+   the resulting write removes records and adds none, and a shrinking write is
+   the only status write an IR at the limit still accepts. A ColumnarV2
+   conversion is also a shrinking write on this shape, so it should be
+   accepted on an IR already at the limit for the same reason the incident's
+   shrinking writes were; the `mass-failure` real-apiserver run is where that
+   is proven. The annotation remains the break-glass path for fleets still on
+   DenseV1 and for objects whose sparse entries alone exceed the limit, where
+   no representation helps. It is distinct from the corruption-repair helper
+   above, which replaces a malformed representation and never clears history.
+3. **A status-size gauge and a `StatusSizeExceeded` condition at the single
+   writer boundary.** The adapter that owns every IR status write records the
+   serialized bytes of each selected request and, when a write is rejected as
+   too large, surfaces `StatusSizeExceeded` on the IR. The gauge is
+   `ome_omenative_ir_status_bytes`, the metric this OEP's front matter
+   names—one instrument, not two; V2 adds its `encoding` label. This OEP
+   relies on the instrument: it is among the write-boundary metrics that make
+   the Stable no-amplification gate measurable, and without a size signal the
+   first evidence that an IR is approaching the limit is the rejected write
+   itself. A reader will ask how a condition can be written to an object that
+   rejects growing writes. It cannot be, on its own; the companion change must
+   carry it in a shrinking write or surface the signal on the parent
+   InferenceService and as an Event. This OEP takes no position on that
+   mechanism beyond requiring that both signals are emitted from the same
+   writer boundary the codec sits behind, so that DenseV1 and ColumnarV2
+   writes are measured alike.
+
 ## Test Plan
 
 The test volume is intentionally larger than the production codec. Tests are
@@ -933,6 +1001,38 @@ only the column payload—at 0, 1, 100, 1,000, 2,000, and 5,000 Instances for:
 - few and all-Instance Operations; and
 - best-case, representative, and deliberately adversarial grouping.
 
+One further fixture is required at exactly 4,000 single-Pod Instances rather
+than at the count ladder above, because its counts are the measured ones. The
+`mass-failure` fixture reproduces the shape from the Motivation that reached
+the etcd request limit after a whole-cluster power loss:
+
+| Rows | Phase | Sparse entry |
+| ---: | --- | --- |
+| 2,812 | Ready | `lastFailure` only |
+| 814 | Restarting | in-flight Restart `operation` plus `lastFailure` |
+| 374 | Failed | preserved Restart `operation` plus `lastFailure` |
+
+Every row carries a `lastFailure` record whose message is about 140 bytes, and
+the rows split 3,999/1 across two revisions. The measured DenseV1 reference is
+1,572,914 object bytes and 1,554,415 status bytes in compact JSON, with
+523,539 bytes of `lastFailure` and 341,575 bytes of `operation`. Fidelity is
+part of the fixture: with the row counts above, its DenseV1 complete request
+must be no smaller than the measured 1,572,914 bytes, so DenseV1 sits at the
+limit exactly as the incident object did, and the artifact records whether a
+real API server accepts that seed. A variant that DenseV1 stores comfortably
+is a different fixture and proves nothing about this regime.
+
+The Summary's 99.9% reduction does **not** apply to this shape, and the
+implementation must not be judged against it here. That table measures only
+the repeated per-Instance section of a uniform status. In the `mass-failure`
+fixture, `operation` and `lastFailure` records are 865,114 of the 1,554,415
+status bytes (56%), and ColumnarV2 stores every one of them per Instance in
+`entries[]`, exactly as DenseV1 stores them inline; at most the remaining 44%
+is compressible. To a first approximation the selected request lands near
+0.9 MB—under the limit, but far above the 256-KiB steady-state gate, and with
+headroom that comes entirely from the healthy-row bytes. The implementation's
+measurement, not this estimate, is the evidence.
+
 Record bytes by field family and selected representation alongside CPU,
 allocations, peak resident-memory delta, and status-write latency. The
 measurement artifacts have distinct purposes:
@@ -964,8 +1064,19 @@ The release gates are deliberately stricter than “the API accepted it”:
   DenseV1 object is rejected, only the absolute gate applies and the rejection
   is recorded;
 - every adversarial selection equals the smaller complete candidate, with a
-  tie selecting DenseV1; and
-- no selected representation is larger than the equivalent DenseV1 request.
+  tie selecting DenseV1;
+- no selected representation is larger than the equivalent DenseV1 request; and
+- the `mass-failure` selected request—the complete status-update request, not
+  the column payload—is strictly smaller than the API request limit (etcd's
+  default 1,572,864 bytes unless the qualification environment records a
+  different configured value), and a real API server accepts it. The artifact
+  reports the headroom, i.e. the limit minus the selected request, in bytes
+  and as a percentage of the limit. The 256-KiB gate does not apply to this
+  fixture.
+
+The `mass-failure` headroom is reported, not gated: this OEP sets no minimum
+for it, because how to grow it is the open question below and a floor chosen
+now would be unanchored. The qualification PR records the measured value.
 
 The 50% complete-object gate defines “material” despite irreducible spec and
 metadata bytes; the 10% and 25% gates isolate the repeated status this OEP owns.
@@ -1138,10 +1249,12 @@ controller, resource, or persistence path requires another OEP amendment.
 
 **Alpha** requires every implementation-qualification obligation in the Test
 Plan: codec and field parity, ten-minute fuzz runs, actual-column accounting,
-dual-target KIND and harness runs, 2,000/5,000 size and performance gates,
-real-apiserver faults, transition and repair tooling, consumer signoff, and both
-successful and 413-blocked downgrade drills. Passing Alpha permits a controlled
-canary activation; merge or install alone remains DenseV1.
+dual-target KIND and harness runs, 2,000/5,000 size and performance gates, the
+`mass-failure` fixture gate (a selected request under the request limit, with
+its headroom measured and reported), real-apiserver faults, transition and
+repair tooling, consumer signoff, and both successful and 413-blocked downgrade
+drills. Passing Alpha permits a controlled canary activation; merge or install
+alone remains DenseV1.
 
 **Beta** requires three consecutive authoritative main runs with no behavioral
 test retry, no codec errors, no representation oscillation, no added object
@@ -1202,6 +1315,43 @@ decode-limit default.
    non-overlapping maintenance window prevents format oscillation with less
    state and fewer rollback paths. Deployments that cannot accept the documented
    OME control-plane outage remain on DenseV1.
+
+## Open Questions
+
+1. **How should sparse-entry growth under mass failure be bounded without
+   breaking the lossless contract?** Non-Goal 3 excludes bounding failure
+   messages, and Contract 2 requires every `operation` and `lastFailure`
+   record to round-trip exactly. The `mass-failure` fixture prices that
+   position: 865,114 of its 1,554,415 status bytes are sparse records that
+   ColumnarV2 stores per Instance, and to a first approximation an in-flight
+   operation on all 4,000 rows—about 290 bytes each—would add roughly 0.8 MB
+   and exceed the request limit under either representation; put differently,
+   4,000 rows fit under ColumnarV2 only because 2,812 of them carried no
+   operation. Three answers are on the table, and each costs something this
+   OEP currently promises:
+   - **Cap `lastFailure.message` at write time.** A cap applied before the
+     logical row is formed keeps the codec lossless with respect to the row,
+     but the row becomes lossy with respect to what the Pod reported.
+     Tradeoff: it bounds the one free-text field, yet 140-byte messages, not
+     multi-kilobyte ones, produced the incident, so a cap loose enough to keep
+     diagnostics useful may save nothing on this shape.
+   - **Age failure records out once the Instance is Ready again.** The 2,812
+     Ready rows carried 2,812 records—on the order of 370 KB if records are
+     uniformly sized. Tradeoff: OEP-0007.4 keeps `lastFailure` durable so
+     timeout and migration recovery can read it after a manager restart;
+     whether any gate reads the last failure of a now-Ready Instance is
+     exactly what would have to be audited before a record may disappear, and
+     the answer changes the logical rows, not just their encoding.
+   - **An operational ceiling on Instances per InferenceReplica.** Tradeoff:
+     it leaves the contract untouched and is the only option that also bounds
+     `operation` bytes, but the safe ceiling depends on the sparse-entry mix
+     rather than on the row count alone, so it is a per-profile number to be
+     sized against the `mass-failure` headroom, and it constrains what
+     operators may deploy rather than what the controller stores.
+
+   None of the three is decided here. Whoever records the `mass-failure`
+   headroom owns this question, because that measurement is the number any of
+   the three would be sized against.
 
 ## Next Action
 
