@@ -17,9 +17,10 @@ import (
 // reconcile time:
 //
 //   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent,
-//     rollout. The ISVC reconciler reads ingress + deploy + rollout; the
-//     BaseModel PVC path reads omeAgent; the InferenceReplica reconciler
-//     reads lifecycle.
+//     rollout, omenativeStatus. The ISVC reconciler reads ingress + deploy +
+//     rollout; the BaseModel PVC path reads omeAgent; the InferenceReplica
+//     reconciler reads lifecycle; the manager binary requires omenativeStatus
+//     at startup (DenseV1 here, matching the chart default).
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -90,6 +91,9 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 		"rollout": `{
   "maxPinnedPlanBytes": 16384,
   "defaultReadyTimeout": "15m"
+}`,
+		"omenativeStatus": `{
+  "instanceStatusEncoding": "DenseV1"
 }`,
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	placementrouting "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
@@ -161,7 +162,7 @@ func validateDispatcherMode(mode placement.DispatcherMode) error {
 // controllers read the live per-cluster clients it connects. Tunables load from
 // the inferenceservice-config ConfigMap; topology, identity, and security come
 // from options (flags).
-func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, options Options, isControlPlane bool) error {
+func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, options Options, isControlPlane bool, instanceStatusDecoder irstatus.Decoder) error {
 	mcConfig, err := controllerconfig.NewMultiClusterConfig(clientSet)
 	if err != nil {
 		return fmt.Errorf("load multi-cluster configuration: %w", err)
@@ -265,6 +266,7 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 	if err := (&placement.Reconciler{
 		Client:                  mgr.GetClient(),
 		APIReader:               mgr.GetAPIReader(),
+		InstanceStatusDecoder:   instanceStatusDecoder,
 		Scheme:                  mgr.GetScheme(),
 		Log:                     ctrl.Log.WithName("controllers").WithName("Placement"),
 		Clusters:                clusterManager,

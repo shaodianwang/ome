@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
@@ -282,7 +283,8 @@ func appendMigrationStatus(ctx context.Context, c client.Client, reads client.Re
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		wrote = false
 		fresh := &v1beta1.InferenceReplica{}
-		if err := reads.Get(ctx, key, fresh); err != nil {
+		source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}
@@ -299,7 +301,7 @@ func appendMigrationStatus(ctx context.Context, c client.Client, reads client.Re
 			}
 		}
 		fresh.Status.Migrations = append(fresh.Status.Migrations, entry)
-		if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}
@@ -421,7 +423,8 @@ func buildMutateMigration(c client.Client, reads client.Reader, ir *v1beta1.Infe
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			wrote = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workload.ErrStatusOwnerGone
 				}
@@ -447,7 +450,7 @@ func buildMutateMigration(c client.Client, reads client.Reader, ir *v1beta1.Infe
 			// The subject key is fixed: a callback cannot re-key the entry.
 			w.RequestUUID = requestUUID
 			fresh.Status.Migrations[pos] = migrationFromWorkload(w)
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workload.ErrStatusOwnerGone
 				}
@@ -531,7 +534,8 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		wrote = false
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
+		source, err := irstatus.GetDecoded(ctx, r.liveReader(), key, fresh)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}
@@ -579,7 +583,7 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 			wrote = true
 			return nil
 		}
-		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh, source); err != nil {
 			if apierrors.IsNotFound(err) {
 				return workload.ErrStatusOwnerGone
 			}

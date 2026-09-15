@@ -21,6 +21,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	isvcstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -149,7 +150,8 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	var nextAvailableIn time.Duration
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
-		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
+		source, err := irstatus.GetDecoded(ctx, r.liveReader(), key, fresh)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
 				// IR deleted under us; nothing to aggregate into.
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
@@ -255,7 +257,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return nil
 		}
 
-		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh); err != nil {
+		if err := updateInferenceReplicaStatus(ctx, r.Client, fresh, source); err != nil {
 			if apierrors.IsNotFound(err) {
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
 				ownerUnavailable = true
@@ -379,7 +381,7 @@ func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) worklo
 		Key:                     buildKey(ir),
 		ObservedState:           observedFromIR(ir),
 		Clock:                   r.Clock,
-		MutateInstance:          buildMutateInstance(r.Client, r.APIReader, ir),
+		MutateInstance:          buildMutateInstance(r.Client, r.liveReader(), ir),
 		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
 		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
 		WarnInstanceFailed:      func(_ int32, _, _ string) {},

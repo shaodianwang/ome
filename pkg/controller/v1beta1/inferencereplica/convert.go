@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -132,7 +133,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	if parent != nil {
 		eventTarget = parent
 	}
-	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.Client, r.APIReader, ir)
+	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.Client, r.liveReader(), ir)
 	input := workload.ReconcileInput{
 		OwnerObject:                          ir,
 		OwnerGVK:                             irGVK,
@@ -140,24 +141,24 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		Key:                                  buildKey(ir),
 		DesiredSpec:                          desired,
 		ObservedState:                        observed,
-		MutateInstance:                       buildMutateInstance(r.Client, r.APIReader, ir),
+		MutateInstance:                       buildMutateInstance(r.Client, r.liveReader(), ir),
 		ApplyInstanceMutations:               instanceOnlyMutationAdapter(applyInstanceMutationsWithRetryBlock),
 		ApplyInstanceMutationsWithRetryBlock: applyInstanceMutationsWithRetryBlock,
-		RemoveInstance:                       buildRemoveInstance(r.Client, r.APIReader, ir, r.Expectations),
-		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, r.APIReader, ir),
+		RemoveInstance:                       buildRemoveInstance(r.Client, r.liveReader(), ir, r.Expectations),
+		WriteAggregateCondition:              buildWriteAggregateCondition(r.Client, r.liveReader(), ir),
 		// Same-target RetryBlock persistence + policy. The
 		// closure is always wired on the IR-managed path — the policy
 		// alone decides Backoff vs fail-safe Held.
-		MutateRetryBlock:  buildMutateRetryBlock(r.Client, r.APIReader, ir),
+		MutateRetryBlock:  buildMutateRetryBlock(r.Client, r.liveReader(), ir),
 		UpdateRetryPolicy: updateRetryPolicy,
 		// Migration-record persistence: the executor advances
 		// status.migrations phases through this seam (same RMW +
 		// in-memory-mirror discipline as MutateRetryBlock).
-		MutateMigration: buildMutateMigration(r.Client, r.APIReader, ir),
+		MutateMigration: buildMutateMigration(r.Client, r.liveReader(), ir),
 		// Record creation (born-terminal Auto mirrors from the
 		// disposition). Separate from MutateMigration so mutate-on-
 		// missing stays a structural no-op.
-		AppendMigration: buildAppendMigration(r.Client, r.APIReader, ir),
+		AppendMigration: buildAppendMigration(r.Client, r.liveReader(), ir),
 		// Stuck-Terminating force-delete gate. nil disables the
 		// escalation; non-nil durations are validated > 0 upstream.
 		ForceDelete: forceDeletePolicy,
@@ -209,7 +210,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// cross-Component coordination against a cache-lagged peer would
 		// admit a rollout the peer's real state forbids.
 		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workload.RolloutHoldGate, string) {
-			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.APIReader, parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
+			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
 			return allowed, workload.RolloutHoldGate(gate), reason
 		}
 	}
@@ -503,7 +504,8 @@ func buildMutateInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			committed = nil
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -533,7 +535,7 @@ func buildMutateInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 			}
 			*slot = v1beta1convert.InstanceStatusFromWorkload(w)
 			fresh.Status.InstanceStatuses = insts
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -631,7 +633,8 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 			replaceCommittedInstances = false
 			committedRetryBlockMutation = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -786,13 +789,13 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(c client.Client, reads 
 				return nil
 			}
 			statusWriteAttempted = true
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
 				updateErr := fmt.Errorf("update IR status: %w", err)
 				confirmed := &v1beta1.InferenceReplica{}
-				if readErr := reads.Get(ctx, key, confirmed); readErr != nil || confirmed.UID != fresh.UID {
+				if _, readErr := irstatus.GetDecoded(ctx, reads, key, confirmed); readErr != nil || confirmed.UID != fresh.UID {
 					return updateErr
 				}
 				if len(muts) > 0 && !instanceMutationPostconditionsHold(confirmed, muts) {
@@ -986,7 +989,8 @@ func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1bet
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			committed = ""
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1003,7 +1007,7 @@ func buildPromoteCurrentRevision(c client.Client, reads client.Reader, ir *v1bet
 				return nil
 			}
 			fresh.Status.CurrentRevision = targetName
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1051,7 +1055,8 @@ func buildMutateRetryBlock(c client.Client, reads client.Reader, ir *v1beta1.Inf
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			wrote = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1093,7 +1098,7 @@ func buildMutateRetryBlock(c client.Client, reads client.Reader, ir *v1beta1.Inf
 				return nil
 			}
 			fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1183,7 +1188,8 @@ func buildRemoveInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			hadEntry = false
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1204,7 +1210,7 @@ func buildRemoveInstance(c client.Client, reads client.Reader, ir *v1beta1.Infer
 				return nil
 			}
 			fresh.Status.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1244,7 +1250,8 @@ func buildWriteAggregateCondition(c client.Client, reads client.Reader, ir *v1be
 		}
 		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			fresh := &v1beta1.InferenceReplica{}
-			if err := reads.Get(ctx, key, fresh); err != nil {
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
@@ -1263,7 +1270,7 @@ func buildWriteAggregateCondition(c client.Client, reads client.Reader, ir *v1be
 				return nil
 			}
 			apimeta.SetStatusCondition(&fresh.Status.Conditions, cond)
-			if err := updateInferenceReplicaStatus(ctx, c, fresh); err != nil {
+			if err := updateInferenceReplicaStatus(ctx, c, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}

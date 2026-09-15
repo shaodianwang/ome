@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 )
 
 var transientInstanceObservationFields = map[string]struct{}{
@@ -79,7 +81,7 @@ func TestUpdateInferenceReplicaStatusPersistsCompactedStatus(t *testing.T) {
 	want.Status.InstanceStatuses[0].ScheduledPodCount = 0
 	want.Status.InstanceStatuses[0].NodesOccupied = nil
 
-	if err := updateInferenceReplicaStatus(ctx, c, live); err != nil {
+	if err := updateInferenceReplicaStatus(ctx, c, live, irstatus.EncodingDenseV1); err != nil {
 		t.Fatalf("update status: %v", err)
 	}
 	stored := &v1beta1.InferenceReplica{}
@@ -88,6 +90,57 @@ func TestUpdateInferenceReplicaStatusPersistsCompactedStatus(t *testing.T) {
 	}
 	if !reflect.DeepEqual(stored.Status, want.Status) {
 		t.Fatalf("persisted status differs outside the three transient fields:\n got: %#v\nwant: %#v", stored.Status, want.Status)
+	}
+}
+
+// TestUpdateInferenceReplicaStatusRefusesColumnarV2 pins the slice boundary:
+// the writer persists DenseV1 only, so an object read from ColumnarV2 is
+// refused with a typed error and nothing reaches the API server.
+func TestUpdateInferenceReplicaStatusRefusesColumnarV2(t *testing.T) {
+	ctx := context.Background()
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "model-engine", Namespace: "default"},
+		Status: v1beta1.InferenceReplicaStatus{
+			Replicas:         1,
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{populatedInstanceStatus()},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(ir).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		Build()
+	key := client.ObjectKeyFromObject(ir)
+	before := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, key, before); err != nil {
+		t.Fatalf("get InferenceReplica: %v", err)
+	}
+
+	decoded := before.DeepCopy()
+	decoded.Status.Replicas = 2
+	err := updateInferenceReplicaStatus(ctx, c, decoded, irstatus.EncodingColumnarV2)
+	if !errors.Is(err, ErrColumnarV2StatusWrite) {
+		t.Fatalf("ColumnarV2 source must be refused with ErrColumnarV2StatusWrite, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "default/model-engine") || !strings.Contains(err.Error(), "DenseV1 only") {
+		t.Fatalf("refusal must name the object and the supported target: %v", err)
+	}
+
+	marked := before.DeepCopy()
+	encoding := v1beta1.InstanceStatusEncodingColumnarV2
+	marked.Status.InstanceStatusEncoding = &encoding
+	marked.Status.InstanceStatusColumns = &v1beta1.InstanceStatusColumns{Members: "0"}
+	marked.Status.InstanceStatuses = nil
+	if err := updateInferenceReplicaStatus(ctx, c, marked, irstatus.EncodingDenseV1); !errors.Is(err, ErrColumnarV2StatusWrite) {
+		t.Fatalf("an object carrying the ColumnarV2 marker must be refused, got %v", err)
+	}
+
+	after := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, key, after); err != nil {
+		t.Fatalf("get InferenceReplica: %v", err)
+	}
+	if !reflect.DeepEqual(after.Status, before.Status) || after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("a refused write must not reach the API server:\n before: %#v\n after: %#v", before.Status, after.Status)
 	}
 }
 
@@ -154,6 +207,10 @@ func TestInferenceReplicaStatusUpdatesUseWriterBoundary(t *testing.T) {
 	if len(statusSubresources) != 0 {
 		t.Fatalf("SubResource(\"status\") bypasses %s: %v", writer, statusSubresources)
 	}
+
+	// The package-local checks above are syntactic; the repo-wide sweep is
+	// type-aware and covers every client shape.
+	assertInferenceReplicaStatusWritesUseSingleWriter(t)
 }
 
 func selectorCallNamed(call *ast.CallExpr, name string) bool {
