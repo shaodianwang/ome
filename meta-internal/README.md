@@ -34,6 +34,7 @@ Verify either way with:
 go build ./...            # must pass with the directory absent
 go vet ./pkg/... ./cmd/...
 go test ./pkg/controller/v1beta1/placement/routing/ ./cmd/manager/
+go test -tags meta_internal ./meta-internal/...
 ```
 
 Why one file outside the directory: Go links statically and has no plugin
@@ -52,6 +53,7 @@ Current extension points:
 | Registry | Owner |
 |---|---|
 | `routing.RegisterCapacityFormat` | `pkg/controller/v1beta1/placement/routing` |
+| `routing.RegisterTrafficMapPublisher` | `pkg/controller/v1beta1/placement/routing` |
 
 Registration collides loudly: registering a name twice is an error rather than
 an overwrite, so the active implementation can never depend on import order.
@@ -101,7 +103,70 @@ ceiling. Because the reading already folds in hardware weighting, do not also
 set a per-home `capacityFactor` for the same home — that applies the weighting
 twice.
 
-The manager logs the formats a binary carries at startup
-(`capacityFormats=[...]`), so a build missing an optional one is visible
-immediately rather than at the first poll. Naming a format the build does not
-carry is a startup error, never a silent fallback to the plan.
+### `xdspublisher/` — TrafficMap to the internal xDS publisher
+
+This extension implements the existing `placement/endpoint.EndpointPublisher`
+contract. The shared endpoint reconciler continues to own the
+InferenceService/TrafficMap watches and finalizer; this package only translates
+TrafficMap homes into calls to the native cluster-weight API:
+
+```go
+p, err := publisher.NewClusterWeightPublisher(oncall, acl)
+err = p.PublishWeight(cluster, weight)
+err = p.ClearWeight(cluster)
+```
+
+The API stores `xds_auto.cluster_weight`; it does not mutate EDS membership.
+The target must already be a statically authored route arm, and its SMC tier
+must already contain usable service endpoints.
+
+Selecting `routing.publisher.name: xds` replaces the default Gateway API
+publisher; the two publishers do not run side by side.
+
+OME journals targets on the source InferenceService before each external call.
+Targets removed from an active map are held at weight zero; deletion or an
+explicit disable clears the overrides before the shared endpoint finalizer is
+released. Journals also prevent two InferenceServices in one control plane from
+claiming the same target.
+
+Configuration is deliberately explicit and has no defaults:
+
+```yaml
+routing:
+  enabled: true
+  publisher:
+    name: xds
+    options:
+      oncall: ome
+      acl: ome-xds-publisher       # optional
+      targetTemplate: '{{.EndpointHostname}}'
+      resyncInterval: 1m
+```
+
+The target template receives `Namespace`, `Service`, `Cluster`, `Endpoint`,
+`EndpointHost`, `EndpointHostname`, and `EndpointPort`. It must render a bare
+cluster name. A `;fallback=` suffix is canonicalized to its primary tier.
+
+The Ligen-generated package is not a Go module. A checked-in `.go` import would
+make `go mod tidy` attempt to resolve it publicly, so the binding lives in
+`native_meta_xds.go.in`. A deployment-owned Buck composition must materialize
+it as `native_meta_xds_generated.go`, provide the Ligen dependency, and supply
+both `meta_internal` and `meta_xds`. Only that composition registers
+`publisher.name: xds`; the normal OME image and a plain `-tags meta_internal`
+build do not advertise an unusable publisher.
+
+The composing Go target must use `cgo = True` and depend on
+`//mrpc/xds/automation:cluster_weight_publisher-go_serialized` when OME is
+mirrored into the fbcode cell (or the cell-qualified `fbcode//mrpc/...` label
+from another registered cell), matching the D119218279 smoke test. No xDS-owned
+source change is required. OME is not currently a Buck project, so adding a
+BUCK file here alone is insufficient: the internal build must first place OME
+and its transitive Go dependencies in the shared Buck graph.
+
+The native API is synchronous and exposes no context or deadline. Periodic
+reconciliation repairs drift, but callers should not enable the adapter until
+the native implementation's timeout behavior is acceptable. Disable it in two
+steps: first set `routing.enabled: false` while keeping `publisher.name: xds`,
+then remove the publisher configuration after the endpoint finalizers drain.
+Likewise, drain the currently selected backend before switching between xDS and
+Gateway API; the shared finalizer invokes only the publisher selected at startup.

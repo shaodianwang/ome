@@ -87,6 +87,7 @@ fi
 # We already built libxet above so the marginal cost is the
 # cmd/ome-agent test packages (~tens of seconds), not a Rust recompile.
 make test
+make test-meta-internal
 
 # Enforce the 48% average coverage threshold defined in `make
 # coverage` (Makefile §coverage). Operates on the coverage-{cmd,

@@ -1,0 +1,42 @@
+// Materialized as native_meta_xds_generated.go by the internal Buck/Ligen-aware
+// build. Keeping the generated-only import out of a checked-in .go file prevents
+// `go mod tidy` from resolving an internal package as a public Go module.
+//
+//go:build meta_internal && meta_xds
+
+package xdspublisher
+
+import (
+	"fmt"
+
+	publisher "mrpc/xds/automation/go_serialized/cluster_weight_publisher"
+)
+
+func init() {
+	err := RegisterClusterWeightPublisher(func(oncall string, acl *string) (ClusterWeightPublisher, error) {
+		p, err := publisher.NewClusterWeightPublisher(oncall, acl)
+		if err != nil {
+			return nil, err
+		}
+		return &nativePublisher{
+			publishWeight: p.PublishWeight,
+			clearWeight:   p.ClearWeight,
+		}, nil
+	})
+	if err != nil {
+		panic(fmt.Sprintf("registering the %s TrafficMap publisher: %v", Name, err))
+	}
+}
+
+type nativePublisher struct {
+	publishWeight func(string, uint32) error
+	clearWeight   func(string) error
+}
+
+func (p *nativePublisher) PublishWeight(cluster string, weight uint32) error {
+	return p.publishWeight(cluster, weight)
+}
+
+func (p *nativePublisher) ClearWeight(cluster string) error {
+	return p.clearWeight(cluster)
+}

@@ -649,6 +649,16 @@ test-no-xet: fmt vet manifests envtest test-no-xet-deps ## 🧪 Run tests exclud
 	$(call run_go_test,$(INTERNAL_PACKAGES_NO_XET),internal,-no-xet)
 	@echo "\n🎉 All tests completed successfully (excluding XET-linked ome-agent packages)!"
 
+.PHONY: test-meta-internal
+test-meta-internal: ## 🧪 Run deployment-extension tests under the meta_internal build tag
+	@echo "🧪 Running meta-internal tests..."
+	@if [ -d meta-internal ]; then \
+		$(GO_CMD) test -tags meta_internal ./meta-internal/...; \
+	else \
+		echo "meta-internal absent; skipped"; \
+	fi
+	@echo "✅ meta-internal tests passed"
+
 .PHONY: test-no-xet-deps
 test-no-xet-deps: ## 🧪 Verify the no-xet package set does not link XET
 	@deps="$$( $(GO_CMD) list -deps $(CMD_PACKAGES_NO_XET) $(PKG_PACKAGES) $(INTERNAL_PACKAGES_NO_XET) )" || exit $$?; \
