@@ -23,6 +23,7 @@ package workload
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -187,13 +188,20 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 				return ctrl.Result{}, false, derr
 			}
 
-		// 3. Per-Instance restart pass.
+		// 3. Per-Instance restart pass. Instances are isolated from each
+		// other: one Instance's failed step never skips the Instances
+		// after it, and the pass fails as a whole (joined error) only
+		// after every selection has run.
 		case ActionRestart:
 			anyRestarting := false
+			var restartErrs []error
 			for _, sel := range action.Restarts {
 				done, rerr := workloadops.Restart(ctx, deps, input, plan, sel.Instance, sel.Reason)
 				if rerr != nil {
-					return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: restart instance %d: %w", sel.Instance.Index, rerr)
+					logf.FromContext(ctx).Error(rerr, "restart pass: instance failed",
+						"component", plan.Component, "instance", sel.Instance.Index)
+					restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: restart instance %d: %w", sel.Instance.Index, rerr))
+					continue
 				}
 				if !done {
 					anyRestarting = true
@@ -202,14 +210,24 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			if anyRestarting {
 				result := ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}
 				if hasActionKind(d.Actions[actionIndex+1:], ActionCreate) {
+					// Surge-free indices are materialized even when another
+					// Instance's restart failed this pass: a persistently
+					// failing restart must not starve an unrelated scale-up.
 					freshPlan := planExcludingRestartSelections(plan, action.Restarts)
 					createResult, ferr := workloadops.CreateFreshIndices(ctx, deps, input, freshPlan, target)
 					if ferr != nil {
-						return createResult, false, fmt.Errorf("workload.Reconcile: create fresh indices during restart: %w", ferr)
+						restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: create fresh indices during restart: %w", ferr))
+						return createResult, false, errors.Join(restartErrs...)
 					}
 					result = foldRetryAfter(createResult, workloadops.RestartRequeueInterval)
 				}
+				if len(restartErrs) > 0 {
+					return ctrl.Result{}, false, errors.Join(restartErrs...)
+				}
 				return result, false, nil
+			}
+			if len(restartErrs) > 0 {
+				return ctrl.Result{}, false, errors.Join(restartErrs...)
 			}
 
 		// 4. Migration expiry pass. When anything expired, requeue
