@@ -455,6 +455,34 @@ routing_probe_checksum="$(grep -m1 'checksum/config:' <<<"${routing_probe_contro
 [[ "${default_controller_checksum}" != "${routing_probe_checksum}" ]] ||
   fail "enabling the routing probe did not roll the controller checksum"
 
+if grep -Fq '"publisher"' <<<"${controller_config}"; then
+  fail "TrafficMap publisher was rendered when disabled"
+fi
+
+routing_publisher_args=(
+  --set-string ome.multicluster.config.routing.publisher.name=test-publisher
+  --set-json 'ome.multicluster.config.routing.publisher.options={"key":"value"}'
+)
+routing_publisher_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  "${routing_publisher_args[@]}" \
+  --show-only templates/ome-controller/configmap.yaml)"
+for expected in \
+  '"name": "test-publisher"' \
+  '"key":"value"'; do
+  grep -Fq "${expected}" <<<"${routing_publisher_config}" ||
+    fail "TrafficMap publisher setting was not rendered: ${expected}"
+done
+routing_publisher_controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  "${routing_publisher_args[@]}" \
+  --show-only templates/ome-controller/deployment.yaml)"
+routing_publisher_checksum="$(grep -m1 'checksum/config:' <<<"${routing_publisher_controller}" | awk '{print $2}')"
+[[ -n "${routing_publisher_checksum}" ]] ||
+  fail "TrafficMap publisher controller checksum was not rendered"
+[[ "${default_controller_checksum}" != "${routing_publisher_checksum}" ]] ||
+  fail "configuring a TrafficMap publisher did not roll the controller checksum"
+
 # acceleratorResources has no in-code default: the chart default is the only
 # source of any non-nvidia recognition. It stays nvidia-only so upgrading the
 # chart cannot change which pods get a PARALLELISM_SIZE env var — recognizing

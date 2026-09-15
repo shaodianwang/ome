@@ -181,6 +181,10 @@ data:
           "timeout": {{ .timeout | quote }},
           "failureThreshold": {{ .failureThreshold | default 0 }},
           "successThreshold": {{ .successThreshold | default 0 }}
+        }{{- end }}{{- with .Values.ome.multicluster.config.routing.publisher }},
+        "publisher": {
+          "name": {{ .name | quote }},
+          "options": {{ .options | default dict | toJson }}
         }{{- end }}
       }
     }
