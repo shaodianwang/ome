@@ -594,7 +594,7 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 				Labels: map[string]string{
 					"app":                            "llama",
 					"ome.io/placement-origin":        "3b6514b9-91dd-4caf-ad46-2315dd9feade",
-					"ome.io/placement-control-plane": "msl-mks-ome-lco-0-rc",
+					"ome.io/placement-control-plane": "control-plane-a",
 				},
 				Annotations: map[string]string{"ome.io/deploymentMode": "OMENative"},
 			},
@@ -605,7 +605,7 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 				Labels: map[string]string{
 					"app":                            "llama",
 					"ome.io/placement-origin":        "0e2f1a77-0000-4000-8000-000000000000",
-					"ome.io/placement-control-plane": "msl-mks-ome-lco-1-rc",
+					"ome.io/placement-control-plane": "control-plane-b",
 				},
 				Annotations: map[string]string{"ome.io/deploymentMode": "OMENative"},
 			},
@@ -629,7 +629,7 @@ func TestRevisionHash_OnlyPlacementMarkersEqualNoMeta(t *testing.T) {
 	only := &metav1.ObjectMeta{
 		Labels: map[string]string{
 			"ome.io/placement-origin":        "3b6514b9-91dd-4caf-ad46-2315dd9feade",
-			"ome.io/placement-control-plane": "msl-mks-ome-lco-0-rc",
+			"ome.io/placement-control-plane": "control-plane-a",
 		},
 	}
 

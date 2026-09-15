@@ -45,7 +45,7 @@ ome:
   # cluster.
   multiclusterAccess:
     enabled: true
-  # multicluster enables the OEP-0018 control-plane fan-out placement controllers.
+  # multicluster enables the control-plane fan-out placement controllers.
   # Alpha; default off. On the CONTROL-PLANE cluster set enabled: true and
   # role: control-plane (this disables the local InferenceService->pods reconciler
   # and runs the placement + WorkloadCluster controllers). Leave default on
@@ -112,7 +112,7 @@ ome:
             enabled: false                # manage one BackendTLSPolicy per home
             wellKnownCACertificates: ""   # required when TLS is enabled; currently "System"
           endpointSlices:
-            enabled: false                # MKS fallback: use child Gateway IPs instead of ExternalName DNS
+            enabled: false                # fallback for gateways that cannot resolve ExternalName DNS: publish child Gateway IPs
             addressRefreshInterval: ""    # required refresh cadence when EndpointSlices are enabled
       # routing: the TrafficMap routing controller (control plane only), which
       # projects a placed InferenceService into a capacity-aware, health-gated

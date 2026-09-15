@@ -254,7 +254,7 @@ type CapacityConfig struct {
 	MaxAge string `json:"maxAge,omitempty"`
 }
 
-// PeriodDuration parses Period, yielding 0 on an unparseable value so Validate
+// PeriodDuration parses Period, yielding 0 on an unparsable value so Validate
 // rejects it rather than a default being silently substituted.
 func (c CapacityConfig) PeriodDuration() time.Duration {
 	d, err := time.ParseDuration(c.Period)
@@ -324,7 +324,7 @@ type ProbeConfig struct {
 	SuccessThreshold int `json:"successThreshold,omitempty"`
 }
 
-// PeriodDuration parses Period. An unparseable value yields 0, which the
+// PeriodDuration parses Period. An unparsable value yields 0, which the
 // routing config's Validate rejects rather than silently substituting a rate.
 func (p ProbeConfig) PeriodDuration() time.Duration {
 	d, err := time.ParseDuration(p.Period)

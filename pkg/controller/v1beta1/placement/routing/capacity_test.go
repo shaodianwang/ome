@@ -101,7 +101,7 @@ func TestCapacityPoller_FailsOpenOnEveryBadAnswer(t *testing.T) {
 		body   string
 	}{
 		{"non-200 response", http.StatusServiceUnavailable, freshReport(2)},
-		{"unparseable body", http.StatusOK, "not json"},
+		{"unparsable body", http.StatusOK, "not json"},
 		{"stale report beyond maxAge", http.StatusOK, string(stale)},
 		{"negative servable count", http.StatusOK, string(negative)},
 		{"report with no observedAt stamp", http.StatusOK, string(noStamp)},

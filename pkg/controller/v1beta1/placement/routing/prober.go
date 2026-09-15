@@ -30,8 +30,8 @@ type key struct {
 	Cluster string
 }
 
-// homeState is the prober's running verdict for one home.
-type homeState struct {
+// homeProbeState is the prober's running verdict for one home.
+type homeProbeState struct {
 	// gated is the value ANDed into the health gate, flipped only when a
 	// threshold is crossed rather than on every probe.
 	gated bool
@@ -44,7 +44,7 @@ type homeState struct {
 	lastProbeTime       time.Time
 }
 
-// Prober runs the active end-to-end health probe for OEP-0025 and holds each
+// Prober runs the active end-to-end health probe and holds each
 // home's gate verdict.
 //
 // It probes an entry's endpoint — the URL a client uses — so the verdict covers
@@ -81,7 +81,7 @@ type Prober struct {
 	OnChange func(types.NamespacedName)
 
 	mu    sync.RWMutex
-	state map[key]*homeState
+	state map[key]*homeProbeState
 }
 
 // NewProber builds a prober for the given config, using the supplied HTTP
@@ -97,7 +97,7 @@ func NewProber(cfg ProbeConfig, client *http.Client, log logr.Logger) *Prober {
 		Config: cfg,
 		Log:    log,
 		Client: client,
-		state:  map[key]*homeState{},
+		state:  map[key]*homeProbeState{},
 	}
 }
 
@@ -279,7 +279,7 @@ func (p *Prober) record(tgt Target, v Verdict, msg string) bool {
 	k := key{Map: tgt.Map, Cluster: tgt.Cluster}
 	st, ok := p.state[k]
 	if !ok {
-		st = &homeState{lastResult: v1beta1.ProbeResultUnknown}
+		st = &homeProbeState{lastResult: v1beta1.ProbeResultUnknown}
 		p.state[k] = st
 	}
 	st.lastMessage = msg
